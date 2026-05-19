@@ -6,3 +6,6 @@ packages:
   - "packages/happy-wire"
   - "packages/happy-app-logs"
   - "packages/codium"
+  - "packages/joy-daemon"
+  - "packages/joy-agent"
+  - "packages/joy-cli"
