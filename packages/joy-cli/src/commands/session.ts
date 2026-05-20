@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { ControlClient } from '../control/client';
 import { ensureDaemon, findAgentBin } from '../ensureDaemon';
 import { b64encode, randomBytesU8 } from 'joy-daemon/src/relay/encryption';
+import { loadHappySessionKey } from 'joy-daemon/src/relay/credentials';
 import type {
     AttachInputResult,
     SessionStartResult,
@@ -36,8 +37,24 @@ export interface StartOpts {
 
 export async function sessionStart(opts: StartOpts = {}): Promise<void> {
     const sessionId = opts.sessionId ?? randomUUID();
-    const sessionKeyB64 = opts.sessionKeyB64 ?? b64encode(randomBytesU8(32));
-    const variant = opts.variant ?? 'legacy';
+
+    // If the user named an existing session and didn't supply a key, try the
+    // legacy ~/.happy/sessions.json fallback so previously-paired sessions
+    // work without manual key entry.
+    let sessionKeyB64 = opts.sessionKeyB64;
+    let variant: 'legacy' | 'dataKey' | undefined = opts.variant;
+    if (!sessionKeyB64 && opts.sessionId) {
+        const happy = loadHappySessionKey(opts.sessionId);
+        if (happy) {
+            sessionKeyB64 = happy.sessionKeyB64;
+            variant = variant ?? happy.variant;
+            process.stderr.write(`joy: using session key from ${happy.source} (variant=${happy.variant})\n`);
+        }
+    }
+    // Net-new session: mint a key + default variant.
+    sessionKeyB64 ??= b64encode(randomBytesU8(32));
+    variant ??= 'dataKey';
+
     const agentBin = opts.agentBin ?? findAgentBin();
     const agentEnv: Record<string, string> = {};
     if (opts.cwd) agentEnv.JOY_CWD = opts.cwd;
