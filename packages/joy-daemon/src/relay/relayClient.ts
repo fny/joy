@@ -17,14 +17,27 @@ import type { Credentials } from './credentials';
 
 const log = logger('relay');
 
+/**
+ * Wire-shape of `content` as RETURNED by GET /v3/.../messages:
+ * either a plain base64 string (POSTed by older clients) or an object
+ * envelope `{ c: <base64>, t: 'encrypted' }`. We accept both.
+ */
+export type RawContent = string | { c: string; t?: string };
+
 export interface RawMessage {
     id: string;
     seq: number;
-    /** base64-encoded encrypted blob */
-    content: string;
+    content: RawContent;
     localId: string | null;
     createdAt: number;
     updatedAt: number;
+}
+
+/** Extract the base64 ciphertext from either wire shape. */
+export function rawContentB64(content: RawContent): string | null {
+    if (typeof content === 'string') return content;
+    if (content && typeof content === 'object' && typeof content.c === 'string') return content.c;
+    return null;
 }
 
 export interface AppendResult {
