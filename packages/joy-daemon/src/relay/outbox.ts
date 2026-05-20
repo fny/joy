@@ -54,7 +54,7 @@ export class Outbox {
     private readonly path: string;
     private readonly opts: OutboxOpts;
     private entries: OutboxEntry[] = [];
-    private inFlight = false;
+    private inFlight: Promise<void> | null = null;
 
     constructor(opts: OutboxOpts) {
         this.opts = opts;
@@ -119,29 +119,29 @@ export class Outbox {
         log.debug('outbox compacted', { sessionId: this.opts.sessionId, kept: live.length });
     }
 
-    async flush(): Promise<void> {
-        if (this.inFlight) return;
-        this.inFlight = true;
-        try {
-            while (!this.opts.signal.aborted) {
-                const next = this.entries.find((e) => e.ackedSeq === null);
-                if (!next) return;
-                try {
-                    const enc = encrypt(this.opts.variant, this.opts.sessionKey, next.envelope);
-                    const res = await this.opts.relay.append(this.opts.sessionId, enc, next.eventId);
-                    next.ackedSeq = res.seq;
-                    this.opts.onAck?.(next);
-                    const line: OutboxLineAck = { kind: 'ack', eventId: next.eventId, seq: res.seq };
-                    appendFileSync(this.path, JSON.stringify(line) + '\n');
-                } catch (e) {
-                    next.attempts += 1;
-                    const d = backoffMs(next.attempts, CONSTANTS.BACKOFF_BASE_MS, CONSTANTS.BACKOFF_CAP_MS);
-                    log.warn('append failed, retrying', { eventId: next.eventId, attempt: next.attempts, delayMs: d, err: String(e) });
-                    await sleep(d, this.opts.signal);
-                }
+    flush(): Promise<void> {
+        if (this.inFlight) return this.inFlight;
+        this.inFlight = this.drain().finally(() => { this.inFlight = null; });
+        return this.inFlight;
+    }
+
+    private async drain(): Promise<void> {
+        while (!this.opts.signal.aborted) {
+            const next = this.entries.find((e) => e.ackedSeq === null);
+            if (!next) return;
+            try {
+                const enc = encrypt(this.opts.variant, this.opts.sessionKey, next.envelope);
+                const res = await this.opts.relay.append(this.opts.sessionId, enc, next.eventId);
+                next.ackedSeq = res.seq;
+                this.opts.onAck?.(next);
+                const line: OutboxLineAck = { kind: 'ack', eventId: next.eventId, seq: res.seq };
+                appendFileSync(this.path, JSON.stringify(line) + '\n');
+            } catch (e) {
+                next.attempts += 1;
+                const d = backoffMs(next.attempts, CONSTANTS.BACKOFF_BASE_MS, CONSTANTS.BACKOFF_CAP_MS);
+                log.warn('append failed, retrying', { eventId: next.eventId, attempt: next.attempts, delayMs: d, err: String(e) });
+                await sleep(d, this.opts.signal);
             }
-        } finally {
-            this.inFlight = false;
         }
     }
 }

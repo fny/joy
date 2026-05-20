@@ -241,6 +241,11 @@ export function fold(state: Projection, e: FoldEvent): Projection {
             // tool calls, and observability events are visible to consumers
             // via the raw event stream; they are not part of the projection.
             return next;
+        default:
+            // Unknown event types are identity (forward-compat per §7). The
+            // TypeScript-enforced exhaustive switch above only catches *known*
+            // variants; a runtime value with an unrecognized `type` falls here.
+            return next;
     }
 }
 
