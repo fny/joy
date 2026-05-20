@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { logger } from '../util/log';
 import { sessionDir } from '../util/paths';
 import { decrypt, type EncryptionVariant, b64decode } from './encryption';
-import type { RelayClient, RawMessage } from './relayClient';
+import { rawContentB64, type RelayClient, type RawMessage } from './relayClient';
 import { EnvelopeSchema, type Envelope } from '../protocol/envelope';
 import { AnyEventSchema, type AnyEvent } from '../protocol/events';
 import { fold, type FoldEvent } from '../protocol/fold';
@@ -160,7 +160,9 @@ export class Cursor {
     }
 
     private parse(m: RawMessage): ParsedEvent | null {
-        const enc = b64decode(m.content);
+        const b64 = rawContentB64(m.content);
+        if (!b64) return null;
+        const enc = b64decode(b64);
         const plain = decrypt(this.opts.variant, this.opts.sessionKey, enc);
         if (plain === null || typeof plain !== 'object') return null;
         const envParse = EnvelopeSchema.safeParse(plain);
