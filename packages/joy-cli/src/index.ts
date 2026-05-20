@@ -40,7 +40,15 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
     const s = program.command('session').description('Session operations');
     s.command('list').action(async () => { await sessionList(); });
-    s.command('start').option('--cwd <dir>', 'Working directory for the agent').action(async (o: { cwd?: string }) => { await sessionStart({ cwd: o.cwd }); });
+    s.command('start')
+        .option('--cwd <dir>', 'Working directory for the agent')
+        .option('--session-id <id>', 'Adopt an existing sessionId (key auto-loaded from ~/.happy if present)')
+        .option('--session-key <b64>', 'Per-session encryption key (base64), 32 bytes')
+        .option('--variant <v>', "Encryption variant: 'legacy' or 'dataKey'")
+        .action(async (o: { cwd?: string; sessionId?: string; sessionKey?: string; variant?: string }) => {
+            const variant = o.variant === 'legacy' || o.variant === 'dataKey' ? o.variant : undefined;
+            await sessionStart({ cwd: o.cwd, sessionId: o.sessionId, sessionKeyB64: o.sessionKey, variant });
+        });
     s.command('stop <sessionId>').option('--reason <r>').action(async (sessionId: string, o: { reason?: string }) => { await sessionStop(sessionId, o.reason); });
 
     program

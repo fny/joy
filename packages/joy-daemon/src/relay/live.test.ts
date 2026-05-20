@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { RelayClient } from './relayClient';
 import { decrypt, b64decode } from './encryption';
 import { rawContentB64 } from './relayClient';
-import type { Credentials } from './credentials';
+import { loadCredentials } from './credentials';
 
 const HOME = homedir();
 const HAPPY_DIR = process.env.HAPPY_HOME_DIR ?? join(HOME, '.happy');
@@ -25,20 +25,10 @@ const settingsPath = join(HAPPY_DIR, 'settings.json');
 const LIVE = process.env.JOY_LIVE_TEST === '1';
 const havePrereqs = existsSync(accessKeyPath) && existsSync(sessionsPath);
 
-function loadServerUrl(): string {
-    if (process.env.HAPPY_SERVER_URL) return process.env.HAPPY_SERVER_URL;
-    try {
-        const s = JSON.parse(readFileSync(settingsPath, 'utf8')) as { serverUrl?: string };
-        if (s.serverUrl) return s.serverUrl;
-    } catch { /* ok */ }
-    return 'https://api.cluster-fluster.com';
-}
-
-function loadCreds(): Credentials {
-    const ak = JSON.parse(readFileSync(accessKeyPath, 'utf8')) as { token: string };
-    // sessionsSecret is the per-session key — set later per session.
-    return { token: ak.token, sessionSecret: new Uint8Array(), serverUrl: loadServerUrl() };
-}
+// settingsPath retained for legibility (kept for backward-compat); the
+// real source-of-truth is loadCredentials() with its happy/access.key
+// fallback path.
+void settingsPath;
 
 interface SessionsFile {
     sessions: Record<string, { encryptionKey: string; encryptionVariant: 'legacy' | 'dataKey'; seq?: number }>;
@@ -80,7 +70,9 @@ function describeKind(v: unknown): string {
 
 describe.runIf(LIVE && havePrereqs)('relay live smoke', () => {
     it('readSince pulls messages and we can decrypt at least one', async () => {
-        const creds = loadCreds();
+        const creds = loadCredentials();
+        // eslint-disable-next-line no-console
+        console.log(`[live] creds source=${creds.source}`);
         const sess = pickSession();
         expect(sess).not.toBeNull();
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
