@@ -35,6 +35,7 @@ export const ja: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'キャンセル',
+        tapAgainToConfirm: ({ label }: { label: string }) => `もう一度タップ: ${label}`,
         authenticate: '認証',
         save: '保存',
         error: 'エラー',
@@ -210,6 +211,8 @@ export const ja: TranslationStructure = {
         chatHistoryLimitPlaceholder: '例: 50',
         chatHistoryLimitOff: 'オフ',
         chatHistoryLimitValue: ({ count }: { count: number }) => `直近${count}件のメッセージ`,
+        mod06Title: '06 · ダブルタップ',
+        mod06Description: 'アシスタントからの選択式回答を確定するには、2秒以内に2回目のタップが必要です。誤選択を防ぐのに役立ちます。',
     },
 
     settingsFeatures: {
@@ -548,6 +551,7 @@ export const ja: TranslationStructure = {
         },
         askUserQuestion: {
             submit: '回答を送信',
+            tapAgain: 'もう一度タップして送信',
             multipleQuestions: ({ count }: { count: number }) => `${count}件の質問`,
             other: 'その他',
             otherDescription: '自分の回答を入力',

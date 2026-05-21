@@ -32,6 +32,7 @@ export const es: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Cancelar',
+        tapAgainToConfirm: ({ label }: { label: string }) => `Toca de nuevo: ${label}`,
         authenticate: 'Autenticar',
         save: 'Guardar',
         saveAs: 'Guardar como',
@@ -209,6 +210,8 @@ export const es: TranslationStructure = {
         chatHistoryLimitPlaceholder: 'p. ej. 50',
         chatHistoryLimitOff: 'Desactivado',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Últimos ${count} mensajes`,
+        mod06Title: '06 · Doble toque',
+        mod06Description: 'Requiere un segundo toque en 2 segundos para confirmar una respuesta de opción múltiple del asistente. Ayuda a evitar selecciones accidentales.',
     },
 
     settingsFeatures: {
@@ -589,6 +592,7 @@ export const es: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Enviar respuesta',
+            tapAgain: 'Toca de nuevo para enviar',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'pregunta', plural: 'preguntas' })}`,
             other: 'Otro',
             otherDescription: 'Escribe tu propia respuesta',

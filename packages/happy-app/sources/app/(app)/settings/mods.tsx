@@ -12,6 +12,7 @@ export default React.memo(function ModsSettingsScreen() {
     const [modXhighEnabled, setModXhighEnabled] = useSettingMutable('joy__xHighEnabled');
     const [modHideModesEnabled, setModHideModesEnabled] = useSettingMutable('joy__hideModesEnabled');
     const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
+    const [modDoubleTapEnabled, setModDoubleTapEnabled] = useSettingMutable('joy__doubleTapEnabled');
 
     const handleChatHistoryLimit = React.useCallback(async () => {
         const value = await Modal.prompt(
@@ -71,6 +72,15 @@ export default React.memo(function ModsSettingsScreen() {
                     icon={<Ionicons name="chatbubbles-outline" size={29} color="#007AFF" />}
                     detail={limitDetail}
                     onPress={handleChatHistoryLimit}
+                />
+            </ItemGroup>
+
+            <ItemGroup title={t('settingsMods.mod06Title')} footer={t('settingsMods.mod06Description')}>
+                <Item
+                    title={t('settingsMods.enabled')}
+                    rightElement={<Switch value={!!modDoubleTapEnabled} onValueChange={setModDoubleTapEnabled} />}
+                    onPress={() => setModDoubleTapEnabled(!modDoubleTapEnabled)}
+                    showChevron={false}
                 />
             </ItemGroup>
         </ItemList>

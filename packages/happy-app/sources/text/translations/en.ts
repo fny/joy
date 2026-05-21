@@ -47,6 +47,7 @@ export const en: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Cancel',
+        tapAgainToConfirm: ({ label }: { label: string }) => `Tap again: ${label}`,
         authenticate: 'Authenticate',
         save: 'Save',
         saveAs: 'Save As',
@@ -223,6 +224,8 @@ export const en: TranslationStructure = {
         chatHistoryLimitPlaceholder: 'e.g. 50',
         chatHistoryLimitOff: 'Off',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Last ${count} messages`,
+        mod06Title: '06 · Double Tap',
+        mod06Description: 'Require a second tap within 2 seconds to commit a multiple-choice answer from the assistant. Helps prevent accidental selections.',
     },
 
     settingsFeatures: {
@@ -586,6 +589,7 @@ export const en: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Submit Answer',
+            tapAgain: 'Tap again to submit',
             multipleQuestions: ({ count }: { count: number }) => `${count} questions`,
             other: 'Other',
             otherDescription: 'Type your own answer',

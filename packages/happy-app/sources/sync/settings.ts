@@ -47,6 +47,7 @@ export const SettingsSchema = z.object({
     joy__xHighEnabled: z.boolean().describe('Mod 02: show xhigh effort level between high and max'),
     joy__hideModesEnabled: z.boolean().describe('Mod 04: show only Plan and Yolo permission modes'),
     joy__chatHistoryLimit: z.number().nullable().describe('Mod 05: max messages to display per conversation (null = unlimited / off)'),
+    joy__doubleTapEnabled: z.boolean().describe('Mod 06: require double tap to commit AskUserQuestion option/submit selections'),
     dismissedCLIWarnings: z.object({
         perMachine: z.record(z.string(), z.object({
             claude: z.boolean().optional(),
@@ -116,6 +117,7 @@ export const settingsDefaults: Settings = {
     joy__xHighEnabled: false,
     joy__hideModesEnabled: false,
     joy__chatHistoryLimit: null,
+    joy__doubleTapEnabled: false,
     dismissedCLIWarnings: { perMachine: {}, global: {} },
 };
 Object.freeze(settingsDefaults);
