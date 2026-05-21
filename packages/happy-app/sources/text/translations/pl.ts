@@ -229,6 +229,8 @@ export const pl: TranslationStructure = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `Ostatnie ${count} wiadomości`,
         mod06Title: '06 · Podwójne dotknięcie',
         mod06Description: 'Wymaga drugiego dotknięcia w ciągu 2 sekund, aby zatwierdzić wybór odpowiedzi z listy od asystenta. Pomaga zapobiegać przypadkowym wyborom.',
+        mod07Title: '07 · Otwórz plik z Read',
+        mod07Description: 'Wyświetla przycisk „Otwórz plik" przy wywołaniach narzędzia Read. Przycisk korzysta z wbudowanej przeglądarki plików Happy, która pobiera plik z hosta Claude — działa niezależnie od tego, czy aplikacja i Claude są na tej samej maszynie.',
     },
 
     settingsFeatures: {
@@ -537,6 +539,7 @@ export const pl: TranslationStructure = {
     toolView: {
         input: 'Wejście',
         output: 'Wyjście',
+        openFile: 'Otwórz plik',
     },
 
     toolGroup: {

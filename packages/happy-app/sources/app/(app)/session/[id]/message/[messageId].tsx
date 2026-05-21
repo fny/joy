@@ -103,9 +103,10 @@ export default React.memo(() => {
 function FullView(props: { message: Message }) {
     const { theme } = useUnistyles();
     const styles = stylesheet;
-    
+    const { id: sessionId } = useLocalSearchParams<{ id: string }>();
+
     if (props.message.kind === 'tool-call') {
-        return <ToolFullView tool={props.message.tool} messages={props.message.children} />
+        return <ToolFullView tool={props.message.tool} messages={props.message.children} sessionId={sessionId} />
     }
     if (props.message.kind === 'agent-text') {
         return (

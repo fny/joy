@@ -1,26 +1,37 @@
 import * as React from 'react';
-import { Text, View, ScrollView, Platform, useWindowDimensions } from 'react-native';
+import { Text, View, ScrollView, Platform, TouchableOpacity, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { ToolCall, Message } from '@/sync/typesMessage';
 import { CodeView } from '../CodeView';
 import { Metadata } from '@/sync/storageTypes';
 import { getToolFullViewComponent } from './views/_all';
 import { layout } from '../layout';
-import { useLocalSetting } from '@/sync/storage';
-import { StyleSheet } from 'react-native-unistyles';
+import { useLocalSetting, useSetting } from '@/sync/storage';
+import { useRouter } from 'expo-router';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 
 interface ToolFullViewProps {
     tool: ToolCall;
     metadata?: Metadata | null;
     messages?: Message[];
+    sessionId?: string;
 }
 
-export function ToolFullView({ tool, metadata, messages = [] }: ToolFullViewProps) {
+export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolFullViewProps) {
     // Check if there's a specialized content view for this tool
     const SpecializedFullView = getToolFullViewComponent(tool.name);
     const screenWidth = useWindowDimensions().width;
     const devModeEnabled = (useLocalSetting('devModeEnabled') || __DEV__);
+    const { theme } = useUnistyles();
+    const router = useRouter();
+    const readOpenFileEnabled = !!useSetting('joy__readOpenFileEnabled');
+    const readFilePath = tool.name === 'Read' && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
+    const showOpenFileButton = readOpenFileEnabled && readFilePath && sessionId;
+    const handleOpenReadFile = React.useCallback(() => {
+        if (!sessionId || !readFilePath) return;
+        router.push(`/session/${sessionId}/file?path=${btoa(readFilePath)}`);
+    }, [sessionId, readFilePath, router]);
     console.log('ToolFullView', devModeEnabled);
 
     return (
@@ -50,6 +61,19 @@ export function ToolFullView({ tool, metadata, messages = [] }: ToolFullViewProp
                                 <Text style={styles.sectionTitle}>{t('tools.fullView.inputParams')}</Text>
                             </View>
                             <CodeView code={JSON.stringify(tool.input, null, 2)} />
+                        </View>
+                    )}
+
+                    {showOpenFileButton && (
+                        <View style={styles.section}>
+                            <TouchableOpacity
+                                style={[styles.openFileButton, { backgroundColor: theme.colors.button.primary.background }]}
+                                onPress={handleOpenReadFile}
+                                activeOpacity={0.7}
+                            >
+                                <Ionicons name="open-outline" size={16} color={theme.colors.button.primary.tint} />
+                                <Text style={[styles.openFileButtonText, { color: theme.colors.button.primary.tint }]}>{t('toolView.openFile')}</Text>
+                            </TouchableOpacity>
                         </View>
                     )}
 
@@ -92,7 +116,7 @@ export function ToolFullView({ tool, metadata, messages = [] }: ToolFullViewProp
 
                 </>
                 )}
-                
+
                 {/* Raw JSON View (Dev Mode Only) */}
                 {devModeEnabled && (
                     <View style={styles.section}>
@@ -186,6 +210,19 @@ const styles = StyleSheet.create((theme) => ({
     emptyOutputSubtext: {
         fontSize: 14,
         color: theme.colors.textSecondary,
+    },
+    openFileButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderRadius: 6,
+        alignSelf: 'flex-start',
+    },
+    openFileButtonText: {
+        fontSize: 13,
+        fontWeight: '600',
     },
 }));
 

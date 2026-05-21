@@ -213,6 +213,8 @@ export const zhHans: TranslationStructure = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 条消息`,
         mod06Title: '06 · 双击确认',
         mod06Description: '需要在 2 秒内再次点击以提交助手的多选答案。有助于防止误选。',
+        mod07Title: '07 · 打开 Read 文件',
+        mod07Description: '在 Read 工具调用上显示"打开文件"按钮。该按钮使用 Happy 的应用内文件查看器路由,从 Claude 主机获取文件 — 无论应用和 Claude 是否在同一台机器上都能工作。',
     },
 
     settingsFeatures: {
@@ -522,6 +524,7 @@ export const zhHans: TranslationStructure = {
     toolView: {
         input: '输入',
         output: '输出',
+        openFile: '打开文件',
     },
 
     toolGroup: {

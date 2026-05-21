@@ -13,6 +13,7 @@ export default React.memo(function ModsSettingsScreen() {
     const [modHideModesEnabled, setModHideModesEnabled] = useSettingMutable('joy__hideModesEnabled');
     const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
     const [modDoubleTapEnabled, setModDoubleTapEnabled] = useSettingMutable('joy__doubleTapEnabled');
+    const [modReadOpenFileEnabled, setModReadOpenFileEnabled] = useSettingMutable('joy__readOpenFileEnabled');
 
     const handleChatHistoryLimit = React.useCallback(async () => {
         const value = await Modal.prompt(
@@ -80,6 +81,15 @@ export default React.memo(function ModsSettingsScreen() {
                     title={t('settingsMods.enabled')}
                     rightElement={<Switch value={!!modDoubleTapEnabled} onValueChange={setModDoubleTapEnabled} />}
                     onPress={() => setModDoubleTapEnabled(!modDoubleTapEnabled)}
+                    showChevron={false}
+                />
+            </ItemGroup>
+
+            <ItemGroup title={t('settingsMods.mod07Title')} footer={t('settingsMods.mod07Description')}>
+                <Item
+                    title={t('settingsMods.enabled')}
+                    rightElement={<Switch value={!!modReadOpenFileEnabled} onValueChange={setModReadOpenFileEnabled} />}
+                    onPress={() => setModReadOpenFileEnabled(!modReadOpenFileEnabled)}
                     showChevron={false}
                 />
             </ItemGroup>

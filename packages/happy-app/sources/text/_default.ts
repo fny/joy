@@ -210,6 +210,8 @@ export const en = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `Last ${count} messages`,
         mod06Title: '06 · Double Tap',
         mod06Description: 'Require a second tap within 2 seconds to commit a multiple-choice answer from the assistant. Helps prevent accidental selections.',
+        mod07Title: '07 · Read Open File',
+        mod07Description: 'Show an "Open file" button on Read tool calls. The button uses Happy\'s in-app file viewer route which fetches from the Claude host — works whether the app and Claude are on the same machine or not.',
     },
 
     settingsFeatures: {
@@ -535,6 +537,7 @@ export const en = {
     toolView: {
         input: 'Input',
         output: 'Output',
+        openFile: 'Open file',
     },
 
     toolGroup: {
