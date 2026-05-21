@@ -10,7 +10,6 @@ import { t } from '@/text';
 import { getClaudePermissionModes, getClaudeModelModes, getClaudeEffortLevels } from '@/components/modelModeOptions';
 
 export default React.memo(function ModsSettingsScreen() {
-    const [modAudioEnabled, setModAudioEnabled] = useSettingMutable('joy__audioEnabled');
     const [modXhighEnabled, setModXhighEnabled] = useSettingMutable('joy__xHighEnabled');
     const [modSessionDefaultsEnabled, setModSessionDefaultsEnabled] = useSettingMutable('joy__sessionDefaultsEnabled');
     const [modHideModesEnabled, setModHideModesEnabled] = useSettingMutable('joy__hideModesEnabled');
@@ -72,15 +71,6 @@ export default React.memo(function ModsSettingsScreen() {
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
-            <ItemGroup title={t('settingsMods.mod01Title')} footer={t('settingsMods.mod01Description')}>
-                <Item
-                    title={t('settingsMods.enabled')}
-                    rightElement={<Switch value={!!modAudioEnabled} onValueChange={setModAudioEnabled} />}
-                    onPress={() => setModAudioEnabled(!modAudioEnabled)}
-                    showChevron={false}
-                />
-            </ItemGroup>
-
             <ItemGroup title={t('settingsMods.mod02Title')} footer={t('settingsMods.mod02Description')}>
                 <Item
                     title={t('settingsMods.enabled')}

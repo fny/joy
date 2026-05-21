@@ -445,9 +445,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const availableModels = React.useMemo(() => (
         getAvailableModels(flavor, session.metadata, t)
     ), [flavor, session.metadata]);
-    const availableModes = React.useMemo(() => (
-        getAvailablePermissionModes(flavor, session.metadata, t)
-    ), [flavor, session.metadata]);
+    const modHideModesEnabled = useSetting('joy__hideModesEnabled');
+    const modXhighEnabled = useSetting('joy__xHighEnabled');
+    const availableModes = React.useMemo(() => {
+        const modes = getAvailablePermissionModes(flavor, session.metadata, t);
+        if (modHideModesEnabled && (flavor === 'claude' || !flavor)) {
+            return modes.filter(m => m.key === 'plan' || m.key === 'bypassPermissions');
+        }
+        return modes;
+    }, [flavor, session.metadata, modHideModesEnabled]);
 
     const permissionMode = React.useMemo<PermissionMode | null>(() => (
         resolveCurrentOption(availableModes, [
@@ -467,9 +473,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     // Effort level state
     const modelKey = modelMode?.key ?? 'default';
-    const availableEffortLevels = React.useMemo<EffortLevel[]>(() => (
-        getEffortLevelsForModel(flavor, modelKey)
-    ), [flavor, modelKey]);
+    const availableEffortLevels = React.useMemo<EffortLevel[]>(() => {
+        const levels = getEffortLevelsForModel(flavor, modelKey);
+        return modXhighEnabled ? levels : levels.filter(l => l.key !== 'xhigh');
+    }, [flavor, modelKey, modXhighEnabled]);
     const effortLevel = React.useMemo<EffortLevel | null>(() => (
         resolveCurrentOption(availableEffortLevels, [
             session.effortLevel,
