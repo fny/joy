@@ -1,0 +1,281 @@
+From fd9925d3c3e21c50d39ef70ea9239dc90edcdf74 Mon Sep 17 00:00:00 2001
+From: JJ_EMPTY_STRING <JJ_EMPTY_STRING>
+Date: Wed, 13 May 2026 18:27:19 -0400
+Subject: [PATCH] =?UTF-8?q?mod(12):=20keep=20on=20top=20=E2=80=94=20Window?=
+ =?UTF-8?q?=20>=20Keep=20on=20Top=20menu=20toggle,=20persisted=20via=20tau?=
+ =?UTF-8?q?ri-plugin-store?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ mods/12 Keep on Top.md                  |  62 +++++++++++++
+ packages/happy-app/src-tauri/Cargo.lock |  29 ++++++
+ packages/happy-app/src-tauri/Cargo.toml |   1 +
+ packages/happy-app/src-tauri/src/lib.rs | 118 +++++++++++++++++++++---
+ 4 files changed, 196 insertions(+), 14 deletions(-)
+ create mode 100644 mods/12 Keep on Top.md
+
+diff --git a/mods/12 Keep on Top.md b/mods/12 Keep on Top.md
+new file mode 100644
+index 000000000..f805f4727
+--- /dev/null
++++ b/mods/12 Keep on Top.md	
+@@ -0,0 +1,62 @@
++# Mod 12: Keep on Top
++
++## What It Does
++
++Adds a **Window > Keep on Top** toggle to the Tauri app's macOS menu bar. When checked, the Happy window stays above all other windows (`NSWindow.level = .floating`). The state is persisted via `tauri-plugin-store` and re-applied on every launch.
++
++Useful for chatting with an agent in a side window while you're working in another app — no more alt-tabbing.
++
++## Mechanism
++
++- The setting is a single boolean stored under `joy__keepOnTop` in a Tauri-managed JSON store file (`joy.json` under the OS app-data directory). `tauri-plugin-store` handles read/write/persist.
++- The menu item is a `CheckMenuItem` whose initial `checked` state reflects the stored value.
++- The menu event handler flips the check, calls `window.set_always_on_top(...)`, and writes back to the store.
++
++## Changes
++
++### 1. `packages/happy-app/src-tauri/Cargo.toml`
++
++Add the store plugin dependency:
++
++```toml
++tauri-plugin-store = "2"
++```
++
++### 2. `packages/happy-app/src-tauri/src/lib.rs`
++
++Full rewrite of the `run()` function to:
++
++1. Register `tauri_plugin_store`.
++2. On setup, read `joy__keepOnTop` from the store and call `window.set_always_on_top(...)`.
++3. Build a custom macOS app menu (Happy / Edit / Window submenus, mostly populated by `PredefinedMenuItem` so cut/copy/paste/Cmd+Q/etc. all work) and insert a `CheckMenuItem` "Keep on Top" inside Window.
++4. Register `on_menu_event` to toggle the window's always-on-top state, flip the check, and persist.
++
++### Why replace the default menu rather than inject?
++
++Tauri 2.x doesn't expose a clean way to mutate the auto-generated default macOS menu (no public API to look up the existing Window submenu and append to it). Replacing the whole menu via `app.set_menu(...)` is the documented path, and `PredefinedMenuItem` covers all the standard items (about / hide / quit / undo / redo / cut / copy / paste / minimize / close) so nothing important is lost.
++
++What we **do** lose from the auto-generated menu, that could be added back manually if desired:
++- "Bring All to Front" in Window
++- File submenu (we never had real File actions, but some users expect the slot)
++- View submenu (Tauri's default View has "Enter Full Screen", etc.)
++
++If any of these matter, add them via `PredefinedMenuItem::fullscreen()` etc. in `lib.rs`.
++
++## How To Use
++
++1. `pnpm tauri:joy` (or `pnpm tauri:build:joy` for the release binary).
++2. Top-of-screen menu bar → **Window** → **Keep on Top**. Click to toggle.
++3. The window now floats above other windows. The check appears in the menu and the setting survives app restart.
++
++## Why Not Upstream
++
++Personal-build affordance. Most users don't care, and upstream prefers the system's default menu unmodified.
++
++## Rebase Notes
++
++- `Cargo.toml`: easy — just keep the `tauri-plugin-store = "2"` line.
++- `src-tauri/src/lib.rs`: this mod overwrites the whole `run()` body, which makes upstream `run()` changes more likely to conflict. When rebasing:
++  1. Take upstream's new `run()` as the base.
++  2. Re-add the `.plugin(tauri_plugin_store::Builder::default().build())` registration line.
++  3. Re-insert the store-load → window apply → menu build → event handler block inside the `setup` closure.
++- Store file location is `joy.json` under the Tauri app-data dir. If you rename the bundle identifier upstream, the store moves automatically — no manual data migration needed.
+diff --git a/packages/happy-app/src-tauri/Cargo.lock b/packages/happy-app/src-tauri/Cargo.lock
+index 24af596bf..1d35693a8 100644
+--- a/packages/happy-app/src-tauri/Cargo.lock
++++ b/packages/happy-app/src-tauri/Cargo.lock
+@@ -101,6 +101,7 @@ dependencies = [
+  "tauri-build",
+  "tauri-plugin-http",
+  "tauri-plugin-log",
++ "tauri-plugin-store",
+ ]
+ 
+ [[package]]
+@@ -3976,6 +3977,22 @@ dependencies = [
+  "time",
+ ]
+ 
++[[package]]
++name = "tauri-plugin-store"
++version = "2.4.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5ca1a8ff83c269b115e98726ffc13f9e548a10161544a92ad121d6d0a96e16ea"
++dependencies = [
++ "dunce",
++ "serde",
++ "serde_json",
++ "tauri",
++ "tauri-plugin",
++ "thiserror 2.0.16",
++ "tokio",
++ "tracing",
++]
++
+ [[package]]
+ name = "tauri-runtime"
+ version = "2.10.1"
+@@ -4373,9 +4390,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "784e0ac535deb450455cbfa28a6f0df145ea1bb7ae51b821cf5e7927fdcfbdd0"
+ dependencies = [
+  "pin-project-lite",
++ "tracing-attributes",
+  "tracing-core",
+ ]
+ 
++[[package]]
++name = "tracing-attributes"
++version = "0.1.31"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.106",
++]
++
+ [[package]]
+ name = "tracing-core"
+ version = "0.1.34"
+diff --git a/packages/happy-app/src-tauri/Cargo.toml b/packages/happy-app/src-tauri/Cargo.toml
+index beb0ce197..9a29c6726 100644
+--- a/packages/happy-app/src-tauri/Cargo.toml
++++ b/packages/happy-app/src-tauri/Cargo.toml
+@@ -24,3 +24,4 @@ log = "0.4"
+ tauri = { version = "~2.9", features = ["devtools"] }
+ tauri-plugin-log = "2"
+ tauri-plugin-http = "2"
++tauri-plugin-store = "2"
+diff --git a/packages/happy-app/src-tauri/src/lib.rs b/packages/happy-app/src-tauri/src/lib.rs
+index 619b344ed..16f02738d 100644
+--- a/packages/happy-app/src-tauri/src/lib.rs
++++ b/packages/happy-app/src-tauri/src/lib.rs
+@@ -1,17 +1,107 @@
++// Mod 12: Window > Keep on Top menu toggle, persisted via tauri-plugin-store.
++//
++// Tauri auto-generates a default macOS app menu when no menu is set. There is
++// no clean API in Tauri 2.x to inject a single item into that default menu,
++// so this mod builds a replacement menu that mirrors the standard macOS
++// conventions (Happy / Edit / Window submenus via `PredefinedMenuItem`) and
++// inserts a `CheckMenuItem` "Keep on Top" inside the Window submenu.
++//
++// The toggle state is persisted to `joy.json` via `tauri-plugin-store` and
++// re-applied on next launch.
++
++use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, SubmenuBuilder};
++use tauri::Manager;
++use tauri_plugin_store::StoreExt;
++
++const STORE_FILE: &str = "joy.json";
++const KEEP_ON_TOP_KEY: &str = "joy__keepOnTop";
++const MENU_ID_KEEP_ON_TOP: &str = "joy:keep-on-top";
++
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+-  tauri::Builder::default()
+-    .plugin(tauri_plugin_http::init())
+-    .setup(|app| {
+-      if cfg!(debug_assertions) {
+-        app.handle().plugin(
+-          tauri_plugin_log::Builder::default()
+-            .level(log::LevelFilter::Info)
+-            .build(),
+-        )?;
+-      }
+-      Ok(())
+-    })
+-    .run(tauri::generate_context!())
+-    .expect("error while running tauri application");
++    tauri::Builder::default()
++        .plugin(tauri_plugin_http::init())
++        .plugin(tauri_plugin_store::Builder::default().build())
++        .setup(|app| {
++            if cfg!(debug_assertions) {
++                app.handle().plugin(
++                    tauri_plugin_log::Builder::default()
++                        .level(log::LevelFilter::Info)
++                        .build(),
++                )?;
++            }
++
++            // Load persisted Keep-on-Top state (defaults to false on first launch
++            // or if the value is missing/wrong type).
++            let store = app.store(STORE_FILE)?;
++            let keep_on_top: bool = store
++                .get(KEEP_ON_TOP_KEY)
++                .and_then(|v| v.as_bool())
++                .unwrap_or(false);
++
++            // Apply to the main window so the setting takes effect immediately
++            // on app launch, before the user opens the Window menu.
++            if let Some(window) = app.get_webview_window("main") {
++                let _ = window.set_always_on_top(keep_on_top);
++            }
++
++            let keep_on_top_item = CheckMenuItemBuilder::with_id(MENU_ID_KEEP_ON_TOP, "Keep on Top")
++                .checked(keep_on_top)
++                .build(app)?;
++
++            let app_submenu = SubmenuBuilder::new(app, "Happy")
++                .about(None)
++                .separator()
++                .services()
++                .separator()
++                .hide()
++                .hide_others()
++                .show_all()
++                .separator()
++                .quit()
++                .build()?;
++
++            let edit_submenu = SubmenuBuilder::new(app, "Edit")
++                .undo()
++                .redo()
++                .separator()
++                .cut()
++                .copy()
++                .paste()
++                .select_all()
++                .build()?;
++
++            let window_submenu = SubmenuBuilder::new(app, "Window")
++                .minimize()
++                .item(&keep_on_top_item)
++                .separator()
++                .close_window()
++                .build()?;
++
++            let menu = MenuBuilder::new(app)
++                .items(&[&app_submenu, &edit_submenu, &window_submenu])
++                .build()?;
++
++            app.set_menu(menu)?;
++
++            // Toggle handler: flip the check, flip the window state, persist.
++            let keep_on_top_item_for_event = keep_on_top_item.clone();
++            app.on_menu_event(move |app, event| {
++                if event.id().as_ref() == MENU_ID_KEEP_ON_TOP {
++                    let new_state = !keep_on_top_item_for_event.is_checked().unwrap_or(false);
++                    let _ = keep_on_top_item_for_event.set_checked(new_state);
++                    if let Some(window) = app.get_webview_window("main") {
++                        let _ = window.set_always_on_top(new_state);
++                    }
++                    if let Ok(store) = app.store(STORE_FILE) {
++                        store.set(KEEP_ON_TOP_KEY, serde_json::json!(new_state));
++                        let _ = store.save();
++                    }
++                }
++            });
++
++            Ok(())
++        })
++        .run(tauri::generate_context!())
++        .expect("error while running tauri application");
+ }
+-- 
+2.54.0
+
