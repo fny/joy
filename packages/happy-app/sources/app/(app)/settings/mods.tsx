@@ -71,6 +71,13 @@ export default React.memo(function ModsSettingsScreen() {
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
+            <ItemGroup title={t('settingsMods.mod01Title')} footer={t('settingsMods.mod01Description')}>
+                <Item
+                    title="Microphone entitlement added"
+                    showChevron={false}
+                />
+            </ItemGroup>
+
             <ItemGroup title={t('settingsMods.mod02Title')} footer={t('settingsMods.mod02Description')}>
                 <Item
                     title={t('settingsMods.enabled')}
