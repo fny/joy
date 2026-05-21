@@ -510,6 +510,10 @@ function NewSessionScreen() {
     const allMachines = useAllMachines({ includeOffline: true });
     const sessions = useSessions();
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
+    const defaultPermissionMode = useSetting('joy__defaultPermissionMode');
+    const modSessionDefaultsEnabled = useSetting('joy__sessionDefaultsEnabled');
+    const modXhighEnabled = useSetting('joy__xHighEnabled');
+    const modHideModesEnabled = useSetting('joy__hideModesEnabled');
 
     // Persisted draft state (survives navigation).
     //
@@ -696,10 +700,10 @@ function NewSessionScreen() {
     const currentModel = modelModes[modelIndex] ?? modelModes[0];
     const currentModelKey = currentModel?.key ?? 'default';
 
-    const effortLevels = React.useMemo<EffortLevel[]>(
-        () => getEffortLevelsForModel(selectedAgent, currentModelKey),
-        [selectedAgent, currentModelKey],
-    );
+    const effortLevels = React.useMemo<EffortLevel[]>(() => {
+        const levels = getEffortLevelsForModel(selectedAgent, currentModelKey);
+        return modXhighEnabled ? levels : levels.filter(e => e.key !== 'xhigh');
+    }, [selectedAgent, currentModelKey, modXhighEnabled]);
 
     const supportsWorktree = getSupportsWorktree(selectedAgent);
     const showModel = modelModes.length > 1;
