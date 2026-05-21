@@ -198,6 +198,8 @@ export const ru: TranslationStructure = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `Последние ${count} сообщений`,
         mod06Title: '06 · Двойное нажатие',
         mod06Description: 'Требует повторного нажатия в течение 2 секунд для подтверждения выбора варианта ответа от ассистента. Помогает избежать случайных выборов.',
+        mod07Title: '07 · Открыть файл из Read',
+        mod07Description: 'Показывает кнопку «Открыть файл» при вызовах инструмента Read. Кнопка использует встроенный просмотрщик файлов Happy, который загружает файл с хоста Claude — работает независимо от того, находятся ли приложение и Claude на одной машине.',
     },
 
     settingsFeatures: {
@@ -537,6 +539,7 @@ export const ru: TranslationStructure = {
     toolView: {
         input: 'Входные данные',
         output: 'Результат',
+        openFile: 'Открыть файл',
     },
 
     toolGroup: {

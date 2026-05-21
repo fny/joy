@@ -213,6 +213,8 @@ export const ja: TranslationStructure = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `直近${count}件のメッセージ`,
         mod06Title: '06 · ダブルタップ',
         mod06Description: 'アシスタントからの選択式回答を確定するには、2秒以内に2回目のタップが必要です。誤選択を防ぐのに役立ちます。',
+        mod07Title: '07 · Read ファイルを開く',
+        mod07Description: 'Read ツール呼び出しに「ファイルを開く」ボタンを表示します。このボタンは Happy のアプリ内ファイルビューアを使用し、Claude ホストから取得します — アプリと Claude が同じマシン上にあってもなくても動作します。',
     },
 
     settingsFeatures: {
@@ -522,6 +524,7 @@ export const ja: TranslationStructure = {
     toolView: {
         input: '入力',
         output: '出力',
+        openFile: 'ファイルを開く',
     },
 
     toolGroup: {

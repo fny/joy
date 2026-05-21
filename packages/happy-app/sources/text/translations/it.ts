@@ -210,6 +210,8 @@ export const it: TranslationStructure = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `Ultimi ${count} messaggi`,
         mod06Title: '06 · Doppio tocco',
         mod06Description: 'Richiede un secondo tocco entro 2 secondi per confermare una risposta a scelta multipla dall\'assistente. Aiuta a prevenire selezioni accidentali.',
+        mod07Title: '07 · Apri file da Read',
+        mod07Description: 'Mostra un pulsante «Apri file» nelle chiamate allo strumento Read. Il pulsante utilizza il visualizzatore di file integrato di Happy, che scarica dall\'host di Claude — funziona sia che l\'app e Claude si trovino sulla stessa macchina sia che no.',
     },
 
     settingsFeatures: {
@@ -519,6 +521,7 @@ export const it: TranslationStructure = {
     toolView: {
         input: 'Input',
         output: 'Output',
+        openFile: 'Apri file',
     },
 
     toolGroup: {

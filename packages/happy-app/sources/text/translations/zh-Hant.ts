@@ -212,6 +212,8 @@ export const zhHant: TranslationStructure = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 則訊息`,
         mod06Title: '06 · 雙擊確認',
         mod06Description: '需要在 2 秒內再次點擊以提交助手的多選答案。有助於防止誤選。',
+        mod07Title: '07 · 開啟 Read 檔案',
+        mod07Description: '在 Read 工具呼叫上顯示「開啟檔案」按鈕。該按鈕使用 Happy 的應用內檔案檢視器路由,從 Claude 主機取得檔案 — 無論應用程式和 Claude 是否在同一台機器上都能運作。',
     },
 
     settingsFeatures: {
@@ -521,6 +523,7 @@ export const zhHant: TranslationStructure = {
     toolView: {
         input: '輸入',
         output: '輸出',
+        openFile: '開啟檔案',
     },
 
     toolGroup: {

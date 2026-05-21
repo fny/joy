@@ -212,6 +212,8 @@ export const ca: TranslationStructure = {
         chatHistoryLimitValue: ({ count }: { count: number }) => `Últims ${count} missatges`,
         mod06Title: '06 · Doble toc',
         mod06Description: 'Requereix un segon toc en 2 segons per confirmar una resposta de selecció múltiple de l\'assistent. Ajuda a evitar seleccions accidentals.',
+        mod07Title: '07 · Obre fitxer de Read',
+        mod07Description: 'Mostra un botó «Obre el fitxer» a les crides de l\'eina Read. El botó utilitza el visor de fitxers integrat de Happy, que descarrega des de l\'host de Claude — funciona tant si l\'app i Claude són a la mateixa màquina com si no.',
     },
 
     settingsFeatures: {
@@ -521,6 +523,7 @@ export const ca: TranslationStructure = {
     toolView: {
         input: 'Entrada',
         output: 'Sortida',
+        openFile: 'Obre el fitxer',
     },
 
     toolGroup: {
