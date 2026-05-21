@@ -688,10 +688,13 @@ function NewSessionScreen() {
     }, [availableAgents, selectedAgent, setSelectedAgent]);
 
     // Derive options from agent type
-    const permissionModes = React.useMemo<PermissionMode[]>(
-        () => getHardcodedPermissionModes(selectedAgent, t),
-        [selectedAgent],
-    );
+    const permissionModes = React.useMemo<PermissionMode[]>(() => {
+        const modes = getHardcodedPermissionModes(selectedAgent, t);
+        if (modHideModesEnabled && (selectedAgent === 'claude' || !selectedAgent)) {
+            return modes.filter(m => m.key === 'plan' || m.key === 'bypassPermissions');
+        }
+        return modes;
+    }, [selectedAgent, modHideModesEnabled]);
     const modelModes = React.useMemo<ModelMode[]>(
         () => getHardcodedModelModes(selectedAgent, t),
         [selectedAgent],
