@@ -44,6 +44,13 @@ export const SettingsSchema = z.object({
     lastUsedPermissionMode: z.string().nullable().describe('Last selected permission mode for new sessions'),
     lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions'),
     // Dismissed CLI warning banners (supports both per-machine and global dismissal)
+    joy__chatHistoryLimit: z.number().nullable().describe('Max messages to display per conversation (null = unlimited)'),
+    joy__defaultPermissionMode: z.string().nullable().describe('Default permission mode for new sessions (null = use hardcoded default)'),
+    joy__defaultModelMode: z.string().nullable().describe('Default model mode for new sessions (null = use hardcoded default)'),
+    joy__defaultEffortLevel: z.string().nullable().describe('Default effort level for new sessions (null = use hardcoded default)'),
+    joy__xHighEnabled: z.boolean().describe('Mod 02: show xhigh effort level between high and max'),
+    joy__sessionDefaultsEnabled: z.boolean().describe('Mod 03: apply default permission mode, model, effort and chat history limit'),
+    joy__hideModesEnabled: z.boolean().describe('Mod 04: show only Plan and Yolo permission modes'),
     dismissedCLIWarnings: z.object({
         perMachine: z.record(z.string(), z.object({
             claude: z.boolean().optional(),
@@ -110,6 +117,13 @@ export const settingsDefaults: Settings = {
     lastUsedAgent: null,
     lastUsedPermissionMode: null,
     lastUsedModelMode: null,
+    joy__chatHistoryLimit: null,
+    joy__defaultPermissionMode: null,
+    joy__defaultModelMode: null,
+    joy__defaultEffortLevel: null,
+    joy__xHighEnabled: false,
+    joy__sessionDefaultsEnabled: false,
+    joy__hideModesEnabled: false,
     dismissedCLIWarnings: { perMachine: {}, global: {} },
 };
 Object.freeze(settingsDefaults);
