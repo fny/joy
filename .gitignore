@@ -12,6 +12,7 @@ expo-env.d.ts
 /android
 /packages/happy-app/ios
 /packages/happy-app/android
+/packages/happy-app/build
 
 # Native
 .kotlin/
