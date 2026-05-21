@@ -43,6 +43,7 @@ export const pl: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Anuluj',
+        tapAgainToConfirm: ({ label }: { label: string }) => `Naciśnij ponownie: ${label}`,
         authenticate: 'Uwierzytelnij',
         save: 'Zapisz',
         saveAs: 'Zapisz jako',
@@ -226,6 +227,8 @@ export const pl: TranslationStructure = {
         chatHistoryLimitPlaceholder: 'np. 50',
         chatHistoryLimitOff: 'Wył.',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Ostatnie ${count} wiadomości`,
+        mod06Title: '06 · Podwójne dotknięcie',
+        mod06Description: 'Wymaga drugiego dotknięcia w ciągu 2 sekund, aby zatwierdzić wybór odpowiedzi z listy od asystenta. Pomaga zapobiegać przypadkowym wyborom.',
     },
 
     settingsFeatures: {
@@ -605,6 +608,7 @@ export const pl: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Wyślij odpowiedź',
+            tapAgain: 'Naciśnij ponownie, aby wysłać',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'pytanie', few: 'pytania', many: 'pytań' })}`,
             other: 'Inne',
             otherDescription: 'Wpisz własną odpowiedź',

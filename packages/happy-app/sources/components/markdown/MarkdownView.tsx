@@ -17,6 +17,7 @@ import { MermaidRenderer } from './MermaidRenderer';
 import { t } from '@/text';
 import { isHttpMarkdownLink } from './linkUtils';
 import { openExternalUrl } from '@/utils/openExternalUrl';
+import { useDoubleTap } from '@/hooks/useDoubleTap';
 
 // Option type for callback
 export type Option = {
@@ -225,27 +226,33 @@ function RenderImageBlock(props: { url: string, alt: string, first: boolean, las
     );
 }
 
-function RenderOptionsBlock(props: { 
-    items: string[], 
-    first: boolean, 
-    last: boolean, 
+function RenderOptionsBlock(props: {
+    items: string[],
+    first: boolean,
+    last: boolean,
     selectable: boolean,
-    onOptionPress?: (option: Option) => void 
+    onOptionPress?: (option: Option) => void
 }) {
+    const { armedKey, requireDoubleTap } = useDoubleTap();
     return (
         <View style={[style.optionsContainer, props.first && style.first, props.last && style.last]}>
             {props.items.map((item, index) => {
                 if (props.onOptionPress) {
+                    const optionKey = `opt:${index}:${item}`;
+                    const isArmed = armedKey === optionKey;
                     return (
-                        <Pressable 
-                            key={index} 
+                        <Pressable
+                            key={index}
                             style={({ pressed }) => [
                                 style.optionItem,
-                                pressed && style.optionItemPressed
+                                pressed && style.optionItemPressed,
+                                isArmed && style.optionItemArmed,
                             ]}
-                            onPress={() => props.onOptionPress?.({ title: item })}
+                            onPress={() => requireDoubleTap(optionKey, () => props.onOptionPress?.({ title: item }))}
                         >
-                            <Text selectable={props.selectable} style={style.optionText}>{item}</Text>
+                            <Text selectable={props.selectable && !isArmed} style={style.optionText}>
+                                {isArmed ? t('common.tapAgainToConfirm', { label: item }) : item}
+                            </Text>
                         </Pressable>
                     );
                 } else {
@@ -603,6 +610,11 @@ const style = StyleSheet.create((theme) => ({
     },
     optionItemPressed: {
         opacity: 0.7,
+        backgroundColor: theme.colors.surfaceHigh,
+    },
+    optionItemArmed: {
+        borderColor: theme.colors.radio.active,
+        borderWidth: 2,
         backgroundColor: theme.colors.surfaceHigh,
     },
     optionText: {

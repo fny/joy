@@ -32,6 +32,7 @@ export const ca: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Cancel·la',
+        tapAgainToConfirm: ({ label }: { label: string }) => `Toca de nou: ${label}`,
         authenticate: 'Autentica',
         save: 'Desa',
         saveAs: 'Desa com a',
@@ -209,6 +210,8 @@ export const ca: TranslationStructure = {
         chatHistoryLimitPlaceholder: 'p. ex. 50',
         chatHistoryLimitOff: 'Desactivat',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Últims ${count} missatges`,
+        mod06Title: '06 · Doble toc',
+        mod06Description: 'Requereix un segon toc en 2 segons per confirmar una resposta de selecció múltiple de l\'assistent. Ajuda a evitar seleccions accidentals.',
     },
 
     settingsFeatures: {
@@ -589,6 +592,7 @@ export const ca: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Envia resposta',
+            tapAgain: 'Toca de nou per enviar',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'pregunta', plural: 'preguntes' })}`,
             other: 'Altres',
             otherDescription: 'Escriu la teva pròpia resposta',

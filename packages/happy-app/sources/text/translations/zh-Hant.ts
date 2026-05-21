@@ -34,6 +34,7 @@ export const zhHant: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: '取消',
+        tapAgainToConfirm: ({ label }: { label: string }) => `再次點擊: ${label}`,
         authenticate: '驗證',
         save: '儲存',
         saveAs: '另存為',
@@ -209,6 +210,8 @@ export const zhHant: TranslationStructure = {
         chatHistoryLimitPlaceholder: '例如 50',
         chatHistoryLimitOff: '關閉',
         chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 則訊息`,
+        mod06Title: '06 · 雙擊確認',
+        mod06Description: '需要在 2 秒內再次點擊以提交助手的多選答案。有助於防止誤選。',
     },
 
     settingsFeatures: {
@@ -572,6 +575,7 @@ export const zhHant: TranslationStructure = {
         },
         askUserQuestion: {
             submit: '提交答案',
+            tapAgain: '再次點擊以提交',
             multipleQuestions: ({ count }: { count: number }) => `${count} 個問題`,
             other: '其他',
             otherDescription: '輸入您自己的答案',

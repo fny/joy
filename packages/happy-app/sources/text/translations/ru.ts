@@ -43,6 +43,7 @@ export const ru: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Отмена',
+        tapAgainToConfirm: ({ label }: { label: string }) => `Нажмите ещё раз: ${label}`,
         authenticate: 'Авторизация',
         save: 'Сохранить',
         saveAs: 'Сохранить как',
@@ -195,6 +196,8 @@ export const ru: TranslationStructure = {
         chatHistoryLimitPlaceholder: 'например, 50',
         chatHistoryLimitOff: 'Выкл',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Последние ${count} сообщений`,
+        mod06Title: '06 · Двойное нажатие',
+        mod06Description: 'Требует повторного нажатия в течение 2 секунд для подтверждения выбора варианта ответа от ассистента. Помогает избежать случайных выборов.',
     },
 
     settingsFeatures: {
@@ -605,6 +608,7 @@ export const ru: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Отправить ответ',
+            tapAgain: 'Нажмите ещё раз для отправки',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'вопрос', few: 'вопроса', many: 'вопросов' })}`,
             other: 'Другое',
             otherDescription: 'Введите свой ответ',
