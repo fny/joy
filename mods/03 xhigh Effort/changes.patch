@@ -1,0 +1,59 @@
+From 37440e307aba7543b78bc6cb5008f5fed24cefdb Mon Sep 17 00:00:00 2001
+From: Faraz Yashar <faraz.yashar@gmail.com>
+Date: Sun, 10 May 2026 20:27:47 -0400
+Subject: [PATCH] =?UTF-8?q?mod(03):=20xhigh=20effort=20mod=20=E2=80=94=20a?=
+ =?UTF-8?q?dd=20xhigh=20effort=20level?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ packages/happy-app/sources/app/(app)/new/index.tsx   | 12 ++++++++----
+ .../happy-app/sources/components/modelModeOptions.ts |  1 +
+ 2 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/packages/happy-app/sources/app/(app)/new/index.tsx b/packages/happy-app/sources/app/(app)/new/index.tsx
+index b681d3316..80b9c81e7 100644
+--- a/packages/happy-app/sources/app/(app)/new/index.tsx
++++ b/packages/happy-app/sources/app/(app)/new/index.tsx
+@@ -477,6 +477,10 @@ function NewSessionScreen() {
+     const allMachines = useAllMachines({ includeOffline: true });
+     const sessions = useSessions();
+     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
++    const defaultPermissionMode = useSetting('joy__defaultPermissionMode');
++    const modSessionDefaultsEnabled = useSetting('joy__sessionDefaultsEnabled');
++    const modXhighEnabled = useSetting('joy__xHighEnabled');
++    const modHideModesEnabled = useSetting('joy__hideModesEnabled');
+ 
+     // Persisted draft state (survives navigation)
+     const draft = useNewSessionDraft();
+@@ -641,10 +645,10 @@ function NewSessionScreen() {
+     const currentModel = modelModes[modelIndex] ?? modelModes[0];
+     const currentModelKey = currentModel?.key ?? 'default';
+ 
+-    const effortLevels = React.useMemo<EffortLevel[]>(
+-        () => getEffortLevelsForModel(selectedAgent, currentModelKey),
+-        [selectedAgent, currentModelKey],
+-    );
++    const effortLevels = React.useMemo<EffortLevel[]>(() => {
++        const levels = getEffortLevelsForModel(selectedAgent, currentModelKey);
++        return modXhighEnabled ? levels : levels.filter(e => e.key !== 'xhigh');
++    }, [selectedAgent, currentModelKey, modXhighEnabled]);
+ 
+     const supportsWorktree = getSupportsWorktree(selectedAgent);
+     const showModel = modelModes.length > 1;
+diff --git a/packages/happy-app/sources/components/modelModeOptions.ts b/packages/happy-app/sources/components/modelModeOptions.ts
+index c1026d4cf..ff174de5e 100644
+--- a/packages/happy-app/sources/components/modelModeOptions.ts
++++ b/packages/happy-app/sources/components/modelModeOptions.ts
+@@ -211,6 +211,7 @@ export function getClaudeEffortLevels(): EffortLevel[] {
+         { key: 'low', name: 'low' },
+         { key: 'medium', name: 'medium' },
+         { key: 'high', name: 'high' },
++        { key: 'xhigh', name: 'xhigh' },
+         { key: 'max', name: 'max' },
+     ];
+ }
+-- 
+2.54.0
+

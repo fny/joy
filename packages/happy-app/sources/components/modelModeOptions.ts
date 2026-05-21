@@ -211,6 +211,7 @@ export function getClaudeEffortLevels(): EffortLevel[] {
         { key: 'low', name: 'low' },
         { key: 'medium', name: 'medium' },
         { key: 'high', name: 'high' },
+        { key: 'xhigh', name: 'xhigh' },
         { key: 'max', name: 'max' },
     ];
 }
