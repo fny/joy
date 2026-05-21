@@ -510,8 +510,6 @@ function NewSessionScreen() {
     const allMachines = useAllMachines({ includeOffline: true });
     const sessions = useSessions();
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
-    const defaultPermissionMode = useSetting('joy__defaultPermissionMode');
-    const modSessionDefaultsEnabled = useSetting('joy__sessionDefaultsEnabled');
     const modXhighEnabled = useSetting('joy__xHighEnabled');
     const modHideModesEnabled = useSetting('joy__hideModesEnabled');
 

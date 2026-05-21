@@ -1,0 +1,375 @@
+From 57cde71c849d4278629df1a7ec85580f40827adb Mon Sep 17 00:00:00 2001
+From: JJ_EMPTY_STRING <JJ_EMPTY_STRING>
+Date: Sun, 10 May 2026 22:23:09 -0400
+Subject: [PATCH] =?UTF-8?q?mod(06):=20chat=20history=20limit=20mod=20?=
+ =?UTF-8?q?=E2=80=94=20cap=20messages=20displayed=20per=20conversation?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ mods/06 Chat History Limit.md                 | 24 +++++++++++++
+ .../sources/app/(app)/settings/mods.tsx       | 35 +++++++++++++++++++
+ .../happy-app/sources/components/ChatList.tsx |  6 ++--
+ packages/happy-app/sources/sync/settings.ts   |  2 ++
+ packages/happy-app/sources/text/_default.ts   |  7 ++++
+ .../happy-app/sources/text/translations/ca.ts |  7 ++++
+ .../happy-app/sources/text/translations/en.ts |  7 ++++
+ .../happy-app/sources/text/translations/es.ts |  7 ++++
+ .../happy-app/sources/text/translations/it.ts |  7 ++++
+ .../happy-app/sources/text/translations/ja.ts |  7 ++++
+ .../happy-app/sources/text/translations/pl.ts |  7 ++++
+ .../happy-app/sources/text/translations/pt.ts |  7 ++++
+ .../happy-app/sources/text/translations/ru.ts |  7 ++++
+ .../sources/text/translations/zh-Hans.ts      |  7 ++++
+ .../sources/text/translations/zh-Hant.ts      |  7 ++++
+ 15 files changed, 142 insertions(+), 2 deletions(-)
+ create mode 100644 mods/06 Chat History Limit.md
+
+diff --git a/mods/06 Chat History Limit.md b/mods/06 Chat History Limit.md
+new file mode 100644
+index 000000000..d8c8bc833
+--- /dev/null
++++ b/mods/06 Chat History Limit.md	
+@@ -0,0 +1,24 @@
++# Mod 06: Chat History Limit
++
++## What It Does
++
++Caps the number of messages rendered per conversation. Gated by `joy__chatHistoryLimit != null` — set a number to enable, clear to disable. Default: **null (off)**.
++
++## Changes
++
++### 1. `packages/happy-app/sources/sync/settings.ts`
++
++Setting added:
++- `joy__chatHistoryLimit: z.number().nullable()` (default `null`)
++
++### 2. `packages/happy-app/sources/components/ChatList.tsx`
++
++When `joy__chatHistoryLimit` is non-null, `messages.slice(0, joy__chatHistoryLimit)` is passed to the internal list instead of the full message array.
++
++### 3. `packages/happy-app/sources/app/(app)/settings/mods.tsx`
++
++New `ItemGroup` ("05 · Chat History Limit") with a single Item that opens a numeric prompt. Clearing the prompt sets the value back to `null`.
++
++## Why Not Upstream
++
++Personal preference for trimming long conversations to improve scroll performance on the desktop build. Upstream has no notion of message capping.
+diff --git a/packages/happy-app/sources/app/(app)/settings/mods.tsx b/packages/happy-app/sources/app/(app)/settings/mods.tsx
+index 54d3ed3d7..4df024f9b 100644
+--- a/packages/happy-app/sources/app/(app)/settings/mods.tsx
++++ b/packages/happy-app/sources/app/(app)/settings/mods.tsx
+@@ -5,6 +5,7 @@ import { Item } from '@/components/Item';
+ import { ItemGroup } from '@/components/ItemGroup';
+ import { ItemList } from '@/components/ItemList';
+ import { useSettingMutable } from '@/sync/storage';
++import { Modal } from '@/modal';
+ import { t } from '@/text';
+ import { getClaudePermissionModes, getClaudeModelModes, getClaudeEffortLevels } from '@/components/modelModeOptions';
+ 
+@@ -12,6 +13,7 @@ export default React.memo(function ModsSettingsScreen() {
+     const [modXhighEnabled, setModXhighEnabled] = useSettingMutable('joy__xHighEnabled');
+     const [modSessionDefaultsEnabled, setModSessionDefaultsEnabled] = useSettingMutable('joy__sessionDefaultsEnabled');
+     const [modHideModesEnabled, setModHideModesEnabled] = useSettingMutable('joy__hideModesEnabled');
++    const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
+ 
+     const [defaultPermissionMode, setDefaultPermissionMode] = useSettingMutable('joy__defaultPermissionMode');
+     const [defaultModelMode, setDefaultModelMode] = useSettingMutable('joy__defaultModelMode');
+@@ -39,9 +41,33 @@ export default React.memo(function ModsSettingsScreen() {
+         setDefaultEffortLevel(effortLevels[(idx + 1) % effortLevels.length]!.key);
+     }, [defaultEffortLevel, effortLevels, setDefaultEffortLevel]);
+ 
++    const handleChatHistoryLimit = React.useCallback(async () => {
++        const value = await Modal.prompt(
++            t('settingsMods.chatHistoryLimit'),
++            t('settingsMods.chatHistoryLimitDescription'),
++            {
++                defaultValue: chatHistoryLimit != null ? String(chatHistoryLimit) : '',
++                placeholder: t('settingsMods.chatHistoryLimitPlaceholder'),
++            }
++        );
++        if (value === null) return;
++        const trimmed = value.trim();
++        if (trimmed === '') {
++            setChatHistoryLimit(null);
++        } else {
++            const parsed = parseInt(trimmed, 10);
++            if (!isNaN(parsed) && parsed > 0) {
++                setChatHistoryLimit(parsed);
++            }
++        }
++    }, [chatHistoryLimit, setChatHistoryLimit]);
++
+     const permModeDetail = permissionModes.find(m => m.key === (defaultPermissionMode ?? 'default'))?.name ?? permissionModes[0]!.name;
+     const modelDetail = modelModes.find(m => m.key === (defaultModelMode ?? 'default'))?.name ?? modelModes[0]!.name;
+     const effortDetail = effortLevels.find(e => e.key === (defaultEffortLevel ?? 'high'))?.name ?? 'high';
++    const limitDetail = chatHistoryLimit != null
++        ? t('settingsMods.chatHistoryLimitValue', { count: chatHistoryLimit })
++        : t('settingsMods.chatHistoryLimitOff');
+ 
+     return (
+         <ItemList style={{ paddingTop: 0 }}>
+@@ -103,6 +129,15 @@ export default React.memo(function ModsSettingsScreen() {
+                     showChevron={false}
+                 />
+             </ItemGroup>
++
++            <ItemGroup title={t('settingsMods.mod05Title')} footer={t('settingsMods.mod05Description')}>
++                <Item
++                    title={t('settingsMods.chatHistoryLimit')}
++                    icon={<Ionicons name="chatbubbles-outline" size={29} color="#007AFF" />}
++                    detail={limitDetail}
++                    onPress={handleChatHistoryLimit}
++                />
++            </ItemGroup>
+         </ItemList>
+     );
+ });
+diff --git a/packages/happy-app/sources/components/ChatList.tsx b/packages/happy-app/sources/components/ChatList.tsx
+index 95f6b2a80..74727325d 100644
+--- a/packages/happy-app/sources/components/ChatList.tsx
++++ b/packages/happy-app/sources/components/ChatList.tsx
+@@ -1,5 +1,5 @@
+ import * as React from 'react';
+-import { useSession, useSessionMessages } from "@/sync/storage";
++import { useSession, useSessionMessages, useSetting } from "@/sync/storage";
+ import { FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
+ import { useCallback } from 'react';
+ import { useHeaderHeight } from '@/utils/responsive';
+@@ -18,11 +18,13 @@ const SCROLL_THRESHOLD = 300;
+ 
+ export const ChatList = React.memo((props: { session: Session }) => {
+     const { messages } = useSessionMessages(props.session.id);
++    const joy__chatHistoryLimit = useSetting('joy__chatHistoryLimit');
++    const visibleMessages = joy__chatHistoryLimit != null ? messages.slice(0, joy__chatHistoryLimit) : messages;
+     return (
+         <ChatListInternal
+             metadata={props.session.metadata}
+             sessionId={props.session.id}
+-            messages={messages}
++            messages={visibleMessages}
+         />
+     )
+ });
+diff --git a/packages/happy-app/sources/sync/settings.ts b/packages/happy-app/sources/sync/settings.ts
+index 446d1e830..88c4fce4a 100644
+--- a/packages/happy-app/sources/sync/settings.ts
++++ b/packages/happy-app/sources/sync/settings.ts
+@@ -49,6 +49,7 @@ export const SettingsSchema = z.object({
+     joy__xHighEnabled: z.boolean().describe('Mod 02: show xhigh effort level between high and max'),
+     joy__sessionDefaultsEnabled: z.boolean().describe('Mod 03: apply default permission mode, model, effort'),
+     joy__hideModesEnabled: z.boolean().describe('Mod 04: show only Plan and Yolo permission modes'),
++    joy__chatHistoryLimit: z.number().nullable().describe('Mod 05: max messages to display per conversation (null = unlimited / off)'),
+     dismissedCLIWarnings: z.object({
+         perMachine: z.record(z.string(), z.object({
+             claude: z.boolean().optional(),
+@@ -120,6 +121,7 @@ export const settingsDefaults: Settings = {
+     joy__xHighEnabled: false,
+     joy__sessionDefaultsEnabled: false,
+     joy__hideModesEnabled: false,
++    joy__chatHistoryLimit: null,
+     dismissedCLIWarnings: { perMachine: {}, global: {} },
+ };
+ Object.freeze(settingsDefaults);
+diff --git a/packages/happy-app/sources/text/_default.ts b/packages/happy-app/sources/text/_default.ts
+index c041e1780..67ab45cf7 100644
+--- a/packages/happy-app/sources/text/_default.ts
++++ b/packages/happy-app/sources/text/_default.ts
+@@ -208,6 +208,13 @@ export const en = {
+         defaultEffortDescription: 'Starting effort level for new sessions',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Shows only Plan and Yolo in the permission mode selector.',
++        mod05Title: '05 · Chat History Limit',
++        mod05Description: 'Cap how many messages are rendered per conversation. Useful for long chats on slower devices.',
++        chatHistoryLimit: 'Message Limit',
++        chatHistoryLimitDescription: 'Show only the most recent messages per conversation',
++        chatHistoryLimitPlaceholder: 'e.g. 50',
++        chatHistoryLimitOff: 'Off',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Last ${count} messages`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/ca.ts b/packages/happy-app/sources/text/translations/ca.ts
+index 7a308d20c..e6506673e 100644
+--- a/packages/happy-app/sources/text/translations/ca.ts
++++ b/packages/happy-app/sources/text/translations/ca.ts
+@@ -210,6 +210,13 @@ export const ca: TranslationStructure = {
+         defaultEffortDescription: "Nivell d'esforç inicial per a noves sessions",
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Mostra només Plan i Yolo al selector de mode de permisos.',
++        mod05Title: "05 · Límit de l'historial de xat",
++        mod05Description: 'Limita quants missatges es mostren per conversa. Útil per a xats llargs en dispositius més lents.',
++        chatHistoryLimit: 'Límit de missatges',
++        chatHistoryLimitDescription: 'Mostra només els missatges més recents per conversa',
++        chatHistoryLimitPlaceholder: 'p. ex. 50',
++        chatHistoryLimitOff: 'Desactivat',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Últims ${count} missatges`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/en.ts b/packages/happy-app/sources/text/translations/en.ts
+index d620b9e96..9a0a302a9 100644
+--- a/packages/happy-app/sources/text/translations/en.ts
++++ b/packages/happy-app/sources/text/translations/en.ts
+@@ -224,6 +224,13 @@ export const en: TranslationStructure = {
+         defaultEffortDescription: 'Starting effort level for new sessions',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Shows only Plan and Yolo in the permission mode selector.',
++        mod05Title: '05 · Chat History Limit',
++        mod05Description: 'Cap how many messages are rendered per conversation. Useful for long chats on slower devices.',
++        chatHistoryLimit: 'Message Limit',
++        chatHistoryLimitDescription: 'Show only the most recent messages per conversation',
++        chatHistoryLimitPlaceholder: 'e.g. 50',
++        chatHistoryLimitOff: 'Off',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Last ${count} messages`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/es.ts b/packages/happy-app/sources/text/translations/es.ts
+index a994bce38..86052c098 100644
+--- a/packages/happy-app/sources/text/translations/es.ts
++++ b/packages/happy-app/sources/text/translations/es.ts
+@@ -210,6 +210,13 @@ export const es: TranslationStructure = {
+         defaultEffortDescription: 'Nivel de esfuerzo inicial para nuevas sesiones',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Muestra solo Plan y Yolo en el selector de modo de permisos.',
++        mod05Title: '05 · Límite de historial de chat',
++        mod05Description: 'Limita cuántos mensajes se muestran por conversación. Útil para chats largos en dispositivos más lentos.',
++        chatHistoryLimit: 'Límite de mensajes',
++        chatHistoryLimitDescription: 'Mostrar solo los mensajes más recientes por conversación',
++        chatHistoryLimitPlaceholder: 'p. ej. 50',
++        chatHistoryLimitOff: 'Desactivado',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Últimos ${count} mensajes`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/it.ts b/packages/happy-app/sources/text/translations/it.ts
+index a2ace7eb0..f9d0f82c9 100644
+--- a/packages/happy-app/sources/text/translations/it.ts
++++ b/packages/happy-app/sources/text/translations/it.ts
+@@ -208,6 +208,13 @@ export const it: TranslationStructure = {
+         defaultEffortDescription: 'Livello di sforzo iniziale per le nuove sessioni',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Mostra solo Plan e Yolo nel selettore della modalità permessi.',
++        mod05Title: '05 · Limite cronologia chat',
++        mod05Description: 'Limita quanti messaggi vengono mostrati per conversazione. Utile per chat lunghe su dispositivi più lenti.',
++        chatHistoryLimit: 'Limite messaggi',
++        chatHistoryLimitDescription: 'Mostra solo i messaggi più recenti per conversazione',
++        chatHistoryLimitPlaceholder: 'es. 50',
++        chatHistoryLimitOff: 'Disattivato',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Ultimi ${count} messaggi`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/ja.ts b/packages/happy-app/sources/text/translations/ja.ts
+index bf9fb1713..b1d8924db 100644
+--- a/packages/happy-app/sources/text/translations/ja.ts
++++ b/packages/happy-app/sources/text/translations/ja.ts
+@@ -211,6 +211,13 @@ export const ja: TranslationStructure = {
+         defaultEffortDescription: '新しいセッションの開始時の努力レベル',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: '権限モードセレクターにPlanとYoloのみを表示します。',
++        mod05Title: '05 · チャット履歴の上限',
++        mod05Description: '会話ごとに表示するメッセージ数を制限します。低速デバイスでの長いチャットに便利です。',
++        chatHistoryLimit: 'メッセージ上限',
++        chatHistoryLimitDescription: '会話ごとに最新のメッセージのみを表示',
++        chatHistoryLimitPlaceholder: '例: 50',
++        chatHistoryLimitOff: 'オフ',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `直近${count}件のメッセージ`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/pl.ts b/packages/happy-app/sources/text/translations/pl.ts
+index e4762a1f3..037545527 100644
+--- a/packages/happy-app/sources/text/translations/pl.ts
++++ b/packages/happy-app/sources/text/translations/pl.ts
+@@ -227,6 +227,13 @@ export const pl: TranslationStructure = {
+         defaultEffortDescription: 'Początkowy poziom wysiłku dla nowych sesji',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Pokazuje tylko Plan i Yolo w selektorze trybu uprawnień.',
++        mod05Title: '05 · Limit historii czatu',
++        mod05Description: 'Ogranicza liczbę wiadomości wyświetlanych w każdej rozmowie. Przydatne w długich czatach na wolniejszych urządzeniach.',
++        chatHistoryLimit: 'Limit wiadomości',
++        chatHistoryLimitDescription: 'Pokazuj tylko najnowsze wiadomości w każdej rozmowie',
++        chatHistoryLimitPlaceholder: 'np. 50',
++        chatHistoryLimitOff: 'Wył.',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Ostatnie ${count} wiadomości`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/pt.ts b/packages/happy-app/sources/text/translations/pt.ts
+index f81905654..fee528c57 100644
+--- a/packages/happy-app/sources/text/translations/pt.ts
++++ b/packages/happy-app/sources/text/translations/pt.ts
+@@ -209,6 +209,13 @@ export const pt: TranslationStructure = {
+         defaultEffortDescription: 'Nível de esforço inicial para novas sessões',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Mostra apenas Plan e Yolo no seletor de modo de permissão.',
++        mod05Title: '05 · Limite do histórico de chat',
++        mod05Description: 'Limita quantas mensagens são exibidas por conversa. Útil para chats longos em dispositivos mais lentos.',
++        chatHistoryLimit: 'Limite de mensagens',
++        chatHistoryLimitDescription: 'Mostrar apenas as mensagens mais recentes por conversa',
++        chatHistoryLimitPlaceholder: 'ex. 50',
++        chatHistoryLimitOff: 'Desativado',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Últimas ${count} mensagens`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/ru.ts b/packages/happy-app/sources/text/translations/ru.ts
+index d96f6449f..68e77d15b 100644
+--- a/packages/happy-app/sources/text/translations/ru.ts
++++ b/packages/happy-app/sources/text/translations/ru.ts
+@@ -196,6 +196,13 @@ export const ru: TranslationStructure = {
+         defaultEffortDescription: 'Начальный уровень усилий для новых сессий',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: 'Показывает только Plan и Yolo в выборе режима разрешений.',
++        mod05Title: '05 · Лимит истории чата',
++        mod05Description: 'Ограничивает количество сообщений, отображаемых в каждом разговоре. Полезно для длинных чатов на медленных устройствах.',
++        chatHistoryLimit: 'Лимит сообщений',
++        chatHistoryLimitDescription: 'Показывать только последние сообщения в каждом разговоре',
++        chatHistoryLimitPlaceholder: 'например, 50',
++        chatHistoryLimitOff: 'Выкл',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `Последние ${count} сообщений`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/zh-Hans.ts b/packages/happy-app/sources/text/translations/zh-Hans.ts
+index ba53f9f27..4e50b1f97 100644
+--- a/packages/happy-app/sources/text/translations/zh-Hans.ts
++++ b/packages/happy-app/sources/text/translations/zh-Hans.ts
+@@ -211,6 +211,13 @@ export const zhHans: TranslationStructure = {
+         defaultEffortDescription: '新会话的初始努力级别',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: '在权限模式选择器中只显示 Plan 和 Yolo。',
++        mod05Title: '05 · 聊天记录上限',
++        mod05Description: '限制每个会话渲染的消息数量。适用于在较慢设备上的长对话。',
++        chatHistoryLimit: '消息上限',
++        chatHistoryLimitDescription: '每个会话只显示最近的消息',
++        chatHistoryLimitPlaceholder: '例如 50',
++        chatHistoryLimitOff: '关闭',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 条消息`,
+     },
+ 
+     settingsFeatures: {
+diff --git a/packages/happy-app/sources/text/translations/zh-Hant.ts b/packages/happy-app/sources/text/translations/zh-Hant.ts
+index 3f75efd89..be333ed47 100644
+--- a/packages/happy-app/sources/text/translations/zh-Hant.ts
++++ b/packages/happy-app/sources/text/translations/zh-Hant.ts
+@@ -210,6 +210,13 @@ export const zhHant: TranslationStructure = {
+         defaultEffortDescription: '新工作階段的初始努力級別',
+         mod04Title: '04 · Simplified Modes',
+         mod04Description: '在權限模式選擇器中只顯示 Plan 和 Yolo。',
++        mod05Title: '05 · 聊天記錄上限',
++        mod05Description: '限制每個對話呈現的訊息數量。適合在較慢的裝置上進行長對話。',
++        chatHistoryLimit: '訊息上限',
++        chatHistoryLimitDescription: '每個對話只顯示最近的訊息',
++        chatHistoryLimitPlaceholder: '例如 50',
++        chatHistoryLimitOff: '關閉',
++        chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 則訊息`,
+     },
+ 
+     settingsFeatures: {
+-- 
+2.54.0
+
