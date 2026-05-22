@@ -744,6 +744,21 @@ class Sync {
         this.settingsSync.invalidate();
     }
 
+    // Mod 13: replace the entire settings payload (used by the raw settings
+    // editor). Unlike applySettings(), this does NOT merge with the previous
+    // settings — keys the user removed in the editor are actually dropped.
+    // The raw object is run through settingsParse() so known fields keep their
+    // defaults and any kept unknown/deprecated keys are preserved verbatim,
+    // while removed keys stay removed. pendingSettings is replaced wholesale so
+    // stale deltas can't re-introduce a removed key on the next sync push.
+    replaceSettings = (raw: unknown) => {
+        const parsed = settingsParse(raw);
+        storage.getState().applySettingsRaw(parsed);
+        this.pendingSettings = { ...parsed } as Partial<Settings>;
+        savePendingSettings(this.pendingSettings);
+        this.settingsSync.invalidate();
+    }
+
     refreshPurchases = () => {
         this.purchasesSync.invalidate();
     }

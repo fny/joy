@@ -189,6 +189,9 @@ interface StorageState {
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
+    // Mod 13: replace the full settings object (no merge), so deprecated/unknown
+    // keys removed by the raw editor are actually dropped instead of preserved.
+    applySettingsRaw: (settings: Settings) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
     applyPurchases: (customerInfo: CustomerInfo) => void;
     applyProfile: (profile: Profile) => void;
@@ -849,6 +852,13 @@ export const storage = create<StorageState>()((set, get) => {
             } else {
                 return state;
             }
+        }),
+        // Mod 13: wholesale replace (no merge with previous settings), keeping
+        // the current version. Removed keys are gone; sync.replaceSettings()
+        // pushes the replaced object to the server.
+        applySettingsRaw: (settings: Settings) => set((state) => {
+            saveSettings(settings, state.settingsVersion ?? 0);
+            return { ...state, settings };
         }),
         applyLocalSettings: (delta: Partial<LocalSettings>) => set((state) => {
             const updatedLocalSettings = applyLocalSettings(state.localSettings, delta);
