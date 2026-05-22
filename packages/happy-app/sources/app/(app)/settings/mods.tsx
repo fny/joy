@@ -5,10 +5,12 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useSettingMutable } from '@/sync/storage';
+import { useRouter } from 'expo-router';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 
 export default React.memo(function ModsSettingsScreen() {
+    const router = useRouter();
     const [modXhighEnabled, setModXhighEnabled] = useSettingMutable('joy__xHighEnabled');
     const [modHideModesEnabled, setModHideModesEnabled] = useSettingMutable('joy__hideModesEnabled');
     const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
@@ -91,6 +93,14 @@ export default React.memo(function ModsSettingsScreen() {
                     rightElement={<Switch value={!!modReadOpenFileEnabled} onValueChange={setModReadOpenFileEnabled} />}
                     onPress={() => setModReadOpenFileEnabled(!modReadOpenFileEnabled)}
                     showChevron={false}
+                />
+            </ItemGroup>
+
+            <ItemGroup title="08 · Raw Settings" footer="View and edit the raw settings JSON. Lets you remove deprecated keys that no toggle controls.">
+                <Item
+                    title="Edit raw settings"
+                    icon={<Ionicons name="code-slash-outline" size={29} color="#8E8E93" />}
+                    onPress={() => router.push('/settings/raw')}
                 />
             </ItemGroup>
         </ItemList>
