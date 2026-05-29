@@ -141,6 +141,8 @@ export const es: TranslationStructure = {
         exchangingTokens: 'Intercambiando tokens...',
         usage: 'Uso',
         usageSubtitle: 'Ver tu uso de API y costos',
+        sessions: 'Joy Sessions',
+        sessionsSubtitle: 'Administrar sesiones basadas en tmux',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Cuenta de ${service} conectada`,
@@ -1006,6 +1008,23 @@ export const es: TranslationStructure = {
             : `No se pudieron subir ${count} imágenes y no se enviaron.`,
         notSupportedTitle: 'Imágenes no compatibles',
         notSupportedMessage: 'Este agente no admite imágenes adjuntas. Solo se envió el texto.',
+    },
+
+    settingsSessions: {
+        serverUrl: 'URL del servidor',
+        serverUrlFooter: 'URL del servidor joy-tmux en ejecución en tu máquina',
+        sessions: 'Sesiones',
+        noSessions: 'No hay sesiones activas',
+        loading: 'Cargando...',
+        newSession: 'Nueva sesión',
+        workingDirectory: 'Directorio de trabajo',
+        workingDirectoryPlaceholder: 'p. ej. /home/user/projects',
+        confirmKill: 'Terminar sesión',
+        confirmKillMessage: 'Esto terminará el proceso de Claude y no se puede deshacer.',
+        killSession: 'Terminar',
+        statusStarting: 'Iniciando',
+        statusActive: 'Activa',
+        statusEnded: 'Finalizada',
     },
 
     feed: {

@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>joy</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d0d0d; --surface: #161616; --border: #2a2a2a;
+    --text: #e8e8e8; --muted: #666; --accent: #cc785c;
+    --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  }
+  html, body { height: 100%; font-family: var(--font-mono); background: var(--bg); color: var(--text); font-size: 13px; }
+  #app { display: flex; flex-direction: column; height: 100dvh; }
+
+  /* Header */
+  #header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 18px; height: 44px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  #header-title { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; color: var(--accent); }
+  #header-right { display: flex; align-items: center; gap: 8px; }
+  #status-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #444;
+    transition: background 0.3s; display: inline-block; margin-right: 4px;
+  }
+  #status-dot.connected { background: #4caf77; }
+  #status-dot.error { background: #cc4444; }
+  #status-label { font-size: 11px; color: var(--muted); }
+
+  /* Toolbar */
+  #toolbar {
+    padding: 10px 18px; border-bottom: 1px solid var(--border);
+    background: var(--surface); display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+  }
+  #toolbar-title { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; flex: 1; }
+  .btn-primary {
+    padding: 5px 12px; background: var(--accent); border: none;
+    border-radius: 4px; color: #fff; font-family: var(--font-mono);
+    font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  .btn-primary:hover { background: #d4866a; }
+
+  /* Sessions list */
+  #sessions-list {
+    flex: 1; overflow-y: auto; padding: 14px 18px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #sessions-list::-webkit-scrollbar { width: 4px; }
+  #sessions-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  #sessions-empty { color: var(--muted); font-size: 12px; text-align: center; padding: 48px 16px; line-height: 1.8; }
+
+  /* Session card — acts as a link */
+  .session-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 7px;
+    cursor: pointer; text-decoration: none; color: inherit;
+    transition: border-color 0.15s;
+  }
+  .session-card:hover { border-color: #3a3a3a; }
+  .session-card.status-active   { border-color: #1e3a28; }
+  .session-card.status-active:hover { border-color: #2a5038; }
+  .session-card.status-starting { border-color: #3a3010; }
+  .session-card.status-ended    { opacity: 0.5; }
+
+  .session-card-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .session-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .session-status-dot.starting { background: #c9a84c; }
+  .session-status-dot.active   { background: #4caf77; }
+  .session-status-dot.ended    { background: #444; }
+  .session-id { font-size: 11px; color: var(--accent); font-weight: 600; letter-spacing: 0.3px; }
+  .session-status-badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 3px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .session-status-badge.starting { background: #3a3010; color: #c9a84c; }
+  .session-status-badge.active   { background: #1a3028; color: #4caf77; }
+  .session-status-badge.ended    { background: #1e1e1e; color: #555; }
+
+  .session-card-meta { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .session-meta-item { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .session-meta-item.cwd { color: var(--text); max-width: 500px; overflow: hidden; text-overflow: ellipsis; }
+
+  .session-card-actions { display: flex; gap: 8px; }
+  .btn-session-action {
+    padding: 3px 12px; border-radius: 3px;
+    font-family: var(--font-mono); font-size: 11px; cursor: pointer; border: 1px solid;
+  }
+  .btn-kill   { background: transparent; border-color: #4a1e1e; color: #cc5555; }
+  .btn-kill:hover   { background: #3a1010; }
+  .btn-resume { background: transparent; border-color: #1e3a4a; color: #5588cc; }
+  .btn-resume:hover { background: #10202e; }
+  .btn-session-action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Modal */
+  .modal-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0,0,0,0.75);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .modal-overlay.hidden { display: none; }
+  .modal-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; width: 100%; max-width: 460px;
+    display: flex; flex-direction: column; max-height: 90dvh; overflow-y: auto;
+  }
+  .modal-header {
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+  }
+  .modal-header h2 { font-size: 13px; font-weight: 600; }
+  .modal-close {
+    background: transparent; border: 1px solid var(--border);
+    border-radius: 3px; color: var(--muted); padding: 2px 8px;
+    font-family: var(--font-mono); font-size: 11px; cursor: pointer;
+  }
+  .modal-close:hover { color: var(--text); border-color: #444; }
+  .modal-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .form-group { display: flex; flex-direction: column; gap: 6px; }
+  .form-label { font-size: 10px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+  .form-input, .form-select {
+    background: #1a1a1a; border: 1px solid var(--border);
+    border-radius: 4px; padding: 8px 10px; color: var(--text);
+    font-family: var(--font-mono); font-size: 12px; outline: none;
+  }
+  .form-select {
+    appearance: none; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px;
+  }
+  .form-input:focus, .form-select:focus { border-color: #3a3a3a; }
+
+  .form-toggle-row { display: flex; align-items: center; gap: 10px; }
+  .toggle-switch { position: relative; width: 34px; height: 18px; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .toggle-track {
+    position: absolute; inset: 0; background: #2a2a2a; border-radius: 18px;
+    cursor: pointer; transition: background 0.2s;
+  }
+  .toggle-track::after {
+    content: ''; position: absolute; left: 2px; top: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #555; transition: transform 0.15s, background 0.15s;
+  }
+  .toggle-switch input:checked + .toggle-track { background: #1a3a20; }
+  .toggle-switch input:checked + .toggle-track::after { transform: translateX(16px); background: #4caf77; }
+  .toggle-label { font-size: 12px; color: var(--text); }
+  .toggle-desc  { font-size: 11px; color: var(--muted); }
+
+  #dir-not-found {
+    display: none; background: #1f1a0e; border: 1px solid #5c4a00;
+    border-radius: 4px; padding: 8px 12px; font-size: 11px; color: #c9a84c;
+    align-items: center; gap: 10px;
+  }
+  #dir-not-found.visible { display: flex; }
+  #dir-not-found span { flex: 1; }
+  .btn-create-dir {
+    padding: 3px 10px; background: #3a2e08; border: 1px solid #7a6010;
+    color: #c9a84c; border-radius: 3px; font-family: var(--font-mono);
+    font-size: 11px; cursor: pointer; white-space: nowrap;
+  }
+  .btn-create-dir:hover { background: #4a3a10; }
+
+  .modal-footer {
+    padding: 12px 18px; border-top: 1px solid var(--border);
+    display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0;
+  }
+  .btn-cancel {
+    padding: 7px 16px; background: transparent; border: 1px solid var(--border);
+    border-radius: 4px; color: var(--muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer;
+  }
+  .btn-cancel:hover { border-color: #444; color: var(--text); }
+  .btn-launch {
+    padding: 7px 18px; background: var(--accent); border: none;
+    border-radius: 4px; color: #fff; font-family: var(--font-mono);
+    font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .btn-launch:hover { background: #d4866a; }
+  .btn-launch:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  @media (max-width: 767px) {
+    html, body { font-size: 14px; }
+    #header { padding: 0 14px; }
+    .session-meta-item.cwd { max-width: 220px; }
+    .modal-overlay { align-items: flex-end; padding: 0; }
+    .modal-box { max-width: 100%; border-radius: 12px 12px 0 0; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <span id="header-title">joy</span>
+    <div id="header-right">
+      <span id="status-dot"></span>
+      <span id="status-label">connecting…</span>
+    </div>
+  </div>
+
+  <div id="toolbar">
+    <span id="toolbar-title">Sessions</span>
+    <button class="btn-primary" id="new-session-btn">+ New Session</button>
+  </div>
+
+  <div id="sessions-list">
+    <div id="sessions-empty">No sessions yet.<br>Launch a new session to get started.</div>
+  </div>
+</div>
+
+<!-- New / Resume session modal -->
+<div id="session-modal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2 id="modal-title">New Session</h2>
+      <button class="modal-close" id="modal-close-btn">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label" for="form-cwd">Working Directory</label>
+        <input type="text" class="form-input" id="form-cwd" placeholder="/home/user/project" spellcheck="false" autocomplete="off" />
+        <div id="dir-not-found">
+          <span>Directory not found</span>
+          <button class="btn-create-dir" id="btn-create-dir" type="button">Create it</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="form-model">Model</label>
+        <select class="form-select" id="form-model">
+          <option value="">default</option>
+          <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+          <option value="claude-opus-4-7">claude-opus-4-7</option>
+          <option value="claude-haiku-4-5">claude-haiku-4-5</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="form-effort">Thinking Level</label>
+        <select class="form-select" id="form-effort">
+          <option value="">default</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Options</label>
+        <div class="form-toggle-row">
+          <label class="toggle-switch">
+            <input type="checkbox" id="form-continue" />
+            <span class="toggle-track"></span>
+          </label>
+          <div>
+            <div class="toggle-label">--continue</div>
+            <div class="toggle-desc">Resume most recent conversation in this directory</div>
+          </div>
+        </div>
+        <div class="form-toggle-row" style="margin-top:8px">
+          <label class="toggle-switch">
+            <input type="checkbox" id="form-yolo" />
+            <span class="toggle-track"></span>
+          </label>
+          <div>
+            <div class="toggle-label">yolo mode</div>
+            <div class="toggle-desc">--dangerously-skip-permissions</div>
+          </div>
+        </div>
+        <div class="form-toggle-row" style="margin-top:8px">
+          <label class="toggle-switch">
+            <input type="checkbox" id="form-direct" />
+            <span class="toggle-track"></span>
+          </label>
+          <div>
+            <div class="toggle-label">direct mode</div>
+            <div class="toggle-desc">send via tmux · read from transcript JSONL</div>
+          </div>
+        </div>
+      </div>
+      <input type="hidden" id="form-resume-id" value="" />
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" id="modal-cancel-btn">Cancel</button>
+      <button class="btn-launch" id="modal-launch-btn">Launch</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const sessionsListEl = $('sessions-list');
+const sessionModal = $('session-modal');
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function setStatus(state, text) {
+  $('status-dot').className = state;
+  $('status-label').textContent = text;
+}
+function formatAge(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+// ── Session cards ─────────────────────────────────────────────────────────────
+function renderSession(s) {
+  const cwd = s.cwd || '';
+  const shortCwd = cwd.length > 52 ? '…' + cwd.slice(-49) : cwd;
+  const modelStr = s.model || 'default';
+  const effortStr = s.effort && s.effort !== 'default' ? `thinking: ${s.effort}` : '';
+  const pidStr = s.pid ? `pid ${s.pid}` : '';
+  const endReason = s.end_reason ? ` · ${s.end_reason}` : '';
+
+  const actionsHtml = s.status !== 'ended'
+    ? `<button class="btn-session-action btn-kill" data-id="${escapeHtml(s.id)}" type="button">Kill</button>`
+    : `<button class="btn-session-action btn-resume" data-id="${escapeHtml(s.id)}" type="button">Resume</button>`;
+
+  const inner = `
+    <div class="session-card-top">
+      <span class="session-status-dot ${s.status}"></span>
+      <span class="session-id">${escapeHtml(s.id)}</span>
+      <span class="session-status-badge ${s.status}">${s.status}${escapeHtml(endReason)}</span>
+    </div>
+    <div class="session-card-meta">
+      <span class="session-meta-item cwd" title="${escapeHtml(cwd)}">${escapeHtml(shortCwd)}</span>
+      ${s.mode === 'direct' ? `<span class="session-meta-item" style="color:#5566aa">direct</span>` : ''}
+      <span class="session-meta-item">model: ${escapeHtml(modelStr)}</span>
+      ${effortStr ? `<span class="session-meta-item">${escapeHtml(effortStr)}</span>` : ''}
+      ${pidStr ? `<span class="session-meta-item">${pidStr}</span>` : ''}
+      <span class="session-meta-item" data-age="${s.started_at}">${formatAge(s.started_at)}</span>
+    </div>
+    <div class="session-card-actions">${actionsHtml}</div>`;
+
+  let card = document.getElementById('session-' + s.id);
+  if (card) {
+    card.className = `session-card status-${s.status}`;
+    card.innerHTML = inner;
+  } else {
+    $('sessions-empty').style.display = 'none';
+    card = document.createElement('a');
+    card.href = `/session/${s.id}`;
+    card.className = `session-card status-${s.status}`;
+    card.id = 'session-' + s.id;
+    card.innerHTML = inner;
+    sessionsListEl.insertBefore(card, sessionsListEl.firstChild);
+  }
+
+  card.querySelector('.btn-kill')?.addEventListener('click', async function(e) {
+    e.preventDefault(); e.stopPropagation();
+    this.disabled = true; this.textContent = '…';
+    await fetch(`/sessions/${s.id}`, { method: 'DELETE' });
+  });
+  card.querySelector('.btn-resume')?.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    openModal({ cwd: s.cwd, resume_id: s.claude_session_id || '' });
+  });
+}
+
+setInterval(() => {
+  document.querySelectorAll('[data-age]').forEach(el => {
+    const ts = parseInt(el.dataset.age);
+    if (!isNaN(ts)) el.textContent = formatAge(ts);
+  });
+}, 10000);
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+let modalCreateDir = false;
+
+function openModal(prefill = {}) {
+  $('form-cwd').value = prefill.cwd || '';
+  $('form-model').value = prefill.model || '';
+  $('form-effort').value = prefill.effort || '';
+  $('form-continue').checked = !!prefill.continue;
+  $('form-yolo').checked = !!prefill.yolo;
+  $('form-direct').checked = prefill.mode === 'direct';
+  $('form-resume-id').value = prefill.resume_id || '';
+  $('modal-title').textContent = prefill.resume_id ? 'Resume Session' : 'New Session';
+  $('dir-not-found').classList.remove('visible');
+  modalCreateDir = false;
+  sessionModal.classList.remove('hidden');
+  setTimeout(() => $('form-cwd').focus(), 50);
+}
+
+function closeModal() {
+  sessionModal.classList.add('hidden');
+  $('form-resume-id').value = '';
+  modalCreateDir = false;
+  const btn = $('modal-launch-btn');
+  btn.disabled = false; btn.textContent = 'Launch';
+}
+
+$('new-session-btn').addEventListener('click', () => openModal());
+$('modal-close-btn').addEventListener('click', closeModal);
+$('modal-cancel-btn').addEventListener('click', closeModal);
+sessionModal.addEventListener('click', e => { if (e.target === sessionModal) closeModal(); });
+$('form-cwd').addEventListener('input', () => {
+  $('dir-not-found').classList.remove('visible');
+  modalCreateDir = false;
+});
+$('btn-create-dir').addEventListener('click', () => {
+  modalCreateDir = true;
+  $('dir-not-found').classList.remove('visible');
+  doLaunch();
+});
+$('modal-launch-btn').addEventListener('click', doLaunch);
+
+async function doLaunch() {
+  const cwd = $('form-cwd').value.trim();
+  if (!cwd) { $('form-cwd').focus(); return; }
+
+  const body = { cwd };
+  const model = $('form-model').value;
+  const effort = $('form-effort').value;
+  if (model)  body.model = model;
+  if (effort) body.effort = effort;
+  if ($('form-continue').checked) body.continue = true;
+  if ($('form-yolo').checked) body.yolo = true;
+  if ($('form-direct').checked) body.mode = 'direct';
+  const resumeId = $('form-resume-id').value;
+  if (resumeId) body.resume_id = resumeId;
+  if (modalCreateDir) body.createDir = true;
+
+  const btn = $('modal-launch-btn');
+  btn.disabled = true; btn.textContent = 'Launching…';
+
+  try {
+    const res = await fetch('/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 422) {
+      $('dir-not-found').classList.add('visible');
+      modalCreateDir = false;
+      btn.disabled = false; btn.textContent = 'Launch';
+      return;
+    }
+    if (res.ok) {
+      const session = await res.json();
+      closeModal();
+      window.location.href = `/session/${session.id}`;
+    } else {
+      const err = await res.json().catch(() => ({}));
+      alert(`Error: ${err.error || res.statusText}`);
+      btn.disabled = false; btn.textContent = 'Launch';
+    }
+  } catch(e) {
+    alert(`Network error: ${e.message}`);
+    btn.disabled = false; btn.textContent = 'Launch';
+  }
+}
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.addEventListener('sessions_history', e => { JSON.parse(e.data).forEach(renderSession); });
+  es.addEventListener('session_update', e => renderSession(JSON.parse(e.data)));
+  es.onopen = () => setStatus('connected', 'connected');
+  es.onerror = () => {
+    setStatus('error', 'disconnected — retrying…');
+    es.close();
+    setTimeout(connectSSE, 3000);
+  };
+}
+connectSSE();
+</script>
+</body>
+</html>

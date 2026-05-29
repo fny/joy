@@ -156,6 +156,8 @@ export const en: TranslationStructure = {
         exchangingTokens: 'Exchanging tokens...',
         usage: 'Usage',
         usageSubtitle: 'View your API usage and costs',
+        sessions: 'Joy Sessions',
+        sessionsSubtitle: 'Manage tmux-based sessions',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service} account connected`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1020,6 +1022,23 @@ export const en: TranslationStructure = {
             : `${count} images could not be uploaded and were not sent.`,
         notSupportedTitle: 'Images Not Supported',
         notSupportedMessage: 'This agent does not support image attachments. Only the text was sent.',
+    },
+
+    settingsSessions: {
+        serverUrl: 'Server URL',
+        serverUrlFooter: 'URL of the joy-tmux server running on your machine',
+        sessions: 'Sessions',
+        noSessions: 'No active sessions',
+        loading: 'Loading...',
+        newSession: 'New Session',
+        workingDirectory: 'Working Directory',
+        workingDirectoryPlaceholder: 'e.g. /home/user/projects',
+        confirmKill: 'Kill Session',
+        confirmKillMessage: 'This will terminate the Claude process and cannot be undone.',
+        killSession: 'Kill',
+        statusStarting: 'Starting',
+        statusActive: 'Active',
+        statusEnded: 'Ended',
     },
 
     feed: {

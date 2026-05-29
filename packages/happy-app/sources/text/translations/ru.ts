@@ -128,6 +128,8 @@ export const ru: TranslationStructure = {
         exchangingTokens: 'Обмен токенов...',
         usage: 'Использование',
         usageSubtitle: 'Просмотр использования API и затрат',
+        sessions: 'Joy Sessions',
+        sessionsSubtitle: 'Управление сессиями на основе tmux',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Аккаунт ${service} подключен`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1034,6 +1036,23 @@ export const ru: TranslationStructure = {
             : `${count} изображений не удалось загрузить — они не были отправлены.`,
         notSupportedTitle: 'Изображения не поддерживаются',
         notSupportedMessage: 'Этот агент не поддерживает изображения. Отправлен только текст.',
+    },
+
+    settingsSessions: {
+        serverUrl: 'URL сервера',
+        serverUrlFooter: 'URL сервера joy-tmux, запущенного на вашем компьютере',
+        sessions: 'Сессии',
+        noSessions: 'Нет активных сессий',
+        loading: 'Загрузка...',
+        newSession: 'Новая сессия',
+        workingDirectory: 'Рабочая директория',
+        workingDirectoryPlaceholder: 'например, /home/user/projects',
+        confirmKill: 'Завершить сессию',
+        confirmKillMessage: 'Это завершит процесс Claude и не может быть отменено.',
+        killSession: 'Завершить',
+        statusStarting: 'Запускается',
+        statusActive: 'Активна',
+        statusEnded: 'Завершена',
     },
 
     feed: {

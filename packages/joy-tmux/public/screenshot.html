@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terminal · joy</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #1a1a1a;
+    color: #d4d4d4;
+    font-family: 'Fira Mono', 'Cascadia Code', 'Menlo', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 14px;
+    background: #111;
+    border-bottom: 1px solid #2a2a2a;
+    flex-shrink: 0;
+  }
+
+  header a {
+    color: #888;
+    text-decoration: none;
+    font-size: 12px;
+  }
+  header a:hover { color: #ccc; }
+
+  #session-label {
+    font-size: 12px;
+    color: #666;
+    font-family: monospace;
+  }
+
+  #status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #555;
+    flex-shrink: 0;
+  }
+  #status-dot.live { background: #4caf82; }
+
+  #refresh-btn {
+    margin-left: auto;
+    background: none;
+    border: 1px solid #333;
+    color: #888;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+  }
+  #refresh-btn:hover { border-color: #555; color: #ccc; }
+
+  #pane-wrap {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+  }
+
+  #pane {
+    white-space: pre;
+    tab-size: 8;
+    min-height: 100%;
+  }
+
+  #error {
+    color: #e07070;
+    padding: 12px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <a id="back-link" href="/">← Sessions</a>
+  <span id="session-label">—</span>
+  <span id="status-dot"></span>
+  <button id="refresh-btn">⟳ Refresh</button>
+</header>
+
+<div id="pane-wrap">
+  <pre id="pane"></pre>
+  <div id="error"></div>
+</div>
+
+<script>
+const sessId = location.pathname.split('/')[2];
+document.getElementById('session-label').textContent = sessId;
+document.getElementById('back-link').href = `/session/${sessId}`;
+
+const paneEl = document.getElementById('pane');
+const errorEl = document.getElementById('error');
+const dot = document.getElementById('status-dot');
+
+async function refresh() {
+  try {
+    const res = await fetch(`/sessions/${sessId}/pane`);
+    if (!res.ok) { throw new Error(await res.text()); }
+    const { text } = await res.json();
+    paneEl.textContent = text;
+    errorEl.style.display = 'none';
+    dot.classList.add('live');
+  } catch(e) {
+    errorEl.textContent = `Error: ${e.message}`;
+    errorEl.style.display = 'block';
+    dot.classList.remove('live');
+  }
+}
+
+document.getElementById('refresh-btn').addEventListener('click', refresh);
+
+// Auto-refresh every second
+refresh();
+const interval = setInterval(refresh, 1000);
+window.addEventListener('beforeunload', () => clearInterval(interval));
+</script>
+</body>
+</html>

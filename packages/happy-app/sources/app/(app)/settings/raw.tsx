@@ -7,8 +7,37 @@ import { useSettings } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { Modal } from '@/modal';
 import { layout } from '@/components/layout';
+import { SettingsSchemaPartial } from '@/sync/settings';
 
-// Mod 13: Raw Settings editor.
+// Validate the editor text. Returns null when OK, or a human-readable error.
+// Two layers: (1) JSON must parse to a plain object; (2) known settings keys
+// must match the schema's types — otherwise settingsParse would silently reset
+// all known fields to defaults on save, losing the user's settings. Unknown
+// keys are allowed (zod strips them without error) so deprecated keys can be
+// kept or removed freely.
+function validateSettingsText(text: string): string | null {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(text);
+    } catch (e) {
+        return `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return 'The payload must be a JSON object.';
+    }
+    const result = SettingsSchemaPartial.safeParse(parsed);
+    if (!result.success) {
+        const issues = result.error.issues
+            .slice(0, 5)
+            .map((i) => `• ${i.path.join('.') || '(root)'}: ${i.message}`)
+            .join('\n');
+        const more = result.error.issues.length > 5 ? `\n…and ${result.error.issues.length - 5} more` : '';
+        return `Schema validation failed:\n${issues}${more}`;
+    }
+    return null;
+}
+
+// Mod 14: Raw Settings editor.
 //
 // Shows the entire settings payload as editable JSON and replaces it wholesale
 // on save (sync.replaceSettings → applySettingsRaw, NOT a merge). This lets you
@@ -22,23 +51,20 @@ export default React.memo(function RawSettingsScreen() {
     const initial = React.useMemo(() => JSON.stringify(settings, null, 2), [settings]);
     const [text, setText] = React.useState(initial);
     const dirty = text !== initial;
+    const error = React.useMemo(() => validateSettingsText(text), [text]);
+    const canSave = dirty && !error;
 
     const onReset = React.useCallback(() => {
         setText(JSON.stringify(settings, null, 2));
     }, [settings]);
 
     const onSave = React.useCallback(() => {
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(text);
-        } catch (e) {
-            Modal.alert('Invalid JSON', String(e instanceof Error ? e.message : e), [{ text: 'OK', style: 'cancel' }]);
+        const err = validateSettingsText(text);
+        if (err) {
+            Modal.alert('Invalid settings', err, [{ text: 'OK', style: 'cancel' }]);
             return;
         }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            Modal.alert('Invalid settings', 'The payload must be a JSON object.', [{ text: 'OK', style: 'cancel' }]);
-            return;
-        }
+        const parsed = JSON.parse(text);
         Modal.alert(
             'Replace settings?',
             'This replaces the entire settings payload. Keys you removed will be deleted (locally and on the server). Keys you keep are preserved.',
@@ -74,11 +100,14 @@ export default React.memo(function RawSettingsScreen() {
                         textAlignVertical="top"
                     />
                 </ScrollView>
+                {error && dirty ? (
+                    <Text style={styles.error}>{error}</Text>
+                ) : null}
                 <View style={styles.actions}>
                     <Pressable style={[styles.button, styles.secondary]} onPress={onReset} disabled={!dirty}>
                         <Text style={[styles.buttonText, !dirty && styles.disabledText]}>Reset</Text>
                     </Pressable>
-                    <Pressable style={[styles.button, styles.primary, !dirty && styles.disabledButton]} onPress={onSave} disabled={!dirty}>
+                    <Pressable style={[styles.button, styles.primary, !canSave && styles.disabledButton]} onPress={onSave} disabled={!canSave}>
                         <Text style={styles.primaryText}>Save</Text>
                     </Pressable>
                 </View>
@@ -103,6 +132,11 @@ const styles = StyleSheet.create((theme, runtime) => ({
     hint: {
         fontSize: 13,
         color: theme.colors.textSecondary,
+    },
+    error: {
+        fontSize: 12,
+        fontFamily: 'monospace',
+        color: '#FF3B30',
     },
     editorScroll: {
         flex: 1,

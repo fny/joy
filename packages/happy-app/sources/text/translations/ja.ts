@@ -143,6 +143,8 @@ export const ja: TranslationStructure = {
         exchangingTokens: 'トークンを交換中...',
         usage: '使用状況',
         usageSubtitle: 'API使用量とコストを確認',
+        sessions: 'Joy Sessions',
+        sessionsSubtitle: 'tmuxベースのセッションを管理',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service}アカウントが接続されました`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1007,6 +1009,23 @@ export const ja: TranslationStructure = {
             : `${count}枚の画像をアップロードできず、送信されませんでした。`,
         notSupportedTitle: '画像はサポートされていません',
         notSupportedMessage: 'このエージェントは画像の添付に対応していません。テキストのみが送信されました。',
+    },
+
+    settingsSessions: {
+        serverUrl: 'サーバーURL',
+        serverUrlFooter: 'お使いのマシンで動作しているjoy-tmuxサーバーのURL',
+        sessions: 'セッション',
+        noSessions: 'アクティブなセッションはありません',
+        loading: '読み込み中...',
+        newSession: '新しいセッション',
+        workingDirectory: '作業ディレクトリ',
+        workingDirectoryPlaceholder: '例: /home/user/projects',
+        confirmKill: 'セッションを終了',
+        confirmKillMessage: 'Claudeのプロセスを終了します。この操作は取り消せません。',
+        killSession: '終了',
+        statusStarting: '起動中',
+        statusActive: 'アクティブ',
+        statusEnded: '終了済み',
     },
 
     feed: {
