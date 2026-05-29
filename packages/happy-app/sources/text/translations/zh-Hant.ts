@@ -142,6 +142,8 @@ export const zhHant: TranslationStructure = {
         exchangingTokens: '正在交換權杖...',
         usage: '使用情況',
         usageSubtitle: '查看 API 使用情況和費用',
+        sessions: 'Joy Sessions',
+        sessionsSubtitle: '管理 tmux 工作階段',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `已連結 ${service} 帳戶`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1005,6 +1007,23 @@ export const zhHant: TranslationStructure = {
             : `${count} 張圖片上傳失敗，未傳送。`,
         notSupportedTitle: '不支援圖片',
         notSupportedMessage: '此代理不支援圖片附件。僅傳送了文字。',
+    },
+
+    settingsSessions: {
+        serverUrl: '伺服器 URL',
+        serverUrlFooter: '在您的機器上執行的 joy-tmux 伺服器的 URL',
+        sessions: '工作階段',
+        noSessions: '沒有作用中的工作階段',
+        loading: '載入中...',
+        newSession: '新增工作階段',
+        workingDirectory: '工作目錄',
+        workingDirectoryPlaceholder: '例如 /home/user/projects',
+        confirmKill: '終止工作階段',
+        confirmKillMessage: '這將終止 Claude 程序，且無法復原。',
+        killSession: '終止',
+        statusStarting: '啟動中',
+        statusActive: '作用中',
+        statusEnded: '已結束',
     },
 
     feed: {

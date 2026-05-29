@@ -5,8 +5,13 @@ module.exports = function (api) {
   const platform = api.caller((caller) => caller && caller.platform);
   const isWeb = platform === 'web';
   const isProduction = api.env('production');
+  // Component-info is a dev-only inspection aid by default, but it can be
+  // force-enabled for a production web export (e.g. a hosted preview/tailnet
+  // page) by setting EXPO_PUBLIC_COMPONENT_INFO=1 at build time.
+  const forceComponentInfo = process.env.EXPO_PUBLIC_COMPONENT_INFO === '1';
+  const enableComponentInfo = isWeb && (!isProduction || forceComponentInfo);
   let componentInfoMtime = 0;
-  if (isWeb && !isProduction) {
+  if (enableComponentInfo) {
     try {
       componentInfoMtime = require('node:fs').statSync(
         require.resolve('./babel-plugin-component-info.cjs'),
@@ -14,7 +19,7 @@ module.exports = function (api) {
     } catch (_e) {}
   }
   api.cache.using(
-    () => `${platform || 'unknown'}:${isProduction ? 'prod' : 'dev'}:${componentInfoMtime}`,
+    () => `${platform || 'unknown'}:${isProduction ? 'prod' : 'dev'}:${forceComponentInfo ? 'ci1' : 'ci0'}:${componentInfoMtime}`,
   );
 
   // Determine which worklets plugin to use based on installed versions
@@ -34,7 +39,7 @@ module.exports = function (api) {
     // This won't cause issues since the plugin won't be needed anyway
   }
 
-  const componentInfoPlugin = isWeb && !isProduction
+  const componentInfoPlugin = enableComponentInfo
     ? [require.resolve('./babel-plugin-component-info.cjs')]
     : [];
 

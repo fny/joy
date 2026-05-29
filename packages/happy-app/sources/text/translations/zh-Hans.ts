@@ -143,6 +143,8 @@ export const zhHans: TranslationStructure = {
         exchangingTokens: '正在交换令牌...',
         usage: '使用情况',
         usageSubtitle: '查看 API 使用情况和费用',
+        sessions: 'Joy Sessions',
+        sessionsSubtitle: '管理基于 tmux 的会话',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `已连接 ${service} 账户`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1006,6 +1008,23 @@ export const zhHans: TranslationStructure = {
             : `${count} 张图片上传失败，未发送。`,
         notSupportedTitle: '不支持图片',
         notSupportedMessage: '该代理不支持图片附件。仅发送了文本。',
+    },
+
+    settingsSessions: {
+        serverUrl: '服务器 URL',
+        serverUrlFooter: '运行在您机器上的 joy-tmux 服务器的 URL',
+        sessions: '会话',
+        noSessions: '没有活跃的会话',
+        loading: '加载中...',
+        newSession: '新建会话',
+        workingDirectory: '工作目录',
+        workingDirectoryPlaceholder: '例如 /home/user/projects',
+        confirmKill: '终止会话',
+        confirmKillMessage: '这将终止 Claude 进程，且无法撤销。',
+        killSession: '终止',
+        statusStarting: '启动中',
+        statusActive: '活跃',
+        statusEnded: '已结束',
     },
 
     feed: {

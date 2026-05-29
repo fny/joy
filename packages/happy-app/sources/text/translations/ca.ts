@@ -141,6 +141,8 @@ export const ca: TranslationStructure = {
         exchangingTokens: 'Intercanviant tokens...',
         usage: 'Ús',
         usageSubtitle: "Veure l'ús de l'API i costos",
+        sessions: 'Joy Sessions',
+        sessionsSubtitle: 'Gestiona les sessions basades en tmux',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Compte de ${service} connectat`,
@@ -1005,6 +1007,23 @@ export const ca: TranslationStructure = {
             : `No s'han pogut pujar ${count} imatges i no s'han enviat.`,
         notSupportedTitle: 'Imatges no compatibles',
         notSupportedMessage: 'Aquest agent no admet imatges adjuntes. Només s\'ha enviat el text.',
+    },
+
+    settingsSessions: {
+        serverUrl: 'URL del servidor',
+        serverUrlFooter: 'URL del servidor joy-tmux que s\'executa a la teva màquina',
+        sessions: 'Sessions',
+        noSessions: 'No hi ha sessions actives',
+        loading: 'Carregant...',
+        newSession: 'Nova sessió',
+        workingDirectory: 'Directori de treball',
+        workingDirectoryPlaceholder: 'p. ex. /home/user/projects',
+        confirmKill: 'Finalitza la sessió',
+        confirmKillMessage: 'Això finalitzarà el procés de Claude i no es pot desfer.',
+        killSession: 'Finalitza',
+        statusStarting: 'Iniciant',
+        statusActive: 'Activa',
+        statusEnded: 'Finalitzada',
     },
 
     feed: {

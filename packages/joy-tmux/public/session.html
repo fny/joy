@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Session — joy</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d0d0d; --surface: #161616; --border: #2a2a2a;
+    --text: #e8e8e8; --muted: #666; --accent: #cc785c;
+    --user-bg: #1e2433; --assistant-bg: #161616;
+    --cli-badge: #3d3220; --web-badge: #1a2e3d;
+    --font-mono: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  }
+  html, body { height: 100%; font-family: var(--font-mono); background: var(--bg); color: var(--text); font-size: 13px; }
+  #app { display: flex; flex-direction: column; height: 100dvh; }
+
+  /* ── Header ────────────────────────────────────────────────────────────── */
+  #header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 16px; height: 44px; flex-shrink: 0;
+    border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  #back-btn {
+    color: var(--muted); text-decoration: none; font-size: 11px;
+    padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  #back-btn:hover { color: var(--text); border-color: #444; }
+
+  #session-info { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow: hidden; }
+  #session-id-display { font-size: 11px; color: var(--accent); font-weight: 600; white-space: nowrap; }
+  .session-status-badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 3px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; flex-shrink: 0;
+  }
+  .session-status-badge.starting { background: #3a3010; color: #c9a84c; }
+  .session-status-badge.active   { background: #1a3028; color: #4caf77; }
+  .session-status-badge.ended    { background: #1e1e1e; color: #555; }
+  #session-cwd {
+    font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+#header-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  #status-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #444;
+    transition: background 0.3s; display: inline-block; margin-right: 4px;
+  }
+  #status-dot.connected { background: #4caf77; }
+  #status-dot.error { background: #cc4444; }
+  #status-label { font-size: 11px; color: var(--muted); }
+  #log-toggle, #jsonl-toggle {
+    padding: 4px 10px; background: transparent; border: 1px solid var(--border);
+    border-radius: 4px; color: var(--muted); font-family: var(--font-mono);
+    font-size: 11px; cursor: pointer;
+  }
+  #log-toggle:hover, #jsonl-toggle:hover { border-color: #444; color: var(--text); }
+  #log-toggle.active, #jsonl-toggle.active { border-color: var(--accent); color: var(--accent); }
+
+  /* ── Main content ──────────────────────────────────────────────────────── */
+  #main-content { flex: 1; min-height: 0; display: flex; }
+
+  /* ── Chat section ──────────────────────────────────────────────────────── */
+  #chat-section {
+    flex: 1; min-width: 0; display: flex; flex-direction: column;
+    max-width: 900px;
+  }
+  #messages {
+    flex: 1; overflow-y: auto; padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  #messages::-webkit-scrollbar { width: 4px; }
+  #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .msg { display: flex; flex-direction: column; gap: 4px; max-width: 82%; }
+  @media (max-width: 600px) { .msg { max-width: 92%; } }
+  .msg.user { align-self: flex-end; }
+  .msg.assistant { align-self: flex-start; }
+
+  .msg-meta { font-size: 10px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .msg.user .msg-meta { justify-content: flex-end; }
+
+  .badge {
+    padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.3px; text-transform: uppercase;
+  }
+  .badge.web { background: var(--web-badge); color: #5bafd6; }
+  .badge.cli { background: var(--cli-badge); color: #c9a84c; }
+  .badge.assistant-web { background: #1a2e1a; color: #5db87a; }
+  .badge.assistant-cli { background: #2e1a2e; color: #b87adb; }
+
+  .msg-bubble {
+    padding: 10px 14px; border-radius: 8px;
+    line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user .msg-bubble { background: var(--user-bg); border: 1px solid #2a3550; }
+  .msg.assistant .msg-bubble { background: var(--assistant-bg); border: 1px solid var(--border); }
+
+  .thinking {
+    display: flex; align-items: center; gap: 8px; align-self: flex-start;
+    padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--muted); font-size: 12px;
+  }
+  .thinking .dots { display: flex; gap: 4px; }
+  .thinking .dot {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--muted);
+    animation: bounce 1.2s ease-in-out infinite;
+  }
+  .thinking .dot:nth-child(2) { animation-delay: 0.2s; }
+  .thinking .dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+    40% { transform: translateY(-4px); opacity: 1; }
+  }
+
+  .msg.event { align-self: center; max-width: 96%; text-align: center; }
+  .event-pill {
+    display: inline-block; padding: 2px 10px; border-radius: 3px;
+    font-size: 10.5px; border: 1px solid; font-family: var(--font-mono);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+  }
+  .event-pill.info    { color: #484848; border-color: #1e1e1e; background: transparent; }
+  .event-pill.success { color: #2e6040; border-color: #1a3028; background: transparent; }
+  .event-pill.error   { color: #783030; border-color: #3a1818; background: transparent; }
+  .event-pill.warning { color: #786028; border-color: #3a2e10; background: transparent; }
+
+  #empty {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: var(--muted); gap: 8px;
+  }
+  #empty .logo { font-size: 28px; margin-bottom: 6px; }
+  #empty p { font-size: 12px; }
+  #empty.waiting p { color: #c9a84c; }
+
+  .ts { color: var(--muted); font-size: 10px; }
+
+
+  /* ── Input area ────────────────────────────────────────────────────────── */
+  #input-area {
+    border-top: 1px solid var(--border); padding: 12px 16px;
+    background: var(--surface); display: flex; gap: 10px;
+    align-items: flex-end; flex-shrink: 0;
+  }
+  #input {
+    flex: 1; background: #1a1a1a; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; color: var(--text);
+    font-family: var(--font-mono); font-size: 13px; resize: none;
+    min-height: 42px; max-height: 140px; outline: none; line-height: 1.4;
+  }
+  #input:focus { border-color: #3a3a3a; }
+  #input::placeholder { color: var(--muted); }
+  #input:disabled { opacity: 0.4; }
+  #send-btn {
+    padding: 10px 18px; background: var(--accent); border: none;
+    border-radius: 6px; color: #fff; font-family: var(--font-mono);
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    white-space: nowrap; height: 44px; min-width: 64px;
+  }
+  #send-btn:hover { background: #d4866a; }
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── JSON panel ────────────────────────────────────────────────────────── */
+  #json-panel {
+    display: none; flex-direction: column; width: 480px; flex-shrink: 0;
+    border-left: 1px solid var(--border); background: #0a0a0a; min-height: 0;
+  }
+  #app.log-open #json-panel { display: flex; }
+  #app.jsonl-open #jsonl-panel { display: flex; }
+  #app.log-open #chat-section, #app.jsonl-open #chat-section { max-width: none; }
+
+  @media (max-width: 767px) {
+    #json-panel, #jsonl-panel { position: fixed; inset: 0; width: 100%; z-index: 100; border-left: none; }
+  }
+
+  /* ── JSONL panel ───────────────────────────────────────────────────────── */
+  #jsonl-panel {
+    display: none; flex-direction: column; width: 480px; flex-shrink: 0;
+    border-left: 1px solid var(--border); background: #0a0a0a; min-height: 0;
+  }
+  #jsonl-entries {
+    flex: 1; min-height: 0; overflow-y: auto; padding: 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  #jsonl-entries::-webkit-scrollbar { width: 4px; }
+  #jsonl-entries::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .jsonl-entry { border-radius: 4px; overflow: hidden; border: 1px solid #222; flex-shrink: 0; }
+  .jsonl-entry-meta {
+    display: flex; align-items: center; gap: 8px; padding: 0 10px;
+    height: 28px; min-height: 28px;
+    background: #0e0e0e; font-size: 10px; color: #555;
+    cursor: pointer; user-select: none;
+  }
+  .jsonl-entry-meta:hover { background: #131313; color: #888; }
+  .jsonl-entry-type { font-weight: 600; color: #666; flex-shrink: 0; }
+  .jsonl-entry-preview { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .jsonl-entry-chevron { font-size: 9px; flex-shrink: 0; transition: transform 0.15s; }
+  .jsonl-entry.open .jsonl-entry-chevron { transform: rotate(90deg); }
+  .jsonl-entry-body { display: none; max-height: 300px; overflow-y: auto; }
+  .jsonl-entry.open .jsonl-entry-body { display: block; }
+  .jsonl-entry pre { padding: 8px 12px; white-space: pre-wrap; word-break: break-all; font-size: 10.5px; line-height: 1.5; color: #6a9a6a; }
+
+  #json-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0;
+  }
+  #json-header span { font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--muted); text-transform: uppercase; }
+  #json-messages {
+    flex: 1; min-height: 0; overflow-y: auto; padding: 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #json-messages::-webkit-scrollbar { width: 4px; }
+  #json-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .json-msg { border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+  .json-msg.user { border-color: #2a3550; }
+  .json-msg.assistant { border-color: #2a2a2a; }
+  .json-msg-meta {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    background: #111; font-size: 10px; color: var(--muted);
+    cursor: pointer; user-select: none;
+  }
+  .json-msg-meta:hover { background: #161616; }
+  .json-msg.user .json-msg-meta { background: #0e1520; }
+  .json-msg.user .json-msg-meta:hover { background: #121a28; }
+  .json-msg.assistant .json-msg-meta { background: #0e0e0e; }
+  .json-msg.assistant .json-msg-meta:hover { background: #131313; }
+  .json-msg-chevron { margin-left: auto; font-size: 9px; color: var(--muted); transition: transform 0.15s; }
+  .json-msg.open .json-msg-chevron { transform: rotate(90deg); }
+  .json-msg-body { display: none; }
+  .json-msg.open .json-msg-body { display: block; }
+  .json-msg pre { padding: 10px 12px; white-space: pre-wrap; word-break: break-all; font-size: 11px; line-height: 1.6; }
+  .json-msg.user pre { color: #8ab4d4; }
+  .json-msg.assistant pre { color: #a8c4a8; }
+
+  /* ── Mobile ────────────────────────────────────────────────────────────── */
+  @media (max-width: 767px) {
+    html, body { font-size: 14px; }
+    #header { padding: 0 10px; gap: 8px; }
+    #session-cwd { display: none; }
+    #messages { padding: 12px; gap: 10px; }
+    .msg-bubble { padding: 9px 12px; }
+    #input-area { padding: 10px 12px; gap: 8px; }
+    #input { font-size: 16px; padding: 10px; }
+    .btn-allow, .btn-deny { padding: 10px 18px; font-size: 13px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Header -->
+  <div id="header">
+    <a href="/" id="back-btn">← Sessions</a>
+    <div id="session-info">
+      <span id="session-id-display">…</span>
+      <span id="session-status" class="session-status-badge"></span>
+      <span id="session-cwd"></span>
+    </div>
+    <div id="header-right">
+      <button id="log-toggle">{ } JSON</button>
+      <button id="jsonl-toggle">JSONL</button>
+      <div>
+        <span id="status-dot"></span>
+        <span id="status-label">connecting…</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main content -->
+  <div id="main-content">
+    <div id="chat-section">
+      <div id="messages">
+        <div id="empty">
+          <div class="logo">◆</div>
+          <p id="empty-msg">Waiting for session to start…</p>
+        </div>
+      </div>
+
+<div id="input-area">
+        <textarea id="input" placeholder="Message Claude…" rows="1"></textarea>
+        <button id="send-btn">Send</button>
+      </div>
+    </div>
+
+    <!-- JSON panel -->
+    <div id="json-panel">
+      <div id="json-header">
+        <span>JSON</span>
+        <button id="json-close" style="padding:3px 8px;background:transparent;border:1px solid var(--border);border-radius:3px;color:var(--muted);font-family:var(--font-mono);font-size:10px;cursor:pointer">✕</button>
+      </div>
+      <div id="json-messages"></div>
+    </div>
+
+    <!-- JSONL panel -->
+    <div id="jsonl-panel">
+      <div id="json-header" style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0">
+        <span style="font-size:11px;font-weight:600;letter-spacing:0.5px;color:var(--muted);text-transform:uppercase">JSONL</span>
+        <button id="jsonl-close" style="padding:3px 8px;background:transparent;border:1px solid var(--border);border-radius:3px;color:var(--muted);font-family:var(--font-mono);font-size:10px;cursor:pointer">✕</button>
+      </div>
+      <div id="jsonl-entries"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ── Session context ───────────────────────────────────────────────────────────
+const sessionId = window.location.pathname.split('/session/')[1] || '';
+let claudeSessionId = null;
+let sessionEnded = false;
+let pendingMessages = [];
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function setStatus(state, text) {
+  $('status-dot').className = state;
+  $('status-label').textContent = text;
+}
+function formatTime(ts) {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function messageMatchesSession(msg) {
+  if (!claudeSessionId) return false;
+  // CLI messages tagged with this session, or untagged web messages
+  return msg.session_id === claudeSessionId || (!msg.session_id && msg.source === 'web');
+}
+
+function tryFlushPending() {
+  if (!claudeSessionId) return;
+  if (pendingMessages.length > 0) {
+    const msgs = pendingMessages.splice(0);
+    msgs.filter(messageMatchesSession).forEach(m => {
+      renderMessage(m);
+      renderJsonMessage(m);
+    });
+  }
+  loadJsonlHistory();
+}
+
+// ── Session header ────────────────────────────────────────────────────────────
+function updateSessionHeader(s) {
+  $('session-id-display').textContent = s.id;
+  const badge = $('session-status');
+  badge.textContent = s.status + (s.end_reason ? ` · ${s.end_reason}` : '');
+  badge.className = `session-status-badge ${s.status}`;
+  const cwd = s.cwd || '';
+  $('session-cwd').textContent = cwd.length > 60 ? '…' + cwd.slice(-57) : cwd;
+  $('session-cwd').title = cwd;
+  document.title = `${s.id} · joy`;
+
+  sessionEnded = s.status === 'ended';
+  $('input').disabled = sessionEnded;
+  $('send-btn').disabled = sessionEnded;
+  if (sessionEnded) $('input').placeholder = 'Session ended';
+}
+
+async function loadSession() {
+  try {
+    const res = await fetch(`/sessions/${sessionId}`);
+    if (!res.ok) {
+      document.title = 'Not found · joy';
+      $('session-id-display').textContent = 'session not found';
+      return;
+    }
+    const s = await res.json();
+    updateSessionHeader(s);
+    if (s.claude_session_id) {
+      claudeSessionId = s.claude_session_id;
+      tryFlushPending();
+    }
+  } catch (e) {
+    $('session-id-display').textContent = 'error loading session';
+  }
+}
+
+// ── Message rendering ─────────────────────────────────────────────────────────
+const messagesEl = $('messages');
+const emptyEl = $('empty');
+const jsonMessagesEl = $('json-messages');
+
+function removeEmpty() {
+  if (emptyEl.parentNode) emptyEl.remove();
+}
+
+function renderMessage(msg) {
+  removeEmpty();
+  if (document.getElementById('msg-' + msg.id)) return;
+
+  const div = document.createElement('div');
+  div.className = `msg ${msg.role}`;
+  div.id = 'msg-' + msg.id;
+
+  if (msg.role === 'event') {
+    div.innerHTML = `<div class="event-pill ${msg.event_status || 'info'}">${escapeHtml(msg.content)}</div>`;
+  } else {
+    let badgeClass, badgeText;
+    if (msg.role === 'user') {
+      badgeClass = msg.source === 'cli' ? 'cli' : 'web';
+      badgeText = msg.source === 'cli' ? 'CLI' : 'Web';
+    } else {
+      badgeClass = msg.source === 'cli' ? 'assistant-cli' : 'assistant-web';
+      badgeText = msg.source === 'cli' ? 'Claude (CLI)' : 'Claude (Web)';
+    }
+    div.innerHTML = `
+      <div class="msg-meta">
+        <span class="badge ${badgeClass}">${badgeText}</span>
+        <span class="ts">${formatTime(msg.timestamp)}</span>
+      </div>
+      <div class="msg-bubble">${escapeHtml(msg.content)}</div>`;
+  }
+  messagesEl.appendChild(div);
+  scrollToBottom();
+}
+
+function renderJsonMessage(msg) {
+  if (msg.role === 'event') return;
+  if (document.getElementById('jmsg-' + msg.id)) return;
+
+  const div = document.createElement('div');
+  div.className = `json-msg ${msg.role}`;
+  div.id = 'jmsg-' + msg.id;
+
+  let badgeClass, badgeText;
+  if (msg.role === 'user') {
+    badgeClass = msg.source === 'cli' ? 'cli' : 'web';
+    badgeText = msg.source === 'cli' ? 'CLI' : 'Web';
+  } else {
+    badgeClass = msg.source === 'cli' ? 'assistant-cli' : 'assistant-web';
+    badgeText = msg.source === 'cli' ? 'Claude (CLI)' : 'Claude (Web)';
+  }
+  const preview = escapeHtml(msg.content.slice(0, 60)) + (msg.content.length > 60 ? '…' : '');
+  div.innerHTML = `
+    <div class="json-msg-meta">
+      <span class="badge ${badgeClass}">${badgeText}</span>
+      <span class="ts">${formatTime(msg.timestamp)}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:6px;color:#555">${preview}</span>
+      <span class="json-msg-chevron">▶</span>
+    </div>
+    <div class="json-msg-body"><pre>${escapeHtml(JSON.stringify(msg, null, 2))}</pre></div>`;
+  div.querySelector('.json-msg-meta').addEventListener('click', () => div.classList.toggle('open'));
+  jsonMessagesEl.appendChild(div);
+  jsonMessagesEl.scrollTop = jsonMessagesEl.scrollHeight;
+}
+
+function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+let thinkingEl = null;
+function showThinking() {
+  if (thinkingEl) return;
+  thinkingEl = document.createElement('div');
+  thinkingEl.className = 'thinking';
+  thinkingEl.innerHTML = `<span>Claude is thinking</span><div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+  messagesEl.appendChild(thinkingEl);
+  scrollToBottom();
+}
+function hideThinking() { if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; } }
+
+// ── JSON panel ────────────────────────────────────────────────────────────────
+let logOpen = false;
+function setLogOpen(open) {
+  logOpen = open;
+  $('app').classList.toggle('log-open', open);
+  $('log-toggle').classList.toggle('active', open);
+  if (open) setJsonlOpen(false);
+}
+$('log-toggle').addEventListener('click', () => setLogOpen(!logOpen));
+$('json-close').addEventListener('click', () => setLogOpen(false));
+
+// ── JSONL panel ───────────────────────────────────────────────────────────────
+let jsonlOpen = false;
+let jsonlLoaded = false;
+let pendingJsonlEntries = [];
+const jsonlEntriesEl = $('jsonl-entries');
+
+function entryLabel(entry) {
+  const type = entry.type || '';
+  const role = entry.message?.role || '';
+  const subtype = entry.subtype || '';
+  if (role) return role;
+  if (subtype) return `${type}:${subtype}`;
+  return type || 'entry';
+}
+
+function entryPreview(entry) {
+  if (entry.message?.content) {
+    const c = entry.message.content;
+    const text = typeof c === 'string' ? c : (Array.isArray(c) ? (c.find(b => b.type === 'text')?.text || '') : '');
+    if (text) return text.slice(0, 80);
+  }
+  return '';
+}
+
+function renderJsonlEntry(entry, idx) {
+  const id = `jsonl-${idx}`;
+  if (document.getElementById(id)) return;
+  const div = document.createElement('div');
+  div.className = 'jsonl-entry';
+  div.id = id;
+  const label = entryLabel(entry);
+  const preview = entryPreview(entry);
+  div.innerHTML = `
+    <div class="jsonl-entry-meta">
+      <span class="jsonl-entry-type">${escapeHtml(label)}</span>
+      <span class="jsonl-entry-preview">${escapeHtml(preview)}</span>
+      <span class="jsonl-entry-chevron">▶</span>
+    </div>
+    <div class="jsonl-entry-body"><pre>${escapeHtml(JSON.stringify(entry, null, 2))}</pre></div>`;
+  div.querySelector('.jsonl-entry-meta').addEventListener('click', () => div.classList.toggle('open'));
+  jsonlEntriesEl.appendChild(div);
+  jsonlEntriesEl.scrollTop = jsonlEntriesEl.scrollHeight;
+}
+
+async function loadJsonlHistory() {
+  if (jsonlLoaded || !claudeSessionId) return;
+  jsonlLoaded = true;
+  try {
+    const res = await fetch(`/sessions/${sessionId}/transcript`);
+    const { lines } = await res.json();
+    lines.forEach((entry, i) => renderJsonlEntry(entry, i));
+    nextJsonlIdx = lines.length;
+    pendingJsonlEntries.splice(0).forEach(entry => renderJsonlEntry(entry, nextJsonlIdx++));
+  } catch {}
+}
+
+let nextJsonlIdx = 0;
+
+function setJsonlOpen(open) {
+  jsonlOpen = open;
+  $('app').classList.toggle('jsonl-open', open);
+  $('jsonl-toggle').classList.toggle('active', open);
+  if (open) { setLogOpen(false); if (!jsonlLoaded) loadJsonlHistory(); }
+}
+$('jsonl-toggle').addEventListener('click', () => setJsonlOpen(!jsonlOpen));
+$('jsonl-close').addEventListener('click', () => setJsonlOpen(false));
+
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+function connectSSE() {
+  const es = new EventSource('/events');
+
+  es.addEventListener('history', e => {
+    const history = JSON.parse(e.data);
+    if (claudeSessionId) {
+      history.filter(messageMatchesSession).forEach(m => { renderMessage(m); renderJsonMessage(m); });
+    } else {
+      pendingMessages.push(...history);
+    }
+  });
+
+  es.addEventListener('message', e => {
+    const msg = JSON.parse(e.data);
+    if (claudeSessionId) {
+      if (messageMatchesSession(msg)) {
+        hideThinking();
+        renderMessage(msg);
+        renderJsonMessage(msg);
+      }
+    } else {
+      pendingMessages.push(msg);
+    }
+  });
+
+  es.addEventListener('stop', e => {
+    const data = JSON.parse(e.data);
+    if (data.session_id === claudeSessionId) hideThinking();
+  });
+
+  es.addEventListener('transcript_entry', e => {
+    const { session_id, entry } = JSON.parse(e.data);
+    if (claudeSessionId && session_id !== claudeSessionId) return;
+    if (jsonlLoaded) {
+      renderJsonlEntry(entry, nextJsonlIdx++);
+    } else {
+      pendingJsonlEntries.push(entry);
+    }
+  });
+
+  es.addEventListener('session_update', e => {
+    const s = JSON.parse(e.data);
+    if (s.id !== sessionId) return;
+    updateSessionHeader(s);
+    if (!claudeSessionId && s.claude_session_id) {
+      claudeSessionId = s.claude_session_id;
+      tryFlushPending();
+      if (jsonlOpen) loadJsonlHistory();
+    }
+  });
+
+  es.onopen = () => setStatus('connected', 'connected');
+  es.onerror = () => {
+    setStatus('error', 'disconnected — retrying…');
+    es.close();
+    setTimeout(connectSSE, 3000);
+  };
+}
+
+// ── Send message ──────────────────────────────────────────────────────────────
+const inputEl = $('input');
+const sendBtn = $('send-btn');
+
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || sessionEnded) return;
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  sendBtn.disabled = true;
+  showThinking();
+  try {
+    const res = await fetch('/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, session_id: sessionId }),
+    });
+    if (!res.ok) hideThinking();
+  } catch {
+    hideThinking();
+    setStatus('error', 'send failed');
+  } finally {
+    if (!sessionEnded) sendBtn.disabled = false;
+  }
+}
+
+sendBtn.addEventListener('click', sendMessage);
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+if (!sessionId) {
+  window.location.href = '/';
+} else {
+  connectSSE();
+  loadSession();
+}
+</script>
+</body>
+</html>
