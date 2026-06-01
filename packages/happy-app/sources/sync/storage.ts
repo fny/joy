@@ -134,8 +134,8 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         completedTodosCount: session.todos?.filter(todo => todo.status === 'completed').length ?? 0,
         totalTodosCount: session.todos?.length ?? 0,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
-        isJoyTmux: session.metadata?.source === 'joy-tmux',
-        joySessionId: session.metadata?.joySessionId ?? null,
+        isJoyTmux: session.metadata?.joy__source === 'joy-tmux',
+        joySessionId: session.metadata?.joy__sessionId ?? null,
     };
 }
 

@@ -540,7 +540,7 @@ export async function createRelaySession(
 ): Promise<RelaySession> {
   const result = await client.createSession({
     tag: opts.tag,
-    metadata: { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, source: 'joy-tmux', joySessionId: opts.id },
+    metadata: { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id },
   });
   // Start from the current end of the session so we don't replay historical messages on restart.
   const initialSeq = await client.fetchLastSeq(result.sessionId);
