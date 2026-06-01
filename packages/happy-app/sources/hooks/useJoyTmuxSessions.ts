@@ -75,5 +75,14 @@ export function useJoyTmuxSessions(serverUrl: string) {
         await refresh();
     }, [normalizedUrl, refresh]);
 
-    return { sessions, loading, error, refresh, createSession, killSession };
+    const fetchPane = React.useCallback(async (id: string): Promise<string> => {
+        const res = await fetch(`${normalizedUrl}/sessions/${encodeURIComponent(id)}/pane`, {
+            signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json() as { ok: boolean; text: string };
+        return data.text ?? '';
+    }, [normalizedUrl]);
+
+    return { sessions, loading, error, refresh, createSession, killSession, fetchPane };
 }

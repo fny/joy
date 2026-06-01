@@ -145,6 +145,9 @@ export const ja: TranslationStructure = {
         usageSubtitle: 'API使用量とコストを確認',
         sessions: 'Joy Sessions',
         sessionsSubtitle: 'tmuxベースのセッションを管理',
+        debug: 'デバッグ',
+        joyHttp: 'Joy HTTP',
+        joyHttpSubtitle: 'joy-tmuxサーバーへの直接HTTPアクセス',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service}アカウントが接続されました`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1012,6 +1015,10 @@ export const ja: TranslationStructure = {
     },
 
     settingsSessions: {
+        machine: 'マシン',
+        machineFooter: 'joy-tmuxが実行中のマシン',
+        noMachine: '接続中のマシンなし',
+        selectMachine: 'マシンを選択',
         serverUrl: 'サーバーURL',
         serverUrlFooter: 'お使いのマシンで動作しているjoy-tmuxサーバーのURL',
         sessions: 'セッション',
@@ -1023,6 +1030,8 @@ export const ja: TranslationStructure = {
         confirmKill: 'セッションを終了',
         confirmKillMessage: 'Claudeのプロセスを終了します。この操作は取り消せません。',
         killSession: '終了',
+        screenshot: 'スクリーンショット',
+        viewPane: 'ペインを表示',
         statusStarting: '起動中',
         statusActive: 'アクティブ',
         statusEnded: '終了済み',

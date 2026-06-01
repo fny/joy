@@ -5,42 +5,31 @@ import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
+import { useSettingMutable } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useHappyAction } from '@/hooks/useHappyAction';
-import { useJoyRpcSessions, type JoySession } from '@/hooks/useJoyRpcSessions';
-import { useAllMachines } from '@/sync/storage';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { useJoyTmuxSessions, type JoySession } from '@/hooks/useJoyTmuxSessions';
 import { StyleSheet } from 'react-native-unistyles';
 
-export default React.memo(function JoySessionsScreen() {
-    const machines = useAllMachines({ includeOffline: true });
-    const joyMachines = machines; // all machines may have joy-tmux
+const DEFAULT_SERVER_URL = 'http://localhost:4997';
 
-    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(
-        () => joyMachines.find(m => isMachineOnline(m))?.id ?? joyMachines[0]?.id ?? null
-    );
-
-    // Keep selected machine valid when machine list changes
-    React.useEffect(() => {
-        if (selectedMachineId && machines.some(m => m.id === selectedMachineId)) return;
-        setSelectedMachineId(machines.find(m => isMachineOnline(m))?.id ?? machines[0]?.id ?? null);
-    }, [machines, selectedMachineId]);
-
-    const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyRpcSessions(selectedMachineId);
+export default React.memo(function JoyHttpScreen() {
+    const [serverUrl, setServerUrl] = useSettingMutable('joy__tmuxServerUrl');
+    const url = (serverUrl as string | null) ?? DEFAULT_SERVER_URL;
+    const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyTmuxSessions(url);
 
     const killingIdRef = React.useRef<string | null>(null);
     const screenshotIdRef = React.useRef<string | null>(null);
 
-    const handlePickMachine = React.useCallback(async () => {
-        if (joyMachines.length === 0) return;
-        const buttons = joyMachines.map(m => ({
-            text: m.metadata?.displayName || m.metadata?.host || m.id,
-            onPress: () => setSelectedMachineId(m.id),
-        }));
-        buttons.push({ text: t('common.cancel'), style: 'cancel' } as any);
-        Modal.alert(t('settingsSessions.selectMachine'), undefined, buttons);
-    }, [joyMachines]);
+    const handleConfigureUrl = React.useCallback(async () => {
+        const value = await Modal.prompt(
+            t('settingsSessions.serverUrl'),
+            t('settingsSessions.serverUrlFooter'),
+            { defaultValue: url, placeholder: DEFAULT_SERVER_URL },
+        );
+        if (value?.trim()) setServerUrl(value.trim());
+    }, [url, setServerUrl]);
 
     const [createLoading, doCreate] = useHappyAction(React.useCallback(async () => {
         const cwd = await Modal.prompt(
@@ -88,32 +77,19 @@ export default React.memo(function JoySessionsScreen() {
         );
     }, [doKill]);
 
-    const selectedMachine = machines.find(m => m.id === selectedMachineId);
-    const machineName = selectedMachine
-        ? (selectedMachine.metadata?.displayName || selectedMachine.metadata?.host || selectedMachineId)
-        : t('settingsSessions.noMachine');
-
     const activeSessions = sessions.filter(s => s.status !== 'ended');
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
             <ItemGroup
-                title={t('settingsSessions.machine')}
-                footer={t('settingsSessions.machineFooter')}
+                title={t('settingsSessions.serverUrl')}
+                footer={t('settingsSessions.serverUrlFooter')}
             >
-                {joyMachines.length === 0 ? (
-                    <Item
-                        title={t('settingsSessions.noMachine')}
-                        showChevron={false}
-                    />
-                ) : (
-                    <Item
-                        title={machineName as string}
-                        icon={<Ionicons name="hardware-chip-outline" size={29} color="#8E8E93" />}
-                        onPress={joyMachines.length > 1 ? handlePickMachine : undefined}
-                        showChevron={joyMachines.length > 1}
-                    />
-                )}
+                <Item
+                    title={url}
+                    icon={<Ionicons name="server-outline" size={29} color="#8E8E93" />}
+                    onPress={handleConfigureUrl}
+                />
             </ItemGroup>
 
             <ItemGroup
@@ -166,7 +142,7 @@ export default React.memo(function JoySessionsScreen() {
                 <Item
                     title={t('settingsSessions.newSession')}
                     icon={<Ionicons name="add-circle-outline" size={29} color="#34C759" />}
-                    onPress={selectedMachineId ? doCreate : undefined}
+                    onPress={doCreate}
                     showChevron={false}
                     rightElement={createLoading ? <ActivityIndicator /> : undefined}
                 />

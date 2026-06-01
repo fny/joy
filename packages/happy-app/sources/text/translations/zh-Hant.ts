@@ -144,6 +144,9 @@ export const zhHant: TranslationStructure = {
         usageSubtitle: '查看 API 使用情況和費用',
         sessions: 'Joy Sessions',
         sessionsSubtitle: '管理 tmux 工作階段',
+        debug: '偵錯',
+        joyHttp: 'Joy HTTP',
+        joyHttpSubtitle: '直接 HTTP 存取 joy-tmux 伺服器',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `已連結 ${service} 帳戶`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1010,6 +1013,10 @@ export const zhHant: TranslationStructure = {
     },
 
     settingsSessions: {
+        machine: '裝置',
+        machineFooter: '執行 joy-tmux 的裝置',
+        noMachine: '無已連線的裝置',
+        selectMachine: '選擇裝置',
         serverUrl: '伺服器 URL',
         serverUrlFooter: '在您的機器上執行的 joy-tmux 伺服器的 URL',
         sessions: '工作階段',
@@ -1021,6 +1028,8 @@ export const zhHant: TranslationStructure = {
         confirmKill: '終止工作階段',
         confirmKillMessage: '這將終止 Claude 程序，且無法復原。',
         killSession: '終止',
+        screenshot: '截圖',
+        viewPane: '查看面板',
         statusStarting: '啟動中',
         statusActive: '作用中',
         statusEnded: '已結束',

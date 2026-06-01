@@ -143,6 +143,9 @@ export const ca: TranslationStructure = {
         usageSubtitle: "Veure l'ús de l'API i costos",
         sessions: 'Joy Sessions',
         sessionsSubtitle: 'Gestiona les sessions basades en tmux',
+        debug: 'Depuració',
+        joyHttp: 'Joy HTTP',
+        joyHttpSubtitle: 'Accés HTTP directe al servidor joy-tmux',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Compte de ${service} connectat`,
@@ -1010,6 +1013,10 @@ export const ca: TranslationStructure = {
     },
 
     settingsSessions: {
+        machine: 'Màquina',
+        machineFooter: 'Màquina amb joy-tmux en execució',
+        noMachine: 'No hi ha màquines connectades',
+        selectMachine: 'Selecciona màquina',
         serverUrl: 'URL del servidor',
         serverUrlFooter: 'URL del servidor joy-tmux que s\'executa a la teva màquina',
         sessions: 'Sessions',
@@ -1021,6 +1028,8 @@ export const ca: TranslationStructure = {
         confirmKill: 'Finalitza la sessió',
         confirmKillMessage: 'Això finalitzarà el procés de Claude i no es pot desfer.',
         killSession: 'Finalitza',
+        screenshot: 'Captura',
+        viewPane: 'Veure panell',
         statusStarting: 'Iniciant',
         statusActive: 'Activa',
         statusEnded: 'Finalitzada',

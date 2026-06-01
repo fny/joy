@@ -361,6 +361,17 @@ export const SettingsView = React.memo(function SettingsView() {
                 />
             </ItemGroup>
 
+            {(__DEV__ || devModeEnabled) && (
+                <ItemGroup title={t('settings.debug')}>
+                    <Item
+                        title={t('settings.joyHttp')}
+                        subtitle={t('settings.joyHttpSubtitle')}
+                        icon={<Ionicons name="globe-outline" size={29} color="#8E8E93" />}
+                        onPress={() => router.push('/settings/joy-http')}
+                    />
+                </ItemGroup>
+            )}
+
             {/* Developer */}
             {(__DEV__ || devModeEnabled) && (
                 <ItemGroup title={t('settings.developer')}>

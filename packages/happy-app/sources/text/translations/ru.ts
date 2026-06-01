@@ -130,6 +130,9 @@ export const ru: TranslationStructure = {
         usageSubtitle: 'Просмотр использования API и затрат',
         sessions: 'Joy Sessions',
         sessionsSubtitle: 'Управление сессиями на основе tmux',
+        debug: 'Отладка',
+        joyHttp: 'Joy HTTP',
+        joyHttpSubtitle: 'Прямой HTTP-доступ к серверу joy-tmux',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Аккаунт ${service} подключен`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1039,6 +1042,10 @@ export const ru: TranslationStructure = {
     },
 
     settingsSessions: {
+        machine: 'Машина',
+        machineFooter: 'Машина с запущенным joy-tmux',
+        noMachine: 'Нет подключённых машин',
+        selectMachine: 'Выбрать машину',
         serverUrl: 'URL сервера',
         serverUrlFooter: 'URL сервера joy-tmux, запущенного на вашем компьютере',
         sessions: 'Сессии',
@@ -1050,6 +1057,8 @@ export const ru: TranslationStructure = {
         confirmKill: 'Завершить сессию',
         confirmKillMessage: 'Это завершит процесс Claude и не может быть отменено.',
         killSession: 'Завершить',
+        screenshot: 'Снимок',
+        viewPane: 'Просмотр панели',
         statusStarting: 'Запускается',
         statusActive: 'Активна',
         statusEnded: 'Завершена',

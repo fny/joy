@@ -130,6 +130,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/joy-http"
+                options={{
+                    headerTitle: t('settings.joyHttp'),
+                }}
+            />
+            <Stack.Screen
                 name="terminal/connect"
                 options={{
                     headerTitle: t('navigation.connectTerminal'),
