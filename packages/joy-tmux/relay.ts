@@ -17,6 +17,7 @@ export type EncryptionVariant = 'legacy' | 'dataKey';
 export interface Credentials {
   token: string;
   serverUrl: string;
+  machineId: string;
   encryption:
     | { type: 'dataKey'; publicKey: Uint8Array; machineKey: Uint8Array }
     | { type: 'legacy'; secret: Uint8Array };
@@ -125,9 +126,11 @@ export function loadCredentials(): Credentials | null {
     if (!ak.token) return null;
 
     let serverUrl = process.env.HAPPY_SERVER_URL ?? DEFAULT_SERVER_URL;
+    let machineId = crypto.randomUUID();
     try {
-      const s = JSON.parse(readFileSync(join(happyHome, 'settings.json'), 'utf8')) as { serverUrl?: string };
+      const s = JSON.parse(readFileSync(join(happyHome, 'settings.json'), 'utf8')) as { serverUrl?: string; machineId?: string };
       if (s.serverUrl && !process.env.HAPPY_SERVER_URL) serverUrl = s.serverUrl;
+      if (s.machineId) machineId = s.machineId;
     } catch {}
 
     let encryption: Credentials['encryption'] | null = null;
@@ -142,7 +145,38 @@ export function loadCredentials(): Credentials | null {
     }
     if (!encryption) return null;
 
-    return { token: ak.token, serverUrl, encryption };
+    return { token: ak.token, serverUrl, machineId, encryption };
+  } catch { return null; }
+}
+
+// ── RPC encryption (matches happy-cli encryptWithDataKey / decryptWithDataKey) ─
+
+function encryptRpc(key: Uint8Array, data: unknown): string {
+  const nonce = randomBytesU8(12);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce);
+  const pt = new TextEncoder().encode(JSON.stringify(data));
+  const ct = Buffer.concat([cipher.update(pt), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  // version(1=0x00) + nonce(12) + ciphertext + tag(16)
+  const bundle = new Uint8Array(1 + 12 + ct.length + 16);
+  bundle[0] = 0;
+  bundle.set(nonce, 1);
+  bundle.set(new Uint8Array(ct), 13);
+  bundle.set(new Uint8Array(tag), 13 + ct.length);
+  return Buffer.from(bundle).toString('base64');
+}
+
+function decryptRpc(key: Uint8Array, b64: string): unknown {
+  const bundle = Buffer.from(b64, 'base64');
+  if (bundle.length < 1 + 12 + 16 || bundle[0] !== 0) return null;
+  const nonce = bundle.slice(1, 13);
+  const tag = bundle.slice(bundle.length - 16);
+  const ct = bundle.slice(13, bundle.length - 16);
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, nonce);
+    decipher.setAuthTag(tag);
+    const pt = Buffer.concat([decipher.update(ct), decipher.final()]);
+    return JSON.parse(new TextDecoder().decode(pt));
   } catch { return null; }
 }
 
@@ -169,27 +203,72 @@ export interface CreateSessionResult {
 
 export class RelayClient {
   readonly serverUrl: string;
-  private readonly creds: Credentials;
+  readonly creds: Credentials;
   private socket: Socket | null = null;
   private listeners = new Map<string, Set<() => void>>();
+  private activeSessions = new Set<RelaySession>();
 
   constructor(creds: Credentials) {
     this.creds = creds;
     this.serverUrl = creds.serverUrl;
   }
 
+  trackSession(rs: RelaySession): void { this.activeSessions.add(rs); }
+  untrackSession(rs: RelaySession): void { this.activeSessions.delete(rs); }
+
+  onReconnect: (() => void) | null = null;
+
+  private rpcHandlers = new Map<string, (params: unknown) => Promise<unknown>>();
+
+  registerRpcHandler(method: string, handler: (params: unknown) => Promise<unknown>): void {
+    const prefixed = `${this.creds.machineId}:${method}`;
+    this.rpcHandlers.set(prefixed, handler);
+    this.socket?.emit('rpc-register', { method: prefixed });
+  }
+
   connect(): void {
     if (this.socket) return;
     this.socket = io(this.creds.serverUrl, {
+      path: '/v1/updates',
       transports: ['websocket'],
-      auth: { token: this.creds.token, clientType: 'machine-scoped' },
+      auth: { token: this.creds.token, clientType: 'machine-scoped', machineId: this.creds.machineId },
       reconnection: true,
       reconnectionDelay: 1_000,
       reconnectionDelayMax: 10_000,
     });
-    this.socket.on('connect', () => log('socket connected'));
+    let firstConnect = true;
+    this.socket.on('connect', () => {
+      log('socket connected');
+      for (const rs of this.activeSessions) rs.setThinking(false);
+      // Re-register all RPC handlers on reconnect
+      for (const method of this.rpcHandlers.keys()) {
+        this.socket?.emit('rpc-register', { method });
+      }
+      if (!firstConnect) this.onReconnect?.();
+      firstConnect = false;
+    });
     this.socket.on('disconnect', (r: string) => log(`socket disconnected: ${r}`));
+    this.socket.on('connect_error', (e: Error) => log(`socket connect_error: ${e.message}`));
     this.socket.on('update', (p: unknown) => this.handlePoke(p));
+    this.socket.on('rpc-request', async (req: unknown, callback: (res: string) => void) => {
+      if (!isObj(req)) return;
+      const method = String(req['method'] ?? '');
+      const handler = this.rpcHandlers.get(method);
+      const key = this.creds.encryption.type === 'dataKey'
+        ? this.creds.encryption.machineKey
+        : this.creds.encryption.secret;
+      if (!handler) {
+        callback(encryptRpc(key, { error: 'Method not found' }));
+        return;
+      }
+      try {
+        const params = decryptRpc(key, String(req['params'] ?? ''));
+        const result = await handler(params);
+        callback(encryptRpc(key, result));
+      } catch (e) {
+        callback(encryptRpc(key, { error: String(e) }));
+      }
+    });
   }
 
   close(): void { this.socket?.close(); this.socket = null; }
@@ -226,7 +305,10 @@ export class RelayClient {
     let dataEncryptionKeyB64: string | null = null;
 
     if (this.creds.encryption.type === 'dataKey') {
-      sessionKey = randomBytesU8(32);
+      // machineKey is the stable per-machine symmetric key stored in access.key.
+      // Using it as the sessionKey ensures messages can be decrypted across restarts,
+      // even when the server deduplicates sessions by tag and returns an existing session ID.
+      sessionKey = this.creds.encryption.machineKey;
       variant = 'dataKey';
       const encryptedKey = libsodiumEncryptForPublicKey(sessionKey, this.creds.encryption.publicKey);
       const bundle = new Uint8Array(1 + encryptedKey.length);
@@ -273,6 +355,17 @@ export class RelayClient {
     return res.json() as Promise<{ messages: RawMessage[]; hasMore: boolean }>;
   }
 
+  async fetchLastSeq(sessionId: string): Promise<number> {
+    let lastSeq = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const r = await this.readSince(sessionId, lastSeq, 100);
+      for (const m of r.messages) if (m.seq > lastSeq) lastSeq = m.seq;
+      hasMore = r.hasMore;
+    }
+    return lastSeq;
+  }
+
   emitAlive(sessionId: string, thinking: boolean): void {
     this.socket?.volatile.emit('session-alive', {
       sid: sessionId, time: Date.now(), thinking, mode: 'remote',
@@ -293,7 +386,7 @@ export class RelaySession {
   readonly relaySessionId: string;
   private readonly sessionKey: Uint8Array;
   private readonly variant: EncryptionVariant;
-  private lastSeq = 0;
+  private lastSeq: number;
   private queue: Array<{ localId: string; wire: WireRecord; attempts: number }> = [];
   private draining = false;
 
@@ -304,25 +397,44 @@ export class RelaySession {
     relaySessionId: string;
     sessionKey: Uint8Array;
     variant: EncryptionVariant;
+    initialSeq?: number;
   }) {
     this.client = opts.client;
     this.relaySessionId = opts.relaySessionId;
     this.sessionKey = opts.sessionKey;
     this.variant = opts.variant;
+    this.lastSeq = opts.initialSeq ?? 0;
   }
 
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
   start(): void {
+    this.client.trackSession(this);
     this.client.subscribe(this.relaySessionId, () => void this.pull());
     this.client.emitAlive(this.relaySessionId, false);
+    // Poll for incoming messages every 3s (machine-scoped socket doesn't receive update pokes)
+    // and send keepalive every 30s
+    let ticks = 0;
+    this.heartbeatTimer = setInterval(() => {
+      void this.pull();
+      if (++ticks % 10 === 0) this.client.emitAlive(this.relaySessionId, false);
+    }, 3_000);
+  }
+
+  stop(): void {
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    this.client.untrackSession(this);
   }
 
   private async pull(): Promise<void> {
     try {
       let { messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq);
+      if (messages.length > 0) log(`pull ${this.relaySessionId}: got ${messages.length} msgs, lastSeq=${this.lastSeq}`);
       while (messages.length > 0) {
         for (const msg of messages) {
           if (msg.seq > this.lastSeq) this.lastSeq = msg.seq;
           const dec = this.client.decryptMessage(msg, this.sessionKey, this.variant);
+          log(`pull msg seq=${msg.seq} dec=${JSON.stringify(dec)?.slice(0, 120)}`);
           if (!isObj(dec) || dec['role'] !== 'user') continue;
           const c = dec['content'] as { type?: string; text?: string } | undefined;
           if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
@@ -407,6 +519,10 @@ export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts
   return sessionEnvelope({ t: 'turn-end', status }, opts);
 }
 
+export function encodeUserMessage(text: string): WireRecord {
+  return { role: 'user', content: { type: 'text', text }, meta: { sentFrom: 'joy' } };
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 export function initRelay(): RelayClient | null {
@@ -420,17 +536,20 @@ export function initRelay(): RelayClient | null {
 
 export async function createRelaySession(
   client: RelayClient,
-  opts: { tag: string; cwd: string },
+  opts: { tag: string; cwd: string; id: string },
 ): Promise<RelaySession> {
   const result = await client.createSession({
     tag: opts.tag,
-    metadata: { path: opts.cwd, host: hostname(), version: '0.1.0' },
+    metadata: { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, source: 'joy-tmux', joySessionId: opts.id },
   });
+  // Start from the current end of the session so we don't replay historical messages on restart.
+  const initialSeq = await client.fetchLastSeq(result.sessionId);
   return new RelaySession({
     client,
     relaySessionId: result.sessionId,
     sessionKey: result.sessionKey,
     variant: result.variant,
+    initialSeq,
   });
 }
 

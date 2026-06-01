@@ -60,6 +60,8 @@ export const MetadataSchema = z.object({
      */
     parentSessionId: z.string().optional(),
     forkedFromMessageId: z.string().optional(),
+    source: z.string().optional(), // e.g. 'joy-tmux'
+    joySessionId: z.string().optional(), // tmux session ID on the joy-tmux server
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;

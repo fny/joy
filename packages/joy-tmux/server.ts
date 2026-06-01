@@ -2,7 +2,7 @@
 import { readFileSync, existsSync, mkdirSync, watch, readdirSync, statSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import { initRelay, createRelaySession, encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd, encodeTurnEnd, type RelaySession } from "./relay.ts";
+import { initRelay, createRelaySession, encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd, encodeTurnEnd, encodeUserMessage, type RelaySession } from "./relay.ts";
 
 const PORT = parseInt(process.env.PORT ?? "4997");
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
@@ -279,6 +279,8 @@ function stopTranscriptWatcher(sessionId: string) {
   transcriptWatchers.delete(sessionId);
   directUserDedup.delete(sessionId);
   turnStates.delete(sessionId);
+  relaySessions.get(sessionId)?.stop();
+  relaySessions.delete(sessionId);
 }
 
 // ── PID-based session end detection ──────────────────────────────────────────
@@ -346,10 +348,9 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   pollSessionEnd(record);
 
   if (relayClient) {
-    createRelaySession(relayClient, { tag: `joy-tmux-${id}`, cwd: opts.cwd }).then(rs => {
+    createRelaySession(relayClient, { tag: `joy-tmux-v2-${id}`, cwd: opts.cwd, id }).then(rs => {
       rs.onMessage = (text) => {
-        if (!directUserDedup.has(id)) directUserDedup.set(id, new Set());
-        directUserDedup.get(id)!.add(text);
+        if (directUserDedup.get(id)?.has(text)) { directUserDedup.get(id)!.delete(text); return; }
         run("tmux", "send-keys", "-l", "-t", record.tmux_window, text);
         run("tmux", "send-keys", "-t", record.tmux_window, "Enter");
         rs.setThinking(true);
@@ -403,6 +404,23 @@ function recoverDirectSessions() {
     if (isAlive) {
       if (transcriptPath) startTranscriptWatcher(record, transcriptPath);
       pollSessionEnd(record);
+      if (relayClient) {
+        process.stderr.write(`[relay] creating session for recovered ${id}\n`);
+        createRelaySession(relayClient, { tag: `joy-tmux-v2-${id}`, cwd, id }).then(rs => {
+          process.stderr.write(`[relay] recovered session ${id} → relay ${rs.relaySessionId}\n`);
+          rs.onMessage = (text) => {
+            if (directUserDedup.get(id)?.has(text)) { directUserDedup.get(id)!.delete(text); return; }
+            run("tmux", "send-keys", "-l", "-t", record.tmux_window, text);
+            run("tmux", "send-keys", "-t", record.tmux_window, "Enter");
+            rs.setThinking(true);
+            if (!transcriptWatchers.has(id) && record.status !== "ended") pollForTranscript(record);
+          };
+          rs.start();
+          relaySessions.set(id, rs);
+          record.relay_session_id = rs.relaySessionId;
+          broadcast("session_update", record);
+        }).catch(e => process.stderr.write(`[relay] failed to create session for ${id}: ${e}\n`));
+      }
     }
     process.stderr.write(`[recover] ${id} cwd=${cwd} alive=${isAlive} transcript=${transcriptPath}\n`);
   }
@@ -435,7 +453,7 @@ function extractTextFromContent(content: unknown): string {
 
 Bun.serve({
   port: PORT,
-  hostname: "0.0.0.0",
+  hostname: "127.0.0.1",
   idleTimeout: 0,
   async fetch(req) {
     const url = new URL(req.url);
@@ -552,6 +570,7 @@ Bun.serve({
       directUserDedup.get(sess.id)!.add(text.trim());
       run("tmux", "send-keys", "-l", "-t", sess.tmux_window, text.trim());
       run("tmux", "send-keys", "-t", sess.tmux_window, "Enter");
+      relaySessions.get(sess.id)?.send(encodeUserMessage(text.trim()));
       relaySessions.get(sess.id)?.setThinking(true);
       // Restart transcript polling if first message triggers JSONL creation
       if (!transcriptWatchers.has(sess.id) && sess.status !== "ended") pollForTranscript(sess);
@@ -568,3 +587,74 @@ Bun.serve({
 
 process.stderr.write(`webchat server running on http://0.0.0.0:${PORT}\n`);
 recoverDirectSessions();
+
+if (relayClient) {
+  relayClient.registerRpcHandler('joy-list-sessions', async () => {
+    return [...sessions.values()];
+  });
+
+  relayClient.registerRpcHandler('joy-create-session', async (params) => {
+    const { cwd, createDir } = params as { cwd: string; createDir?: boolean };
+    if (!cwd?.trim()) return { error: 'cwd required' };
+    try {
+      const record = await launchSession({ cwd: cwd.trim(), createDir });
+      return { ok: true, session: record };
+    } catch (e) {
+      return { error: String(e) };
+    }
+  });
+
+  relayClient.registerRpcHandler('joy-kill-session', async (params) => {
+    const { id } = params as { id: string };
+    const ok = killSession(id);
+    return { ok };
+  });
+
+  relayClient.registerRpcHandler('joy-pane', async (params) => {
+    const { id } = params as { id: string };
+    const sess = sessions.get(id);
+    if (!sess) return { error: 'session_not_found' };
+    const { out } = run("tmux", "capture-pane", "-p", "-t", sess.tmux_window);
+    return { ok: true, text: out };
+  });
+
+  relayClient.registerRpcHandler('joy-send', async (params) => {
+    const { text, session_id: sessId } = params as { text: string; session_id?: string };
+    if (!text?.trim()) return { error: 'empty' };
+    const sess = sessId ? sessions.get(sessId) : undefined;
+    if (!sess) return { error: 'session_not_found' };
+    const chat_id = String(nextChatId++);
+    addMessage({ role: "user", content: text.trim(), source: "rpc", chat_id, session_id: sess.claude_session_id });
+    if (!directUserDedup.has(sess.id)) directUserDedup.set(sess.id, new Set());
+    directUserDedup.get(sess.id)!.add(text.trim());
+    run("tmux", "send-keys", "-l", "-t", sess.tmux_window, text.trim());
+    run("tmux", "send-keys", "-t", sess.tmux_window, "Enter");
+    relaySessions.get(sess.id)?.send(encodeUserMessage(text.trim()));
+    relaySessions.get(sess.id)?.setThinking(true);
+    if (!transcriptWatchers.has(sess.id) && sess.status !== "ended") pollForTranscript(sess);
+    return { ok: true, chat_id };
+  });
+}
+
+if (relayClient) {
+  relayClient.onReconnect = () => {
+    for (const [id, sess] of sessions) {
+      if (sess.status !== "active" || relaySessions.has(id)) continue;
+      process.stderr.write(`[relay] reconnect: creating session for orphaned ${id}\n`);
+      createRelaySession(relayClient!, { tag: `joy-tmux-v2-${id}`, cwd: sess.cwd, id }).then(rs => {
+        process.stderr.write(`[relay] reconnect: ${id} → relay ${rs.relaySessionId}\n`);
+        rs.onMessage = (text) => {
+          if (directUserDedup.get(id)?.has(text)) { directUserDedup.get(id)!.delete(text); return; }
+          run("tmux", "send-keys", "-l", "-t", sess.tmux_window, text);
+          run("tmux", "send-keys", "-t", sess.tmux_window, "Enter");
+          rs.setThinking(true);
+          if (!transcriptWatchers.has(id) && sess.status !== "ended") pollForTranscript(sess);
+        };
+        rs.start();
+        relaySessions.set(id, rs);
+        sess.relay_session_id = rs.relaySessionId;
+        broadcast("session_update", sess);
+      }).catch(e => process.stderr.write(`[relay] reconnect failed for ${id}: ${e}\n`));
+    }
+  };
+}

@@ -145,6 +145,9 @@ export const zhHans: TranslationStructure = {
         usageSubtitle: '查看 API 使用情况和费用',
         sessions: 'Joy Sessions',
         sessionsSubtitle: '管理基于 tmux 的会话',
+        debug: '调试',
+        joyHttp: 'Joy HTTP',
+        joyHttpSubtitle: '直接 HTTP 访问 joy-tmux 服务器',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `已连接 ${service} 账户`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1011,6 +1014,10 @@ export const zhHans: TranslationStructure = {
     },
 
     settingsSessions: {
+        machine: '设备',
+        machineFooter: '运行 joy-tmux 的设备',
+        noMachine: '无已连接的设备',
+        selectMachine: '选择设备',
         serverUrl: '服务器 URL',
         serverUrlFooter: '运行在您机器上的 joy-tmux 服务器的 URL',
         sessions: '会话',
@@ -1022,6 +1029,8 @@ export const zhHans: TranslationStructure = {
         confirmKill: '终止会话',
         confirmKillMessage: '这将终止 Claude 进程，且无法撤销。',
         killSession: '终止',
+        screenshot: '截图',
+        viewPane: '查看面板',
         statusStarting: '启动中',
         statusActive: '活跃',
         statusEnded: '已结束',

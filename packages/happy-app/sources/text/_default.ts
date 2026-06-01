@@ -142,6 +142,9 @@ export const en = {
         usageSubtitle: 'View your API usage and costs',
         sessions: 'Joy Sessions',
         sessionsSubtitle: 'Manage tmux-based sessions',
+        debug: 'Debug',
+        joyHttp: 'Joy HTTP',
+        joyHttpSubtitle: 'Direct HTTP access to joy-tmux server',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service} account connected`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -196,6 +199,10 @@ export const en = {
     },
 
     settingsSessions: {
+        machine: 'Machine',
+        machineFooter: 'Machine running joy-tmux',
+        noMachine: 'No machines connected',
+        selectMachine: 'Select Machine',
         serverUrl: 'Server URL',
         serverUrlFooter: 'URL of the joy-tmux server running on your machine',
         sessions: 'Sessions',
@@ -207,6 +214,8 @@ export const en = {
         confirmKill: 'Kill Session',
         confirmKillMessage: 'This will terminate the Claude process and cannot be undone.',
         killSession: 'Kill',
+        screenshot: 'Screenshot',
+        viewPane: 'View Pane',
         statusStarting: 'Starting',
         statusActive: 'Active',
         statusEnded: 'Ended',

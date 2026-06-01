@@ -99,6 +99,8 @@ export interface SessionRowData {
     completedTodosCount: number;
     totalTodosCount: number;
     hasUnread: boolean;
+    isJoyTmux: boolean;
+    joySessionId: string | null;
 }
 
 function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
@@ -132,6 +134,8 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         completedTodosCount: session.todos?.filter(todo => todo.status === 'completed').length ?? 0,
         totalTodosCount: session.todos?.length ?? 0,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
+        isJoyTmux: session.metadata?.source === 'joy-tmux',
+        joySessionId: session.metadata?.joySessionId ?? null,
     };
 }
 
