@@ -11,21 +11,38 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { useJoyRpcSessions, type JoySession } from '@/hooks/useJoyRpcSessions';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
+import { apiSocket } from '@/sync/apiSocket';
 import { StyleSheet } from 'react-native-unistyles';
 
 export default React.memo(function JoySessionsScreen() {
     const machines = useAllMachines({ includeOffline: true });
-    const joyMachines = machines; // all machines may have joy-tmux
+    const onlineMachines = machines.filter(isMachineOnline);
 
-    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(
-        () => joyMachines.find(m => isMachineOnline(m))?.id ?? joyMachines[0]?.id ?? null
-    );
+    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(null);
+    const probedRef = React.useRef(false);
 
-    // Keep selected machine valid when machine list changes
+    // Probe all online machines in parallel for joy-list-sessions; pick first responder.
     React.useEffect(() => {
-        if (selectedMachineId && machines.some(m => m.id === selectedMachineId)) return;
-        setSelectedMachineId(machines.find(m => isMachineOnline(m))?.id ?? machines[0]?.id ?? null);
-    }, [machines, selectedMachineId]);
+        if (probedRef.current || onlineMachines.length === 0) return;
+        probedRef.current = true;
+        let cancelled = false;
+        (async () => {
+            const results = await Promise.allSettled(
+                onlineMachines.map(m =>
+                    apiSocket.machineRPC(m.id, 'joy-list-sessions', {}).then(() => m.id)
+                )
+            );
+            if (cancelled) return;
+            const found = results.find(r => r.status === 'fulfilled');
+            if (found && found.status === 'fulfilled') {
+                setSelectedMachineId(found.value as string);
+            } else {
+                // No machine has joy-tmux — still set one so user sees error
+                setSelectedMachineId(onlineMachines[0]?.id ?? null);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [onlineMachines.map(m => m.id).join(',')]);
 
     const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyRpcSessions(selectedMachineId);
 
@@ -33,14 +50,14 @@ export default React.memo(function JoySessionsScreen() {
     const screenshotIdRef = React.useRef<string | null>(null);
 
     const handlePickMachine = React.useCallback(async () => {
-        if (joyMachines.length === 0) return;
-        const buttons = joyMachines.map(m => ({
+        if (onlineMachines.length === 0) return;
+        const buttons = onlineMachines.map(m => ({
             text: m.metadata?.displayName || m.metadata?.host || m.id,
-            onPress: () => setSelectedMachineId(m.id),
+            onPress: () => { probedRef.current = true; setSelectedMachineId(m.id); },
         }));
         buttons.push({ text: t('common.cancel'), style: 'cancel' } as any);
         Modal.alert(t('settingsSessions.selectMachine'), undefined, buttons);
-    }, [joyMachines]);
+    }, [onlineMachines]);
 
     const [createLoading, doCreate] = useHappyAction(React.useCallback(async () => {
         const cwd = await Modal.prompt(
@@ -101,7 +118,7 @@ export default React.memo(function JoySessionsScreen() {
                 title={t('settingsSessions.machine')}
                 footer={t('settingsSessions.machineFooter')}
             >
-                {joyMachines.length === 0 ? (
+                {onlineMachines.length === 0 ? (
                     <Item
                         title={t('settingsSessions.noMachine')}
                         showChevron={false}
@@ -110,8 +127,8 @@ export default React.memo(function JoySessionsScreen() {
                     <Item
                         title={machineName as string}
                         icon={<Ionicons name="hardware-chip-outline" size={29} color="#8E8E93" />}
-                        onPress={joyMachines.length > 1 ? handlePickMachine : undefined}
-                        showChevron={joyMachines.length > 1}
+                        onPress={onlineMachines.length > 1 ? handlePickMachine : undefined}
+                        showChevron={onlineMachines.length > 1}
                     />
                 )}
             </ItemGroup>
