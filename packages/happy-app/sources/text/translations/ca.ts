@@ -1014,6 +1014,11 @@ export const ca: TranslationStructure = {
 
     settingsSessions: {
         machine: 'Màquina',
+        machines: 'Màquines',
+        statusOnline: 'en línia',
+        statusOffline: 'sense connexió',
+        showOfflineMachines: ({ count }: { count: number }) => `Mostra ${count} ${count === 1 ? 'màquina' : 'màquines'} sense connexió`,
+        hideOfflineMachines: 'Amaga màquines sense connexió',
         machineFooter: 'Màquina amb joy-tmux en execució',
         noMachine: 'No hi ha màquines connectades',
         selectMachine: 'Selecciona màquina',

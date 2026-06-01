@@ -199,10 +199,15 @@ export const en = {
     },
 
     settingsSessions: {
+        machines: 'Machines',
         machine: 'Machine',
         machineFooter: 'Machine running joy-tmux',
         noMachine: 'No machines connected',
         selectMachine: 'Select Machine',
+        statusOnline: 'online',
+        statusOffline: 'offline',
+        showOfflineMachines: ({ count }: { count: number }) => `Show ${count} offline ${count === 1 ? 'machine' : 'machines'}`,
+        hideOfflineMachines: 'Hide offline machines',
         serverUrl: 'Server URL',
         serverUrlFooter: 'URL of the joy-tmux server running on your machine',
         sessions: 'Sessions',

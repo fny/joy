@@ -1015,6 +1015,11 @@ export const zhHans: TranslationStructure = {
 
     settingsSessions: {
         machine: '设备',
+        machines: '设备列表',
+        statusOnline: '在线',
+        statusOffline: '离线',
+        showOfflineMachines: ({ count }: { count: number }) => `显示 ${count} 台离线设备`,
+        hideOfflineMachines: '隐藏离线设备',
         machineFooter: '运行 joy-tmux 的设备',
         noMachine: '无已连接的设备',
         selectMachine: '选择设备',

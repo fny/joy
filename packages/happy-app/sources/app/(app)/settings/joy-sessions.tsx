@@ -17,11 +17,13 @@ import { StyleSheet } from 'react-native-unistyles';
 export default React.memo(function JoySessionsScreen() {
     const machines = useAllMachines({ includeOffline: true });
     const onlineMachines = machines.filter(isMachineOnline);
+    const offlineMachines = machines.filter(m => !isMachineOnline(m));
 
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(null);
+    const [showOffline, setShowOffline] = React.useState(false);
     const probedRef = React.useRef(false);
 
-    // Probe all online machines in parallel for joy-list-sessions; pick first responder.
+    // Probe all online machines in parallel; pick first one with joy-tmux.
     React.useEffect(() => {
         if (probedRef.current || onlineMachines.length === 0) return;
         probedRef.current = true;
@@ -34,30 +36,22 @@ export default React.memo(function JoySessionsScreen() {
             );
             if (cancelled) return;
             const found = results.find(r => r.status === 'fulfilled');
-            if (found && found.status === 'fulfilled') {
-                setSelectedMachineId(found.value as string);
-            } else {
-                // No machine has joy-tmux — still set one so user sees error
-                setSelectedMachineId(onlineMachines[0]?.id ?? null);
-            }
+            setSelectedMachineId(
+                found?.status === 'fulfilled' ? (found.value as string) : (onlineMachines[0]?.id ?? null)
+            );
         })();
         return () => { cancelled = true; };
     }, [onlineMachines.map(m => m.id).join(',')]);
+
+    const handleSelectMachine = React.useCallback((id: string) => {
+        probedRef.current = true;
+        setSelectedMachineId(id);
+    }, []);
 
     const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyRpcSessions(selectedMachineId);
 
     const killingIdRef = React.useRef<string | null>(null);
     const screenshotIdRef = React.useRef<string | null>(null);
-
-    const handlePickMachine = React.useCallback(async () => {
-        if (onlineMachines.length === 0) return;
-        const buttons = onlineMachines.map(m => ({
-            text: m.metadata?.displayName || m.metadata?.host || m.id,
-            onPress: () => { probedRef.current = true; setSelectedMachineId(m.id); },
-        }));
-        buttons.push({ text: t('common.cancel'), style: 'cancel' } as any);
-        Modal.alert(t('settingsSessions.selectMachine'), undefined, buttons);
-    }, [onlineMachines]);
 
     const [createLoading, doCreate] = useHappyAction(React.useCallback(async () => {
         const cwd = await Modal.prompt(
@@ -96,98 +90,116 @@ export default React.memo(function JoySessionsScreen() {
                 {
                     text: t('settingsSessions.killSession'),
                     style: 'destructive',
-                    onPress: () => {
-                        killingIdRef.current = session.id;
-                        doKill();
-                    },
+                    onPress: () => { killingIdRef.current = session.id; doKill(); },
                 },
             ],
         );
     }, [doKill]);
 
-    const selectedMachine = machines.find(m => m.id === selectedMachineId);
-    const machineName = selectedMachine
-        ? (selectedMachine.metadata?.displayName || selectedMachine.metadata?.host || selectedMachineId)
-        : t('settingsSessions.noMachine');
-
+    const visibleMachines = showOffline ? machines : onlineMachines;
     const activeSessions = sessions.filter(s => s.status !== 'ended');
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
-            <ItemGroup
-                title={t('settingsSessions.machine')}
-                footer={t('settingsSessions.machineFooter')}
-            >
-                {onlineMachines.length === 0 ? (
-                    <Item
-                        title={t('settingsSessions.noMachine')}
-                        showChevron={false}
-                    />
+            <ItemGroup title={t('settingsSessions.machines')}>
+                {machines.length === 0 ? (
+                    <Item title={t('settingsSessions.noMachine')} showChevron={false} />
                 ) : (
-                    <Item
-                        title={machineName as string}
-                        icon={<Ionicons name="hardware-chip-outline" size={29} color="#8E8E93" />}
-                        onPress={onlineMachines.length > 1 ? handlePickMachine : undefined}
-                        showChevron={onlineMachines.length > 1}
-                    />
+                    <>
+                        {visibleMachines.map(machine => {
+                            const isOnline = isMachineOnline(machine);
+                            const isSelected = machine.id === selectedMachineId;
+                            const name = machine.metadata?.displayName || machine.metadata?.host || machine.id;
+                            const platform = machine.metadata?.platform || '';
+                            const status = isOnline ? t('settingsSessions.statusOnline') : t('settingsSessions.statusOffline');
+                            const subtitle = platform ? `${platform} • ${status}` : status;
+                            return (
+                                <Item
+                                    key={machine.id}
+                                    title={name}
+                                    subtitle={subtitle}
+                                    icon={
+                                        <Ionicons
+                                            name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                                            size={29}
+                                            color={isOnline ? '#34C759' : '#8E8E93'}
+                                        />
+                                    }
+                                    onPress={() => handleSelectMachine(machine.id)}
+                                    showChevron={false}
+                                />
+                            );
+                        })}
+                        {offlineMachines.length > 0 && (
+                            <Item
+                                title={showOffline
+                                    ? t('settingsSessions.hideOfflineMachines')
+                                    : t('settingsSessions.showOfflineMachines', { count: offlineMachines.length })}
+                                showChevron={false}
+                                onPress={() => setShowOffline(v => !v)}
+                            />
+                        )}
+                    </>
                 )}
             </ItemGroup>
 
-            <ItemGroup
-                title={t('settingsSessions.sessions')}
-                footer={error ?? undefined}
-            >
-                {loading && activeSessions.length === 0 ? (
-                    <Item
-                        title={t('settingsSessions.loading')}
-                        showChevron={false}
-                        rightElement={<ActivityIndicator />}
-                    />
-                ) : activeSessions.length === 0 ? (
-                    <Item
-                        title={t('settingsSessions.noSessions')}
-                        showChevron={false}
-                    />
-                ) : (
-                    activeSessions.map(session => (
+            {selectedMachineId && (
+                <ItemGroup
+                    title={t('settingsSessions.sessions')}
+                    footer={error ?? undefined}
+                >
+                    {loading && activeSessions.length === 0 ? (
                         <Item
-                            key={session.id}
-                            title={session.cwd.split('/').pop() ?? session.cwd}
-                            subtitle={`${statusLabel(session.status)} · ${session.cwd}`}
-                            onPress={session.relay_session_id ? () => router.push(`/session/${encodeURIComponent(session.relay_session_id!)}`) : undefined}
-                            showChevron={!!session.relay_session_id}
-                            rightElement={
-                                <View style={styles.sessionActions}>
-                                    <Pressable
-                                        onPress={() => handleScreenshot(session)}
-                                        style={styles.actionButton}
-                                        hitSlop={8}
-                                    >
-                                        {screenshotLoading && screenshotIdRef.current === session.id
-                                            ? <ActivityIndicator size="small" />
-                                            : <Ionicons name="terminal-outline" size={20} color="#8E8E93" />
-                                        }
-                                    </Pressable>
-                                    <Pressable
-                                        onPress={() => handleKill(session)}
-                                        style={styles.actionButton}
-                                        hitSlop={8}
-                                    >
-                                        <Ionicons name="trash-outline" size={20} color="#FF3B30" />
-                                    </Pressable>
-                                </View>
-                            }
+                            title={t('settingsSessions.loading')}
+                            showChevron={false}
+                            rightElement={<ActivityIndicator />}
                         />
-                    ))
-                )}
-                <Item
-                    title={t('settingsSessions.newSession')}
-                    icon={<Ionicons name="add-circle-outline" size={29} color="#34C759" />}
-                    onPress={selectedMachineId ? doCreate : undefined}
-                    showChevron={false}
-                    rightElement={createLoading ? <ActivityIndicator /> : undefined}
-                />
-            </ItemGroup>
+                    ) : activeSessions.length === 0 ? (
+                        <Item
+                            title={t('settingsSessions.noSessions')}
+                            showChevron={false}
+                        />
+                    ) : (
+                        activeSessions.map(session => (
+                            <Item
+                                key={session.id}
+                                title={session.cwd.split('/').pop() ?? session.cwd}
+                                subtitle={`${statusLabel(session.status)} · ${session.cwd}`}
+                                onPress={session.relay_session_id ? () => router.push(`/session/${encodeURIComponent(session.relay_session_id!)}`) : undefined}
+                                showChevron={!!session.relay_session_id}
+                                rightElement={
+                                    <View style={styles.sessionActions}>
+                                        <Pressable
+                                            onPress={() => handleScreenshot(session)}
+                                            style={styles.actionButton}
+                                            hitSlop={8}
+                                        >
+                                            {screenshotLoading && screenshotIdRef.current === session.id
+                                                ? <ActivityIndicator size="small" />
+                                                : <Ionicons name="terminal-outline" size={20} color="#8E8E93" />
+                                            }
+                                        </Pressable>
+                                        <Pressable
+                                            onPress={() => handleKill(session)}
+                                            style={styles.actionButton}
+                                            hitSlop={8}
+                                        >
+                                            <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+                                        </Pressable>
+                                    </View>
+                                }
+                            />
+                        ))
+                    )}
+                    <Item
+                        title={t('settingsSessions.newSession')}
+                        icon={<Ionicons name="add-circle-outline" size={29} color="#34C759" />}
+                        onPress={doCreate}
+                        showChevron={false}
+                        rightElement={createLoading ? <ActivityIndicator /> : undefined}
+                    />
+                </ItemGroup>
+            )}
         </ItemList>
     );
 });

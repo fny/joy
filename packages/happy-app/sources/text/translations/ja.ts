@@ -1016,6 +1016,11 @@ export const ja: TranslationStructure = {
 
     settingsSessions: {
         machine: 'マシン',
+        machines: 'マシン一覧',
+        statusOnline: 'オンライン',
+        statusOffline: 'オフライン',
+        showOfflineMachines: ({ count }: { count: number }) => `オフラインのマシンを${count}台表示`,
+        hideOfflineMachines: 'オフラインのマシンを非表示',
         machineFooter: 'joy-tmuxが実行中のマシン',
         noMachine: '接続中のマシンなし',
         selectMachine: 'マシンを選択',
