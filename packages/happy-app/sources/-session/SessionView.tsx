@@ -206,6 +206,7 @@ export const SessionView = React.memo((props: { id: string }) => {
             title: sessionName,
             folderName,
             isConnected,
+            badge: session.metadata?.source === 'joy-tmux' ? '>_' : undefined,
         };
     }, [session, isDataReady]);
 
@@ -245,6 +246,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         title={headerProps.title}
                         folderName={headerProps.folderName}
                         isConnected={headerProps.isConnected}
+                        badge={headerProps.badge}
                         extraPathSegment={fileViewPath ?? undefined}
                         rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : null}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
