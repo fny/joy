@@ -124,7 +124,7 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
-                name="settings/sessions"
+                name="settings/joy-sessions"
                 options={{
                     headerTitle: t('settings.sessions'),
                 }}
