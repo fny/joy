@@ -1043,6 +1043,11 @@ export const ru: TranslationStructure = {
 
     settingsSessions: {
         machine: 'Машина',
+        machines: 'Машины',
+        statusOnline: 'онлайн',
+        statusOffline: 'офлайн',
+        showOfflineMachines: ({ count }: { count: number }) => `Показать ${count} офлайн ${count === 1 ? 'машину' : 'машины'}`,
+        hideOfflineMachines: 'Скрыть офлайн машины',
         machineFooter: 'Машина с запущенным joy-tmux',
         noMachine: 'Нет подключённых машин',
         selectMachine: 'Выбрать машину',

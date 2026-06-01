@@ -1013,6 +1013,11 @@ export const it: TranslationStructure = {
 
     settingsSessions: {
         machine: 'Macchina',
+        machines: 'Macchine',
+        statusOnline: 'online',
+        statusOffline: 'offline',
+        showOfflineMachines: ({ count }: { count: number }) => `Mostra ${count} ${count === 1 ? 'macchina' : 'macchine'} offline`,
+        hideOfflineMachines: 'Nascondi macchine offline',
         machineFooter: 'Macchina che esegue joy-tmux',
         noMachine: 'Nessuna macchina connessa',
         selectMachine: 'Seleziona macchina',

@@ -1029,6 +1029,11 @@ export const en: TranslationStructure = {
 
     settingsSessions: {
         machine: 'Machine',
+        machines: 'Machines',
+        statusOnline: 'online',
+        statusOffline: 'offline',
+        showOfflineMachines: ({ count }: { count: number }) => `Show ${count} offline ${count === 1 ? 'machine' : 'machines'}`,
+        hideOfflineMachines: 'Hide offline machines',
         machineFooter: 'Machine running joy-tmux',
         noMachine: 'No machines connected',
         selectMachine: 'Select Machine',

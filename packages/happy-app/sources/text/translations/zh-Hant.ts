@@ -1014,6 +1014,11 @@ export const zhHant: TranslationStructure = {
 
     settingsSessions: {
         machine: '裝置',
+        machines: '裝置列表',
+        statusOnline: '在線',
+        statusOffline: '離線',
+        showOfflineMachines: ({ count }: { count: number }) => `顯示 ${count} 台離線裝置`,
+        hideOfflineMachines: '隱藏離線裝置',
         machineFooter: '執行 joy-tmux 的裝置',
         noMachine: '無已連線的裝置',
         selectMachine: '選擇裝置',
