@@ -9,13 +9,12 @@ import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { useJoyRpcSessions, type JoySession } from '@/hooks/useJoyRpcSessions';
-import { useAllMachines, useIsDataReady } from '@/sync/storage';
+import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { StyleSheet } from 'react-native-unistyles';
 
 export default React.memo(function JoySessionsScreen() {
-    const isDataReady = useIsDataReady();
     const machines = useAllMachines({ includeOffline: true });
     const onlineMachines = machines.filter(isMachineOnline);
     const offlineMachines = machines.filter(m => !isMachineOnline(m));
@@ -25,22 +24,21 @@ export default React.memo(function JoySessionsScreen() {
     const probedRef = React.useRef(false);
 
     // Probe all online machines in parallel; pick first one with joy-tmux.
-    // Uses a 5s timeout per machine so the page doesn't hang.
     React.useEffect(() => {
         if (probedRef.current || onlineMachines.length === 0) return;
         probedRef.current = true;
         let cancelled = false;
-        const withTimeout = (promise: Promise<string>) =>
-            Promise.race([promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))]);
         (async () => {
             const results = await Promise.allSettled(
                 onlineMachines.map(m =>
-                    withTimeout(apiSocket.machineRPC(m.id, 'joy-list-sessions', {}).then(() => m.id))
+                    apiSocket.machineRPC(m.id, 'joy-list-sessions', {}).then(() => m.id)
                 )
             );
             if (cancelled) return;
             const found = results.find(r => r.status === 'fulfilled');
-            if (found?.status === 'fulfilled') setSelectedMachineId(found.value as string);
+            setSelectedMachineId(
+                found?.status === 'fulfilled' ? (found.value as string) : (onlineMachines[0]?.id ?? null)
+            );
         })();
         return () => { cancelled = true; };
     }, [onlineMachines.map(m => m.id).join(',')]);
@@ -104,9 +102,7 @@ export default React.memo(function JoySessionsScreen() {
     return (
         <ItemList style={{ paddingTop: 0 }}>
             <ItemGroup title={t('settingsSessions.machines')}>
-                {!isDataReady ? (
-                    <Item title={t('settingsSessions.loading')} showChevron={false} rightElement={<ActivityIndicator />} />
-                ) : machines.length === 0 ? (
+                {machines.length === 0 ? (
                     <Item title={t('settingsSessions.noMachine')} showChevron={false} />
                 ) : (
                     <>
