@@ -86,6 +86,9 @@ function NewJoyTmuxSessionScreen() {
     const [pathInput, setPathInput] = React.useState<string>('~');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
+    // When true, joy-tmux launches `claude --continue …`, resuming the most
+    // recent Claude conversation in this cwd instead of starting fresh.
+    const [continueLast, setContinueLast] = React.useState(false);
     const [prompt, setPrompt] = React.useState('');
     const [isSpawning, setIsSpawning] = React.useState(false);
     const [machinePickerOpen, setMachinePickerOpen] = React.useState(false);
@@ -172,10 +175,12 @@ function NewJoyTmuxSessionScreen() {
                 cwd: string;
                 model?: string;
                 effort?: string;
+                continue?: boolean;
             }>(selectedMachineId, 'joy-create-session', {
                 cwd,
                 model: currentModel && currentModel.key !== 'default' ? currentModel.key : undefined,
                 effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
+                continue: continueLast || undefined,
             });
 
             if ('error' in result) {
@@ -208,7 +213,7 @@ function NewJoyTmuxSessionScreen() {
         } finally {
             setIsSpawning(false);
         }
-    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, prompt, router, navigateToSession]);
+    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, continueLast, prompt, router, navigateToSession]);
 
     const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
 
@@ -302,6 +307,26 @@ function NewJoyTmuxSessionScreen() {
                                     </>
                                 )}
                             </View>
+
+                            {/* Continue last conversation toggle — when on, joy-tmux passes
+                                --continue to claude so it resumes the most recent Claude
+                                conversation in this cwd instead of starting fresh. */}
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={() => setContinueLast(v => !v)}
+                            >
+                                <Ionicons
+                                    name={continueLast ? 'checkbox' : 'square-outline'}
+                                    size={15}
+                                    color={continueLast ? theme.colors.button.primary.background : theme.colors.textSecondary}
+                                />
+                                <Text style={styles.configLabel} numberOfLines={1}>
+                                    --continue
+                                </Text>
+                                <Text style={[styles.configLabel, { color: theme.colors.textSecondary, fontSize: 12 }]} numberOfLines={1}>
+                                    {continueLast ? 'resume last claude conversation' : 'start fresh'}
+                                </Text>
+                            </Pressable>
 
                             {/* YOLO indicator — not interactive, just a reminder */}
                             <View style={styles.configRow}>
