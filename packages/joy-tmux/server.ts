@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, watch, 
 import { join, basename } from "path";
 import { homedir } from "os";
 import { initRelay, createRelaySession, encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd, encodeTurnEnd, encodeUserMessage, type RelaySession } from "./relay.ts";
+import { registerSessionRpcs } from "./sessionRpcs";
 
 const PORT = parseInt(process.env.PORT ?? "4997");
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
@@ -113,6 +114,18 @@ function wireRelaySession(opts: {
     run("tmux", "send-keys", "-t", tmuxWindow, "Escape");
     rs.setThinking(false);
     return { ok: true };
+  });
+
+  // Session-scoped file/shell RPCs (bash, readFile, writeFile, listDirectory,
+  // getDirectoryTree, ripgrep) + killSession. These let the app's file
+  // browser, search, and archive button work against joy-tmux sessions just
+  // like they do for happy-cli sessions.
+  const sess = sessions.get(sessionId);
+  const cwd = sess?.cwd ?? process.cwd();
+  registerSessionRpcs({
+    register: (method, handler) => rs.registerRpc(method, handler),
+    sessionCwd: cwd,
+    killSession: () => killSession(sessionId),
   });
 }
 
