@@ -317,6 +317,27 @@ export class RelayClient {
     return { Authorization: `Bearer ${this.creds.token}`, 'Content-Type': 'application/json' };
   }
 
+  /**
+   * Mark a session inactive on the API server (flips `active=false`).
+   * Mirrors happy-cli's `deactivateSession`: POST /v1/sessions/{id}/archive.
+   * Without this the session keeps showing as active in the app even after
+   * the underlying tmux window has been killed, because killSession only
+   * cleans up local state — it doesn't tell the server to archive.
+   */
+  async archiveSession(relaySessionId: string): Promise<boolean> {
+    try {
+      const r = await fetch(this.url(`/v1/sessions/${relaySessionId}/archive`), {
+        method: 'POST',
+        headers: this.headers(),
+        body: '{}',
+      });
+      return r.ok;
+    } catch (e) {
+      log(`archiveSession failed for ${relaySessionId}: ${e}`);
+      return false;
+    }
+  }
+
   async createSession(opts: { tag: string; metadata: unknown }): Promise<CreateSessionResult> {
     let sessionKey: Uint8Array;
     let variant: EncryptionVariant;

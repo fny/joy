@@ -583,6 +583,17 @@ function killSession(id: string): boolean {
   const s = sessions.get(id);
   if (!s) return false;
   stopTranscriptWatcher(id);
+  // Stop the relay session (stops heartbeats + untracks from socket) and
+  // archive it server-side (flips `active=false`) so the app removes the
+  // session card from the active list. Mirrors happy-cli's cleanup path:
+  // killing the CLI process there calls deactivateSession before exit.
+  const rs = relaySessions.get(id);
+  if (rs) {
+    rs.stop();
+    if (relayClient) {
+      void relayClient.archiveSession(rs.relaySessionId);
+    }
+  }
   relaySessions.delete(id);
   run("tmux", "kill-window", "-t", s.tmux_window);
   s.status = "ended";
