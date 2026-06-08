@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync, existsSync, mkdirSync, watch, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, watch, readdirSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
 import { initRelay, createRelaySession, encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd, encodeTurnEnd, encodeUserMessage, type RelaySession } from "./relay.ts";
@@ -13,7 +13,7 @@ interface Message {
   id: string;
   role: "user" | "assistant" | "event";
   content: string;
-  source: "web" | "cli";
+  source: "web" | "cli" | "rpc";
   timestamp: number;
   chat_id?: string;
   session_id?: string;
@@ -21,6 +21,7 @@ interface Message {
   event_status?: "info" | "success" | "error" | "warning";
 }
 
+const MAX_MESSAGES = 500;
 const messages: Message[] = [];
 let nextChatId = 1;
 let nextMsgId = 1;
@@ -28,6 +29,7 @@ let nextMsgId = 1;
 function addMessage(msg: Omit<Message, "id" | "timestamp">): Message {
   const full: Message = { ...msg, id: String(nextMsgId++), timestamp: Date.now() };
   messages.push(full);
+  if (messages.length > MAX_MESSAGES) messages.splice(0, messages.length - MAX_MESSAGES);
   broadcast("message", full);
   return full;
 }
@@ -64,9 +66,72 @@ interface CreateSessionOpts {
   yolo?: boolean;
 }
 
-const transcriptWatchers = new Map<string, { close: () => void; lineCount: number }>();
-const directUserDedup = new Map<string, Set<string>>();
+const transcriptWatchers = new Map<string, { close: () => void; byteOffset: number }>();
 const turnStates = new Map<string, { turnId: string }>();
+
+// ── Delivery receipts ────────────────────────────────────────────────────────
+// See ./receipts.ts for the persistence + matching logic.
+import {
+  initDeliveryState,
+  matchPendingForUserEntry,
+  recordInboundReceipt as _recordInboundReceipt,
+  recordOutboundReceipt as _recordOutboundReceipt,
+  type DeliveryState,
+  type InboundReceipt,
+  type OutboundReceipt,
+} from "./receipts";
+
+const deliveryStates = new Map<string, DeliveryState>(); // sessionId → state
+
+// Builds the standard onMessage callback + registers session-scoped RPC
+// handlers (abort) for a newly-created relay session. Used by launch, recover,
+// and reconnect paths so the wiring stays consistent.
+function wireRelaySession(opts: {
+  sessionId: string;
+  tmuxWindow: string;
+  rs: RelaySession;
+  sessionAlive: () => boolean;
+  watcherActive: () => boolean;
+  startWatcher: () => void;
+}): void {
+  const { sessionId, tmuxWindow, rs, sessionAlive, watcherActive, startWatcher } = opts;
+
+  rs.onMessage = (text, seq) => {
+    const st = getOrInitDeliveryState(sessionId, rs.relaySessionId);
+    st.pending.push({ seq, text, source: 'relay', at: Date.now() });
+    const r = run("tmux", "send-keys", "-l", "-t", tmuxWindow, text.replace(/\n/g, " "));
+    if (!r.ok) { st.pending.pop(); throw new Error("tmux send-keys failed"); }
+    run("tmux", "send-keys", "-t", tmuxWindow, "Enter");
+    rs.setThinking(true);
+    if (!watcherActive() && sessionAlive()) startWatcher();
+  };
+
+  // Session-scoped abort: app calls sessionRPC(sessionId, 'abort', {}) — we
+  // map that to Escape, which Claude Code interactive interprets as
+  // "interrupt current generation, return to prompt."
+  rs.registerRpc('abort', async () => {
+    run("tmux", "send-keys", "-t", tmuxWindow, "Escape");
+    rs.setThinking(false);
+    return { ok: true };
+  });
+}
+
+function getOrInitDeliveryState(sessionId: string, relaySessionId: string): DeliveryState {
+  let st = deliveryStates.get(sessionId);
+  if (!st) {
+    st = initDeliveryState(relaySessionId);
+    deliveryStates.set(sessionId, st);
+  }
+  return st;
+}
+
+function recordInboundReceipt(sessionId: string, relaySessionId: string, receipt: InboundReceipt): void {
+  _recordInboundReceipt(getOrInitDeliveryState(sessionId, relaySessionId), relaySessionId, receipt);
+}
+
+function recordOutboundReceipt(sessionId: string, relaySessionId: string, receipt: OutboundReceipt): void {
+  _recordOutboundReceipt(getOrInitDeliveryState(sessionId, relaySessionId), relaySessionId, receipt);
+}
 
 // ── SSE broadcast ─────────────────────────────────────────────────────────────
 const sseListeners = new Set<(data: string) => void>();
@@ -102,11 +167,16 @@ function findLatestTranscript(dir: string, minMtime: number): string | null {
   } catch { return null; }
 }
 
+// M4: 120 attempts × 500ms = 60s window, enough for slow first-runs (trust prompts etc.)
 function pollForTranscript(sess: SessionRecord, attempts = 0) {
   if (transcriptWatchers.has(sess.id) || sess.status === "ended") return;
   const path = findLatestTranscript(cwdToTranscriptDir(sess.cwd), sess.started_at);
   if (path) { startTranscriptWatcher(sess, path); return; }
-  if (attempts < 40) setTimeout(() => pollForTranscript(sess, attempts + 1), 500);
+  if (attempts < 120) {
+    setTimeout(() => pollForTranscript(sess, attempts + 1), 500);
+  } else {
+    process.stderr.write(`[transcript] WARN: no transcript found for ${sess.id} after 60s — assistant output will not reach the relay\n`);
+  }
 }
 
 // ── JSONL entry processing ────────────────────────────────────────────────────
@@ -174,13 +244,40 @@ function handleTranscriptEntry(sess: SessionRecord, entry: Record<string, unknow
     // skip slash command wrappers injected by the CLI
     if (content.startsWith("<local-command") || content.startsWith("<command-name>")) return;
 
-    const dedup = directUserDedup.get(sess.id);
-    if (dedup?.has(content)) { dedup.delete(content); return; }
+    // Match this transcript entry against the front of the pending-send queue.
+    // Identical messages are matched sequentially: two "yes" sends pair with
+    // two "yes" transcript entries in order, regardless of text equality.
+    const uuid = typeof entry.uuid === "string" ? entry.uuid : "";
+    const rs = relaySessions.get(sess.id);
+    if (rs && uuid) {
+      const st = getOrInitDeliveryState(sess.id, rs.relaySessionId);
+      const front = st.pending[0];
+      if (front && front.text === content) {
+        st.pending.shift();
+        recordInboundReceipt(sess.id, rs.relaySessionId, {
+          seq: front.seq, uuid, text: content, source: front.source, at: Date.now(),
+        });
+        return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
+      }
+      // No queue match → direct typing in the tmux pane. Skip if we already
+      // forwarded it (recovery), otherwise mirror it to the relay so the app
+      // sees the full conversation.
+      if (!st.forwardedUuids.has(uuid)) {
+        rs.send(encodeUserMessage(content));
+        recordOutboundReceipt(sess.id, rs.relaySessionId, { uuid, turn: "", at: Date.now() });
+      }
+    }
     addMessage({ role: "user", content, source: "cli", session_id: sid });
 
   } else if (role === "assistant") {
     const blocks = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
     const rs = relaySessions.get(sess.id);
+    const entryUuid = typeof entry.uuid === "string" ? entry.uuid : "";
+    // Skip if we've already forwarded this transcript entry (recovery case).
+    if (rs && entryUuid) {
+      const st = getOrInitDeliveryState(sess.id, rs.relaySessionId);
+      if (st.forwardedUuids.has(entryUuid)) return;
+    }
     if (rs && blocks.length > 0) {
       // Ensure a turn is open; send turn-start on the first assistant entry per turn
       let ts = turnStates.get(sess.id);
@@ -204,6 +301,21 @@ function handleTranscriptEntry(sess: SessionRecord, entry: Record<string, unknow
             ...opts,
           }));
         }
+      }
+      // Record outbound receipt — we forwarded this transcript entry to the relay.
+      if (entryUuid) {
+        recordOutboundReceipt(sess.id, rs.relaySessionId, {
+          uuid: entryUuid, turn: ts.turnId, at: Date.now(),
+        });
+      }
+      // M3: send turn-end when the assistant finishes — don't require a Stop hook.
+      // end_turn = normal completion; tool_use = more tool calls pending (no turn-end yet).
+      const stopReason = String((msg as Record<string, unknown>).stop_reason || "");
+      if (stopReason === "end_turn" || stopReason === "max_tokens") {
+        rs.send(encodeTurnEnd('completed', { turn: ts.turnId }));
+        turnStates.delete(sess.id);
+        rs.setThinking(false);
+        broadcast("stop", { session_id: sid });
       }
     }
     for (const block of blocks) {
@@ -236,18 +348,24 @@ function startTranscriptWatcher(sess: SessionRecord, transcriptPath: string, for
   }
 
   sess.transcript_path = transcriptPath;
-  let lineCount = 0;
+  let byteOffset = 0;
+  let leftover = "";  // incomplete line carried across reads
 
   function readNew() {
     try {
-      const text = readFileSync(transcriptPath, "utf-8");
-      const lines = text.split("\n").slice(0, -1);
-      const newLines = lines.slice(lineCount);
-      if (newLines.length === 0) return;
-      lineCount += newLines.length;
+      const { size } = statSync(transcriptPath);
+      if (size <= byteOffset) return;
+      const fd = openSync(transcriptPath, "r");
+      const buf = Buffer.allocUnsafe(size - byteOffset);
+      const bytesRead = readSync(fd, buf, 0, buf.length, byteOffset);
+      closeSync(fd);
+      byteOffset += bytesRead;
       const w = transcriptWatchers.get(sess.id);
-      if (w) w.lineCount = lineCount;
-      for (const line of newLines) {
+      if (w) w.byteOffset = byteOffset;
+      const chunk = leftover + buf.subarray(0, bytesRead).toString("utf-8");
+      const parts = chunk.split("\n");
+      leftover = parts.pop() ?? "";  // last part is incomplete if no trailing \n
+      for (const line of parts) {
         if (!line.trim()) continue;
         try {
           const entry = JSON.parse(line);
@@ -271,14 +389,14 @@ function startTranscriptWatcher(sess: SessionRecord, transcriptPath: string, for
   }
 
   attachWatcher();
-  transcriptWatchers.set(sess.id, { close: () => fsWatcher?.close(), lineCount });
+  transcriptWatchers.set(sess.id, { close: () => fsWatcher?.close(), byteOffset });
 }
 
 function stopTranscriptWatcher(sessionId: string) {
   transcriptWatchers.get(sessionId)?.close();
   transcriptWatchers.delete(sessionId);
-  directUserDedup.delete(sessionId);
   turnStates.delete(sessionId);
+  deliveryStates.delete(sessionId);
   relaySessions.get(sessionId)?.stop();
   relaySessions.delete(sessionId);
 }
@@ -305,6 +423,13 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   if (!run("tmux", "has-session", "-t", TMUX_SESSION).ok) {
     run("tmux", "new-session", "-d", "-s", TMUX_SESSION, "-c", opts.cwd);
   }
+
+  // Validate user-supplied fields to prevent shell injection via send-keys
+  const SAFE_ID = /^[a-zA-Z0-9:._/-]{1,128}$/;
+  const SAFE_EFFORT = /^[a-z]{1,32}$/;
+  if (opts.model && !SAFE_ID.test(opts.model)) throw new Error("invalid model");
+  if (opts.resume_id && !SAFE_ID.test(opts.resume_id)) throw new Error("invalid resume_id");
+  if (opts.effort && !SAFE_EFFORT.test(opts.effort)) throw new Error("invalid effort");
 
   const envParts: string[] = [];
   if (opts.effort && opts.effort !== "default") envParts.push(`CLAUDE_EFFORT=${opts.effort}`);
@@ -348,14 +473,17 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   pollSessionEnd(record);
 
   if (relayClient) {
-    createRelaySession(relayClient, { tag: `joy-tmux-v2-${id}`, cwd: opts.cwd, id }).then(rs => {
-      rs.onMessage = (text) => {
-        if (directUserDedup.get(id)?.has(text)) { directUserDedup.get(id)!.delete(text); return; }
-        run("tmux", "send-keys", "-l", "-t", record.tmux_window, text);
-        run("tmux", "send-keys", "-t", record.tmux_window, "Enter");
-        rs.setThinking(true);
-        if (!transcriptWatchers.has(id) && record.status !== "ended") pollForTranscript(record);
-      };
+    createRelaySession(relayClient, { tag: `joy-tmux-${id}`, cwd: opts.cwd, id }).then(rs => {
+      // M1: guard against kill racing the async create — don't start a poller for a dead session
+      if (record.status === "ended") { rs.stop(); return; }
+      wireRelaySession({
+        sessionId: id,
+        tmuxWindow: record.tmux_window,
+        rs,
+        sessionAlive: () => record.status !== "ended",
+        watcherActive: () => transcriptWatchers.has(id),
+        startWatcher: () => pollForTranscript(record),
+      });
       rs.start();
       relaySessions.set(id, rs);
       record.relay_session_id = rs.relaySessionId;
@@ -406,15 +534,17 @@ function recoverDirectSessions() {
       pollSessionEnd(record);
       if (relayClient) {
         process.stderr.write(`[relay] creating session for recovered ${id}\n`);
-        createRelaySession(relayClient, { tag: `joy-tmux-v2-${id}`, cwd, id }).then(rs => {
+        createRelaySession(relayClient, { tag: `joy-tmux-${id}`, cwd, id }).then(rs => {
           process.stderr.write(`[relay] recovered session ${id} → relay ${rs.relaySessionId}\n`);
-          rs.onMessage = (text) => {
-            if (directUserDedup.get(id)?.has(text)) { directUserDedup.get(id)!.delete(text); return; }
-            run("tmux", "send-keys", "-l", "-t", record.tmux_window, text);
-            run("tmux", "send-keys", "-t", record.tmux_window, "Enter");
-            rs.setThinking(true);
-            if (!transcriptWatchers.has(id) && record.status !== "ended") pollForTranscript(record);
-          };
+          if (record.status === "ended") { rs.stop(); return; } // M1: alive guard
+          wireRelaySession({
+            sessionId: id,
+            tmuxWindow: record.tmux_window,
+            rs,
+            sessionAlive: () => record.status !== "ended",
+            watcherActive: () => transcriptWatchers.has(id),
+            startWatcher: () => pollForTranscript(record),
+          });
           rs.start();
           relaySessions.set(id, rs);
           record.relay_session_id = rs.relaySessionId;
@@ -440,16 +570,16 @@ function killSession(id: string): boolean {
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return (content as Array<{ type: string; text?: string }>)
-      .filter(b => b.type === "text" && b.text)
-      .map(b => b.text!)
-      .join("\n").trim();
-  }
-  return "";
-}
+// H3: per-instance token required on all mutating routes — prevents drive-by
+// cross-origin session creation / prompt injection via no-cors POST.
+// CORS is locked to localhost origins only.
+const SERVER_TOKEN = crypto.randomUUID();
+process.stderr.write(`[server] token: ${SERVER_TOKEN}\n`);
+
+const ALLOWED_ORIGINS = new Set([
+  `http://localhost:${PORT}`,
+  `http://127.0.0.1:${PORT}`,
+]);
 
 Bun.serve({
   port: PORT,
@@ -458,12 +588,16 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const method = req.method;
+    const origin = req.headers.get("origin") ?? "";
 
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
+    const corsHeaders: Record<string, string> = {
       "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type, X-Joy-Token",
     };
+    // Only echo back known origins; unknown origins get no ACAO header (blocks reads)
+    if (ALLOWED_ORIGINS.has(origin)) {
+      corsHeaders["Access-Control-Allow-Origin"] = origin;
+    }
     if (method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
     const json = (data: unknown, status = 200) =>
@@ -471,6 +605,13 @@ Bun.serve({
         status,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+
+    // Token check on all mutating routes
+    const MUTATING = method === "POST" || method === "DELETE";
+    if (MUTATING) {
+      const tok = req.headers.get("X-Joy-Token");
+      if (tok !== SERVER_TOKEN) return json({ error: "unauthorized" }, 401);
+    }
 
     if (method === "GET" && url.pathname === "/") {
       return new Response(readFileSync(join(PUBLIC_DIR, "index.html"), "utf-8"),
@@ -490,7 +631,7 @@ Bun.serve({
         start(ctrl) {
           const enc = new TextEncoder();
           const enqueue = (s: string) => ctrl.enqueue(enc.encode(s));
-          enqueue(`event: history\ndata: ${JSON.stringify(messages)}\n\n`);
+          enqueue(`event: history\ndata: ${JSON.stringify(messages.slice(-MAX_MESSAGES))}\n\n`);
           enqueue(`event: sessions_history\ndata: ${JSON.stringify([...sessions.values()])}\n\n`);
           const emit = (d: string) => enqueue(d);
           sseListeners.add(emit);
@@ -565,13 +706,17 @@ Bun.serve({
       if (!sess) return json({ error: "session_not_found" }, 404);
 
       const chat_id = String(nextChatId++);
-      addMessage({ role: "user", content: text.trim(), source: "web", chat_id, session_id: sess.claude_session_id });
-      if (!directUserDedup.has(sess.id)) directUserDedup.set(sess.id, new Set());
-      directUserDedup.get(sess.id)!.add(text.trim());
-      run("tmux", "send-keys", "-l", "-t", sess.tmux_window, text.trim());
+      const trimmed = text.trim();
+      addMessage({ role: "user", content: trimmed, source: "web", chat_id, session_id: sess.claude_session_id });
+      const rs = relaySessions.get(sess.id);
+      if (rs) {
+        const st = getOrInitDeliveryState(sess.id, rs.relaySessionId);
+        st.pending.push({ text: trimmed, source: 'web', at: Date.now() });
+      }
+      run("tmux", "send-keys", "-l", "-t", sess.tmux_window, trimmed.replace(/\n/g, " "));
       run("tmux", "send-keys", "-t", sess.tmux_window, "Enter");
-      relaySessions.get(sess.id)?.send(encodeUserMessage(text.trim()));
-      relaySessions.get(sess.id)?.setThinking(true);
+      rs?.send(encodeUserMessage(trimmed));
+      rs?.setThinking(true);
       // Restart transcript polling if first message triggers JSONL creation
       if (!transcriptWatchers.has(sess.id) && sess.status !== "ended") pollForTranscript(sess);
       return json({ ok: true, chat_id });
@@ -624,13 +769,17 @@ if (relayClient) {
     const sess = sessId ? sessions.get(sessId) : undefined;
     if (!sess) return { error: 'session_not_found' };
     const chat_id = String(nextChatId++);
-    addMessage({ role: "user", content: text.trim(), source: "rpc", chat_id, session_id: sess.claude_session_id });
-    if (!directUserDedup.has(sess.id)) directUserDedup.set(sess.id, new Set());
-    directUserDedup.get(sess.id)!.add(text.trim());
-    run("tmux", "send-keys", "-l", "-t", sess.tmux_window, text.trim());
+    const trimmed = text.trim();
+    addMessage({ role: "user", content: trimmed, source: "rpc", chat_id, session_id: sess.claude_session_id });
+    const rs = relaySessions.get(sess.id);
+    if (rs) {
+      const st = getOrInitDeliveryState(sess.id, rs.relaySessionId);
+      st.pending.push({ text: trimmed, source: 'rpc', at: Date.now() });
+    }
+    run("tmux", "send-keys", "-l", "-t", sess.tmux_window, trimmed.replace(/\n/g, " "));
     run("tmux", "send-keys", "-t", sess.tmux_window, "Enter");
-    relaySessions.get(sess.id)?.send(encodeUserMessage(text.trim()));
-    relaySessions.get(sess.id)?.setThinking(true);
+    rs?.send(encodeUserMessage(trimmed));
+    rs?.setThinking(true);
     if (!transcriptWatchers.has(sess.id) && sess.status !== "ended") pollForTranscript(sess);
     return { ok: true, chat_id };
   });
@@ -641,15 +790,17 @@ if (relayClient) {
     for (const [id, sess] of sessions) {
       if (sess.status !== "active" || relaySessions.has(id)) continue;
       process.stderr.write(`[relay] reconnect: creating session for orphaned ${id}\n`);
-      createRelaySession(relayClient!, { tag: `joy-tmux-v2-${id}`, cwd: sess.cwd, id }).then(rs => {
+      createRelaySession(relayClient!, { tag: `joy-tmux-${id}`, cwd: sess.cwd, id }).then(rs => {
         process.stderr.write(`[relay] reconnect: ${id} → relay ${rs.relaySessionId}\n`);
-        rs.onMessage = (text) => {
-          if (directUserDedup.get(id)?.has(text)) { directUserDedup.get(id)!.delete(text); return; }
-          run("tmux", "send-keys", "-l", "-t", sess.tmux_window, text);
-          run("tmux", "send-keys", "-t", sess.tmux_window, "Enter");
-          rs.setThinking(true);
-          if (!transcriptWatchers.has(id) && sess.status !== "ended") pollForTranscript(sess);
-        };
+        if (sess.status === "ended") { rs.stop(); return; } // M1: alive guard
+        wireRelaySession({
+          sessionId: id,
+          tmuxWindow: sess.tmux_window,
+          rs,
+          sessionAlive: () => sess.status !== "ended",
+          watcherActive: () => transcriptWatchers.has(id),
+          startWatcher: () => pollForTranscript(sess),
+        });
         rs.start();
         relaySessions.set(id, rs);
         sess.relay_session_id = rs.relaySessionId;
