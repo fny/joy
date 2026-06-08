@@ -77,3 +77,9 @@ happy-workspaces/
 
 # third party tools
 .supervibe/
+
+# magpie review artifacts
+.magpie/
+
+# Expo web bundle output (large WASM files)
+packages/happy-app/dist-web/
