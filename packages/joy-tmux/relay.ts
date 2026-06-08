@@ -4,7 +4,7 @@
  * External deps: socket.io-client, tweetnacl.
  */
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { io, type Socket } from 'socket.io-client';
@@ -126,12 +126,17 @@ export function loadCredentials(): Credentials | null {
     if (!ak.token) return null;
 
     let serverUrl = process.env.HAPPY_SERVER_URL ?? DEFAULT_SERVER_URL;
-    let machineId = crypto.randomUUID();
+    let machineId: string | undefined;
     try {
       const s = JSON.parse(readFileSync(join(happyHome, 'settings.json'), 'utf8')) as { serverUrl?: string; machineId?: string };
       if (s.serverUrl && !process.env.HAPPY_SERVER_URL) serverUrl = s.serverUrl;
       if (s.machineId) machineId = s.machineId;
     } catch {}
+    // M5 (machineId): a random fallback would silently break RPC on every restart
+    if (!machineId) {
+      process.stderr.write('[relay] WARNING: machineId missing from settings.json — RPC handlers will not be reachable. Run the happy-cli daemon once to populate it.\n');
+      machineId = crypto.randomUUID();
+    }
 
     let encryption: Credentials['encryption'] | null = null;
     if (ak.encryption?.publicKey) {
@@ -220,10 +225,21 @@ export class RelayClient {
 
   private rpcHandlers = new Map<string, (params: unknown) => Promise<unknown>>();
 
+  /** Register a session-scoped RPC handler that the app calls via apiSocket.sessionRPC. */
+  registerSessionRpcHandler(relaySessionId: string, method: string, handler: (params: unknown) => Promise<unknown>): void {
+    const prefixed = `${relaySessionId}:${method}`;
+    this.rpcHandlers.set(prefixed, handler);
+    log(`rpc: registering session ${prefixed}`);
+    this.socket?.emit('rpc-register', { method: prefixed });
+  }
+
   registerRpcHandler(method: string, handler: (params: unknown) => Promise<unknown>): void {
     const prefixed = `${this.creds.machineId}:${method}`;
     this.rpcHandlers.set(prefixed, handler);
-    this.socket?.emit('rpc-register', { method: prefixed });
+    log(`rpc: registering ${prefixed}`);
+    this.socket?.emit('rpc-register', { method: prefixed }, (ack: unknown) => {
+      log(`rpc: registered ${prefixed} ack=${JSON.stringify(ack)}`);
+    });
   }
 
   connect(): void {
@@ -240,8 +256,9 @@ export class RelayClient {
     this.socket.on('connect', () => {
       log('socket connected');
       for (const rs of this.activeSessions) rs.setThinking(false);
-      // Re-register all RPC handlers on reconnect
+      // Re-register all RPC handlers on (re)connect
       for (const method of this.rpcHandlers.keys()) {
+        log(`rpc: re-registering ${method}`);
         this.socket?.emit('rpc-register', { method });
       }
       if (!firstConnect) this.onReconnect?.();
@@ -253,6 +270,7 @@ export class RelayClient {
     this.socket.on('rpc-request', async (req: unknown, callback: (res: string) => void) => {
       if (!isObj(req)) return;
       const method = String(req['method'] ?? '');
+      log(`rpc: incoming request method=${method}`);
       const handler = this.rpcHandlers.get(method);
       const key = this.creds.encryption.type === 'dataKey'
         ? this.creds.encryption.machineKey
@@ -390,7 +408,7 @@ export class RelaySession {
   private queue: Array<{ localId: string; wire: WireRecord; attempts: number }> = [];
   private draining = false;
 
-  onMessage: (text: string) => void = () => {};
+  onMessage: (text: string, seq: number) => void = () => {};
 
   constructor(opts: {
     client: RelayClient;
@@ -430,20 +448,31 @@ export class RelaySession {
     try {
       let { messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq);
       if (messages.length > 0) log(`pull ${this.relaySessionId}: got ${messages.length} msgs, lastSeq=${this.lastSeq}`);
+      let advanced = false;
       while (messages.length > 0) {
         for (const msg of messages) {
-          if (msg.seq > this.lastSeq) this.lastSeq = msg.seq;
+          // M2: decrypt before advancing seq so a failed decrypt doesn't silently consume the seq
           const dec = this.client.decryptMessage(msg, this.sessionKey, this.variant);
+          if (dec === null) {
+            log(`pull msg seq=${msg.seq} DECRYPT_FAILED — skipping without advancing seq`);
+            continue;
+          }
+          if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; }
           log(`pull msg seq=${msg.seq} dec=${JSON.stringify(dec)?.slice(0, 120)}`);
           if (!isObj(dec) || dec['role'] !== 'user') continue;
+          // H1: skip messages sent by joy itself to avoid double-injecting into tmux
+          const meta = dec['meta'] as { sentFrom?: string } | undefined;
+          if (meta?.sentFrom === 'joy') continue;
           const c = dec['content'] as { type?: string; text?: string } | undefined;
           if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
-            this.onMessage(c.text.trim());
+            this.onMessage(c.text.trim(), msg.seq);
           }
         }
         if (!hasMore) break;
         ({ messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq));
       }
+      // Low: only write to disk when seq actually changed
+      if (advanced) savePersistedSeq(this.relaySessionId, this.lastSeq);
     } catch (e) { log(`pull error for ${this.relaySessionId}: ${e}`); }
   }
 
@@ -451,6 +480,8 @@ export class RelaySession {
     this.queue.push({ localId: crypto.randomUUID(), wire, attempts: 0 });
     void this.drain();
   }
+
+  private static readonly MAX_SEND_ATTEMPTS = 10;
 
   private async drain(): Promise<void> {
     if (this.draining) return;
@@ -463,6 +494,12 @@ export class RelaySession {
         this.queue.shift();
       } catch (e) {
         item.attempts++;
+        // H2: cap retries so a permanent failure (401/404) doesn't wedge the queue forever
+        if (item.attempts >= RelaySession.MAX_SEND_ATTEMPTS) {
+          log(`send failed after ${item.attempts} attempts, dropping: ${e}`);
+          this.queue.shift();
+          continue;
+        }
         const delay = Math.min(500 * 2 ** item.attempts, 30_000);
         log(`send failed (attempt ${item.attempts}), retrying in ${delay}ms: ${e}`);
         await Bun.sleep(delay);
@@ -473,6 +510,11 @@ export class RelaySession {
 
   setThinking(thinking: boolean): void {
     this.client.emitAlive(this.relaySessionId, thinking);
+  }
+
+  /** Register a session-scoped RPC handler bound to this relay session. */
+  registerRpc(method: string, handler: (params: unknown) => Promise<unknown>): void {
+    this.client.registerSessionRpcHandler(this.relaySessionId, method, handler);
   }
 }
 
@@ -542,8 +584,13 @@ export async function createRelaySession(
     tag: opts.tag,
     metadata: { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id },
   });
-  // Start from the current end of the session so we don't replay historical messages on restart.
-  const initialSeq = await client.fetchLastSeq(result.sessionId);
+  // Resume from persisted seq so messages sent during downtime are delivered.
+  // On first-ever start (no saved seq), fetch to end to avoid replaying history.
+  let initialSeq = loadPersistedSeq(result.sessionId);
+  if (initialSeq === 0) {
+    initialSeq = await client.fetchLastSeq(result.sessionId);
+    if (initialSeq > 0) savePersistedSeq(result.sessionId, initialSeq);
+  }
   return new RelaySession({
     client,
     relaySessionId: result.sessionId,
@@ -551,6 +598,34 @@ export async function createRelaySession(
     variant: result.variant,
     initialSeq,
   });
+}
+
+// ── lastSeq persistence ───────────────────────────────────────────────────────
+// Stores the last processed seq per relay session so messages sent during
+// joy-tmux downtime are delivered on next startup, not silently skipped.
+
+function seqStatePath(relaySessionId: string): string {
+  const dir = join(homedir(), '.happy', 'joy-tmux-state');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, `${relaySessionId}.seq`);
+}
+
+function loadPersistedSeq(relaySessionId: string): number {
+  try {
+    const p = seqStatePath(relaySessionId);
+    if (existsSync(p)) return parseInt(readFileSync(p, 'utf8').trim(), 10) || 0;
+  } catch {}
+  return 0;
+}
+
+function savePersistedSeq(relaySessionId: string, seq: number): void {
+  // Low: write-temp-then-rename for atomic update — crash mid-write can't corrupt
+  try {
+    const p = seqStatePath(relaySessionId);
+    const tmp = p + '.tmp';
+    writeFileSync(tmp, String(seq));
+    renameSync(tmp, p);
+  } catch {}
 }
 
 // ── Util ──────────────────────────────────────────────────────────────────────
