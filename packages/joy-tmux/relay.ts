@@ -3,7 +3,7 @@
  * Self-contained — no deps on joy-daemon internals.
  * External deps: socket.io-client, tweetnacl.
  */
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, hostname } from 'node:os';
@@ -93,6 +93,48 @@ function encryptWire(variant: EncryptionVariant, key: Uint8Array, data: unknown)
 
 function decryptWire(variant: EncryptionVariant, key: Uint8Array, buf: Uint8Array): unknown | null {
   return variant === 'legacy' ? decryptLegacy(buf, key) : decryptDataKey(buf, key);
+}
+
+// ── Blob crypto (image attachments) ────────────────────────────────────────────
+//
+// Mirrors happy-cli's deriveKey + decryptBlob: HMAC-SHA512 key tree derivation
+// rooted at the encryption secret, then NaCl secretbox unwrap. Used to download
+// + decrypt image attachments that the app uploads via /v1/sessions/{id}/attachments.
+
+function hmacSha512(key: Uint8Array, data: Uint8Array): Uint8Array {
+  return new Uint8Array(createHmac('sha512', key).update(data).digest());
+}
+
+function deriveKeyTreeRoot(seed: Uint8Array, usage: string): { key: Uint8Array; chainCode: Uint8Array } {
+  const I = hmacSha512(new TextEncoder().encode(usage + ' Master Seed'), seed);
+  return { key: I.slice(0, 32), chainCode: I.slice(32) };
+}
+
+function deriveKeyTreeChild(chainCode: Uint8Array, index: string): { key: Uint8Array; chainCode: Uint8Array } {
+  const data = new Uint8Array([0, ...new TextEncoder().encode(index)]);
+  const I = hmacSha512(chainCode, data);
+  return { key: I.slice(0, 32), chainCode: I.slice(32) };
+}
+
+function deriveKey(master: Uint8Array, usage: string, path: string[]): Uint8Array {
+  let state = deriveKeyTreeRoot(master, usage);
+  for (const seg of path) {
+    state = deriveKeyTreeChild(state.chainCode, seg);
+  }
+  return state.key;
+}
+
+/**
+ * Decrypt a NaCl secretbox bundle: [24-byte nonce][ciphertext + 16-byte tag].
+ * Returns null on tamper / wrong key. Matches happy-cli's decryptBlob.
+ */
+function decryptBlob(bundle: Uint8Array, key: Uint8Array): Uint8Array | null {
+  const NONCE_LEN = tweetnacl.secretbox.nonceLength;
+  if (bundle.length < NONCE_LEN + 16) return null;
+  const nonce = bundle.slice(0, NONCE_LEN);
+  const ciphertext = bundle.slice(NONCE_LEN);
+  const plain = tweetnacl.secretbox.open(ciphertext, nonce, key);
+  return plain ? new Uint8Array(plain) : null;
 }
 
 function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint8Array): Uint8Array {
@@ -318,6 +360,54 @@ export class RelayClient {
   }
 
   /**
+   * Download + decrypt an attachment blob. Mirrors happy-cli's
+   * downloadAndDecryptAttachment. Two-step flow:
+   *   1. POST /v1/sessions/{id}/attachments/request-download → { downloadUrl }
+   *   2. GET downloadUrl → encrypted bytes (NaCl secretbox bundle)
+   * The blob key is derived from the session's encryption key with the
+   * "Happy Blobs" usage and a variant-specific path. Returns null on any
+   * failure (network, auth, decryption).
+   */
+  async downloadAndDecryptAttachment(
+    relaySessionId: string,
+    ref: string,
+    sessionKey: Uint8Array,
+    variant: EncryptionVariant,
+  ): Promise<Uint8Array | null> {
+    try {
+      // Step 1: request a download URL (the server may presign an S3 URL or
+      // hand back a self-served path requiring our bearer token).
+      const reqRes = await fetch(this.url(`/v1/sessions/${relaySessionId}/attachments/request-download`), {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify({ ref }),
+      });
+      if (!reqRes.ok) return null;
+      const reqData = await reqRes.json() as { downloadUrl?: string };
+      if (!reqData.downloadUrl) return null;
+
+      // Step 2: fetch the encrypted bytes. Only send bearer when the URL
+      // points back at our server — S3 presigned URLs reject extra headers.
+      const isServerUrl = reqData.downloadUrl.startsWith(this.creds.serverUrl);
+      const dlRes = await fetch(reqData.downloadUrl, {
+        headers: isServerUrl ? { Authorization: `Bearer ${this.creds.token}` } : {},
+      });
+      if (!dlRes.ok) return null;
+      const encrypted = new Uint8Array(await dlRes.arrayBuffer());
+
+      // Step 3: decrypt with the per-session blob key.
+      // Legacy sessions: deriveKey(secret, 'Happy Blobs', ['master']).
+      // DataKey sessions: deriveKey(dataKey, 'Happy Blobs', ['session']).
+      const path = variant === 'dataKey' ? ['session'] : ['master'];
+      const blobKey = deriveKey(sessionKey, 'Happy Blobs', path);
+      return decryptBlob(encrypted, blobKey);
+    } catch (e) {
+      log(`downloadAndDecryptAttachment failed for ${ref}: ${e}`);
+      return null;
+    }
+  }
+
+  /**
    * Mark a session inactive on the API server (flips `active=false`).
    * Mirrors happy-cli's `deactivateSession`: POST /v1/sessions/{id}/archive.
    * Without this the session keeps showing as active in the app even after
@@ -430,6 +520,17 @@ export class RelaySession {
   private draining = false;
 
   onMessage: (text: string, seq: number) => void = () => {};
+  /**
+   * Fires for each file/attachment event the app sends ahead of a user
+   * message (envelope `role:'session'`, `ev.t:'file'`). The handler is
+   * expected to download + decrypt the blob (via the parent RelayClient)
+   * and stash it for the next user message.
+   */
+  onFileEvent: (ev: { ref: string; name: string; size: number; mimeType?: string }) => void = () => {};
+  /** Exposed so handlers (e.g. attachment download) can derive blob keys. */
+  get encryptionMaterial(): { sessionKey: Uint8Array; variant: EncryptionVariant } {
+    return { sessionKey: this.sessionKey, variant: this.variant };
+  }
 
   constructor(opts: {
     client: RelayClient;
@@ -480,7 +581,22 @@ export class RelaySession {
           }
           if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; }
           log(`pull msg seq=${msg.seq} dec=${JSON.stringify(dec)?.slice(0, 120)}`);
-          if (!isObj(dec) || dec['role'] !== 'user') continue;
+          if (!isObj(dec)) continue;
+          const role = dec['role'];
+
+          // File attachment envelope: role='session', ev.t='file'. App sends
+          // these ahead of the user-text message; the handler downloads and
+          // stashes them, drained on the next text message.
+          if (role === 'session') {
+            const c = dec['content'] as { type?: string; data?: { ev?: { t?: string; ref?: string; name?: string; size?: number; mimeType?: string } } } | undefined;
+            const ev = c?.data?.ev;
+            if (c?.type === 'session' && ev?.t === 'file' && typeof ev.ref === 'string' && typeof ev.name === 'string' && typeof ev.size === 'number') {
+              this.onFileEvent({ ref: ev.ref, name: ev.name, size: ev.size, mimeType: ev.mimeType });
+            }
+            continue;
+          }
+
+          if (role !== 'user') continue;
           // H1: skip messages sent by joy itself to avoid double-injecting into tmux
           const meta = dec['meta'] as { sentFrom?: string } | undefined;
           if (meta?.sentFrom === 'joy') continue;

@@ -4,6 +4,7 @@ import { join, basename } from "path";
 import { homedir } from "os";
 import { initRelay, createRelaySession, encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd, encodeTurnEnd, encodeUserMessage, type RelaySession } from "./relay.ts";
 import { registerSessionRpcs } from "./sessionRpcs";
+import { writeAttachmentToCwd } from "./attachments";
 
 const PORT = parseInt(process.env.PORT ?? "4997");
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
@@ -84,6 +85,13 @@ import {
 
 const deliveryStates = new Map<string, DeliveryState>(); // sessionId → state
 
+// Per-session bucket of attachment downloads that arrived ahead of a text
+// message. Each entry is a promise that resolves to the decrypted blob
+// (or null on failure). On the next user-text message we drain the bucket,
+// write surviving images into the session's cwd, and append the bare
+// relative paths to the text before piping into tmux.
+const pendingAttachments = new Map<string, Promise<Uint8Array | null>[]>();
+
 // Builds the standard onMessage callback + registers session-scoped RPC
 // handlers (abort) for a newly-created relay session. Used by launch, recover,
 // and reconnect paths so the wiring stays consistent.
@@ -97,10 +105,53 @@ function wireRelaySession(opts: {
 }): void {
   const { sessionId, tmuxWindow, rs, sessionAlive, watcherActive, startWatcher } = opts;
 
-  rs.onMessage = (text, seq) => {
+  // File events arrive ahead of the user-text message. Kick off the
+  // download/decrypt immediately and stash the promise; the next onMessage
+  // call drains the bucket, writes survivors into cwd, and appends paths
+  // to the chat text.
+  rs.onFileEvent = (ev) => {
+    if (!relayClient) return;
+    const { sessionKey, variant } = rs.encryptionMaterial;
+    const promise = relayClient.downloadAndDecryptAttachment(rs.relaySessionId, ev.ref, sessionKey, variant);
+    const bucket = pendingAttachments.get(sessionId) ?? [];
+    bucket.push(promise);
+    pendingAttachments.set(sessionId, bucket);
+  };
+
+  rs.onMessage = async (text, seq) => {
+    // Drain attachments first so paths can be appended to this turn's text.
+    // Atomic swap: take the bucket, replace with an empty one so any
+    // late-arriving file event lands in the next batch (matches
+    // happy-cli's drainAttachmentsForUserMessage swap-then-await order).
+    const drained = pendingAttachments.get(sessionId) ?? [];
+    pendingAttachments.set(sessionId, []);
+    let augmentedText = text;
+    if (drained.length > 0) {
+      const sess = sessions.get(sessionId);
+      const cwd = sess?.cwd;
+      const results = await Promise.all(drained);
+      const paths: string[] = [];
+      if (cwd) {
+        for (const bytes of results) {
+          if (!bytes) continue;
+          const refPath = writeAttachmentToCwd(cwd, bytes);
+          if (refPath) paths.push(refPath);
+        }
+      }
+      if (paths.length > 0) {
+        // Append the bare relative paths after the text, space-separated.
+        // tmux send-keys -l followed by Enter sends a single line, so we
+        // can't preserve line breaks; one space between the prompt and the
+        // first path, single space between paths. Claude code interactive
+        // resolves these against the session cwd and reads each file as
+        // an image.
+        augmentedText = text + " " + paths.join(" ");
+      }
+    }
+
     const st = getOrInitDeliveryState(sessionId, rs.relaySessionId);
-    st.pending.push({ seq, text, source: 'relay', at: Date.now() });
-    const r = run("tmux", "send-keys", "-l", "-t", tmuxWindow, text.replace(/\n/g, " "));
+    st.pending.push({ seq, text: augmentedText, source: 'relay', at: Date.now() });
+    const r = run("tmux", "send-keys", "-l", "-t", tmuxWindow, augmentedText.replace(/\n/g, " "));
     if (!r.ok) { st.pending.pop(); throw new Error("tmux send-keys failed"); }
     run("tmux", "send-keys", "-t", tmuxWindow, "Enter");
     rs.setThinking(true);
