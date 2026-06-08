@@ -342,17 +342,19 @@ function NewJoyTmuxSessionScreen() {
                     {/* Prompt input */}
                     <View style={styles.inputBox}>
                         <View style={styles.inputField}>
-                            <MultiTextInput
-                                ref={composerInputRef}
-                                value={prompt}
-                                onChangeText={setPrompt}
-                                placeholder="initial prompt (optional)"
-                                lineHeight={MULTI_TEXT_INPUT_LINE_HEIGHT}
-                                paddingTop={COMPOSER_INPUT_VERTICAL_PADDING}
-                                paddingBottom={COMPOSER_INPUT_VERTICAL_PADDING}
-                                maxHeight={COMPOSER_INPUT_MAX_HEIGHT}
-                                onKeyPress={handleKeyPress}
-                            />
+                            <View style={{ flex: 1 }}>
+                                <MultiTextInput
+                                    ref={composerInputRef}
+                                    value={prompt}
+                                    onChangeText={setPrompt}
+                                    placeholder="initial prompt (optional)"
+                                    lineHeight={MULTI_TEXT_INPUT_LINE_HEIGHT}
+                                    paddingTop={COMPOSER_INPUT_VERTICAL_PADDING}
+                                    paddingBottom={COMPOSER_INPUT_VERTICAL_PADDING}
+                                    maxHeight={COMPOSER_INPUT_MAX_HEIGHT}
+                                    onKeyPress={handleKeyPress}
+                                />
+                            </View>
                             <Pressable
                                 onPress={() => void handleCreate()}
                                 disabled={!canSend}
