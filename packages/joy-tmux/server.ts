@@ -447,11 +447,15 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   const envParts: string[] = [];
   if (opts.effort && opts.effort !== "default") envParts.push(`CLAUDE_EFFORT=${opts.effort}`);
 
+  // YOLO mode is the default for joy-tmux sessions — the app drives the
+  // session and approving permission prompts via tmux send-keys is fragile.
+  // Caller can opt out with `yolo: false`.
+  const yolo = opts.yolo ?? true;
   const flags: string[] = [];
   if (opts.model) flags.push("--model", opts.model);
   if (opts.continue) flags.push("--continue");
   if (opts.resume_id) flags.push("--resume", opts.resume_id);
-  if (opts.yolo) flags.push("--dangerously-skip-permissions");
+  if (yolo) flags.push("--dangerously-skip-permissions");
 
   const cmd = [...envParts, "claude", ...flags].join(" ");
   run("tmux", "new-window", "-t", TMUX_SESSION, "-n", windowName, "-c", opts.cwd);
@@ -486,22 +490,28 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   pollSessionEnd(record);
 
   if (relayClient) {
-    createRelaySession(relayClient, { tag: `joy-tmux-${id}`, cwd: opts.cwd, id }).then(rs => {
+    try {
+      const rs = await createRelaySession(relayClient, { tag: `joy-tmux-${id}`, cwd: opts.cwd, id });
       // M1: guard against kill racing the async create — don't start a poller for a dead session
-      if (record.status === "ended") { rs.stop(); return; }
-      wireRelaySession({
-        sessionId: id,
-        tmuxWindow: record.tmux_window,
-        rs,
-        sessionAlive: () => record.status !== "ended",
-        watcherActive: () => transcriptWatchers.has(id),
-        startWatcher: () => pollForTranscript(record),
-      });
-      rs.start();
-      relaySessions.set(id, rs);
-      record.relay_session_id = rs.relaySessionId;
-      broadcast("session_update", record);
-    }).catch(e => process.stderr.write(`[relay] failed to create session for ${id}: ${e}\n`));
+      if (record.status === "ended") {
+        rs.stop();
+      } else {
+        wireRelaySession({
+          sessionId: id,
+          tmuxWindow: record.tmux_window,
+          rs,
+          sessionAlive: () => record.status !== "ended",
+          watcherActive: () => transcriptWatchers.has(id),
+          startWatcher: () => pollForTranscript(record),
+        });
+        rs.start();
+        relaySessions.set(id, rs);
+        record.relay_session_id = rs.relaySessionId;
+        broadcast("session_update", record);
+      }
+    } catch (e) {
+      process.stderr.write(`[relay] failed to create session for ${id}: ${e}\n`);
+    }
   }
 
   return record;
@@ -752,11 +762,29 @@ if (relayClient) {
   });
 
   relayClient.registerRpcHandler('joy-create-session', async (params) => {
-    const { cwd, createDir } = params as { cwd: string; createDir?: boolean };
-    if (!cwd?.trim()) return { error: 'cwd required' };
+    const p = params as {
+      cwd: string;
+      createDir?: boolean;
+      model?: string;
+      effort?: string;
+      yolo?: boolean;
+      continue?: boolean;
+      resume_id?: string;
+    };
+    if (!p.cwd?.trim()) return { error: 'cwd required' };
     try {
-      const record = await launchSession({ cwd: cwd.trim(), createDir });
-      return { ok: true, session: record };
+      const record = await launchSession({
+        cwd: p.cwd.trim(),
+        createDir: p.createDir,
+        model: p.model,
+        effort: p.effort,
+        yolo: p.yolo,
+        continue: p.continue,
+        resume_id: p.resume_id,
+      });
+      // record.relay_session_id is populated synchronously now that
+      // launchSession awaits createRelaySession.
+      return { ok: true, session: record, relaySessionId: record.relay_session_id };
     } catch (e) {
       return { error: String(e) };
     }
