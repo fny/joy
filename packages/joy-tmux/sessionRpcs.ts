@@ -1,16 +1,28 @@
 // Session-scoped RPC handlers that joy-tmux exposes for the app.
 //
-// The app calls these via `apiSocket.sessionRPC(sessionId, method, params)` —
-// the relay routes the call to whoever owns the session (joy-tmux). All run
-// locally on the machine joy-tmux is running on.
+// Mirrors the behavior of happy-cli's registerCommonHandlers so the app's
+// file browser, search, diff view, and archive button behave the same against
+// joy-tmux sessions as they do against happy-cli sessions.
 //
 // Request/response shapes mirror the ones in
-// packages/happy-app/sources/sync/ops.ts so the app can talk to joy-tmux
-// sessions just like happy-cli sessions.
+// packages/happy-app/sources/sync/ops.ts.
 
 import { createHash } from "crypto";
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync } from "fs";
-import { join, isAbsolute, resolve } from "path";
+import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
+import { promisify } from "util";
+import { existsSync } from "fs";
+import { readFile, writeFile, readdir, stat } from "fs/promises";
+import { join, resolve, sep } from "path";
+import { platform } from "os";
+
+const execAsync = promisify(exec);
+
+// Resolve to happy-cli's bundled tool binaries the same way happy-cli does
+// (postinstall unpacks them into packages/happy-cli/tools/unpacked/). The
+// binaries are platform-specific and live next to joy-tmux in the monorepo.
+const HAPPY_CLI_TOOLS = resolve(import.meta.dir, "..", "happy-cli", "tools", "unpacked");
+const DIFFT_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "difft.exe" : "difft");
+const RG_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "rg.exe" : "rg");
 
 type RegisterSessionRpcHandler = (
   method: string,
@@ -18,7 +30,7 @@ type RegisterSessionRpcHandler = (
 ) => void;
 
 interface BashRequest { command: string; cwd?: string; timeout?: number; }
-interface BashResponse { success: boolean; stdout: string; stderr: string; exitCode: number; error?: string; }
+interface BashResponse { success: boolean; stdout?: string; stderr?: string; exitCode?: number; error?: string; }
 
 interface ReadFileRequest { path: string; }
 interface ReadFileResponse { success: boolean; content?: string; error?: string; }
@@ -37,139 +49,266 @@ interface GetDirectoryTreeResponse { success: boolean; tree?: TreeNode; error?: 
 interface RipgrepRequest { args: string[]; cwd?: string; }
 interface RipgrepResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
 
+interface DifftasticRequest { args: string[]; cwd?: string; }
+interface DifftasticResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
+
 interface KillResponse { success: boolean; message: string; }
 
-// Resolve a path relative to the session's cwd if not absolute, then normalize.
-// Throws if the result escapes the cwd via traversal (defense against path-injection
-// from the app; the app is trusted but cheap to enforce).
-function resolveSessionPath(sessionCwd: string, requested: string): string {
-  const abs = isAbsolute(requested) ? requested : resolve(sessionCwd, requested);
-  return resolve(abs); // collapses .. segments
-}
-
-function sha256(data: Uint8Array | string): string {
-  return createHash("sha256").update(data).digest("hex");
-}
-
-async function handleBash(sessionCwd: string, req: BashRequest): Promise<BashResponse> {
-  const cwd = req.cwd ? resolveSessionPath(sessionCwd, req.cwd) : sessionCwd;
-  const proc = Bun.spawn(["bash", "-c", req.command], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const timeoutMs = req.timeout && req.timeout > 0 ? req.timeout : 30_000;
-  const killer = setTimeout(() => { try { proc.kill(); } catch {} }, timeoutMs);
-  try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    return { success: exitCode === 0, stdout, stderr, exitCode };
-  } finally {
-    clearTimeout(killer);
-  }
-}
-
-async function handleReadFile(sessionCwd: string, req: ReadFileRequest): Promise<ReadFileResponse> {
-  const path = resolveSessionPath(sessionCwd, req.path);
-  const file = Bun.file(path);
-  if (!(await file.exists())) return { success: false, error: "file not found" };
-  const buf = new Uint8Array(await file.arrayBuffer());
-  return { success: true, content: Buffer.from(buf).toString("base64") };
-}
-
-async function handleWriteFile(sessionCwd: string, req: WriteFileRequest): Promise<WriteFileResponse> {
-  const path = resolveSessionPath(sessionCwd, req.path);
-  if (req.expectedHash != null) {
-    // Verify the on-disk hash matches what the app thinks it is before overwriting.
-    // Missing file with non-null expectedHash counts as mismatch.
-    if (!existsSync(path)) {
-      return { success: false, error: "expected hash mismatch (file missing)" };
-    }
-    const current = readFileSync(path);
-    const currentHash = sha256(current);
-    if (currentHash !== req.expectedHash) {
-      return { success: false, error: "expected hash mismatch" };
-    }
-  }
-  const bytes = Buffer.from(req.content, "base64");
-  writeFileSync(path, bytes);
-  return { success: true, hash: sha256(bytes) };
-}
-
-async function handleListDirectory(sessionCwd: string, req: ListDirectoryRequest): Promise<ListDirectoryResponse> {
-  const path = resolveSessionPath(sessionCwd, req.path);
-  if (!existsSync(path)) return { success: false, error: "directory not found" };
-  const names = readdirSync(path);
-  const entries: DirectoryEntry[] = [];
-  for (const name of names) {
-    try {
-      const st = statSync(join(path, name));
-      const type: DirectoryEntry["type"] = st.isFile() ? "file" : st.isDirectory() ? "directory" : "other";
-      entries.push({ name, type, size: st.size, modified: Math.floor(st.mtimeMs) });
-    } catch {
-      entries.push({ name, type: "other" });
-    }
-  }
-  return { success: true, entries };
-}
-
-async function handleGetDirectoryTree(sessionCwd: string, req: GetDirectoryTreeRequest): Promise<GetDirectoryTreeResponse> {
-  const root = resolveSessionPath(sessionCwd, req.path);
-  if (!existsSync(root)) return { success: false, error: "directory not found" };
-  const maxDepth = Math.max(0, req.maxDepth ?? 3);
-
-  function walk(absPath: string, name: string, depth: number): TreeNode | null {
-    let st: ReturnType<typeof statSync>;
-    try { st = statSync(absPath); } catch { return null; }
-    if (!st.isDirectory() && !st.isFile()) return null;
-    const node: TreeNode = {
-      name,
-      path: absPath,
-      type: st.isDirectory() ? "directory" : "file",
-      size: st.size,
-      modified: Math.floor(st.mtimeMs),
+// Mirrors happy-cli/src/modules/common/pathSecurity.validatePath. Restricts
+// access to paths within the session's working directory; rejects traversal.
+function validatePath(targetPath: string, workingDirectory: string): { valid: boolean; resolvedPath?: string; error?: string } {
+  const resolvedTarget = resolve(workingDirectory, targetPath);
+  const resolvedWorkingDir = resolve(workingDirectory);
+  if (
+    !resolvedTarget.startsWith(resolvedWorkingDir + sep) &&
+    resolvedTarget !== resolvedWorkingDir
+  ) {
+    return {
+      valid: false,
+      resolvedPath: resolvedTarget,
+      error: `Access denied: Path '${targetPath}' is outside the working directory`,
     };
-    if (node.type === "directory" && depth < maxDepth) {
-      const children: TreeNode[] = [];
-      let names: string[] = [];
-      try { names = readdirSync(absPath); } catch { return node; }
-      for (const child of names) {
-        const c = walk(join(absPath, child), child, depth + 1);
-        if (c) children.push(c);
-      }
-      node.children = children;
-    }
-    return node;
   }
-
-  const tree = walk(root, root.split("/").pop() || root, 0);
-  if (!tree) return { success: false, error: "could not stat root" };
-  return { success: true, tree };
+  return { valid: true, resolvedPath: resolvedTarget };
 }
 
-async function handleRipgrep(sessionCwd: string, req: RipgrepRequest): Promise<RipgrepResponse> {
-  const cwd = req.cwd ? resolveSessionPath(sessionCwd, req.cwd) : sessionCwd;
-  const proc = Bun.spawn(["rg", ...req.args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
+async function handleBash(workingDirectory: string, data: BashRequest): Promise<BashResponse> {
+  // Special case: "/" means "use the shell's default cwd" (matches happy-cli; used by CLI detection).
+  if (data.cwd && data.cwd !== "/") {
+    const validation = validatePath(data.cwd, workingDirectory);
+    if (!validation.valid) return { success: false, error: validation.error };
+    data.cwd = validation.resolvedPath;
+  }
+
+  try {
+    const options: ExecOptions = {
+      cwd: data.cwd === "/" ? undefined : data.cwd,
+      timeout: data.timeout || 30_000,
+      windowsHide: true,
+    };
+    const { stdout, stderr } = await execAsync(data.command, options);
+    return {
+      success: true,
+      stdout: stdout ? stdout.toString() : "",
+      stderr: stderr ? stderr.toString() : "",
+      exitCode: 0,
+    };
+  } catch (error) {
+    const execError = error as NodeJS.ErrnoException & {
+      stdout?: string; stderr?: string; code?: number | string; killed?: boolean;
+    };
+    if (execError.code === "ETIMEDOUT" || execError.killed) {
+      return {
+        success: false,
+        stdout: execError.stdout || "",
+        stderr: execError.stderr || "",
+        exitCode: typeof execError.code === "number" ? execError.code : -1,
+        error: "Command timed out",
+      };
+    }
+    return {
+      success: false,
+      stdout: execError.stdout ? execError.stdout.toString() : "",
+      stderr: execError.stderr ? execError.stderr.toString() : execError.message || "Command failed",
+      exitCode: typeof execError.code === "number" ? execError.code : 1,
+      error: execError.message || "Command failed",
+    };
+  }
+}
+
+async function handleReadFile(workingDirectory: string, data: ReadFileRequest): Promise<ReadFileResponse> {
+  const validation = validatePath(data.path, workingDirectory);
+  if (!validation.valid) return { success: false, error: validation.error };
+  try {
+    const buffer = await readFile(validation.resolvedPath!);
+    return { success: true, content: buffer.toString("base64") };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : "Failed to read file" };
+  }
+}
+
+async function handleWriteFile(workingDirectory: string, data: WriteFileRequest): Promise<WriteFileResponse> {
+  const validation = validatePath(data.path, workingDirectory);
+  if (!validation.valid) return { success: false, error: validation.error };
+  const targetPath = validation.resolvedPath!;
+  try {
+    if (data.expectedHash !== null && data.expectedHash !== undefined) {
+      // Must match existing file's hash.
+      try {
+        const existingBuffer = await readFile(targetPath);
+        const existingHash = createHash("sha256").update(existingBuffer).digest("hex");
+        if (existingHash !== data.expectedHash) {
+          return { success: false, error: `File hash mismatch. Expected: ${data.expectedHash}, Actual: ${existingHash}` };
+        }
+      } catch (error) {
+        const nodeError = error as NodeJS.ErrnoException;
+        if (nodeError.code !== "ENOENT") throw error;
+        return { success: false, error: "File does not exist but hash was provided" };
+      }
+    } else {
+      // expectedHash === null → expecting a NEW file; reject if one exists.
+      try {
+        await stat(targetPath);
+        return { success: false, error: "File already exists but was expected to be new" };
+      } catch (error) {
+        const nodeError = error as NodeJS.ErrnoException;
+        if (nodeError.code !== "ENOENT") throw error;
+        // File doesn't exist — proceed.
+      }
+    }
+    const buffer = Buffer.from(data.content, "base64");
+    await writeFile(targetPath, buffer);
+    const hash = createHash("sha256").update(buffer).digest("hex");
+    return { success: true, hash };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : "Failed to write file" };
+  }
+}
+
+async function handleListDirectory(workingDirectory: string, data: ListDirectoryRequest): Promise<ListDirectoryResponse> {
+  const validation = validatePath(data.path, workingDirectory);
+  if (!validation.valid) return { success: false, error: validation.error };
+  try {
+    const directoryPath = validation.resolvedPath!;
+    const entries = await readdir(directoryPath, { withFileTypes: true });
+    const directoryEntries: DirectoryEntry[] = await Promise.all(
+      entries.map(async (entry) => {
+        const fullPath = join(directoryPath, entry.name);
+        let type: DirectoryEntry["type"] = "other";
+        if (entry.isDirectory()) type = "directory";
+        else if (entry.isFile()) type = "file";
+        let size: number | undefined;
+        let modified: number | undefined;
+        try {
+          const stats = await stat(fullPath);
+          size = stats.size;
+          modified = stats.mtime.getTime();
+        } catch { /* skip stat failure */ }
+        return { name: entry.name, type, size, modified };
+      }),
+    );
+    // Sort: directories first, then files, alphabetic.
+    directoryEntries.sort((a, b) => {
+      if (a.type === "directory" && b.type !== "directory") return -1;
+      if (a.type !== "directory" && b.type === "directory") return 1;
+      return a.name.localeCompare(b.name);
+    });
+    return { success: true, entries: directoryEntries };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : "Failed to list directory" };
+  }
+}
+
+async function handleGetDirectoryTree(workingDirectory: string, data: GetDirectoryTreeRequest): Promise<GetDirectoryTreeResponse> {
+  const validation = validatePath(data.path, workingDirectory);
+  if (!validation.valid) return { success: false, error: validation.error };
+  if (data.maxDepth < 0) return { success: false, error: "maxDepth must be non-negative" };
+
+  async function buildTree(path: string, name: string, currentDepth: number): Promise<TreeNode | null> {
+    try {
+      const stats = await stat(path);
+      const node: TreeNode = {
+        name,
+        path,
+        type: stats.isDirectory() ? "directory" : "file",
+        size: stats.size,
+        modified: stats.mtime.getTime(),
+      };
+      if (stats.isDirectory() && currentDepth < data.maxDepth) {
+        const entries = await readdir(path, { withFileTypes: true });
+        const children: TreeNode[] = [];
+        await Promise.all(
+          entries.map(async (entry) => {
+            // Skip symlinks to avoid cycles.
+            if (entry.isSymbolicLink()) return;
+            const childPath = join(path, entry.name);
+            const childNode = await buildTree(childPath, entry.name, currentDepth + 1);
+            if (childNode) children.push(childNode);
+          }),
+        );
+        children.sort((a, b) => {
+          if (a.type === "directory" && b.type !== "directory") return -1;
+          if (a.type !== "directory" && b.type === "directory") return 1;
+          return a.name.localeCompare(b.name);
+        });
+        node.children = children;
+      }
+      return node;
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const rootPath = validation.resolvedPath!;
+    const baseName = rootPath === "/" ? "/" : rootPath.split("/").pop() || rootPath;
+    const tree = await buildTree(rootPath, baseName, 0);
+    if (!tree) return { success: false, error: "Failed to access the specified path" };
+    return { success: true, tree };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : "Failed to get directory tree" };
+  }
+}
+
+// Spawn an external tool, capture stdout/stderr, return result. Used by
+// ripgrep and difftastic. Matches happy-cli's behavior: ANY exit code counts
+// as success — the app inspects exitCode itself. Only spawn errors (ENOENT,
+// permission denied) cause success=false.
+function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return new Promise((resolveResult, rejectResult) => {
+    const child = nodeSpawn(binary, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd,
+      windowsHide: true,
+      env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d.toString(); });
+    child.stderr.on("data", (d) => { stderr += d.toString(); });
+    child.on("close", (code) => { resolveResult({ exitCode: code ?? 0, stdout, stderr }); });
+    child.on("error", (err) => { rejectResult(err); });
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  // rg uses exitCode 0 (matches), 1 (no matches), 2 (error). Treat 0/1 as success.
-  return { success: exitCode === 0 || exitCode === 1, exitCode, stdout, stderr };
+}
+
+async function handleRipgrep(workingDirectory: string, data: RipgrepRequest): Promise<RipgrepResponse> {
+  let cwd = data.cwd;
+  if (cwd) {
+    const validation = validatePath(cwd, workingDirectory);
+    if (!validation.valid) return { success: false, error: validation.error };
+    cwd = validation.resolvedPath;
+  }
+  // Prefer the bundled rg shipped alongside happy-cli; fall back to system `rg`.
+  const binary = existsSync(RG_BIN) ? RG_BIN : "rg";
+  try {
+    const result = await runTool(binary, data.args, cwd);
+    return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : "Failed to run ripgrep" };
+  }
+}
+
+async function handleDifftastic(workingDirectory: string, data: DifftasticRequest): Promise<DifftasticResponse> {
+  let cwd = data.cwd;
+  if (cwd) {
+    const validation = validatePath(cwd, workingDirectory);
+    if (!validation.valid) return { success: false, error: validation.error };
+    cwd = validation.resolvedPath;
+  }
+  // Always use the bundled difft (no reliable system-wide install path).
+  if (!existsSync(DIFFT_BIN)) {
+    return { success: false, error: `difft binary not found at ${DIFFT_BIN}. Run \`node scripts/unpack-tools.cjs\` in packages/happy-cli to unpack it.` };
+  }
+  try {
+    const result = await runTool(DIFFT_BIN, data.args, cwd, { FORCE_COLOR: "1" });
+    return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : "Failed to run difftastic" };
+  }
 }
 
 /**
  * Wire all session-scoped RPCs that the app expects, plus killSession.
- * Returns nothing; handlers are registered as side-effects on the RelaySession.
- *
  * killSession needs the local killSession function from server.ts (closes the
  * tmux window, cleans up watcher and relay session); it's passed in so we
  * avoid a circular import.
@@ -187,6 +326,7 @@ export function registerSessionRpcs(opts: {
   register("listDirectory", async (params) => handleListDirectory(sessionCwd, params as ListDirectoryRequest));
   register("getDirectoryTree", async (params) => handleGetDirectoryTree(sessionCwd, params as GetDirectoryTreeRequest));
   register("ripgrep", async (params) => handleRipgrep(sessionCwd, params as RipgrepRequest));
+  register("difftastic", async (params) => handleDifftastic(sessionCwd, params as DifftasticRequest));
   register("killSession", async (): Promise<KillResponse> => {
     const ok = killSession();
     return { success: ok, message: ok ? "killed" : "session not found" };
