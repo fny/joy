@@ -94,13 +94,41 @@ function NewJoyTmuxSessionScreen() {
     const [machinePickerOpen, setMachinePickerOpen] = React.useState(false);
     const [pathPickerOpen, setPathPickerOpen] = React.useState(false);
 
-    // Auto-select first online machine
+    // Probe online machines for a joy-tmux daemon: ping every online machine
+    // with `joy-list-sessions` in parallel and pick the first one that
+    // responds within 3s. Mirrors the pattern in settings/joy-sessions.
+    // Without this, we'd auto-select the first online machine — which usually
+    // doesn't run joy-tmux — and the create RPC would hang silently.
+    // The per-probe timeout is critical: apiSocket.machineRPC has no built-in
+    // timeout, so a machine without joy-tmux installed never resolves; without
+    // racing with a timer, Promise.allSettled would wait forever.
+    const probedRef = React.useRef(false);
     React.useEffect(() => {
-        if (selectedMachineId) return;
-        const online = allMachines.find(isMachineOnline);
-        if (online) setSelectedMachineId(online.id);
-        else if (allMachines.length > 0) setSelectedMachineId(allMachines[0].id);
-    }, [allMachines, selectedMachineId]);
+        if (probedRef.current || selectedMachineId) return;
+        const online = allMachines.filter(isMachineOnline);
+        if (online.length === 0) {
+            if (allMachines.length > 0) setSelectedMachineId(allMachines[0].id);
+            return;
+        }
+        probedRef.current = true;
+        let cancelled = false;
+        const probeOne = async (machineId: string): Promise<string> => {
+            const result = await Promise.race([
+                apiSocket.machineRPC(machineId, 'joy-list-sessions', {}).then(() => machineId),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
+            ]);
+            return result;
+        };
+        (async () => {
+            const results = await Promise.allSettled(online.map(m => probeOne(m.id)));
+            if (cancelled) return;
+            const found = results.find(r => r.status === 'fulfilled');
+            setSelectedMachineId(
+                found?.status === 'fulfilled' ? (found.value as string) : online[0].id,
+            );
+        })();
+        return () => { cancelled = true; };
+    }, [allMachines.map(m => m.id).join(','), selectedMachineId]);
 
     const selectedMachine = React.useMemo(
         () => allMachines.find(m => m.id === selectedMachineId) ?? null,
@@ -171,17 +199,25 @@ function NewJoyTmuxSessionScreen() {
 
         setIsSpawning(true);
         try {
-            const result = await apiSocket.machineRPC<JoyCreateResult, {
-                cwd: string;
-                model?: string;
-                effort?: string;
-                continue?: boolean;
-            }>(selectedMachineId, 'joy-create-session', {
-                cwd,
-                model: currentModel && currentModel.key !== 'default' ? currentModel.key : undefined,
-                effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
-                continue: continueLast || undefined,
-            });
+            // Race the RPC against a 30s timeout. machineRPC has no built-in
+            // timeout — a machine without joy-tmux would hang the spinner
+            // forever. 30s is enough for the slowest legitimate spawn (claude
+            // CLI startup + first transcript entry) and short enough to surface
+            // misconfigurations.
+            const result = await Promise.race<JoyCreateResult>([
+                apiSocket.machineRPC<JoyCreateResult, {
+                    cwd: string;
+                    model?: string;
+                    effort?: string;
+                    continue?: boolean;
+                }>(selectedMachineId, 'joy-create-session', {
+                    cwd,
+                    model: currentModel && currentModel.key !== 'default' ? currentModel.key : undefined,
+                    effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
+                    continue: continueLast || undefined,
+                }),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s — is the daemon running on the selected machine?')), 30000)),
+            ]);
 
             if ('error' in result) {
                 Modal.alert(t('common.error'), result.error);
