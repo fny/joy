@@ -70,6 +70,10 @@ export const SidebarView = React.memo(() => {
         router.navigate('/new');
     }, [router]);
 
+    const handleNewJoyTmuxSession = React.useCallback(() => {
+        router.navigate('/joy/new');
+    }, [router]);
+
     return (
         <View style={[styles.container, { paddingTop: safeArea.top + headerHeight }]}>
             {/* New Session button */}
@@ -82,6 +86,18 @@ export const SidebarView = React.memo(() => {
             >
                 <Ionicons name="create-outline" size={16} color={stylesheet.newSessionText.color} />
                 <Text style={styles.newSessionText}>{t('sidebar.newSession')}</Text>
+            </Pressable>
+
+            {/* New joy-tmux session button */}
+            <Pressable
+                onPress={handleNewJoyTmuxSession}
+                style={({ pressed }) => [
+                    styles.newSessionButton,
+                    pressed && styles.newSessionButtonPressed,
+                ]}
+            >
+                <Ionicons name="terminal-outline" size={16} color={stylesheet.newSessionText.color} />
+                <Text style={styles.newSessionText}>New joy-tmux session</Text>
             </Pressable>
 
             {realtimeStatus !== 'disconnected' && (

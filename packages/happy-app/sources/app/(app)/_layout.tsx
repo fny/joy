@@ -328,6 +328,13 @@ export default function RootLayout() {
                     headerBackTitle: t('common.back'),
                 }}
             />
+            <Stack.Screen
+                name="joy/new/index"
+                options={{
+                    headerTitle: 'New joy-tmux session',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
         </Stack>
     );
 }
