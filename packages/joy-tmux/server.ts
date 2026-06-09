@@ -92,6 +92,18 @@ const deliveryStates = new Map<string, DeliveryState>(); // sessionId → state
 // relative paths to the text before piping into tmux.
 const pendingAttachments = new Map<string, Promise<Uint8Array | null>[]>();
 
+// Per-session message buffer used while the session is still starting.
+// Claude takes ~2-5s to initialize after the tmux window opens; send-keys
+// during that window land in bash or claude's loading screen and are lost.
+// We queue here and flush in handleTranscriptEntry once Claude's first
+// transcript line arrives (the same place where status flips to "active").
+type PendingTextMessage = { seq: number; text: string };
+const pendingPrelaunchMessages = new Map<string, PendingTextMessage[]>();
+// sessionId → flusher that drains the prelaunch buffer for that session.
+// Registered by wireRelaySession, invoked by handleTranscriptEntry on the
+// status='starting' → 'active' transition.
+const prelaunchFlushers = new Map<string, () => void>();
+
 // Builds the standard onMessage callback + registers session-scoped RPC
 // handlers (abort) for a newly-created relay session. Used by launch, recover,
 // and reconnect paths so the wiring stays consistent.
@@ -116,6 +128,18 @@ function wireRelaySession(opts: {
     const bucket = pendingAttachments.get(sessionId) ?? [];
     bucket.push(promise);
     pendingAttachments.set(sessionId, bucket);
+  };
+
+  // Actually type a message into the tmux pane + record receipt + bump thinking.
+  // Pulled out of onMessage so the prelaunch buffer flusher can reuse it.
+  const sendIntoTmux = (seq: number, text: string): void => {
+    const st = getOrInitDeliveryState(sessionId, rs.relaySessionId);
+    st.pending.push({ seq, text, source: 'relay', at: Date.now() });
+    const r = run("tmux", "send-keys", "-l", "-t", tmuxWindow, text.replace(/\n/g, " "));
+    if (!r.ok) { st.pending.pop(); throw new Error("tmux send-keys failed"); }
+    run("tmux", "send-keys", "-t", tmuxWindow, "Enter");
+    rs.setThinking(true);
+    if (!watcherActive() && sessionAlive()) startWatcher();
   };
 
   rs.onMessage = async (text, seq) => {
@@ -149,14 +173,32 @@ function wireRelaySession(opts: {
       }
     }
 
-    const st = getOrInitDeliveryState(sessionId, rs.relaySessionId);
-    st.pending.push({ seq, text: augmentedText, source: 'relay', at: Date.now() });
-    const r = run("tmux", "send-keys", "-l", "-t", tmuxWindow, augmentedText.replace(/\n/g, " "));
-    if (!r.ok) { st.pending.pop(); throw new Error("tmux send-keys failed"); }
-    run("tmux", "send-keys", "-t", tmuxWindow, "Enter");
-    rs.setThinking(true);
-    if (!watcherActive() && sessionAlive()) startWatcher();
+    // If Claude hasn't booted yet, buffer the message and let the
+    // transcript-watcher flush it once status flips to 'active'. Without
+    // this, the first user message after launch races Claude's startup
+    // and ends up typed into bash before claude takes over the pane.
+    const sess = sessions.get(sessionId);
+    if (sess && sess.status === "starting") {
+      const buf = pendingPrelaunchMessages.get(sessionId) ?? [];
+      buf.push({ seq, text: augmentedText });
+      pendingPrelaunchMessages.set(sessionId, buf);
+      return;
+    }
+
+    sendIntoTmux(seq, augmentedText);
   };
+
+  // Stash the flusher so handleTranscriptEntry can call it when status
+  // first flips to 'active'. Keyed by the joy-tmux local session id.
+  prelaunchFlushers.set(sessionId, () => {
+    const buf = pendingPrelaunchMessages.get(sessionId);
+    if (!buf || buf.length === 0) return;
+    pendingPrelaunchMessages.delete(sessionId);
+    for (const m of buf) {
+      try { sendIntoTmux(m.seq, m.text); }
+      catch (e) { process.stderr.write(`[prelaunch] flush failed for ${sessionId}: ${e}\n`); }
+    }
+  });
 
   // Session-scoped abort: app calls sessionRPC(sessionId, 'abort', {}) — we
   // map that to Escape, which Claude Code interactive interprets as
@@ -264,6 +306,9 @@ function handleTranscriptEntry(sess: SessionRecord, entry: Record<string, unknow
       sess.status = "active";
       sess.last_active_at = Date.now();
       broadcast("session_update", sess);
+      // Claude is now reading from the pane — drain any messages the user
+      // sent while we were waiting for it to boot.
+      prelaunchFlushers.get(sess.id)?.();
     }
   }
 
@@ -480,12 +525,53 @@ function pollSessionEnd(sess: SessionRecord) {
 }
 
 // ── Launch / kill ─────────────────────────────────────────────────────────────
+
+/**
+ * Sentinel thrown by launchSession when opts.cwd doesn't exist and the
+ * caller hasn't set createDir. joy-create-session catches it and returns
+ * { requestToApproveDirectoryCreation: { directory } } to the app, which
+ * surfaces a Modal.confirm and retries with createDir: true.
+ */
+class DirectoryCreationApprovalRequired extends Error {
+  constructor(public readonly directory: string) {
+    super(`directory does not exist: ${directory}`);
+  }
+}
+
+/**
+ * Expand a leading ~ to the joy-tmux user's home directory. tmux's -c flag
+ * does NOT expand tildes (it's not a shell), and the app may send paths
+ * with ~ unresolved when the machine metadata doesn't expose homeDir.
+ * This makes the resolution defensive: even if the app sends ~/foo we
+ * end up with an absolute path that tmux can actually chdir into.
+ */
+function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
 async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   const windowName = `dd-${id}`;
 
+  // Resolve ~, then verify the directory exists. tmux -c silently falls back
+  // to the joy-tmux process's cwd when the requested directory is missing,
+  // which is the root of "I asked for ~/test-2 but Claude opened in
+  // /home/claude" — without this guard the wrong cwd cascades into the
+  // transcript watcher looking in the wrong projects/ folder and Claude's
+  // responses never reaching the app.
+  const cwd = expandHome(opts.cwd);
+  if (!existsSync(cwd)) {
+    if (opts.createDir) {
+      mkdirSync(cwd, { recursive: true });
+    } else {
+      throw new DirectoryCreationApprovalRequired(cwd);
+    }
+  }
+
   if (!run("tmux", "has-session", "-t", TMUX_SESSION).ok) {
-    run("tmux", "new-session", "-d", "-s", TMUX_SESSION, "-c", opts.cwd);
+    run("tmux", "new-session", "-d", "-s", TMUX_SESSION, "-c", cwd);
   }
 
   // Validate user-supplied fields to prevent shell injection via send-keys
@@ -509,7 +595,7 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   if (yolo) flags.push("--dangerously-skip-permissions");
 
   const cmd = [...envParts, "claude", ...flags].join(" ");
-  run("tmux", "new-window", "-t", TMUX_SESSION, "-n", windowName, "-c", opts.cwd);
+  run("tmux", "new-window", "-t", TMUX_SESSION, "-n", windowName, "-c", cwd);
   run("tmux", "send-keys", "-t", `${TMUX_SESSION}:${windowName}`, cmd, "Enter");
 
   await Bun.sleep(400);
@@ -526,7 +612,7 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
   const record: SessionRecord = {
     id, pid,
     tmux_window: `${TMUX_SESSION}:${windowName}`,
-    cwd: opts.cwd,
+    cwd,
     model: opts.model,
     effort: opts.effort,
     flags,
@@ -542,7 +628,7 @@ async function launchSession(opts: CreateSessionOpts): Promise<SessionRecord> {
 
   if (relayClient) {
     try {
-      const rs = await createRelaySession(relayClient, { tag: `joy-tmux-${id}`, cwd: opts.cwd, id });
+      const rs = await createRelaySession(relayClient, { tag: `joy-tmux-${id}`, cwd, id });
       // M1: guard against kill racing the async create — don't start a poller for a dead session
       if (record.status === "ended") {
         rs.stop();
@@ -848,6 +934,11 @@ if (relayClient) {
       // launchSession awaits createRelaySession.
       return { ok: true, session: record, relaySessionId: record.relay_session_id };
     } catch (e) {
+      // Distinguish "user needs to confirm dir creation" from generic errors
+      // so the app can surface a Modal.confirm rather than a flat error toast.
+      if (e instanceof DirectoryCreationApprovalRequired) {
+        return { requestToApproveDirectoryCreation: true, directory: e.directory };
+      }
       return { error: String(e) };
     }
   });
