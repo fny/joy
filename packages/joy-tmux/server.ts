@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, watch, readdirSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join, basename } from "path";
-import { homedir } from "os";
+import { homedir, hostname, platform as osPlatform } from "os";
 import { initRelay, createRelaySession, encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd, encodeTurnEnd, encodeUserMessage, type RelaySession } from "./relay.ts";
 import { registerSessionRpcs } from "./sessionRpcs";
 import { writeAttachmentToCwd } from "./attachments";
@@ -905,6 +905,21 @@ process.stderr.write(`webchat server running on http://0.0.0.0:${PORT}\n`);
 recoverDirectSessions();
 
 if (relayClient) {
+  // Upsert this machine's metadata server-side so the app's path picker
+  // can format ~/foo nicely. homeDir is the field we actually care about;
+  // we send the rest because the schema requires them. Best-effort —
+  // failures here only degrade the picker UX, not session correctness.
+  void relayClient.getOrCreateMachine({
+    host: hostname(),
+    platform: osPlatform(),
+    happyCliVersion: 'joy-tmux/0.1.0',
+    homeDir: homedir(),
+    happyHomeDir: join(homedir(), '.happy'),
+    happyLibDir: import.meta.dir,
+  }).then(ok => {
+    process.stderr.write(`[relay] machine metadata upsert: ${ok ? 'ok' : 'failed'}\n`);
+  });
+
   relayClient.registerRpcHandler('joy-list-sessions', async () => {
     return [...sessions.values()];
   });

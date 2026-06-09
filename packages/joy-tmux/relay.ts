@@ -6,7 +6,7 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir, hostname } from 'node:os';
+import { homedir, hostname, platform } from 'node:os';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
 
@@ -404,6 +404,61 @@ export class RelayClient {
     } catch (e) {
       log(`downloadAndDecryptAttachment failed for ${ref}: ${e}`);
       return null;
+    }
+  }
+
+  /**
+   * Upsert the machine row's metadata server-side. Mirrors happy-cli's
+   * `getOrCreateMachine` (api.ts:144): POST /v1/machines with the
+   * machineId and an encrypted MachineMetadata payload.
+   *
+   * The point of doing this from joy-tmux is purely a UX guarantee:
+   * the app's path picker uses `selectedMachine.metadata.homeDir` to
+   * format paths as `~/foo`. If happy-cli's daemon has never run on
+   * this host, that field is undefined and the picker shows literal
+   * `~/foo`. joy-tmux always knows its homedir, so we can guarantee
+   * the field is set.
+   *
+   * Caveat: this REST POST is an unconditional upsert — the server
+   * replaces the full metadata blob. If happy-cli's daemon had set
+   * optional fields (cliAvailability, resumeSupport), our upsert
+   * wipes them until happy-cli re-upserts on its next session spawn.
+   * Acceptable trade-off for the picker reliability gain.
+   */
+  async getOrCreateMachine(metadata: Record<string, unknown>): Promise<boolean> {
+    try {
+      let encryptionKey: Uint8Array;
+      let variant: EncryptionVariant;
+      let dataEncryptionKeyB64: string | undefined;
+
+      if (this.creds.encryption.type === 'dataKey') {
+        variant = 'dataKey';
+        encryptionKey = this.creds.encryption.machineKey;
+        // Same envelope as createSession: [0x00][encrypted(machineKey, publicKey)]
+        // so the server can hand the dataKey to authorized clients.
+        const encryptedKey = libsodiumEncryptForPublicKey(encryptionKey, this.creds.encryption.publicKey);
+        const bundle = new Uint8Array(1 + encryptedKey.length);
+        bundle.set([0], 0);
+        bundle.set(encryptedKey, 1);
+        dataEncryptionKeyB64 = b64encode(bundle);
+      } else {
+        variant = 'legacy';
+        encryptionKey = this.creds.encryption.secret;
+      }
+
+      const r = await fetch(this.url('/v1/machines'), {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify({
+          id: this.creds.machineId,
+          metadata: b64encode(encryptWire(variant, encryptionKey, metadata)),
+          dataEncryptionKey: dataEncryptionKeyB64,
+        }),
+      });
+      return r.ok;
+    } catch (e) {
+      log(`getOrCreateMachine failed: ${e}`);
+      return false;
     }
   }
 
