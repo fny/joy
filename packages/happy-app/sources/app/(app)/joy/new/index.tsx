@@ -69,7 +69,10 @@ function trimPathInput(path: string | null | undefined): string {
     return path?.trim() ?? '';
 }
 
-type JoyCreateResult = { ok: true; relaySessionId?: string; session: { id: string } } | { error: string };
+type JoyCreateResult =
+    | { ok: true; relaySessionId?: string; session: { id: string } }
+    | { error: string }
+    | { requestToApproveDirectoryCreation: true; directory: string };
 
 function NewJoyTmuxSessionScreen() {
     const { theme } = useUnistyles();
@@ -186,7 +189,7 @@ function NewJoyTmuxSessionScreen() {
         setEffortIndex(i => (i + 1) % effortLevels.length);
     }, [effortLevels.length]);
 
-    const handleCreate = React.useCallback(async () => {
+    const handleCreate = React.useCallback(async (): Promise<void> => {
         if (!selectedMachineId || !selectedMachine) {
             Modal.alert(t('common.error'), 'Select a machine');
             return;
@@ -196,31 +199,56 @@ function NewJoyTmuxSessionScreen() {
             return;
         }
         const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedHomeDir);
+        // Race the RPC against a 30s timeout. machineRPC has no built-in
+        // timeout — a machine without joy-tmux would hang the spinner
+        // forever. 30s is enough for the slowest legitimate spawn (claude
+        // CLI startup + first transcript entry) and short enough to surface
+        // misconfigurations.
+        const sendCreateRpc = (createDir: boolean) => Promise.race<JoyCreateResult>([
+            apiSocket.machineRPC<JoyCreateResult, {
+                cwd: string;
+                model?: string;
+                effort?: string;
+                continue?: boolean;
+                createDir?: boolean;
+            }>(selectedMachineId, 'joy-create-session', {
+                cwd,
+                model: currentModel && currentModel.key !== 'default' ? currentModel.key : undefined,
+                effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
+                continue: continueLast || undefined,
+                createDir: createDir || undefined,
+            }),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s — is the daemon running on the selected machine?')), 30000)),
+        ]);
 
         setIsSpawning(true);
         try {
-            // Race the RPC against a 30s timeout. machineRPC has no built-in
-            // timeout — a machine without joy-tmux would hang the spinner
-            // forever. 30s is enough for the slowest legitimate spawn (claude
-            // CLI startup + first transcript entry) and short enough to surface
-            // misconfigurations.
-            const result = await Promise.race<JoyCreateResult>([
-                apiSocket.machineRPC<JoyCreateResult, {
-                    cwd: string;
-                    model?: string;
-                    effort?: string;
-                    continue?: boolean;
-                }>(selectedMachineId, 'joy-create-session', {
-                    cwd,
-                    model: currentModel && currentModel.key !== 'default' ? currentModel.key : undefined,
-                    effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
-                    continue: continueLast || undefined,
-                }),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s — is the daemon running on the selected machine?')), 30000)),
-            ]);
+            let result = await sendCreateRpc(false);
+
+            // Directory doesn't exist — ask the user before joy-tmux creates
+            // it. Matches the same pattern as the regular /new spawn flow.
+            if ('requestToApproveDirectoryCreation' in result) {
+                setIsSpawning(false);
+                const approved = await Modal.confirm(
+                    'Create directory?',
+                    `The directory '${result.directory}' does not exist. Create it?`,
+                    { cancelText: t('common.cancel'), confirmText: t('common.create') },
+                );
+                if (!approved) return;
+                setIsSpawning(true);
+                result = await sendCreateRpc(true);
+            }
 
             if ('error' in result) {
                 Modal.alert(t('common.error'), result.error);
+                return;
+            }
+
+            if ('requestToApproveDirectoryCreation' in result) {
+                // Shouldn't happen on the retry, but guard so TS narrowing
+                // stays sound and we surface the misconfiguration instead of
+                // crashing.
+                Modal.alert(t('common.error'), 'Directory still missing after creation approval');
                 return;
             }
 
