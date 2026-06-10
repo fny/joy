@@ -1,13 +1,14 @@
 // New joy-tmux session screen — sister of /new but stripped to Claude only,
-// no worktrees, defaults to YOLO mode (joy-tmux server now defaults yolo=true).
+// no worktrees, yolo by default.
 //
 // Differences from /new:
 //   - No agent picker (Claude only)
 //   - No worktree picker
-//   - No permission-mode UI (always yolo)
+//   - Full claude CLI surface: permission mode, fallback model, continue,
+//     fork, chrome, plus a free-form extra-arguments string
 //   - Spawn goes through machineRPC('joy-create-session', ...) instead of
 //     machineSpawnNewSession; the joy-tmux daemon on the selected machine
-//     opens a new tmux window running `claude --dangerously-skip-permissions`.
+//     opens a new tmux window running the assembled claude command.
 import React from 'react';
 import {
     View,
@@ -50,7 +51,7 @@ import {
     type ModelMode,
     type EffortLevel,
 } from '@/components/modelModeOptions';
-import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
+import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES } from '@/sync/joyModels';
 
 const COMPOSER_INPUT_VERTICAL_PADDING = Platform.OS === 'web' ? 10 : 8;
 const COMPOSER_INPUT_MAX_HEIGHT = Platform.OS === 'web' ? 480 : 240;
@@ -88,9 +89,22 @@ function NewJoyTmuxSessionScreen() {
     const [pathInput, setPathInput] = React.useState<string>('~');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
+    // Permission mode, cycled by tapping the row. Index 0 = yolo
+    // (bypassPermissions) — the joy-tmux default, since the app drives the
+    // session and answering permission prompts through tmux is fragile.
+    const [modeIndex, setModeIndex] = React.useState(0);
+    // Fallback model (--fallback-model) — index 0 = none.
+    const [fallbackIndex, setFallbackIndex] = React.useState(0);
     // When true, joy-tmux launches `claude --continue …`, resuming the most
     // recent Claude conversation in this cwd instead of starting fresh.
     const [continueLast, setContinueLast] = React.useState(false);
+    // --fork-session: resume the conversation but mint a new session id.
+    // Claude only accepts it alongside --continue/--resume, so the row is
+    // disabled until continue is on.
+    const [forkSession, setForkSession] = React.useState(false);
+    const [chrome, setChrome] = React.useState(false);
+    // Free-form extra CLI arguments appended verbatim to the claude command.
+    const [extraArgs, setExtraArgs] = React.useState('');
     const [prompt, setPrompt] = React.useState('');
     const [isSpawning, setIsSpawning] = React.useState(false);
     const [machinePickerOpen, setMachinePickerOpen] = React.useState(false);
@@ -188,6 +202,23 @@ function NewJoyTmuxSessionScreen() {
         setEffortIndex(i => (i + 1) % effortLevels.length);
     }, [effortLevels.length]);
 
+    const currentMode = JOY_CLAUDE_PERMISSION_MODES[modeIndex] ?? JOY_CLAUDE_PERMISSION_MODES[0];
+    const isYolo = currentMode.key === 'bypassPermissions';
+    const cycleMode = React.useCallback(() => {
+        setModeIndex(i => (i + 1) % JOY_CLAUDE_PERMISSION_MODES.length);
+    }, []);
+
+    // 'none' plus the model catalog — claude falls back when the primary
+    // model is overloaded.
+    const fallbackOptions = React.useMemo(
+        () => [{ key: null as string | null, name: 'none' }, ...JOY_CLAUDE_MODELS],
+        [],
+    );
+    const currentFallback = fallbackOptions[fallbackIndex] ?? fallbackOptions[0];
+    const cycleFallback = React.useCallback(() => {
+        setFallbackIndex(i => (i + 1) % fallbackOptions.length);
+    }, [fallbackOptions.length]);
+
     const handleCreate = React.useCallback(async (): Promise<void> => {
         if (!selectedMachineId || !selectedMachine) {
             Modal.alert(t('common.error'), 'Select a machine');
@@ -210,12 +241,22 @@ function NewJoyTmuxSessionScreen() {
                 effort?: string;
                 continue?: boolean;
                 createDir?: boolean;
+                permissionMode?: string;
+                fallbackModel?: string;
+                forkSession?: boolean;
+                chrome?: boolean;
+                extraArgs?: string;
             }>(selectedMachineId, 'joy-create-session', {
                 cwd,
-                model: currentModel && currentModel.key !== 'default' ? currentModel.key : undefined,
+                model: currentModel?.key,
                 effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
                 continue: continueLast || undefined,
                 createDir: createDir || undefined,
+                permissionMode: currentMode.key,
+                fallbackModel: currentFallback.key ?? undefined,
+                forkSession: (continueLast && forkSession) || undefined,
+                chrome: chrome || undefined,
+                extraArgs: extraArgs.trim() || undefined,
             }),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s — is the daemon running on the selected machine?')), 30000)),
         ]);
@@ -276,7 +317,7 @@ function NewJoyTmuxSessionScreen() {
         } finally {
             setIsSpawning(false);
         }
-    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, continueLast, prompt, router, navigateToSession]);
+    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, chrome, extraArgs, prompt, router, navigateToSession]);
 
     const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
 
@@ -371,9 +412,44 @@ function NewJoyTmuxSessionScreen() {
                                 )}
                             </View>
 
-                            {/* Continue last conversation toggle — when on, joy-tmux passes
-                                --continue to claude so it resumes the most recent Claude
-                                conversation in this cwd instead of starting fresh. */}
+                            {/* Permission mode — tap to cycle through the same order as
+                                claude's Shift+Tab. yolo (bypassPermissions) is the default. */}
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={cycleMode}
+                            >
+                                <Ionicons
+                                    name={isYolo ? 'play-forward' : 'shield-outline'}
+                                    size={15}
+                                    color={isYolo ? '#F87171' : theme.colors.textSecondary}
+                                />
+                                <Text style={[styles.configLabel, isYolo && { color: '#F87171' }]} numberOfLines={1}>
+                                    {currentMode.name}
+                                </Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
+                                    {isYolo ? 'permission prompts are skipped' : 'permission mode'}
+                                </Text>
+                            </Pressable>
+
+                            {/* Fallback model — tap to cycle. */}
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={cycleFallback}
+                            >
+                                <Ionicons name="swap-horizontal-outline" size={15} color={theme.colors.textSecondary} />
+                                <Text style={styles.configLabel} numberOfLines={1}>fallback</Text>
+                                <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
+                                    {currentFallback.name}
+                                </Text>
+                                {currentFallback.key != null && (
+                                    <Text style={styles.configHint} numberOfLines={1}>
+                                        when {currentModel?.name ?? 'the model'} is overloaded
+                                    </Text>
+                                )}
+                            </Pressable>
+
+                            {/* Continue — resume the most recent Claude conversation in
+                                this cwd instead of starting fresh. */}
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={() => setContinueLast(v => !v)}
@@ -383,21 +459,58 @@ function NewJoyTmuxSessionScreen() {
                                     size={15}
                                     color={continueLast ? theme.colors.button.primary.background : theme.colors.textSecondary}
                                 />
-                                <Text style={styles.configLabel} numberOfLines={1}>
-                                    --continue
-                                </Text>
-                                <Text style={[styles.configLabel, { color: theme.colors.textSecondary, fontSize: 12 }]} numberOfLines={1}>
+                                <Text style={styles.configLabel} numberOfLines={1}>continue</Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
                                     {continueLast ? 'resume last claude conversation' : 'start fresh'}
                                 </Text>
                             </Pressable>
 
-                            {/* YOLO indicator — not interactive, just a reminder */}
-                            <View style={styles.configRow}>
-                                <Ionicons name="play-forward" size={15} color="#F87171" />
-                                <Text style={[styles.configLabel, { color: '#F87171' }]} numberOfLines={1}>yolo</Text>
-                                <Text style={[styles.configLabel, { color: theme.colors.textSecondary, fontSize: 12 }]} numberOfLines={1}>
-                                    permission prompts are skipped
+                            {/* Fork — only meaningful with continue (claude rejects
+                                --fork-session on a fresh session), so dim it until then. */}
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed, !continueLast && { opacity: 0.4 }]}
+                                onPress={() => setForkSession(v => !v)}
+                                disabled={!continueLast}
+                            >
+                                <Ionicons
+                                    name={continueLast && forkSession ? 'checkbox' : 'square-outline'}
+                                    size={15}
+                                    color={continueLast && forkSession ? theme.colors.button.primary.background : theme.colors.textSecondary}
+                                />
+                                <Text style={styles.configLabel} numberOfLines={1}>fork</Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
+                                    {continueLast ? 'continue under a new session id' : 'requires continue'}
                                 </Text>
+                            </Pressable>
+
+                            {/* Chrome integration */}
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={() => setChrome(v => !v)}
+                            >
+                                <Ionicons
+                                    name={chrome ? 'checkbox' : 'square-outline'}
+                                    size={15}
+                                    color={chrome ? theme.colors.button.primary.background : theme.colors.textSecondary}
+                                />
+                                <Text style={styles.configLabel} numberOfLines={1}>chrome</Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
+                                    claude in chrome integration
+                                </Text>
+                            </Pressable>
+
+                            {/* Extra CLI arguments, appended verbatim to the claude command */}
+                            <View style={styles.configRow}>
+                                <Ionicons name="options-outline" size={15} color={theme.colors.textSecondary} />
+                                <TextInput
+                                    value={extraArgs}
+                                    onChangeText={setExtraArgs}
+                                    placeholder="extra arguments"
+                                    placeholderTextColor={theme.colors.textSecondary}
+                                    style={styles.argsInput}
+                                    autoCapitalize="none"
+                                    autoCorrect={false}
+                                />
                             </View>
                         </View>
                     </View>
@@ -544,6 +657,20 @@ const styles = StyleSheet.create((theme) => ({
         color: theme.colors.text,
         ...Typography.default('semiBold'),
         ...Platform.select({ web: { userSelect: 'none' } as any, default: {} }),
+    },
+    configHint: {
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        ...Typography.default('semiBold'),
+        ...Platform.select({ web: { userSelect: 'none' } as any, default: {} }),
+    },
+    argsInput: {
+        flex: 1,
+        fontSize: 14,
+        color: theme.colors.text,
+        padding: 0,
+        ...Typography.mono(),
+        ...Platform.select({ web: { outlineStyle: 'none' } as any, default: {} }),
     },
     offlineHelp: {
         flexDirection: 'row',
