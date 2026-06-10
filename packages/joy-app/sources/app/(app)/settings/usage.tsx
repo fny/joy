@@ -19,6 +19,12 @@ export default function UsageSettingsScreen() {
                     icon={<Ionicons name="analytics-outline" size={29} color="#34C759" />}
                     onPress={() => router.push('/settings/joy-usage')}
                 />
+                <Item
+                    title="Codeburn"
+                    subtitle="Rich report: projects, models, activities, tools — today to 6 months"
+                    icon={<Ionicons name="flame-outline" size={29} color="#FF3B30" />}
+                    onPress={() => router.push('/settings/codeburn')}
+                />
             </ItemGroup>
             <UsagePanel />
         </ItemList>

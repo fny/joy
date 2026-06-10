@@ -156,6 +156,12 @@ export default React.memo(function ModsSettingsScreen() {
                     icon={<Ionicons name="analytics-outline" size={29} color="#8E8E93" />}
                     onPress={() => router.push('/settings/joy-usage')}
                 />
+                <Item
+                    title="Codeburn"
+                    subtitle="Rich usage: projects, models, activities, tools, MCP servers"
+                    icon={<Ionicons name="flame-outline" size={29} color="#8E8E93" />}
+                    onPress={() => router.push('/settings/codeburn')}
+                />
             </ItemGroup>
         </ItemList>
     );

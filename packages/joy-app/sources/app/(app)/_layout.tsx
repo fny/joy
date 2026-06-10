@@ -156,6 +156,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/codeburn"
+                options={{
+                    headerTitle: 'Codeburn',
+                }}
+            />
+            <Stack.Screen
                 name="terminal/connect"
                 options={{
                     headerTitle: t('navigation.connectTerminal'),
