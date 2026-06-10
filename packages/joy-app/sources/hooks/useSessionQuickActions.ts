@@ -5,6 +5,7 @@ import { Modal } from '@/modal';
 import { machineResumeSession, sessionArchive, sessionKill, forkAndSpawn, type ForkSource } from '@/sync/ops';
 import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
 import { storage, useLocalSetting, useMachine, useSetting } from '@/sync/storage';
+import { apiSocket } from '@/sync/apiSocket';
 import { Machine, Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { resolveMessageModeMeta } from '@/sync/messageMeta';
@@ -112,9 +113,16 @@ export function useSessionQuickActions(
     const machine = useMachine(machineId);
     const devModeEnabled = useLocalSetting('devModeEnabled');
     const expResumeSession = useSetting('expResumeSession');
+
+    // joy-tmux sessions get their own restart flow (below) instead of the
+    // happy-cli resume/fork paths, which spawn through the happy daemon and
+    // don't exist for joy sessions.
+    const isJoy = session.metadata?.joy__source === 'joy-tmux';
+    const joySessionId = session.metadata?.joy__sessionId;
+
     const resumeAvailability = React.useMemo(
-        () => expResumeSession ? getResumeAvailability(session, machine, sessionStatus.isConnected) : { canResume: false, canShowResume: false, subtitle: '', message: '' },
-        [machine, session, sessionStatus.isConnected, expResumeSession],
+        () => (expResumeSession && !isJoy) ? getResumeAvailability(session, machine, sessionStatus.isConnected) : { canResume: false, canShowResume: false, subtitle: '', message: '' },
+        [machine, session, sessionStatus.isConnected, expResumeSession, isJoy],
     );
 
     // Fork eligibility — separate from resume because fork works on both
@@ -126,12 +134,15 @@ export function useSessionQuickActions(
     const claudeSessionId = session.metadata?.claudeSessionId;
     const canFork = Boolean(
         expResumeSession
+        && !isJoy
         && claudeFlavor
         && claudeSessionId
         && machineId
         && machine
         && isMachineOnline(machine),
     );
+
+    const canRestart = Boolean(isJoy && joySessionId && machineId && machine && isMachineOnline(machine));
 
     const openDetails = React.useCallback(() => {
         router.push(`/session/${session.id}/info`);
@@ -237,6 +248,32 @@ export function useSessionQuickActions(
         performFork();
     }, [performFork]);
 
+    // Restart a joy-tmux session: the daemon kills the tmux window and starts
+    // a fresh claude in the same cwd resuming the same conversation. A new
+    // relay session comes back — navigate there.
+    const [restarting, performRestart] = useHappyAction(async () => {
+        if (!canRestart) {
+            throw new HappyError('joy-tmux machine is offline', false);
+        }
+        type RestartResult = { ok?: boolean; relaySessionId?: string; error?: string };
+        const result = await Promise.race([
+            apiSocket.machineRPC<RestartResult, { id: string; cwd?: string }>(machineId, 'joy-restart-session', {
+                id: joySessionId!,
+                cwd: session.metadata?.path,
+            }),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s')), 30000)),
+        ]);
+        if (!result.ok || !result.relaySessionId) {
+            throw new HappyError(result.error || 'Failed to restart session', false);
+        }
+        await sync.refreshSessions();
+        navigateToSession(result.relaySessionId);
+    });
+
+    const restartSession = React.useCallback(() => {
+        performRestart();
+    }, [performRestart]);
+
     const openDuplicateSheet = React.useCallback(() => {
         if (!canFork) return;
         Modal.show({
@@ -251,6 +288,10 @@ export function useSessionQuickActions(
         const items: SessionActionItem[] = [
             { id: 'details', icon: 'information-circle-outline', label: t('profile.details'), onPress: openDetails },
         ];
+
+        if (canRestart) {
+            items.push({ id: 'restart', icon: 'refresh-outline', label: 'Restart session', onPress: restartSession });
+        }
 
         if (resumeAvailability.canShowResume) {
             items.push({ id: 'resume', icon: 'play-circle-outline', label: t('sessionInfo.resumeSession'), onPress: resumeSession });
@@ -273,11 +314,13 @@ export function useSessionQuickActions(
         archiveSession,
         canCopySessionMetadata,
         canFork,
+        canRestart,
         copySessionMetadata,
         copySessionMetadataAndLogs,
         forkSession,
         openDetails,
         openDuplicateSheet,
+        restartSession,
         resumeAvailability.canShowResume,
         resumeSession,
     ]);
@@ -302,12 +345,16 @@ export function useSessionQuickActions(
         canResume: resumeAvailability.canResume,
         canShowResume: resumeAvailability.canShowResume,
         canFork,
+        canRestart,
         copySessionMetadata,
         copySessionMetadataAndLogs,
         forkSession,
         forking,
+        isJoy,
         openDetails,
         openDuplicateSheet,
+        restartSession,
+        restarting,
         resumeSession,
         resumeSessionSubtitle: resumeAvailability.subtitle,
         resumingSession,

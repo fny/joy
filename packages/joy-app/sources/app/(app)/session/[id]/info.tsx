@@ -132,9 +132,13 @@ function SessionInfoContent({ session }: { session: Session }) {
     const {
         canShowResume,
         canFork,
+        canRestart,
         forking,
         forkSession,
+        isJoy,
         openDuplicateSheet,
+        restartSession,
+        restarting,
         resumeSession,
         resumeSessionSubtitle,
     } = useSessionQuickActions(session);
@@ -356,6 +360,15 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
                         />
                     )}
+                    {canRestart && (
+                        <Item
+                            title="Restart Session"
+                            subtitle="Kill the tmux window and resume this conversation in a fresh one"
+                            icon={<Ionicons name="refresh-outline" size={29} color="#007AFF" />}
+                            onPress={restartSession}
+                            loading={restarting}
+                        />
+                    )}
                     {canShowResume && (
                         <Item
                             title={t('sessionInfo.resumeSession')}
@@ -483,11 +496,13 @@ function SessionInfoContent({ session }: { session: Session }) {
                         )}
                         <Item
                             title={t('sessionInfo.copyMetadata')}
+                            subtitle="Session metadata only"
                             icon={<Ionicons name="copy-outline" size={29} color="#007AFF" />}
                             onPress={handleCopyMetadata}
                         />
                         <Item
-                            title={t('sessionInfo.copyMetadata') + '\n& Client Logs'}
+                            title={t('sessionInfo.copyMetadata') + ' & Client Logs'}
+                            subtitle="Metadata plus recent app logs, for bug reports"
                             icon={<Ionicons name="document-text-outline" size={29} color="#007AFF" />}
                             onPress={handleCopyMetadataAndLogs}
                         />
