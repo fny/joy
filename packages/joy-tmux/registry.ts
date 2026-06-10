@@ -56,6 +56,9 @@ const MAX_MESSAGES = 500;
 export class SessionRegistry {
   readonly tmuxSession: string;
   readonly relayClient: RelayClient | null;
+  /** Daemon boot time — exposed via the status op as uptime. */
+  readonly startedAt = Date.now();
+  #claudeInfo: { available: boolean; version: string | null } | null = null;
   #sessions = new Map<string, Session>();
   #sseListeners = new Set<(data: string) => void>();
   #messages: StoredChatMessage[] = [];
@@ -72,6 +75,21 @@ export class SessionRegistry {
     this.tmuxSession = opts.tmuxSession;
     this.relayClient = opts.relayClient;
     this.#onRelayAttached = opts.onRelayAttached;
+  }
+
+  /**
+   * Is the claude CLI on this machine, and which version? Detected once on
+   * first ask (spawning `claude --version` costs ~100ms) and cached for the
+   * daemon's lifetime — the binary doesn't move while we're running.
+   */
+  claudeInfo(): { available: boolean; version: string | null } {
+    if (!this.#claudeInfo) {
+      const r = run("claude", "--version");
+      this.#claudeInfo = r.ok
+        ? { available: true, version: r.out.split("\n")[0].trim() || null }
+        : { available: false, version: null };
+    }
+    return this.#claudeInfo;
   }
 
   // ── Lookup ──────────────────────────────────────────────────────────────────

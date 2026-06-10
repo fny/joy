@@ -210,6 +210,9 @@ export const machineOps: MachineOp[] = [
       messages: registry.chatHistory().length,
       sessions: registry.size,
       clients: registry.sseClientCount,
+      version: "joy-tmux/0.1.0",
+      uptimeMs: Date.now() - registry.startedAt,
+      claude: registry.claudeInfo(),
     }),
   },
 ];
