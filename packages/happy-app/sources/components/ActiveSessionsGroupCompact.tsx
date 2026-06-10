@@ -275,10 +275,9 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const baseStatus = STATUS_CONFIG[session.state];
-    // Mod 11: use the same green (#34C759) as the rest of the app for unread results,
-    // not the iOS blue that overlaps with the `thinking` state.
+    // Override to solid blue when session has unread results
     const status = session.hasUnread
-        ? { ...baseStatus, color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: baseStatus.isConnected }
+        ? { ...baseStatus, color: '#007AFF', dotColor: '#007AFF', isPulsing: false, isConnected: baseStatus.isConnected }
         : baseStatus;
     const navigateToSession = useNavigateToSession();
     const swipeableRef = React.useRef<Swipeable | null>(null);
@@ -318,6 +317,32 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         onLongPress: showActionAlert,
     };
 
+    const renderLeadingIndicator = () => {
+        let indicator: React.ReactNode = null;
+
+        if (session.hasUnread) {
+            indicator = <StatusDot color={status.dotColor} isPulsing={false} />;
+        } else if (session.state === 'waiting' && session.hasDraft) {
+            indicator = (
+                <Ionicons
+                    name="create-outline"
+                    size={14}
+                    color={theme.colors.textSecondary}
+                />
+            );
+        } else if (session.state === 'permission_required' || session.state === 'thinking') {
+            indicator = <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />;
+        } else if (session.state === 'waiting') {
+            indicator = <StatusDot color={theme.colors.textSecondary} isPulsing={false} />;
+        }
+
+        return (
+            <View style={styles.leadingIndicatorSlot}>
+                {indicator}
+            </View>
+        );
+    };
+
     const itemContent = (
         <Pressable
             style={[
@@ -330,44 +355,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         >
             <View style={styles.sessionContent}>
                 <View style={styles.sessionTitleRow}>
-                    {(() => {
-                        if (session.hasUnread) {
-                            return (
-                                <View style={[styles.statusDotContainer, { marginRight: 8 }]}>
-                                    <StatusDot color={status.dotColor} isPulsing={false} />
-                                </View>
-                            );
-                        }
-
-                        if (session.state === 'waiting' && session.hasDraft) {
-                            return (
-                                <Ionicons
-                                    name="create-outline"
-                                    size={14}
-                                    color={theme.colors.textSecondary}
-                                    style={{ marginRight: 8 }}
-                                />
-                            );
-                        }
-
-                        if (session.state === 'permission_required' || session.state === 'thinking') {
-                            return (
-                                <View style={[styles.statusDotContainer, { marginRight: 8 }]}>
-                                    <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />
-                                </View>
-                            );
-                        }
-
-                        if (session.state === 'waiting') {
-                            return (
-                                <View style={[styles.statusDotContainer, { marginRight: 8 }]}>
-                                    <StatusDot color={theme.colors.textSecondary} isPulsing={false} />
-                                </View>
-                            );
-                        }
-
-                        return null;
-                    })()}
+                    {renderLeadingIndicator()}
 
                     <Text
                         style={[
@@ -377,7 +365,6 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                         numberOfLines={2}
                     >
                         {session.name}
-                        {session.isJoyTmux && <Text style={styles.joyBadge}>{' >_'}</Text>}
                     </Text>
                 </View>
             </View>
@@ -550,22 +537,18 @@ const stylesheet = StyleSheet.create((theme) => ({
         flex: 1,
         ...Typography.default('regular'),
     },
-    joyBadge: {
-        fontSize: 10,
-        opacity: 0.45,
-        ...Typography.default(),
-    },
     sessionTitleConnected: {
         color: theme.colors.text,
     },
     sessionTitleDisconnected: {
         color: theme.colors.textSecondary,
     },
-    statusDotContainer: {
+    leadingIndicatorSlot: {
         alignItems: 'center',
         justifyContent: 'center',
         width: 16,
         height: 16,
+        marginRight: 8,
     },
     swipeAction: {
         width: 112,

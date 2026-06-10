@@ -112,27 +112,15 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/agents"
+                options={{
+                    headerTitle: 'Agent Defaults',
+                }}
+            />
+            <Stack.Screen
                 name="settings/features"
                 options={{
                     headerTitle: t('settings.features'),
-                }}
-            />
-            <Stack.Screen
-                name="settings/raw"
-                options={{
-                    headerTitle: 'Raw Settings',
-                }}
-            />
-            <Stack.Screen
-                name="settings/joy-sessions"
-                options={{
-                    headerTitle: t('settings.sessions'),
-                }}
-            />
-            <Stack.Screen
-                name="settings/joy-http"
-                options={{
-                    headerTitle: t('settings.joyHttp'),
                 }}
             />
             <Stack.Screen
@@ -325,13 +313,6 @@ export default function RootLayout() {
                 name="new/index"
                 options={{
                     headerTitle: t('newSession.title'),
-                    headerBackTitle: t('common.back'),
-                }}
-            />
-            <Stack.Screen
-                name="joy/new/index"
-                options={{
-                    headerTitle: 'New joy-tmux session',
                     headerBackTitle: t('common.back'),
                 }}
             />

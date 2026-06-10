@@ -180,7 +180,7 @@ const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
     if (activeTab === 'sessions') {
         return (
             <Pressable
-                onPress={() => router.navigate('/joy/new')}
+                onPress={() => router.navigate('/new')}
                 hitSlop={15}
                 style={styles.headerButton}
             >

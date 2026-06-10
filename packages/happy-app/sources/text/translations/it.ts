@@ -32,7 +32,6 @@ export const it: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Annulla',
-        tapAgainToConfirm: ({ label }: { label: string }) => `Tocca di nuovo: ${label}`,
         authenticate: 'Autentica',
         save: 'Salva',
         error: 'Errore',
@@ -114,8 +113,6 @@ export const it: TranslationStructure = {
         accountSubtitle: 'Gestisci i dettagli del tuo account',
         appearance: 'Aspetto',
         appearanceSubtitle: 'Personalizza l\'aspetto dell\'app',
-        mods: 'Mods',
-        modsSubtitle: "Attiva le modifiche dell'app",
         voiceAssistant: 'Assistente vocale',
         voiceAssistantSubtitle: 'Configura le preferenze vocali',
         featuresTitle: 'Funzionalità',
@@ -140,11 +137,6 @@ export const it: TranslationStructure = {
         exchangingTokens: 'Scambio dei token...',
         usage: 'Utilizzo',
         usageSubtitle: 'Vedi il tuo utilizzo API e i costi',
-        sessions: 'Joy Sessions',
-        sessionsSubtitle: 'Gestisci le sessioni basate su tmux',
-        debug: 'Debug',
-        joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: 'Accesso HTTP diretto al server joy-tmux',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Account ${service} collegato`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -196,27 +188,6 @@ export const it: TranslationStructure = {
         },
         showFlavorIcons: 'Mostra icone provider IA',
         showFlavorIconsDescription: 'Mostra le icone del provider IA sugli avatar di sessione',
-    },
-
-    settingsMods: {
-        enabled: 'Abilitato',
-        mod01Title: '01 · Audio',
-        mod01Description: "Mostra il pulsante del microfono per l'input vocale. Abilita anche i permessi microfono macOS nella build Tauri.",
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: 'Aggiunge un livello di sforzo xhigh tra high e max per Claude.',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: 'Mostra solo Plan e Yolo nel selettore della modalità permessi.',
-        mod05Title: '05 · Limite cronologia chat',
-        mod05Description: 'Limita quanti messaggi vengono mostrati per conversazione. Utile per chat lunghe su dispositivi più lenti.',
-        chatHistoryLimit: 'Limite messaggi',
-        chatHistoryLimitDescription: 'Mostra solo i messaggi più recenti per conversazione',
-        chatHistoryLimitPlaceholder: 'es. 50',
-        chatHistoryLimitOff: 'Disattivato',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `Ultimi ${count} messaggi`,
-        mod06Title: '06 · Doppio tocco',
-        mod06Description: 'Richiede un secondo tocco entro 2 secondi per confermare una risposta a scelta multipla dall\'assistente. Aiuta a prevenire selezioni accidentali.',
-        mod07Title: '07 · Apri file da Read',
-        mod07Description: 'Mostra un pulsante «Apri file» nelle chiamate allo strumento Read. Il pulsante utilizza il visualizzatore di file integrato di Happy, che scarica dall\'host di Claude — funziona sia che l\'app e Claude si trovino sulla stessa macchina sia che no.',
     },
 
     settingsFeatures: {
@@ -526,7 +497,6 @@ export const it: TranslationStructure = {
     toolView: {
         input: 'Input',
         output: 'Output',
-        openFile: 'Apri file',
     },
 
     toolGroup: {
@@ -556,7 +526,6 @@ export const it: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Invia risposta',
-            tapAgain: 'Tocca di nuovo per inviare',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'domanda', plural: 'domande' })}`,
             other: 'Altro',
             otherDescription: 'Scrivi la tua risposta',
@@ -1009,34 +978,6 @@ export const it: TranslationStructure = {
             : `Non è stato possibile caricare ${count} immagini e non sono state inviate.`,
         notSupportedTitle: 'Immagini non supportate',
         notSupportedMessage: 'Questo agente non supporta gli allegati immagine. È stato inviato solo il testo.',
-    },
-
-    settingsSessions: {
-        machine: 'Macchina',
-        machines: 'Macchine',
-        statusOnline: 'online',
-        statusOffline: 'offline',
-        showOfflineMachines: ({ count }: { count: number }) => `Mostra ${count} ${count === 1 ? 'macchina' : 'macchine'} offline`,
-        hideOfflineMachines: 'Nascondi macchine offline',
-        machineFooter: 'Macchina che esegue joy-tmux',
-        noMachine: 'Nessuna macchina connessa',
-        selectMachine: 'Seleziona macchina',
-        serverUrl: 'URL del server',
-        serverUrlFooter: 'URL del server joy-tmux in esecuzione sul tuo computer',
-        sessions: 'Sessioni',
-        noSessions: 'Nessuna sessione attiva',
-        loading: 'Caricamento...',
-        newSession: 'Nuova sessione',
-        workingDirectory: 'Directory di lavoro',
-        workingDirectoryPlaceholder: 'es. /home/user/projects',
-        confirmKill: 'Termina sessione',
-        confirmKillMessage: 'Questo terminerà il processo di Claude e non può essere annullato.',
-        killSession: 'Termina',
-        screenshot: 'Screenshot',
-        viewPane: 'Visualizza pannello',
-        statusStarting: 'Avvio in corso',
-        statusActive: 'Attiva',
-        statusEnded: 'Terminata',
     },
 
     feed: {

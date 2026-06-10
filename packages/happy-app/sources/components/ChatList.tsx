@@ -21,13 +21,11 @@ const SCROLL_THRESHOLD = 300;
 
 export const ChatList = React.memo((props: { session: Session }) => {
     const { messages, hasMoreOlder, isLoadingOlder } = useSessionMessages(props.session.id);
-    const joy__chatHistoryLimit = useSetting('joy__chatHistoryLimit');
-    const visibleMessages = joy__chatHistoryLimit != null ? messages.slice(0, joy__chatHistoryLimit) : messages;
     return (
         <ChatListInternal
             metadata={props.session.metadata}
             sessionId={props.session.id}
-            messages={visibleMessages}
+            messages={messages}
             hasMoreOlder={hasMoreOlder}
             isLoadingOlder={isLoadingOlder}
         />

@@ -30,10 +30,59 @@ import { getDisplayName, getAvatarUrl, getBio } from '@/sync/profile';
 import { Avatar } from '@/components/Avatar';
 import { t } from '@/text';
 
+type BuildConfig = {
+    buildCommitSha?: unknown;
+    buildCommitTimestamp?: unknown;
+};
+
+function getBuildConfig(): BuildConfig {
+    const appConfig = Constants.expoConfig?.extra?.app;
+    return appConfig && typeof appConfig === 'object' ? appConfig as BuildConfig : {};
+}
+
+function formatUtcTimestamp(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return value;
+    }
+
+    return date.toISOString()
+        .replace(/\.\d{3}Z$/, 'Z')
+        .replace(/:\d{2}Z$/, 'Z')
+        .replace('T', ' ')
+        .replace('Z', ' UTC');
+}
+
+function formatBuildSubtitle(buildConfig: BuildConfig): string | undefined {
+    const commitTimestamp = typeof buildConfig.buildCommitTimestamp === 'string'
+        ? formatUtcTimestamp(buildConfig.buildCommitTimestamp)
+        : undefined;
+    const commitSha = typeof buildConfig.buildCommitSha === 'string'
+        ? buildConfig.buildCommitSha.slice(0, 7)
+        : undefined;
+
+    if (!commitTimestamp && !commitSha) {
+        return undefined;
+    }
+
+    return [
+        commitTimestamp ? `Commit ${commitTimestamp}` : 'Commit',
+        commitSha,
+    ].filter(Boolean).join(' / ');
+}
+
 export const SettingsView = React.memo(function SettingsView() {
     const { theme } = useUnistyles();
     const router = useRouter();
     const appVersion = Constants.expoConfig?.version || '1.0.0';
+    const runtimeVersion = typeof Constants.expoConfig?.runtimeVersion === 'string'
+        ? Constants.expoConfig.runtimeVersion
+        : undefined;
+    const versionDetail = [
+        appVersion,
+        runtimeVersion ? `runtime ${runtimeVersion}` : undefined,
+    ].filter(Boolean).join(' / ');
+    const versionSubtitle = formatBuildSubtitle(getBuildConfig());
     const auth = useAuth();
     const [devModeEnabled, setDevModeEnabled] = useLocalSettingMutable('devModeEnabled');
     const isPro = __DEV__ || useEntitlement('pro');
@@ -322,12 +371,6 @@ export const SettingsView = React.memo(function SettingsView() {
                     onPress={() => router.push('/settings/account')}
                 />
                 <Item
-                    title={t('settings.mods')}
-                    subtitle={t('settings.modsSubtitle')}
-                    icon={<Ionicons name="construct-outline" size={29} color="#FF9500" />}
-                    onPress={() => router.push('/settings/mods')}
-                />
-                <Item
                     title={t('settings.appearance')}
                     subtitle={t('settings.appearanceSubtitle')}
                     icon={<Ionicons name="color-palette-outline" size={29} color="#5856D6" />}
@@ -338,6 +381,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     subtitle={t('settings.voiceAssistantSubtitle')}
                     icon={<Ionicons name="mic-outline" size={29} color="#34C759" />}
                     onPress={() => router.push('/settings/voice')}
+                />
+                <Item
+                    title="Agent Defaults"
+                    subtitle="Default model, effort, and permissions"
+                    icon={<Ionicons name="options-outline" size={29} color="#5AC8FA" />}
+                    onPress={() => router.push('/settings/agents' as any)}
                 />
                 <Item
                     title={t('settings.featuresTitle')}
@@ -353,24 +402,7 @@ export const SettingsView = React.memo(function SettingsView() {
                         onPress={() => router.push('/settings/usage')}
                     />
                 )}
-                <Item
-                    title={t('settings.sessions')}
-                    subtitle={t('settings.sessionsSubtitle')}
-                    icon={<Ionicons name="terminal-outline" size={29} color="#007AFF" />}
-                    onPress={() => router.push('/settings/joy-sessions')}
-                />
             </ItemGroup>
-
-            {(__DEV__ || devModeEnabled) && (
-                <ItemGroup title={t('settings.debug')}>
-                    <Item
-                        title={t('settings.joyHttp')}
-                        subtitle={t('settings.joyHttpSubtitle')}
-                        icon={<Ionicons name="globe-outline" size={29} color="#8E8E93" />}
-                        onPress={() => router.push('/settings/joy-http')}
-                    />
-                </ItemGroup>
-            )}
 
             {/* Developer */}
             {(__DEV__ || devModeEnabled) && (
@@ -424,7 +456,9 @@ export const SettingsView = React.memo(function SettingsView() {
                 )}
                 <Item
                     title={t('common.version')}
-                    detail={appVersion}
+                    subtitle={versionSubtitle}
+                    subtitleLines={2}
+                    detail={versionDetail}
                     icon={<Ionicons name="information-circle-outline" size={29} color={theme.colors.textSecondary} />}
                     onPress={handleVersionClick}
                     showChevron={false}

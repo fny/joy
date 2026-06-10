@@ -23,7 +23,6 @@ import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
 import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionEffortLevels, saveSessionEffortLevels } from "./persistence";
-import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
 import { sync } from "./sync";
@@ -51,11 +50,6 @@ function resolveSessionOnlineState(session: { active: boolean; activeAt: number 
 function isSessionActive(session: { active: boolean; activeAt: number }): boolean {
     // Use the active flag directly, no timeout checks
     return session.active;
-}
-
-function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boolean {
-    const sandbox = metadata?.sandbox;
-    return !!sandbox && typeof sandbox === 'object' && (sandbox as { enabled?: unknown }).enabled === true;
 }
 
 // Known entitlement IDs
@@ -99,8 +93,6 @@ export interface SessionRowData {
     completedTodosCount: number;
     totalTodosCount: number;
     hasUnread: boolean;
-    isJoyTmux: boolean;
-    joySessionId: string | null;
 }
 
 function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
@@ -134,8 +126,6 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         completedTodosCount: session.todos?.filter(todo => todo.status === 'completed').length ?? 0,
         totalTodosCount: session.todos?.length ?? 0,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
-        isJoyTmux: session.metadata?.joy__source === 'joy-tmux',
-        joySessionId: session.metadata?.joy__sessionId ?? null,
     };
 }
 
@@ -193,9 +183,6 @@ interface StorageState {
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
-    // Mod 13: replace the full settings object (no merge), so deprecated/unknown
-    // keys removed by the raw editor are actually dropped instead of preserved.
-    applySettingsRaw: (settings: Settings) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
     applyPurchases: (customerInfo: CustomerInfo) => void;
     applyProfile: (profile: Profile) => void;
@@ -213,9 +200,10 @@ interface StorageState {
     setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     getActiveSessions: () => Session[];
     updateSessionDraft: (sessionId: string, draft: string | null) => void;
-    updateSessionPermissionMode: (sessionId: string, mode: string) => void;
-    updateSessionModelMode: (sessionId: string, mode: string) => void;
-    updateSessionEffortLevel: (sessionId: string, level: string) => void;
+    updateSessionPermissionMode: (sessionId: string, mode: string | null) => void;
+    updateSessionModelMode: (sessionId: string, mode: string | null) => void;
+    updateSessionEffortLevel: (sessionId: string, level: string | null) => void;
+    resetSessionAgentOverrides: (sessionId: string) => void;
     // Artifact methods
     applyArtifacts: (artifacts: DecryptedArtifact[]) => void;
     addArtifact: (artifact: DecryptedArtifact) => void;
@@ -417,23 +405,27 @@ export const storage = create<StorageState>()((set, get) => {
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
-                // Preserve existing draft and permission mode if they exist, or load from saved data
+                // Preserve explicit local overrides if they exist, or load from
+                // saved data. Missing/null means "no user override"; the UI and
+                // CLI resolve code defaults later.
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
-                const existingPermissionMode = state.sessions[session.id]?.permissionMode;
-                const savedPermissionMode = savedPermissionModes[session.id];
-                const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
-                const resolvedPermissionMode: PermissionModeKey =
-                    (existingPermissionMode && existingPermissionMode !== 'default' ? existingPermissionMode : undefined) ||
-                    (savedPermissionMode && savedPermissionMode !== 'default' ? savedPermissionMode : undefined) ||
-                    (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ||
-                    defaultPermissionMode;
+                const savedPermissionMode = savedPermissionModes[session.id] ?? null;
+                const existingPermissionModeRaw = state.sessions[session.id]?.permissionMode ?? null;
+                const existingPermissionMode = existingPermissionModeRaw === 'default' && savedPermissionMode !== 'default'
+                    ? null
+                    : existingPermissionModeRaw;
+                const resolvedPermissionMode = existingPermissionMode ?? savedPermissionMode ?? session.permissionMode ?? null;
 
                 // Restore model mode / effort level from MMKV on first load — server
                 // does not sync these, and they used to reset on every app restart (#1028).
-                const existingModelMode = state.sessions[session.id]?.modelMode;
-                const resolvedModelMode = existingModelMode ?? savedModelModes[session.id] ?? session.modelMode ?? null;
-                const existingEffortLevel = state.sessions[session.id]?.effortLevel;
+                const savedModelMode = savedModelModes[session.id] ?? null;
+                const existingModelModeRaw = state.sessions[session.id]?.modelMode ?? null;
+                const existingModelMode = existingModelModeRaw === 'default' && savedModelMode !== 'default'
+                    ? null
+                    : existingModelModeRaw;
+                const resolvedModelMode = existingModelMode ?? savedModelMode ?? session.modelMode ?? null;
+                const existingEffortLevel = state.sessions[session.id]?.effortLevel ?? null;
                 const resolvedEffortLevel = existingEffortLevel ?? savedEffortLevels[session.id] ?? session.effortLevel ?? null;
 
                 mergedSessions[session.id] = {
@@ -857,13 +849,6 @@ export const storage = create<StorageState>()((set, get) => {
                 return state;
             }
         }),
-        // Mod 13: wholesale replace (no merge with previous settings), keeping
-        // the current version. Removed keys are gone; sync.replaceSettings()
-        // pushes the replaced object to the server.
-        applySettingsRaw: (settings: Settings) => set((state) => {
-            saveSettings(settings, state.settingsVersion ?? 0);
-            return { ...state, settings };
-        }),
         applyLocalSettings: (delta: Partial<LocalSettings>) => set((state) => {
             const updatedLocalSettings = applyLocalSettings(state.localSettings, delta);
             saveLocalSettings(updatedLocalSettings);
@@ -1025,7 +1010,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessionListViewData: buildSessionListViewData(updatedSessions)
             };
         }),
-        updateSessionPermissionMode: (sessionId: string, mode: string) => set((state) => {
+        updateSessionPermissionMode: (sessionId: string, mode: string | null) => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
@@ -1041,12 +1026,12 @@ export const storage = create<StorageState>()((set, get) => {
             // Collect all permission modes for persistence
             const allModes: Record<string, string> = {};
             Object.entries(updatedSessions).forEach(([id, sess]) => {
-                if (sess.permissionMode && sess.permissionMode !== 'default') {
+                if (sess.permissionMode) {
                     allModes[id] = sess.permissionMode;
                 }
             });
 
-            // Persist permission modes (only non-default values to save space)
+            // Persist only explicit overrides; null/missing means code default.
             saveSessionPermissionModes(allModes);
 
             // No need to rebuild sessionListViewData since permission mode doesn't affect the list display
@@ -1055,7 +1040,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: updatedSessions
             };
         }),
-        updateSessionModelMode: (sessionId: string, mode: string) => set((state) => {
+        updateSessionModelMode: (sessionId: string, mode: string | null) => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
@@ -1068,11 +1053,10 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             };
 
-            // Persist model modes so the selection survives app restart (#1028).
-            // Only non-default values are kept — matches the permissionMode pattern above.
+            // Persist only explicit overrides; null/missing means code default.
             const allModes: Record<string, string> = {};
             Object.entries(updatedSessions).forEach(([id, sess]) => {
-                if (sess.modelMode && sess.modelMode !== 'default') {
+                if (sess.modelMode) {
                     allModes[id] = sess.modelMode;
                 }
             });
@@ -1084,7 +1068,7 @@ export const storage = create<StorageState>()((set, get) => {
                 sessions: updatedSessions
             };
         }),
-        updateSessionEffortLevel: (sessionId: string, level: string) => set((state) => {
+        updateSessionEffortLevel: (sessionId: string, level: string | null) => set((state) => {
             const session = state.sessions[sessionId];
             if (!session) return state;
 
@@ -1104,6 +1088,37 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             });
             saveSessionEffortLevels(allLevels);
+
+            return {
+                ...state,
+                sessions: updatedSessions
+            };
+        }),
+        resetSessionAgentOverrides: (sessionId: string) => set((state) => {
+            const session = state.sessions[sessionId];
+            if (!session) return state;
+
+            const updatedSessions = {
+                ...state.sessions,
+                [sessionId]: {
+                    ...session,
+                    permissionMode: null,
+                    modelMode: null,
+                    effortLevel: null,
+                }
+            };
+
+            const permissionModes: Record<string, string> = {};
+            const modelModes: Record<string, string> = {};
+            const effortLevels: Record<string, string> = {};
+            Object.entries(updatedSessions).forEach(([id, sess]) => {
+                if (sess.permissionMode) permissionModes[id] = sess.permissionMode;
+                if (sess.modelMode) modelModes[id] = sess.modelMode;
+                if (sess.effortLevel) effortLevels[id] = sess.effortLevel;
+            });
+            saveSessionPermissionModes(permissionModes);
+            saveSessionModelModes(modelModes);
+            saveSessionEffortLevels(effortLevels);
 
             return {
                 ...state,

@@ -38,9 +38,7 @@
     "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
     "tauri:build:preview": "tauri build --config src-tauri/tauri.preview.conf.json",
-    "tauri:build:production": "tauri build",
-    "tauri:joy": "tauri dev --config src-tauri/tauri.joy.conf.json",
-    "tauri:build:joy": "tauri build --config src-tauri/tauri.joy.conf.json"
+    "tauri:build:production": "tauri build"
   },
   "jest": {
     "preset": "jest-expo"

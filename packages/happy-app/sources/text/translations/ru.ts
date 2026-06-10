@@ -43,7 +43,6 @@ export const ru: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Отмена',
-        tapAgainToConfirm: ({ label }: { label: string }) => `Нажмите ещё раз: ${label}`,
         authenticate: 'Авторизация',
         save: 'Сохранить',
         saveAs: 'Сохранить как',
@@ -102,8 +101,6 @@ export const ru: TranslationStructure = {
         accountSubtitle: 'Управление учётной записью',
         appearance: 'Внешний вид',
         appearanceSubtitle: 'Настройка внешнего вида приложения',
-        mods: 'Mods',
-        modsSubtitle: 'Переключение модификаций приложения',
         voiceAssistant: 'Голосовой ассистент',
         voiceAssistantSubtitle: 'Настройка предпочтений голосового взаимодействия',
         featuresTitle: 'Возможности',
@@ -128,11 +125,6 @@ export const ru: TranslationStructure = {
         exchangingTokens: 'Обмен токенов...',
         usage: 'Использование',
         usageSubtitle: 'Просмотр использования API и затрат',
-        sessions: 'Joy Sessions',
-        sessionsSubtitle: 'Управление сессиями на основе tmux',
-        debug: 'Отладка',
-        joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: 'Прямой HTTP-доступ к серверу joy-tmux',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Аккаунт ${service} подключен`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -184,27 +176,6 @@ export const ru: TranslationStructure = {
         },
         showFlavorIcons: 'Показывать иконки провайдеров ИИ',
         showFlavorIconsDescription: 'Отображать иконки провайдеров ИИ на аватарах сессий',
-    },
-
-    settingsMods: {
-        enabled: 'Включено',
-        mod01Title: '01 · Audio',
-        mod01Description: 'Показывает кнопку микрофона для голосового ввода. Также включает права доступа к микрофону macOS в сборке Tauri.',
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: 'Добавляет уровень усилий xhigh между high и max для Claude.',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: 'Показывает только Plan и Yolo в выборе режима разрешений.',
-        mod05Title: '05 · Лимит истории чата',
-        mod05Description: 'Ограничивает количество сообщений, отображаемых в каждом разговоре. Полезно для длинных чатов на медленных устройствах.',
-        chatHistoryLimit: 'Лимит сообщений',
-        chatHistoryLimitDescription: 'Показывать только последние сообщения в каждом разговоре',
-        chatHistoryLimitPlaceholder: 'например, 50',
-        chatHistoryLimitOff: 'Выкл',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `Последние ${count} сообщений`,
-        mod06Title: '06 · Двойное нажатие',
-        mod06Description: 'Требует повторного нажатия в течение 2 секунд для подтверждения выбора варианта ответа от ассистента. Помогает избежать случайных выборов.',
-        mod07Title: '07 · Открыть файл из Read',
-        mod07Description: 'Показывает кнопку «Открыть файл» при вызовах инструмента Read. Кнопка использует встроенный просмотрщик файлов Happy, который загружает файл с хоста Claude — работает независимо от того, находятся ли приложение и Claude на одной машине.',
     },
 
     settingsFeatures: {
@@ -544,7 +515,6 @@ export const ru: TranslationStructure = {
     toolView: {
         input: 'Входные данные',
         output: 'Результат',
-        openFile: 'Открыть файл',
     },
 
     toolGroup: {
@@ -616,7 +586,6 @@ export const ru: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Отправить ответ',
-            tapAgain: 'Нажмите ещё раз для отправки',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'вопрос', few: 'вопроса', many: 'вопросов' })}`,
             other: 'Другое',
             otherDescription: 'Введите свой ответ',
@@ -1039,34 +1008,6 @@ export const ru: TranslationStructure = {
             : `${count} изображений не удалось загрузить — они не были отправлены.`,
         notSupportedTitle: 'Изображения не поддерживаются',
         notSupportedMessage: 'Этот агент не поддерживает изображения. Отправлен только текст.',
-    },
-
-    settingsSessions: {
-        machine: 'Машина',
-        machines: 'Машины',
-        statusOnline: 'онлайн',
-        statusOffline: 'офлайн',
-        showOfflineMachines: ({ count }: { count: number }) => `Показать ${count} офлайн ${count === 1 ? 'машину' : 'машины'}`,
-        hideOfflineMachines: 'Скрыть офлайн машины',
-        machineFooter: 'Машина с запущенным joy-tmux',
-        noMachine: 'Нет подключённых машин',
-        selectMachine: 'Выбрать машину',
-        serverUrl: 'URL сервера',
-        serverUrlFooter: 'URL сервера joy-tmux, запущенного на вашем компьютере',
-        sessions: 'Сессии',
-        noSessions: 'Нет активных сессий',
-        loading: 'Загрузка...',
-        newSession: 'Новая сессия',
-        workingDirectory: 'Рабочая директория',
-        workingDirectoryPlaceholder: 'например, /home/user/projects',
-        confirmKill: 'Завершить сессию',
-        confirmKillMessage: 'Это завершит процесс Claude и не может быть отменено.',
-        killSession: 'Завершить',
-        screenshot: 'Снимок',
-        viewPane: 'Просмотр панели',
-        statusStarting: 'Запускается',
-        statusActive: 'Активна',
-        statusEnded: 'Завершена',
     },
 
     feed: {

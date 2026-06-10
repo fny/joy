@@ -34,7 +34,6 @@ export const zhHans: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: '取消',
-        tapAgainToConfirm: ({ label }: { label: string }) => `再次点击: ${label}`,
         authenticate: '认证',
         save: '保存',
         saveAs: '另存为',
@@ -117,8 +116,6 @@ export const zhHans: TranslationStructure = {
         accountSubtitle: '管理您的账户详情',
         appearance: '外观',
         appearanceSubtitle: '自定义应用外观',
-        mods: 'Mods',
-        modsSubtitle: '切换应用修改',
         voiceAssistant: '语音助手',
         voiceAssistantSubtitle: '配置语音交互偏好',
         featuresTitle: '功能',
@@ -143,11 +140,6 @@ export const zhHans: TranslationStructure = {
         exchangingTokens: '正在交换令牌...',
         usage: '使用情况',
         usageSubtitle: '查看 API 使用情况和费用',
-        sessions: 'Joy Sessions',
-        sessionsSubtitle: '管理基于 tmux 的会话',
-        debug: '调试',
-        joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: '直接 HTTP 访问 joy-tmux 服务器',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `已连接 ${service} 账户`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -199,27 +191,6 @@ export const zhHans: TranslationStructure = {
         },
         showFlavorIcons: '显示 AI 提供商图标',
         showFlavorIconsDescription: '在会话头像上显示 AI 提供商图标',
-    },
-
-    settingsMods: {
-        enabled: '已启用',
-        mod01Title: '01 · Audio',
-        mod01Description: '显示语音输入的麦克风按钮。也在 Tauri 桌面版启用 macOS 麦克风权限。',
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: '为 Claude 在 high 和 max 之间添加 xhigh 努力级别。',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: '在权限模式选择器中只显示 Plan 和 Yolo。',
-        mod05Title: '05 · 聊天记录上限',
-        mod05Description: '限制每个会话渲染的消息数量。适用于在较慢设备上的长对话。',
-        chatHistoryLimit: '消息上限',
-        chatHistoryLimitDescription: '每个会话只显示最近的消息',
-        chatHistoryLimitPlaceholder: '例如 50',
-        chatHistoryLimitOff: '关闭',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 条消息`,
-        mod06Title: '06 · 双击确认',
-        mod06Description: '需要在 2 秒内再次点击以提交助手的多选答案。有助于防止误选。',
-        mod07Title: '07 · 打开 Read 文件',
-        mod07Description: '在 Read 工具调用上显示"打开文件"按钮。该按钮使用 Happy 的应用内文件查看器路由,从 Claude 主机获取文件 — 无论应用和 Claude 是否在同一台机器上都能工作。',
     },
 
     settingsFeatures: {
@@ -529,7 +500,6 @@ export const zhHans: TranslationStructure = {
     toolView: {
         input: '输入',
         output: '输出',
-        openFile: '打开文件',
     },
 
     toolGroup: {
@@ -601,7 +571,6 @@ export const zhHans: TranslationStructure = {
         },
         askUserQuestion: {
             submit: '提交答案',
-            tapAgain: '再次点击以提交',
             multipleQuestions: ({ count }: { count: number }) => `${count} 个问题`,
             other: '其他',
             otherDescription: '输入您自己的答案',
@@ -1011,34 +980,6 @@ export const zhHans: TranslationStructure = {
             : `${count} 张图片上传失败，未发送。`,
         notSupportedTitle: '不支持图片',
         notSupportedMessage: '该代理不支持图片附件。仅发送了文本。',
-    },
-
-    settingsSessions: {
-        machine: '设备',
-        machines: '设备列表',
-        statusOnline: '在线',
-        statusOffline: '离线',
-        showOfflineMachines: ({ count }: { count: number }) => `显示 ${count} 台离线设备`,
-        hideOfflineMachines: '隐藏离线设备',
-        machineFooter: '运行 joy-tmux 的设备',
-        noMachine: '无已连接的设备',
-        selectMachine: '选择设备',
-        serverUrl: '服务器 URL',
-        serverUrlFooter: '运行在您机器上的 joy-tmux 服务器的 URL',
-        sessions: '会话',
-        noSessions: '没有活跃的会话',
-        loading: '加载中...',
-        newSession: '新建会话',
-        workingDirectory: '工作目录',
-        workingDirectoryPlaceholder: '例如 /home/user/projects',
-        confirmKill: '终止会话',
-        confirmKillMessage: '这将终止 Claude 进程，且无法撤销。',
-        killSession: '终止',
-        screenshot: '截图',
-        viewPane: '查看面板',
-        statusStarting: '启动中',
-        statusActive: '活跃',
-        statusEnded: '已结束',
     },
 
     feed: {
