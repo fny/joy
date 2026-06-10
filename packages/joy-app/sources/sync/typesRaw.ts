@@ -744,7 +744,11 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
         return {
             id,
             localId,
-            createdAt,
+            // joy-tmux mirrors user messages with Claude's transcript timestamp
+            // in meta.joyTime. Agent events already sort by their embedded
+            // time, so honoring it here puts both on one clock — a --resume
+            // replay sorts chronologically instead of splitting agent-then-user.
+            createdAt: typeof raw.meta?.joyTime === 'number' ? raw.meta.joyTime : createdAt,
             role: 'user',
             content: raw.content,
             isSidechain: false,
