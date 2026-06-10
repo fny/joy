@@ -150,12 +150,6 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
-                name="settings/joy-usage"
-                options={{
-                    headerTitle: 'Usage (ccusage)',
-                }}
-            />
-            <Stack.Screen
                 name="settings/codeburn"
                 options={{
                     headerTitle: 'Codeburn',
