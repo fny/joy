@@ -20,6 +20,7 @@ let cachedBurnMachineIds: Set<string> | null = null;
 
 const PERIODS = [
     { key: 'today', label: 'Today' },
+    { key: 'week', label: '1 Week' },
     { key: '30days', label: '30 Days' },
     { key: '90days', label: '90 Days' },
     { key: '6months', label: '6 Months' },
@@ -61,6 +62,121 @@ function fmtCost(n: number | undefined): string {
     const v = n ?? 0;
     if (v !== 0 && v < 1) return `$${v.toFixed(3)}`;
     return `$${v.toFixed(2)}`;
+}
+
+// ── Date helpers for the activity rollups ───────────────────────────────────
+// All date strings are codeburn's local YYYY-MM-DD; T12:00 dodges TZ edges.
+
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function dayOfWeek(dateStr: string): string {
+    return DOW[new Date(`${dateStr}T12:00:00`).getDay()];
+}
+
+function mondayOf(dateStr: string): Date {
+    const d = new Date(`${dateStr}T12:00:00`);
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return d;
+}
+
+function isoDate(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+type DailyRow = { date: string; cost: number; calls: number };
+type ActivityRow = { key: string; label: string; cost: number; calls: number };
+
+// 90 days reads better as 13 weekly bars than 90 daily slivers; same idea
+// for 6 months → monthly. Codeburn only emits days with activity, so the
+// rollup is a plain group-by (gaps simply contribute nothing).
+function rollupActivity(daily: DailyRow[], period: PeriodKey): ActivityRow[] {
+    if (period === '90days') {
+        const weeks = new Map<string, ActivityRow>();
+        for (const d of daily) {
+            const wk = isoDate(mondayOf(d.date));
+            const row = weeks.get(wk) ?? { key: wk, label: `wk ${wk.slice(5)}`, cost: 0, calls: 0 };
+            row.cost += d.cost;
+            row.calls += d.calls;
+            weeks.set(wk, row);
+        }
+        return [...weeks.values()].sort((a, b) => a.key.localeCompare(b.key));
+    }
+    if (period === '6months') {
+        const months = new Map<string, ActivityRow>();
+        for (const d of daily) {
+            const mo = d.date.slice(0, 7);
+            const label = `${MONTHS[parseInt(mo.slice(5), 10) - 1]} ${mo.slice(0, 4)}`;
+            const row = months.get(mo) ?? { key: mo, label, cost: 0, calls: 0 };
+            row.cost += d.cost;
+            row.calls += d.calls;
+            months.set(mo, row);
+        }
+        return [...months.values()].sort((a, b) => a.key.localeCompare(b.key));
+    }
+    return daily.map(d => ({ key: d.date, label: `${dayOfWeek(d.date)} ${d.date.slice(5)}`, cost: d.cost, calls: d.calls }));
+}
+
+// GitHub-style heatmap for the 30-day view: rows are calendar weeks
+// (Mon → Sun), cell intensity is the day's cost share of the period max.
+function Heatmap({ daily }: { daily: DailyRow[] }) {
+    const byDate = new Map(daily.map(d => [d.date, d]));
+    const max = Math.max(1e-9, ...daily.map(d => d.cost));
+
+    const end = new Date(); end.setHours(12, 0, 0, 0);
+    const start = new Date(end); start.setDate(start.getDate() - 29);
+    const cursor = mondayOf(isoDate(start));
+
+    const weeks: Array<Array<{ iso: string; dayNum: number; cost: number | null; inRange: boolean }>> = [];
+    while (cursor <= end) {
+        const week: Array<{ iso: string; dayNum: number; cost: number | null; inRange: boolean }> = [];
+        for (let i = 0; i < 7; i++) {
+            const iso = isoDate(cursor);
+            const inRange = cursor >= start && cursor <= end;
+            const day = byDate.get(iso);
+            week.push({ iso, dayNum: cursor.getDate(), cost: day ? day.cost : null, inRange });
+            cursor.setDate(cursor.getDate() + 1);
+        }
+        weeks.push(week);
+    }
+
+    return (
+        <View style={{ gap: 4 }}>
+            <View style={styles.heatRow}>
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(d => (
+                    <Text key={d} style={styles.heatHeader}>{d}</Text>
+                ))}
+            </View>
+            {weeks.map((week, wi) => (
+                <View key={wi} style={styles.heatRow}>
+                    {week.map(cell => {
+                        const intensity = cell.cost != null ? 0.18 + 0.82 * (cell.cost / max) : 0;
+                        return (
+                            <View
+                                key={cell.iso}
+                                style={[
+                                    styles.heatCell,
+                                    !cell.inRange && { opacity: 0.25 },
+                                    cell.cost != null
+                                        ? { backgroundColor: `rgba(255, 107, 53, ${intensity.toFixed(2)})` }
+                                        : null,
+                                ]}
+                            >
+                                <Text style={[styles.heatDay, cell.cost != null && cell.cost / max > 0.55 && { color: '#FFF' }]}>
+                                    {cell.dayNum}
+                                </Text>
+                                {cell.cost != null && (
+                                    <Text style={[styles.heatCost, cell.cost / max > 0.55 && { color: '#FFF' }]} numberOfLines={1}>
+                                        ${cell.cost < 10 ? cell.cost.toFixed(1) : Math.round(cell.cost)}
+                                    </Text>
+                                )}
+                            </View>
+                        );
+                    })}
+                </View>
+            ))}
+        </View>
+    );
 }
 
 // One TUI-style row: proportional bar | label | value columns.
@@ -181,7 +297,8 @@ export default React.memo(function CodeburnSettingsScreen() {
 
     const report = state.phase === 'done' ? state.report : null;
     const o = report?.overview;
-    const maxDaily = Math.max(1e-9, ...(report?.daily ?? []).map(d => d.cost));
+    const activityRows = rollupActivity(report?.daily ?? [], period);
+    const maxActivityRow = Math.max(1e-9, ...activityRows.map(d => d.cost));
     const maxProject = Math.max(1e-9, ...(report?.projects ?? []).map(p => p.cost));
     const maxModel = Math.max(1e-9, ...(report?.models ?? []).map(m => m.cost));
     const maxActivity = Math.max(1e-9, ...(report?.activities ?? []).map(a => a.cost));
@@ -249,13 +366,19 @@ export default React.memo(function CodeburnSettingsScreen() {
                         </Text>
                     </View>
 
-                    {!!report.daily?.length && report.daily.length > 1 && (
-                        <Section title="Daily Activity">
-                            {report.daily.map(d => (
+                    {period === '30days' && !!report.daily?.length && (
+                        <Section title="30-Day Heatmap">
+                            <Heatmap daily={report.daily} />
+                        </Section>
+                    )}
+
+                    {activityRows.length > 1 && (
+                        <Section title={period === '90days' ? 'Weekly Activity' : period === '6months' ? 'Monthly Activity' : 'Daily Activity'}>
+                            {activityRows.map(d => (
                                 <BarRow
-                                    key={d.date}
-                                    frac={d.cost / maxDaily}
-                                    label={d.date.slice(5)}
+                                    key={d.key}
+                                    frac={d.cost / maxActivityRow}
+                                    label={d.label}
                                     value={fmtCost(d.cost)}
                                     sub={`${d.calls}`}
                                     color="#FF6B35"
@@ -489,6 +612,35 @@ const styles = StyleSheet.create((theme) => ({
         minWidth: 62,
         textAlign: 'right',
         flexShrink: 0,
+        ...Typography.mono('semiBold'),
+    },
+    heatRow: {
+        flexDirection: 'row',
+        gap: 4,
+    },
+    heatHeader: {
+        flex: 1,
+        fontSize: 10,
+        textAlign: 'center',
+        color: theme.colors.textSecondary,
+        ...Typography.mono(),
+    },
+    heatCell: {
+        flex: 1,
+        aspectRatio: 1,
+        borderRadius: 6,
+        backgroundColor: theme.colors.divider,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    heatDay: {
+        fontSize: 10,
+        color: theme.colors.textSecondary,
+        ...Typography.mono(),
+    },
+    heatCost: {
+        fontSize: 9,
+        color: theme.colors.text,
         ...Typography.mono('semiBold'),
     },
 }));

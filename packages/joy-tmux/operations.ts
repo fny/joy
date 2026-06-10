@@ -312,6 +312,7 @@ async function runCodeburn(period: string): Promise<Record<string, unknown>> {
 
   const periodArgs =
     period === "today" ? ["-p", "today"]
+    : period === "week" ? ["-p", "week"]
     : period === "90days" ? ["--from", daysAgoISO(90)]
     : period === "6months" ? ["--from", daysAgoISO(183)]
     : ["-p", "30days"];
