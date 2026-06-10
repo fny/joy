@@ -248,13 +248,18 @@ export class SessionRegistry {
       pid = isNaN(child) ? shellPid : child;
     }
 
+    const startedAt = Date.now();
     const session = new Session({
       id, pid, tmuxWindow, cwd,
       model: opts.model,
       effort: opts.effort,
       flags,
       status: "starting",
-      startedAt: Date.now(),
+      startedAt,
+      // --resume/--continue replays the prior conversation into the new
+      // transcript; skip mirroring anything that predates this launch so the
+      // fresh relay session isn't flooded with mis-ordered history.
+      mirrorFromMs: (opts.continue || opts.resume_id) ? startedAt : undefined,
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);

@@ -98,6 +98,17 @@ export interface SessionInit {
   pid?: number;
   claudeSessionId?: string;
   transcriptPath?: string;
+  /**
+   * Don't mirror transcript entries older than this (epoch ms). Set for
+   * --resume/--continue sessions: claude replays the entire prior
+   * conversation into the new transcript in a sub-second burst, and
+   * re-mirroring it floods the fresh relay session with history that (a) the
+   * app never asked for and (b) sorts wrong, because agent events carry the
+   * daemon's embedded clock while user messages carry the relay's append
+   * clock — a constant skew that splits a replay burst into "all agent, then
+   * all user". Mirrors happy-cli's skipExistingMessages() on resume.
+   */
+  mirrorFromMs?: number;
 }
 
 export class Session {
@@ -127,6 +138,7 @@ export class Session {
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
   #prelaunchBuffer: BufferedMessage[] = [];
   #promptPollActive = false;
+  #mirrorFromMs: number;
 
   constructor(init: SessionInit, deps: SessionDeps) {
     this.id = init.id;
@@ -141,6 +153,7 @@ export class Session {
     this.pid = init.pid;
     this.claudeSessionId = init.claudeSessionId;
     this.transcriptPath = init.transcriptPath;
+    this.#mirrorFromMs = init.mirrorFromMs ?? 0;
     this.#deps = deps;
   }
 
@@ -534,6 +547,17 @@ export class Session {
     }
 
     const sid = this.claudeSessionId;
+
+    // Resume replay guard: --resume/--continue rewrites the entire prior
+    // conversation into this transcript. Those entries carry their original
+    // (old) timestamps; anything before mirrorFromMs is replayed history we
+    // must NOT re-mirror (see SessionInit.mirrorFromMs). Activation above
+    // still ran so the session goes live and the prelaunch buffer flushes;
+    // we just don't forward the history.
+    if (this.#mirrorFromMs && (entryType === "user" || entryType === "assistant" || entryType === "system")) {
+      const tsMs = Date.parse(String(entry.timestamp || ""));
+      if (!isNaN(tsMs) && tsMs < this.#mirrorFromMs) return;
+    }
 
     // Turn complete → send turn-end and clear turn state
     if (entryType === "system" && entry.subtype === "stop_hook_summary") {
