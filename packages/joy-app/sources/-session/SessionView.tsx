@@ -210,6 +210,23 @@ export const SessionView = React.memo((props: { id: string }) => {
         };
     }, [session, isDataReady]);
 
+    // joy-tmux sessions: header shortcut to the interactive tmux pane
+    // (/joy/pane) for raw intervention — trust prompts, TUI menus, etc.
+    const joyTerminalSlot = React.useMemo(() => {
+        const joyId = session?.metadata?.joy__sessionId;
+        const joyMachine = session?.metadata?.machineId;
+        if (session?.metadata?.joy__source !== 'joy-tmux' || !joyId || !joyMachine) return null;
+        return (
+            <Pressable
+                onPress={() => router.push(`/joy/pane/${encodeURIComponent(joyMachine)}/${encodeURIComponent(joyId)}`)}
+                hitSlop={10}
+                style={{ paddingHorizontal: 4 }}
+            >
+                <Ionicons name="terminal-outline" size={20} color={theme.colors.header.tint} />
+            </Pressable>
+        );
+    }, [session?.metadata?.joy__source, session?.metadata?.joy__sessionId, session?.metadata?.machineId, router, theme]);
+
     const mainContent = (
         <>
             {/* Status bar shadow for landscape mode */}
@@ -248,7 +265,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         isConnected={headerProps.isConnected}
                         badge={headerProps.badge}
                         extraPathSegment={fileViewPath ?? undefined}
-                        rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : null}
+                        rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : joyTerminalSlot}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
                         onBackPress={() => router.back()}
                     />
