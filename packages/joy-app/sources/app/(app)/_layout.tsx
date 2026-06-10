@@ -362,6 +362,13 @@ export default function RootLayout() {
                     headerBackTitle: t('common.back'),
                 }}
             />
+            <Stack.Screen
+                name="joy/machine/[id]"
+                options={{
+                    headerTitle: 'Machine (joy-tmux)',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
         </Stack>
     );
 }
