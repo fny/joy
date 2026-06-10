@@ -24,6 +24,7 @@ type SessionUsage = {
     cost: number;
     calls: number;
     turns: number;
+    models?: Array<{ name: string; cost: number }>;
 };
 
 function raceTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -171,6 +172,19 @@ export default React.memo(function SessionUsageScreen() {
                     showChevron={false}
                 />
             </ItemGroup>
+
+            {!!entry.models?.length && (
+                <ItemGroup title="By model">
+                    {entry.models.map(m => (
+                        <Item
+                            key={m.name}
+                            title={m.name}
+                            detail={`$${m.cost.toFixed(2)}`}
+                            showChevron={false}
+                        />
+                    ))}
+                </ItemGroup>
+            )}
         </ItemList>
     );
 });
