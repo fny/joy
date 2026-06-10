@@ -188,6 +188,11 @@ export class SessionRegistry {
 
     if (!run("tmux", "has-session", "-t", this.tmuxSession).ok) {
       run("tmux", "new-session", "-d", "-s", this.tmuxSession, "-c", cwd);
+      // When a real terminal attaches, let it drive the window size (tmux's
+      // default `latest` behavior). The app's resize-window flips windows to
+      // `manual`; this hook hands control back on attach so the most recent
+      // connector — app or terminal — owns the width.
+      run("tmux", "set-hook", "-t", this.tmuxSession, "client-attached", "setw window-size latest");
     }
 
     // Validate user-supplied fields to prevent shell injection via send-keys
@@ -228,6 +233,11 @@ export class SessionRegistry {
     const tmuxWindow = `${this.tmuxSession}:${windowName}`;
     const cmd = [...envParts, "claude", ...flags].join(" ");
     run("tmux", "new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd);
+    // Pin a sane default size so the window doesn't inherit whatever terminal
+    // last touched the session (could be 182+ cols). A viewing client drives
+    // it afterwards via joy-resize. Set before launch so claude's TUI renders
+    // at this width from the start.
+    run("tmux", "resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40");
     run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
 
     // Kick off the relay session creation NOW so its network round-trips
