@@ -34,6 +34,11 @@ import { navigateToSession } from '@/hooks/useNavigateToSession';
 import { applyVoiceUpsellOverride } from '@/realtime/voiceExperiment';
 import { useTauriZoom } from '@/hooks/useTauriZoom';
 import { useTauriDrag } from '@/hooks/useTauriDrag';
+import { preventInputZoom } from '@/utils/preventInputZoom';
+
+// Mobile web: stop iOS Safari from zooming the page when small-font inputs
+// gain focus. Module scope so it runs before first paint.
+preventInputZoom();
 
 // Configure notification handler — suppress push display when app is in foreground
 Notifications.setNotificationHandler({
