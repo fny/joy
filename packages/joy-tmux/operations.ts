@@ -335,6 +335,11 @@ async function runCodeburn(period: string): Promise<Record<string, unknown>> {
     currency: full.currency,
     period: full.period,
     overview: full.overview,
+    // Per-day rows power the app's bar chart; only the charted fields ride.
+    daily: Array.isArray(full.daily)
+      ? (full.daily as Array<{ date?: string; cost?: number; calls?: number }>)
+          .map((d) => ({ date: d.date, cost: d.cost, calls: d.calls }))
+      : [],
     projects: top("projects", 12),
     models: top("models", 12),
     activities: top("activities", 13),
