@@ -11,7 +11,14 @@ export default function Root({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
-        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+        {/*
+          maximum-scale=1 prevents iOS Safari's automatic zoom-in when an
+          input with font-size < 16px gains focus (e.g. the monospace
+          terminal input). iOS deliberately ignores maximum-scale for user
+          pinch gestures, so accessibility zoom keeps working — this only
+          suppresses the focus auto-zoom.
+        */}
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, shrink-to-fit=no" />
 
         {/* 
           Disable body scrolling on web. This makes ScrollView components work closer to how they do on native. 
