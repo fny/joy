@@ -712,10 +712,14 @@ export class RelaySession {
 
 // ── Wire encoding ──────────────────────────────────────────────────────────────
 
-function sessionEnvelope(ev: Record<string, unknown>, opts: { turn: string; claudeUuid?: string }): WireRecord {
+// opts.time is Claude's transcript timestamp (epoch ms) for this entry. The
+// app sorts agent events by this embedded time, so stamping it from the
+// transcript (not Date.now at mirror time) keeps a --resume replay in true
+// chronological order. Falls back to now() when a caller omits it.
+function sessionEnvelope(ev: Record<string, unknown>, opts: { turn: string; claudeUuid?: string; time?: number }): WireRecord {
   const data: Record<string, unknown> = {
     id: crypto.randomUUID(),
-    time: Date.now(),
+    time: opts.time ?? Date.now(),
     role: 'agent',
     turn: opts.turn,
     ev,
@@ -724,16 +728,16 @@ function sessionEnvelope(ev: Record<string, unknown>, opts: { turn: string; clau
   return { role: 'session', content: { type: 'session', data }, meta: { sentFrom: 'joy' } };
 }
 
-export function encodeTurnStart(opts: { turn: string; claudeUuid?: string }): WireRecord {
+export function encodeTurnStart(opts: { turn: string; claudeUuid?: string; time?: number }): WireRecord {
   return sessionEnvelope({ t: 'turn-start' }, opts);
 }
 
-export function encodeTextEvent(text: string, opts: { turn: string; claudeUuid?: string }): WireRecord {
+export function encodeTextEvent(text: string, opts: { turn: string; claudeUuid?: string; time?: number }): WireRecord {
   return sessionEnvelope({ t: 'text', text }, opts);
 }
 
 export function encodeToolCallStart(opts: {
-  call: string; name: string; input: unknown; turn: string; claudeUuid?: string;
+  call: string; name: string; input: unknown; turn: string; claudeUuid?: string; time?: number;
 }): WireRecord {
   return sessionEnvelope({
     t: 'tool-call-start',
@@ -745,16 +749,21 @@ export function encodeToolCallStart(opts: {
   }, opts);
 }
 
-export function encodeToolCallEnd(call: string, opts: { turn: string; claudeUuid?: string }): WireRecord {
+export function encodeToolCallEnd(call: string, opts: { turn: string; claudeUuid?: string; time?: number }): WireRecord {
   return sessionEnvelope({ t: 'tool-call-end', call }, opts);
 }
 
-export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts: { turn: string }): WireRecord {
+export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts: { turn: string; time?: number }): WireRecord {
   return sessionEnvelope({ t: 'turn-end', status }, opts);
 }
 
-export function encodeUserMessage(text: string): WireRecord {
-  return { role: 'user', content: { type: 'text', text }, meta: { sentFrom: 'joy' } };
+// User messages are sorted by the relay's server-assigned createdAt, NOT an
+// embedded time — so on a replay burst they'd diverge from agent events (a
+// different clock). joyTime carries Claude's transcript timestamp; joy-app
+// reads it (MessageMetaSchema.joyTime) and orders joy user messages by it,
+// putting both sides on one clock.
+export function encodeUserMessage(text: string, timeMs?: number): WireRecord {
+  return { role: 'user', content: { type: 'text', text }, meta: { sentFrom: 'joy', joyTime: timeMs } };
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────

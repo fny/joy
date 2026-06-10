@@ -98,17 +98,6 @@ export interface SessionInit {
   pid?: number;
   claudeSessionId?: string;
   transcriptPath?: string;
-  /**
-   * Don't mirror transcript entries older than this (epoch ms). Set for
-   * --resume/--continue sessions: claude replays the entire prior
-   * conversation into the new transcript in a sub-second burst, and
-   * re-mirroring it floods the fresh relay session with history that (a) the
-   * app never asked for and (b) sorts wrong, because agent events carry the
-   * daemon's embedded clock while user messages carry the relay's append
-   * clock — a constant skew that splits a replay burst into "all agent, then
-   * all user". Mirrors happy-cli's skipExistingMessages() on resume.
-   */
-  mirrorFromMs?: number;
 }
 
 export class Session {
@@ -138,7 +127,6 @@ export class Session {
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
   #prelaunchBuffer: BufferedMessage[] = [];
   #promptPollActive = false;
-  #mirrorFromMs: number;
 
   constructor(init: SessionInit, deps: SessionDeps) {
     this.id = init.id;
@@ -153,7 +141,6 @@ export class Session {
     this.pid = init.pid;
     this.claudeSessionId = init.claudeSessionId;
     this.transcriptPath = init.transcriptPath;
-    this.#mirrorFromMs = init.mirrorFromMs ?? 0;
     this.#deps = deps;
   }
 
@@ -548,22 +535,18 @@ export class Session {
 
     const sid = this.claudeSessionId;
 
-    // Resume replay guard: --resume/--continue rewrites the entire prior
-    // conversation into this transcript. Those entries carry their original
-    // (old) timestamps; anything before mirrorFromMs is replayed history we
-    // must NOT re-mirror (see SessionInit.mirrorFromMs). Activation above
-    // still ran so the session goes live and the prelaunch buffer flushes;
-    // we just don't forward the history.
-    if (this.#mirrorFromMs && (entryType === "user" || entryType === "assistant" || entryType === "system")) {
-      const tsMs = Date.parse(String(entry.timestamp || ""));
-      if (!isNaN(tsMs) && tsMs < this.#mirrorFromMs) return;
-    }
+    // Every mirrored message is stamped with Claude's own transcript
+    // timestamp (one clock for both user and agent messages), so a --resume
+    // replay sorts in true chronological order in the app instead of
+    // splitting into "all agent, then all user" from daemon/relay clock skew.
+    // Falls back to now() for entries without a parseable timestamp.
+    const entryTimeMs = Date.parse(String(entry.timestamp || "")) || Date.now();
 
     // Turn complete → send turn-end and clear turn state
     if (entryType === "system" && entry.subtype === "stop_hook_summary") {
       this.#deps.broadcast("stop", { session_id: sid });
       if (this.#relay && this.#turn) {
-        this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId }));
+        this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
       }
       this.#turn = null;
       this.#relay?.setThinking(false);
@@ -585,7 +568,7 @@ export class Session {
         if (this.#relay && this.#turn && Array.isArray(content)) {
           for (const item of content as Array<Record<string, unknown>>) {
             if (item.type === "tool_result" && typeof item.tool_use_id === "string") {
-              this.#relay.send(encodeToolCallEnd(item.tool_use_id, { turn: this.#turn.turnId }));
+              this.#relay.send(encodeToolCallEnd(item.tool_use_id, { turn: this.#turn.turnId, time: entryTimeMs }));
             }
           }
         }
@@ -612,7 +595,7 @@ export class Session {
         // forwarded it (recovery), otherwise mirror it to the relay so the app
         // sees the full conversation.
         if (!delivery.forwardedUuids.has(uuid)) {
-          this.#relay!.send(encodeUserMessage(content));
+          this.#relay!.send(encodeUserMessage(content, entryTimeMs));
           recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "", at: Date.now() });
         }
       }
@@ -631,9 +614,9 @@ export class Session {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {
           this.#turn = { turnId: crypto.randomUUID() };
-          this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId }));
+          this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
         }
-        const opts = { turn: this.#turn.turnId, claudeUuid: entryUuid || undefined };
+        const opts = { turn: this.#turn.turnId, claudeUuid: entryUuid || undefined, time: entryTimeMs };
         for (const block of blocks) {
           const blockType = String(block.type || "");
           if (blockType === "text") {
@@ -660,7 +643,7 @@ export class Session {
         // calls pending (no turn-end yet).
         const stopReason = String(msg.stop_reason || "");
         if (stopReason === "end_turn" || stopReason === "max_tokens") {
-          this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId }));
+          this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
           this.#turn = null;
           this.#relay.setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
