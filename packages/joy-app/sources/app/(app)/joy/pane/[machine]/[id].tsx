@@ -15,8 +15,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
+import { AnsiText } from '@/components/AnsiText';
 
 const POLL_MS = 1500;
+// Pane font metrics — char width ≈ 0.6em for the mono fonts below; used to
+// map the rendered pixel width to terminal columns for adaptive sizing.
+const PANE_LINE_HEIGHT = 15; // must match styles.paneText.lineHeight
+const CHAR_WIDTH = 11 * 0.6; // styles.paneText.fontSize (11) × mono advance ≈ 0.6em
 
 // One-tap keys for the most common interventions.
 const QUICK_KEYS: { label: string; script: string }[] = [
@@ -53,8 +58,8 @@ export default React.memo(function JoyPaneScreen() {
     const refresh = React.useCallback(async () => {
         try {
             const result = await Promise.race([
-                apiSocket.machineRPC<{ ok?: boolean; text?: string; error?: string }, { id: string }>(
-                    machineId, 'joy-pane', { id: sessionId },
+                apiSocket.machineRPC<{ ok?: boolean; text?: string; error?: string }, { id: string; color?: boolean }>(
+                    machineId, 'joy-pane', { id: sessionId, color: true },
                 ),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
             ]);
@@ -70,8 +75,26 @@ export default React.memo(function JoyPaneScreen() {
         }
     }, [machineId, sessionId]);
 
+    // Adaptive width: tell the daemon to size the tmux window to our rendered
+    // pane — "last connector drives the width". Only fires when the column
+    // count actually changes (each resize reflows claude's TUI), and is
+    // re-asserted on focus so re-opening on a different device re-claims.
+    const lastColsRef = React.useRef(0);
+    const drivePaneSize = React.useCallback((widthPx: number, heightPx: number) => {
+        const cols = Math.max(20, Math.round(widthPx / CHAR_WIDTH));
+        const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT));
+        if (cols === lastColsRef.current || !cols) return;
+        lastColsRef.current = cols;
+        void apiSocket.machineRPC(machineId, 'joy-resize', { id: sessionId, cols, rows })
+            .then(() => setTimeout(() => void refresh(), 200))
+            .catch(() => { /* best-effort */ });
+    }, [machineId, sessionId, refresh]);
+
     // Poll while the screen is focused.
     useFocusEffect(React.useCallback(() => {
+        // Re-claim the width on focus (the size may have drifted to another
+        // viewer or a real terminal since we last looked).
+        lastColsRef.current = 0;
         void refresh();
         const timer = setInterval(() => void refresh(), POLL_MS);
         return () => clearInterval(timer);
@@ -115,12 +138,13 @@ export default React.memo(function JoyPaneScreen() {
             <ScrollView
                 ref={scrollRef}
                 style={styles.paneScroll}
+                onLayout={(e) => drivePaneSize(e.nativeEvent.layout.width, e.nativeEvent.layout.height)}
                 onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
             >
                 <ScrollView horizontal>
-                    <Text style={styles.paneText} selectable>
-                        {paneError ? `⚠ ${paneError}` : (pane || '…')}
-                    </Text>
+                    {paneError
+                        ? <Text style={styles.paneText} selectable>{`⚠ ${paneError}`}</Text>
+                        : <AnsiText text={pane || '…'} style={styles.paneText} />}
                 </ScrollView>
             </ScrollView>
 
