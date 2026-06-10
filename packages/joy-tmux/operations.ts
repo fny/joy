@@ -258,6 +258,20 @@ export const machineOps: MachineOp[] = [
     }),
   },
   {
+    name: "codeburn",
+    scope: "machine",
+    rpcName: "joy-codeburn",
+    http: { method: "GET", path: "/codeburn" },
+    // Rich usage report via codeburn (getagentseal/codeburn): cost/tokens
+    // plus per-project, per-model, activity, tool and MCP breakdowns.
+    // period: today | 30days (default) | 90days | 6months.
+    handler: async (_registry, params) => {
+      const period = typeof params.period === "string" ? params.period : "30days";
+      const data = await runCodeburn(period);
+      return { ok: true, ...data };
+    },
+  },
+  {
     name: "usage",
     scope: "machine",
     rpcName: "joy-usage",
@@ -283,6 +297,55 @@ export const machineOps: MachineOp[] = [
 // (kind, since) briefly — the app polls these from multiple pages.
 const usageCache = new Map<string, { at: number; data: unknown }>();
 const USAGE_CACHE_TTL_MS = 60_000;
+
+function daysAgoISO(days: number): string {
+  const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// codeburn knows today/week/30days/month/all as named periods; longer rolling
+// windows go through --from. ~1.5-3s per run, so cache like ccusage.
+async function runCodeburn(period: string): Promise<Record<string, unknown>> {
+  const key = `codeburn:${period}`;
+  const hit = usageCache.get(key);
+  if (hit && Date.now() - hit.at < USAGE_CACHE_TTL_MS) return hit.data as Record<string, unknown>;
+
+  const periodArgs =
+    period === "today" ? ["-p", "today"]
+    : period === "90days" ? ["--from", daysAgoISO(90)]
+    : period === "6months" ? ["--from", daysAgoISO(183)]
+    : ["-p", "30days"];
+
+  const bin = Bun.which("codeburn");
+  const argv = [...(bin ? [bin] : ["bunx", "codeburn"]), "report", "--format", "json", ...periodArgs];
+
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+  const killTimer = setTimeout(() => proc.kill(), 60_000);
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  clearTimeout(killTimer);
+  if (proc.exitCode !== 0) throw new Error(`codeburn exited with ${proc.exitCode}`);
+
+  const full = JSON.parse(out) as Record<string, unknown>;
+  // The raw report runs to tens of KB (shellCommands alone had 370+ entries)
+  // and rides an encrypted RPC envelope, so keep only what the app renders.
+  const top = (k: string, n: number) => (Array.isArray(full[k]) ? (full[k] as unknown[]).slice(0, n) : []);
+  const data: Record<string, unknown> = {
+    generated: full.generated,
+    currency: full.currency,
+    period: full.period,
+    overview: full.overview,
+    projects: top("projects", 12),
+    models: top("models", 12),
+    activities: top("activities", 13),
+    tools: top("tools", 10),
+    mcpServers: top("mcpServers", 10),
+    skills: top("skills", 10),
+    subagents: top("subagents", 10),
+  };
+  usageCache.set(key, { at: Date.now(), data });
+  return data;
+}
 
 async function runCcusage(kind: "daily" | "monthly" | "session", since?: string): Promise<unknown> {
   const key = `${kind}:${since ?? ""}`;
