@@ -32,6 +32,11 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
         ]
         : config.buttons || [{ text: 'OK', style: 'default' as const }];
 
+    // iOS UIAlertController behavior: up to two buttons sit side by side;
+    // three or more stack vertically (the session action menu has ~7 —
+    // squeezing them into one 270px row produced unreadable slivers).
+    const isVertical = buttons.length > 2;
+
     const styles = StyleSheet.create({
         container: {
             backgroundColor: theme.colors.surface,
@@ -69,10 +74,10 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
         buttonContainer: {
             borderTopWidth: 1,
             borderTopColor: theme.colors.divider,
-            flexDirection: 'row'
+            flexDirection: isVertical ? 'column' : 'row'
         },
         button: {
-            flex: 1,
+            flex: isVertical ? undefined : 1,
             paddingVertical: 11,
             alignItems: 'center',
             justifyContent: 'center'
@@ -81,7 +86,8 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
             backgroundColor: theme.colors.divider
         },
         buttonSeparator: {
-            width: 1,
+            width: isVertical ? undefined : 1,
+            height: isVertical ? 1 : undefined,
             backgroundColor: theme.colors.divider
         },
         buttonText: {
