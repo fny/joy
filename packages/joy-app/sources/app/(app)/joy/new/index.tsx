@@ -89,7 +89,7 @@ function NewJoyTmuxSessionScreen() {
     // repo's machine + path when this page is the default New session).
     const params = useLocalSearchParams<{ machineId?: string; path?: string }>();
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
-    const [pathInput, setPathInput] = React.useState<string>(params.path || '~');
+    const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
     // Permission mode, cycled by tapping the row. Index 0 = yolo
@@ -343,7 +343,7 @@ function NewJoyTmuxSessionScreen() {
     const machineName = selectedMachine ? getMachineName(selectedMachine) : 'Select machine';
     const displayPath = trimPathInput(pathInput)
         ? formatPathRelativeToHome(trimPathInput(pathInput), selectedHomeDir)
-        : '~';
+        : '~/';
 
     return (
         <KeyboardAvoidingView
@@ -593,7 +593,7 @@ function NewJoyTmuxSessionScreen() {
                         <TextInput
                             value={pathInput}
                             onChangeText={setPathInput}
-                            placeholder="~"
+                            placeholder="~/"
                             placeholderTextColor={theme.colors.textSecondary}
                             style={styles.pathTextInput}
                             autoCapitalize="none"
