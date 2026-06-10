@@ -27,6 +27,16 @@ const PERIODS = [
 ] as const;
 type PeriodKey = typeof PERIODS[number]['key'];
 
+type SessionRow = {
+    id: string;
+    project: string;
+    startedAt: string;
+    cost: number;
+    calls: number;
+    turns: number;
+    machineId?: string;
+};
+
 type BurnReport = {
     ok?: boolean;
     error?: string;
@@ -115,6 +125,87 @@ function rollupActivity(daily: DailyRow[], period: PeriodKey): ActivityRow[] {
         return [...months.values()].sort((a, b) => a.key.localeCompare(b.key));
     }
     return daily.map(d => ({ key: d.date, label: `${dayOfWeek(d.date)} ${d.date.slice(5)}`, cost: d.cost, calls: d.calls }));
+}
+
+// ── All-machines aggregation ────────────────────────────────────────────────
+
+function mergeBy<T>(items: T[], key: (t: T) => string, combine: (a: T, b: T) => T): T[] {
+    const m = new Map<string, T>();
+    for (const it of items) {
+        const k = key(it);
+        const prev = m.get(k);
+        m.set(k, prev ? combine(prev, it) : it);
+    }
+    return [...m.values()];
+}
+
+// Weighted-average a rate across machines; `a` is the running merge so its
+// weight is already cumulative.
+function mergeRate(a: number | null | undefined, wa: number, b: number | null | undefined, wb: number): number | null {
+    if (a != null && b != null && wa + wb > 0) return Math.round(((a * wa + b * wb) / (wa + wb)) * 10) / 10;
+    return a ?? b ?? null;
+}
+
+function mergeReports(reports: BurnReport[]): BurnReport {
+    const sum = (f: (o: NonNullable<BurnReport['overview']>) => number) =>
+        reports.reduce((acc, r) => acc + (r.overview ? f(r.overview) : 0), 0);
+    const calls = sum(o => o.calls);
+    const overview = {
+        cost: sum(o => o.cost),
+        netCost: sum(o => o.netCost),
+        savings: sum(o => o.savings),
+        calls,
+        sessions: sum(o => o.sessions),
+        cacheHitPercent: calls
+            ? Math.round(reports.reduce((acc, r) => acc + (r.overview ? r.overview.cacheHitPercent * r.overview.calls : 0), 0) / calls)
+            : 0,
+        tokens: {
+            input: sum(o => o.tokens.input),
+            output: sum(o => o.tokens.output),
+            cacheRead: sum(o => o.tokens.cacheRead),
+            cacheWrite: sum(o => o.tokens.cacheWrite),
+        },
+    };
+    const byCostDesc = <T extends { cost: number }>(arr: T[]) => arr.sort((a, b) => b.cost - a.cost);
+    const byCallsDesc = <T extends { calls: number }>(arr: T[]) => arr.sort((a, b) => b.calls - a.calls);
+    return {
+        ok: true,
+        period: reports[0]?.period,
+        overview,
+        daily: mergeBy(reports.flatMap(r => r.daily ?? []), d => d.date,
+            (a, b) => ({ date: a.date, cost: a.cost + b.cost, calls: a.calls + b.calls }))
+            .sort((a, b) => a.date.localeCompare(b.date)),
+        projects: byCostDesc(mergeBy(reports.flatMap(r => r.projects ?? []), p => p.path || p.name,
+            (a, b) => {
+                const sessions = a.sessions + b.sessions;
+                const cost = a.cost + b.cost;
+                return { ...a, cost, calls: a.calls + b.calls, sessions, avgCostPerSession: sessions ? cost / sessions : undefined };
+            })).slice(0, 12),
+        models: byCostDesc(mergeBy(reports.flatMap(r => r.models ?? []), m => m.name,
+            (a, b) => ({
+                ...a,
+                cost: a.cost + b.cost,
+                calls: a.calls + b.calls,
+                inputTokens: a.inputTokens + b.inputTokens,
+                outputTokens: a.outputTokens + b.outputTokens,
+                oneShotRate: mergeRate(a.oneShotRate, a.calls, b.oneShotRate, b.calls),
+            }))).slice(0, 12),
+        activities: byCostDesc(mergeBy(reports.flatMap(r => r.activities ?? []), a => a.category,
+            (a, b) => ({
+                ...a,
+                cost: a.cost + b.cost,
+                turns: a.turns + b.turns,
+                oneShotRate: mergeRate(a.oneShotRate, a.turns, b.oneShotRate, b.turns),
+            }))).slice(0, 13),
+        tools: byCallsDesc(mergeBy(reports.flatMap(r => r.tools ?? []), t => t.name,
+            (a, b) => ({ name: a.name, calls: a.calls + b.calls }))).slice(0, 10),
+        mcpServers: byCallsDesc(mergeBy(reports.flatMap(r => r.mcpServers ?? []), s => s.name,
+            (a, b) => ({ name: a.name, calls: a.calls + b.calls }))).slice(0, 10),
+        skills: byCostDesc(mergeBy(reports.flatMap(r => r.skills ?? []), s => s.name,
+            (a, b) => ({ name: a.name, calls: (a.calls ?? 0) + (b.calls ?? 0), cost: (a.cost ?? 0) + (b.cost ?? 0) })).map(s => ({ ...s, cost: s.cost ?? 0 }))).slice(0, 10),
+        subagents: byCostDesc(mergeBy(reports.flatMap(r => r.subagents ?? []), s => s.name,
+            (a, b) => ({ name: a.name, calls: (a.calls ?? 0) + (b.calls ?? 0), cost: (a.cost ?? 0) + (b.cost ?? 0) })).map(s => ({ ...s, cost: s.cost ?? 0 }))).slice(0, 10),
+    };
 }
 
 // GitHub-style heatmap for the 30-day view: rows are calendar weeks
@@ -214,8 +305,11 @@ export default React.memo(function CodeburnSettingsScreen() {
     const onlineIds = machines.filter(isMachineOnline).map(m => m.id);
 
     const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(cachedBurnMachineIds);
-    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(
-        () => cachedBurnMachineIds?.values().next().value ?? null,
+    // 'all' aggregates every responding machine; otherwise a machine id.
+    const [scope, setScope] = React.useState<string | null>(
+        () => (cachedBurnMachineIds && cachedBurnMachineIds.size > 0
+            ? (cachedBurnMachineIds.size > 1 ? 'all' : cachedBurnMachineIds.values().next().value!)
+            : null),
     );
     const [period, setPeriod] = React.useState<PeriodKey>('today');
     const probedRef = React.useRef(false);
@@ -236,7 +330,7 @@ export default React.memo(function CodeburnSettingsScreen() {
             );
             cachedBurnMachineIds = found;
             setJoyMachineIds(found);
-            setSelectedMachineId(prev => prev ?? (found.values().next().value ?? null));
+            setScope(prev => prev ?? (found.size > 1 ? 'all' : (found.values().next().value ?? null)));
         })();
         return () => { cancelled = true; };
     }, [onlineIds.join(',')]);
@@ -244,31 +338,62 @@ export default React.memo(function CodeburnSettingsScreen() {
     const [state, setState] = React.useState<
         | { phase: 'loading' }
         | { phase: 'error'; message: string }
-        | { phase: 'done'; report: BurnReport }
+        | { phase: 'done'; report: BurnReport; byMachine: Array<{ id: string; cost: number; sessions: number }>; sessions: SessionRow[] }
     >({ phase: 'loading' });
 
     React.useEffect(() => {
-        if (!selectedMachineId) return;
+        if (!scope || !joyMachineIds) return;
+        const targets = scope === 'all' ? [...joyMachineIds] : [scope];
+        if (targets.length === 0) return;
         setState({ phase: 'loading' });
         let cancelled = false;
         (async () => {
             try {
-                const result = await Promise.race([
-                    apiSocket.machineRPC<BurnReport, { period: string }>(selectedMachineId, 'joy-codeburn', { period }),
+                const withTimeout = <T,>(p: Promise<T>) => Promise.race([
+                    p,
                     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond — is the daemon running?')), 60000)),
                 ]);
+                const results = await Promise.allSettled(targets.map(async id => {
+                    // Sessions fetch is best-effort: an older daemon without
+                    // joy-codeburn-sessions still gets the main report.
+                    const [rep, sess] = await Promise.all([
+                        withTimeout(apiSocket.machineRPC<BurnReport, { period: string }>(id, 'joy-codeburn', { period })),
+                        withTimeout(apiSocket.machineRPC<{ ok?: boolean; sessions?: SessionRow[] }, { period: string }>(id, 'joy-codeburn-sessions', { period })).catch(() => null),
+                    ]);
+                    return { id, rep, sess };
+                }));
                 if (cancelled) return;
-                if (!result.ok) {
-                    setState({ phase: 'error', message: result.error || 'codeburn query failed' });
+                const good = results
+                    .filter((r): r is PromiseFulfilledResult<{ id: string; rep: BurnReport; sess: { ok?: boolean; sessions?: SessionRow[] } | null }> => r.status === 'fulfilled')
+                    .map(r => r.value)
+                    .filter(x => x.rep?.ok);
+                if (good.length === 0) {
+                    const firstRejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult | undefined;
+                    const firstError = results
+                        .filter(r => r.status === 'fulfilled')
+                        .map(r => (r as PromiseFulfilledResult<{ rep: BurnReport }>).value.rep?.error)
+                        .find(Boolean);
+                    setState({
+                        phase: 'error',
+                        message: firstError || (firstRejected?.reason instanceof Error ? firstRejected.reason.message : 'codeburn query failed'),
+                    });
                     return;
                 }
-                setState({ phase: 'done', report: result });
+                const report = good.length === 1 ? good[0].rep : mergeReports(good.map(g => g.rep));
+                const byMachine = good
+                    .map(g => ({ id: g.id, cost: g.rep.overview?.cost ?? 0, sessions: g.rep.overview?.sessions ?? 0 }))
+                    .sort((a, b) => b.cost - a.cost);
+                const sessions = good
+                    .flatMap(g => (g.sess?.sessions ?? []).map(s => ({ ...s, machineId: g.id })))
+                    .sort((a, b) => b.cost - a.cost)
+                    .slice(0, 15);
+                setState({ phase: 'done', report, byMachine, sessions });
             } catch (e) {
                 if (!cancelled) setState({ phase: 'error', message: e instanceof Error ? e.message : 'codeburn query failed' });
             }
         })();
         return () => { cancelled = true; };
-    }, [selectedMachineId, period]);
+    }, [scope, period, joyMachineIds && [...joyMachineIds].sort().join(',')]);
 
     const machineName = (id: string) => {
         const m = machines.find(x => x.id === id);
@@ -296,6 +421,10 @@ export default React.memo(function CodeburnSettingsScreen() {
     }
 
     const report = state.phase === 'done' ? state.report : null;
+    const byMachine = state.phase === 'done' ? state.byMachine : [];
+    const topSessions = state.phase === 'done' ? state.sessions : [];
+    const maxMachine = Math.max(1e-9, ...byMachine.map(m => m.cost));
+    const maxSession = Math.max(1e-9, ...topSessions.map(s => s.cost));
     const o = report?.overview;
     const activityRows = rollupActivity(report?.daily ?? [], period);
     const maxActivityRow = Math.max(1e-9, ...activityRows.map(d => d.cost));
@@ -324,13 +453,19 @@ export default React.memo(function CodeburnSettingsScreen() {
 
             {joyMachineIds.size > 1 && (
                 <View style={styles.chipRow}>
+                    <Pressable
+                        onPress={() => setScope('all')}
+                        style={[styles.chip, scope === 'all' && styles.chipActive]}
+                    >
+                        <Text style={[styles.chipText, scope === 'all' && styles.chipTextActive]}>All Machines</Text>
+                    </Pressable>
                     {[...joyMachineIds].map(id => (
                         <Pressable
                             key={id}
-                            onPress={() => setSelectedMachineId(id)}
-                            style={[styles.chip, id === selectedMachineId && styles.chipActive]}
+                            onPress={() => setScope(id)}
+                            style={[styles.chip, id === scope && styles.chipActive]}
                         >
-                            <Text style={[styles.chipText, id === selectedMachineId && styles.chipTextActive]}>{machineName(id)}</Text>
+                            <Text style={[styles.chipText, id === scope && styles.chipTextActive]}>{machineName(id)}</Text>
                         </Pressable>
                     ))}
                 </View>
@@ -366,6 +501,21 @@ export default React.memo(function CodeburnSettingsScreen() {
                         </Text>
                     </View>
 
+                    {scope === 'all' && byMachine.length > 1 && (
+                        <Section title="By Machine">
+                            {byMachine.map(m => (
+                                <BarRow
+                                    key={m.id}
+                                    frac={m.cost / maxMachine}
+                                    label={machineName(m.id)}
+                                    value={fmtCost(m.cost)}
+                                    sub={`${m.sessions} sess`}
+                                    color="#5E5CE6"
+                                />
+                            ))}
+                        </Section>
+                    )}
+
                     {period === '30days' && !!report.daily?.length && (
                         <Section title="30-Day Heatmap">
                             <Heatmap daily={report.daily} />
@@ -382,6 +532,21 @@ export default React.memo(function CodeburnSettingsScreen() {
                                     value={fmtCost(d.cost)}
                                     sub={`${d.calls}`}
                                     color="#FF6B35"
+                                />
+                            ))}
+                        </Section>
+                    )}
+
+                    {topSessions.length > 0 && (
+                        <Section title="Top Sessions">
+                            {topSessions.map(s => (
+                                <BarRow
+                                    key={`${s.machineId}:${s.id}`}
+                                    frac={s.cost / maxSession}
+                                    label={`${s.project.split('/').filter(Boolean).pop() || s.project} · ${s.id.slice(0, 8)}`}
+                                    value={fmtCost(s.cost)}
+                                    sub={`${s.turns}t`}
+                                    color="#66D4CF"
                                 />
                             ))}
                         </Section>
