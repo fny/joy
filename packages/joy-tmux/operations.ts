@@ -25,6 +25,9 @@ import {
   handleDifftastic,
 } from "./fileOps";
 import { computeUsage, periodToRange } from "./usage";
+import { existsSync } from "fs";
+import { basename } from "path";
+import { hostname, platform, release, arch } from "os";
 
 export type HttpMethod = "GET" | "POST" | "DELETE";
 
@@ -256,7 +259,31 @@ export const machineOps: MachineOp[] = [
       version: "joy-tmux/0.1.0",
       uptimeMs: Date.now() - registry.startedAt,
       claude: registry.claudeInfo(),
+      pid: process.pid,
+      os: { platform: platform(), release: release(), arch: arch(), hostname: hostname() },
     }),
+  },
+  {
+    name: "sessionLog",
+    scope: "machine",
+    rpcName: "joy-session-log",
+    http: { method: "GET", path: "/sessions/:id/log" },
+    // Ship the session's transcript JSONL so the app can offer it as a
+    // download. Base64 inside the encrypted RPC envelope — capped so a
+    // monster transcript doesn't wedge the socket.
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const path = session.transcriptPath;
+      if (!path || !existsSync(path)) return { error: "no transcript on disk yet" };
+      const file = Bun.file(path);
+      const MAX = 25 * 1024 * 1024;
+      if (file.size > MAX) {
+        return { error: `transcript is ${Math.round(file.size / 1048576)}MB (cap 25MB) — copy it from ${path}` };
+      }
+      const contentBase64 = Buffer.from(await file.arrayBuffer()).toString("base64");
+      return { ok: true, filename: basename(path), size: file.size, contentBase64 };
+    },
   },
   {
     name: "codeburn",

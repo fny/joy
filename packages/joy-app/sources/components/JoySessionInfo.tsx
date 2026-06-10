@@ -7,7 +7,7 @@
 //
 // Personal-build dev page — plain strings, no i18n (matches the /joy pages).
 import * as React from 'react';
-import { View, Text } from 'react-native';
+import { View, Text, Animated, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
@@ -15,7 +15,8 @@ import { Typography } from '@/constants/Typography';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
-import { useSessionStatus, formatPathRelativeToHome, getSessionName } from '@/utils/sessionUtils';
+import { Avatar } from '@/components/Avatar';
+import { useSessionStatus, formatPathRelativeToHome, getSessionName, getSessionAvatarId, getResumeCommand } from '@/utils/sessionUtils';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
@@ -43,6 +44,37 @@ type JoySessionRecord = {
     started_at?: number;
     end_reason?: string;
 };
+
+// Same animated status dot as the stock info page header.
+function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
+    const pulseAnim = React.useRef(new Animated.Value(1)).current;
+
+    React.useEffect(() => {
+        if (isPulsing) {
+            Animated.loop(
+                Animated.sequence([
+                    Animated.timing(pulseAnim, { toValue: 0.3, duration: 1000, useNativeDriver: true }),
+                    Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+                ])
+            ).start();
+        } else {
+            pulseAnim.setValue(1);
+        }
+    }, [isPulsing, pulseAnim]);
+
+    return (
+        <Animated.View
+            style={{
+                width: size,
+                height: size,
+                borderRadius: size / 2,
+                backgroundColor: color,
+                opacity: pulseAnim,
+                marginRight: 4,
+            }}
+        />
+    );
+}
 
 function CopyRow({ title, value, icon, short }: { title: string; value: string; icon: React.ReactNode; short?: boolean }) {
     const [copied, setCopied] = React.useState(false);
@@ -117,6 +149,28 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         }
     });
 
+    // Download the transcript JSONL via joy-session-log. Web-only: native
+    // file saving isn't wired up and this is a debugging affordance.
+    const [downloadingLog, performDownloadLog] = useHappyAction(async () => {
+        if (!machineId || !joySessionId) throw new HappyError('No machine or joy session id on this session', false);
+        if (Platform.OS !== 'web') throw new HappyError('Download is web-only for now', false);
+        type LogResult = { ok?: boolean; filename?: string; contentBase64?: string; error?: string };
+        const result = await Promise.race([
+            apiSocket.machineRPC<LogResult, { id: string }>(machineId, 'joy-session-log', { id: joySessionId }),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond')), 60000)),
+        ]);
+        if (!result.ok || !result.contentBase64) {
+            throw new HappyError(result.error || 'Failed to fetch session log', false);
+        }
+        const bytes = Uint8Array.from(atob(result.contentBase64), c => c.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes], { type: 'application/x-ndjson' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = result.filename || 'session.jsonl';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+    });
+
     const handleDelete = React.useCallback(() => {
         Modal.alert('Delete session', 'This permanently deletes the chat history on the relay. The tmux window is killed if still running.', [
             { text: 'Cancel', style: 'cancel' },
@@ -125,38 +179,41 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
     }, [performDelete]);
 
     const formatDate = (ts: number) => new Date(ts).toLocaleString();
-    const statusColor = live?.status === 'active' ? '#34C759'
-        : live?.status === 'starting' ? '#FFCC00'
-        : live?.status === 'ended' ? '#8E8E93'
-        : sessionStatus.statusDotColor;
+
+    // Resume command — stock builder when metadata has the claude session
+    // id, otherwise assembled from the daemon's live record.
+    const claudeSessionId = live?.claude_session_id ?? session.metadata?.claudeSessionId;
+    const sessionPath = live?.cwd ?? session.metadata?.path;
+    const resumeCommand = getResumeCommand(session)
+        ?? (claudeSessionId && sessionPath ? `cd '${sessionPath}' && happy claude --resume ${claudeSessionId}` : null);
 
     return (
         <ItemList>
-            {/* Header — terminal-flavored, no avatar theater */}
+            {/* Session Header — same as the stock info page */}
             <View style={{ maxWidth: layout.maxWidth, alignSelf: 'center', width: '100%' }}>
-                <View style={{
-                    backgroundColor: theme.colors.surface,
-                    marginHorizontal: 16,
-                    marginTop: 16,
-                    marginBottom: 8,
-                    borderRadius: 12,
-                    paddingVertical: 20,
-                    alignItems: 'center',
-                    gap: 6,
-                }}>
-                    <Text style={{ fontSize: 24, color: theme.colors.text, ...Typography.mono('semiBold') }}>
-                        {'>_'} {sessionName}
+                <View style={{ alignItems: 'center', paddingVertical: 24, backgroundColor: theme.colors.surface, marginBottom: 8, borderRadius: 12, marginHorizontal: 16, marginTop: 16 }}>
+                    <Avatar id={getSessionAvatarId(session)} size={80} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                    <Text style={{
+                        fontSize: 20,
+                        fontWeight: '600',
+                        marginTop: 12,
+                        textAlign: 'center',
+                        color: theme.colors.text,
+                        ...Typography.default('semiBold')
+                    }}>
+                        {sessionName}
                     </Text>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: statusColor }} />
-                        <Text style={{ fontSize: 14, color: theme.colors.textSecondary, ...Typography.mono() }}>
-                            {live?.status ?? sessionStatus.statusText}
-                            {live?.end_reason ? ` (${live.end_reason})` : ''}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+                        <StatusDot color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} size={10} />
+                        <Text style={{
+                            fontSize: 15,
+                            color: sessionStatus.statusColor,
+                            fontWeight: '500',
+                            ...Typography.default()
+                        }}>
+                            {sessionStatus.statusText}
                         </Text>
                     </View>
-                    <Text style={{ fontSize: 12, color: theme.colors.textSecondary, ...Typography.mono() }}>
-                        joy-tmux session
-                    </Text>
                 </View>
             </View>
 
@@ -210,11 +267,18 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                 {machineId && (
                     <Item
                         title="View Machine"
-                        subtitle="Daemon status and other sessions on this machine"
+                        subtitle="joy-tmux daemon: version, PID, OS"
                         icon={<Ionicons name="server-outline" size={29} color="#007AFF" />}
-                        onPress={() => router.push(`/machine/${machineId}`)}
+                        onPress={() => router.push(`/joy/machine/${machineId}`)}
                     />
                 )}
+                <Item
+                    title="Download Session Log"
+                    subtitle="The raw transcript .jsonl from the machine"
+                    icon={<Ionicons name="download-outline" size={29} color="#007AFF" />}
+                    onPress={performDownloadLog}
+                    loading={downloadingLog}
+                />
                 <Item
                     title="Kill & Archive"
                     subtitle="End the tmux window and archive this chat"
@@ -254,6 +318,13 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                     icon={<Ionicons name="finger-print-outline" size={29} color="#007AFF" />}
                     short
                 />
+                {resumeCommand && (
+                    <CopyRow
+                        title="Resume Command"
+                        value={resumeCommand}
+                        icon={<Ionicons name="play-circle-outline" size={29} color="#30D158" />}
+                    />
+                )}
             </ItemGroup>
 
             {/* Details */}
