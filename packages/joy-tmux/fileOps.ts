@@ -1,11 +1,12 @@
-// Session-scoped RPC handlers that joy-tmux exposes for the app.
+// File/shell operation handlers exposed to the app for joy-tmux sessions.
 //
 // Mirrors the behavior of happy-cli's registerCommonHandlers so the app's
 // file browser, search, diff view, and archive button behave the same against
-// joy-tmux sessions as they do against happy-cli sessions.
+// joy-tmux sessions as they do against happy-cli sessions. Request/response
+// shapes mirror packages/happy-app/sources/sync/ops.ts.
 //
-// Request/response shapes mirror the ones in
-// packages/happy-app/sources/sync/ops.ts.
+// All handlers are pure functions of (workingDirectory, params) — transport
+// binding (relay RPC, HTTP) happens in operations.ts.
 
 import { createHash } from "crypto";
 import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
@@ -24,39 +25,32 @@ const HAPPY_CLI_TOOLS = resolve(import.meta.dir, "..", "happy-cli", "tools", "un
 const DIFFT_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "difft.exe" : "difft");
 const RG_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "rg.exe" : "rg");
 
-type RegisterSessionRpcHandler = (
-  method: string,
-  handler: (params: unknown) => Promise<unknown>,
-) => void;
+export interface BashRequest { command: string; cwd?: string; timeout?: number; }
+export interface BashResponse { success: boolean; stdout?: string; stderr?: string; exitCode?: number; error?: string; }
 
-interface BashRequest { command: string; cwd?: string; timeout?: number; }
-interface BashResponse { success: boolean; stdout?: string; stderr?: string; exitCode?: number; error?: string; }
+export interface ReadFileRequest { path: string; }
+export interface ReadFileResponse { success: boolean; content?: string; error?: string; }
 
-interface ReadFileRequest { path: string; }
-interface ReadFileResponse { success: boolean; content?: string; error?: string; }
+export interface WriteFileRequest { path: string; content: string; expectedHash?: string | null; }
+export interface WriteFileResponse { success: boolean; hash?: string; error?: string; }
 
-interface WriteFileRequest { path: string; content: string; expectedHash?: string | null; }
-interface WriteFileResponse { success: boolean; hash?: string; error?: string; }
+export interface ListDirectoryRequest { path: string; }
+export interface DirectoryEntry { name: string; type: "file" | "directory" | "other"; size?: number; modified?: number; }
+export interface ListDirectoryResponse { success: boolean; entries?: DirectoryEntry[]; error?: string; }
 
-interface ListDirectoryRequest { path: string; }
-interface DirectoryEntry { name: string; type: "file" | "directory" | "other"; size?: number; modified?: number; }
-interface ListDirectoryResponse { success: boolean; entries?: DirectoryEntry[]; error?: string; }
+export interface GetDirectoryTreeRequest { path: string; maxDepth: number; }
+export interface TreeNode { name: string; path: string; type: "file" | "directory"; size?: number; modified?: number; children?: TreeNode[]; }
+export interface GetDirectoryTreeResponse { success: boolean; tree?: TreeNode; error?: string; }
 
-interface GetDirectoryTreeRequest { path: string; maxDepth: number; }
-interface TreeNode { name: string; path: string; type: "file" | "directory"; size?: number; modified?: number; children?: TreeNode[]; }
-interface GetDirectoryTreeResponse { success: boolean; tree?: TreeNode; error?: string; }
+export interface RipgrepRequest { args: string[]; cwd?: string; }
+export interface RipgrepResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
 
-interface RipgrepRequest { args: string[]; cwd?: string; }
-interface RipgrepResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
-
-interface DifftasticRequest { args: string[]; cwd?: string; }
-interface DifftasticResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
-
-interface KillResponse { success: boolean; message: string; }
+export interface DifftasticRequest { args: string[]; cwd?: string; }
+export interface DifftasticResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
 
 // Mirrors happy-cli/src/modules/common/pathSecurity.validatePath. Restricts
 // access to paths within the session's working directory; rejects traversal.
-function validatePath(targetPath: string, workingDirectory: string): { valid: boolean; resolvedPath?: string; error?: string } {
+export function validatePath(targetPath: string, workingDirectory: string): { valid: boolean; resolvedPath?: string; error?: string } {
   const resolvedTarget = resolve(workingDirectory, targetPath);
   const resolvedWorkingDir = resolve(workingDirectory);
   if (
@@ -72,7 +66,7 @@ function validatePath(targetPath: string, workingDirectory: string): { valid: bo
   return { valid: true, resolvedPath: resolvedTarget };
 }
 
-async function handleBash(workingDirectory: string, data: BashRequest): Promise<BashResponse> {
+export async function handleBash(workingDirectory: string, data: BashRequest): Promise<BashResponse> {
   // Special case: "/" means "use the shell's default cwd" (matches happy-cli; used by CLI detection).
   if (data.cwd && data.cwd !== "/") {
     const validation = validatePath(data.cwd, workingDirectory);
@@ -82,7 +76,11 @@ async function handleBash(workingDirectory: string, data: BashRequest): Promise<
 
   try {
     const options: ExecOptions = {
-      cwd: data.cwd === "/" ? undefined : data.cwd,
+      // No cwd → the session's working directory. happy-cli gets this
+      // implicitly (its process cwd IS the session dir); joy-tmux's daemon
+      // cwd is unrelated, so it must be explicit. "/" still means "shell
+      // default" (CLI detection).
+      cwd: data.cwd === "/" ? undefined : (data.cwd ?? workingDirectory),
       timeout: data.timeout || 30_000,
       windowsHide: true,
     };
@@ -116,7 +114,7 @@ async function handleBash(workingDirectory: string, data: BashRequest): Promise<
   }
 }
 
-async function handleReadFile(workingDirectory: string, data: ReadFileRequest): Promise<ReadFileResponse> {
+export async function handleReadFile(workingDirectory: string, data: ReadFileRequest): Promise<ReadFileResponse> {
   const validation = validatePath(data.path, workingDirectory);
   if (!validation.valid) return { success: false, error: validation.error };
   try {
@@ -127,7 +125,7 @@ async function handleReadFile(workingDirectory: string, data: ReadFileRequest): 
   }
 }
 
-async function handleWriteFile(workingDirectory: string, data: WriteFileRequest): Promise<WriteFileResponse> {
+export async function handleWriteFile(workingDirectory: string, data: WriteFileRequest): Promise<WriteFileResponse> {
   const validation = validatePath(data.path, workingDirectory);
   if (!validation.valid) return { success: false, error: validation.error };
   const targetPath = validation.resolvedPath!;
@@ -165,7 +163,7 @@ async function handleWriteFile(workingDirectory: string, data: WriteFileRequest)
   }
 }
 
-async function handleListDirectory(workingDirectory: string, data: ListDirectoryRequest): Promise<ListDirectoryResponse> {
+export async function handleListDirectory(workingDirectory: string, data: ListDirectoryRequest): Promise<ListDirectoryResponse> {
   const validation = validatePath(data.path, workingDirectory);
   if (!validation.valid) return { success: false, error: validation.error };
   try {
@@ -199,7 +197,7 @@ async function handleListDirectory(workingDirectory: string, data: ListDirectory
   }
 }
 
-async function handleGetDirectoryTree(workingDirectory: string, data: GetDirectoryTreeRequest): Promise<GetDirectoryTreeResponse> {
+export async function handleGetDirectoryTree(workingDirectory: string, data: GetDirectoryTreeRequest): Promise<GetDirectoryTreeResponse> {
   const validation = validatePath(data.path, workingDirectory);
   if (!validation.valid) return { success: false, error: validation.error };
   if (data.maxDepth < 0) return { success: false, error: "maxDepth must be non-negative" };
@@ -271,7 +269,7 @@ function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record
   });
 }
 
-async function handleRipgrep(workingDirectory: string, data: RipgrepRequest): Promise<RipgrepResponse> {
+export async function handleRipgrep(workingDirectory: string, data: RipgrepRequest): Promise<RipgrepResponse> {
   let cwd = data.cwd;
   if (cwd) {
     const validation = validatePath(cwd, workingDirectory);
@@ -281,14 +279,14 @@ async function handleRipgrep(workingDirectory: string, data: RipgrepRequest): Pr
   // Prefer the bundled rg shipped alongside happy-cli; fall back to system `rg`.
   const binary = existsSync(RG_BIN) ? RG_BIN : "rg";
   try {
-    const result = await runTool(binary, data.args, cwd);
+    const result = await runTool(binary, data.args, cwd ?? workingDirectory);
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run ripgrep" };
   }
 }
 
-async function handleDifftastic(workingDirectory: string, data: DifftasticRequest): Promise<DifftasticResponse> {
+export async function handleDifftastic(workingDirectory: string, data: DifftasticRequest): Promise<DifftasticResponse> {
   let cwd = data.cwd;
   if (cwd) {
     const validation = validatePath(cwd, workingDirectory);
@@ -300,35 +298,9 @@ async function handleDifftastic(workingDirectory: string, data: DifftasticReques
     return { success: false, error: `difft binary not found at ${DIFFT_BIN}. Run \`node scripts/unpack-tools.cjs\` in packages/happy-cli to unpack it.` };
   }
   try {
-    const result = await runTool(DIFFT_BIN, data.args, cwd, { FORCE_COLOR: "1" });
+    const result = await runTool(DIFFT_BIN, data.args, cwd ?? workingDirectory, { FORCE_COLOR: "1" });
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run difftastic" };
   }
-}
-
-/**
- * Wire all session-scoped RPCs that the app expects, plus killSession.
- * killSession needs the local killSession function from server.ts (closes the
- * tmux window, cleans up watcher and relay session); it's passed in so we
- * avoid a circular import.
- */
-export function registerSessionRpcs(opts: {
-  register: RegisterSessionRpcHandler;
-  sessionCwd: string;
-  killSession: () => boolean;
-}): void {
-  const { register, sessionCwd, killSession } = opts;
-
-  register("bash", async (params) => handleBash(sessionCwd, params as BashRequest));
-  register("readFile", async (params) => handleReadFile(sessionCwd, params as ReadFileRequest));
-  register("writeFile", async (params) => handleWriteFile(sessionCwd, params as WriteFileRequest));
-  register("listDirectory", async (params) => handleListDirectory(sessionCwd, params as ListDirectoryRequest));
-  register("getDirectoryTree", async (params) => handleGetDirectoryTree(sessionCwd, params as GetDirectoryTreeRequest));
-  register("ripgrep", async (params) => handleRipgrep(sessionCwd, params as RipgrepRequest));
-  register("difftastic", async (params) => handleDifftastic(sessionCwd, params as DifftasticRequest));
-  register("killSession", async (): Promise<KillResponse> => {
-    const ok = killSession();
-    return { success: ok, message: ok ? "killed" : "session not found" };
-  });
 }
