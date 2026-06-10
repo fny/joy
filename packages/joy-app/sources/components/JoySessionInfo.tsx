@@ -269,7 +269,7 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                         title="View Machine"
                         subtitle="joy-tmux daemon: version, PID, OS"
                         icon={<Ionicons name="server-outline" size={29} color="#007AFF" />}
-                        onPress={() => router.push(`/joy/machine/${machineId}`)}
+                        onPress={() => router.push(`/machine/${machineId}`)}
                     />
                 )}
                 <Item
