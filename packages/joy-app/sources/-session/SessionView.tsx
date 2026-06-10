@@ -465,8 +465,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isCliOutdated = cliVersion && !isVersionSupported(cliVersion, MINIMUM_CLI_VERSION);
     const isAcknowledged = machineId && acknowledgedCliVersions[machineId] === cliVersion;
     const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
-    const flavor = session.metadata?.flavor;
     const isJoyTmux = session.metadata?.joy__source === 'joy-tmux';
+    // joy sessions carry no `flavor` in metadata (just joy__source); they're
+    // always Claude, so coerce it so model/effort lookups resolve.
+    const flavor = isJoyTmux ? 'claude' : session.metadata?.flavor;
     const joySessionId = session.metadata?.joy__sessionId;
     const availableModels = React.useMemo(() => (
         isJoyTmux ? JOY_CLAUDE_MODELS : getAvailableModels(flavor, session.metadata, t)
