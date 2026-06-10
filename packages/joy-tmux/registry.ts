@@ -20,7 +20,26 @@ export interface CreateSessionOpts {
   resume_id?: string;
   createDir?: boolean;
   yolo?: boolean;
+  /**
+   * One of claude's --permission-mode choices. 'bypassPermissions' maps to
+   * --dangerously-skip-permissions instead (interactive claude treats them
+   * the same but the bypass flag skips the startup confirmation). When set,
+   * this wins over `yolo`.
+   */
+  permissionMode?: string;
+  /** --fallback-model: model to fall back to when the primary is overloaded. */
+  fallbackModel?: string;
+  /** --fork-session: new session id when resuming. Ignored without continue/resume_id. */
+  forkSession?: boolean;
+  /** --chrome: Claude in Chrome integration. */
+  chrome?: boolean;
+  /** Raw extra CLI arguments appended verbatim to the claude command line. */
+  extraArgs?: string;
 }
+
+const PERMISSION_MODES = new Set([
+  "acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan",
+]);
 
 /**
  * Thrown by create() when opts.cwd doesn't exist and createDir isn't set.
@@ -175,21 +194,36 @@ export class SessionRegistry {
     const SAFE_ID = /^[a-zA-Z0-9:._/-]{1,128}$/;
     const SAFE_EFFORT = /^[a-z]{1,32}$/;
     if (opts.model && !SAFE_ID.test(opts.model)) throw new Error("invalid model");
+    if (opts.fallbackModel && !SAFE_ID.test(opts.fallbackModel)) throw new Error("invalid fallbackModel");
     if (opts.resume_id && !SAFE_ID.test(opts.resume_id)) throw new Error("invalid resume_id");
     if (opts.effort && !SAFE_EFFORT.test(opts.effort)) throw new Error("invalid effort");
+    if (opts.permissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw new Error("invalid permissionMode");
+    // extraArgs is appended to the shell line verbatim (the caller may need
+    // quoting, e.g. --allowedTools "Bash(git:*)"), so only control characters
+    // are rejected — a newline would submit the command early via send-keys.
+    // Authenticated callers can already type anything via joy-send-keys, so
+    // this isn't a security boundary, just an integrity check.
+    if (opts.extraArgs && /[\x00-\x1f\x7f]/.test(opts.extraArgs)) throw new Error("invalid extraArgs");
 
     const envParts: string[] = [];
     if (opts.effort && opts.effort !== "default") envParts.push(`CLAUDE_EFFORT=${opts.effort}`);
 
     // YOLO mode is the default for joy-tmux sessions — the app drives the
     // session and approving permission prompts via tmux send-keys is fragile.
-    // Caller can opt out with `yolo: false`.
-    const yolo = opts.yolo ?? true;
+    // An explicit permissionMode wins; otherwise `yolo: false` opts out.
+    const mode = opts.permissionMode ?? ((opts.yolo ?? true) ? "bypassPermissions" : undefined);
     const flags: string[] = [];
     if (opts.model) flags.push("--model", opts.model);
+    if (opts.fallbackModel) flags.push("--fallback-model", opts.fallbackModel);
     if (opts.continue) flags.push("--continue");
     if (opts.resume_id) flags.push("--resume", opts.resume_id);
-    if (yolo) flags.push("--dangerously-skip-permissions");
+    // claude rejects --fork-session without --resume/--continue, so silently
+    // dropping it here beats a dead tmux window with a usage error in it.
+    if (opts.forkSession && (opts.continue || opts.resume_id)) flags.push("--fork-session");
+    if (mode === "bypassPermissions") flags.push("--dangerously-skip-permissions");
+    else if (mode && mode !== "default") flags.push("--permission-mode", mode);
+    if (opts.chrome) flags.push("--chrome");
+    if (opts.extraArgs?.trim()) flags.push(opts.extraArgs.trim());
 
     const tmuxWindow = `${this.tmuxSession}:${windowName}`;
     const cmd = [...envParts, "claude", ...flags].join(" ");
