@@ -14,16 +14,27 @@ import { isMachineOnline } from '@/utils/machineUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { StyleSheet } from 'react-native-unistyles';
 
+// Survives navigation: which machines answered the joy-tmux probe last time.
+// Lets revisits render the machine list instantly while a background
+// re-probe keeps it fresh.
+let cachedJoyMachineIds: Set<string> | null = null;
+
 export default React.memo(function JoySessionsScreen() {
     const machines = useAllMachines({ includeOffline: true });
     const onlineMachines = machines.filter(isMachineOnline);
     const offlineMachines = machines.filter(m => !isMachineOnline(m));
 
-    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(null);
-    // null = probe in flight; afterwards the set of machine ids that answered
-    // a joy-list-sessions probe within 3s. Online machines without joy-tmux
-    // never respond (machineRPC has no timeout), hence the per-probe race.
-    const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(null);
+    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(
+        () => cachedJoyMachineIds?.values().next().value ?? null,
+    );
+    // null = first-ever probe in flight; afterwards the set of machine ids
+    // that answered a joy-list-sessions probe within 3s. Online machines
+    // without joy-tmux never respond (machineRPC has no timeout), hence the
+    // per-probe race. Results are cached module-level: the happy machine
+    // list renders instantly from synced storage, and without the cache this
+    // page ate a 3s live-probe on every visit. Cached results render
+    // immediately; a background re-probe refreshes them.
+    const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(cachedJoyMachineIds);
     const probedRef = React.useRef(false);
 
     React.useEffect(() => {
@@ -40,6 +51,7 @@ export default React.memo(function JoySessionsScreen() {
             const found = new Set(
                 results.filter(r => r.status === 'fulfilled').map(r => (r as PromiseFulfilledResult<string>).value),
             );
+            cachedJoyMachineIds = found;
             setJoyMachineIds(found);
             setSelectedMachineId(prev => prev ?? (found.values().next().value ?? null));
         })();
