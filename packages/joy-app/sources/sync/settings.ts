@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { AgentDefaultOverridesSchema } from './agentDefaults';
 
 //
 // Settings Schema
@@ -43,6 +44,7 @@ export const SettingsSchema = z.object({
     lastUsedAgent: z.string().nullable().describe('Last selected agent type for new sessions'),
     lastUsedPermissionMode: z.string().nullable().describe('Last selected permission mode for new sessions'),
     lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions'),
+    agentDefaultOverrides: AgentDefaultOverridesSchema.describe('User-selected agent defaults. Missing values use code defaults and are not sent as agent metadata.'),
     // Dismissed CLI warning banners (supports both per-machine and global dismissal)
     joy__xHighEnabled: z.boolean().describe('Mod 02: show xhigh effort level between high and max'),
     joy__hideModesEnabled: z.boolean().describe('Mod 04: show only Plan and Yolo permission modes'),
@@ -122,6 +124,7 @@ export const settingsDefaults: Settings = {
     joy__doubleTapEnabled: false,
     joy__readOpenFileEnabled: false,
     joy__tmuxServerUrl: null,
+    agentDefaultOverrides: {},
     dismissedCLIWarnings: { perMachine: {}, global: {} },
 };
 Object.freeze(settingsDefaults);
@@ -176,5 +179,20 @@ export function applySettings(settings: Settings, delta: Partial<Settings>): Set
         }
     });
 
+    return result;
+}
+
+export function settingsToSyncPayload(settings: Settings): Partial<Settings> {
+    const result: Partial<Settings> = { ...settings };
+    const compactAgentOverrides = Object.fromEntries(
+        Object.entries(settings.agentDefaultOverrides ?? {}).filter(([, value]) => (
+            value && typeof value === 'object' && Object.keys(value).length > 0
+        )),
+    ) as Settings['agentDefaultOverrides'];
+    if (Object.keys(compactAgentOverrides).length === 0) {
+        delete result.agentDefaultOverrides;
+    } else {
+        result.agentDefaultOverrides = compactAgentOverrides;
+    }
     return result;
 }
