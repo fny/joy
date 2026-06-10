@@ -148,6 +148,29 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "sendKeys",
+    scope: "machine",
+    rpcName: "joy-send-keys",
+    http: { method: "POST", path: "/sessions/:id/keys" },
+    // Raw keyboard intervention: bracketed key tokens (git commit<Enter><C-c>;
+    // see keyTokens.ts for the dialect table). Unlike send, nothing is
+    // buffered, mirrored to the relay, or recorded — it's a direct wire to
+    // the pane for trust prompts, TUI menus, or unsticking claude.
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const script = typeof params.script === "string" ? params.script : "";
+      if (!script) return { error: "empty" };
+      return session.sendRawKeys(script);
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error === "empty") return { status: 400, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
     name: "pane",
     scope: "machine",
     rpcName: "joy-pane",

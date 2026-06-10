@@ -33,6 +33,7 @@ import {
 } from "./receipts";
 import { writeAttachmentToCwd } from "./attachments";
 import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "./transcript";
+import { parseKeyScript } from "./keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";
 
@@ -271,6 +272,38 @@ export class Session {
     run("tmux", "send-keys", "-t", this.tmuxWindow, "Escape");
     this.#relay?.setThinking(false);
     return { ok: true };
+  }
+
+  /**
+   * Raw intervention path: parse a bracketed key script (see keyTokens.ts —
+   * `git commit<Enter>oops<C-c>`) and replay it into the pane verbatim.
+   * Unlike sendText this does NOT buffer, record receipts, mirror to the
+   * relay, or auto-append Enter — it is a direct keyboard, for poking at
+   * trust prompts, TUI menus, or a wedged claude. Consecutive named keys
+   * are batched into one tmux call; literal runs are sent with -l so tmux
+   * doesn't interpret them.
+   */
+  sendRawKeys(script: string): { ok: boolean; segments: number; error?: string } {
+    const segments = parseKeyScript(script);
+    let pendingKeys: string[] = [];
+    const flushKeys = () => {
+      if (pendingKeys.length === 0) return true;
+      const ok = run("tmux", "send-keys", "-t", this.tmuxWindow, ...pendingKeys).ok;
+      pendingKeys = [];
+      return ok;
+    };
+    for (const seg of segments) {
+      if (seg.type === "key") {
+        pendingKeys.push(seg.key);
+        continue;
+      }
+      if (!flushKeys()) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
+      if (!run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, seg.text).ok) {
+        return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
+      }
+    }
+    if (!flushKeys()) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
+    return { ok: true, segments: segments.length };
   }
 
   pane(): { ok: true; text: string } {
