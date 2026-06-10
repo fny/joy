@@ -341,6 +341,13 @@ export default function RootLayout() {
                     headerBackTitle: t('common.back'),
                 }}
             />
+            <Stack.Screen
+                name="joy/pane/[machine]/[id]"
+                options={{
+                    headerTitle: 'Terminal',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
         </Stack>
     );
 }
