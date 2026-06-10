@@ -273,6 +273,34 @@ export class SessionRegistry {
     return session;
   }
 
+  /**
+   * Restart a session: kill the existing tmux window (if any) and start a
+   * fresh one in the same cwd that resumes the same Claude conversation —
+   * `--resume <claudeSessionId>` when we know it, `--continue` otherwise.
+   * The app gets a new relay session; the old one is archived by end().
+   *
+   * `cwd` is a fallback for sessions this daemon no longer knows about
+   * (e.g. after a daemon restart with the window already gone): the app
+   * still has the path in relay metadata, and --continue in that cwd picks
+   * up the most recent conversation there.
+   */
+  async restart(opts: { id: string; cwd?: string }): Promise<Session> {
+    const existing = this.get(opts.id);
+    if (!existing && !opts.cwd) throw new Error(`unknown session: ${opts.id}`);
+
+    const cwd = existing?.cwd ?? opts.cwd!;
+    const resumeId = existing?.claudeSessionId;
+    if (existing && existing.status !== "ended") existing.end("killed");
+
+    return this.create({
+      cwd,
+      resume_id: resumeId,
+      continue: resumeId ? undefined : true,
+      model: existing?.model,
+      effort: existing?.effort,
+    });
+  }
+
   // ── Recovery (joy-tmux restart with live tmux windows) ──────────────────────
 
   recover(): void {

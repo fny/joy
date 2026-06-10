@@ -113,6 +113,23 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "restart",
+    scope: "machine",
+    rpcName: "joy-restart-session",
+    http: { method: "POST", path: "/sessions/:id/restart" },
+    // Kills the window and starts a fresh claude in the same cwd resuming
+    // the same conversation (--resume, or --continue when the claude session
+    // id was never learned). Returns the NEW session — the app should
+    // navigate to the returned relaySessionId.
+    handler: async (registry, params) => {
+      const session = await registry.restart({
+        id: String(params.id ?? ""),
+        cwd: typeof params.cwd === "string" ? params.cwd : undefined,
+      });
+      return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };
+    },
+  },
+  {
     name: "kill",
     scope: "machine",
     rpcName: "joy-kill-session",
