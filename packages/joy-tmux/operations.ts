@@ -272,29 +272,27 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
-    name: "usage",
+    name: "codeburnSessions",
     scope: "machine",
-    rpcName: "joy-usage",
-    http: { method: "GET", path: "/usage" },
-    // Token usage / cost reporting via ccusage (scans ~/.claude/projects).
-    // kind: daily (default) | monthly | session; since: YYYYMMDD lower bound;
-    // claudeSessionId (kind=session): return just that conversation's entry.
+    rpcName: "joy-codeburn-sessions",
+    http: { method: "GET", path: "/codeburn/sessions" },
+    // Per-session cost rows from `codeburn export` ("Session ID" is the
+    // claude session id). period like joy-codeburn plus "all";
+    // claudeSessionId returns just that conversation's row.
     handler: async (_registry, params) => {
-      const kind = params.kind === "session" ? "session" : params.kind === "monthly" ? "monthly" : "daily";
-      const since = typeof params.since === "string" && /^\d{8}$/.test(params.since) ? params.since : undefined;
-      const data = await runCcusage(kind, since) as Record<string, unknown>;
+      const period = typeof params.period === "string" ? params.period : "30days";
+      const rows = await runCodeburnSessions(period);
       const claudeSessionId = typeof params.claudeSessionId === "string" ? params.claudeSessionId : undefined;
-      if (kind === "session" && claudeSessionId) {
-        const list = Array.isArray(data.session) ? (data.session as Array<{ period?: string }>) : [];
-        return { ok: true, entry: list.find((e) => e.period === claudeSessionId) ?? null };
+      if (claudeSessionId) {
+        return { ok: true, entry: rows.find((r) => r.id === claudeSessionId) ?? null };
       }
-      return { ok: true, ...data };
+      return { ok: true, sessions: rows.slice(0, 20) };
     },
   },
 ];
 
-// ccusage runs take ~1s and rescan every transcript on disk, so cache per
-// (kind, since) briefly — the app polls these from multiple pages.
+// codeburn runs take ~1.5-3s and rescan every transcript on disk, so cache
+// per (command, period) briefly — the app polls these from multiple pages.
 const usageCache = new Map<string, { at: number; data: unknown }>();
 const USAGE_CACHE_TTL_MS = 60_000;
 
@@ -353,26 +351,64 @@ async function runCodeburn(period: string): Promise<Record<string, unknown>> {
   return data;
 }
 
-async function runCcusage(kind: "daily" | "monthly" | "session", since?: string): Promise<unknown> {
-  const key = `${kind}:${since ?? ""}`;
-  const hit = usageCache.get(key);
-  if (hit && Date.now() - hit.at < USAGE_CACHE_TTL_MS) return hit.data;
+interface CodeburnSessionRow {
+  id: string;
+  project: string;
+  startedAt: string;
+  cost: number;
+  calls: number;
+  turns: number;
+}
 
-  const bin = Bun.which("ccusage");
-  const argv = bin ? [bin] : ["bunx", "ccusage"];
-  argv.push(kind, "--json");
-  if (since) argv.push("--since", since);
+// `codeburn export` only writes to a file, so round-trip through /tmp. The
+// export's "Session ID" column is the claude session id, which is how both
+// the per-session usage page and top-sessions list key their lookups.
+async function runCodeburnSessions(period: string): Promise<CodeburnSessionRow[]> {
+  const key = `codeburn-sessions:${period}`;
+  const hit = usageCache.get(key);
+  if (hit && Date.now() - hit.at < USAGE_CACHE_TTL_MS) return hit.data as CodeburnSessionRow[];
+
+  const days =
+    period === "today" ? 0
+    : period === "week" ? 7
+    : period === "90days" ? 90
+    : period === "6months" ? 183
+    : period === "all" ? 3650
+    : 30;
+
+  const bin = Bun.which("codeburn");
+  const tmpPath = `/tmp/joy-codeburn-export-${process.pid}-${Date.now()}.json`;
+  const argv = [
+    ...(bin ? [bin] : ["bunx", "codeburn"]),
+    "export", "-f", "json", "-o", tmpPath,
+    "--from", daysAgoISO(days), "--to", daysAgoISO(0),
+  ];
 
   const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
-  const killTimer = setTimeout(() => proc.kill(), 30_000);
-  const out = await new Response(proc.stdout).text();
+  const killTimer = setTimeout(() => proc.kill(), 60_000);
   await proc.exited;
   clearTimeout(killTimer);
-  if (proc.exitCode !== 0) throw new Error(`ccusage exited with ${proc.exitCode}`);
+  if (proc.exitCode !== 0) throw new Error(`codeburn export exited with ${proc.exitCode}`);
 
-  const data = JSON.parse(out);
-  usageCache.set(key, { at: Date.now(), data });
-  return data;
+  const raw = JSON.parse(await Bun.file(tmpPath).text()) as {
+    sessions?: Array<Record<string, unknown>>;
+  };
+  await Bun.file(tmpPath).delete();
+
+  const rows: CodeburnSessionRow[] = (raw.sessions ?? [])
+    .map((s) => ({
+      id: String(s["Session ID"] ?? ""),
+      project: String(s["Project"] ?? ""),
+      startedAt: String(s["Started At"] ?? ""),
+      cost: Number(s["Cost (USD)"] ?? 0),
+      calls: Number(s["API Calls"] ?? 0),
+      turns: Number(s["Turns"] ?? 0),
+    }))
+    .filter((s) => s.id)
+    .sort((a, b) => b.cost - a.cost);
+
+  usageCache.set(key, { at: Date.now(), data: rows });
+  return rows;
 }
 
 // ── Session-scoped operations ───────────────────────────────────────────────
