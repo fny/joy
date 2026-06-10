@@ -20,6 +20,7 @@ import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { sessionKill } from '@/sync/ops';
 import { isWorktreePath, getRepoPath, getWorktreeName } from '@/utils/worktree';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
+import { isTouchWeb } from '@/utils/isTouchWeb';
 import { useRouter } from 'expo-router';
 
 const STATUS_CONFIG: Record<SessionState, { color: string; dotColor: string; isPulsing: boolean; isConnected: boolean }> = {
@@ -312,8 +313,13 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
     }, []);
 
     const showActionAlert = useSessionActionAlert(session.id);
+    // Desktop web: right-click anchored menu. Touch web: iOS Safari never
+    // fires contextmenu for a touch long-press, so attach onLongPress there
+    // too (same action sheet as native). Desktop keeps click-and-hold free
+    // for text-y interactions by not attaching it when the pointer is fine.
     const menuProps = Platform.OS === 'web' ? {
         onContextMenu: handleContextMenu,
+        ...(isTouchWeb ? { onLongPress: showActionAlert, delayLongPress: 450 } : {}),
     } as any : {
         onLongPress: showActionAlert,
     };

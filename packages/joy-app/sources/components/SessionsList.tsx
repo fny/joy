@@ -21,6 +21,7 @@ import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPop
 import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { useSettingMutable } from '@/sync/storage';
 import { t } from '@/text';
+import { isTouchWeb } from '@/utils/isTouchWeb';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -395,8 +396,13 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     }, []);
 
     const showActionAlert = useSessionActionAlert(session.id);
+    // Desktop web: right-click anchored menu. Touch web: iOS Safari never
+    // fires contextmenu for a touch long-press, so attach onLongPress there
+    // too (same action sheet as native). Desktop keeps click-and-hold free
+    // for text-y interactions by not attaching it when the pointer is fine.
     const menuProps = Platform.OS === 'web' ? {
         onContextMenu: handleContextMenu,
+        ...(isTouchWeb ? { onLongPress: showActionAlert, delayLongPress: 450 } : {}),
     } as any : {
         onLongPress: showActionAlert,
     };
