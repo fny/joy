@@ -51,6 +51,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
+import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
+import { apiSocket } from '@/sync/apiSocket';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -442,9 +444,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isAcknowledged = machineId && acknowledgedCliVersions[machineId] === cliVersion;
     const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
     const flavor = session.metadata?.flavor;
+    const isJoyTmux = session.metadata?.joy__source === 'joy-tmux';
+    const joySessionId = session.metadata?.joy__sessionId;
     const availableModels = React.useMemo(() => (
-        getAvailableModels(flavor, session.metadata, t)
-    ), [flavor, session.metadata]);
+        isJoyTmux ? JOY_CLAUDE_MODELS : getAvailableModels(flavor, session.metadata, t)
+    ), [isJoyTmux, flavor, session.metadata]);
     const modHideModesEnabled = useSetting('joy__hideModesEnabled');
     const modXhighEnabled = useSetting('joy__xHighEnabled');
     const availableModes = React.useMemo(() => {
@@ -519,14 +523,41 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         }
     }, [machineId, cliVersion, acknowledgedCliVersions]);
 
+    // joy-tmux sessions run interactive claude — mode/model changes must be
+    // typed into the pane, not just stored app-side. joy-send-keys is the
+    // raw-keystroke RPC (see joy-tmux keyTokens.ts).
+    const sendJoyKeys = React.useCallback((script: string) => {
+        if (!machineId || !joySessionId) return;
+        void apiSocket.machineRPC(machineId, 'joy-send-keys', { id: joySessionId, script })
+            .catch(() => { /* keystroke best-effort; stored state still updates */ });
+    }, [machineId, joySessionId]);
+
     // Function to update permission mode
     const updatePermissionMode = React.useCallback((mode: PermissionMode) => {
+        if (isJoyTmux) {
+            // Interactive claude has no absolute-set command for permission
+            // modes — Shift+Tab cycles them. Walk the cycle from the current
+            // mode to the target. Cycle order matches claude v2.x launched
+            // with --dangerously-skip-permissions available.
+            const CYCLE = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
+            const from = CYCLE.indexOf(permissionMode?.key ?? 'bypassPermissions');
+            const to = CYCLE.indexOf(mode.key);
+            if (from >= 0 && to >= 0) {
+                const steps = (to - from + CYCLE.length) % CYCLE.length;
+                if (steps > 0) sendJoyKeys('<S-Tab>'.repeat(steps));
+            }
+        }
         storage.getState().updateSessionPermissionMode(sessionId, mode.key);
-    }, [sessionId]);
+    }, [sessionId, isJoyTmux, permissionMode?.key, sendJoyKeys]);
 
     const updateModelMode = React.useCallback((mode: ModelMode) => {
+        if (isJoyTmux) {
+            // /model <key> switches the interactive session directly; keys in
+            // JOY_CLAUDE_MODELS are valid /model arguments.
+            sendJoyKeys(`/model ${mode.key}<Enter>`);
+        }
         storage.getState().updateSessionModelMode(sessionId, mode.key);
-    }, [sessionId]);
+    }, [sessionId, isJoyTmux, sendJoyKeys]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
         storage.getState().updateSessionEffortLevel(sessionId, level.key);
