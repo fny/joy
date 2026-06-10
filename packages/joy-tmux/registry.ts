@@ -178,6 +178,13 @@ export class SessionRegistry {
     run("tmux", "new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd);
     run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
 
+    // Kick off the relay session creation NOW so its network round-trips
+    // overlap the 1.2s of PID-discovery sleeps below instead of running
+    // after them — shaves ~1s off every create as seen from the app.
+    const relayPromise = this.relayClient
+      ? createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id })
+      : null;
+
     await Bun.sleep(400);
     const shellPid = parseInt(
       run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out,
@@ -202,9 +209,9 @@ export class SessionRegistry {
     this.broadcast("session_update", session.toJSON());
     session.beginWatching();
 
-    if (this.relayClient) {
+    if (relayPromise) {
       try {
-        const rs = await createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id });
+        const rs = await relayPromise;
         session.attachRelay(rs); // no-ops (and stops rs) if kill raced the create
       } catch (e) {
         process.stderr.write(`[relay] failed to create session for ${id}: ${e}\n`);
