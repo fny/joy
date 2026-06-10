@@ -10,6 +10,7 @@ import { getServerInfo } from '@/sync/serverConfig';
 import { Image } from 'expo-image';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     headerButton: {
@@ -118,10 +119,11 @@ function HeaderRight() {
     const router = useRouter();
     const styles = stylesheet;
     const { theme } = useUnistyles();
+    const newSessionRoute = useNewSessionRoute();
 
     return (
         <Pressable
-            onPress={() => router.navigate('/new')}
+            onPress={() => router.navigate(newSessionRoute)}
             hitSlop={15}
             style={styles.headerButton}
         >

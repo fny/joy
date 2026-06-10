@@ -20,6 +20,7 @@ import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { sessionKill } from '@/sync/ops';
 import { isWorktreePath, getRepoPath, getWorktreeName } from '@/utils/worktree';
 import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
+import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 import { isTouchWeb } from '@/utils/isTouchWeb';
 import { useRouter } from 'expo-router';
 
@@ -75,17 +76,27 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
     const branchName = worktreeName || gitInfo.branch;
     const hasBranch = !!branchName;
 
+    const newSessionRoute = useNewSessionRoute();
     const handleAdd = React.useCallback(() => {
         const machineId = session.machineId;
+        const pathToSet = formatPathRelativeToHome(repoPath, session.homeDir ?? undefined);
+        // /joy/new doesn't read the /new draft store — it takes the prefill
+        // as route params instead.
+        if (newSessionRoute === '/joy/new') {
+            router.navigate({
+                pathname: '/joy/new',
+                params: { ...(machineId ? { machineId } : {}), path: pathToSet },
+            });
+            return;
+        }
         if (machineId) {
             draft.setMachineId(machineId);
         }
-        const pathToSet = formatPathRelativeToHome(repoPath, session.homeDir ?? undefined);
         draft.setPath(pathToSet);
         draft.setSessionType(isWorktree ? 'worktree' : 'simple');
         draft.setWorktreeKey(isWorktree ? sessionPath : null);
         router.navigate('/new');
-    }, [session.machineId, session.homeDir, repoPath, isWorktree, sessionPath, draft, router]);
+    }, [session.machineId, session.homeDir, repoPath, isWorktree, sessionPath, draft, router, newSessionRoute]);
 
     const [isHovered, setIsHovered] = React.useState(false);
 

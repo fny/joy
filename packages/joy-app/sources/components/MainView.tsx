@@ -21,6 +21,7 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackFriendsSearch } from '@/track';
+import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 
 interface MainViewProps {
     variant: 'phone' | 'sidebar';
@@ -235,9 +236,10 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
     // NOTE: Zen tab removed - the feature never got to a useful state
     const [activeTab, setActiveTab] = React.useState<TabType>('sessions');
 
+    const newSessionRoute = useNewSessionRoute();
     const handleNewSession = React.useCallback(() => {
-        router.navigate('/new');
-    }, [router]);
+        router.navigate(newSessionRoute);
+    }, [router, newSessionRoute]);
 
     const handleTabPress = React.useCallback((tab: TabType) => {
         setActiveTab(tab);

@@ -21,7 +21,7 @@ import {
     ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -85,8 +85,11 @@ function NewJoyTmuxSessionScreen() {
     const allMachines = useAllMachines({ includeOffline: true });
     const sessions = useSessions();
 
-    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(null);
-    const [pathInput, setPathInput] = React.useState<string>('~');
+    // Optional prefill (e.g. the per-repo "+" in the session list passes the
+    // repo's machine + path when this page is the default New session).
+    const params = useLocalSearchParams<{ machineId?: string; path?: string }>();
+    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
+    const [pathInput, setPathInput] = React.useState<string>(params.path || '~');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
     // Permission mode, cycled by tapping the row. Index 0 = yolo
