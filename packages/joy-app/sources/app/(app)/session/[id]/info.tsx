@@ -23,20 +23,7 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { copySessionMetadataToClipboard, copySessionMetadataAndLogsToClipboard } from '@/utils/copySessionMetadataToClipboard';
 import { HappyError } from '@/utils/errors';
-import { apiSocket } from '@/sync/apiSocket';
-
-// Live record from the joy-tmux daemon (snake_case wire shape of
-// Session.toJSON()) — fetched once when viewing a joy session so the page
-// can show what relay metadata doesn't carry: claude session id, tmux
-// window, live status.
-type JoySessionRecord = {
-    id: string;
-    claude_session_id?: string;
-    tmux_window?: string;
-    status?: string;
-    current_model?: string;
-    flags?: string[];
-};
+import { JoySessionInfo } from '@/components/JoySessionInfo';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -146,43 +133,15 @@ function SessionInfoContent({ session }: { session: Session }) {
     const {
         canShowResume,
         canFork,
-        canRestart,
         forking,
         forkSession,
-        isJoy,
         openDuplicateSheet,
-        restartSession,
-        restarting,
         resumeSession,
         resumeSessionSubtitle,
     } = useSessionQuickActions(session);
 
     // Check if CLI version is outdated
     const isCliOutdated = session.metadata?.version && !isVersionSupported(session.metadata.version, MINIMUM_CLI_VERSION);
-
-    // joy-tmux sessions: relay metadata is static (set at create), so ask the
-    // daemon for the live record. Best-effort — daemon offline just means the
-    // joy group shows only what metadata has.
-    const joySessionId = session.metadata?.joy__sessionId;
-    const joyMachineId = session.metadata?.machineId;
-    const [joyLive, setJoyLive] = React.useState<JoySessionRecord | null>(null);
-    React.useEffect(() => {
-        if (!isJoy || !joySessionId || !joyMachineId) return;
-        let cancelled = false;
-        (async () => {
-            try {
-                const result = await Promise.race([
-                    apiSocket.machineRPC<JoySessionRecord & { error?: string }, { id: string }>(
-                        joyMachineId, 'joy-get-session', { id: joySessionId }),
-                    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-                ]);
-                if (!cancelled && !result.error) setJoyLive(result);
-            } catch {
-                // daemon unreachable — leave joyLive null
-            }
-        })();
-        return () => { cancelled = true; };
-    }, [isJoy, joySessionId, joyMachineId]);
 
     const handleCopySessionId = useCallback(async () => {
         if (!session) return;
@@ -388,68 +347,6 @@ function SessionInfoContent({ session }: { session: Session }) {
                     />
                 </ItemGroup>
 
-                {/* joy-tmux details — this is a tmux window driven by the joy
-                    daemon, not a happy-cli process; show the live record. */}
-                {isJoy && joySessionId && (
-                    <ItemGroup
-                        title="joy-tmux"
-                        footer={joyLive ? undefined : 'Live details unavailable — the joy-tmux daemon did not respond.'}
-                    >
-                        <CopyableItem
-                            title="joy Session ID"
-                            subtitle={joySessionId}
-                            icon={<Ionicons name="pricetag-outline" size={29} color="#FF2D55" />}
-                            copyText={joySessionId}
-                        />
-                        {joyLive?.claude_session_id && !session.metadata?.claudeSessionId && (
-                            <CopyableItem
-                                title={t('sessionInfo.claudeCodeSessionId')}
-                                subtitle={`${joyLive.claude_session_id.substring(0, 8)}...${joyLive.claude_session_id.substring(joyLive.claude_session_id.length - 8)}`}
-                                icon={<Ionicons name="code-outline" size={29} color="#9C27B0" />}
-                                copyText={joyLive.claude_session_id}
-                            />
-                        )}
-                        {joyLive?.status && (
-                            <Item
-                                title="Daemon Status"
-                                detail={joyLive.status}
-                                icon={<Ionicons name="pulse-outline" size={29} color={joyLive.status === 'active' ? '#34C759' : '#8E8E93'} />}
-                                showChevron={false}
-                            />
-                        )}
-                        {joyLive?.current_model && (
-                            <Item
-                                title="Model"
-                                detail={joyLive.current_model}
-                                icon={<Ionicons name="sparkles-outline" size={29} color="#FF2D55" />}
-                                showChevron={false}
-                            />
-                        )}
-                        {joyLive?.tmux_window && (
-                            <Item
-                                title="tmux Window"
-                                detail={joyLive.tmux_window}
-                                icon={<Ionicons name="terminal-outline" size={29} color="#FF2D55" />}
-                                showChevron={false}
-                            />
-                        )}
-                        {!!joyLive?.flags?.length && (
-                            <Item
-                                title="Launch Flags"
-                                subtitle={joyLive.flags.join(' ')}
-                                icon={<Ionicons name="options-outline" size={29} color="#FF2D55" />}
-                                showChevron={false}
-                            />
-                        )}
-                        <Item
-                            title="Open Terminal"
-                            subtitle="Live tmux pane with raw key input"
-                            icon={<Ionicons name="open-outline" size={29} color="#007AFF" />}
-                            onPress={() => router.push(`/joy/pane/${joyMachineId}/${joySessionId}`)}
-                        />
-                    </ItemGroup>
-                )}
-
                 {/* Quick Actions */}
                 <ItemGroup title={t('sessionInfo.quickActions')}>
                     {session.metadata?.machineId && (
@@ -458,23 +355,6 @@ function SessionInfoContent({ session }: { session: Session }) {
                             subtitle={t('sessionInfo.viewMachineSubtitle')}
                             icon={<Ionicons name="server-outline" size={29} color="#007AFF" />}
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
-                        />
-                    )}
-                    {(isJoy || session.metadata?.claudeSessionId) && session.metadata?.machineId && (
-                        <Item
-                            title="Usage & Cost"
-                            subtitle="Cost for this conversation, via codeburn on the machine"
-                            icon={<Ionicons name="analytics-outline" size={29} color="#34C759" />}
-                            onPress={() => router.push(`/session/${session.id}/usage`)}
-                        />
-                    )}
-                    {canRestart && (
-                        <Item
-                            title="Restart Session"
-                            subtitle="Kill the tmux window and resume this conversation in a fresh one"
-                            icon={<Ionicons name="refresh-outline" size={29} color="#007AFF" />}
-                            onPress={restartSession}
-                            loading={restarting}
                         />
                     )}
                     {canShowResume && (
@@ -560,7 +440,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             title={t('sessionInfo.aiProvider')}
                             subtitle={(() => {
                                 const flavor = session.metadata.flavor || 'claude';
-                                if (flavor === 'claude') return isJoy ? 'Claude · joy-tmux' : 'Claude';
+                                if (flavor === 'claude') return 'Claude';
                                 if (flavor === 'gpt' || flavor === 'openai') return 'Codex';
                                 if (flavor === 'gemini') return 'Gemini';
                                 if (flavor === 'openclaw') return 'OpenClaw';
@@ -604,13 +484,11 @@ function SessionInfoContent({ session }: { session: Session }) {
                         )}
                         <Item
                             title={t('sessionInfo.copyMetadata')}
-                            subtitle="Session metadata only"
                             icon={<Ionicons name="copy-outline" size={29} color="#007AFF" />}
                             onPress={handleCopyMetadata}
                         />
                         <Item
-                            title={t('sessionInfo.copyMetadata') + ' & Client Logs'}
-                            subtitle="Metadata plus recent app logs, for bug reports"
+                            title={t('sessionInfo.copyMetadata') + '\n& Client Logs'}
                             icon={<Ionicons name="document-text-outline" size={29} color="#007AFF" />}
                             onPress={handleCopyMetadataAndLogs}
                         />
@@ -754,6 +632,12 @@ export default React.memo(() => {
                 <Text style={{ color: theme.colors.textSecondary, fontSize: 15, marginTop: 8, textAlign: 'center', paddingHorizontal: 32, ...Typography.default() }}>{t('errors.sessionDeletedDescription')}</Text>
             </View>
         );
+    }
+
+    // joy-tmux sessions get their own info page built around the daemon's
+    // live record; happy sessions keep the stock upstream page above.
+    if (session.metadata?.joy__source === 'joy-tmux') {
+        return <JoySessionInfo session={session} />;
     }
 
     return <SessionInfoContent session={session} />;
