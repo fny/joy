@@ -6,6 +6,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { useRouter } from 'expo-router';
+import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -64,8 +65,9 @@ export function EmptySessionsTablet() {
         return machines.some(machine => isMachineOnline(machine));
     }, [machines]);
     
+    const newSessionRoute = useNewSessionRoute();
     const handleStartNewSession = () => {
-        router.navigate('/new');
+        router.navigate(newSessionRoute);
     };
     
     return (

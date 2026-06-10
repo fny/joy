@@ -52,6 +52,7 @@ export const SettingsSchema = z.object({
     joy__doubleTapEnabled: z.boolean().describe('Mod 06: require double tap to commit AskUserQuestion option/submit selections'),
     joy__readOpenFileEnabled: z.boolean().describe('Mod 07: show an "Open file" button on Read tool calls'),
     joy__tmuxServerUrl: z.string().nullable().describe('URL of the joy-tmux server for session management'),
+    joy__newSessionDefault: z.boolean().describe('Joy: New session buttons open the joy-tmux create page instead of /new'),
     dismissedCLIWarnings: z.object({
         perMachine: z.record(z.string(), z.object({
             claude: z.boolean().optional(),
@@ -124,6 +125,7 @@ export const settingsDefaults: Settings = {
     joy__doubleTapEnabled: false,
     joy__readOpenFileEnabled: false,
     joy__tmuxServerUrl: null,
+    joy__newSessionDefault: false,
     agentDefaultOverrides: {},
     dismissedCLIWarnings: { perMachine: {}, global: {} },
 };

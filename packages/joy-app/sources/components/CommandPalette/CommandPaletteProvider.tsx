@@ -9,6 +9,7 @@ import { useAuth } from '@/auth/AuthContext';
 import { storage } from '@/sync/storage';
 import { useShallow } from 'zustand/react/shallow';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 
 export function CommandPaletteProvider({ children }: { children: React.ReactNode }) {
     const router = useRouter();
@@ -16,6 +17,7 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
     const sessions = storage(useShallow((state) => state.sessions));
     const commandPaletteEnabled = storage(useShallow((state) => state.localSettings.commandPaletteEnabled));
     const navigateToSession = useNavigateToSession();
+    const newSessionRoute = useNewSessionRoute();
 
     // Define available commands
     const commands = useMemo((): Command[] => {
@@ -29,7 +31,7 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
                 category: 'Sessions',
                 shortcut: '⌘N',
                 action: () => {
-                    router.navigate('/new');
+                    router.navigate(newSessionRoute);
                 }
             },
             {
@@ -121,7 +123,7 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
         }
 
         return cmds;
-    }, [router, logout, sessions]);
+    }, [router, logout, sessions, newSessionRoute]);
 
     const showCommandPalette = useCallback(() => {
         if (Platform.OS !== 'web' || !commandPaletteEnabled) return;
