@@ -151,10 +151,10 @@ export default React.memo(function ModsSettingsScreen() {
                     showChevron={false}
                 />
                 <Item
-                    title="Codeburn"
+                    title="Usage analytics"
                     subtitle="Usage by machine, project, model, activity, session"
                     icon={<Ionicons name="flame-outline" size={29} color="#8E8E93" />}
-                    onPress={() => router.push('/settings/codeburn')}
+                    onPress={() => router.push('/settings/usage')}
                 />
             </ItemGroup>
         </ItemList>
