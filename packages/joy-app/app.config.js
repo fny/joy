@@ -7,9 +7,9 @@ const name = {
     production: "Happy"
 }[variant];
 const bundleId = {
-    development: "com.slopus.happy.dev",
-    preview: "com.slopus.happy.preview",
-    production: "com.ex3ndr.happy"
+    development: "vip.faraz.joy.dev",
+    preview: "vip.faraz.joy.preview",
+    production: "vip.faraz.joy"
 }[variant];
 // const stagingElevenLabsAgentId = 'agent_7801k2c0r5hjfraa1kdbytpvs6yt';
 const productionElevenLabsAgentId = 'agent_6701k211syvvegba4kt7m68nxjmw';
@@ -206,7 +206,7 @@ export default {
             ]
         ],
         updates: {
-            url: "https://u.expo.dev/4558dd3d-cd5a-47cd-bad9-e591a241cc06",
+            url: "https://u.expo.dev/4d6417af-448e-4a7b-a36e-b05ce12251a2",
             requestHeaders: {
                 "expo-channel-name": "production"
             }
@@ -219,7 +219,7 @@ export default {
                 root: "./sources/app"
             },
             eas: {
-                projectId: "4558dd3d-cd5a-47cd-bad9-e591a241cc06"
+                projectId: "4d6417af-448e-4a7b-a36e-b05ce12251a2"
             },
             app: {
                 postHogKey: process.env.EXPO_PUBLIC_POSTHOG_API_KEY,
@@ -232,6 +232,6 @@ export default {
                 buildCommitTimestamp: buildMetadata.commitTimestamp,
             }
         },
-        owner: "bulkacorp"
+        owner: "fny"
     }
 };

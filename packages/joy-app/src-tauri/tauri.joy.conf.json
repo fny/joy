@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Happy",
-  "identifier": "com.farazyashar.joy",
+  "identifier": "vip.faraz.joy",
   "bundle": {
     "icon": [
       "icons/32x32.png",

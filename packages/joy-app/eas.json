@@ -54,23 +54,17 @@
   "submit": {
     "development-store": {
       "ios": {
-        "appleId": "steve@bulkovo.com",
-        "ascAppId": "6748984254",
-        "appleTeamId": "466DQWDR8C"
+        "appleTeamId": "9R9RTH4HE6"
       }
     },
     "preview-store": {
       "ios": {
-        "appleId": "steve@bulkovo.com",
-        "ascAppId": "6749025570",
-        "appleTeamId": "466DQWDR8C"
+        "appleTeamId": "9R9RTH4HE6"
       }
     },
     "production": {
       "ios": {
-        "appleId": "steve@bulkovo.com",
-        "ascAppId": "6748571505",
-        "appleTeamId": "466DQWDR8C"
+        "appleTeamId": "9R9RTH4HE6"
       }
     }
   }
