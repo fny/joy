@@ -257,7 +257,54 @@ export const machineOps: MachineOp[] = [
       claude: registry.claudeInfo(),
     }),
   },
+  {
+    name: "usage",
+    scope: "machine",
+    rpcName: "joy-usage",
+    http: { method: "GET", path: "/usage" },
+    // Token usage / cost reporting via ccusage (scans ~/.claude/projects).
+    // kind: daily (default) | monthly | session; since: YYYYMMDD lower bound;
+    // claudeSessionId (kind=session): return just that conversation's entry.
+    handler: async (_registry, params) => {
+      const kind = params.kind === "session" ? "session" : params.kind === "monthly" ? "monthly" : "daily";
+      const since = typeof params.since === "string" && /^\d{8}$/.test(params.since) ? params.since : undefined;
+      const data = await runCcusage(kind, since) as Record<string, unknown>;
+      const claudeSessionId = typeof params.claudeSessionId === "string" ? params.claudeSessionId : undefined;
+      if (kind === "session" && claudeSessionId) {
+        const list = Array.isArray(data.session) ? (data.session as Array<{ period?: string }>) : [];
+        return { ok: true, entry: list.find((e) => e.period === claudeSessionId) ?? null };
+      }
+      return { ok: true, ...data };
+    },
+  },
 ];
+
+// ccusage runs take ~1s and rescan every transcript on disk, so cache per
+// (kind, since) briefly — the app polls these from multiple pages.
+const usageCache = new Map<string, { at: number; data: unknown }>();
+const USAGE_CACHE_TTL_MS = 60_000;
+
+async function runCcusage(kind: "daily" | "monthly" | "session", since?: string): Promise<unknown> {
+  const key = `${kind}:${since ?? ""}`;
+  const hit = usageCache.get(key);
+  if (hit && Date.now() - hit.at < USAGE_CACHE_TTL_MS) return hit.data;
+
+  const bin = Bun.which("ccusage");
+  const argv = bin ? [bin] : ["bunx", "ccusage"];
+  argv.push(kind, "--json");
+  if (since) argv.push("--since", since);
+
+  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+  const killTimer = setTimeout(() => proc.kill(), 30_000);
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  clearTimeout(killTimer);
+  if (proc.exitCode !== 0) throw new Error(`ccusage exited with ${proc.exitCode}`);
+
+  const data = JSON.parse(out);
+  usageCache.set(key, { at: Date.now(), data });
+  return data;
+}
 
 // ── Session-scoped operations ───────────────────────────────────────────────
 // Registered on each session's RelaySession under the bare rpcName (the relay
