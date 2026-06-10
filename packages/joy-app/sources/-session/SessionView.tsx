@@ -206,7 +206,12 @@ export const SessionView = React.memo((props: { id: string }) => {
             title: sessionName,
             folderName,
             isConnected,
-            badge: session.metadata?.joy__source === 'joy-tmux' ? '>_' : undefined,
+            // joy sessions: surface the joy-tmux session id in the header so
+            // it can be matched against the Joy Sessions page / tmux window
+            // name (dd-<id>) at a glance.
+            badge: session.metadata?.joy__source === 'joy-tmux'
+                ? `>_ ${session.metadata?.joy__sessionId ?? ''}`.trim()
+                : undefined,
         };
     }, [session, isDataReady]);
 
