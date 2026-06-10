@@ -45,13 +45,12 @@ import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
 import type { Machine, Session } from '@/sync/storageTypes';
 import {
-    getClaudeModelModes,
     getEffortLevelsForModel,
     getDefaultEffortKeyForModel,
-    getDefaultModelKey,
     type ModelMode,
     type EffortLevel,
 } from '@/components/modelModeOptions';
+import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
 
 const COMPOSER_INPUT_VERTICAL_PADDING = Platform.OS === 'web' ? 10 : 8;
 const COMPOSER_INPUT_MAX_HEIGHT = Platform.OS === 'web' ? 480 : 240;
@@ -160,7 +159,7 @@ function NewJoyTmuxSessionScreen() {
     }, [selectedMachineId, sessions]);
 
     // Claude models / effort levels (this page is Claude-only)
-    const modelModes = React.useMemo<ModelMode[]>(() => getClaudeModelModes(), []);
+    const modelModes = React.useMemo<ModelMode[]>(() => JOY_CLAUDE_MODELS, []);
     const currentModel = modelModes[modelIndex] ?? modelModes[0];
     const currentModelKey = currentModel?.key ?? 'default';
     const effortLevels = React.useMemo<EffortLevel[]>(
