@@ -585,8 +585,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [sessionId, isJoyTmux, sendJoyKeys]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
+        if (isJoyTmux) {
+            // /effort <level> sets the interactive session's reasoning effort,
+            // exactly like /model sets the model. Levels low/medium/high/xhigh/
+            // max are all valid /effort arguments and take effect immediately.
+            sendJoyKeys(`/effort ${level.key}<Enter>`);
+        }
         storage.getState().updateSessionEffortLevel(sessionId, level.key);
-    }, [sessionId]);
+    }, [sessionId, isJoyTmux, sendJoyKeys]);
 
     // Memoize header-dependent styles to prevent re-renders
     const headerDependentStyles = React.useMemo(() => ({
