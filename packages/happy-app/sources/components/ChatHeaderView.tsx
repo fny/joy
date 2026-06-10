@@ -15,8 +15,6 @@ interface ChatHeaderViewProps {
     extraPathSegment?: string;
     /** Optional content rendered at the right edge of the header (used by file-view / diff overlays). */
     rightSlot?: React.ReactNode;
-    /** Small inline badge rendered after the title (e.g. '>_' for joy-tmux sessions). */
-    badge?: string;
     onTitlePress?: () => void;
     onBackPress?: () => void;
     backgroundColor?: string;
@@ -29,7 +27,6 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     folderName,
     extraPathSegment,
     rightSlot,
-    badge,
     onTitlePress,
     onBackPress,
     isConnected = true,
@@ -80,7 +77,6 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                                             ]}
                                         >
                                             {title}
-                                            {badge && <Text style={styles.badge}>{' ' + badge}</Text>}
                                         </Text>
                                     </>
                                 )}
@@ -104,7 +100,6 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                                 style={[styles.title, { color: theme.colors.header.tint, ...Typography.default() }]}
                             >
                                 {title}
-                                {badge && <Text style={styles.badge}>{' ' + badge}</Text>}
                             </Text>
                         )}
                     </Pressable>
@@ -181,10 +176,5 @@ const styles = StyleSheet.create({
     backButton: {
         paddingHorizontal: 8,
         paddingVertical: 4,
-    },
-    badge: {
-        fontSize: 10,
-        fontWeight: '400',
-        opacity: 0.45,
     },
 });

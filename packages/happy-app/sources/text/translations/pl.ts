@@ -43,7 +43,6 @@ export const pl: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Anuluj',
-        tapAgainToConfirm: ({ label }: { label: string }) => `Naciśnij ponownie: ${label}`,
         authenticate: 'Uwierzytelnij',
         save: 'Zapisz',
         saveAs: 'Zapisz jako',
@@ -132,8 +131,6 @@ export const pl: TranslationStructure = {
         accountSubtitle: 'Zarządzaj szczegółami konta',
         appearance: 'Wygląd',
         appearanceSubtitle: 'Dostosuj wygląd aplikacji',
-        mods: 'Mods',
-        modsSubtitle: 'Przełączaj modyfikacje aplikacji',
         voiceAssistant: 'Asystent głosowy',
         voiceAssistantSubtitle: 'Konfiguruj preferencje interakcji głosowej',
         featuresTitle: 'Funkcje',
@@ -158,11 +155,6 @@ export const pl: TranslationStructure = {
         exchangingTokens: 'Wymiana tokenów...',
         usage: 'Użycie',
         usageSubtitle: 'Zobacz użycie API i koszty',
-        sessions: 'Joy Sessions',
-        sessionsSubtitle: 'Zarządzaj sesjami opartymi na tmux',
-        debug: 'Debug',
-        joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: 'Bezpośredni dostęp HTTP do serwera joy-tmux',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Konto ${service} połączone`,
@@ -215,27 +207,6 @@ export const pl: TranslationStructure = {
         },
         showFlavorIcons: 'Pokaż ikony dostawcy AI',
         showFlavorIconsDescription: 'Wyświetlaj ikony dostawcy AI na awatarach sesji',
-    },
-
-    settingsMods: {
-        enabled: 'Włączono',
-        mod01Title: '01 · Audio',
-        mod01Description: 'Pokazuje przycisk mikrofonu do wprowadzania głosowego. Włącza też uprawnienia do mikrofonu macOS w kompilacji Tauri.',
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: 'Dodaje poziom wysiłku xhigh między high i max dla Claude.',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: 'Pokazuje tylko Plan i Yolo w selektorze trybu uprawnień.',
-        mod05Title: '05 · Limit historii czatu',
-        mod05Description: 'Ogranicza liczbę wiadomości wyświetlanych w każdej rozmowie. Przydatne w długich czatach na wolniejszych urządzeniach.',
-        chatHistoryLimit: 'Limit wiadomości',
-        chatHistoryLimitDescription: 'Pokazuj tylko najnowsze wiadomości w każdej rozmowie',
-        chatHistoryLimitPlaceholder: 'np. 50',
-        chatHistoryLimitOff: 'Wył.',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `Ostatnie ${count} wiadomości`,
-        mod06Title: '06 · Podwójne dotknięcie',
-        mod06Description: 'Wymaga drugiego dotknięcia w ciągu 2 sekund, aby zatwierdzić wybór odpowiedzi z listy od asystenta. Pomaga zapobiegać przypadkowym wyborom.',
-        mod07Title: '07 · Otwórz plik z Read',
-        mod07Description: 'Wyświetla przycisk „Otwórz plik" przy wywołaniach narzędzia Read. Przycisk korzysta z wbudowanej przeglądarki plików Happy, która pobiera plik z hosta Claude — działa niezależnie od tego, czy aplikacja i Claude są na tej samej maszynie.',
     },
 
     settingsFeatures: {
@@ -544,7 +515,6 @@ export const pl: TranslationStructure = {
     toolView: {
         input: 'Wejście',
         output: 'Wyjście',
-        openFile: 'Otwórz plik',
     },
 
     toolGroup: {
@@ -616,7 +586,6 @@ export const pl: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Wyślij odpowiedź',
-            tapAgain: 'Naciśnij ponownie, aby wysłać',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'pytanie', few: 'pytania', many: 'pytań' })}`,
             other: 'Inne',
             otherDescription: 'Wpisz własną odpowiedź',
@@ -1040,34 +1009,6 @@ export const pl: TranslationStructure = {
             : `Nie udało się przesłać ${count} zdjęć i nie zostały wysłane.`,
         notSupportedTitle: 'Obrazy nieobsługiwane',
         notSupportedMessage: 'Ten agent nie obsługuje załączników obrazów. Wysłano tylko tekst.',
-    },
-
-    settingsSessions: {
-        machine: 'Maszyna',
-        machines: 'Maszyny',
-        statusOnline: 'online',
-        statusOffline: 'offline',
-        showOfflineMachines: ({ count }: { count: number }) => `Pokaż ${count} offline ${count === 1 ? 'maszynę' : 'maszyny'}`,
-        hideOfflineMachines: 'Ukryj maszyny offline',
-        machineFooter: 'Maszyna z uruchomionym joy-tmux',
-        noMachine: 'Brak połączonych maszyn',
-        selectMachine: 'Wybierz maszynę',
-        serverUrl: 'URL serwera',
-        serverUrlFooter: 'URL serwera joy-tmux działającego na Twoim komputerze',
-        sessions: 'Sesje',
-        noSessions: 'Brak aktywnych sesji',
-        loading: 'Ładowanie...',
-        newSession: 'Nowa sesja',
-        workingDirectory: 'Katalog roboczy',
-        workingDirectoryPlaceholder: 'np. /home/user/projects',
-        confirmKill: 'Zakończ sesję',
-        confirmKillMessage: 'Spowoduje to zakończenie procesu Claude i nie można tego cofnąć.',
-        killSession: 'Zakończ',
-        screenshot: 'Zrzut',
-        viewPane: 'Podgląd panelu',
-        statusStarting: 'Uruchamianie',
-        statusActive: 'Aktywna',
-        statusEnded: 'Zakończona',
     },
 
     feed: {

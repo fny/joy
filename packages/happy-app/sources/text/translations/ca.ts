@@ -32,7 +32,6 @@ export const ca: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Cancel·la',
-        tapAgainToConfirm: ({ label }: { label: string }) => `Toca de nou: ${label}`,
         authenticate: 'Autentica',
         save: 'Desa',
         saveAs: 'Desa com a',
@@ -115,8 +114,6 @@ export const ca: TranslationStructure = {
         accountSubtitle: 'Gestiona els detalls del teu compte',
         appearance: 'Aparença',
         appearanceSubtitle: 'Personalitza l\'aspecte de l\'aplicació',
-        mods: 'Mods',
-        modsSubtitle: "Activa les modificacions de l'aplicació",
         voiceAssistant: 'Assistent de veu',
         voiceAssistantSubtitle: 'Configura les preferències d\'interacció per veu',
         featuresTitle: 'Funcions',
@@ -141,11 +138,6 @@ export const ca: TranslationStructure = {
         exchangingTokens: 'Intercanviant tokens...',
         usage: 'Ús',
         usageSubtitle: "Veure l'ús de l'API i costos",
-        sessions: 'Joy Sessions',
-        sessionsSubtitle: 'Gestiona les sessions basades en tmux',
-        debug: 'Depuració',
-        joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: 'Accés HTTP directe al servidor joy-tmux',
 
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `Compte de ${service} connectat`,
@@ -198,27 +190,6 @@ export const ca: TranslationStructure = {
         },
         showFlavorIcons: "Mostrar icones de proveïdors d'IA",
         showFlavorIconsDescription: "Mostrar icones del proveïdor d'IA als avatars de sessió",
-    },
-
-    settingsMods: {
-        enabled: 'Habilitat',
-        mod01Title: '01 · Audio',
-        mod01Description: "Mostra el botó del micròfon per a l'entrada de veu. També habilita el permís de micròfon de macOS a la compilació de Tauri.",
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: "Afegeix un nivell d'esforç xhigh entre high i max per a Claude.",
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: 'Mostra només Plan i Yolo al selector de mode de permisos.',
-        mod05Title: "05 · Límit de l'historial de xat",
-        mod05Description: 'Limita quants missatges es mostren per conversa. Útil per a xats llargs en dispositius més lents.',
-        chatHistoryLimit: 'Límit de missatges',
-        chatHistoryLimitDescription: 'Mostra només els missatges més recents per conversa',
-        chatHistoryLimitPlaceholder: 'p. ex. 50',
-        chatHistoryLimitOff: 'Desactivat',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `Últims ${count} missatges`,
-        mod06Title: '06 · Doble toc',
-        mod06Description: 'Requereix un segon toc en 2 segons per confirmar una resposta de selecció múltiple de l\'assistent. Ajuda a evitar seleccions accidentals.',
-        mod07Title: '07 · Obre fitxer de Read',
-        mod07Description: 'Mostra un botó «Obre el fitxer» a les crides de l\'eina Read. El botó utilitza el visor de fitxers integrat de Happy, que descarrega des de l\'host de Claude — funciona tant si l\'app i Claude són a la mateixa màquina com si no.',
     },
 
     settingsFeatures: {
@@ -528,7 +499,6 @@ export const ca: TranslationStructure = {
     toolView: {
         input: 'Entrada',
         output: 'Sortida',
-        openFile: 'Obre el fitxer',
     },
 
     toolGroup: {
@@ -600,7 +570,6 @@ export const ca: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Envia resposta',
-            tapAgain: 'Toca de nou per enviar',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'pregunta', plural: 'preguntes' })}`,
             other: 'Altres',
             otherDescription: 'Escriu la teva pròpia resposta',
@@ -1010,34 +979,6 @@ export const ca: TranslationStructure = {
             : `No s'han pogut pujar ${count} imatges i no s'han enviat.`,
         notSupportedTitle: 'Imatges no compatibles',
         notSupportedMessage: 'Aquest agent no admet imatges adjuntes. Només s\'ha enviat el text.',
-    },
-
-    settingsSessions: {
-        machine: 'Màquina',
-        machines: 'Màquines',
-        statusOnline: 'en línia',
-        statusOffline: 'sense connexió',
-        showOfflineMachines: ({ count }: { count: number }) => `Mostra ${count} ${count === 1 ? 'màquina' : 'màquines'} sense connexió`,
-        hideOfflineMachines: 'Amaga màquines sense connexió',
-        machineFooter: 'Màquina amb joy-tmux en execució',
-        noMachine: 'No hi ha màquines connectades',
-        selectMachine: 'Selecciona màquina',
-        serverUrl: 'URL del servidor',
-        serverUrlFooter: 'URL del servidor joy-tmux que s\'executa a la teva màquina',
-        sessions: 'Sessions',
-        noSessions: 'No hi ha sessions actives',
-        loading: 'Carregant...',
-        newSession: 'Nova sessió',
-        workingDirectory: 'Directori de treball',
-        workingDirectoryPlaceholder: 'p. ex. /home/user/projects',
-        confirmKill: 'Finalitza la sessió',
-        confirmKillMessage: 'Això finalitzarà el procés de Claude i no es pot desfer.',
-        killSession: 'Finalitza',
-        screenshot: 'Captura',
-        viewPane: 'Veure panell',
-        statusStarting: 'Iniciant',
-        statusActive: 'Activa',
-        statusEnded: 'Finalitzada',
     },
 
     feed: {

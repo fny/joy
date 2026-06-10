@@ -32,7 +32,6 @@ export const en = {
     common: {
         // Simple string constants
         cancel: 'Cancel',
-        tapAgainToConfirm: ({ label }: { label: string }) => `Tap again: ${label}`,
         authenticate: 'Authenticate',
         save: 'Save',
         saveAs: 'Save As',
@@ -114,8 +113,6 @@ export const en = {
         accountSubtitle: 'Manage your account details',
         appearance: 'Appearance',
         appearanceSubtitle: 'Customize how the app looks',
-        mods: 'Mods',
-        modsSubtitle: 'Toggle app modifications',
         voiceAssistant: 'Voice Assistant',
         voiceAssistantSubtitle: 'Configure voice interaction preferences',
         featuresTitle: 'Features',
@@ -140,11 +137,6 @@ export const en = {
         exchangingTokens: 'Exchanging tokens...',
         usage: 'Usage',
         usageSubtitle: 'View your API usage and costs',
-        sessions: 'Joy Sessions',
-        sessionsSubtitle: 'Manage tmux-based sessions',
-        debug: 'Debug',
-        joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: 'Direct HTTP access to joy-tmux server',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service} account connected`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -196,55 +188,6 @@ export const en = {
         },
         showFlavorIcons: 'Show AI Provider Icons',
         showFlavorIconsDescription: 'Display AI provider icons on session avatars',
-    },
-
-    settingsSessions: {
-        machines: 'Machines',
-        machine: 'Machine',
-        machineFooter: 'Machine running joy-tmux',
-        noMachine: 'No machines connected',
-        selectMachine: 'Select Machine',
-        statusOnline: 'online',
-        statusOffline: 'offline',
-        showOfflineMachines: ({ count }: { count: number }) => `Show ${count} offline ${count === 1 ? 'machine' : 'machines'}`,
-        hideOfflineMachines: 'Hide offline machines',
-        serverUrl: 'Server URL',
-        serverUrlFooter: 'URL of the joy-tmux server running on your machine',
-        sessions: 'Sessions',
-        noSessions: 'No active sessions',
-        loading: 'Loading...',
-        newSession: 'New Session',
-        workingDirectory: 'Working Directory',
-        workingDirectoryPlaceholder: 'e.g. /home/user/projects',
-        confirmKill: 'Kill Session',
-        confirmKillMessage: 'This will terminate the Claude process and cannot be undone.',
-        killSession: 'Kill',
-        screenshot: 'Screenshot',
-        viewPane: 'View Pane',
-        statusStarting: 'Starting',
-        statusActive: 'Active',
-        statusEnded: 'Ended',
-    },
-
-    settingsMods: {
-        enabled: 'Enabled',
-        mod01Title: '01 · Audio',
-        mod01Description: 'Shows the microphone button for voice input. Also enables the macOS microphone entitlement in the Tauri desktop build.',
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: 'Adds an xhigh effort level between high and max for Claude.',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: 'Shows only Plan and Yolo in the permission mode selector.',
-        mod05Title: '05 · Chat History Limit',
-        mod05Description: 'Cap how many messages are rendered per conversation. Useful for long chats on slower devices.',
-        chatHistoryLimit: 'Message Limit',
-        chatHistoryLimitDescription: 'Show only the most recent messages per conversation',
-        chatHistoryLimitPlaceholder: 'e.g. 50',
-        chatHistoryLimitOff: 'Off',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `Last ${count} messages`,
-        mod06Title: '06 · Double Tap',
-        mod06Description: 'Require a second tap within 2 seconds to commit a multiple-choice answer from the assistant. Helps prevent accidental selections.',
-        mod07Title: '07 · Read Open File',
-        mod07Description: 'Show an "Open file" button on Read tool calls. The button uses Happy\'s in-app file viewer route which fetches from the Claude host — works whether the app and Claude are on the same machine or not.',
     },
 
     settingsFeatures: {
@@ -570,7 +513,6 @@ export const en = {
     toolView: {
         input: 'Input',
         output: 'Output',
-        openFile: 'Open file',
     },
 
     toolGroup: {
@@ -625,7 +567,6 @@ export const en = {
         },
         askUserQuestion: {
             submit: 'Submit Answer',
-            tapAgain: 'Tap again to submit',
             multipleQuestions: ({ count }: { count: number }) => `${count} questions`,
             other: 'Other',
             otherDescription: 'Type your own answer',

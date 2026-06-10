@@ -5,10 +5,7 @@ import { layout } from '@/components/layout';
 import {
     getAvailableModels,
     getAvailablePermissionModes,
-    getDefaultModelKey,
-    getDefaultPermissionModeKey,
     getEffortLevelsForModel,
-    getDefaultEffortKeyForModel,
     resolveCurrentOption,
     EffortLevel,
 } from '@/components/modelModeOptions';
@@ -53,6 +50,7 @@ import Animated, { useSharedValue, useAnimatedStyle, withTiming, Easing } from '
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
+import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -206,7 +204,6 @@ export const SessionView = React.memo((props: { id: string }) => {
             title: sessionName,
             folderName,
             isConnected,
-            badge: session.metadata?.joy__source === 'joy-tmux' ? '>_' : undefined,
         };
     }, [session, isDataReady]);
 
@@ -246,7 +243,6 @@ export const SessionView = React.memo((props: { id: string }) => {
                         title={headerProps.title}
                         folderName={headerProps.folderName}
                         isConnected={headerProps.isConnected}
-                        badge={headerProps.badge}
                         extraPathSegment={fileViewPath ?? undefined}
                         rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : null}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
@@ -447,44 +443,41 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const availableModels = React.useMemo(() => (
         getAvailableModels(flavor, session.metadata, t)
     ), [flavor, session.metadata]);
-    const modHideModesEnabled = useSetting('joy__hideModesEnabled');
-    const modXhighEnabled = useSetting('joy__xHighEnabled');
-    const availableModes = React.useMemo(() => {
-        const modes = getAvailablePermissionModes(flavor, session.metadata, t);
-        if (modHideModesEnabled && (flavor === 'claude' || !flavor)) {
-            return modes.filter(m => m.key === 'plan' || m.key === 'bypassPermissions');
-        }
-        return modes;
-    }, [flavor, session.metadata, modHideModesEnabled]);
+    const availableModes = React.useMemo(() => (
+        getAvailablePermissionModes(flavor, session.metadata, t)
+    ), [flavor, session.metadata]);
+    const agentDefaultOverrides = useSetting('agentDefaultOverrides');
+    const effectiveAgentDefaults = React.useMemo(() => (
+        resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
+    ), [agentDefaultOverrides, flavor]);
 
     const permissionMode = React.useMemo<PermissionMode | null>(() => (
         resolveCurrentOption(availableModes, [
             session.permissionMode,
+            effectiveAgentDefaults.permissionMode,
             session.metadata?.currentOperatingModeCode,
-            getDefaultPermissionModeKey(flavor),
         ])
-    ), [availableModes, session.permissionMode, session.metadata?.currentOperatingModeCode, flavor]);
+    ), [availableModes, session.permissionMode, effectiveAgentDefaults.permissionMode, session.metadata?.currentOperatingModeCode]);
 
     const modelMode = React.useMemo<ModelMode | null>(() => (
         resolveCurrentOption(availableModels, [
             session.modelMode,
+            effectiveAgentDefaults.modelMode,
             session.metadata?.currentModelCode,
-            getDefaultModelKey(flavor),
         ])
-    ), [availableModels, session.modelMode, session.metadata?.currentModelCode, flavor]);
+    ), [availableModels, session.modelMode, effectiveAgentDefaults.modelMode, session.metadata?.currentModelCode]);
 
     // Effort level state
     const modelKey = modelMode?.key ?? 'default';
-    const availableEffortLevels = React.useMemo<EffortLevel[]>(() => {
-        const levels = getEffortLevelsForModel(flavor, modelKey);
-        return modXhighEnabled ? levels : levels.filter(l => l.key !== 'xhigh');
-    }, [flavor, modelKey, modXhighEnabled]);
+    const availableEffortLevels = React.useMemo<EffortLevel[]>(() => (
+        getEffortLevelsForModel(flavor, modelKey)
+    ), [flavor, modelKey]);
     const effortLevel = React.useMemo<EffortLevel | null>(() => (
         resolveCurrentOption(availableEffortLevels, [
             session.effortLevel,
-            getDefaultEffortKeyForModel(flavor, modelKey),
+            effectiveAgentDefaults.effortLevel,
         ])
-    ), [availableEffortLevels, session.effortLevel, flavor, modelKey]);
+    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel]);
 
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
@@ -553,6 +546,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [sessionId, expImageUpload, selectedImages, clearImages]);
 
     const handleAbort = React.useCallback(() => {
+        storage.getState().resetSessionAgentOverrides(sessionId);
         sessionAbort(sessionId);
     }, [sessionId]);
 

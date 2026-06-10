@@ -4,7 +4,6 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ToolViewProps } from './_all';
 import { ToolSectionView } from '../ToolSectionView';
 import { sessionAllow } from '@/sync/ops';
-import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { t } from '@/text';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -71,10 +70,6 @@ const styles = StyleSheet.create((theme) => ({
     optionButtonSelected: {
         backgroundColor: theme.colors.surfaceHigh,
         borderColor: theme.colors.radio.active,
-    },
-    optionButtonArmed: {
-        borderColor: theme.colors.radio.active,
-        borderWidth: 2,
     },
     optionButtonDisabled: {
         opacity: 0.6,
@@ -145,9 +140,6 @@ const styles = StyleSheet.create((theme) => ({
     submitButtonDisabled: {
         opacity: 0.5,
     },
-    submitButtonArmed: {
-        opacity: 0.7,
-    },
     submitButtonText: {
         color: theme.colors.button.primary.tint,
         fontSize: 14,
@@ -177,7 +169,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     const [selections, setSelections] = React.useState<Map<number, Set<number>>>(new Map());
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
-    const { armedKey, requireDoubleTap } = useDoubleTap();
 
     // Parse input
     const input = tool.input as AskUserQuestionInput | undefined;
@@ -297,8 +288,6 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                             <View style={styles.optionsContainer}>
                                 {question.options.map((option, oIndex) => {
                                     const isSelected = selectedOptions.has(oIndex);
-                                    const optionKey = `q${qIndex}:o${oIndex}`;
-                                    const isArmed = armedKey === optionKey;
 
                                     return (
                                         <TouchableOpacity
@@ -306,10 +295,9 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                                             style={[
                                                 styles.optionButton,
                                                 isSelected && styles.optionButtonSelected,
-                                                isArmed && styles.optionButtonArmed,
                                                 !canInteract && styles.optionButtonDisabled,
                                             ]}
-                                            onPress={() => requireDoubleTap(optionKey, () => handleOptionToggle(qIndex, oIndex, question.multiSelect))}
+                                            onPress={() => handleOptionToggle(qIndex, oIndex, question.multiSelect)}
                                             disabled={!canInteract}
                                             activeOpacity={0.7}
                                         >
@@ -349,19 +337,16 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                         <TouchableOpacity
                             style={[
                                 styles.submitButton,
-                                armedKey === 'submit' && styles.submitButtonArmed,
                                 (!allQuestionsAnswered || isSubmitting) && styles.submitButtonDisabled,
                             ]}
-                            onPress={() => requireDoubleTap('submit', handleSubmit)}
+                            onPress={handleSubmit}
                             disabled={!allQuestionsAnswered || isSubmitting}
                             activeOpacity={0.7}
                         >
                             {isSubmitting ? (
                                 <ActivityIndicator size="small" color={theme.colors.button.primary.tint} />
                             ) : (
-                                <Text style={styles.submitButtonText}>
-                                    {armedKey === 'submit' ? t('tools.askUserQuestion.tapAgain') : t('tools.askUserQuestion.submit')}
-                                </Text>
+                                <Text style={styles.submitButtonText}>{t('tools.askUserQuestion.submit')}</Text>
                             )}
                         </TouchableOpacity>
                     </View>

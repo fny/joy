@@ -119,13 +119,6 @@ const stylesheet = StyleSheet.create((theme) => ({
         flex: 1,
         ...Typography.default('semiBold'),
     },
-    joyBadge: {
-        fontSize: 10,
-        color: theme.colors.textSecondary,
-        marginLeft: 5,
-        opacity: 0.6,
-        ...Typography.default(),
-    },
     sessionTitleConnected: {
         color: theme.colors.text,
     },
@@ -360,10 +353,9 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     const navigateToSession = useNavigateToSession();
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
     const baseStatus = STATUS_CONFIG[session.state];
-    // Mod 11: use the same green (#34C759) as the rest of the app for unread results,
-    // not the iOS blue that overlaps with the `thinking` state.
+    // Override to solid blue when session has unread results
     const status = session.hasUnread
-        ? { ...baseStatus, color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: baseStatus.isConnected }
+        ? { ...baseStatus, color: '#007AFF', dotColor: '#007AFF', isPulsing: false, isConnected: baseStatus.isConnected }
         : baseStatus;
 
     const vibingMessage = React.useMemo(() => {
@@ -439,9 +431,6 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     ]} numberOfLines={1}>
                         {session.name}
                     </Text>
-                    {session.isJoyTmux && (
-                        <Text style={styles.joyBadge}>{'  >_'}</Text>
-                    )}
                 </View>
 
                 {session.path ? (

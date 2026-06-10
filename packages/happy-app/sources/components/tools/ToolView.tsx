@@ -14,7 +14,6 @@ import { useRouter } from 'expo-router';
 import { PermissionFooter } from './PermissionFooter';
 import { parseToolUseError } from '@/utils/toolErrorParser';
 import { formatMCPTitle } from './views/MCPToolView';
-import { useSetting } from '@/sync/storage';
 import { t } from '@/text';
 
 interface ToolViewProps {
@@ -30,17 +29,11 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     const { tool, onPress, sessionId, messageId } = props;
     const router = useRouter();
     const { theme } = useUnistyles();
-    const readOpenFileEnabled = !!useSetting('joy__readOpenFileEnabled');
 
     // For file-editing tools, navigate to file route instead of message detail
     const fileEditTools = ['Edit', 'MultiEdit', 'Write'];
     const isFileEditTool = fileEditTools.includes(tool.name);
     const filePath = isFileEditTool && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
-    const readFilePath = tool.name === 'Read' && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
-    const handleOpenReadFile = React.useCallback(() => {
-        if (!sessionId || !readFilePath) return;
-        router.push(`/session/${sessionId}/file?path=${btoa(readFilePath)}`);
-    }, [sessionId, readFilePath, router]);
 
     // Create default onPress handler for navigation
     const handlePress = React.useCallback(() => {
@@ -260,18 +253,6 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                                 <CodeView code={JSON.stringify(tool.input, null, 2)} />
                             </ToolSectionView>
                         )}
-                        {readOpenFileEnabled && readFilePath && sessionId && (
-                            <ToolSectionView>
-                                <TouchableOpacity
-                                    style={styles.openFileButton}
-                                    onPress={handleOpenReadFile}
-                                    activeOpacity={0.7}
-                                >
-                                    <Ionicons name="open-outline" size={16} color={theme.colors.button.primary.tint} />
-                                    <Text style={styles.openFileButtonText}>{t('toolView.openFile')}</Text>
-                                </TouchableOpacity>
-                            </ToolSectionView>
-                        )}
 
                         {tool.state === 'completed' && tool.result && (
                             <ToolSectionView title={t('toolView.output')}>
@@ -355,20 +336,5 @@ const styles = StyleSheet.create((theme) => ({
         paddingHorizontal: 12,
         paddingTop: 8,
         overflow: 'visible'
-    },
-    openFileButton: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 6,
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        borderRadius: 6,
-        backgroundColor: theme.colors.button.primary.background,
-        alignSelf: 'flex-start',
-    },
-    openFileButtonText: {
-        color: theme.colors.button.primary.tint,
-        fontSize: 13,
-        fontWeight: '600',
     },
 }));

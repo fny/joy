@@ -35,7 +35,6 @@ export const ja: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'キャンセル',
-        tapAgainToConfirm: ({ label }: { label: string }) => `もう一度タップ: ${label}`,
         authenticate: '認証',
         save: '保存',
         error: 'エラー',
@@ -117,8 +116,6 @@ export const ja: TranslationStructure = {
         accountSubtitle: 'アカウントの詳細を管理',
         appearance: '外観',
         appearanceSubtitle: 'アプリの見た目をカスタマイズ',
-        mods: 'Mods',
-        modsSubtitle: 'アプリの変更を切り替え',
         voiceAssistant: '音声アシスタント',
         voiceAssistantSubtitle: '音声操作の設定',
         featuresTitle: '機能',
@@ -143,11 +140,6 @@ export const ja: TranslationStructure = {
         exchangingTokens: 'トークンを交換中...',
         usage: '使用状況',
         usageSubtitle: 'API使用量とコストを確認',
-        sessions: 'Joy Sessions',
-        sessionsSubtitle: 'tmuxベースのセッションを管理',
-        debug: 'デバッグ',
-        joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: 'joy-tmuxサーバーへの直接HTTPアクセス',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service}アカウントが接続されました`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -199,27 +191,6 @@ export const ja: TranslationStructure = {
         },
         showFlavorIcons: 'AIプロバイダーアイコンを表示',
         showFlavorIconsDescription: 'セッションアバターにAIプロバイダーアイコンを表示',
-    },
-
-    settingsMods: {
-        enabled: '有効',
-        mod01Title: '01 · Audio',
-        mod01Description: '音声入力用のマイクボタンを表示します。TauriデスクトップビルドでmacOSのマイクアクセス権も有効にします。',
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: 'Claudeのhighとmaxのあいだにxhighの努力レベルを追加します。',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: '権限モードセレクターにPlanとYoloのみを表示します。',
-        mod05Title: '05 · チャット履歴の上限',
-        mod05Description: '会話ごとに表示するメッセージ数を制限します。低速デバイスでの長いチャットに便利です。',
-        chatHistoryLimit: 'メッセージ上限',
-        chatHistoryLimitDescription: '会話ごとに最新のメッセージのみを表示',
-        chatHistoryLimitPlaceholder: '例: 50',
-        chatHistoryLimitOff: 'オフ',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `直近${count}件のメッセージ`,
-        mod06Title: '06 · ダブルタップ',
-        mod06Description: 'アシスタントからの選択式回答を確定するには、2秒以内に2回目のタップが必要です。誤選択を防ぐのに役立ちます。',
-        mod07Title: '07 · Read ファイルを開く',
-        mod07Description: 'Read ツール呼び出しに「ファイルを開く」ボタンを表示します。このボタンは Happy のアプリ内ファイルビューアを使用し、Claude ホストから取得します — アプリと Claude が同じマシン上にあってもなくても動作します。',
     },
 
     settingsFeatures: {
@@ -529,7 +500,6 @@ export const ja: TranslationStructure = {
     toolView: {
         input: '入力',
         output: '出力',
-        openFile: 'ファイルを開く',
     },
 
     toolGroup: {
@@ -559,7 +529,6 @@ export const ja: TranslationStructure = {
         },
         askUserQuestion: {
             submit: '回答を送信',
-            tapAgain: 'もう一度タップして送信',
             multipleQuestions: ({ count }: { count: number }) => `${count}件の質問`,
             other: 'その他',
             otherDescription: '自分の回答を入力',
@@ -1012,34 +981,6 @@ export const ja: TranslationStructure = {
             : `${count}枚の画像をアップロードできず、送信されませんでした。`,
         notSupportedTitle: '画像はサポートされていません',
         notSupportedMessage: 'このエージェントは画像の添付に対応していません。テキストのみが送信されました。',
-    },
-
-    settingsSessions: {
-        machine: 'マシン',
-        machines: 'マシン一覧',
-        statusOnline: 'オンライン',
-        statusOffline: 'オフライン',
-        showOfflineMachines: ({ count }: { count: number }) => `オフラインのマシンを${count}台表示`,
-        hideOfflineMachines: 'オフラインのマシンを非表示',
-        machineFooter: 'joy-tmuxが実行中のマシン',
-        noMachine: '接続中のマシンなし',
-        selectMachine: 'マシンを選択',
-        serverUrl: 'サーバーURL',
-        serverUrlFooter: 'お使いのマシンで動作しているjoy-tmuxサーバーのURL',
-        sessions: 'セッション',
-        noSessions: 'アクティブなセッションはありません',
-        loading: '読み込み中...',
-        newSession: '新しいセッション',
-        workingDirectory: '作業ディレクトリ',
-        workingDirectoryPlaceholder: '例: /home/user/projects',
-        confirmKill: 'セッションを終了',
-        confirmKillMessage: 'Claudeのプロセスを終了します。この操作は取り消せません。',
-        killSession: '終了',
-        screenshot: 'スクリーンショット',
-        viewPane: 'ペインを表示',
-        statusStarting: '起動中',
-        statusActive: 'アクティブ',
-        statusEnded: '終了済み',
     },
 
     feed: {
