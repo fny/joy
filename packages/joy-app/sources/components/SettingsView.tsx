@@ -18,6 +18,7 @@ import { isUsingCustomServer } from '@/sync/serverConfig';
 import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
+import { JoyLogotype } from '@/components/JoyLogotype';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { useUnistyles } from 'react-native-unistyles';
@@ -207,13 +208,11 @@ export const SettingsView = React.memo(function SettingsView() {
                             )}
                         </>
                     ) : (
-                        // Logo view: Original logo + version
+                        // Logo view: block-art wordmark + version
                         <>
-                            <Image
-                                source={theme.dark ? require('@/assets/images/logotype-light.png') : require('@/assets/images/logotype-dark.png')}
-                                contentFit="contain"
-                                style={{ width: 300, height: 90, marginBottom: 12 }}
-                            />
+                            <View style={{ marginBottom: 12 }}>
+                                <JoyLogotype size={22} color={theme.colors.text} />
+                            </View>
                         </>
                     )}
                 </View>
