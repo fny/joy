@@ -41,6 +41,7 @@ export type SessionStatus = "starting" | "active" | "ended";
 export interface SessionRecord {
   id: string;
   claude_session_id?: string;
+  current_model?: string;
   pid?: number;
   tmux_window: string;
   cwd: string;
@@ -113,6 +114,8 @@ export class Session {
   endReason?: string;
   claudeSessionId?: string;
   transcriptPath?: string;
+  /** Model id from the most recent assistant transcript entry (e.g. claude-fable-5). */
+  currentModel?: string;
   /** Survives relay detach so end() can still archive server-side. */
   relaySessionId?: string;
 
@@ -166,6 +169,7 @@ export class Session {
       end_reason: this.endReason,
       transcript_path: this.transcriptPath,
       relay_session_id: this.relaySessionId,
+      current_model: this.currentModel,
     };
   }
 
@@ -265,6 +269,47 @@ export class Session {
     }
     this.#typeIntoTmux(text, opts);
     return { buffered: false };
+  }
+
+  /**
+   * Read the CURRENT permission mode off the pane footer. Empirically mapped
+   * on claude 2.1.170 (launched with --dangerously-skip-permissions):
+   *   "⏵⏵ bypass permissions on"  → bypassPermissions
+   *   "⏵⏵ auto mode on"           → auto
+   *   (no marker line)             → default
+   *   "⏵⏵ accept edits on"        → acceptEdits
+   *   "⏸ plan mode on"            → plan
+   */
+  detectPermissionMode(): string | null {
+    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    if (!pane.ok) return null;
+    return parsePermissionModeFromPane(pane.out);
+  }
+
+  /**
+   * Set the permission mode ABSOLUTELY: detect the current mode from the
+   * footer, walk the Shift+Tab cycle to the target, verify. The cycle order
+   * (same claude version, empirically): bypassPermissions → auto → default →
+   * acceptEdits → plan → bypassPermissions.
+   */
+  async setPermissionMode(target: string): Promise<{ ok: boolean; mode?: string; error?: string }> {
+    const CYCLE = ["bypassPermissions", "auto", "default", "acceptEdits", "plan"];
+    const ti = CYCLE.indexOf(target);
+    if (ti < 0) return { ok: false, error: `unsupported mode: ${target}` };
+    const current = this.detectPermissionMode();
+    if (current === null) return { ok: false, error: "could not read pane" };
+    const ci = CYCLE.indexOf(current);
+    if (ci < 0) return { ok: false, error: `unrecognized current mode: ${current}` };
+    const steps = (ti - ci + CYCLE.length) % CYCLE.length;
+    for (let i = 0; i < steps; i++) {
+      run("tmux", "send-keys", "-t", this.tmuxWindow, "BTab");
+      await Bun.sleep(120); // footer needs a beat to repaint between cycles
+    }
+    await Bun.sleep(250);
+    const after = this.detectPermissionMode();
+    return after === target
+      ? { ok: true, mode: after }
+      : { ok: false, mode: after ?? undefined, error: `landed on ${after ?? "unknown"}` };
   }
 
   /** Escape → Claude Code interactive interprets as "interrupt generation". */
@@ -550,6 +595,7 @@ export class Session {
       this.#deps.addChatMessage({ role: "user", content, source: "cli", session_id: sid });
 
     } else if (role === "assistant") {
+      if (typeof msg.model === "string" && msg.model) this.currentModel = msg.model;
       const blocks = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
       const entryUuid = typeof entry.uuid === "string" ? entry.uuid : "";
       // Skip if we've already forwarded this transcript entry (recovery case).
@@ -630,6 +676,15 @@ export function paneShowsReadyPrompt(text: string): boolean {
     if (!t.startsWith("❯")) return false;
     return !/^❯\s*\d+\./.test(t);
   });
+}
+
+/** Footer → permission mode. Exported for tests. */
+export function parsePermissionModeFromPane(text: string): string {
+  if (/bypass permissions on/i.test(text)) return "bypassPermissions";
+  if (/auto mode on/i.test(text)) return "auto";
+  if (/accept edits on/i.test(text)) return "acceptEdits";
+  if (/plan mode on/i.test(text)) return "plan";
+  return "default"; // no marker line in default mode
 }
 
 function summarizeInput(input: unknown): string {
