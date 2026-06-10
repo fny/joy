@@ -145,6 +145,17 @@ export default React.memo(function ModsSettingsScreen() {
                     subtitle="Pasted images written into the session cwd as paste-*.png"
                     showChevron={false}
                 />
+                <Item
+                    title="Restart session"
+                    subtitle="Joy sessions: kill the tmux window, resume the conversation fresh"
+                    showChevron={false}
+                />
+                <Item
+                    title="Usage (ccusage)"
+                    subtitle="Per-session and machine-wide token cost reports"
+                    icon={<Ionicons name="analytics-outline" size={29} color="#8E8E93" />}
+                    onPress={() => router.push('/settings/joy-usage')}
+                />
             </ItemGroup>
         </ItemList>
     );

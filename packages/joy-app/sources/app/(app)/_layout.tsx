@@ -84,6 +84,14 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="session/[id]/usage"
+                options={{
+                    headerShown: true,
+                    headerTitle: 'Usage',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
+            <Stack.Screen
                 name="session/[id]/files"
                 options={{
                     headerShown: true,
@@ -139,6 +147,12 @@ export default function RootLayout() {
                 name="settings/joy-http"
                 options={{
                     headerTitle: t('settings.joyHttp'),
+                }}
+            />
+            <Stack.Screen
+                name="settings/joy-usage"
+                options={{
+                    headerTitle: 'Usage (ccusage)',
                 }}
             />
             <Stack.Screen
