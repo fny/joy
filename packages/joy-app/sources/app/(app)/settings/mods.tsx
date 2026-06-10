@@ -151,14 +151,8 @@ export default React.memo(function ModsSettingsScreen() {
                     showChevron={false}
                 />
                 <Item
-                    title="Usage (ccusage)"
-                    subtitle="Per-session and machine-wide token cost reports"
-                    icon={<Ionicons name="analytics-outline" size={29} color="#8E8E93" />}
-                    onPress={() => router.push('/settings/joy-usage')}
-                />
-                <Item
                     title="Codeburn"
-                    subtitle="Rich usage: projects, models, activities, tools, MCP servers"
+                    subtitle="Usage by machine, project, model, activity, session"
                     icon={<Ionicons name="flame-outline" size={29} color="#8E8E93" />}
                     onPress={() => router.push('/settings/codeburn')}
                 />

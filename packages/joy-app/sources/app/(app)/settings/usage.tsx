@@ -10,18 +10,13 @@ export default function UsageSettingsScreen() {
     const router = useRouter();
     return (
         <ItemList style={{ paddingTop: 0 }}>
-            {/* joy: machine-local report straight from ~/.claude transcripts,
-                via the joy-tmux daemon — complements happy's server-side panel. */}
+            {/* joy: machine-local report straight from the machines' own
+                transcripts, via the joy-tmux daemon — complements happy's
+                server-side panel. */}
             <ItemGroup>
                 <Item
-                    title="Machine usage (ccusage)"
-                    subtitle="Daily and monthly cost from the machine's own transcripts"
-                    icon={<Ionicons name="analytics-outline" size={29} color="#34C759" />}
-                    onPress={() => router.push('/settings/joy-usage')}
-                />
-                <Item
                     title="Codeburn"
-                    subtitle="Rich report: projects, models, activities, tools — today to 6 months"
+                    subtitle="All machines, per machine, per session — today to 6 months"
                     icon={<Ionicons name="flame-outline" size={29} color="#FF3B30" />}
                     onPress={() => router.push('/settings/codeburn')}
                 />

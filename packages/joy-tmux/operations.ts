@@ -302,7 +302,7 @@ function daysAgoISO(days: number): string {
 }
 
 // codeburn knows today/week/30days/month/all as named periods; longer rolling
-// windows go through --from. ~1.5-3s per run, so cache like ccusage.
+// windows go through --from. ~1.5-3s per run, hence the cache above.
 async function runCodeburn(period: string): Promise<Record<string, unknown>> {
   const key = `codeburn:${period}`;
   const hit = usageCache.get(key);

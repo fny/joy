@@ -463,7 +463,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                     {(isJoy || session.metadata?.claudeSessionId) && session.metadata?.machineId && (
                         <Item
                             title="Usage & Cost"
-                            subtitle="Tokens and cost for this conversation, via ccusage on the machine"
+                            subtitle="Cost for this conversation, via codeburn on the machine"
                             icon={<Ionicons name="analytics-outline" size={29} color="#34C759" />}
                             onPress={() => router.push(`/session/${session.id}/usage`)}
                         />

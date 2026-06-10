@@ -1,8 +1,8 @@
-// Rich machine-wide usage report via codeburn (getagentseal/codeburn),
-// fetched through the joy-tmux daemon (joy-codeburn op). Mirrors the codeburn
-// TUI visually: every row carries a proportional bar (scaled to the section
-// max), with a daily-activity chart up top. The lighter ccusage view lives at
-// /settings/joy-usage.
+// Usage report via codeburn (getagentseal/codeburn), fetched through the
+// joy-tmux daemon (joy-codeburn + joy-codeburn-sessions ops). Mirrors the
+// codeburn TUI visually: every row carries a proportional bar (scaled to the
+// section max), with a heatmap and activity chart up top. Scopes: all
+// machines (aggregated), a single machine, and top sessions by cost.
 //
 // Personal-build dev page — plain strings, no i18n (matches the /joy pages).
 import * as React from 'react';
@@ -15,7 +15,7 @@ import { isMachineOnline } from '@/utils/machineUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { Typography } from '@/constants/Typography';
 
-// Survives navigation so revisits render instantly (same trick as joy-usage).
+// Survives navigation so revisits render instantly (same trick as joy-sessions).
 let cachedBurnMachineIds: Set<string> | null = null;
 
 const PERIODS = [
