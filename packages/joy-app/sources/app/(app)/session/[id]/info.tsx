@@ -460,6 +460,14 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/machine/${session.metadata?.machineId}`)}
                         />
                     )}
+                    {(isJoy || session.metadata?.claudeSessionId) && session.metadata?.machineId && (
+                        <Item
+                            title="Usage & Cost"
+                            subtitle="Tokens and cost for this conversation, via ccusage on the machine"
+                            icon={<Ionicons name="analytics-outline" size={29} color="#34C759" />}
+                            onPress={() => router.push(`/session/${session.id}/usage`)}
+                        />
+                    )}
                     {canRestart && (
                         <Item
                             title="Restart Session"
