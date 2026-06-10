@@ -171,6 +171,26 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "setMode",
+    scope: "machine",
+    rpcName: "joy-set-mode",
+    http: { method: "POST", path: "/sessions/:id/mode" },
+    // Absolute permission-mode set: detects the current mode from the pane
+    // footer, walks Shift+Tab to the target, verifies the footer afterwards.
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const mode = typeof params.mode === "string" ? params.mode : "";
+      if (!mode) return { error: "mode required" };
+      return session.setPermissionMode(mode);
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
     name: "pane",
     scope: "machine",
     rpcName: "joy-pane",

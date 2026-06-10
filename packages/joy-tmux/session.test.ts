@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { paneShowsReadyPrompt } from "./session";
+import { paneShowsReadyPrompt, parsePermissionModeFromPane } from "./session";
 
 test("ready: bare input prompt", () => {
   expect(paneShowsReadyPrompt("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
@@ -25,4 +25,12 @@ test("not ready: bash prompt before claude starts", () => {
 
 test("ready: user message echoed at prompt", () => {
   expect(paneShowsReadyPrompt("● Hi! What can I help with?\n\n❯ hello there\n")).toBe(true);
+});
+
+test("footer → mode: strings captured from claude 2.1.170", () => {
+  expect(parsePermissionModeFromPane("  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents")).toBe("bypassPermissions");
+  expect(parsePermissionModeFromPane("  ⏵⏵ auto mode on (shift+tab to cycle)")).toBe("auto");
+  expect(parsePermissionModeFromPane("  ⏵⏵ accept edits on (shift+tab to cycle)")).toBe("acceptEdits");
+  expect(parsePermissionModeFromPane("  ⏸ plan mode on (shift+tab to cycle)")).toBe("plan");
+  expect(parsePermissionModeFromPane("❯ \n? for shortcuts")).toBe("default");
 });

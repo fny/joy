@@ -556,21 +556,16 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     // Function to update permission mode
     const updatePermissionMode = React.useCallback((mode: PermissionMode) => {
-        if (isJoyTmux) {
-            // Interactive claude has no absolute-set command for permission
-            // modes — Shift+Tab cycles them. Walk the cycle from the current
-            // mode to the target. Cycle order matches claude v2.x launched
-            // with --dangerously-skip-permissions available.
-            const CYCLE = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
-            const from = CYCLE.indexOf(permissionMode?.key ?? 'bypassPermissions');
-            const to = CYCLE.indexOf(mode.key);
-            if (from >= 0 && to >= 0) {
-                const steps = (to - from + CYCLE.length) % CYCLE.length;
-                if (steps > 0) sendJoyKeys('<S-Tab>'.repeat(steps));
-            }
+        if (isJoyTmux && machineId && joySessionId) {
+            // Absolute set, server-side: joy-tmux reads the CURRENT mode off
+            // the pane footer, walks Shift+Tab the right number of steps in
+            // the real cycle (bypass → auto → default → acceptEdits → plan),
+            // and verifies the footer afterwards. No client-side guessing.
+            void apiSocket.machineRPC(machineId, 'joy-set-mode', { id: joySessionId, mode: mode.key })
+                .catch(() => { /* best-effort; stored state still updates */ });
         }
         storage.getState().updateSessionPermissionMode(sessionId, mode.key);
-    }, [sessionId, isJoyTmux, permissionMode?.key, sendJoyKeys]);
+    }, [sessionId, isJoyTmux, machineId, joySessionId]);
 
     const updateModelMode = React.useCallback((mode: ModelMode) => {
         if (isJoyTmux) {
