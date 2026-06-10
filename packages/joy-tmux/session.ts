@@ -358,8 +358,27 @@ export class Session {
     return { ok: true, segments: segments.length };
   }
 
-  pane(): { ok: true; text: string } {
-    return { ok: true, text: run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow).out };
+  pane(color = false): { ok: true; text: string } {
+    // -e includes ANSI SGR escape sequences (colors, bold, …) so the app can
+    // render the TUI in color; without it the capture is plain text.
+    const args = color
+      ? ["capture-pane", "-p", "-e", "-t", this.tmuxWindow]
+      : ["capture-pane", "-p", "-t", this.tmuxWindow];
+    return { ok: true, text: run("tmux", ...args).out };
+  }
+
+  /**
+   * Resize the tmux window. tmux's resize-window auto-switches the window to
+   * window-size=manual, so the size sticks (the session is detached — the app
+   * is the only "viewer"). A real terminal attaching reclaims via the global
+   * client-attached hook (window-size latest), giving "last connector drives
+   * the width". cols/rows are clamped to sane terminal bounds.
+   */
+  resize(cols: number, rows: number): { ok: boolean } {
+    const c = Math.max(20, Math.min(500, Math.floor(cols)));
+    const r = Math.max(10, Math.min(200, Math.floor(rows)));
+    if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false };
+    return { ok: run("tmux", "resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)).ok };
   }
 
   transcript(): { lines: unknown[] } {

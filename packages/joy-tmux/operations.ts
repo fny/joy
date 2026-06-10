@@ -225,12 +225,35 @@ export const machineOps: MachineOp[] = [
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
       if (!session) return { error: "session_not_found" };
-      return session.pane();
+      // color=true → capture with ANSI escape sequences (HTTP: ?color=1).
+      return session.pane(params.color === true || params.color === "1" || params.color === "true");
     },
     httpShape: (result) =>
       (result as { error?: string }).error
         ? { status: 404, body: result }
         : { status: 200, body: result },
+  },
+  {
+    name: "resize",
+    scope: "machine",
+    rpcName: "joy-resize",
+    http: { method: "POST", path: "/sessions/:id/resize" },
+    // Set the pane's column/row size. The viewing client calls this on
+    // connect and when its width changes — last connector drives the width.
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const cols = Number(params.cols);
+      const rows = Number(params.rows);
+      if (!Number.isFinite(cols) || !Number.isFinite(rows)) return { error: "cols and rows required" };
+      return session.resize(cols, rows);
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error) return { status: 400, body: result };
+      return { status: 200, body: result };
+    },
   },
   {
     name: "transcript",
