@@ -40,6 +40,8 @@ export default React.memo(function JoyPaneScreen() {
     const [paneError, setPaneError] = React.useState<string | null>(null);
     const [input, setInput] = React.useState('');
     const [sending, setSending] = React.useState(false);
+    // false = key-token mode (parse <Enter>, <C-c>…); true = plain text sent verbatim.
+    const [literalMode, setLiteralMode] = React.useState(false);
     const scrollRef = React.useRef<ScrollView>(null);
     const mountedRef = React.useRef(true);
 
@@ -75,13 +77,13 @@ export default React.memo(function JoyPaneScreen() {
         return () => clearInterval(timer);
     }, [refresh]));
 
-    const sendScript = React.useCallback(async (script: string) => {
+    const sendScript = React.useCallback(async (script: string, literal = false) => {
         if (!script) return;
         setSending(true);
         try {
             const result = await Promise.race([
-                apiSocket.machineRPC<{ ok?: boolean; error?: string }, { id: string; script: string }>(
-                    machineId, 'joy-send-keys', { id: sessionId, script },
+                apiSocket.machineRPC<{ ok?: boolean; error?: string }, { id: string; script: string; literal?: boolean }>(
+                    machineId, 'joy-send-keys', { id: sessionId, script, literal },
                 ),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond')), 10000)),
             ]);
@@ -102,8 +104,10 @@ export default React.memo(function JoyPaneScreen() {
         const script = input;
         if (!script.trim()) return;
         setInput('');
-        void sendScript(script);
-    }, [input, sendScript]);
+        // In plain-text mode the input is typed verbatim — <Enter>, <C-c> etc.
+        // land as literal characters, not keys.
+        void sendScript(script, literalMode);
+    }, [input, sendScript, literalMode]);
 
     return (
         <View style={styles.container}>
@@ -136,10 +140,19 @@ export default React.memo(function JoyPaneScreen() {
 
             {/* Raw input */}
             <View style={styles.inputRow}>
+                <Pressable
+                    onPress={() => setLiteralMode(v => !v)}
+                    style={(p) => [styles.modeToggle, literalMode && styles.modeToggleActive, p.pressed && styles.quickKeyPressed]}
+                    hitSlop={6}
+                >
+                    <Text style={[styles.modeToggleText, literalMode && styles.modeToggleTextActive]}>
+                        {literalMode ? 'text' : 'keys'}
+                    </Text>
+                </Pressable>
                 <TextInput
                     value={input}
                     onChangeText={setInput}
-                    placeholder="git commit<Enter>oops<C-c>"
+                    placeholder={literalMode ? 'plain text, sent verbatim' : 'git commit<Enter>oops<C-c>'}
                     placeholderTextColor="#666"
                     style={styles.input}
                     autoCapitalize="none"
@@ -160,7 +173,9 @@ export default React.memo(function JoyPaneScreen() {
                 </Pressable>
             </View>
             <Text style={styles.hint}>
-                Keys: {'<Enter> <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt>'} — input is sent raw, no Enter appended.
+                {literalMode
+                    ? 'text mode: typed verbatim — <Enter>, <C-c> land as literal characters. Tap “text” to switch back to keys.'
+                    : 'keys mode: <Enter> <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt>. Tap “keys” for plain text.'}
             </Text>
         </View>
     );
@@ -212,6 +227,28 @@ const styles = StyleSheet.create((theme, runtime) => ({
         gap: 8,
         paddingHorizontal: 8,
         paddingBottom: 4,
+    },
+    modeToggle: {
+        paddingHorizontal: 10,
+        height: 34,
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: '#1e1e1e',
+        borderWidth: 1,
+        borderColor: '#333',
+    },
+    modeToggleActive: {
+        backgroundColor: '#2d4a2d',
+        borderColor: '#3a7a3a',
+    },
+    modeToggleText: {
+        color: '#8a8a8a',
+        fontSize: 12,
+        fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+    },
+    modeToggleTextActive: {
+        color: '#7ee07e',
     },
     input: {
         flex: 1,

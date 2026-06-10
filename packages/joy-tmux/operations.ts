@@ -187,7 +187,8 @@ export const machineOps: MachineOp[] = [
       if (!session) return { error: "session_not_found" };
       const script = typeof params.script === "string" ? params.script : "";
       if (!script) return { error: "empty" };
-      return session.sendRawKeys(script);
+      // literal: send the string verbatim (no bracketed-token parsing).
+      return session.sendRawKeys(script, { literal: params.literal === true });
     },
     httpShape: (result) => {
       const r = result as { error?: string };
