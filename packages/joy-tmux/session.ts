@@ -328,7 +328,14 @@ export class Session {
    * are batched into one tmux call; literal runs are sent with -l so tmux
    * doesn't interpret them.
    */
-  sendRawKeys(script: string): { ok: boolean; segments: number; error?: string } {
+  sendRawKeys(script: string, opts?: { literal?: boolean }): { ok: boolean; segments: number; error?: string } {
+    // Literal mode: type the string verbatim, no token parsing — so
+    // "git commit<Enter>" lands as those exact characters instead of a
+    // command + keypress. Used by the pane's plain-text input toggle.
+    if (opts?.literal) {
+      const ok = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, script).ok;
+      return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
+    }
     const segments = parseKeyScript(script);
     let pendingKeys: string[] = [];
     const flushKeys = () => {
