@@ -96,6 +96,11 @@ export const machineOps: MachineOp[] = [
         yolo: typeof params.yolo === "boolean" ? params.yolo : undefined,
         continue: params.continue === true,
         resume_id: typeof params.resume_id === "string" ? params.resume_id : undefined,
+        permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
+        fallbackModel: typeof params.fallbackModel === "string" ? params.fallbackModel : undefined,
+        forkSession: params.forkSession === true,
+        chrome: params.chrome === true,
+        extraArgs: typeof params.extraArgs === "string" ? params.extraArgs : undefined,
       });
       return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };
     },
