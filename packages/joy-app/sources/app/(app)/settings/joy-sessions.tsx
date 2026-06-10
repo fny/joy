@@ -65,6 +65,20 @@ export default React.memo(function JoySessionsScreen() {
 
     const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyRpcSessions(selectedMachineId);
 
+    // Daemon card: one-shot joy-status fetch per machine selection.
+    type JoyStatus = { ok: boolean; version?: string; uptimeMs?: number; claude?: { available: boolean; version: string | null } };
+    const [daemonStatus, setDaemonStatus] = React.useState<JoyStatus | null>(null);
+    React.useEffect(() => {
+        setDaemonStatus(null);
+        if (!selectedMachineId) return;
+        let cancelled = false;
+        Promise.race([
+            apiSocket.machineRPC<JoyStatus, {}>(selectedMachineId, 'joy-status', {}),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
+        ]).then(s => { if (!cancelled) setDaemonStatus(s); }).catch(() => { /* card stays hidden */ });
+        return () => { cancelled = true; };
+    }, [selectedMachineId]);
+
     const killingIdRef = React.useRef<string | null>(null);
     const screenshotIdRef = React.useRef<string | null>(null);
 
@@ -126,6 +140,9 @@ export default React.memo(function JoySessionsScreen() {
         ? 0
         : (onlineMachines.length - visibleMachines.length) + offlineMachines.length;
     const activeSessions = sessions.filter(s => s.status !== 'ended');
+    // Ended sessions the daemon still remembers (in-memory — clears when the
+    // daemon restarts). Chat history survives on the relay regardless.
+    const endedSessions = sessions.filter(s => s.status === 'ended');
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
@@ -230,6 +247,41 @@ export default React.memo(function JoySessionsScreen() {
                     />
                 </ItemGroup>
             )}
+
+            {selectedMachineId && daemonStatus?.ok && (
+                <ItemGroup title="Daemon">
+                    <Item
+                        title="joy-tmux"
+                        subtitle={`${daemonStatus.version ?? ''}${daemonStatus.uptimeMs != null ? ` · up ${formatUptime(daemonStatus.uptimeMs)}` : ''}`}
+                        icon={<Ionicons name="pulse-outline" size={29} color="#34C759" />}
+                        showChevron={false}
+                    />
+                    <Item
+                        title="claude"
+                        subtitle={daemonStatus.claude?.available ? (daemonStatus.claude.version ?? 'available') : 'not found on PATH'}
+                        icon={<Ionicons
+                            name={daemonStatus.claude?.available ? 'checkmark-circle-outline' : 'close-circle-outline'}
+                            size={29}
+                            color={daemonStatus.claude?.available ? '#34C759' : '#FF3B30'}
+                        />}
+                        showChevron={false}
+                    />
+                </ItemGroup>
+            )}
+
+            {selectedMachineId && endedSessions.length > 0 && (
+                <ItemGroup title="Previous sessions" footer="Held in daemon memory — clears on joy-tmux restart. Chat history stays on the relay.">
+                    {endedSessions.map(session => (
+                        <Item
+                            key={session.id}
+                            title={session.cwd.split('/').pop() ?? session.cwd}
+                            subtitle={`${session.end_reason ?? 'ended'} · ${session.cwd}`}
+                            onPress={session.relay_session_id ? () => router.push(`/session/${encodeURIComponent(session.relay_session_id!)}`) : undefined}
+                            showChevron={!!session.relay_session_id}
+                        />
+                    ))}
+                </ItemGroup>
+            )}
         </ItemList>
     );
 });
@@ -248,6 +300,15 @@ function PaneViewModal({ text, onClose }: { text: string; onClose: () => void })
             </ScrollView>
         </View>
     );
+}
+
+function formatUptime(ms: number): string {
+    const m = Math.floor(ms / 60000);
+    if (m < 1) return '<1m';
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 48) return `${h}h ${m % 60}m`;
+    return `${Math.floor(h / 24)}d`;
 }
 
 function statusLabel(status: JoySession['status']): string {

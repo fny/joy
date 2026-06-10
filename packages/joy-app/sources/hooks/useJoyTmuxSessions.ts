@@ -10,6 +10,7 @@ export interface JoySession {
     claude_session_id?: string;
     started_at: number;
     tmux_window: string;
+    end_reason?: string;
 }
 
 const POLL_INTERVAL_MS = 5000;
