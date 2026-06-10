@@ -24,6 +24,7 @@ import {
   handleRipgrep,
   handleDifftastic,
 } from "./fileOps";
+import { computeUsage, periodToRange } from "./usage";
 
 export type HttpMethod = "GET" | "POST" | "DELETE";
 
@@ -262,13 +263,17 @@ export const machineOps: MachineOp[] = [
     scope: "machine",
     rpcName: "joy-codeburn",
     http: { method: "GET", path: "/codeburn" },
-    // Rich usage report via codeburn (getagentseal/codeburn): cost/tokens
-    // plus per-project, per-model, activity, tool and MCP breakdowns.
-    // period: today | 30days (default) | 90days | 6months.
+    // Usage report computed by our own usage.ts straight from the transcript
+    // JSONL (cost/tokens, daily, per-project/model/tool/MCP). If the codeburn
+    // binary happens to be installed, its activity/skill/subagent panels are
+    // merged in as optional extras — the backbone has no dependency.
+    // period: today | week | 30days (default) | 90days | 6months.
     handler: async (_registry, params) => {
       const period = typeof params.period === "string" ? params.period : "30days";
-      const data = await runCodeburn(period);
-      return { ok: true, ...data };
+      const range = periodToRange(period);
+      const { sessions: _sessions, ...data } = await computeUsage({ fromDay: range.fromDay, toDay: range.toDay });
+      const extras = await runCodeburnExtras(period);
+      return { ok: true, period: range.label, ...data, ...(extras ?? {}) };
     },
   },
   {
@@ -276,139 +281,71 @@ export const machineOps: MachineOp[] = [
     scope: "machine",
     rpcName: "joy-codeburn-sessions",
     http: { method: "GET", path: "/codeburn/sessions" },
-    // Per-session cost rows from `codeburn export` ("Session ID" is the
-    // claude session id). period like joy-codeburn plus "all";
-    // claudeSessionId returns just that conversation's row.
+    // Per-session cost rows from usage.ts (keyed by claude session id, with
+    // subagent burn rolled into the parent and a per-model breakdown).
+    // period like joy-codeburn plus "all"; claudeSessionId returns just that
+    // conversation's row.
     handler: async (_registry, params) => {
       const period = typeof params.period === "string" ? params.period : "30days";
-      const rows = await runCodeburnSessions(period);
+      const range = periodToRange(period);
+      const { sessions } = await computeUsage({ fromDay: range.fromDay, toDay: range.toDay });
       const claudeSessionId = typeof params.claudeSessionId === "string" ? params.claudeSessionId : undefined;
       if (claudeSessionId) {
-        return { ok: true, entry: rows.find((r) => r.id === claudeSessionId) ?? null };
+        return { ok: true, entry: sessions.find((s) => s.id === claudeSessionId) ?? null };
       }
-      return { ok: true, sessions: rows.slice(0, 20) };
+      return { ok: true, sessions: sessions.slice(0, 20) };
     },
   },
 ];
 
-// codeburn runs take ~1.5-3s and rescan every transcript on disk, so cache
-// per (command, period) briefly — the app polls these from multiple pages.
-const usageCache = new Map<string, { at: number; data: unknown }>();
-const USAGE_CACHE_TTL_MS = 60_000;
+// codeburn extras: ONLY when the binary is installed (never bunx — that
+// would silently download and run unpinned code). The own-module backbone
+// covers everything else; these panels (activity classification, one-shot
+// rates, skills) are codeburn heuristics we don't replicate.
+const extrasCache = new Map<string, { at: number; data: Record<string, unknown> | null }>();
+const EXTRAS_CACHE_TTL_MS = 60_000;
 
 function daysAgoISO(days: number): string {
   const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-// codeburn knows today/week/30days/month/all as named periods; longer rolling
-// windows go through --from. ~1.5-3s per run, hence the cache above.
-async function runCodeburn(period: string): Promise<Record<string, unknown>> {
-  const key = `codeburn:${period}`;
-  const hit = usageCache.get(key);
-  if (hit && Date.now() - hit.at < USAGE_CACHE_TTL_MS) return hit.data as Record<string, unknown>;
+async function runCodeburnExtras(period: string): Promise<Record<string, unknown> | null> {
+  const bin = Bun.which("codeburn");
+  if (!bin) return null;
+
+  const key = `extras:${period}`;
+  const hit = extrasCache.get(key);
+  if (hit && Date.now() - hit.at < EXTRAS_CACHE_TTL_MS) return hit.data;
 
   const periodArgs =
     period === "today" ? ["-p", "today"]
     : period === "week" ? ["-p", "week"]
-    : period === "90days" ? ["--from", daysAgoISO(90)]
-    : period === "6months" ? ["--from", daysAgoISO(183)]
+    : period === "90days" ? ["--from", daysAgoISO(89)]
+    : period === "6months" ? ["--from", daysAgoISO(182)]
     : ["-p", "30days"];
 
-  const bin = Bun.which("codeburn");
-  const argv = [...(bin ? [bin] : ["bunx", "codeburn"]), "report", "--format", "json", ...periodArgs];
-
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
-  const killTimer = setTimeout(() => proc.kill(), 60_000);
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  clearTimeout(killTimer);
-  if (proc.exitCode !== 0) throw new Error(`codeburn exited with ${proc.exitCode}`);
-
-  const full = JSON.parse(out) as Record<string, unknown>;
-  // The raw report runs to tens of KB (shellCommands alone had 370+ entries)
-  // and rides an encrypted RPC envelope, so keep only what the app renders.
-  const top = (k: string, n: number) => (Array.isArray(full[k]) ? (full[k] as unknown[]).slice(0, n) : []);
-  const data: Record<string, unknown> = {
-    generated: full.generated,
-    currency: full.currency,
-    period: full.period,
-    overview: full.overview,
-    // Per-day rows power the app's bar chart; only the charted fields ride.
-    daily: Array.isArray(full.daily)
-      ? (full.daily as Array<{ date?: string; cost?: number; calls?: number }>)
-          .map((d) => ({ date: d.date, cost: d.cost, calls: d.calls }))
-      : [],
-    projects: top("projects", 12),
-    models: top("models", 12),
-    activities: top("activities", 13),
-    tools: top("tools", 10),
-    mcpServers: top("mcpServers", 10),
-    skills: top("skills", 10),
-    subagents: top("subagents", 10),
-  };
-  usageCache.set(key, { at: Date.now(), data });
+  let data: Record<string, unknown> | null = null;
+  try {
+    const proc = Bun.spawn([bin, "report", "--format", "json", ...periodArgs], { stdout: "pipe", stderr: "pipe" });
+    const killTimer = setTimeout(() => proc.kill(), 60_000);
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    clearTimeout(killTimer);
+    if (proc.exitCode === 0) {
+      const full = JSON.parse(out) as Record<string, unknown>;
+      const top = (k: string, n: number) => (Array.isArray(full[k]) ? (full[k] as unknown[]).slice(0, n) : []);
+      data = {
+        activities: top("activities", 13),
+        skills: top("skills", 10),
+        subagents: top("subagents", 10),
+      };
+    }
+  } catch {
+    data = null; // extras are strictly optional — never fail the report
+  }
+  extrasCache.set(key, { at: Date.now(), data });
   return data;
-}
-
-interface CodeburnSessionRow {
-  id: string;
-  project: string;
-  startedAt: string;
-  cost: number;
-  calls: number;
-  turns: number;
-}
-
-// `codeburn export` only writes to a file, so round-trip through /tmp. The
-// export's "Session ID" column is the claude session id, which is how both
-// the per-session usage page and top-sessions list key their lookups.
-async function runCodeburnSessions(period: string): Promise<CodeburnSessionRow[]> {
-  const key = `codeburn-sessions:${period}`;
-  const hit = usageCache.get(key);
-  if (hit && Date.now() - hit.at < USAGE_CACHE_TTL_MS) return hit.data as CodeburnSessionRow[];
-
-  const days =
-    period === "today" ? 0
-    : period === "week" ? 7
-    : period === "90days" ? 90
-    : period === "6months" ? 183
-    : period === "all" ? 3650
-    : 30;
-
-  const bin = Bun.which("codeburn");
-  const tmpPath = `/tmp/joy-codeburn-export-${process.pid}-${Date.now()}.json`;
-  const argv = [
-    ...(bin ? [bin] : ["bunx", "codeburn"]),
-    "export", "-f", "json", "-o", tmpPath,
-    "--from", daysAgoISO(days), "--to", daysAgoISO(0),
-  ];
-
-  const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
-  const killTimer = setTimeout(() => proc.kill(), 60_000);
-  await proc.exited;
-  clearTimeout(killTimer);
-  if (proc.exitCode !== 0) throw new Error(`codeburn export exited with ${proc.exitCode}`);
-
-  const raw = JSON.parse(await Bun.file(tmpPath).text()) as {
-    sessions?: Array<Record<string, unknown>>;
-  };
-  await Bun.file(tmpPath).delete();
-
-  const rows: CodeburnSessionRow[] = (raw.sessions ?? [])
-    .map((s) => ({
-      id: String(s["Session ID"] ?? ""),
-      project: String(s["Project"] ?? ""),
-      startedAt: String(s["Started At"] ?? ""),
-      cost: Number(s["Cost (USD)"] ?? 0),
-      calls: Number(s["API Calls"] ?? 0),
-      turns: Number(s["Turns"] ?? 0),
-    }))
-    .filter((s) => s.id)
-    .sort((a, b) => b.cost - a.cost);
-
-  usageCache.set(key, { at: Date.now(), data: rows });
-  return rows;
 }
 
 // ── Session-scoped operations ───────────────────────────────────────────────
