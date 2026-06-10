@@ -31,6 +31,8 @@ const QUICK_KEYS: { label: string; script: string }[] = [
     { label: 'Tab', script: '<Tab>' },
     { label: '↑', script: '<Up>' },
     { label: '↓', script: '<Down>' },
+    { label: 'PgUp', script: '<PgUp>' },
+    { label: 'PgDn', script: '<PgDn>' },
     { label: '1', script: '1' },
     { label: '2', script: '2' },
 ];
