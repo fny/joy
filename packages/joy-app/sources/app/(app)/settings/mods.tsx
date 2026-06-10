@@ -1,3 +1,9 @@
+// Mods catalog: every mod from the repo's mods/ directory (00-17) plus the
+// joy-era features added after happy-app was forked into joy-app. Toggleable
+// mods keep their switches; everything else is listed so the page is the one
+// place to see what this build changes vs stock happy.
+//
+// Personal-build dev page — plain strings, no i18n (matches the /joy pages).
 import * as React from 'react';
 import { Switch } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -7,7 +13,6 @@ import { ItemList } from '@/components/ItemList';
 import { useSettingMutable } from '@/sync/storage';
 import { useRouter } from 'expo-router';
 import { Modal } from '@/modal';
-import { t } from '@/text';
 
 export default React.memo(function ModsSettingsScreen() {
     const router = useRouter();
@@ -19,11 +24,11 @@ export default React.memo(function ModsSettingsScreen() {
 
     const handleChatHistoryLimit = React.useCallback(async () => {
         const value = await Modal.prompt(
-            t('settingsMods.chatHistoryLimit'),
-            t('settingsMods.chatHistoryLimitDescription'),
+            'Chat history limit',
+            'Max messages rendered per conversation. Empty to disable.',
             {
                 defaultValue: chatHistoryLimit != null ? String(chatHistoryLimit) : '',
-                placeholder: t('settingsMods.chatHistoryLimitPlaceholder'),
+                placeholder: 'e.g. 100',
             }
         );
         if (value === null) return;
@@ -38,69 +43,99 @@ export default React.memo(function ModsSettingsScreen() {
         }
     }, [chatHistoryLimit, setChatHistoryLimit]);
 
-    const limitDetail = chatHistoryLimit != null
-        ? t('settingsMods.chatHistoryLimitValue', { count: chatHistoryLimit })
-        : t('settingsMods.chatHistoryLimitOff');
+    const toggle = (value: boolean, set: (v: boolean) => void) => (
+        <Switch value={value} onValueChange={set} />
+    );
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
-            <ItemGroup title={t('settingsMods.mod01Title')} footer={t('settingsMods.mod01Description')}>
+            <ItemGroup title="Toggles" footer="Mods that can be switched on and off.">
                 <Item
-                    title="Microphone entitlement added"
-                    showChevron={false}
-                />
-            </ItemGroup>
-
-            <ItemGroup title={t('settingsMods.mod02Title')} footer={t('settingsMods.mod02Description')}>
-                <Item
-                    title={t('settingsMods.enabled')}
-                    rightElement={<Switch value={!!modXhighEnabled} onValueChange={setModXhighEnabled} />}
+                    title="03 · xhigh effort"
+                    subtitle="Adds an xhigh effort level between high and max for Claude"
+                    rightElement={toggle(!!modXhighEnabled, setModXhighEnabled)}
                     onPress={() => setModXhighEnabled(!modXhighEnabled)}
                     showChevron={false}
                 />
-            </ItemGroup>
-
-            <ItemGroup title={t('settingsMods.mod04Title')} footer={t('settingsMods.mod04Description')}>
                 <Item
-                    title={t('settingsMods.enabled')}
-                    rightElement={<Switch value={!!modHideModesEnabled} onValueChange={setModHideModesEnabled} />}
+                    title="05 · Hide permission modes"
+                    subtitle="Permission selector shows only Plan and Yolo"
+                    rightElement={toggle(!!modHideModesEnabled, setModHideModesEnabled)}
                     onPress={() => setModHideModesEnabled(!modHideModesEnabled)}
                     showChevron={false}
                 />
-            </ItemGroup>
-
-            <ItemGroup title={t('settingsMods.mod05Title')} footer={t('settingsMods.mod05Description')}>
                 <Item
-                    title={t('settingsMods.chatHistoryLimit')}
-                    icon={<Ionicons name="chatbubbles-outline" size={29} color="#007AFF" />}
-                    detail={limitDetail}
+                    title="06 · Chat history limit"
+                    subtitle="Caps messages rendered per conversation"
+                    detail={chatHistoryLimit != null ? `${chatHistoryLimit}` : 'off'}
                     onPress={handleChatHistoryLimit}
                 />
-            </ItemGroup>
-
-            <ItemGroup title={t('settingsMods.mod06Title')} footer={t('settingsMods.mod06Description')}>
                 <Item
-                    title={t('settingsMods.enabled')}
-                    rightElement={<Switch value={!!modDoubleTapEnabled} onValueChange={setModDoubleTapEnabled} />}
+                    title="07 · Double tap"
+                    subtitle="Second tap within 2s required to commit choice selections"
+                    rightElement={toggle(!!modDoubleTapEnabled, setModDoubleTapEnabled)}
                     onPress={() => setModDoubleTapEnabled(!modDoubleTapEnabled)}
                     showChevron={false}
                 />
-            </ItemGroup>
-
-            <ItemGroup title={t('settingsMods.mod07Title')} footer={t('settingsMods.mod07Description')}>
                 <Item
-                    title={t('settingsMods.enabled')}
-                    rightElement={<Switch value={!!modReadOpenFileEnabled} onValueChange={setModReadOpenFileEnabled} />}
+                    title="08 · Read → Open file"
+                    subtitle="Read tool calls get an Open File button into the file viewer"
+                    rightElement={toggle(!!modReadOpenFileEnabled, setModReadOpenFileEnabled)}
                     onPress={() => setModReadOpenFileEnabled(!modReadOpenFileEnabled)}
                     showChevron={false}
                 />
             </ItemGroup>
 
-            <ItemGroup title="08 · Raw Settings" footer="View and edit the raw settings JSON. Lets you remove deprecated keys that no toggle controls.">
+            <ItemGroup title="Always on" footer="Baked-in mods with no toggle.">
+                <Item title="00 · joy App" subtitle="Separate app identifier + icon from stock Happy" showChevron={false} />
+                <Item title="01 · Mods page" subtitle="This page (replaces the old Personal page)" showChevron={false} />
+                <Item title="02 · Audio" subtitle="macOS microphone entitlement for voice in the Tauri build" showChevron={false} />
+                <Item title="09 · Dev tools" subtitle="WebKit inspector enabled in release Tauri builds" showChevron={false} />
+                <Item title="10 · Component info in DOM" subtitle="data-component/data-source attributes on web dev builds" showChevron={false} />
+                <Item title="11 · Unread green dot" subtitle="Unread indicator uses green instead of blue" showChevron={false} />
+                <Item title="12 · Keep on top" subtitle="Window > Keep on Top toggle in the macOS menu bar" showChevron={false} />
                 <Item
-                    title="Edit raw settings"
+                    title="14 · Raw settings"
+                    subtitle="View and edit the raw settings JSON"
                     icon={<Ionicons name="code-slash-outline" size={29} color="#8E8E93" />}
                     onPress={() => router.push('/settings/raw')}
+                />
+                <Item
+                    title="15 · Joy sessions page"
+                    subtitle="Manage joy-tmux sessions, daemon status, previous sessions"
+                    icon={<Ionicons name="terminal-outline" size={29} color="#8E8E93" />}
+                    onPress={() => router.push('/settings/joy-sessions')}
+                />
+                <Item title="16 · Session indicator" subtitle=">_ badge + session id on joy-tmux sessions" showChevron={false} />
+                <Item title="17 · Joy HTTP debug page" subtitle="joy-tmux's local web debug UI on port 4997" showChevron={false} />
+            </ItemGroup>
+
+            <ItemGroup title="Joy features" footer="Added after happy-app was forked into joy-app — no longer tracked as mods.">
+                <Item
+                    title="New joy-tmux session"
+                    subtitle="Claude-only session creation, yolo default, --continue, dir-create prompt"
+                    icon={<Ionicons name="add-circle-outline" size={29} color="#8E8E93" />}
+                    onPress={() => router.push('/joy/new')}
+                />
+                <Item
+                    title="Interactive terminal"
+                    subtitle={'Live pane view + raw key tokens: git commit<Enter><C-c>, <ctrl+shift+a>…'}
+                    showChevron={false}
+                />
+                <Item
+                    title="Model catalog"
+                    subtitle="opus 4.8 / fable 5 at create and via /model switching"
+                    showChevron={false}
+                />
+                <Item
+                    title="Mode switching"
+                    subtitle="Footer-verified Shift+Tab cycle: yolo → auto → default → accept edits → plan"
+                    showChevron={false}
+                />
+                <Item
+                    title="Image attachments"
+                    subtitle="Pasted images written into the session cwd as paste-*.png"
+                    showChevron={false}
                 />
             </ItemGroup>
         </ItemList>
