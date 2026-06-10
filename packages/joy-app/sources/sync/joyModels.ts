@@ -9,7 +9,7 @@
 // This intentionally diverges from happy's getClaudeModelModes(): joy is a
 // personal build, so the list carries the models actually in use (Opus 4.8,
 // Fable 5) rather than the lowest-common-denominator aliases.
-import type { ModelMode } from '@/components/modelModeOptions';
+import type { ModelMode, PermissionMode } from '@/components/modelModeOptions';
 
 export const JOY_CLAUDE_MODELS: ModelMode[] = [
     { key: 'default', name: 'default model', description: null },
@@ -18,4 +18,20 @@ export const JOY_CLAUDE_MODELS: ModelMode[] = [
     { key: 'opus', name: 'opus (latest)', description: null },
     { key: 'sonnet', name: 'sonnet (latest)', description: null },
     { key: 'haiku', name: 'haiku (latest)', description: null },
+];
+
+// Permission modes for joy-tmux sessions, in the SAME order as interactive
+// claude's Shift+Tab cycle (empirically, v2.1.170 launched with bypass
+// available): bypass → auto → default → acceptEdits → plan. Matching the
+// order means browser Shift+Tab cycling (AgentInput) visits modes in the
+// same sequence as terminal Shift+Tab. Notably:
+//   - includes 'auto' (real cycle member missing from happy's list)
+//   - excludes 'dontAsk' (in happy's list but NOT in the interactive cycle —
+//     joy-set-mode can't reach it and would error)
+export const JOY_CLAUDE_PERMISSION_MODES: PermissionMode[] = [
+    { key: 'bypassPermissions', name: 'yolo', description: null },
+    { key: 'auto', name: 'auto', description: null },
+    { key: 'default', name: 'default', description: null },
+    { key: 'acceptEdits', name: 'accept edits', description: null },
+    { key: 'plan', name: 'plan', description: null },
 ];

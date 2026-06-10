@@ -51,7 +51,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
-import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
+import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES } from '@/sync/joyModels';
 import { apiSocket } from '@/sync/apiSocket';
 
 export const SessionView = React.memo((props: { id: string }) => {
@@ -474,12 +474,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const modHideModesEnabled = useSetting('joy__hideModesEnabled');
     const modXhighEnabled = useSetting('joy__xHighEnabled');
     const availableModes = React.useMemo(() => {
-        const modes = getAvailablePermissionModes(flavor, session.metadata, t);
+        // joy sessions: only the modes interactive claude can actually reach
+        // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
+        // cycling matches). happy's list has dontAsk (unreachable) and lacks
+        // auto.
+        const modes = isJoyTmux
+            ? JOY_CLAUDE_PERMISSION_MODES
+            : getAvailablePermissionModes(flavor, session.metadata, t);
         if (modHideModesEnabled && (flavor === 'claude' || !flavor)) {
             return modes.filter(m => m.key === 'plan' || m.key === 'bypassPermissions');
         }
         return modes;
-    }, [flavor, session.metadata, modHideModesEnabled]);
+    }, [isJoyTmux, flavor, session.metadata, modHideModesEnabled]);
     const agentDefaultOverrides = useSetting('agentDefaultOverrides');
     const effectiveAgentDefaults = React.useMemo(() => (
         resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
