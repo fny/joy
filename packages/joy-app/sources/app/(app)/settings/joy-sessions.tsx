@@ -20,25 +20,28 @@ export default React.memo(function JoySessionsScreen() {
     const offlineMachines = machines.filter(m => !isMachineOnline(m));
 
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(null);
-    const [showOffline, setShowOffline] = React.useState(false);
+    // null = probe in flight; afterwards the set of machine ids that answered
+    // a joy-list-sessions probe within 3s. Online machines without joy-tmux
+    // never respond (machineRPC has no timeout), hence the per-probe race.
+    const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(null);
     const probedRef = React.useRef(false);
 
-    // Probe all online machines in parallel; pick first one with joy-tmux.
     React.useEffect(() => {
         if (probedRef.current || onlineMachines.length === 0) return;
         probedRef.current = true;
         let cancelled = false;
         (async () => {
-            const results = await Promise.allSettled(
-                onlineMachines.map(m =>
-                    apiSocket.machineRPC(m.id, 'joy-list-sessions', {}).then(() => m.id)
-                )
-            );
+            const probeOne = (id: string) => Promise.race([
+                apiSocket.machineRPC(id, 'joy-list-sessions', {}).then(() => id),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
+            ]);
+            const results = await Promise.allSettled(onlineMachines.map(m => probeOne(m.id)));
             if (cancelled) return;
-            const found = results.find(r => r.status === 'fulfilled');
-            setSelectedMachineId(
-                found?.status === 'fulfilled' ? (found.value as string) : (onlineMachines[0]?.id ?? null)
+            const found = new Set(
+                results.filter(r => r.status === 'fulfilled').map(r => (r as PromiseFulfilledResult<string>).value),
             );
+            setJoyMachineIds(found);
+            setSelectedMachineId(prev => prev ?? (found.values().next().value ?? null));
         })();
         return () => { cancelled = true; };
     }, [onlineMachines.map(m => m.id).join(',')]);
@@ -81,6 +84,11 @@ export default React.memo(function JoySessionsScreen() {
         doScreenshot();
     }, [doScreenshot]);
 
+    const handleOpenTerminal = React.useCallback((session: JoySession) => {
+        if (!selectedMachineId) return;
+        router.push(`/joy/pane/${encodeURIComponent(selectedMachineId)}/${encodeURIComponent(session.id)}`);
+    }, [selectedMachineId]);
+
     const handleKill = React.useCallback((session: JoySession) => {
         Modal.alert(
             t('settingsSessions.confirmKill'),
@@ -96,7 +104,15 @@ export default React.memo(function JoySessionsScreen() {
         );
     }, [doKill]);
 
-    const visibleMachines = showOffline ? machines : onlineMachines;
+    // Only machines that actually run joy-tmux are listed — an online happy
+    // machine without the daemon can't serve any of the RPCs this page uses.
+    const visibleMachines = joyMachineIds === null
+        ? []
+        : onlineMachines.filter(m => joyMachineIds.has(m.id));
+    const probing = joyMachineIds === null && onlineMachines.length > 0;
+    const withoutJoyCount = joyMachineIds === null
+        ? 0
+        : (onlineMachines.length - visibleMachines.length) + offlineMachines.length;
     const activeSessions = sessions.filter(s => s.status !== 'ended');
 
     return (
@@ -104,6 +120,10 @@ export default React.memo(function JoySessionsScreen() {
             <ItemGroup title={t('settingsSessions.machines')}>
                 {machines.length === 0 ? (
                     <Item title={t('settingsSessions.noMachine')} showChevron={false} />
+                ) : probing ? (
+                    <Item title={t('settingsSessions.loading')} showChevron={false} rightElement={<ActivityIndicator />} />
+                ) : visibleMachines.length === 0 ? (
+                    <Item title="No machines running joy-tmux" showChevron={false} />
                 ) : (
                     <>
                         {visibleMachines.map(machine => {
@@ -130,13 +150,10 @@ export default React.memo(function JoySessionsScreen() {
                                 />
                             );
                         })}
-                        {offlineMachines.length > 0 && (
+                        {withoutJoyCount > 0 && (
                             <Item
-                                title={showOffline
-                                    ? t('settingsSessions.hideOfflineMachines')
-                                    : t('settingsSessions.showOfflineMachines', { count: offlineMachines.length })}
+                                title={`${withoutJoyCount} machine${withoutJoyCount === 1 ? '' : 's'} without joy-tmux hidden`}
                                 showChevron={false}
-                                onPress={() => setShowOffline(v => !v)}
                             />
                         )}
                     </>
@@ -170,7 +187,8 @@ export default React.memo(function JoySessionsScreen() {
                                 rightElement={
                                     <View style={styles.sessionActions}>
                                         <Pressable
-                                            onPress={() => handleScreenshot(session)}
+                                            onPress={() => handleOpenTerminal(session)}
+                                            onLongPress={() => handleScreenshot(session)}
                                             style={styles.actionButton}
                                             hitSlop={8}
                                         >
