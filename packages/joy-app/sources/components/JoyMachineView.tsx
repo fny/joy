@@ -1,12 +1,12 @@
-// Machine page specific to joy-tmux: the daemon's live status (version, PID,
-// uptime, OS, claude CLI) fetched over joy-status, plus links into the joy
-// surfaces for this machine. The stock /machine/[id] page stays for
-// happy-daemon machines.
+// Machine view for joy-tmux: the daemon's live status (version, PID, uptime,
+// OS, claude CLI) fetched over joy-status, plus links into the joy surfaces
+// for this machine. This IS the /machine/[id] page now — the joy build has no
+// separate happy-daemon machine view.
 //
 // Personal-build dev page — plain strings, no i18n (matches the /joy pages).
 import * as React from 'react';
 import { View, Text, ActivityIndicator } from 'react-native';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
@@ -38,28 +38,27 @@ function formatUptime(ms: number): string {
     return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-export default React.memo(function JoyMachineScreen() {
+export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) => {
     const { theme } = useUnistyles();
     const router = useRouter();
-    const { id } = useLocalSearchParams<{ id: string }>();
-    const machine = useMachine(id ?? '');
+    const machine = useMachine(machineId ?? '');
     const online = machine ? isMachineOnline(machine) : false;
 
     const [status, setStatus] = React.useState<JoyStatus | null>(null);
     const [failed, setFailed] = React.useState(false);
     React.useEffect(() => {
-        if (!id || !online) {
+        if (!machineId || !online) {
             setFailed(!online);
             return;
         }
         let cancelled = false;
         Promise.race([
-            apiSocket.machineRPC<JoyStatus, {}>(id, 'joy-status', {}),
+            apiSocket.machineRPC<JoyStatus, {}>(machineId, 'joy-status', {}),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
         ]).then(s => { if (!cancelled) setStatus(s); })
             .catch(() => { if (!cancelled) setFailed(true); });
         return () => { cancelled = true; };
-    }, [id, online]);
+    }, [machineId, online]);
 
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || 'machine';
 
@@ -125,27 +124,21 @@ export default React.memo(function JoyMachineScreen() {
 
             <ItemGroup title="Go to">
                 <Item
-                    title="Joy Sessions"
+                    title="Sessions"
                     subtitle="Manage joy-tmux sessions on this machine"
                     icon={<Ionicons name="terminal-outline" size={29} color="#007AFF" />}
                     onPress={() => router.push('/settings/joy-sessions')}
                 />
                 <Item
-                    title="New joy-tmux Session"
+                    title="New Session"
                     icon={<Ionicons name="add-circle-outline" size={29} color="#007AFF" />}
-                    onPress={() => router.push({ pathname: '/joy/new', params: id ? { machineId: id } : {} })}
+                    onPress={() => router.push({ pathname: '/joy/new', params: machineId ? { machineId } : {} })}
                 />
                 <Item
-                    title="Codeburn"
-                    subtitle="Usage and cost for this machine"
+                    title="Usage & Cost"
+                    subtitle="Token usage and cost for this machine"
                     icon={<Ionicons name="flame-outline" size={29} color="#FF6B35" />}
-                    onPress={() => router.push('/settings/codeburn')}
-                />
-                <Item
-                    title="Stock Machine Page"
-                    subtitle="The happy-daemon view of this machine"
-                    icon={<Ionicons name="server-outline" size={29} color="#8E8E93" />}
-                    onPress={() => router.push(`/machine/${id}`)}
+                    onPress={() => router.push('/settings/usage')}
                 />
             </ItemGroup>
         </ItemList>

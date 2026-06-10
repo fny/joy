@@ -188,7 +188,7 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
     }, [machines]);
 
     // Group sessions by machine, then by project within each machine
-    const { machineGroups, hasMultipleMachines } = React.useMemo(() => {
+    const { machineGroups } = React.useMemo(() => {
         const unknownText = t('status.unknown');
         const byMachine = new Map<string, {
             machineId: string;
@@ -246,12 +246,12 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
 
                 return (
                     <React.Fragment key={machineGroup.machineId}>
-                        {hasMultipleMachines && (
-                            <MachineSeparator
-                                machineName={machineGroup.machineName}
-                                machineId={machineGroup.machineId}
-                            />
-                        )}
+                        {/* joy: always label the machine, even with a single
+                            active machine (upstream hid it unless 2+). */}
+                        <MachineSeparator
+                            machineName={machineGroup.machineName}
+                            machineId={machineGroup.machineId}
+                        />
                         {sortedProjects.map(([projectPath, projectGroup]) => {
                             const firstSession = projectGroup.sessions[0];
                             if (!firstSession) return null;

@@ -1,31 +1,22 @@
-import { View, ScrollView, Pressable, Platform } from 'react-native';
+import { View, Platform } from 'react-native';
 import { openExternalUrl } from '@/utils/openExternalUrl';
-import { Image } from 'expo-image';
 import * as React from 'react';
 import { Text } from '@/components/StyledText';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
-import { useAuth } from '@/auth/AuthContext';
-import { Typography } from "@/constants/Typography";
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useConnectTerminal } from '@/hooks/useConnectTerminal';
-import { useEntitlement, useLocalSettingMutable, useSetting } from '@/sync/storage';
-import { sync } from '@/sync/sync';
-import { isUsingCustomServer } from '@/sync/serverConfig';
-import { trackPaywallButtonClicked, trackWhatsNewClicked } from '@/track';
+import { useLocalSettingMutable } from '@/sync/storage';
+import { trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
 import { JoyLogotype } from '@/components/JoyLogotype';
-import { useAllMachines } from '@/sync/storage';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { useJoyMachines } from '@/hooks/useJoyMachines';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
-import { useHappyAction } from '@/hooks/useHappyAction';
-import { getGitHubOAuthParams, disconnectGitHub } from '@/sync/apiGithub';
-import { disconnectService } from '@/sync/apiServices';
 import { useProfile } from '@/sync/storage';
 import { getDisplayName, getAvatarUrl, getBio } from '@/sync/profile';
 import { Avatar } from '@/components/Avatar';
@@ -84,23 +75,8 @@ export const SettingsView = React.memo(function SettingsView() {
         runtimeVersion ? `runtime ${runtimeVersion}` : undefined,
     ].filter(Boolean).join(' / ');
     const versionSubtitle = formatBuildSubtitle(getBuildConfig());
-    const auth = useAuth();
     const [devModeEnabled, setDevModeEnabled] = useLocalSettingMutable('devModeEnabled');
-    const isPro = __DEV__ || useEntitlement('pro');
-    const experiments = useSetting('experiments');
-    const isCustomServer = isUsingCustomServer();
-    const [showOfflineMachines, setShowOfflineMachines] = React.useState(false);
-    const allMachinesWithOffline = useAllMachines({ includeOffline: true });
-    const offlineMachineCount = React.useMemo(
-        () => allMachinesWithOffline.filter(m => !isMachineOnline(m)).length,
-        [allMachinesWithOffline]
-    );
-    const visibleMachines = React.useMemo(
-        () => showOfflineMachines
-            ? allMachinesWithOffline
-            : allMachinesWithOffline.filter(isMachineOnline),
-        [allMachinesWithOffline, showOfflineMachines]
-    );
+    const { machines: joyMachines } = useJoyMachines();
     const profile = useProfile();
     const displayName = getDisplayName(profile);
     const avatarUrl = getAvatarUrl(profile);
@@ -116,16 +92,6 @@ export const SettingsView = React.memo(function SettingsView() {
         await openExternalUrl('https://github.com/slopus/happy/issues');
     };
 
-    const handleSubscribe = async () => {
-        trackPaywallButtonClicked('voluntary_support');
-        const result = await sync.presentPaywall('voluntary_support');
-        if (!result.success) {
-            console.error('Failed to present paywall:', result.error);
-        } else if (result.purchased) {
-            console.log('Purchase successful!');
-        }
-    };
-
     // Use the multi-click hook for version clicks
     const handleVersionClick = useMultiClick(() => {
         // Toggle dev mode
@@ -139,47 +105,6 @@ export const SettingsView = React.memo(function SettingsView() {
         requiredClicks: 10,
         resetTimeout: 2000
     });
-
-    // Connection status
-    const isGitHubConnected = !!profile.github;
-    const isAnthropicConnected = profile.connectedServices?.includes('anthropic') || false;
-
-    // GitHub connection
-    const [connectingGitHub, connectGitHub] = useHappyAction(async () => {
-        const params = await getGitHubOAuthParams(auth.credentials!);
-        await openExternalUrl(params.url);
-    });
-
-    // GitHub disconnection
-    const [disconnectingGitHub, handleDisconnectGitHub] = useHappyAction(async () => {
-        const confirmed = await Modal.confirm(
-            t('modals.disconnectGithub'),
-            t('modals.disconnectGithubConfirm'),
-            { confirmText: t('modals.disconnect'), destructive: true }
-        );
-        if (confirmed) {
-            await disconnectGitHub(auth.credentials!);
-        }
-    });
-
-    // Anthropic connection
-    const [connectingAnthropic, connectAnthropic] = useHappyAction(async () => {
-        router.push('/settings/connect/claude');
-    });
-
-    // Anthropic disconnection
-    const [disconnectingAnthropic, handleDisconnectAnthropic] = useHappyAction(async () => {
-        const confirmed = await Modal.confirm(
-            t('modals.disconnectService', { service: 'Claude' }),
-            t('modals.disconnectServiceConfirm', { service: 'Claude' }),
-            { confirmText: t('modals.disconnect'), destructive: true }
-        );
-        if (confirmed) {
-            await disconnectService(auth.credentials!, 'anthropic');
-            await sync.refreshProfile();
-        }
-    });
-
 
     return (
 
@@ -249,54 +174,6 @@ export const SettingsView = React.memo(function SettingsView() {
                 </ItemGroup>
             )}
 
-            {/* Support Us */}
-            <ItemGroup>
-                <Item
-                    title={t('settings.supportUs')}
-                    subtitle={isPro ? t('settings.supportUsSubtitlePro') : t('settings.supportUsSubtitle')}
-                    icon={<Ionicons name="heart" size={29} color="#FF3B30" />}
-                    showChevron={false}
-                    onPress={isPro ? undefined : handleSubscribe}
-                />
-            </ItemGroup>
-
-            <ItemGroup title={t('settings.connectedAccounts')}>
-                <Item
-                    title="Claude Code"
-                    subtitle={isAnthropicConnected
-                        ? t('settingsAccount.statusActive')
-                        : t('settings.connectAccount')
-                    }
-                    icon={
-                        <Image
-                            source={require('@/assets/images/icon-claude.png')}
-                            style={{ width: 29, height: 29 }}
-                            contentFit="contain"
-                        />
-                    }
-                    onPress={isAnthropicConnected ? handleDisconnectAnthropic : connectAnthropic}
-                    loading={connectingAnthropic || disconnectingAnthropic}
-                    showChevron={false}
-                />
-                <Item
-                    title={t('settings.github')}
-                    subtitle={isGitHubConnected
-                        ? t('settings.githubConnected', { login: profile.github?.login! })
-                        : t('settings.connectGithubAccount')
-                    }
-                    icon={
-                        <Ionicons
-                            name="logo-github"
-                            size={29}
-                            color={isGitHubConnected ? theme.colors.status.connected : theme.colors.textSecondary}
-                        />
-                    }
-                    onPress={isGitHubConnected ? handleDisconnectGitHub : connectGitHub}
-                    loading={connectingGitHub || disconnectingGitHub}
-                    showChevron={false}
-                />
-            </ItemGroup>
-
             {/* Social */}
             {/* <ItemGroup title={t('settings.social')}>
                 <Item
@@ -307,57 +184,28 @@ export const SettingsView = React.memo(function SettingsView() {
                 />
             </ItemGroup> */}
 
-            {/* Machines (sorted: online first, then last seen desc) */}
-            {allMachinesWithOffline.length > 0 && (
+            {/* Machines — only boxes running the joy-tmux daemon */}
+            {joyMachines.length > 0 && (
                 <ItemGroup title={t('settings.machines')}>
-                    {visibleMachines.map((machine) => {
-                        const isOnline = isMachineOnline(machine);
+                    {joyMachines.map((machine) => {
                         const host = machine.metadata?.host || 'Unknown';
                         const displayName = machine.metadata?.displayName;
                         const platform = machine.metadata?.platform || '';
-
-                        // Use displayName if available, otherwise use host
                         const title = displayName || host;
-
-                        // Build subtitle: show hostname if different from title, plus platform and status
-                        let subtitle = '';
-                        if (displayName && displayName !== host) {
-                            subtitle = host;
-                        }
-                        if (platform) {
-                            subtitle = subtitle ? `${subtitle} • ${platform}` : platform;
-                        }
-                        subtitle = subtitle ? `${subtitle} • ${isOnline ? t('status.online') : t('status.offline')}` : (isOnline ? t('status.online') : t('status.offline'));
+                        let subtitle = displayName && displayName !== host ? host : '';
+                        if (platform) subtitle = subtitle ? `${subtitle} • ${platform}` : platform;
+                        subtitle = subtitle ? `${subtitle} • joy-tmux` : 'joy-tmux';
 
                         return (
                             <Item
                                 key={machine.id}
                                 title={title}
                                 subtitle={subtitle}
-                                icon={
-                                    <Ionicons
-                                        name="desktop-outline"
-                                        size={29}
-                                        color={isOnline ? theme.colors.status.connected : theme.colors.status.disconnected}
-                                    />
-                                }
+                                icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.status.connected} />}
                                 onPress={() => router.push(`/machine/${machine.id}`)}
                             />
                         );
                     })}
-                    {offlineMachineCount > 0 && (
-                        <Item
-                            title={showOfflineMachines
-                                ? t('settings.hideOfflineMachines')
-                                : t('settings.showOfflineMachines', { count: offlineMachineCount })}
-                            onPress={() => setShowOfflineMachines(v => !v)}
-                            showChevron={false}
-                            titleStyle={{
-                                textAlign: 'center',
-                                color: theme.colors.textLink,
-                            }}
-                        />
-                    )}
                 </ItemGroup>
             )}
 
@@ -368,6 +216,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     subtitle={t('settings.accountSubtitle')}
                     icon={<Ionicons name="person-circle-outline" size={29} color="#007AFF" />}
                     onPress={() => router.push('/settings/account')}
+                />
+                <Item
+                    title={t('settings.sessions')}
+                    subtitle={t('settings.sessionsSubtitle')}
+                    icon={<Ionicons name="terminal-outline" size={29} color="#007AFF" />}
+                    onPress={() => router.push('/settings/joy-sessions')}
                 />
                 <Item
                     title={t('settings.mods')}
@@ -399,43 +253,28 @@ export const SettingsView = React.memo(function SettingsView() {
                     icon={<Ionicons name="flask-outline" size={29} color="#FF9500" />}
                     onPress={() => router.push('/settings/features')}
                 />
-                {experiments && (
-                    <Item
-                        title={t('settings.usage')}
-                        subtitle={t('settings.usageSubtitle')}
-                        icon={<Ionicons name="analytics-outline" size={29} color="#007AFF" />}
-                        onPress={() => router.push('/settings/usage')}
-                    />
-                )}
                 <Item
-                    title={t('settings.sessions')}
-                    subtitle={t('settings.sessionsSubtitle')}
-                    icon={<Ionicons name="terminal-outline" size={29} color="#007AFF" />}
-                    onPress={() => router.push('/settings/joy-sessions')}
+                    title={t('settings.usage')}
+                    subtitle={t('settings.usageSubtitle')}
+                    icon={<Ionicons name="analytics-outline" size={29} color="#007AFF" />}
+                    onPress={() => router.push('/settings/usage')}
                 />
             </ItemGroup>
 
-            {(__DEV__ || devModeEnabled) && (
-                <ItemGroup title={t('settings.debug')}>
-                    <Item
-                        title={t('settings.joyHttp')}
-                        subtitle={t('settings.joyHttpSubtitle')}
-                        icon={<Ionicons name="globe-outline" size={29} color="#8E8E93" />}
-                        onPress={() => router.push('/settings/joy-http')}
-                    />
-                </ItemGroup>
-            )}
-
-            {/* Developer */}
-            {(__DEV__ || devModeEnabled) && (
-                <ItemGroup title={t('settings.developer')}>
-                    <Item
-                        title={t('settings.developerTools')}
-                        icon={<Ionicons name="construct-outline" size={29} color="#5856D6" />}
-                        onPress={() => router.push('/dev')}
-                    />
-                </ItemGroup>
-            )}
+            {/* Developer — always shown (joy build keeps dev tools in prod) */}
+            <ItemGroup title={t('settings.developer')}>
+                <Item
+                    title={t('settings.joyHttp')}
+                    subtitle={t('settings.joyHttpSubtitle')}
+                    icon={<Ionicons name="globe-outline" size={29} color="#8E8E93" />}
+                    onPress={() => router.push('/settings/joy-http')}
+                />
+                <Item
+                    title={t('settings.developerTools')}
+                    icon={<Ionicons name="construct-outline" size={29} color="#5856D6" />}
+                    onPress={() => router.push('/dev')}
+                />
+            </ItemGroup>
 
             {/* About */}
             <ItemGroup title={t('settings.about')} footer={t('settings.aboutFooter')}>
