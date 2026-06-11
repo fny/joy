@@ -3,6 +3,8 @@ import { useLocalSearchParams, Stack, useRouter } from "expo-router";
 import { Text, View, ActivityIndicator } from "react-native";
 import { useMessage, useSession, useSessionMessages } from "@/sync/storage";
 import { sync } from '@/sync/sync';
+import { isDemoSession } from '@/sync/demoSession';
+import { useDemoSession } from '@/hooks/useDemoSession';
 import { Deferred } from "@/components/Deferred";
 import { ToolFullView } from '@/components/tools/ToolFullView';
 import { ToolHeader } from '@/components/tools/ToolHeader';
@@ -32,6 +34,9 @@ const stylesheet = StyleSheet.create((theme) => ({
 export default React.memo(() => {
     const { id: sessionId, messageId } = useLocalSearchParams<{ id: string; messageId: string }>();
     const router = useRouter();
+    // Inject demo fixtures (session + messages) so the demo session's message
+    // pages render even when opened directly.
+    useDemoSession(isDemoSession(sessionId));
     const session = useSession(sessionId!);
     const { isLoaded: messagesLoaded } = useSessionMessages(sessionId!);
     const message = useMessage(sessionId!, messageId!);
