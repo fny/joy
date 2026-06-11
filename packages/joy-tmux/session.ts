@@ -861,28 +861,25 @@ export class Session {
         return;
       }
       // Command/bash machinery from the CLI generates a flood of synthetic
-      // user entries. Show exactly ONE clean thing per command and drop the
-      // rest:
-      //  - <command-name>/<command-message> wrapper → fall through to the
-      //    normal mirror; the app renders it as a single /cmd chip.
-      //  - slash-command OUTPUT (<local-command-stdout>) → it's the RESULT of
-      //    the command, so surface it as an agent response, not an outbound msg.
-      //  - the raw typed slash line ("/model opus"), bash input/output blocks
-      //    (<bash-*>), stderr, caveats → SUPPRESS (input echoes optimistically,
-      //    bash output lives in the pane).
-      const isSlashWrapper = content.startsWith("<command-name>") || content.startsWith("<command-message>");
-      if (!isSlashWrapper) {
-        if (content.startsWith("<local-command-stdout>")) {
-          const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(content);
-          const out = m ? stripAnsi(m[1]).trim() : "";
-          if (out) this.#emitAgentNote(out, entryTimeMs, sid);
-          return;
-        }
-        if (content.startsWith("<local-command") ||
-            content.startsWith("<bash-") ||
-            /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(content)) {
-          return;
-        }
+      // user entries. The user's typed command already reaches the relay as
+      // their own message (so it shows as a plain outbound message — no chip),
+      // so here we only:
+      //  - surface slash-command OUTPUT (<local-command-stdout>) as an agent
+      //    RESPONSE (it's the result, not something the user sent);
+      //  - SUPPRESS everything else — the <command-*> wrapper (would render a
+      //    chip), the raw transcript echo (duplicate), bash blocks, caveats.
+      if (content.startsWith("<local-command-stdout>")) {
+        const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(content);
+        const out = m ? stripAnsi(m[1]).trim() : "";
+        if (out) this.#emitAgentNote(out, entryTimeMs, sid);
+        return;
+      }
+      if (content.startsWith("<command-name>") ||
+          content.startsWith("<command-message>") ||
+          content.startsWith("<local-command") ||
+          content.startsWith("<bash-") ||
+          /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(content)) {
+        return;
       }
 
       // Match this transcript entry against the front of the pending-send
