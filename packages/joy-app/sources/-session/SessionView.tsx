@@ -53,6 +53,8 @@ import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelec
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES } from '@/sync/joyModels';
 import { apiSocket } from '@/sync/apiSocket';
+import { useJoyQueue } from '@/hooks/useJoyQueue';
+import { JoyQueueStrip } from '@/components/JoyQueueStrip';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -523,6 +525,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel]);
 
     const sessionStatus = useSessionStatus(session);
+    // joy message queue: messages sent while Claude is busy line up here and
+    // the daemon drains them one at a time. Only meaningful for joy sessions.
+    const joyQueue = useJoyQueue(machineId, joySessionId, isJoyTmux && sessionStatus.isConnected);
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const experiments = useSetting('experiments');
@@ -608,13 +613,24 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // need to re-create on every keystroke.
     const handleSend = React.useCallback(() => {
         const liveMessage = composerHandleRef.current?.getMessage() ?? '';
-        if (liveMessage.trim() || (expImageUpload && selectedImages.length > 0)) {
-            const attachments = expImageUpload ? selectedImages : undefined;
+        const hasImages = expImageUpload && selectedImages.length > 0;
+        if (!liveMessage.trim() && !hasImages) return;
+        const attachments = expImageUpload ? selectedImages : undefined;
+
+        // joy text sends go through the daemon-owned queue: it dispatches
+        // immediately when Claude is idle and lines the message up when busy,
+        // so it's the daemon — not the app — that decides readiness. Image
+        // sends keep the existing immediate path (queue is text-only).
+        if (isJoyTmux && liveMessage.trim() && !hasImages) {
             composerHandleRef.current?.clearMessage();
-            if (expImageUpload) clearImages();
-            sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
+            void joyQueue.add(liveMessage.trim());
+            return;
         }
-    }, [sessionId, expImageUpload, selectedImages, clearImages]);
+
+        composerHandleRef.current?.clearMessage();
+        if (expImageUpload) clearImages();
+        sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
+    }, [sessionId, isJoyTmux, joyQueue, expImageUpload, selectedImages, clearImages]);
 
     const handleAbort = React.useCallback(() => {
         storage.getState().resetSessionAgentOverrides(sessionId);
@@ -739,6 +755,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     ) : null;
 
     const composer = (
+        <>
+        {isJoyTmux && <JoyQueueStrip queue={joyQueue} />}
         <ChatComposer
             composerHandleRef={composerHandleRef}
             placeholder={t('session.inputPlaceholder')}
@@ -771,6 +789,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             alwaysShowContextSize={alwaysShowContextSize}
             zenMode={zenMode}
         />
+        </>
     );
 
     // Disconnected sessions get the full Resume affordance regardless of
