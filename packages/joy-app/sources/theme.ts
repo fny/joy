@@ -135,6 +135,18 @@ export const lightTheme = {
             default: '#8E8E93',
         },
 
+        // Named accent tints (the iOS-style colors used for row icons etc.).
+        // Defaults here; a palette or the dev Accents page can override them so
+        // they coordinate with the active theme instead of being fixed.
+        accents: {
+            blue: '#007AFF',
+            indigo: '#5856D6',
+            green: '#34C759',
+            orange: '#FF9500',
+            red: '#FF3B30',
+            pink: '#FF2D55',
+        },
+
         // Permission mode colors
         permission: {
             default: '#8E8E93',
@@ -343,6 +355,16 @@ export const darkTheme = {
             disconnected: '#8E8E93',
             error: '#FF453A',
             default: '#8E8E93',
+        },
+
+        // Named accent tints — see lightTheme for rationale.
+        accents: {
+            blue: '#0A84FF',
+            indigo: '#5E5CE6',
+            green: '#30D158',
+            orange: '#FF9F0A',
+            red: '#FF453A',
+            pink: '#FF375F',
         },
 
         // Permission mode colors
