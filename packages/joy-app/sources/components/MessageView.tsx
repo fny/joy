@@ -144,13 +144,8 @@ function UserTextBlock(props: {
   const bodyText = stripAnsi(parsed.kind === 'command-run'
     ? `/${parsed.commandName}${parsed.args ? ' ' + parsed.args : ''}`
     : parsed.text);
-  // A `!`-bash command renders as a tool-call-style cell (its output shows as
-  // the monospace block beneath it).
-  const bashMatch = /^\s*!(.+)/s.exec(bodyText);
-  if (bashMatch) {
-    return <CommandCell command={bashMatch[1].trim()} />;
-  }
-  // Other command lines (e.g. `&`) render monospace, matching the composer.
+  // Command lines (`!`bash / `&`background) render monospace, matching the
+  // composer. The bash OUTPUT renders as a structured card on the agent side.
   const isMonoCommand = /^\s*[!&]/.test(bodyText);
 
   return (
@@ -196,10 +191,26 @@ function HarnessBlockRow({ icon, iconColor, title, status, subtitle }: {
   );
 }
 
-// A typed bash command (`!ls`) rendered as a tool-call-style cell: terminal
-// icon + the command in monospace. Full-width like a tool call, not a bubble.
-function CommandCell({ command }: { command: string }) {
+// The daemon emits `!cmd` output as a base64-packed <bash-run> block. Parse it
+// back into { cmd, stdout, stderr }.
+function parseBashRun(text: string): { cmd: string; stdout: string; stderr: string } | null {
+  const t = text.trim();
+  if (!t.startsWith('<bash-run>')) return null;
+  const pick = (tag: string) => {
+    const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(t);
+    return m ? m[1] : '';
+  };
+  const dec = (b64: string) => {
+    try { return decodeURIComponent(escape(atob(b64))); } catch { return ''; }
+  };
+  return { cmd: dec(pick('cmd')), stdout: dec(pick('stdout')), stderr: dec(pick('stderr')) };
+}
+
+// Bash command output, structured like a tool call: the command in the header,
+// stdout in white and stderr red-diff styled in the terminal-coloured body.
+function BashRunCard({ cmd, stdout, stderr }: { cmd: string; stdout: string; stderr: string }) {
   const { theme } = useUnistyles();
+  const hasBody = !!(stdout.trim() || stderr.trim());
   return (
     <View style={styles.harnessContainer}>
       <View style={styles.harnessBox}>
@@ -207,8 +218,14 @@ function CommandCell({ command }: { command: string }) {
           <View style={styles.harnessIcon}>
             <Ionicons name="terminal-outline" size={18} color={theme.colors.textSecondary} />
           </View>
-          <Text style={styles.commandCellText} numberOfLines={2}>{command}</Text>
+          <Text style={styles.commandCellText} numberOfLines={2}>{cmd || '(command)'}</Text>
         </View>
+        {hasBody && (
+          <View style={styles.bashBody}>
+            {!!stdout.trim() && <Text style={styles.bashStdout} selectable>{stdout}</Text>}
+            {!!stderr.trim() && <Text style={styles.bashStderr} selectable>{stderr}</Text>}
+          </View>
+        )}
       </View>
     </View>
   );
@@ -247,6 +264,12 @@ function AgentTextBlock(props: {
   // Hide thinking messages
   if (props.message.isThinking) {
     return null;
+  }
+
+  // Bash command output → structured terminal card.
+  const bashRun = parseBashRun(props.message.text);
+  if (bashRun) {
+    return <BashRunCard cmd={bashRun.cmd} stdout={bashRun.stdout} stderr={bashRun.stderr} />;
   }
 
   return (
@@ -360,6 +383,29 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
     fontSize: 14,
     color: theme.colors.text,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
+  // Bash output body — terminal-coloured: white stdout, red-diff stderr.
+  bashBody: {
+    backgroundColor: theme.colors.terminal.background,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+  },
+  bashStdout: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: theme.colors.terminal.stdout,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
+  bashStderr: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: theme.colors.diff.removedText,
+    backgroundColor: theme.colors.diff.removedBg,
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
   },
   // Harness blocks (task notifications, unknown tags) — same look as tool calls.
