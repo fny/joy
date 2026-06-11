@@ -839,24 +839,21 @@ export class Session {
         }
         return;
       }
-      // Bash / local-command output (`<local-command-stdout>`, `<bash-input>`,
-      // `<local-command-caveat>`): the app has no renderer for these, so mirror
-      // a clean "$ cmd" echo (and drop pure caveats/noise). SLASH-command
-      // wrappers (`<command-name>` / `<command-message>`) are deliberately NOT
-      // handled here — they fall through to the normal mirror below so the
-      // app's parseLocalCommandMessage renders them as a command chip (and its
-      // isUserSlashCommandEcho hides the user's optimistic echo, so no
-      // duplicate). This is why we no longer strip them.
-      if (content.startsWith("<local-command") || content.startsWith("<bash-input")) {
-        const echo = summarizeCommandEcho(content);
-        if (!echo) return; // caveat / pure noise → drop
-        const cuuid = typeof entry.uuid === "string" ? entry.uuid : "";
-        const cdelivery = this.#relay && cuuid ? this.#ensureDelivery() : null;
-        if (cdelivery && this.relaySessionId && !cdelivery.forwardedUuids.has(cuuid)) {
-          this.#relay!.send(encodeUserMessage(echo, entryTimeMs));
-          recordOutboundReceipt(cdelivery, this.relaySessionId, { uuid: cuuid, turn: "", at: Date.now() });
-        }
-        this.#deps.addChatMessage({ role: "user", content: echo, source: "cli", session_id: sid });
+      // Command/bash machinery from the CLI generates a flood of synthetic
+      // user entries. Show exactly ONE clean thing per command and drop the
+      // rest:
+      //  - <command-name>/<command-message> wrapper → fall through to the
+      //    normal mirror; the app renders it as a single /cmd chip.
+      //  - the raw typed slash line ("/model opus"), bash input/output blocks
+      //    (<bash-*>), and local-command output/caveats → SUPPRESS. They're
+      //    noise: composer-typed commands already show optimistically, and
+      //    bash output lives in the pane.
+      const isSlashWrapper = content.startsWith("<command-name>") || content.startsWith("<command-message>");
+      if (!isSlashWrapper && (
+        content.startsWith("<local-command") ||
+        content.startsWith("<bash-") ||
+        /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(content)
+      )) {
         return;
       }
 

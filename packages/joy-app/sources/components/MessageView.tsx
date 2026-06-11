@@ -10,7 +10,7 @@ import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
 import { Option } from './markdown/MarkdownView';
 import { layout } from "./layout";
-import { parseLocalCommandMessage, isUserSlashCommandEcho } from './parseLocalCommandMessage';
+import { parseLocalCommandMessage, isPureSlashCommandLine } from './parseLocalCommandMessage';
 import { parseHarnessBlock } from './parseHarnessBlock';
 import { stripAnsi } from '@/utils/ansi';
 import { Ionicons } from '@expo/vector-icons';
@@ -134,8 +134,10 @@ function UserTextBlock(props: {
   }
   const cleanedText = harness.text;
 
-  const isClaudeFlavor = !props.metadata?.flavor || props.metadata.flavor === 'claude';
-  if (isClaudeFlavor && isUserSlashCommandEcho(cleanedText, props.message.localId != null)) {
+  // Hide raw slash-command lines entirely — the <command-name> wrapper renders
+  // as the single /cmd chip, so the raw line (optimistic echo OR daemon-mirrored
+  // duplicate) shouldn't also appear.
+  if (isPureSlashCommandLine(cleanedText)) {
     return null;
   }
 
