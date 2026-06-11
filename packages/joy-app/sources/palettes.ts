@@ -278,6 +278,10 @@ export function buildPaletteTheme(p: Palette): typeof lightTheme {
             // headers) so tool/markdown cards don't go flat under a palette.
             surfaceHigh: p.surfaceAlt,
             surfaceHighest: shade(p.surfaceAlt, 0.94),
+            // Interaction-state surfaces (pressed/selected rows) derived from the
+            // palette so e.g. the selected session row tints with the theme.
+            surfacePressed: shade(p.surfaceAlt, 0.96),
+            surfaceSelected: shade(p.surfaceAlt, 0.9),
             divider: p.border,
             groupped: { ...c.groupped, background: p.background },
             header: { ...c.header, background: p.surface },
@@ -285,11 +289,11 @@ export function buildPaletteTheme(p: Palette): typeof lightTheme {
             radio: { ...c.radio, active: p.accent, dot: p.accent },
             // Status colours stay semantic (connected/connecting/error keep
             // their meaning) — they must NOT follow the palette accent.
-            // Primary buttons + FAB use the palette's `button` colour, falling
-            // back to the accent (so most palettes tint them, but one can keep
-            // them dark — e.g. Original).
-            button: { ...c.button, primary: { ...c.button.primary, background: p.button ?? p.accent } },
-            fab: { ...c.fab, background: p.button ?? p.accent, backgroundPressed: p.button ?? p.accent },
+            // Primary buttons + FAB stay the theme's dark colour by default
+            // (high-contrast send button); a palette can opt into a tinted
+            // button via `button`.
+            button: { ...c.button, primary: { ...c.button.primary, background: p.button ?? c.button.primary.background } },
+            fab: { ...c.fab, background: p.button ?? c.fab.background, backgroundPressed: p.button ?? c.fab.backgroundPressed },
             userMessageBackground: p.userBubble,
             userMessageText: p.text,
             agentMessageText: p.text,
