@@ -301,7 +301,7 @@ const styles = StyleSheet.create((theme, runtime) => ({
         justifyContent: 'center',
     },
     hint: {
-        color: '#666',
+        color: theme.colors.textSecondary,
         fontSize: 10,
         paddingHorizontal: 8,
         paddingBottom: 6,
