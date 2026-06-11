@@ -4,7 +4,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSetting } from '@/sync/storage';
+import { Item } from '@/components/Item';
+import { ItemGroup } from '@/components/ItemGroup';
 import { PaletteControls } from './PaletteControls';
+import { AccentControls } from './AccentControls';
+
+type DevPage = 'home' | 'palette' | 'accents';
+const PAGE_TITLE: Record<DevPage, string> = { home: 'Dev tweaks', palette: 'Color Palette', accents: 'Accent Colors' };
 
 const FAB_SIZE = 52;
 const MARGIN = 16;
@@ -20,6 +26,8 @@ export const DevFab = React.memo(function DevFab() {
     const { width, height } = useWindowDimensions();
     const insets = useSafeAreaInsets();
     const [open, setOpen] = React.useState(false);
+    const [page, setPage] = React.useState<DevPage>('home');
+    const close = React.useCallback(() => { setOpen(false); setPage('home'); }, []);
 
     // Initial bottom-right position (absolute top-left coords; the view is
     // translated there). Computed once; the user drags from here.
@@ -73,24 +81,46 @@ export const DevFab = React.memo(function DevFab() {
     return (
         <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
             {open && (
-                <>
-                    <Pressable style={styles.backdrop} onPress={() => setOpen(false)} />
-                    <Animated.View style={[styles.sheet, { height: sheetH, paddingBottom: insets.bottom + 12 }]}>
-                        <View style={styles.grabberArea} {...resizeResponder.panHandlers}>
-                            <View style={styles.grabber} />
-                        </View>
-                        <View style={styles.sheetHeader}>
+                // No backdrop — the main screen stays visible and interactive so
+                // appearance changes can be watched live while tweaking.
+                <Animated.View style={[styles.sheet, { height: sheetH, paddingBottom: insets.bottom + 12 }]}>
+                    <View style={styles.grabberArea} {...resizeResponder.panHandlers}>
+                        <View style={styles.grabber} />
+                    </View>
+                    <View style={styles.sheetHeader}>
+                        {page === 'home' ? (
                             <Ionicons name="construct-outline" size={18} color={theme.colors.textSecondary} />
-                            <Text style={styles.sheetTitle}>Dev tweaks</Text>
-                            <Pressable hitSlop={12} onPress={() => setOpen(false)}>
-                                <Ionicons name="close" size={22} color={theme.colors.textSecondary} />
+                        ) : (
+                            <Pressable hitSlop={12} onPress={() => setPage('home')}>
+                                <Ionicons name="chevron-back" size={20} color={theme.colors.textSecondary} />
                             </Pressable>
-                        </View>
-                        <ScrollView style={styles.sheetScroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>
-                            <PaletteControls />
-                        </ScrollView>
-                    </Animated.View>
-                </>
+                        )}
+                        <Text style={styles.sheetTitle}>{PAGE_TITLE[page]}</Text>
+                        <Pressable hitSlop={12} onPress={close}>
+                            <Ionicons name="close" size={22} color={theme.colors.textSecondary} />
+                        </Pressable>
+                    </View>
+                    <ScrollView style={styles.sheetScroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>
+                        {page === 'home' && (
+                            <ItemGroup title="Appearance" footer="Quick, dev-only theme tweaks.">
+                                <Item
+                                    title="Color Palette"
+                                    subtitle="Background, surfaces, text, accent"
+                                    icon={<Ionicons name="color-palette-outline" size={29} color={theme.colors.accents.indigo} />}
+                                    onPress={() => setPage('palette')}
+                                />
+                                <Item
+                                    title="Accent Colors"
+                                    subtitle="Named icon tints + overrides"
+                                    icon={<Ionicons name="brush-outline" size={29} color={theme.colors.accents.pink} />}
+                                    onPress={() => setPage('accents')}
+                                />
+                            </ItemGroup>
+                        )}
+                        {page === 'palette' && <PaletteControls />}
+                        {page === 'accents' && <AccentControls />}
+                    </ScrollView>
+                </Animated.View>
             )}
             <Animated.View
                 {...panResponder.panHandlers}
@@ -118,11 +148,6 @@ const styles = StyleSheet.create((theme) => ({
         shadowOffset: { width: 0, height: 3 },
         elevation: 6,
         zIndex: 1000,
-    },
-    backdrop: {
-        ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'rgba(0,0,0,0.35)',
-        zIndex: 999,
     },
     sheet: {
         position: 'absolute',
