@@ -80,7 +80,14 @@ export function initDeliveryState(relaySessionId: string, baseDir = defaultState
   return {
     pending: [],
     receipts,
-    forwardedUuids: new Set(receipts.outbound.map(o => o.uuid)),
+    // Every transcript uuid we've already handled — both pane-typed entries we
+    // mirrored (outbound) AND relay/RPC sends we matched (inbound). After a
+    // restart the in-memory pending queue is gone, so this set is what stops a
+    // re-tailed user message from being mirrored a second time (duplicate).
+    forwardedUuids: new Set([
+      ...receipts.outbound.map(o => o.uuid),
+      ...receipts.inbound.map(i => i.uuid),
+    ]),
   };
 }
 
@@ -106,6 +113,8 @@ export function recordInboundReceipt(
   baseDir = defaultStateDir(),
 ): void {
   if (state.receipts.inbound.some(r => r.uuid === receipt.uuid)) return;
+  // Mark as handled so a re-tail (in-run or after restart) won't re-mirror it.
+  state.forwardedUuids.add(receipt.uuid);
   state.receipts.inbound.push(receipt);
   saveReceipts(relaySessionId, state.receipts, baseDir);
 }
