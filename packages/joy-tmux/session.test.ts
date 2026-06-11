@@ -59,3 +59,52 @@ test("agent event falls back to a fresh timestamp when time omitted", () => {
   const rec = encodeTextEvent("hi", { turn: "turn-1" }) as any;
   expect((rec.content.data as any).time).toBeGreaterThanOrEqual(before);
 });
+
+import { Session } from "./session";
+
+function qSession() {
+  // status 'starting' so enqueue's drain check short-circuits before any tmux call.
+  return new Session(
+    { id: "q1", tmuxWindow: "joy:dd-q1", cwd: "/tmp/q", flags: [], status: "starting", startedAt: 0 },
+    { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
+  );
+}
+
+test("queue: enqueue / list / edit / cancel", () => {
+  const s = qSession();
+  const a = s.enqueue("first");
+  const b = s.enqueue("second");
+  expect(s.queueState().queue.map(q => q.text)).toEqual(["first", "second"]);
+  expect(s.queueState().inFlight).toBeNull();
+  expect(s.queueState().paused).toBe(false);
+
+  expect(s.editQueued(a.id, "FIRST")).toBe(true);
+  expect(s.editQueued("nope", "x")).toBe(false);
+  expect(s.queueState().queue.map(q => q.text)).toEqual(["FIRST", "second"]);
+
+  expect(s.cancelQueued(a.id)).toBe(true);
+  expect(s.queueState().queue.map(q => q.text)).toEqual(["second"]);
+  expect(s.cancelQueued(a.id)).toBe(false); // already gone
+  void b;
+});
+
+test("queue: reorder clamps and moves", () => {
+  const s = qSession();
+  const a = s.enqueue("a");
+  s.enqueue("b");
+  s.enqueue("c");
+  expect(s.reorderQueued(a.id, 2)).toBe(true);
+  expect(s.queueState().queue.map(q => q.text)).toEqual(["b", "c", "a"]);
+  // clamp beyond end
+  expect(s.reorderQueued(a.id, 99)).toBe(true);
+  expect(s.queueState().queue.map(q => q.text)).toEqual(["b", "c", "a"]);
+});
+
+test("queue: resume clears paused, clearQueue empties", () => {
+  const s = qSession();
+  s.enqueue("x");
+  s.resumeQueue();
+  expect(s.queueState().paused).toBe(false);
+  s.clearQueue();
+  expect(s.queueState().queue).toEqual([]);
+});

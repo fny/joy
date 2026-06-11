@@ -86,6 +86,20 @@ interface BufferedMessage extends SendOptions {
   text: string;
 }
 
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  createdAt: number;
+}
+
+export interface QueueState {
+  queue: QueuedMessage[];
+  /** Text of the message dispatched but not yet confirmed, or null. */
+  inFlight: string | null;
+  /** True when auto-drain is halted after a failed dispatch. */
+  paused: boolean;
+}
+
 export interface SessionInit {
   id: string;
   tmuxWindow: string;
@@ -127,6 +141,22 @@ export class Session {
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
   #prelaunchBuffer: BufferedMessage[] = [];
   #promptPollActive = false;
+
+  // ── Message queue ──────────────────────────────────────────────────────────
+  // Messages the user lined up while Claude was busy. They stay editable here
+  // until the daemon DISPATCHES one (types it into the pane), at which point it
+  // leaves the queue and becomes a normal turn. So the queue never contains the
+  // in-flight message — edit/cancel/reorder are plain array ops.
+  #queue: QueuedMessage[] = [];
+  // The message typed-but-not-yet-confirmed. Treated as busy: nothing else
+  // dispatches until Claude starts a turn in response (echo confirmation) or we
+  // time out. Confirmed when the next turn-start fires; failed on timeout.
+  #dispatchInFlight: { id: string; text: string; at: number } | null = null;
+  #dispatchTimer: ReturnType<typeof setTimeout> | null = null;
+  #drainRetry: ReturnType<typeof setTimeout> | null = null;
+  // Set when a dispatch failed to land (no turn started) — stops auto-draining
+  // so we don't shovel messages into a wedged/odd state. Cleared by resume.
+  #queuePaused = false;
 
   constructor(init: SessionInit, deps: SessionDeps) {
     this.id = init.id;
@@ -234,6 +264,10 @@ export class Session {
     this.#tailer = null;
     this.#turn = null;
     this.#delivery = null;
+    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
+    this.#queue = [];
+    this.#dispatchInFlight = null;
     this.#relay?.stop();
     this.#relay = null;
 
@@ -269,6 +303,131 @@ export class Session {
     }
     this.#typeIntoTmux(text, opts);
     return { buffered: false };
+  }
+
+  // ── Message queue API ───────────────────────────────────────────────────────
+
+  queueState(): QueueState {
+    return {
+      queue: this.#queue.map(q => ({ ...q })),
+      inFlight: this.#dispatchInFlight?.text ?? null,
+      paused: this.#queuePaused,
+    };
+  }
+
+  enqueue(text: string): QueuedMessage {
+    const msg: QueuedMessage = { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
+    this.#queue.push(msg);
+    this.#broadcastQueue();
+    this.#maybeDrainQueue(); // drains immediately if Claude is idle
+    return msg;
+  }
+
+  editQueued(id: string, text: string): boolean {
+    const m = this.#queue.find(q => q.id === id);
+    if (!m) return false; // already dispatched or unknown
+    m.text = text;
+    this.#broadcastQueue();
+    return true;
+  }
+
+  cancelQueued(id: string): boolean {
+    const i = this.#queue.findIndex(q => q.id === id);
+    if (i < 0) return false;
+    this.#queue.splice(i, 1);
+    this.#broadcastQueue();
+    return true;
+  }
+
+  /** Move a queued message to a new index (clamped). */
+  reorderQueued(id: string, toIndex: number): boolean {
+    const from = this.#queue.findIndex(q => q.id === id);
+    if (from < 0) return false;
+    const [m] = this.#queue.splice(from, 1);
+    const to = Math.max(0, Math.min(this.#queue.length, Math.floor(toIndex)));
+    this.#queue.splice(to, 0, m);
+    this.#broadcastQueue();
+    return true;
+  }
+
+  /** Re-enable auto-drain after a paused (failed) dispatch. */
+  resumeQueue(): void {
+    this.#queuePaused = false;
+    this.#broadcastQueue();
+    this.#maybeDrainQueue();
+  }
+
+  clearQueue(): void {
+    this.#queue = [];
+    this.#broadcastQueue();
+  }
+
+  #broadcastQueue(): void {
+    this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...this.queueState() });
+  }
+
+  /**
+   * Dispatch the head of the queue IF Claude is genuinely idle. The decision
+   * does NOT trust the GUI alone — it gates on the authoritative transcript
+   * turn state (#turn) and the in-flight echo confirmation, then confirms the
+   * pane is at the ready prompt (not a dialog/spinner) before typing.
+   */
+  #maybeDrainQueue(): void {
+    if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
+    if (this.status !== "active") return;
+    if (this.#queuePaused) return;
+    if (this.#dispatchInFlight) return; // one dispatch awaiting echo confirmation
+    if (this.#turn) return;             // a turn is open → Claude is busy (authoritative)
+    if (this.#queue.length === 0) return;
+
+    // Idle per the transcript — now confirm the pane actually shows the ready
+    // input prompt. At the instant a turn ends the prompt may not have
+    // repainted yet, so recheck shortly rather than dispatching blind.
+    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    if (!pane.ok || !paneShowsReadyPrompt(pane.out)) {
+      this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 500);
+      return;
+    }
+
+    const next = this.#queue.shift()!;
+    this.#dispatchInFlight = { id: next.id, text: next.text, at: Date.now() };
+    this.#broadcastQueue();
+    try {
+      this.sendText(next.text, { source: "rpc", mirrorToRelay: true });
+    } catch (e) {
+      // Send failed outright — put it back at the head and pause.
+      this.#queue.unshift(next);
+      this.#dispatchInFlight = null;
+      this.#queuePaused = true;
+      this.#broadcastQueue();
+      process.stderr.write(`[queue] dispatch send failed for ${this.id}: ${e}\n`);
+      return;
+    }
+    // Arm the echo-confirmation timeout: a successful dispatch produces a new
+    // turn (Claude responds). If none appears, the message didn't land.
+    this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), 20000);
+  }
+
+  /** Called from onTranscriptEntry when a new turn starts — confirms the dispatch landed. */
+  #confirmDispatchIfAwaiting(): void {
+    if (!this.#dispatchInFlight) return;
+    this.#dispatchInFlight = null;
+    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    this.#broadcastQueue();
+  }
+
+  #onDispatchTimeout(): void {
+    this.#dispatchTimer = null;
+    const inflight = this.#dispatchInFlight;
+    if (!inflight) return;
+    // No turn started in time → the message didn't land (a dialog ate it, or
+    // Claude wasn't actually ready). Re-queue at the head and pause so we don't
+    // pile more into a bad state; the user resumes once it's sorted.
+    this.#dispatchInFlight = null;
+    this.#queue.unshift({ id: inflight.id, text: inflight.text, createdAt: Date.now() });
+    this.#queuePaused = true;
+    this.#broadcastQueue();
+    process.stderr.write(`[queue] dispatch for ${this.id} never echoed — paused\n`);
   }
 
   /**
@@ -576,6 +735,7 @@ export class Session {
       }
       this.#turn = null;
       this.#relay?.setThinking(false);
+      this.#maybeDrainQueue(); // turn done → send the next queued message
       return;
     }
 
@@ -641,6 +801,9 @@ export class Session {
         if (!this.#turn) {
           this.#turn = { turnId: crypto.randomUUID() };
           this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
+          // A fresh turn starting is the proof a dispatched queue message
+          // landed — Claude is now responding to it.
+          this.#confirmDispatchIfAwaiting();
         }
         const opts = { turn: this.#turn.turnId, claudeUuid: entryUuid || undefined, time: entryTimeMs };
         for (const block of blocks) {
@@ -673,6 +836,7 @@ export class Session {
           this.#turn = null;
           this.#relay.setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
+          this.#maybeDrainQueue(); // turn done → send the next queued message
         }
       }
       for (const block of blocks) {
