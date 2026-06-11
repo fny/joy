@@ -181,6 +181,9 @@ export class Session {
   #turn: { turnId: string } | null = null;
   #delivery: DeliveryState | null = null;
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
+  // The most recent `!cmd` command, captured from <bash-input> so it can head
+  // the bash-output card.
+  #pendingBashCmd?: string;
   #prelaunchBuffer: BufferedMessage[] = [];
   #promptPollActive = false;
 
@@ -874,12 +877,25 @@ export class Session {
         if (out) this.#emitAgentNote(out, entryTimeMs, sid);
         return;
       }
-      // Bash command output (`!cmd`) → surface as an agent response rendered as
-      // a monospace code block (file-like), terminal escape codes stripped.
+      // `!cmd`: capture the command from <bash-input> (to head the output card)
+      // and suppress its echo — the user's typed `! cmd` already shows.
+      if (content.startsWith("<bash-input>")) {
+        const m = /<bash-input>([\s\S]*?)<\/bash-input>/.exec(content);
+        this.#pendingBashCmd = m ? stripAnsi(m[1]).trim() : "";
+        return;
+      }
+      // Bash output (`!cmd`) → a structured card the app renders as a tool call:
+      // command in the header, stdout/stderr in the body. Parts are base64'd so
+      // arbitrary output can't break the block. Terminal escape codes stripped.
       if (content.startsWith("<bash-stdout>") || content.startsWith("<bash-stderr>")) {
-        const m = /<bash-(?:stdout|stderr)>([\s\S]*?)<\/bash-(?:stdout|stderr)>/.exec(content);
-        const out = m ? stripAnsi(m[1]).replace(/\s+$/, "") : "";
-        if (out) this.#emitAgentNote("```\n" + out + "\n```", entryTimeMs, sid);
+        const so = /<bash-stdout>([\s\S]*?)<\/bash-stdout>/.exec(content);
+        const se = /<bash-stderr>([\s\S]*?)<\/bash-stderr>/.exec(content);
+        const stdout = so ? stripAnsi(so[1]).replace(/\s+$/, "") : "";
+        const stderr = se ? stripAnsi(se[1]).replace(/\s+$/, "") : "";
+        const cmd = this.#pendingBashCmd ?? "";
+        this.#pendingBashCmd = undefined;
+        const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+        this.#emitAgentNote(`<bash-run><cmd>${b64(cmd)}</cmd><stdout>${b64(stdout)}</stdout><stderr>${b64(stderr)}</stderr></bash-run>`, entryTimeMs, sid);
         return;
       }
       if (content.startsWith("<command-name>") ||
