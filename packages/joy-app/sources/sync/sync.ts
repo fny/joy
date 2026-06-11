@@ -56,6 +56,7 @@ import { encryptBlob } from '@/encryption/blob';
 import { readFileBytes } from '@/utils/readFileBytes';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { isDemoSession } from './demoSession';
 
 type V3GetSessionMessagesResponse = {
     messages: ApiMessage[];
@@ -279,6 +280,9 @@ class Sync {
 
 
     onSessionVisible = (sessionId: string) => {
+        // The demo session is local-only (no encryption/backend) — fixtures are
+        // injected client-side; never fetch/clobber it.
+        if (isDemoSession(sessionId)) return;
         this.getMessagesSync(sessionId).invalidate();
 
         // Also invalidate git status sync for this session

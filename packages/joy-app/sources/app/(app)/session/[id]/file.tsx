@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { View, ScrollView, ActivityIndicator, Platform, Pressable } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
+import { isDemoSession } from '@/sync/demoSession';
 import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
@@ -200,7 +201,7 @@ export default React.memo(function FileScreen() {
                 // Preview/demo or unknown session (no real session record, hence
                 // no encryption) — there's no backend to read from, so skip the
                 // RPC instead of throwing "Session encryption not found".
-                if (!sessionId || !storage.getState().sessions[sessionId]) {
+                if (!sessionId || isDemoSession(sessionId) || !storage.getState().sessions[sessionId]) {
                     if (!isCancelled) {
                         setFileContent({ content: '', encoding: 'utf8', isBinary: false });
                         setIsLoading(false);
