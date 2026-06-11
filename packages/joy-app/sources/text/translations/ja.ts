@@ -807,7 +807,7 @@ export const ja: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Vibe with Glee',
+        title: 'Vibe Happily',
         subtitle: 'エンドツーエンド暗号化され、アカウントはデバイスにのみ保存されます。',
         createAccount: 'アカウントを作成',
         linkOrRestoreAccount: 'アカウントをリンクまたは復元',

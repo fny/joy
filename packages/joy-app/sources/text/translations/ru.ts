@@ -810,7 +810,7 @@ export const ru: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Vibe with Glee',
+        title: 'Vibe Happily',
         subtitle: 'Сквозное шифрование, аккаунт хранится только на вашем устройстве.',
         createAccount: 'Создать аккаунт',
         linkOrRestoreAccount: 'Связать или восстановить аккаунт',

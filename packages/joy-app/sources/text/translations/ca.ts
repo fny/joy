@@ -806,7 +806,7 @@ export const ca: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Vibe with Glee',
+        title: 'Vibe Happily',
         subtitle: 'Xifrat punt a punt i el teu compte s\'emmagatzema només al teu dispositiu.',
         createAccount: 'Crea un compte',
         linkOrRestoreAccount: 'Enllaça o restaura un compte',

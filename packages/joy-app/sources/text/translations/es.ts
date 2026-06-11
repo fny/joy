@@ -806,7 +806,7 @@ export const es: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Vibe with Glee',
+        title: 'Vibe Happily',
         subtitle: 'Cifrado de extremo a extremo y tu cuenta se guarda solo en tu dispositivo.',
         createAccount: 'Crear cuenta',
         linkOrRestoreAccount: 'Vincular o restaurar cuenta',
