@@ -165,35 +165,54 @@ function UserTextBlock(props: {
   );
 }
 
-// Background task completion (the harness's <task-notification> block).
-function TaskNotificationCard({ status, summary }: { status: string; summary: string }) {
-  const { theme } = useUnistyles();
-  const ok = /complet|success|done|ok/i.test(status);
-  const failed = /fail|error|cancel/i.test(status);
-  const icon = ok ? 'checkmark-circle' : failed ? 'close-circle' : 'ellipse-outline';
-  const color = ok ? '#30D158' : failed ? '#FF3B30' : theme.colors.textSecondary;
+// A harness block rendered in the same visual language as tool calls: a
+// rounded surface box with an icon, a title (+ inline status), and a subtitle.
+function HarnessBlockRow({ icon, iconColor, title, status, subtitle }: {
+  icon: keyof typeof Ionicons.glyphMap;
+  iconColor: string;
+  title: string;
+  status?: string;
+  subtitle?: string;
+}) {
   return (
-    <View style={styles.userMessageContainer}>
-      <View style={styles.taskCard}>
-        <Ionicons name={icon as any} size={18} color={color} />
-        <View style={{ flex: 1 }}>
-          <Text style={styles.taskCardLabel}>Background task · {status}</Text>
-          <Text style={styles.taskCardSummary}>{summary}</Text>
+    <View style={styles.harnessContainer}>
+      <View style={styles.harnessBox}>
+        <View style={styles.harnessHeader}>
+          <View style={styles.harnessIcon}>
+            <Ionicons name={icon} size={18} color={iconColor} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.harnessTitle} numberOfLines={1}>
+              {title}{status ? <Text style={styles.harnessStatus}>{` ${status}`}</Text> : null}
+            </Text>
+            {subtitle ? <Text style={styles.harnessSubtitle} numberOfLines={2}>{subtitle}</Text> : null}
+          </View>
         </View>
       </View>
     </View>
   );
 }
 
+// Background task completion (the harness's <task-notification> block).
+function TaskNotificationCard({ status, summary }: { status: string; summary: string }) {
+  const { theme } = useUnistyles();
+  const ok = /complet|success|done|ok/i.test(status);
+  const failed = /fail|error|cancel/i.test(status);
+  return (
+    <HarnessBlockRow
+      icon={ok ? 'checkmark-circle' : failed ? 'close-circle' : 'ellipse-outline'}
+      iconColor={ok ? '#30D158' : failed ? '#FF3B30' : theme.colors.textSecondary}
+      title="Background task"
+      status={status}
+      subtitle={summary}
+    />
+  );
+}
+
 // Fallback for any unknown harness block, so raw XML never reaches the user.
 function GenericBlockChip({ tag }: { tag: string }) {
-  return (
-    <View style={styles.userMessageContainer}>
-      <View style={styles.commandChip}>
-        <Text style={styles.commandChipText}>{tag}</Text>
-      </View>
-    </View>
-  );
+  const { theme } = useUnistyles();
+  return <HarnessBlockRow icon="cube-outline" iconColor={theme.colors.textSecondary} title={tag} />;
 }
 
 function AgentTextBlock(props: {
@@ -309,28 +328,45 @@ const styles = StyleSheet.create((theme) => ({
     marginBottom: 12,
     maxWidth: '100%',
   },
-  taskCard: {
+  // Harness blocks (task notifications, unknown tags) — same look as tool calls.
+  harnessContainer: {
+    marginHorizontal: 8,
+    maxWidth: '100%',
+    overflow: 'hidden',
+  },
+  harnessBox: {
+    backgroundColor: theme.colors.surfaceHigh,
+    borderRadius: 8,
+    marginVertical: 4,
+    overflow: 'hidden',
+  },
+  harnessHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    alignSelf: 'flex-start',
-    maxWidth: '100%',
-    backgroundColor: theme.colors.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.colors.divider,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 12,
+    gap: 8,
+    padding: 12,
+    backgroundColor: theme.colors.surfaceHighest,
   },
-  taskCardLabel: {
+  harnessIcon: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  harnessTitle: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: theme.colors.text,
+  },
+  harnessStatus: {
+    fontSize: 14,
+    fontWeight: '400',
+    color: theme.colors.textSecondary,
+  },
+  harnessSubtitle: {
     fontSize: 11,
     color: theme.colors.textSecondary,
-    marginBottom: 1,
-  },
-  taskCardSummary: {
-    fontSize: 13,
-    color: theme.colors.text,
+    marginTop: 2,
   },
   commandChip: {
     backgroundColor: theme.colors.userMessageBackground,
