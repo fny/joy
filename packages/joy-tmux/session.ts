@@ -874,6 +874,14 @@ export class Session {
         if (out) this.#emitAgentNote(out, entryTimeMs, sid);
         return;
       }
+      // Bash command output (`!cmd`) → surface as an agent response rendered as
+      // a monospace code block (file-like), terminal escape codes stripped.
+      if (content.startsWith("<bash-stdout>") || content.startsWith("<bash-stderr>")) {
+        const m = /<bash-(?:stdout|stderr)>([\s\S]*?)<\/bash-(?:stdout|stderr)>/.exec(content);
+        const out = m ? stripAnsi(m[1]).replace(/\s+$/, "") : "";
+        if (out) this.#emitAgentNote("```\n" + out + "\n```", entryTimeMs, sid);
+        return;
+      }
       if (content.startsWith("<command-name>") ||
           content.startsWith("<command-message>") ||
           content.startsWith("<local-command") ||
