@@ -52,6 +52,22 @@ export const DevFab = React.memo(function DevFab() {
         },
     }), [pan, clamp]);
 
+    // Resizable sheet height — dragged via the grabber at the top of the panel.
+    const SHEET_MIN = 220;
+    const initialSheetH = Math.min(Math.max(height * 0.6, SHEET_MIN), height * 0.92);
+    const sheetH = React.useRef(new Animated.Value(initialSheetH)).current;
+    const sheetHStart = React.useRef(initialSheetH);
+    const resizeResponder = React.useMemo(() => {
+        const clampH = (h: number) => Math.max(SHEET_MIN, Math.min(h, height * 0.92));
+        return PanResponder.create({
+            onStartShouldSetPanResponder: () => true,
+            onMoveShouldSetPanResponder: () => true,
+            // Drag up grows the sheet, drag down shrinks it.
+            onPanResponderMove: (_e, g) => sheetH.setValue(clampH(sheetHStart.current - g.dy)),
+            onPanResponderRelease: (_e, g) => { sheetHStart.current = clampH(sheetHStart.current - g.dy); },
+        });
+    }, [sheetH, height]);
+
     if (!devMode) return null;
 
     return (
@@ -59,7 +75,10 @@ export const DevFab = React.memo(function DevFab() {
             {open && (
                 <>
                     <Pressable style={styles.backdrop} onPress={() => setOpen(false)} />
-                    <View style={[styles.sheet, { paddingBottom: insets.bottom + 12, maxHeight: height * 0.78 }]}>
+                    <Animated.View style={[styles.sheet, { height: sheetH, paddingBottom: insets.bottom + 12 }]}>
+                        <View style={styles.grabberArea} {...resizeResponder.panHandlers}>
+                            <View style={styles.grabber} />
+                        </View>
                         <View style={styles.sheetHeader}>
                             <Ionicons name="construct-outline" size={18} color={theme.colors.textSecondary} />
                             <Text style={styles.sheetTitle}>Dev tweaks</Text>
@@ -67,10 +86,10 @@ export const DevFab = React.memo(function DevFab() {
                                 <Ionicons name="close" size={22} color={theme.colors.textSecondary} />
                             </Pressable>
                         </View>
-                        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>
+                        <ScrollView style={styles.sheetScroll} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>
                             <PaletteControls />
                         </ScrollView>
-                    </View>
+                    </Animated.View>
                 </>
             )}
             <Animated.View
@@ -115,12 +134,26 @@ const styles = StyleSheet.create((theme) => ({
         borderTopRightRadius: 16,
         zIndex: 1001,
     },
+    grabberArea: {
+        alignItems: 'center',
+        paddingTop: 8,
+        paddingBottom: 4,
+    },
+    grabber: {
+        width: 40,
+        height: 5,
+        borderRadius: 3,
+        backgroundColor: theme.colors.divider,
+    },
+    sheetScroll: {
+        flex: 1,
+    },
     sheetHeader: {
         flexDirection: 'row',
         alignItems: 'center',
         gap: 8,
         paddingHorizontal: 16,
-        paddingTop: 14,
+        paddingTop: 4,
         paddingBottom: 8,
     },
     sheetTitle: {
