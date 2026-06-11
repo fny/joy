@@ -10,6 +10,7 @@ import { useAppearanceHistory, captureAppearance } from './appearanceHistory';
 import {
     PALETTES,
     PALETTE_FIELDS,
+    type PaletteShellKey,
     DEFAULT_PALETTE_ID,
     CUSTOM_PALETTE_ID,
     DEFAULT_SHELL,
@@ -53,7 +54,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
         applyAppearance(id, storedCustom, accentOverrides);
     }, [storedCustom, accentOverrides, setSelectedId]);
 
-    const editField = React.useCallback((key: keyof Palette, value: string) => {
+    const editField = React.useCallback((key: PaletteShellKey, value: string) => {
         useAppearanceHistory.getState().record(`shell:${key}`, captureAppearance());
         const next = { ...draft, [key]: value };
         setDraft(next);
