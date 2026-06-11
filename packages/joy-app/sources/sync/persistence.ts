@@ -96,6 +96,19 @@ export function loadThemePreference(): 'light' | 'dark' | 'adaptive' {
     return localSettingsDefaults.themePreference;
 }
 
+export function loadPaletteState(): { themePalette: string; customPalette: Record<string, string> | null } {
+    const localSettings = mmkv.getString('local-settings');
+    if (localSettings) {
+        try {
+            const parsed = localSettingsParse(JSON.parse(localSettings));
+            return { themePalette: parsed.themePalette, customPalette: parsed.customPalette };
+        } catch (e) {
+            console.error('Failed to parse local settings for palette', e);
+        }
+    }
+    return { themePalette: localSettingsDefaults.themePalette, customPalette: localSettingsDefaults.customPalette };
+}
+
 export function loadPurchases(): Purchases {
     const purchases = mmkv.getString('purchases');
     if (purchases) {

@@ -244,16 +244,14 @@ export default function AppearanceSettingsScreen() {
             </ItemGroup>
 
             {/* Colors */}
-            {/* <ItemGroup title="Colors" footer="Customize accent colors and highlights">
+            <ItemGroup title="Colors" footer="Try alternate color palettes, or enter your own.">
                 <Item
-                    title="Accent Color"
-                    subtitle="Choose your accent color"
+                    title="Color Palette"
+                    subtitle="Background, surfaces, text and accent"
                     icon={<Ionicons name="color-palette-outline" size={29} color="#FF3B30" />}
-                    detail="Blue"
-                    onPress={() => { }}
-                    disabled
+                    onPress={() => router.push('/settings/palette')}
                 />
-            </ItemGroup> */}
+            </ItemGroup>
         </ItemList>
     );
 }
