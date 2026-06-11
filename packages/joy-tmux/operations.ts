@@ -173,6 +173,92 @@ export const machineOps: MachineOp[] = [
       return { status: 200, body: result };
     },
   },
+  // ── Message queue ───────────────────────────────────────────────────────────
+  // Messages line up while Claude is busy and stay editable until the daemon
+  // dispatches one (see Session queue). All target a session by session_id.
+  {
+    name: "queueList",
+    scope: "machine",
+    rpcName: "joy-queue-list",
+    http: { method: "GET", path: "/sessions/:id/queue" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      return { ok: true, ...session.queueState() };
+    },
+    httpShape: (result) =>
+      (result as { error?: string }).error ? { status: 404, body: result } : { status: 200, body: result },
+  },
+  {
+    name: "queueAdd",
+    scope: "machine",
+    rpcName: "joy-queue-add",
+    http: { method: "POST", path: "/sessions/:id/queue" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const text = typeof params.text === "string" ? params.text.trim() : "";
+      if (!text) return { error: "empty" };
+      const msg = session.enqueue(text);
+      return { ok: true, id: msg.id, ...session.queueState() };
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "empty") return { status: 400, body: result };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
+    name: "queueEdit",
+    scope: "machine",
+    rpcName: "joy-queue-edit",
+    http: { method: "POST", path: "/sessions/:id/queue/:qid" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const text = typeof params.text === "string" ? params.text.trim() : "";
+      if (!text) return { error: "empty" };
+      const ok = session.editQueued(String(params.qid ?? params.queue_id ?? ""), text);
+      return { ok, ...session.queueState() };
+    },
+  },
+  {
+    name: "queueCancel",
+    scope: "machine",
+    rpcName: "joy-queue-cancel",
+    http: { method: "DELETE", path: "/sessions/:id/queue/:qid" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const ok = session.cancelQueued(String(params.qid ?? params.queue_id ?? ""));
+      return { ok, ...session.queueState() };
+    },
+  },
+  {
+    name: "queueReorder",
+    scope: "machine",
+    rpcName: "joy-queue-reorder",
+    http: { method: "POST", path: "/sessions/:id/queue/:qid/move" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const ok = session.reorderQueued(String(params.qid ?? params.queue_id ?? ""), Number(params.toIndex ?? params.to ?? 0));
+      return { ok, ...session.queueState() };
+    },
+  },
+  {
+    name: "queueResume",
+    scope: "machine",
+    rpcName: "joy-queue-resume",
+    http: { method: "POST", path: "/sessions/:id/queue/resume" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      session.resumeQueue();
+      return { ok: true, ...session.queueState() };
+    },
+  },
   {
     name: "sendKeys",
     scope: "machine",
