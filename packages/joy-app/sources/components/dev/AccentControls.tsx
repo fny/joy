@@ -12,6 +12,7 @@ import {
     type AccentKey,
 } from '@/palettes';
 import { ColorBox } from './ColorBox';
+import { useAppearanceHistory, captureAppearance } from './appearanceHistory';
 
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
@@ -24,8 +25,11 @@ export const AccentControls = React.memo(function AccentControls() {
     const [customPalette] = useLocalSettingMutable('customPalette');
 
     const [draft, setDraft] = React.useState<Record<AccentKey, string>>(() => coerceAccentOverrides(storedAccents));
+    // Keep the editor in sync when accents change externally (undo).
+    React.useEffect(() => { setDraft(coerceAccentOverrides(storedAccents)); }, [storedAccents]);
 
     const edit = React.useCallback((key: AccentKey, value: string) => {
+        useAppearanceHistory.getState().record(`accent:${key}`, captureAppearance());
         const next = { ...draft, [key]: value };
         setDraft(next);
         setStoredAccents(next);

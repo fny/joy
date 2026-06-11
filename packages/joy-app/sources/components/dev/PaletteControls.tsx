@@ -6,6 +6,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { useLocalSettingMutable } from '@/sync/storage';
 import { ColorBox } from './ColorBox';
+import { useAppearanceHistory, captureAppearance } from './appearanceHistory';
 import {
     PALETTES,
     PALETTE_FIELDS,
@@ -41,8 +42,11 @@ export const PaletteControls = React.memo(function PaletteControls() {
     // Local editor state (raw text per field) so typing stays smooth; seeded
     // from the stored custom palette (or the custom default).
     const [draft, setDraft] = React.useState<Palette>(() => coerceCustomPalette(storedCustom));
+    // Keep the editor in sync when the stored palette changes externally (undo).
+    React.useEffect(() => { setDraft(coerceCustomPalette(storedCustom)); }, [storedCustom]);
 
     const select = React.useCallback((id: string) => {
+        useAppearanceHistory.getState().commit(captureAppearance());
         setSelectedId(id);
         // `draft` is persisted to `storedCustom` on every edit, so storedCustom
         // is the current custom palette.
@@ -50,6 +54,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
     }, [storedCustom, accentOverrides, setSelectedId]);
 
     const editField = React.useCallback((key: keyof Palette, value: string) => {
+        useAppearanceHistory.getState().record(`shell:${key}`, captureAppearance());
         const next = { ...draft, [key]: value };
         setDraft(next);
         setStoredCustom(next as Record<string, string>);
@@ -63,6 +68,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
     // Copy the currently-selected palette into the Custom slot and switch to it,
     // so its colors (and any accents it ships) become editable.
     const copyToCustom = React.useCallback(() => {
+        useAppearanceHistory.getState().commit(captureAppearance());
         const preset = PALETTES.find((p) => p.id === selectedId);
         const src: Palette = selectedId === CUSTOM_PALETTE_ID ? draft : (preset ?? DEFAULT_SHELL);
         const shell: Palette = {

@@ -9,6 +9,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { PaletteControls } from './PaletteControls';
 import { AccentControls } from './AccentControls';
 import { FontControls } from './FontControls';
+import { useAppearanceHistory } from './appearanceHistory';
 
 type DevPage = 'home' | 'palette' | 'accents' | 'fonts';
 const PAGE_TITLE: Record<DevPage, string> = { home: 'Dev tweaks', palette: 'Color Palette', accents: 'Accent Colors', fonts: 'Font' };
@@ -29,6 +30,7 @@ export const DevFab = React.memo(function DevFab() {
     const [open, setOpen] = React.useState(false);
     const [page, setPage] = React.useState<DevPage>('home');
     const close = React.useCallback(() => { setOpen(false); setPage('home'); }, []);
+    const canUndo = useAppearanceHistory((s) => s.past.length > 0);
 
     // Initial bottom-right position (absolute top-left coords; the view is
     // translated there). Computed once; the user drags from here.
@@ -104,6 +106,15 @@ export const DevFab = React.memo(function DevFab() {
                             </Pressable>
                         )}
                         <Text style={styles.sheetTitle}>{PAGE_TITLE[page]}</Text>
+                        <Pressable
+                            hitSlop={12}
+                            onPress={() => useAppearanceHistory.getState().undo()}
+                            disabled={!canUndo}
+                            style={{ opacity: canUndo ? 1 : 0.3 }}
+                            accessibilityLabel="Undo color change"
+                        >
+                            <Ionicons name="arrow-undo" size={20} color={theme.colors.textSecondary} />
+                        </Pressable>
                         <Pressable hitSlop={12} onPress={close}>
                             <Ionicons name="close" size={22} color={theme.colors.textSecondary} />
                         </Pressable>
