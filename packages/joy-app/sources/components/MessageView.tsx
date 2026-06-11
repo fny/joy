@@ -144,7 +144,13 @@ function UserTextBlock(props: {
   const bodyText = stripAnsi(parsed.kind === 'command-run'
     ? `/${parsed.commandName}${parsed.args ? ' ' + parsed.args : ''}`
     : parsed.text);
-  // Bang/ampersand command lines render monospace, matching the composer.
+  // A `!`-bash command renders as a tool-call-style cell (its output shows as
+  // the monospace block beneath it).
+  const bashMatch = /^\s*!(.+)/s.exec(bodyText);
+  if (bashMatch) {
+    return <CommandCell command={bashMatch[1].trim()} />;
+  }
+  // Other command lines (e.g. `&`) render monospace, matching the composer.
   const isMonoCommand = /^\s*[!&]/.test(bodyText);
 
   return (
@@ -184,6 +190,24 @@ function HarnessBlockRow({ icon, iconColor, title, status, subtitle }: {
             </Text>
             {subtitle ? <Text style={styles.harnessSubtitle} numberOfLines={2}>{subtitle}</Text> : null}
           </View>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// A typed bash command (`!ls`) rendered as a tool-call-style cell: terminal
+// icon + the command in monospace. Full-width like a tool call, not a bubble.
+function CommandCell({ command }: { command: string }) {
+  const { theme } = useUnistyles();
+  return (
+    <View style={styles.harnessContainer}>
+      <View style={styles.harnessBox}>
+        <View style={styles.harnessHeader}>
+          <View style={styles.harnessIcon}>
+            <Ionicons name="terminal-outline" size={18} color={theme.colors.textSecondary} />
+          </View>
+          <Text style={styles.commandCellText} numberOfLines={2}>{command}</Text>
         </View>
       </View>
     </View>
@@ -328,6 +352,12 @@ const styles = StyleSheet.create((theme) => ({
   // `!`/`&`-prefixed messages (bash / background) read as monospace in chat,
   // matching how the composer renders them.
   monoMessageText: {
+    fontSize: 14,
+    color: theme.colors.text,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
+  commandCellText: {
+    flex: 1,
     fontSize: 14,
     color: theme.colors.text,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
