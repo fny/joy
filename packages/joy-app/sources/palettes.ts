@@ -182,6 +182,21 @@ export const PALETTES: NamedPalette[] = [
         userBubble: '#f3e2e0',
         accents: { blue: '#7d7fb3', indigo: '#9b6fa8', green: '#7ba883', orange: '#cc8b5a', red: '#c4685f', pink: '#c76d8e' },
     },
+    {
+        // Solarized Light (Ethan Schoonover) — base2/base3 surfaces, base00/base1
+        // text, and the canonical Solarized accent hues.
+        id: 'solarized-light',
+        name: 'Solarized Light',
+        background: '#eee8d5',
+        surface: '#fdf6e3',
+        surfaceAlt: '#e6dfc6',
+        text: '#657b83',
+        textSecondary: '#93a1a1',
+        accent: '#268bd2',
+        border: '#ddd6c1',
+        userBubble: '#e6dfc6',
+        accents: { blue: '#268bd2', indigo: '#6c71c4', green: '#859900', orange: '#cb4b16', red: '#dc322f', pink: '#d33682' },
+    },
 ];
 
 // The original light theme expressed as a shell palette — used when copying
