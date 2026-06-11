@@ -16,6 +16,7 @@ export interface Palette {
     accent: string;         // links, selection, active status dot
     border: string;         // dividers
     userBubble: string;     // chat: the user's message background
+    button?: string;        // primary button + FAB bg (defaults to accent)
 }
 
 export type AccentKey = 'blue' | 'indigo' | 'green' | 'orange' | 'red' | 'pink';
@@ -46,6 +47,7 @@ export const PALETTES: NamedPalette[] = [
         accent: '#2BACCC',
         border: '#eaeaea',
         userBubble: '#f0eee6',
+        button: '#000000', // keep the original black send/primary button
     },
     {
         // Lively: clean warm-white shell, vivid accents pulled from the confetti
@@ -214,10 +216,12 @@ export const DEFAULT_SHELL: Palette = {
 
 // Seed for the custom editor when the user hasn't set one yet.
 export const CUSTOM_PALETTE_DEFAULT: Palette = { ...PALETTES[0] };
-const PALETTE_KEYS: (keyof Palette)[] = ['background', 'surface', 'surfaceAlt', 'text', 'textSecondary', 'accent', 'border', 'userBubble'];
+// The editable shell colours (excludes the optional `button`).
+export type PaletteShellKey = 'background' | 'surface' | 'surfaceAlt' | 'text' | 'textSecondary' | 'accent' | 'border' | 'userBubble';
+const PALETTE_KEYS: PaletteShellKey[] = ['background', 'surface', 'surfaceAlt', 'text', 'textSecondary', 'accent', 'border', 'userBubble'];
 
 // Labels for the custom editor fields.
-export const PALETTE_FIELDS: { key: keyof Palette; label: string }[] = [
+export const PALETTE_FIELDS: { key: PaletteShellKey; label: string }[] = [
     { key: 'background', label: 'Background' },
     { key: 'surface', label: 'Surface (cards, header)' },
     { key: 'surfaceAlt', label: 'Raised surface / inputs' },
@@ -267,10 +271,11 @@ export function buildPaletteTheme(p: Palette): typeof lightTheme {
             input: { ...c.input, background: p.surfaceAlt, text: p.text },
             radio: { ...c.radio, active: p.accent, dot: p.accent },
             status: { ...c.status, connecting: p.accent },
-            // Interactive surfaces follow the accent (primary buttons + FAB are
-            // black by default; on a palette they pick up its accent color).
-            button: { ...c.button, primary: { ...c.button.primary, background: p.accent } },
-            fab: { ...c.fab, background: p.accent, backgroundPressed: p.accent },
+            // Primary buttons + FAB use the palette's `button` colour, falling
+            // back to the accent (so most palettes tint them, but one can keep
+            // them dark — e.g. Original).
+            button: { ...c.button, primary: { ...c.button.primary, background: p.button ?? p.accent } },
+            fab: { ...c.fab, background: p.button ?? p.accent, backgroundPressed: p.button ?? p.accent },
             userMessageBackground: p.userBubble,
             userMessageText: p.text,
             agentMessageText: p.text,
