@@ -134,6 +134,10 @@ export function buildPaletteTheme(p: Palette): typeof lightTheme {
             input: { ...c.input, background: p.surfaceAlt, text: p.text },
             radio: { ...c.radio, active: p.accent, dot: p.accent },
             status: { ...c.status, connecting: p.accent },
+            // Interactive surfaces follow the accent (primary buttons + FAB are
+            // black by default; on a palette they pick up its accent color).
+            button: { ...c.button, primary: { ...c.button.primary, background: p.accent } },
+            fab: { ...c.fab, background: p.accent, backgroundPressed: p.accent },
             userMessageBackground: p.userBubble,
             userMessageText: p.text,
             agentMessageText: p.text,
