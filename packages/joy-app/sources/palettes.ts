@@ -289,11 +289,10 @@ export function buildPaletteTheme(p: Palette): typeof lightTheme {
             radio: { ...c.radio, active: p.accent, dot: p.accent },
             // Status colours stay semantic (connected/connecting/error keep
             // their meaning) — they must NOT follow the palette accent.
-            // Primary buttons + FAB stay the theme's dark colour by default
-            // (high-contrast send button); a palette can opt into a tinted
-            // button via `button`.
-            button: { ...c.button, primary: { ...c.button.primary, background: p.button ?? c.button.primary.background } },
-            fab: { ...c.fab, background: p.button ?? c.fab.background, backgroundPressed: p.button ?? c.fab.backgroundPressed },
+            // Primary buttons + FAB default to the accent; a palette can override
+            // with an explicit `button` colour (e.g. Original keeps it black).
+            button: { ...c.button, primary: { ...c.button.primary, background: p.button ?? p.accent } },
+            fab: { ...c.fab, background: p.button ?? p.accent, backgroundPressed: p.button ?? p.accent },
             userMessageBackground: p.userBubble,
             userMessageText: p.text,
             agentMessageText: p.text,
