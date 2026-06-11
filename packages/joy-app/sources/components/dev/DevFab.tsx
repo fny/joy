@@ -8,9 +8,10 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { PaletteControls } from './PaletteControls';
 import { AccentControls } from './AccentControls';
+import { FontControls } from './FontControls';
 
-type DevPage = 'home' | 'palette' | 'accents';
-const PAGE_TITLE: Record<DevPage, string> = { home: 'Dev tweaks', palette: 'Color Palette', accents: 'Accent Colors' };
+type DevPage = 'home' | 'palette' | 'accents' | 'fonts';
+const PAGE_TITLE: Record<DevPage, string> = { home: 'Dev tweaks', palette: 'Color Palette', accents: 'Accent Colors', fonts: 'Font' };
 
 const FAB_SIZE = 52;
 const MARGIN = 16;
@@ -115,10 +116,17 @@ export const DevFab = React.memo(function DevFab() {
                                     icon={<Ionicons name="brush-outline" size={29} color={theme.colors.accents.pink} />}
                                     onPress={() => setPage('accents')}
                                 />
+                                <Item
+                                    title="Font"
+                                    subtitle="Default UI font family"
+                                    icon={<Ionicons name="text-outline" size={29} color={theme.colors.accents.green} />}
+                                    onPress={() => setPage('fonts')}
+                                />
                             </ItemGroup>
                         )}
                         {page === 'palette' && <PaletteControls />}
                         {page === 'accents' && <AccentControls />}
+                        {page === 'fonts' && <FontControls />}
                     </ScrollView>
                 </Animated.View>
             )}
