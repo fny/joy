@@ -646,6 +646,27 @@ export class Session {
     this.sendText(augmented, { seq, source: "relay", mirrorToRelay: false });
   }
 
+  /**
+   * Emit a standalone agent-side note (e.g. slash-command output) as a
+   * response. Wraps it in a transient turn when none is open so the app
+   * renders it left-aligned like Claude's replies, not as an outbound message.
+   */
+  #emitAgentNote(text: string, timeMs: number, sid?: string): void {
+    if (this.#relay) {
+      const opened = !this.#turn;
+      if (opened) {
+        this.#turn = { turnId: crypto.randomUUID() };
+        this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: timeMs }));
+      }
+      this.#relay.send(encodeTextEvent(text, { turn: this.#turn!.turnId, time: timeMs }));
+      if (opened) {
+        this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn!.turnId, time: timeMs }));
+        this.#turn = null;
+      }
+    }
+    this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: sid });
+  }
+
   #ensureDelivery(): DeliveryState | null {
     if (!this.relaySessionId) return null;
     if (!this.#delivery) this.#delivery = initDeliveryState(this.relaySessionId);
@@ -844,17 +865,24 @@ export class Session {
       // rest:
       //  - <command-name>/<command-message> wrapper → fall through to the
       //    normal mirror; the app renders it as a single /cmd chip.
+      //  - slash-command OUTPUT (<local-command-stdout>) → it's the RESULT of
+      //    the command, so surface it as an agent response, not an outbound msg.
       //  - the raw typed slash line ("/model opus"), bash input/output blocks
-      //    (<bash-*>), and local-command output/caveats → SUPPRESS. They're
-      //    noise: composer-typed commands already show optimistically, and
-      //    bash output lives in the pane.
+      //    (<bash-*>), stderr, caveats → SUPPRESS (input echoes optimistically,
+      //    bash output lives in the pane).
       const isSlashWrapper = content.startsWith("<command-name>") || content.startsWith("<command-message>");
-      if (!isSlashWrapper && (
-        content.startsWith("<local-command") ||
-        content.startsWith("<bash-") ||
-        /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(content)
-      )) {
-        return;
+      if (!isSlashWrapper) {
+        if (content.startsWith("<local-command-stdout>")) {
+          const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(content);
+          const out = m ? stripAnsi(m[1]).trim() : "";
+          if (out) this.#emitAgentNote(out, entryTimeMs, sid);
+          return;
+        }
+        if (content.startsWith("<local-command") ||
+            content.startsWith("<bash-") ||
+            /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(content)) {
+          return;
+        }
       }
 
       // Match this transcript entry against the front of the pending-send
