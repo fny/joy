@@ -170,6 +170,8 @@ export class Session {
   transcriptPath?: string;
   /** Model id from the most recent assistant transcript entry (e.g. claude-fable-5). */
   currentModel?: string;
+  /** Claude's generated conversation title (ai-title), mirrored to the relay summary. */
+  summary?: string;
   /** Survives relay detach so end() can still archive server-side. */
   relaySessionId?: string;
 
@@ -283,7 +285,31 @@ export class Session {
     this.#deps.onRelayAttached?.(this, rs);
     rs.start();
     this.#deps.broadcast("session_update", this.toJSON());
+
+    // Push the existing conversation title on attach. On recovery the tailer
+    // runs before the relay exists, so the ai-title entry it sees can't be
+    // forwarded — read the latest one straight from the transcript here.
+    const title = this.summary ?? this.#readLatestAiTitle();
+    if (title) { this.summary = title; void rs.updateSummary(title); }
     return true;
+  }
+
+  /** Scan the transcript for the most recent ai-title entry (recovery path). */
+  #readLatestAiTitle(): string | null {
+    if (!this.transcriptPath || !existsSync(this.transcriptPath)) return null;
+    try {
+      const lines = readFileSync(this.transcriptPath, "utf-8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('"ai-title"')) continue;
+        try {
+          const e = JSON.parse(lines[i]);
+          if (e.type === "ai-title" && typeof e.aiTitle === "string" && e.aiTitle.trim()) {
+            return e.aiTitle.trim();
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* unreadable */ }
+    return null;
   }
 
   /**
@@ -759,6 +785,19 @@ export class Session {
     }
 
     const sid = this.claudeSessionId;
+
+    // Claude generates a conversation title and writes it as an `ai-title`
+    // entry. Push it into the relay session summary so the app shows the real
+    // title instead of "New Chat".
+    if (entryType === "ai-title") {
+      const title = typeof entry.aiTitle === "string" ? entry.aiTitle.trim() : "";
+      if (title) {
+        this.summary = title;
+        void this.#relay?.updateSummary(title);
+        this.#deps.broadcast("session_update", this.toJSON());
+      }
+      return;
+    }
 
     // Every mirrored message is stamped with Claude's own transcript
     // timestamp (one clock for both user and agent messages), so a --resume

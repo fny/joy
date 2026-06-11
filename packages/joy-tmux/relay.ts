@@ -333,6 +333,19 @@ export class RelayClient {
 
   close(): void { this.socket?.close(); this.socket = null; }
 
+  /** Emit the server's version-checked session metadata update (used for summaries). */
+  updateSessionMetadata(sid: string, expectedVersion: number, metadataB64: string): Promise<{ result: string; version?: number } | null> {
+    return new Promise((resolve) => {
+      if (!this.socket) { resolve(null); return; }
+      let done = false;
+      const finish = (v: { result: string; version?: number } | null) => { if (!done) { done = true; resolve(v); } };
+      this.socket.emit('update-metadata', { sid, expectedVersion, metadata: metadataB64 }, (ack: unknown) => {
+        finish(isObj(ack) ? (ack as { result: string; version?: number }) : null);
+      });
+      setTimeout(() => finish(null), 5000);
+    });
+  }
+
   private handlePoke(payload: unknown): void {
     const sid = isObj(payload) ? String(payload['sessionId'] ?? '') : '';
     if (sid && this.listeners.has(sid)) {
@@ -573,6 +586,10 @@ export class RelaySession {
   private lastSeq: number;
   private queue: Array<{ localId: string; wire: WireRecord; attempts: number }> = [];
   private draining = false;
+  // Last-known session metadata blob + its server version, so we can merge in
+  // a summary update (Claude's ai-title) without clobbering the other fields.
+  private metadata: Record<string, unknown> | null;
+  private metadataVersion = 0;
 
   onMessage: (text: string, seq: number) => void = () => {};
   /**
@@ -593,12 +610,41 @@ export class RelaySession {
     sessionKey: Uint8Array;
     variant: EncryptionVariant;
     initialSeq?: number;
+    metadata?: Record<string, unknown> | null;
   }) {
     this.client = opts.client;
     this.relaySessionId = opts.relaySessionId;
     this.sessionKey = opts.sessionKey;
     this.variant = opts.variant;
     this.lastSeq = opts.initialSeq ?? 0;
+    this.metadata = opts.metadata ?? null;
+  }
+
+  /**
+   * Set the session's title (summary) — joy uses Claude's ai-title so the app
+   * shows the real conversation title instead of "New Chat". Merges into the
+   * existing metadata (server is version-checked; retry once on mismatch).
+   */
+  async updateSummary(title: string): Promise<void> {
+    if (!this.metadata) return;
+    const current = this.metadata.summary as { text?: string } | undefined;
+    if (current?.text === title) return; // unchanged
+    const merged = { ...this.metadata, summary: { text: title, updatedAt: Date.now() } };
+    const enc = b64encode(encryptWire(this.variant, this.sessionKey, merged));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ack = await this.client.updateSessionMetadata(this.relaySessionId, this.metadataVersion, enc);
+      if (!ack) return;
+      if (ack.result === 'success') {
+        this.metadata = merged;
+        if (typeof ack.version === 'number') this.metadataVersion = ack.version;
+        return;
+      }
+      if (ack.result === 'version-mismatch' && typeof ack.version === 'number') {
+        this.metadataVersion = ack.version;
+        continue; // retry with the server's current version
+      }
+      return;
+    }
   }
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -781,10 +827,8 @@ export async function createRelaySession(
   client: RelayClient,
   opts: { tag: string; cwd: string; id: string },
 ): Promise<RelaySession> {
-  const result = await client.createSession({
-    tag: opts.tag,
-    metadata: { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id },
-  });
+  const metadata = { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id };
+  const result = await client.createSession({ tag: opts.tag, metadata });
   // Resume from persisted seq so messages sent during downtime are delivered.
   // On first-ever start (no saved seq), fetch to end to avoid replaying history.
   let initialSeq = loadPersistedSeq(result.sessionId);
@@ -798,6 +842,7 @@ export async function createRelaySession(
     sessionKey: result.sessionKey,
     variant: result.variant,
     initialSeq,
+    metadata,
   });
 }
 
