@@ -34,6 +34,20 @@ export const CUSTOM_PALETTE_ID = 'custom';
 
 export const PALETTES: NamedPalette[] = [
     {
+        // Original: the stock light theme's colours, surfaced as a palette so you
+        // can see/copy/edit them. (The "Default" row restores the true theme.)
+        id: 'original',
+        name: 'Original',
+        background: '#F2F2F7',
+        surface: '#ffffff',
+        surfaceAlt: '#F8F8F8',
+        text: '#000000',
+        textSecondary: '#8E8E93',
+        accent: '#2BACCC',
+        border: '#eaeaea',
+        userBubble: '#f0eee6',
+    },
+    {
         // Lively: clean warm-white shell, vivid accents pulled from the confetti
         // logo. Colour lives in the accents/icons, not the surfaces, so it reads
         // playful without being busy.
@@ -113,6 +127,60 @@ export const PALETTES: NamedPalette[] = [
         accent: '#0f766e',
         border: '#d3e8df',
         userBubble: '#dcefe4',
+    },
+    {
+        // Paper: warm, low-contrast, easy on the eyes.
+        id: 'paper',
+        name: 'Paper',
+        background: '#f5f2ea',
+        surface: '#fbf9f3',
+        surfaceAlt: '#ece7da',
+        text: '#33302a',
+        textSecondary: '#8f897b',
+        accent: '#9c6b4f',
+        border: '#e2dcce',
+        userBubble: '#ece5d6',
+    },
+    {
+        // Graphite: cool neutral gray with crisp dark text.
+        id: 'graphite',
+        name: 'Graphite',
+        background: '#eceef0',
+        surface: '#ffffff',
+        surfaceAlt: '#e0e3e7',
+        text: '#23272b',
+        textSecondary: '#79818a',
+        accent: '#3a6ea5',
+        border: '#d8dce0',
+        userBubble: '#dde2e7',
+    },
+    {
+        // Ocean: soft blue-tinted, cool and calm; blue-leaning accents.
+        id: 'ocean',
+        name: 'Ocean',
+        background: '#eef4f7',
+        surface: '#fbfdfe',
+        surfaceAlt: '#dfeaf0',
+        text: '#15303a',
+        textSecondary: '#6f8a96',
+        accent: '#0e7490',
+        border: '#d3e2ea',
+        userBubble: '#dcebf1',
+        accents: { blue: '#0e7490', indigo: '#3b6fb0', green: '#2c9c8f', orange: '#c2843e', red: '#bf6b63', pink: '#b56d92' },
+    },
+    {
+        // Rosé: warm blush; soft warm accents.
+        id: 'rose',
+        name: 'Rosé',
+        background: '#faf1f0',
+        surface: '#fef8f7',
+        surfaceAlt: '#f1e0de',
+        text: '#3a2a2a',
+        textSecondary: '#9c8482',
+        accent: '#b05a6a',
+        border: '#ecd8d6',
+        userBubble: '#f3e2e0',
+        accents: { blue: '#7d7fb3', indigo: '#9b6fa8', green: '#7ba883', orange: '#cc8b5a', red: '#c4685f', pink: '#c76d8e' },
     },
 ];
 
