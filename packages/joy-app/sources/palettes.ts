@@ -59,10 +59,12 @@ export const PALETTES: NamedPalette[] = [
         surfaceAlt: '#eceae4',
         text: '#2b2a27',
         textSecondary: '#9a958c',
-        accent: '#7c8aa0',
+        accent: '#5f93b8',
         border: '#e3e0d9',
         userBubble: '#ecebe6',
-        accents: { blue: '#6f9bc4', indigo: '#8f7bb0', green: '#6fb09a', orange: '#c79a6a', red: '#c47e7e', pink: '#c07f9c' },
+        // Desaturated versions of the joy logo hues (blue/purple/cyan/orange/
+        // red/magenta) — still recognizably joy, just quiet.
+        accents: { blue: '#5f93b8', indigo: '#8a78b8', green: '#5fae93', orange: '#cc9658', red: '#c87b73', pink: '#c57ba1' },
     },
     {
         id: 'cream',
@@ -113,6 +115,19 @@ export const PALETTES: NamedPalette[] = [
         userBubble: '#dcefe4',
     },
 ];
+
+// The original light theme expressed as a shell palette — used when copying
+// the "Default" selection into the custom editor.
+export const DEFAULT_SHELL: Palette = {
+    background: lightTheme.colors.groupped.background as string,
+    surface: lightTheme.colors.surface,
+    surfaceAlt: lightTheme.colors.surfaceHigh,
+    text: lightTheme.colors.text,
+    textSecondary: lightTheme.colors.textSecondary as string,
+    accent: lightTheme.colors.textLink,
+    border: lightTheme.colors.divider as string,
+    userBubble: lightTheme.colors.userMessageBackground,
+};
 
 // Seed for the custom editor when the user hasn't set one yet.
 export const CUSTOM_PALETTE_DEFAULT: Palette = { ...PALETTES[0] };
