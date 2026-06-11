@@ -1,6 +1,7 @@
 import { StyleSheet, UnistylesRuntime } from 'react-native-unistyles';
 import { darkTheme, lightTheme } from './theme';
-import { loadThemePreference } from './sync/persistence';
+import { loadThemePreference, loadPaletteState } from './sync/persistence';
+import { resolvePalette, applyPalette } from './palettes';
 import { Appearance, Platform } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 
@@ -80,6 +81,10 @@ const setRootBackgroundColor = () => {
 
 // Set initial background color
 setRootBackgroundColor();
+
+// Apply the saved color palette (overrides the light theme's shell colors).
+const { themePalette, customPalette } = loadPaletteState();
+applyPalette(resolvePalette(themePalette, customPalette));
 
 // Re-sync theme when tab becomes visible (web only — Appearance API may miss changes while hidden)
 if (Platform.OS === 'web' && themePreference === 'adaptive') {
