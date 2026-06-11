@@ -10,7 +10,7 @@ import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
 import { Option } from './markdown/MarkdownView';
 import { layout } from "./layout";
-import { parseLocalCommandMessage, isPureSlashCommandLine } from './parseLocalCommandMessage';
+import { parseLocalCommandMessage } from './parseLocalCommandMessage';
 import { parseHarnessBlock } from './parseHarnessBlock';
 import { stripAnsi } from '@/utils/ansi';
 import { Ionicons } from '@expo/vector-icons';
@@ -134,26 +134,18 @@ function UserTextBlock(props: {
   }
   const cleanedText = harness.text;
 
-  // Hide raw slash-command lines entirely — the <command-name> wrapper renders
-  // as the single /cmd chip, so the raw line (optimistic echo OR daemon-mirrored
-  // duplicate) shouldn't also appear.
-  if (isPureSlashCommandLine(cleanedText)) {
-    return null;
-  }
-
+  // No command chips: the user's typed commands (slash or !bash) show as plain
+  // messages. parseLocalCommandMessage only hides pure caveats and reconstructs
+  // a readable line if a <command-*> wrapper ever slips through.
   const parsed = parseLocalCommandMessage(cleanedText);
   if (parsed.kind === 'caveat') {
     return null;
   }
-  if (parsed.kind === 'command-run') {
-    return (
-      <View style={styles.userMessageContainer}>
-        <View style={styles.commandChip}>
-          <Text style={styles.commandChipText}>/{parsed.commandName}</Text>
-        </View>
-      </View>
-    );
-  }
+  const bodyText = stripAnsi(parsed.kind === 'command-run'
+    ? `/${parsed.commandName}${parsed.args ? ' ' + parsed.args : ''}`
+    : parsed.text);
+  // Bang/ampersand command lines render monospace, matching the composer.
+  const isMonoCommand = /^\s*[!&]/.test(bodyText);
 
   return (
     <View style={styles.userMessageContainer}>
@@ -162,7 +154,9 @@ function UserTextBlock(props: {
         delayLongPress={400}
         style={styles.userMessageBubble}
       >
-        <MarkdownView markdown={stripAnsi(parsed.text)} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+        {isMonoCommand
+          ? <Text style={styles.monoMessageText} selectable>{bodyText}</Text>
+          : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} />}
       </Pressable>
     </View>
   );
@@ -330,6 +324,13 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '100%',
+  },
+  // `!`/`&`-prefixed messages (bash / background) read as monospace in chat,
+  // matching how the composer renders them.
+  monoMessageText: {
+    fontSize: 14,
+    color: theme.colors.text,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
   },
   // Harness blocks (task notifications, unknown tags) — same look as tool calls.
   harnessContainer: {
