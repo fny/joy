@@ -11,8 +11,7 @@ import {
     DEFAULT_PALETTE_ID,
     CUSTOM_PALETTE_ID,
     coerceCustomPalette,
-    resolvePalette,
-    applyPalette,
+    applyAppearance,
     type Palette,
     type NamedPalette,
 } from '@/palettes';
@@ -35,6 +34,7 @@ function Swatches({ p }: { p: Pick<Palette, 'background' | 'surface' | 'accent' 
 export const PaletteControls = React.memo(function PaletteControls() {
     const [selectedId, setSelectedId] = useLocalSettingMutable('themePalette');
     const [storedCustom, setStoredCustom] = useLocalSettingMutable('customPalette');
+    const [accentOverrides] = useLocalSettingMutable('accentOverrides');
 
     // Local editor state (raw text per field) so typing stays smooth; seeded
     // from the stored custom palette (or the custom default).
@@ -42,8 +42,10 @@ export const PaletteControls = React.memo(function PaletteControls() {
 
     const select = React.useCallback((id: string) => {
         setSelectedId(id);
-        applyPalette(id === CUSTOM_PALETTE_ID ? draft : resolvePalette(id, storedCustom));
-    }, [draft, storedCustom, setSelectedId]);
+        // `draft` is persisted to `storedCustom` on every edit, so storedCustom
+        // is the current custom palette.
+        applyAppearance(id, storedCustom, accentOverrides);
+    }, [storedCustom, accentOverrides, setSelectedId]);
 
     const editField = React.useCallback((key: keyof Palette, value: string) => {
         const next = { ...draft, [key]: value };
@@ -52,9 +54,9 @@ export const PaletteControls = React.memo(function PaletteControls() {
         // Live-apply while the custom palette is the active one (only push valid
         // hex so a half-typed value doesn't blank the UI).
         if (selectedId === CUSTOM_PALETTE_ID && HEX_RE.test(value.trim())) {
-            applyPalette(next);
+            applyAppearance(CUSTOM_PALETTE_ID, next as Record<string, string>, accentOverrides);
         }
-    }, [draft, selectedId, setStoredCustom]);
+    }, [draft, selectedId, accentOverrides, setStoredCustom]);
 
     return (
         <>

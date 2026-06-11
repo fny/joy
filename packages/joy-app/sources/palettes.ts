@@ -18,9 +18,13 @@ export interface Palette {
     userBubble: string;     // chat: the user's message background
 }
 
+export type AccentKey = 'blue' | 'indigo' | 'green' | 'orange' | 'red' | 'pink';
+
 export interface NamedPalette extends Palette {
     id: string;
     name: string;
+    // Optional accent tweaks that ship with this palette (e.g. a muted set).
+    accents?: Partial<Record<AccentKey, string>>;
 }
 
 // Sentinel: restore the original light theme (no override).
@@ -146,13 +150,63 @@ export function buildPaletteTheme(p: Palette): typeof lightTheme {
     };
 }
 
-// Apply a palette to the live 'light' theme (or restore the original when
-// null). Built from the pristine lightTheme each time so palettes never
-// compound. Also updates the root view background when light is active.
-export function applyPalette(p: Palette | null): void {
-    UnistylesRuntime.updateTheme('light', () => (p ? buildPaletteTheme(p) : lightTheme));
+//
+// Accents — named icon-tint colors, overridable independently of the shell.
+//
+
+export const ACCENT_FIELDS: { key: AccentKey; label: string }[] = [
+    { key: 'blue', label: 'Blue' },
+    { key: 'indigo', label: 'Indigo' },
+    { key: 'green', label: 'Green' },
+    { key: 'orange', label: 'Orange' },
+    { key: 'red', label: 'Red' },
+    { key: 'pink', label: 'Pink' },
+];
+const ACCENT_KEYS: AccentKey[] = ACCENT_FIELDS.map((f) => f.key);
+const HEX_OK = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+// The shipped defaults (from the light theme) — the "default" shown per accent.
+export const ACCENT_DEFAULTS: Record<AccentKey, string> = { ...lightTheme.colors.accents };
+
+// Fill missing/invalid keys from the defaults so we always have a full set.
+export function coerceAccentOverrides(stored: Record<string, string> | null | undefined): Record<AccentKey, string> {
+    const out = { ...ACCENT_DEFAULTS };
+    if (stored) {
+        for (const k of ACCENT_KEYS) {
+            if (typeof stored[k] === 'string') out[k] = stored[k];
+        }
+    }
+    return out;
+}
+
+// Compose the live light theme: palette shell + accent overrides layered onto
+// the theme's accent defaults. Only valid hex overrides are applied.
+export function buildLiveTheme(palette: Palette | null, accents?: Record<string, string> | null): typeof lightTheme {
+    const base = palette ? buildPaletteTheme(palette) : lightTheme;
+    if (!accents) return base;
+    const merged: Record<AccentKey, string> = { ...base.colors.accents };
+    for (const k of ACCENT_KEYS) {
+        const v = accents[k];
+        if (typeof v === 'string' && HEX_OK.test(v.trim())) merged[k] = v.trim();
+    }
+    return { ...base, colors: { ...base.colors, accents: merged } };
+}
+
+// Apply the full appearance (palette shell + accents) to the live 'light'
+// theme. Accents = the selected preset palette's own accents, overlaid with the
+// global accent overrides from the dev Accents page. Rebuilt from the pristine
+// lightTheme each time so nothing compounds.
+export function applyAppearance(
+    id: string,
+    customShell: Record<string, string> | null | undefined,
+    accentOverrides: Record<string, string> | null | undefined,
+): void {
+    const palette = resolvePalette(id, customShell);
+    const presetAccents = PALETTES.find((p) => p.id === id)?.accents;
+    const accents = { ...(presetAccents ?? {}), ...(accentOverrides ?? {}) };
+    UnistylesRuntime.updateTheme('light', () => buildLiveTheme(palette, accents));
     if (UnistylesRuntime.themeName === 'light') {
-        const bg = p ? p.background : lightTheme.colors.groupped.background;
+        const bg = palette ? palette.background : lightTheme.colors.groupped.background;
         UnistylesRuntime.setRootViewBackgroundColor(bg);
     }
 }
