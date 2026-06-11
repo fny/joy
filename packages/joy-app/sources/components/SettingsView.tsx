@@ -13,7 +13,7 @@ import { useLocalSettingMutable } from '@/sync/storage';
 import { trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
-import { JoyLogotype } from '@/components/JoyLogotype';
+import { JoyLogoType } from '@/components/JoyLogotype';
 import { useJoyMachines } from '@/hooks/useJoyMachines';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -132,7 +132,7 @@ export const SettingsView = React.memo(function SettingsView() {
                         // Logo view: block-art wordmark + version
                         <>
                             <View style={{ marginBottom: 12 }}>
-                                <JoyLogotype size={22} color={theme.colors.text} />
+                                <JoyLogoType size={22} />
                             </View>
                         </>
                     )}
