@@ -74,6 +74,7 @@ export const en = {
 
     status: {
         connected: 'connected',
+        machinesConnected: ({ online, total }: { online: number; total: number }) => `${online}/${total} connected`,
         connecting: 'connecting',
         disconnected: 'disconnected',
         error: 'error',
@@ -557,7 +558,7 @@ export const en = {
     },
 
     sidebar: {
-        sessionsTitle: 'Happy',
+        sessionsTitle: 'Joy',
         showArchived: 'Show archived',
         hideArchived: 'Hide archived',
         newSession: 'New session',
@@ -848,11 +849,11 @@ export const en = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Codex and Claude Code mobile client',
+        title: 'Vibe with Glee',
         subtitle: 'End-to-end encrypted and your account is stored only on your device.',
         createAccount: 'Create account',
         linkOrRestoreAccount: 'Link or restore account',
-        loginWithMobileApp: 'Login with mobile app',
+        loginWithMobileApp: 'Login',
     },
 
     review: {

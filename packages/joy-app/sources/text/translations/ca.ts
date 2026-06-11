@@ -75,6 +75,7 @@ export const ca: TranslationStructure = {
 
     status: {
         connected: 'connectat',
+        machinesConnected: ({ online, total }: { online: number; total: number }) => `${online}/${total} connectat`,
         connecting: 'connectant',
         disconnected: 'desconnectat',
         error: 'error',
@@ -515,7 +516,7 @@ export const ca: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Happy',
+        sessionsTitle: 'Joy',
         showArchived: 'Mostra arxivades',
         hideArchived: 'Amaga arxivades',
         newSession: 'Nova sessió',
@@ -805,11 +806,11 @@ export const ca: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Client mòbil de Codex i Claude Code',
+        title: 'Vibe with Glee',
         subtitle: 'Xifrat punt a punt i el teu compte s\'emmagatzema només al teu dispositiu.',
         createAccount: 'Crea un compte',
         linkOrRestoreAccount: 'Enllaça o restaura un compte',
-        loginWithMobileApp: 'Inicia sessió amb l\'aplicació mòbil',
+        loginWithMobileApp: 'Inicia sessió',
     },
 
     review: {
