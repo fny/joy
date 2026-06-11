@@ -6,6 +6,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { useLocalSettingMutable } from '@/sync/storage';
 import { FONT_OPTIONS, FontFamilies, setDefaultFontFamily } from '@/constants/Typography';
 import { applyAppearance } from '@/palettes';
+import { useAppearanceHistory, captureAppearance } from './appearanceHistory';
 
 // Dev font picker — overrides the default (body/UI) font family. Each option is
 // previewed in its own font (label + a sample line). Mono and logo fonts are
@@ -18,6 +19,7 @@ export const FontControls = React.memo(function FontControls() {
     const [accentOverrides] = useLocalSettingMutable('accentOverrides');
 
     const select = React.useCallback((family: string | null) => {
+        useAppearanceHistory.getState().commit(captureAppearance());
         setFontOverride(family);
         setDefaultFontFamily(family);
         // Nudge a reflow so styles that bake in the default font recompute.
