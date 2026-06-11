@@ -252,6 +252,17 @@ export function resolvePalette(id: string, custom: Record<string, string> | null
     return PALETTES.find((p) => p.id === id) ?? null;
 }
 
+// Scale each RGB channel by `factor` (<1 darkens, >1 lightens). Used to derive
+// a second elevation level from one palette surface. Falls back on bad input.
+function shade(hex: string, factor: number): string {
+    const m = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(hex.trim());
+    if (!m) return hex;
+    const h = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+    const ch = (i: number) => Math.round(Math.min(255, Math.max(0, parseInt(h.slice(i, i + 2), 16) * factor)));
+    const to2 = (n: number) => n.toString(16).padStart(2, '0');
+    return `#${to2(ch(0))}${to2(ch(2))}${to2(ch(4))}`;
+}
+
 // Build a full light-theme object with the palette's colors patched in.
 export function buildPaletteTheme(p: Palette): typeof lightTheme {
     const c = lightTheme.colors;
@@ -263,14 +274,17 @@ export function buildPaletteTheme(p: Palette): typeof lightTheme {
             textSecondary: p.textSecondary,
             textLink: p.accent,
             surface: p.surface,
+            // Two elevation levels — keep them distinct (cards vs. raised
+            // headers) so tool/markdown cards don't go flat under a palette.
             surfaceHigh: p.surfaceAlt,
-            surfaceHighest: p.surfaceAlt,
+            surfaceHighest: shade(p.surfaceAlt, 0.94),
             divider: p.border,
             groupped: { ...c.groupped, background: p.background },
             header: { ...c.header, background: p.surface },
             input: { ...c.input, background: p.surfaceAlt, text: p.text },
             radio: { ...c.radio, active: p.accent, dot: p.accent },
-            status: { ...c.status, connecting: p.accent },
+            // Status colours stay semantic (connected/connecting/error keep
+            // their meaning) — they must NOT follow the palette accent.
             // Primary buttons + FAB use the palette's `button` colour, falling
             // back to the accent (so most palettes tint them, but one can keep
             // them dark — e.g. Original).
