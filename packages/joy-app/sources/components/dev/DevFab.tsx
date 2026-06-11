@@ -62,20 +62,27 @@ export const DevFab = React.memo(function DevFab() {
     }), [pan, clamp]);
 
     // Resizable sheet height — dragged via the grabber at the top of the panel.
+    // State-based (not an Animated value committed on release) so a missed
+    // pointerup on web can't leave a stale start height — the cause of resizing
+    // getting "stuck". The start height is captured fresh at each gesture grant.
     const SHEET_MIN = 220;
-    const initialSheetH = Math.min(Math.max(height * 0.6, SHEET_MIN), height * 0.92);
-    const sheetH = React.useRef(new Animated.Value(initialSheetH)).current;
-    const sheetHStart = React.useRef(initialSheetH);
+    const [sheetHeight, setSheetHeight] = React.useState(() => Math.min(Math.max(height * 0.6, SHEET_MIN), height * 0.92));
+    const heightRef = React.useRef(sheetHeight);
+    heightRef.current = sheetHeight;
     const resizeResponder = React.useMemo(() => {
         const clampH = (h: number) => Math.max(SHEET_MIN, Math.min(h, height * 0.92));
+        let start = 0;
         return PanResponder.create({
             onStartShouldSetPanResponder: () => true,
+            onStartShouldSetPanResponderCapture: () => true,
             onMoveShouldSetPanResponder: () => true,
+            onMoveShouldSetPanResponderCapture: () => true,
+            onPanResponderTerminationRequest: () => false,
+            onPanResponderGrant: () => { start = heightRef.current; },
             // Drag up grows the sheet, drag down shrinks it.
-            onPanResponderMove: (_e, g) => sheetH.setValue(clampH(sheetHStart.current - g.dy)),
-            onPanResponderRelease: (_e, g) => { sheetHStart.current = clampH(sheetHStart.current - g.dy); },
+            onPanResponderMove: (_e, g) => setSheetHeight(clampH(start - g.dy)),
         });
-    }, [sheetH, height]);
+    }, [height]);
 
     if (!devMode) return null;
 
@@ -84,7 +91,7 @@ export const DevFab = React.memo(function DevFab() {
             {open && (
                 // No backdrop — the main screen stays visible and interactive so
                 // appearance changes can be watched live while tweaking.
-                <Animated.View style={[styles.sheet, { height: sheetH, paddingBottom: insets.bottom + 12 }]}>
+                <View style={[styles.sheet, { height: sheetHeight, paddingBottom: insets.bottom + 12 }]}>
                     <View style={styles.grabberArea} {...resizeResponder.panHandlers}>
                         <View style={styles.grabber} />
                     </View>
@@ -128,7 +135,7 @@ export const DevFab = React.memo(function DevFab() {
                         {page === 'accents' && <AccentControls />}
                         {page === 'fonts' && <FontControls />}
                     </ScrollView>
-                </Animated.View>
+                </View>
             )}
             <Animated.View
                 {...panResponder.panHandlers}
@@ -169,14 +176,16 @@ const styles = StyleSheet.create((theme) => ({
     },
     grabberArea: {
         alignItems: 'center',
-        paddingTop: 8,
-        paddingBottom: 4,
+        justifyContent: 'center',
+        // Taller hit area so the resize drag is easy to grab.
+        height: 28,
     },
     grabber: {
-        width: 40,
-        height: 5,
+        width: 48,
+        height: 6,
         borderRadius: 3,
-        backgroundColor: theme.colors.divider,
+        backgroundColor: theme.colors.textSecondary,
+        opacity: 0.5,
     },
     sheetScroll: {
         flex: 1,
