@@ -34,6 +34,37 @@ export const CUSTOM_PALETTE_ID = 'custom';
 
 export const PALETTES: NamedPalette[] = [
     {
+        // Lively: clean warm-white shell, vivid accents pulled from the confetti
+        // logo. Colour lives in the accents/icons, not the surfaces, so it reads
+        // playful without being busy.
+        id: 'lively',
+        name: 'Lively',
+        background: '#fffdf8',
+        surface: '#ffffff',
+        surfaceAlt: '#f4f1ea',
+        text: '#1b1a17',
+        textSecondary: '#8a8578',
+        accent: '#00b3ff',
+        border: '#ece6d8',
+        userBubble: '#eaf6ff',
+        accents: { blue: '#00b3ff', indigo: '#8a2dff', green: '#00c2a0', orange: '#ff8a00', red: '#ff4040', pink: '#ff2d95' },
+    },
+    {
+        // Muted: soft warm-gray shell, desaturated logo hues. The calmest, least
+        // distracting option — accents are present but quiet.
+        id: 'muted',
+        name: 'Muted',
+        background: '#f6f5f2',
+        surface: '#fbfaf7',
+        surfaceAlt: '#eceae4',
+        text: '#2b2a27',
+        textSecondary: '#9a958c',
+        accent: '#7c8aa0',
+        border: '#e3e0d9',
+        userBubble: '#ecebe6',
+        accents: { blue: '#6f9bc4', indigo: '#8f7bb0', green: '#6fb09a', orange: '#c79a6a', red: '#c47e7e', pink: '#c07f9c' },
+    },
+    {
         id: 'cream',
         name: 'Cream',
         background: '#fffdf8',
