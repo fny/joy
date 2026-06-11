@@ -122,3 +122,14 @@ const J_LINES = ART.slice(1, 4).map((l) => l.slice(0, 5));
 export const JoyLogoTypeJ = React.memo(({ size = 12 }: { size?: number }) => (
     <Grid lines={J_LINES} size={size} colorAt={(r, c, ch) => (ch === ' ' ? undefined : STATIC[r + 1]?.[c])} />
 ));
+
+// Solid 4×3 confetti block — a compact, fully-filled app-icon mark.
+const BLOCK_LINES = ['████', '████', '████'];
+const BLOCK_COLORS: Record<number, Record<number, string>> = {
+    0: { 0: '#00e5a0', 1: '#ffe600', 2: '#ff2d95', 3: '#8a2dff' },
+    1: { 0: '#00b3ff', 1: '#2dd4bf', 2: '#00e5a0', 3: '#00b3ff' },
+    2: { 0: '#8a2dff', 1: '#ff4040', 2: '#ff8a00', 3: '#ffe600' },
+};
+export const BlockLogo = React.memo(({ size = 12 }: { size?: number }) => (
+    <Grid lines={BLOCK_LINES} size={size} colorAt={(r, c) => BLOCK_COLORS[r]?.[c]} />
+));

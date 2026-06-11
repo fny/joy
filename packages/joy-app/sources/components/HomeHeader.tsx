@@ -8,7 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useSegments } from 'expo-router';
 import { getServerInfo } from '@/sync/serverConfig';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { JoyLogoTypeJ } from './JoyLogotype';
+import { BlockLogo } from './JoyLogotype';
 import { t } from '@/text';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 
@@ -153,7 +153,7 @@ function HeaderLeft() {
     const styles = stylesheet;
     return (
         <View style={styles.logoContainer}>
-            <JoyLogoTypeJ size={8} />
+            <BlockLogo size={8} />
         </View>
     );
 }
