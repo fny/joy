@@ -57,9 +57,29 @@ export const FontFamilies = {
   }
 };
 
+// Runtime override for the default (body/UI) font family — set by the dev font
+// picker. When set, every Typography.default()/header()/body() usage (all routed
+// through getDefaultFont) uses it instead of IBM Plex Sans. Mono and logo fonts
+// are unaffected.
+let overrideDefaultFamily: string | null = null;
+export const setDefaultFontFamily = (family: string | null) => { overrideDefaultFamily = family; };
+export const getDefaultFontOverride = () => overrideDefaultFamily;
+
+// Selectable fonts for the dev picker. `family: null` restores the default.
+// Loaded custom fonts work everywhere; the system/serif stacks are mainly for
+// web (and degrade gracefully on native).
+export const FONT_OPTIONS: { id: string; label: string; family: string | null }[] = [
+  { id: 'default', label: 'IBM Plex Sans (default)', family: null },
+  { id: 'system', label: 'System', family: Platform.select({ ios: 'System', android: 'sans-serif', default: 'system-ui' }) ?? null },
+  { id: 'mono', label: 'IBM Plex Mono', family: 'IBMPlexMono-Regular' },
+  { id: 'spaceMono', label: 'Space Mono', family: 'SpaceMono' },
+  { id: 'serif', label: 'Serif', family: Platform.select({ ios: 'Georgia', android: 'serif', default: 'Georgia, serif' }) ?? null },
+  { id: 'bricolage', label: 'Bricolage Grotesque', family: 'BricolageGrotesque-Bold' },
+];
+
 // Helper functions for easy access to font families
 export const getDefaultFont = (weight: 'regular' | 'italic' | 'semiBold' = 'regular') => {
-  return FontFamilies.default[weight];
+  return overrideDefaultFamily ?? FontFamilies.default[weight];
 };
 
 export const getMonoFont = (weight: 'regular' | 'italic' | 'semiBold' = 'regular') => {

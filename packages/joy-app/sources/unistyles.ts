@@ -2,6 +2,7 @@ import { StyleSheet, UnistylesRuntime } from 'react-native-unistyles';
 import { darkTheme, lightTheme } from './theme';
 import { loadThemePreference, loadPaletteState } from './sync/persistence';
 import { applyAppearance } from './palettes';
+import { setDefaultFontFamily } from './constants/Typography';
 import { Appearance, Platform } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 
@@ -83,7 +84,8 @@ const setRootBackgroundColor = () => {
 setRootBackgroundColor();
 
 // Apply the saved appearance (palette shell + accent overrides) to the light theme.
-const { themePalette, customPalette, accentOverrides } = loadPaletteState();
+const { themePalette, customPalette, accentOverrides, fontOverride } = loadPaletteState();
+setDefaultFontFamily(fontOverride);
 applyAppearance(themePalette, customPalette, accentOverrides);
 
 // Re-sync theme when tab becomes visible (web only — Appearance API may miss changes while hidden)
