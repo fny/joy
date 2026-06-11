@@ -1,9 +1,10 @@
 // Pending-message strip shown above the composer for joy-tmux sessions. Lists
-// messages queued while Claude is busy; each is editable/cancelable until the
-// daemon dispatches it (the in-flight one has already left the queue). Shows a
-// resume affordance if a dispatch failed and auto-drain paused.
+// only messages still WAITING behind a processing turn — once the daemon
+// dispatches one it leaves the queue and shows up in chat, so there's no
+// "sending…" limbo row here. Edit/Delete live behind a long-press (touch) or
+// right-click (web) menu so they're not hit by accident.
 import * as React from 'react';
-import { View, Text, Pressable } from 'react-native';
+import { View, Text, Pressable, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
@@ -14,12 +15,22 @@ type Queue = ReturnType<typeof useJoyQueue>;
 
 export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
     const { theme } = useUnistyles();
-    const hasItems = queue.queue.length > 0 || queue.inFlight != null || queue.paused;
+    // Only waiting items (and the paused banner). The in-flight message has
+    // left the queue — no "sending" block.
+    const hasItems = queue.queue.length > 0 || queue.paused;
     if (!hasItems) return null;
 
     const editItem = async (id: string, current: string) => {
         const next = await Modal.prompt('Edit queued message', '', { defaultValue: current });
         if (next != null && next.trim() && next.trim() !== current) queue.edit(id, next.trim());
+    };
+
+    const showMenu = (id: string, text: string) => {
+        Modal.alert('Queued message', text, [
+            { text: 'Edit', onPress: () => { void editItem(id, text); } },
+            { text: 'Delete', style: 'destructive', onPress: () => { void queue.cancel(id); } },
+            { text: 'Cancel', style: 'cancel' },
+        ]);
     };
 
     return (
@@ -33,30 +44,28 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
                 </Pressable>
             )}
 
-            {queue.inFlight != null && (
-                <View style={[styles.row, styles.inFlightRow]}>
-                    <Ionicons name="paper-plane-outline" size={14} color={theme.colors.textSecondary} />
-                    <Text style={[styles.text, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                        {queue.inFlight}
-                    </Text>
-                    <Text style={styles.tag}>sending…</Text>
-                </View>
-            )}
-
             {queue.queue.map((m, i) => (
-                <View key={m.id} style={styles.row}>
+                <Pressable
+                    key={m.id}
+                    style={(p) => [styles.row, p.pressed && styles.rowPressed]}
+                    onLongPress={() => showMenu(m.id, m.text)}
+                    delayLongPress={350}
+                    // Desktop web: right-click opens the same menu.
+                    {...(Platform.OS === 'web'
+                        ? { onContextMenu: (e: any) => { e?.preventDefault?.(); showMenu(m.id, m.text); } }
+                        : {})}
+                >
+                    <Ionicons name="time-outline" size={13} color={theme.colors.textSecondary} />
                     <Text style={styles.idx}>{i + 1}</Text>
-                    <Pressable style={styles.textPress} onPress={() => editItem(m.id, m.text)}>
-                        <Text style={styles.text} numberOfLines={2}>{m.text}</Text>
-                    </Pressable>
-                    <Pressable hitSlop={8} onPress={() => editItem(m.id, m.text)} style={styles.iconBtn}>
-                        <Ionicons name="pencil-outline" size={15} color={theme.colors.textSecondary} />
-                    </Pressable>
-                    <Pressable hitSlop={8} onPress={() => queue.cancel(m.id)} style={styles.iconBtn}>
-                        <Ionicons name="close-circle" size={17} color={theme.colors.textSecondary} />
-                    </Pressable>
-                </View>
+                    <Text style={styles.text} numberOfLines={2}>{m.text}</Text>
+                </Pressable>
             ))}
+
+            {queue.queue.length > 0 && (
+                <Text style={styles.hint}>
+                    {Platform.OS === 'web' ? 'right-click' : 'hold'} a message to edit or delete
+                </Text>
+            )}
         </View>
     );
 });
@@ -88,30 +97,30 @@ const styles = StyleSheet.create((theme) => ({
         alignItems: 'center',
         gap: 8,
         paddingHorizontal: 12,
-        paddingVertical: 6,
+        paddingVertical: 7,
     },
-    inFlightRow: {
-        opacity: 0.7,
+    rowPressed: {
+        backgroundColor: theme.colors.surfacePressed,
     },
     idx: {
         fontSize: 11,
-        minWidth: 14,
+        minWidth: 12,
         textAlign: 'center',
         color: theme.colors.textSecondary,
         ...Typography.mono(),
     },
-    textPress: { flex: 1 },
     text: {
+        flex: 1,
         fontSize: 13,
         color: theme.colors.text,
         ...Typography.default(),
     },
-    tag: {
-        fontSize: 11,
+    hint: {
+        fontSize: 10,
         color: theme.colors.textSecondary,
-        ...Typography.mono(),
-    },
-    iconBtn: {
-        padding: 2,
+        paddingHorizontal: 12,
+        paddingTop: 2,
+        paddingBottom: 4,
+        ...Typography.default(),
     },
 }));
