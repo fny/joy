@@ -22,6 +22,7 @@ const POLL_MS = 1500;
 // map the rendered pixel width to terminal columns for adaptive sizing.
 const PANE_LINE_HEIGHT = 15; // must match styles.paneText.lineHeight
 const CHAR_WIDTH = 11 * 0.6; // styles.paneText.fontSize (11) × mono advance ≈ 0.6em
+const PANE_H_PADDING = 16; // styles.paneScroll paddingHorizontal (8) × 2
 
 // One-tap keys for the most common interventions.
 const QUICK_KEYS: { label: string; script: string }[] = [
@@ -83,7 +84,10 @@ export default React.memo(function JoyPaneScreen() {
     // re-asserted on focus so re-opening on a different device re-claims.
     const lastColsRef = React.useRef(0);
     const drivePaneSize = React.useCallback((widthPx: number, heightPx: number) => {
-        const cols = Math.max(20, Math.round(widthPx / CHAR_WIDTH));
+        // floor (not round) of the padding-adjusted width, so the rendered line
+        // never exceeds the content box — otherwise it wraps or (previously)
+        // scrolled sideways.
+        const cols = Math.max(20, Math.floor((widthPx - PANE_H_PADDING) / CHAR_WIDTH));
         const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT));
         if (cols === lastColsRef.current || !cols) return;
         lastColsRef.current = cols;
@@ -136,18 +140,17 @@ export default React.memo(function JoyPaneScreen() {
 
     return (
         <View style={styles.container}>
-            {/* Pane view */}
+            {/* Pane view — vertical scroll only; the window is sized to fit this
+                width (adaptive resize), so there's no horizontal scroll to drift. */}
             <ScrollView
                 ref={scrollRef}
                 style={styles.paneScroll}
                 onLayout={(e) => drivePaneSize(e.nativeEvent.layout.width, e.nativeEvent.layout.height)}
                 onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
             >
-                <ScrollView horizontal>
-                    {paneError
-                        ? <Text style={styles.paneText} selectable>{`⚠ ${paneError}`}</Text>
-                        : <AnsiText text={pane || '…'} style={styles.paneText} />}
-                </ScrollView>
+                {paneError
+                    ? <Text style={styles.paneText} selectable>{`⚠ ${paneError}`}</Text>
+                    : <AnsiText text={pane || '…'} style={styles.paneText} />}
             </ScrollView>
 
             {/* Quick keys */}
