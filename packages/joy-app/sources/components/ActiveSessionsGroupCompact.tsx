@@ -383,7 +383,6 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                         numberOfLines={2}
                     >
                         {session.name}
-                        {session.isJoyTmux && <Text style={styles.joyBadge}>{' >_'}</Text>}
                     </Text>
                 </View>
             </View>

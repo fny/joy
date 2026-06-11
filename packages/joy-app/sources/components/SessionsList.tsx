@@ -445,9 +445,6 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     ]} numberOfLines={1}>
                         {session.name}
                     </Text>
-                    {session.isJoyTmux && (
-                        <Text style={styles.joyBadge}>{'  >_'}</Text>
-                    )}
                 </View>
 
                 {session.path ? (

@@ -21,7 +21,6 @@ export default React.memo(function ModsSettingsScreen() {
     const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
     const [modDoubleTapEnabled, setModDoubleTapEnabled] = useSettingMutable('joy__doubleTapEnabled');
     const [modReadOpenFileEnabled, setModReadOpenFileEnabled] = useSettingMutable('joy__readOpenFileEnabled');
-    const [joyNewDefault, setJoyNewDefault] = useSettingMutable('joy__newSessionDefault');
 
     const handleChatHistoryLimit = React.useCallback(async () => {
         const value = await Modal.prompt(
@@ -113,17 +112,10 @@ export default React.memo(function ModsSettingsScreen() {
 
             <ItemGroup title="Joy features" footer="Added after happy-app was forked into joy-app — no longer tracked as mods.">
                 <Item
-                    title="New joy-tmux session"
+                    title="New session"
                     subtitle="Claude-only session creation: mode, fallback, fork, chrome, extra args"
                     icon={<Ionicons name="add-circle-outline" size={29} color="#8E8E93" />}
                     onPress={() => router.push('/joy/new')}
-                />
-                <Item
-                    title="joy-tmux is the default New session"
-                    subtitle="New session buttons open the joy-tmux create page"
-                    rightElement={toggle(!!joyNewDefault, setJoyNewDefault)}
-                    onPress={() => setJoyNewDefault(!joyNewDefault)}
-                    showChevron={false}
                 />
                 <Item
                     title="Interactive terminal"
