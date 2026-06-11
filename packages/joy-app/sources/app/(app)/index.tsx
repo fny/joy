@@ -13,7 +13,7 @@ import { Typography } from "@/constants/Typography";
 import { trackAccountCreated, trackAccountRestored } from '@/track';
 import { HomeHeaderNotAuth } from "@/components/HomeHeader";
 import { MainView } from "@/components/MainView";
-import { JoyLogotype } from "@/components/JoyLogotype";
+import { JoyLogoTypeDynamic } from "@/components/JoyLogotype";
 import { t } from '@/text';
 
 export default function Home() {
@@ -52,7 +52,7 @@ function NotAuthenticated() {
 
     const portraitLayout = (
         <View style={styles.portraitContainer}>
-            <JoyLogotype size={22} color={theme.colors.text} />
+            <JoyLogoTypeDynamic size={22} />
             <Text style={styles.title}>
                 {t('welcome.title')}
             </Text>
@@ -107,7 +107,7 @@ function NotAuthenticated() {
         <View style={[styles.landscapeContainer, { paddingBottom: insets.bottom + 24 }]}>
             <View style={styles.landscapeInner}>
                 <View style={styles.landscapeLogoSection}>
-                    <JoyLogotype size={22} color={theme.colors.text} />
+                    <JoyLogoTypeDynamic size={22} />
                 </View>
                 <View style={styles.landscapeContentSection}>
                     <Text style={styles.landscapeTitle}>
