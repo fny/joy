@@ -197,6 +197,17 @@ export default React.memo(function FileScreen() {
 
         const loadFile = async () => {
             try {
+                // Preview/demo or unknown session (no real session record, hence
+                // no encryption) — there's no backend to read from, so skip the
+                // RPC instead of throwing "Session encryption not found".
+                if (!sessionId || !storage.getState().sessions[sessionId]) {
+                    if (!isCancelled) {
+                        setFileContent({ content: '', encoding: 'utf8', isBinary: false });
+                        setIsLoading(false);
+                    }
+                    return;
+                }
+
                 // Only show loading spinner if no cache
                 if (!cached) {
                     setIsLoading(true);
