@@ -95,6 +95,10 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
             inputRef.current.setSelection(sel.start, sel.end);
         }
     });
+    // Command lines (start with ! bash, & , or / slash command) read better in
+    // monospace with autocorrect/autocapitalize off — typing a command into a
+    // proportional, sentence-cased, autocorrecting field mangles it.
+    const isCommandLine = /^\s*[!&/]/.test(text);
     const textStyle = {
         width: '100%' as const,
         fontSize: MULTI_TEXT_INPUT_FONT_SIZE,
@@ -108,7 +112,7 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
         paddingLeft: props.paddingLeft,
         paddingRight: props.paddingRight,
         opacity: editable ? 1 : 0.58,
-        ...Typography.default(),
+        ...(isCommandLine ? Typography.mono() : Typography.default()),
     };
 
     React.useEffect(() => {
@@ -256,8 +260,9 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
                     onKeyPress={handleKeyPress}
                     onSelectionChange={handleSelectionChange}
                     multiline={true}
-                    autoCapitalize="sentences"
-                    autoCorrect={true}
+                    autoCapitalize={isCommandLine ? 'none' : 'sentences'}
+                    autoCorrect={!isCommandLine}
+                    spellCheck={!isCommandLine}
                     keyboardType="default"
                     returnKeyType="default"
                     autoComplete="off"
