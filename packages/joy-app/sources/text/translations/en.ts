@@ -156,7 +156,7 @@ export const en: TranslationStructure = {
         exchangingTokens: 'Exchanging tokens...',
         usage: 'Usage',
         usageSubtitle: 'View your API usage and costs',
-        sessions: 'Joy Sessions',
+        sessions: 'Sessions',
         sessionsSubtitle: 'Manage tmux-based sessions',
         debug: 'Debug',
         joyHttp: 'Joy HTTP',

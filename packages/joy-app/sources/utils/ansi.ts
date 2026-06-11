@@ -5,6 +5,15 @@
 // (38;2;r;g;b / 48;2;…). Non-SGR escape sequences (cursor moves etc.) are
 // stripped. Output is per-line arrays of styled spans.
 
+// Remove ANSI/terminal escape sequences (and stray control chars, keeping
+// tab + newline) so terminal output never renders as garbage in the chat.
+// The pane uses parseAnsiLines instead — it WANTS the color codes.
+// eslint-disable-next-line no-control-regex
+const ANSI_STRIP_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
+export function stripAnsi(s: string): string {
+    return s.replace(ANSI_STRIP_RE, '');
+}
+
 export interface AnsiSpan {
     text: string;
     fg?: string;        // hex

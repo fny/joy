@@ -44,10 +44,18 @@ export type SessionStatus = "starting" | "active" | "ended";
  *   <command-name>/model</command-name><command-args>opus</command-args> → "/model opus"
  *   <bash-input>ls -la</bash-input>…                                       → "$ ls -la"
  */
+// Strip ANSI/terminal escape sequences (SGR colors, cursor moves, OSC) so
+// mirrored command output doesn't render as garbage in the chat.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
+export function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, "");
+}
+
 export function summarizeCommandEcho(content: string): string | null {
   const pick = (tag: string) => {
     const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(content);
-    return m ? m[1].trim() : "";
+    return m ? stripAnsi(m[1]).trim() : "";
   };
   // Slash command: command-message is the human-readable form; fall back to name+args.
   const message = pick("command-message");
