@@ -37,6 +37,38 @@ import { parseKeyScript } from "./keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";
 
+/**
+ * Turn a CLI-wrapped command transcript entry into a clean one-line echo so it
+ * can show in chat instead of being dropped (which left no confirmation a
+ * command was received). Returns null for unparseable noise.
+ *   <command-name>/model</command-name><command-args>opus</command-args> → "/model opus"
+ *   <bash-input>ls -la</bash-input>…                                       → "$ ls -la"
+ */
+export function summarizeCommandEcho(content: string): string | null {
+  const pick = (tag: string) => {
+    const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(content);
+    return m ? m[1].trim() : "";
+  };
+  // Slash command: command-message is the human-readable form; fall back to name+args.
+  const message = pick("command-message");
+  const name = pick("command-name");
+  if (message || name) {
+    if (message) return message.startsWith("/") ? message : `/${message}`;
+    const args = pick("command-args");
+    const slash = name.startsWith("/") ? name : `/${name}`;
+    return args ? `${slash} ${args}` : slash;
+  }
+  // Local ! bash: prefer the input command, else the first line of output.
+  const bashIn = pick("bash-input");
+  if (bashIn) return `$ ${bashIn.split("\n")[0]}`.slice(0, 200);
+  const out = pick("local-command-stdout") || pick("local-command-stderr");
+  if (out) {
+    const first = out.split("\n").find(l => l.trim());
+    return first ? `$ ${first}`.slice(0, 200) : null;
+  }
+  return null;
+}
+
 /** Wire shape — frozen. The app and the debug page consume this JSON. */
 export interface SessionRecord {
   id: string;
@@ -760,8 +792,26 @@ export class Session {
         }
         return;
       }
-      // skip slash command wrappers injected by the CLI
-      if (content.startsWith("<local-command") || content.startsWith("<command-name>")) return;
+      // Bash / local-command output (`<local-command-stdout>`, `<bash-input>`,
+      // `<local-command-caveat>`): the app has no renderer for these, so mirror
+      // a clean "$ cmd" echo (and drop pure caveats/noise). SLASH-command
+      // wrappers (`<command-name>` / `<command-message>`) are deliberately NOT
+      // handled here — they fall through to the normal mirror below so the
+      // app's parseLocalCommandMessage renders them as a command chip (and its
+      // isUserSlashCommandEcho hides the user's optimistic echo, so no
+      // duplicate). This is why we no longer strip them.
+      if (content.startsWith("<local-command") || content.startsWith("<bash-input")) {
+        const echo = summarizeCommandEcho(content);
+        if (!echo) return; // caveat / pure noise → drop
+        const cuuid = typeof entry.uuid === "string" ? entry.uuid : "";
+        const cdelivery = this.#relay && cuuid ? this.#ensureDelivery() : null;
+        if (cdelivery && this.relaySessionId && !cdelivery.forwardedUuids.has(cuuid)) {
+          this.#relay!.send(encodeUserMessage(echo, entryTimeMs));
+          recordOutboundReceipt(cdelivery, this.relaySessionId, { uuid: cuuid, turn: "", at: Date.now() });
+        }
+        this.#deps.addChatMessage({ role: "user", content: echo, source: "cli", session_id: sid });
+        return;
+      }
 
       // Match this transcript entry against the front of the pending-send
       // queue. Identical messages are matched sequentially: two "yes" sends

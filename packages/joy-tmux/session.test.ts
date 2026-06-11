@@ -108,3 +108,13 @@ test("queue: resume clears paused, clearQueue empties", () => {
   s.clearQueue();
   expect(s.queueState().queue).toEqual([]);
 });
+
+import { summarizeCommandEcho } from "./session";
+
+test("summarizeCommandEcho: slash, bash, noise", () => {
+  expect(summarizeCommandEcho("<command-name>model</command-name><command-args>opus</command-args>")).toBe("/model opus");
+  expect(summarizeCommandEcho("<command-message>/clear</command-message>")).toBe("/clear");
+  expect(summarizeCommandEcho("<bash-input>ls -la</bash-input><bash-stdout>x</bash-stdout>")).toBe("$ ls -la");
+  expect(summarizeCommandEcho("<local-command-stdout>line1\nline2</local-command-stdout>")).toBe("$ line1");
+  expect(summarizeCommandEcho("<command-name></command-name>")).toBeNull();
+});
