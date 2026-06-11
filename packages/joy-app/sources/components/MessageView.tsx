@@ -385,27 +385,28 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.text,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
   },
-  // Bash output body — terminal-coloured: white stdout, red-diff stderr.
+  // Bash output body — styled like the file diff view: stdout as context
+  // lines, stderr as removed (red) lines.
   bashBody: {
-    backgroundColor: theme.colors.terminal.background,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 6,
+    backgroundColor: theme.colors.surface,
+    paddingVertical: 4,
   },
   bashStdout: {
     fontSize: 13,
-    lineHeight: 18,
-    color: theme.colors.terminal.stdout,
+    lineHeight: 20,
+    color: theme.colors.diff.contextText,
+    backgroundColor: theme.colors.diff.contextBg,
+    paddingHorizontal: 12,
+    paddingVertical: 2,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
   },
   bashStderr: {
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 20,
     color: theme.colors.diff.removedText,
     backgroundColor: theme.colors.diff.removedBg,
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 2,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
   },
   // Harness blocks (task notifications, unknown tags) — same look as tool calls.
