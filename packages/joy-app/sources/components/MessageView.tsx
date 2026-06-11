@@ -12,6 +12,7 @@ import { Option } from './markdown/MarkdownView';
 import { layout } from "./layout";
 import { parseLocalCommandMessage, isUserSlashCommandEcho } from './parseLocalCommandMessage';
 import { parseHarnessBlock } from './parseHarnessBlock';
+import { stripAnsi } from '@/utils/ansi';
 import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -159,7 +160,7 @@ function UserTextBlock(props: {
         delayLongPress={400}
         style={styles.userMessageBubble}
       >
-        <MarkdownView markdown={parsed.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+        <MarkdownView markdown={stripAnsi(parsed.text)} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
       </Pressable>
     </View>
   );
@@ -230,7 +231,7 @@ function AgentTextBlock(props: {
 
   return (
     <View style={styles.agentMessageContainer}>
-      <MarkdownView markdown={props.message.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+      <MarkdownView markdown={stripAnsi(props.message.text)} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
     </View>
   );
 }
