@@ -77,6 +77,7 @@ export const ja: TranslationStructure = {
 
     status: {
         connected: '接続済み',
+        machinesConnected: ({ online, total }: { online: number; total: number }) => `${online}/${total} 接続済み`,
         connecting: '接続中',
         disconnected: '切断済み',
         error: 'エラー',
@@ -516,7 +517,7 @@ export const ja: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Happy',
+        sessionsTitle: 'Joy',
         showArchived: 'アーカイブを表示',
         hideArchived: 'アーカイブを非表示',
         newSession: '新しいセッション',
@@ -806,11 +807,11 @@ export const ja: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'CodexとClaude Codeのモバイルクライアント',
+        title: 'Vibe with Glee',
         subtitle: 'エンドツーエンド暗号化され、アカウントはデバイスにのみ保存されます。',
         createAccount: 'アカウントを作成',
         linkOrRestoreAccount: 'アカウントをリンクまたは復元',
-        loginWithMobileApp: 'モバイルアプリでログイン',
+        loginWithMobileApp: 'ログイン',
     },
 
     review: {

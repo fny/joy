@@ -411,6 +411,7 @@ export const ru: TranslationStructure = {
 
     status: {
         connected: 'подключено',
+        machinesConnected: ({ online, total }: { online: number; total: number }) => `${online}/${total} подключено`,
         connecting: 'подключение',
         disconnected: 'отключено',
         error: 'ошибка',
@@ -531,7 +532,7 @@ export const ru: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Happy',
+        sessionsTitle: 'Joy',
         showArchived: 'Показать архив',
         hideArchived: 'Скрыть архив',
         newSession: 'Новая сессия',
@@ -809,11 +810,11 @@ export const ru: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Мобильный клиент Codex и Claude Code',
+        title: 'Vibe with Glee',
         subtitle: 'Сквозное шифрование, аккаунт хранится только на вашем устройстве.',
         createAccount: 'Создать аккаунт',
         linkOrRestoreAccount: 'Связать или восстановить аккаунт',
-        loginWithMobileApp: 'Войти через мобильное приложение',
+        loginWithMobileApp: 'Войти',
     },
 
     review: {

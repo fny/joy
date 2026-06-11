@@ -77,6 +77,7 @@ export const zhHans: TranslationStructure = {
 
     status: {
         connected: '已连接',
+        machinesConnected: ({ online, total }: { online: number; total: number }) => `${online}/${total} 已连接`,
         connecting: '连接中',
         disconnected: '已断开',
         error: '错误',
@@ -516,7 +517,7 @@ export const zhHans: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Happy',
+        sessionsTitle: 'Joy',
         showArchived: '显示已归档',
         hideArchived: '隐藏已归档',
         newSession: '新建会话',
@@ -806,11 +807,11 @@ export const zhHans: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Codex 和 Claude Code 移动客户端',
+        title: 'Vibe with Glee',
         subtitle: '端到端加密，您的账户仅存储在您的设备上。',
         createAccount: '创建账户',
         linkOrRestoreAccount: '链接或恢复账户',
-        loginWithMobileApp: '使用移动应用登录',
+        loginWithMobileApp: '登录',
     },
 
     review: {

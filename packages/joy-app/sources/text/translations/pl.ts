@@ -86,6 +86,7 @@ export const pl: TranslationStructure = {
 
     status: {
         connected: 'połączono',
+        machinesConnected: ({ online, total }: { online: number; total: number }) => `${online}/${total} połączono`,
         connecting: 'łączenie',
         disconnected: 'rozłączono',
         error: 'błąd',
@@ -531,7 +532,7 @@ export const pl: TranslationStructure = {
     },
 
     sidebar: {
-        sessionsTitle: 'Happy',
+        sessionsTitle: 'Joy',
         showArchived: 'Pokaż zarchiwizowane',
         hideArchived: 'Ukryj zarchiwizowane',
         newSession: 'Nowa sesja',
@@ -821,11 +822,11 @@ export const pl: TranslationStructure = {
 
     welcome: {
         // Main welcome screen for unauthenticated users
-        title: 'Mobilny klient Codex i Claude Code',
+        title: 'Vibe with Glee',
         subtitle: 'Szyfrowanie end-to-end, a Twoje konto jest przechowywane tylko na Twoim urządzeniu.',
         createAccount: 'Utwórz konto',
         linkOrRestoreAccount: 'Połącz lub przywróć konto',
-        loginWithMobileApp: 'Zaloguj się przez aplikację mobilną',
+        loginWithMobileApp: 'Zaloguj się',
     },
 
     review: {
