@@ -262,7 +262,7 @@ export const SettingsView = React.memo(function SettingsView() {
                 <Item
                     title={t('settings.joyHttp')}
                     subtitle={t('settings.joyHttpSubtitle')}
-                    icon={<Ionicons name="globe-outline" size={29} color="#8E8E93" />}
+                    icon={<Ionicons name="globe-outline" size={29} color={theme.colors.textSecondary} />}
                     onPress={() => router.push('/settings/joy-http')}
                 />
                 <Item

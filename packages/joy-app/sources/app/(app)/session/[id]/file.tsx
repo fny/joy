@@ -390,7 +390,7 @@ export default React.memo(function FileScreen() {
                 </Text>
                 <Text style={{
                     fontSize: 14,
-                    color: '#999',
+                    color: theme.colors.textSecondary,
                     textAlign: 'center',
                     marginTop: 8,
                     ...Typography.default()
