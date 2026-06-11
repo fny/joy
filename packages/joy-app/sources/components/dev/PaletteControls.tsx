@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { useLocalSettingMutable } from '@/sync/storage';
+import { ColorBox } from './ColorBox';
 import {
     PALETTES,
     PALETTE_FIELDS,
@@ -93,7 +94,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
                         const valid = HEX_RE.test(value.trim());
                         return (
                             <View key={key} style={styles.fieldRow}>
-                                <View style={[styles.fieldSwatch, { backgroundColor: valid ? value : 'transparent' }]} />
+                                <ColorBox value={value} onChange={(hex) => editField(key, hex)} size={22} />
                                 <Text style={styles.fieldLabel} numberOfLines={1}>{label}</Text>
                                 <TextInput
                                     value={value}
