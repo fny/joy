@@ -11,6 +11,9 @@ import { sync } from '@/sync/sync';
 import { Option } from './markdown/MarkdownView';
 import { layout } from "./layout";
 import { parseLocalCommandMessage, isUserSlashCommandEcho } from './parseLocalCommandMessage';
+import { parseHarnessBlock } from './parseHarnessBlock';
+import { Ionicons } from '@expo/vector-icons';
+import { useUnistyles } from 'react-native-unistyles';
 
 
 export const MessageView = React.memo((props: {
@@ -113,12 +116,29 @@ function UserTextBlock(props: {
   // Codex/Gemini don't reliably emit the <command-*> wrapper, so hiding the
   // echo there would drop the command with nothing to replace it. (Absent
   // flavor == Claude, matching the convention used elsewhere.)
+  // Harness-injected pseudo-XML blocks (task notifications, system reminders,
+  // unknown tags) — render as cards/chips or strip, so raw XML never shows.
+  const rawText = props.message.displayText || props.message.text;
+  const harness = parseHarnessBlock(rawText);
+  if (harness.kind === 'task-notification') {
+    return <TaskNotificationCard status={harness.status} summary={harness.summary} />;
+  }
+  if (harness.kind === 'unknown-block') {
+    return <GenericBlockChip tag={harness.tag} />;
+  }
+  // After stripping system-reminders, an empty message was pure machine
+  // context — hide it.
+  if (harness.text.length === 0 && rawText.trim().length > 0) {
+    return null;
+  }
+  const cleanedText = harness.text;
+
   const isClaudeFlavor = !props.metadata?.flavor || props.metadata.flavor === 'claude';
-  if (isClaudeFlavor && isUserSlashCommandEcho(props.message.text, props.message.localId != null)) {
+  if (isClaudeFlavor && isUserSlashCommandEcho(cleanedText, props.message.localId != null)) {
     return null;
   }
 
-  const parsed = parseLocalCommandMessage(props.message.displayText || props.message.text);
+  const parsed = parseLocalCommandMessage(cleanedText);
   if (parsed.kind === 'caveat') {
     return null;
   }
@@ -141,6 +161,37 @@ function UserTextBlock(props: {
       >
         <MarkdownView markdown={parsed.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
       </Pressable>
+    </View>
+  );
+}
+
+// Background task completion (the harness's <task-notification> block).
+function TaskNotificationCard({ status, summary }: { status: string; summary: string }) {
+  const { theme } = useUnistyles();
+  const ok = /complet|success|done|ok/i.test(status);
+  const failed = /fail|error|cancel/i.test(status);
+  const icon = ok ? 'checkmark-circle' : failed ? 'close-circle' : 'ellipse-outline';
+  const color = ok ? '#30D158' : failed ? '#FF3B30' : theme.colors.textSecondary;
+  return (
+    <View style={styles.userMessageContainer}>
+      <View style={styles.taskCard}>
+        <Ionicons name={icon as any} size={18} color={color} />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.taskCardLabel}>Background task · {status}</Text>
+          <Text style={styles.taskCardSummary}>{summary}</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// Fallback for any unknown harness block, so raw XML never reaches the user.
+function GenericBlockChip({ tag }: { tag: string }) {
+  return (
+    <View style={styles.userMessageContainer}>
+      <View style={styles.commandChip}>
+        <Text style={styles.commandChipText}>{tag}</Text>
+      </View>
     </View>
   );
 }
@@ -257,6 +308,29 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '100%',
+  },
+  taskCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    backgroundColor: theme.colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.divider,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+  taskCardLabel: {
+    fontSize: 11,
+    color: theme.colors.textSecondary,
+    marginBottom: 1,
+  },
+  taskCardSummary: {
+    fontSize: 13,
+    color: theme.colors.text,
   },
   commandChip: {
     backgroundColor: theme.colors.userMessageBackground,
