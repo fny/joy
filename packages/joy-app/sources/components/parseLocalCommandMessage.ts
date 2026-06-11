@@ -83,6 +83,16 @@ const SLASH_COMMAND_RE = /^\/[a-zA-Z][\w:-]*(?:\s[\s\S]*)?$/;
  * Gated on `hasLocalId` so we only ever hide a message the user actually
  * sent from Happy, never an agent/SDK-originated one.
  */
+// A raw, pure slash-command line ("/model opus") with no wrapper tags — the
+// canonical representation is the <command-name> wrapper chip, so the raw line
+// (whether the user's optimistic echo or a daemon-mirrored duplicate) should
+// not also render. Unlike isUserSlashCommandEcho this ignores localId, so it
+// also catches daemon-mirrored duplicates.
+export function isPureSlashCommandLine(text: string): boolean {
+    const trimmed = text.trim();
+    return SLASH_COMMAND_RE.test(trimmed) && parseLocalCommandMessage(trimmed).kind === 'text';
+}
+
 export function isUserSlashCommandEcho(text: string, hasLocalId: boolean): boolean {
     if (!hasLocalId) {
         return false;

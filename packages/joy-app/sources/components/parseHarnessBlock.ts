@@ -23,10 +23,13 @@ function pick(tag: string, s: string): string | undefined {
 // "<task-notification>" → "task-notification". Tag chars: letters, digits, _ -.
 const LEADING_TAG_RE = /^<([a-zA-Z][\w-]*)>/;
 
+// Machine-only blocks that should never reach the user: system reminders plus
+// the CLI's bash/local-command input+output wrappers (the pane shows bash).
+const NOISE_BLOCK_RE = /<(system-reminder|bash-input|bash-stdout|bash-stderr|local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*?<\/\1>\s*/g;
+
 export function parseHarnessBlock(raw: string): HarnessBlock {
-    // System reminders are machine-to-model context, never user-facing. Strip
-    // every occurrence (they're often prepended to a real prompt).
-    const text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>\s*/g, '').trim();
+    // Strip machine-only blocks (often prepended to a real prompt).
+    const text = raw.replace(NOISE_BLOCK_RE, '').trim();
 
     // Background task completion → card.
     if (text.startsWith('<task-notification>')) {
