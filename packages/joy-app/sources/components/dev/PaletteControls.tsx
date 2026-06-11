@@ -11,6 +11,7 @@ import {
     PALETTE_FIELDS,
     DEFAULT_PALETTE_ID,
     CUSTOM_PALETTE_ID,
+    DEFAULT_SHELL,
     coerceCustomPalette,
     applyAppearance,
     type Palette,
@@ -35,7 +36,7 @@ function Swatches({ p }: { p: Pick<Palette, 'background' | 'surface' | 'accent' 
 export const PaletteControls = React.memo(function PaletteControls() {
     const [selectedId, setSelectedId] = useLocalSettingMutable('themePalette');
     const [storedCustom, setStoredCustom] = useLocalSettingMutable('customPalette');
-    const [accentOverrides] = useLocalSettingMutable('accentOverrides');
+    const [accentOverrides, setStoredAccents] = useLocalSettingMutable('accentOverrides');
 
     // Local editor state (raw text per field) so typing stays smooth; seeded
     // from the stored custom palette (or the custom default).
@@ -58,6 +59,27 @@ export const PaletteControls = React.memo(function PaletteControls() {
             applyAppearance(CUSTOM_PALETTE_ID, next as Record<string, string>, accentOverrides);
         }
     }, [draft, selectedId, accentOverrides, setStoredCustom]);
+
+    // Copy the currently-selected palette into the Custom slot and switch to it,
+    // so its colors (and any accents it ships) become editable.
+    const copyToCustom = React.useCallback(() => {
+        const preset = PALETTES.find((p) => p.id === selectedId);
+        const src: Palette = selectedId === CUSTOM_PALETTE_ID ? draft : (preset ?? DEFAULT_SHELL);
+        const shell: Palette = {
+            background: src.background, surface: src.surface, surfaceAlt: src.surfaceAlt,
+            text: src.text, textSecondary: src.textSecondary, accent: src.accent,
+            border: src.border, userBubble: src.userBubble,
+        };
+        const shellRec: Record<string, string> = Object.fromEntries(Object.entries(shell));
+        setDraft(shell);
+        setStoredCustom(shellRec);
+        const nextAccents = preset?.accents
+            ? ({ ...(accentOverrides ?? {}), ...preset.accents } as Record<string, string>)
+            : accentOverrides;
+        if (preset?.accents) setStoredAccents(nextAccents);
+        setSelectedId(CUSTOM_PALETTE_ID);
+        applyAppearance(CUSTOM_PALETTE_ID, shellRec, nextAccents);
+    }, [selectedId, draft, accentOverrides, setStoredCustom, setStoredAccents, setSelectedId]);
 
     return (
         <>
@@ -84,6 +106,12 @@ export const PaletteControls = React.memo(function PaletteControls() {
                     rightElement={<Swatches p={draft} />}
                     selected={selectedId === CUSTOM_PALETTE_ID}
                     onPress={() => select(CUSTOM_PALETTE_ID)}
+                />
+                <Item
+                    title="Copy selected → Custom"
+                    subtitle="Edit a copy of the selected palette"
+                    icon={<Ionicons name="copy-outline" size={29} color="#8E8E93" />}
+                    onPress={copyToCustom}
                 />
             </ItemGroup>
 
