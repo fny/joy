@@ -7,7 +7,7 @@ import { useWindowDimensions, View, Pressable, Platform } from 'react-native';
 import { useLocalSetting, useLocalSettingMutable } from '@/sync/storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, usePathname } from 'expo-router';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons, Octicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { isTauri } from '@/utils/isTauri';
@@ -196,10 +196,10 @@ const PersistentHeader = React.memo(() => {
                     style={{ width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }}
                     accessibilityLabel={t('zen.toggle')}
                 >
-                    {/* This toggle collapses/expands the sidebar; highlighted when collapsed (zen). */}
-                    <MaterialCommunityIcons
-                        name="page-layout-sidebar-left"
-                        size={20}
+                    {/* Collapse when the sidebar is open, expand when it's collapsed (zen). */}
+                    <Octicons
+                        name={zenMode ? 'sidebar-expand' : 'sidebar-collapse'}
+                        size={18}
                         color={zenMode ? theme.colors.textLink : theme.colors.header.tint}
                     />
                 </Pressable>
