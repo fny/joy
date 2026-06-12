@@ -303,13 +303,21 @@ export class SessionRegistry {
     if (!existing && !opts.cwd) throw new Error(`unknown session: ${opts.id}`);
 
     const cwd = existing?.cwd ?? opts.cwd!;
-    const resumeId = existing?.claudeSessionId;
+    // Resume THIS session's specific conversation — its learned Claude id, or
+    // failing that the exact transcript file it was tailing (basename = the
+    // Claude session uuid). Crucially, do NOT fall back to `--continue` for a
+    // known session: `--continue` resumes whatever conversation was most recent
+    // in the cwd, so with several sessions in one directory it restarts the
+    // WRONG one. `--continue` is only a last resort when we have nothing but a
+    // cwd (recovery after the daemon lost the session entirely).
+    const resumeId = existing?.claudeSessionId
+      ?? (existing?.transcriptPath ? basename(existing.transcriptPath, ".jsonl") : undefined);
     if (existing && existing.status !== "ended") existing.end("killed");
 
     return this.create({
       cwd,
       resume_id: resumeId,
-      continue: resumeId ? undefined : true,
+      continue: (!resumeId && !existing) ? true : undefined,
       model: existing?.model,
       effort: existing?.effort,
     });
