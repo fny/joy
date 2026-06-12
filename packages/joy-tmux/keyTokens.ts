@@ -19,7 +19,9 @@
 // Bare single characters (<a>) are deliberately NOT keys for the same reason.
 //
 // Newlines inside literal text are translated to Enter key presses, so a
-// multi-line paste behaves like typing it.
+// multi-line paste behaves like typing it. C-style escapes in literal text are
+// also honored: \n and \r → Enter, \t → Tab, \\ → a literal backslash (so
+// `\\n` sends a literal "\n" rather than a newline).
 
 export type KeySegment =
   | { type: "text"; text: string }
@@ -129,18 +131,36 @@ export function parseKeyScript(script: string): KeySegment[] {
   }
   pushText(script.slice(cursor));
 
-  // Translate newlines inside literal text into Enter presses.
+  // Expand literal text: actual newlines AND C-style escapes (\n \r → Enter,
+  // \t → Tab, \\ → a literal backslash). Backslash escaping means `\\n` sends a
+  // literal "\n", not a newline.
   const expanded: KeySegment[] = [];
   for (const seg of segments) {
-    if (seg.type === "key") {
-      expanded.push(seg);
-      continue;
-    }
-    const lines = seg.text.split("\n");
-    lines.forEach((line, i) => {
-      if (line) expanded.push({ type: "text", text: line });
-      if (i < lines.length - 1) expanded.push({ type: "key", key: "Enter" });
-    });
+    if (seg.type === "key") { expanded.push(seg); continue; }
+    expanded.push(...expandTextSegment(seg.text));
   }
   return expanded;
+}
+
+function expandTextSegment(text: string): KeySegment[] {
+  const out: KeySegment[] = [];
+  let buf = "";
+  const flush = () => { if (buf) { out.push({ type: "text", text: buf }); buf = ""; } };
+  const enter = () => { flush(); out.push({ type: "key", key: "Enter" }); };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\" && i + 1 < text.length) {
+      const n = text[i + 1];
+      if (n === "n" || n === "r") { enter(); i++; continue; }
+      if (n === "t") { flush(); out.push({ type: "key", key: "Tab" }); i++; continue; }
+      if (n === "\\") { buf += "\\"; i++; continue; }
+      // Unknown escape → keep the backslash literal (the next char appends normally).
+      buf += "\\";
+      continue;
+    }
+    if (c === "\n") { enter(); continue; }
+    buf += c;
+  }
+  flush();
+  return out;
 }
