@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { Text, View, StyleSheet, Platform } from 'react-native';
-import { useLocalSetting } from '@/sync/storage';
-import { resolveTerminalTheme, terminalSemantics } from '@/constants/terminalThemes';
+import { useUnistyles } from 'react-native-unistyles';
 
 interface CommandViewProps {
     command: string;
@@ -27,13 +26,13 @@ export const CommandView = React.memo<CommandViewProps>(({
     fullWidth,
     hideEmptyOutput,
 }) => {
-    const tc = terminalSemantics(resolveTerminalTheme(useLocalSetting('terminalTheme')));
+    const { theme } = useUnistyles();
     // Use legacy output if new props aren't provided
     const hasNewProps = stdout !== undefined || stderr !== undefined || error !== undefined;
 
     const styles = StyleSheet.create({
         container: {
-            backgroundColor: tc.background,
+            backgroundColor: theme.colors.terminal.background,
             borderRadius: 8,
             overflow: 'hidden',
             padding: 16,
@@ -49,41 +48,41 @@ export const CommandView = React.memo<CommandViewProps>(({
             fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
             fontSize: 14,
             lineHeight: 20,
-            color: tc.prompt,
+            color: theme.colors.terminal.prompt,
             fontWeight: '600',
         },
         commandText: {
             fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
             fontSize: 14,
-            color: tc.command,
+            color: theme.colors.terminal.command,
             lineHeight: 20,
             flex: 1,
         },
         stdout: {
             fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
             fontSize: 13,
-            color: tc.stdout,
+            color: theme.colors.terminal.stdout,
             lineHeight: 18,
             marginTop: 8,
         },
         stderr: {
             fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
             fontSize: 13,
-            color: tc.stderr,
+            color: theme.colors.terminal.stderr,
             lineHeight: 18,
             marginTop: 8,
         },
         error: {
             fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
             fontSize: 13,
-            color: tc.error,
+            color: theme.colors.terminal.error,
             lineHeight: 18,
             marginTop: 8,
         },
         emptyOutput: {
             fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
             fontSize: 13,
-            color: tc.emptyOutput,
+            color: theme.colors.terminal.emptyOutput,
             lineHeight: 18,
             marginTop: 8,
             fontStyle: 'italic',

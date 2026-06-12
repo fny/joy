@@ -11,6 +11,7 @@ import { Appearance } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
 import { t, getLanguageNativeName, SUPPORTED_LANGUAGES } from '@/text';
+import { TerminalControls } from '@/components/dev/TerminalControls';
 
 // Define known avatar styles for this version of the app
 type KnownAvatarStyle = 'pixelated' | 'gradient' | 'brutalist';
@@ -252,6 +253,9 @@ export default function AppearanceSettingsScreen() {
                     onPress={() => router.push('/settings/palette')}
                 />
             </ItemGroup>
+
+            {/* Terminal theme picker */}
+            <TerminalControls />
         </ItemList>
     );
 }
