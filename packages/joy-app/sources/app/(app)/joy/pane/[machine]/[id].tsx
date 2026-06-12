@@ -132,12 +132,19 @@ export default React.memo(function JoyPaneScreen() {
 
     const handleSend = React.useCallback(() => {
         if (!input.trim()) return;
+        const script = input;
         setInput('');
-        // In plain-text mode the input is typed verbatim — <Enter>, <C-c> etc.
-        // land as literal characters, not keys. In keys mode, append a
-        // terminating <Enter> so the typed sequence is submitted.
-        const script = literalMode ? input : input + '<Enter>';
-        void sendScript(script, literalMode);
+        if (literalMode) {
+            // text mode: type the text verbatim, then submit with a terminating
+            // Enter (a real key — in literal mode "<Enter>" would type as chars).
+            void (async () => {
+                await sendScript(script, true);
+                await sendScript('<Enter>', false);
+            })();
+        } else {
+            // keys mode: parse <Enter>/<C-c>/… tokens, sent as-is.
+            void sendScript(script, false);
+        }
     }, [input, sendScript, literalMode]);
 
     return (
@@ -205,8 +212,8 @@ export default React.memo(function JoyPaneScreen() {
             </View>
             <Text style={styles.hint}>
                 {literalMode
-                    ? 'text mode: typed verbatim — <Enter>, <C-c> land as literal characters. Tap “text” to switch back to keys.'
-                    : 'keys mode (auto-submits with Enter): <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt>. Tap “keys” for plain text.'}
+                    ? 'text mode (auto-submits with Enter): typed verbatim — <Enter>, <C-c> land as literal characters. Tap “text” to switch back to keys.'
+                    : 'keys mode: <Enter> <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt>. Tap “keys” for plain text.'}
             </Text>
         </View>
     );
