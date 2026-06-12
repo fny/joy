@@ -188,6 +188,7 @@ export class Session {
   #pendingBashCmd?: string;
   #prelaunchBuffer: BufferedMessage[] = [];
   #promptPollActive = false;
+  #trustHandled = false;
 
   // ── Message queue ──────────────────────────────────────────────────────────
   // Messages the user lined up while Claude was busy. They stay editable here
@@ -256,6 +257,27 @@ export class Session {
   beginWatching(): void {
     this.pollForTranscript();
     this.#pollEnd();
+    this.#watchTrustPrompt();
+  }
+
+  /**
+   * Claude shows a "Is this a project you trust?" dialog on the first launch in
+   * an untrusted directory — it blocks the session and `--dangerously-skip-
+   * permissions` doesn't skip it. The user already chose this folder when
+   * creating the session, so auto-confirm "Yes, I trust this folder". Polls for
+   * a bounded window; fires at most once.
+   */
+  #watchTrustPrompt(attempts = 0): void {
+    if (this.status === "ended" || this.status === "active" || this.#trustHandled) return;
+    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    if (pane.ok && /Yes, I trust this folder|Is this a project you (created|trust)/i.test(pane.out)) {
+      // "1" selects "Yes, I trust this folder"; Enter confirms (harmless empty
+      // submit if "1" already activated it).
+      run("tmux", "send-keys", "-t", this.tmuxWindow, "1", "Enter");
+      this.#trustHandled = true;
+      return;
+    }
+    if (attempts < 60) setTimeout(() => this.#watchTrustPrompt(attempts + 1), 700);
   }
 
   /**
