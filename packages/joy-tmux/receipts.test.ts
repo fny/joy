@@ -9,6 +9,8 @@ import {
   matchPendingForUserEntry,
   recordInboundReceipt,
   recordOutboundReceipt,
+  recordReceived,
+  consumeReceived,
   receiptPath,
   type DeliveryState,
   type ReceiptLog,
@@ -25,11 +27,38 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+// ── Received-text resilience backstop ────────────────────────────────────────
+
+test("consumeReceived matches a recorded text once, then misses", () => {
+  const state = initDeliveryState(RID, dir);
+  recordReceived(state, RID, "hello world", 1000, dir);
+  expect(consumeReceived(state, RID, "hello world", 1500, dir)).toBe(true);
+  // consumed — a second echo of the same text is not suppressed
+  expect(consumeReceived(state, RID, "hello world", 1500, dir)).toBe(false);
+  expect(consumeReceived(state, RID, "never sent", 1500, dir)).toBe(false);
+});
+
+test("received backstop survives a reload (restart) — the duplicate fix", () => {
+  const a = initDeliveryState(RID, dir);
+  recordReceived(a, RID, "can you read that file", 1000, dir);
+  // Simulate a daemon restart: fresh state loaded from disk, pending empty.
+  const b = initDeliveryState(RID, dir);
+  expect(b.pending.length).toBe(0);
+  expect(consumeReceived(b, RID, "can you read that file", 1200, dir)).toBe(true);
+});
+
+test("consumeReceived ignores entries older than the window", () => {
+  const state = initDeliveryState(RID, dir);
+  recordReceived(state, RID, "stale", 0, dir);
+  // 16 minutes later — outside the 15-minute window.
+  expect(consumeReceived(state, RID, "stale", 16 * 60 * 1000, dir)).toBe(false);
+});
+
 // ── Persistence ──────────────────────────────────────────────────────────────
 
 test("loadReceipts returns empty log when no file exists", () => {
   const log = loadReceipts(RID, dir);
-  expect(log).toEqual({ inbound: [], outbound: [] });
+  expect(log).toEqual({ inbound: [], outbound: [], received: [] });
 });
 
 test("loadReceipts tolerates corrupt JSON and returns empty", () => {
@@ -37,13 +66,13 @@ test("loadReceipts tolerates corrupt JSON and returns empty", () => {
   receiptPath(RID, dir); // ensures dir exists
   writeFileSync(join(dir, `${RID}.receipts.json`), "{not json");
   const log = loadReceipts(RID, dir);
-  expect(log).toEqual({ inbound: [], outbound: [] });
+  expect(log).toEqual({ inbound: [], outbound: [], received: [] });
 });
 
 test("loadReceipts tolerates partial structure", () => {
   writeFileSync(join(dir, `${RID}.receipts.json`), JSON.stringify({ inbound: "nope" }));
   const log = loadReceipts(RID, dir);
-  expect(log).toEqual({ inbound: [], outbound: [] });
+  expect(log).toEqual({ inbound: [], outbound: [], received: [] });
 });
 
 test("saveReceipts writes atomically via temp + rename", () => {
@@ -70,6 +99,10 @@ test("loadReceipts round-trips saveReceipts", () => {
     outbound: [
       { uuid: "u-4", turn: "t-1", at: 400 },
       { uuid: "u-5", turn: "", at: 500 },
+    ],
+    received: [
+      { text: "hi there", at: 600 },
+      { text: "again", at: 700 },
     ],
   };
   saveReceipts(RID, log, dir);
