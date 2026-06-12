@@ -11,6 +11,7 @@ import { run } from "./shell";
 import { createRelaySession, type RelayClient, type RelaySession } from "./relay.ts";
 import { Session, type ChatMessage, type SessionDeps } from "./session";
 import { cwdToTranscriptDir, findLatestTranscript } from "./transcript";
+import { optionsPromptArg } from "./optionsPrompt";
 
 export interface CreateSessionOpts {
   cwd: string;
@@ -218,6 +219,9 @@ export class SessionRegistry {
     // An explicit permissionMode wins; otherwise `yolo: false` opts out.
     const mode = opts.permissionMode ?? ((opts.yolo ?? true) ? "bypassPermissions" : undefined);
     const flags: string[] = [];
+    // Teach Claude the <options> convention the app renders as a picker (the
+    // happy SDK injects this per-message; a tmux pane can't, so bake it in).
+    flags.push("--append-system-prompt", optionsPromptArg());
     if (opts.model) flags.push("--model", opts.model);
     if (opts.fallbackModel) flags.push("--fallback-model", opts.fallbackModel);
     if (opts.continue) flags.push("--continue");
