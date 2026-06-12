@@ -99,3 +99,33 @@ test("adjacent keys, no text between", () => {
 test("empty script", () => {
   expect(parseKeyScript("")).toEqual([]);
 });
+
+test("escapes: \\n and \\r become Enter, \\t becomes Tab", () => {
+  expect(parseKeyScript("git status\\ny\\t")).toEqual([
+    { type: "text", text: "git status" },
+    { type: "key", key: "Enter" },
+    { type: "text", text: "y" },
+    { type: "key", key: "Tab" },
+  ]);
+});
+
+test("escapes: \\\\ is a literal backslash, and \\\\n escapes the newline", () => {
+  // "a\\nb" (backslash-backslash-n) → literal "a\nb", NOT a newline
+  expect(parseKeyScript("a\\\\nb")).toEqual([
+    { type: "text", text: "a\\nb" },
+  ]);
+});
+
+test("escapes: unknown escape keeps the backslash literal", () => {
+  expect(parseKeyScript("a\\xb")).toEqual([
+    { type: "text", text: "a\\xb" },
+  ]);
+});
+
+test("escapes coexist with key tokens", () => {
+  expect(parseKeyScript("echo hi\\n<C-c>")).toEqual([
+    { type: "text", text: "echo hi" },
+    { type: "key", key: "Enter" },
+    { type: "key", key: "C-c" },
+  ]);
+});
