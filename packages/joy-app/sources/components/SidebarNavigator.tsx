@@ -7,8 +7,7 @@ import { useWindowDimensions, View, Pressable, Platform } from 'react-native';
 import { useLocalSetting, useLocalSettingMutable } from '@/sync/storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, usePathname } from 'expo-router';
-import { BlockLogo } from '@/components/JoyLogotype';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { isTauri } from '@/utils/isTauri';
@@ -197,10 +196,12 @@ const PersistentHeader = React.memo(() => {
                     style={{ width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }}
                     accessibilityLabel={t('zen.toggle')}
                 >
-                    {/* Block logo as the zen toggle; full opacity when zen is active. */}
-                    <View style={{ opacity: zenMode ? 1 : 0.55 }}>
-                        <BlockLogo size={6} />
-                    </View>
+                    {/* This toggle collapses/expands the sidebar; highlighted when collapsed (zen). */}
+                    <MaterialCommunityIcons
+                        name="page-layout-sidebar-left"
+                        size={20}
+                        color={zenMode ? theme.colors.textLink : theme.colors.header.tint}
+                    />
                 </Pressable>
                 <Pressable onPress={handleBack} disabled={!canGoBackEffective} hitSlop={10} style={{ width: 28, height: 28, alignItems: 'center', justifyContent: 'center', opacity: canGoBackEffective ? 1 : 0.3 }}>
                     <Ionicons name="chevron-back" size={20} color={theme.colors.header.tint} />
