@@ -29,6 +29,7 @@ const QUICK_KEYS: { label: string; script: string }[] = [
     { label: 'Enter', script: '<Enter>' },
     { label: 'Esc', script: '<Esc>' },
     { label: '^C', script: '<C-c>' },
+    { label: 'Del', script: '<Del>' },
     { label: 'Tab', script: '<Tab>' },
     { label: '↑', script: '<Up>' },
     { label: '↓', script: '<Down>' },
@@ -130,11 +131,12 @@ export default React.memo(function JoyPaneScreen() {
     }, [machineId, sessionId, refresh]);
 
     const handleSend = React.useCallback(() => {
-        const script = input;
-        if (!script.trim()) return;
+        if (!input.trim()) return;
         setInput('');
         // In plain-text mode the input is typed verbatim — <Enter>, <C-c> etc.
-        // land as literal characters, not keys.
+        // land as literal characters, not keys. In keys mode, append a
+        // terminating <Enter> so the typed sequence is submitted.
+        const script = literalMode ? input : input + '<Enter>';
         void sendScript(script, literalMode);
     }, [input, sendScript, literalMode]);
 
@@ -204,7 +206,7 @@ export default React.memo(function JoyPaneScreen() {
             <Text style={styles.hint}>
                 {literalMode
                     ? 'text mode: typed verbatim — <Enter>, <C-c> land as literal characters. Tap “text” to switch back to keys.'
-                    : 'keys mode: <Enter> <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt>. Tap “keys” for plain text.'}
+                    : 'keys mode (auto-submits with Enter): <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt>. Tap “keys” for plain text.'}
             </Text>
         </View>
     );
