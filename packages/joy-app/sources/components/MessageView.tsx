@@ -375,10 +375,13 @@ const styles = StyleSheet.create((theme) => ({
   // `!`/`&`-prefixed messages (bash / background) read as monospace in chat,
   // matching how the composer renders them.
   monoMessageText: {
-    // Match the normal message text metrics (MarkdownView body) — only the
-    // font family changes, so command messages read like normal messages.
+    // Match the normal message text metrics (MarkdownView body) — size,
+    // line-height AND the 8px top/bottom margins — so command bubbles are the
+    // same height as normal messages, only with a monospace font.
     fontSize: 16,
     lineHeight: 24,
+    marginTop: 8,
+    marginBottom: 8,
     color: theme.colors.text,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
   },
