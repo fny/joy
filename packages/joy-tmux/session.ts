@@ -679,12 +679,18 @@ export class Session {
   /** Type a message into the pane + record receipt + bump thinking. */
   #typeIntoTmux(text: string, opts: SendOptions): void {
     const delivery = this.#ensureDelivery();
-    if (delivery) {
-      delivery.pending.push({ seq: opts.seq, text, source: opts.source, at: Date.now() });
+    // Commands (`!bash`, `/slash`) never produce a user-text transcript entry —
+    // their synthetic wrappers are suppressed — so they must NOT go on the
+    // pending-match queue, where they'd never match and would block the next
+    // real message's match, mirroring it as a duplicate.
+    const isCommand = /^\s*!/.test(text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(text);
+    const tracked = !!delivery && !isCommand;
+    if (tracked) {
+      delivery!.pending.push({ seq: opts.seq, text, source: opts.source, at: Date.now() });
     }
     const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, text.replace(/\n/g, " "));
     if (!r.ok) {
-      delivery?.pending.pop();
+      if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
     }
     run("tmux", "send-keys", "-t", this.tmuxWindow, "Enter");
@@ -881,16 +887,7 @@ export class Session {
       // and suppress its echo — the user's typed `! cmd` already shows.
       if (content.startsWith("<bash-input>")) {
         const m = /<bash-input>([\s\S]*?)<\/bash-input>/.exec(content);
-        const cmd = m ? stripAnsi(m[1]).trim() : "";
-        this.#pendingBashCmd = cmd;
-        // The user's `! cmd` was queued as a pending send, but its transcript
-        // form is <bash-input> (never a user-text entry) — so it would never
-        // match and would block the NEXT message's match, mirroring it as a
-        // duplicate. Consume the matching pending entry here.
-        const delivery = this.relaySessionId ? this.#ensureDelivery() : null;
-        if (delivery && delivery.pending[0] && delivery.pending[0].text.replace(/^\s*!\s*/, "").trim() === cmd) {
-          delivery.pending.shift();
-        }
+        this.#pendingBashCmd = m ? stripAnsi(m[1]).trim() : "";
         return;
       }
       // Bash output (`!cmd`) → a structured card the app renders as a tool call:
