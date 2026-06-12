@@ -23,9 +23,18 @@ export interface OutboundReceipt {
   at: number;
 }
 
+export interface ReceivedEntry {
+  text: string;             // a user message text received from the relay/app
+  at: number;               // ms epoch
+}
+
 export interface ReceiptLog {
   inbound: InboundReceipt[];
   outbound: OutboundReceipt[];
+  // Texts the app sent us (persisted) so their transcript echo is never
+  // mirrored back as a duplicate — even if the pending queue is lost to a
+  // restart. The resilience backstop behind the in-memory pending match.
+  received: ReceivedEntry[];
 }
 
 export interface PendingSend {
@@ -58,10 +67,11 @@ export function loadReceipts(relaySessionId: string, baseDir = defaultStateDir()
       return {
         inbound: Array.isArray(parsed.inbound) ? parsed.inbound : [],
         outbound: Array.isArray(parsed.outbound) ? parsed.outbound : [],
+        received: Array.isArray(parsed.received) ? parsed.received : [],
       };
     }
   } catch {}
-  return { inbound: [], outbound: [] };
+  return { inbound: [], outbound: [], received: [] };
 }
 
 export function saveReceipts(relaySessionId: string, log: ReceiptLog, baseDir = defaultStateDir()): void {
@@ -130,4 +140,40 @@ export function recordOutboundReceipt(
   state.forwardedUuids.add(receipt.uuid);
   state.receipts.outbound.push(receipt);
   saveReceipts(relaySessionId, state.receipts, baseDir);
+}
+
+const RECEIVED_WINDOW_MS = 15 * 60 * 1000;
+const RECEIVED_MAX = 200;
+
+/**
+ * Record a user message text the app sent us, so its later transcript echo is
+ * recognized as our own and never mirrored back as a duplicate — persisted so
+ * it survives a daemon restart. Prunes entries older than the window.
+ */
+export function recordReceived(state: DeliveryState, relaySessionId: string, text: string, at: number, baseDir = defaultStateDir()): void {
+  const cutoff = at - RECEIVED_WINDOW_MS;
+  state.receipts.received = state.receipts.received.filter((r) => r.at >= cutoff);
+  state.receipts.received.push({ text, at });
+  if (state.receipts.received.length > RECEIVED_MAX) {
+    state.receipts.received.splice(0, state.receipts.received.length - RECEIVED_MAX);
+  }
+  saveReceipts(relaySessionId, state.receipts, baseDir);
+}
+
+/**
+ * If `text` was recently received from the app, consume one matching entry and
+ * return true (an echo to suppress). Newest-first so repeated identical sends
+ * each pair with one transcript entry.
+ */
+export function consumeReceived(state: DeliveryState, relaySessionId: string, text: string, now: number, baseDir = defaultStateDir()): boolean {
+  const cutoff = now - RECEIVED_WINDOW_MS;
+  for (let i = state.receipts.received.length - 1; i >= 0; i--) {
+    const r = state.receipts.received[i];
+    if (r.at >= cutoff && r.text === text) {
+      state.receipts.received.splice(i, 1);
+      saveReceipts(relaySessionId, state.receipts, baseDir);
+      return true;
+    }
+  }
+  return false;
 }

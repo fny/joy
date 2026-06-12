@@ -28,6 +28,8 @@ import {
   initDeliveryState,
   recordInboundReceipt,
   recordOutboundReceipt,
+  recordReceived,
+  consumeReceived,
   type DeliveryState,
   type DeliverySource,
 } from "./receipts";
@@ -687,6 +689,10 @@ export class Session {
     const tracked = !!delivery && !isCommand;
     if (tracked) {
       delivery!.pending.push({ seq: opts.seq, text, source: opts.source, at: Date.now() });
+      // Persisted backstop: remember we sent this text so its transcript echo is
+      // never mirrored as a duplicate, even if the pending queue is lost to a
+      // restart.
+      recordReceived(delivery!, this.relaySessionId!, text, Date.now());
     }
     const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, text.replace(/\n/g, " "));
     if (!r.ok) {
@@ -918,20 +924,29 @@ export class Session {
       const uuid = typeof entry.uuid === "string" ? entry.uuid : "";
       const delivery = this.#relay && uuid ? this.#ensureDelivery() : null;
       if (delivery && this.relaySessionId) {
-        const front = delivery.pending[0];
-        if (front && front.text === content) {
-          delivery.pending.shift();
+        // Match anywhere in the queue (not just the front) so an out-of-order or
+        // stale entry can't block a real match.
+        const idx = delivery.pending.findIndex((p) => p.text === content);
+        if (idx >= 0) {
+          const matched = delivery.pending.splice(idx, 1)[0];
           recordInboundReceipt(delivery, this.relaySessionId, {
-            seq: front.seq, uuid, text: content, source: front.source, at: Date.now(),
+            seq: matched.seq, uuid, text: content, source: matched.source, at: Date.now(),
           });
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
         }
-        // No queue match → direct typing in the tmux pane. Skip if we already
-        // forwarded it (recovery), otherwise mirror it to the relay so the app
-        // sees the full conversation.
+        // No queue match. Before assuming this was typed directly in the pane,
+        // check the PERSISTED received-text backstop: if the app sent this text
+        // recently, the pending match was just lost (e.g. a daemon restart) —
+        // suppress it instead of mirroring a duplicate.
         if (!delivery.forwardedUuids.has(uuid)) {
-          this.#relay!.send(encodeUserMessage(content, entryTimeMs));
-          recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "", at: Date.now() });
+          if (consumeReceived(delivery, this.relaySessionId, content, Date.now())) {
+            recordInboundReceipt(delivery, this.relaySessionId, {
+              uuid, text: content, source: "relay", at: Date.now(),
+            });
+          } else {
+            this.#relay!.send(encodeUserMessage(content, entryTimeMs));
+            recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "", at: Date.now() });
+          }
         }
       }
       this.#deps.addChatMessage({ role: "user", content, source: "cli", session_id: sid });
