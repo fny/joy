@@ -881,7 +881,16 @@ export class Session {
       // and suppress its echo — the user's typed `! cmd` already shows.
       if (content.startsWith("<bash-input>")) {
         const m = /<bash-input>([\s\S]*?)<\/bash-input>/.exec(content);
-        this.#pendingBashCmd = m ? stripAnsi(m[1]).trim() : "";
+        const cmd = m ? stripAnsi(m[1]).trim() : "";
+        this.#pendingBashCmd = cmd;
+        // The user's `! cmd` was queued as a pending send, but its transcript
+        // form is <bash-input> (never a user-text entry) — so it would never
+        // match and would block the NEXT message's match, mirroring it as a
+        // duplicate. Consume the matching pending entry here.
+        const delivery = this.relaySessionId ? this.#ensureDelivery() : null;
+        if (delivery && delivery.pending[0] && delivery.pending[0].text.replace(/^\s*!\s*/, "").trim() === cmd) {
+          delivery.pending.shift();
+        }
         return;
       }
       // Bash output (`!cmd`) → a structured card the app renders as a tool call:
