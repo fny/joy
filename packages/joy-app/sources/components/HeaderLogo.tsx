@@ -1,7 +1,6 @@
 import * as React from 'react';
 import { View } from 'react-native';
-import { Image } from 'expo-image';
-import { useUnistyles } from 'react-native-unistyles';
+import { BlockLogo } from '@/components/JoyLogotype';
 
 /**
  * Shared header logo component used across all main tabs.
@@ -9,7 +8,6 @@ import { useUnistyles } from 'react-native-unistyles';
  * had its own HeaderLeft, the component would unmount/remount.
  */
 export const HeaderLogo = React.memo(() => {
-    const { theme } = useUnistyles();
     return (
         <View style={{
             width: 32,
@@ -17,12 +15,7 @@ export const HeaderLogo = React.memo(() => {
             alignItems: 'center',
             justifyContent: 'center',
         }}>
-            <Image
-                source={require('@/assets/images/logo-black.png')}
-                contentFit="contain"
-                style={{ width: 24, height: 24 }}
-                tintColor={theme.colors.header.tint}
-            />
+            <BlockLogo size={8} />
         </View>
     );
 });
