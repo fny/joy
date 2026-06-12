@@ -22,7 +22,7 @@ function TerminalSwatch({ t }: { t: TerminalTheme }) {
 export const TerminalControls = React.memo(function TerminalControls() {
     const [selected, setSelected] = useLocalSettingMutable('terminalTheme');
     return (
-        <ItemGroup title="Terminal theme" footer="Colours for the terminal pane and bash command output.">
+        <ItemGroup title="Terminal theme" footer="Colours for the terminal pane.">
             {TERMINAL_THEMES.map((t) => (
                 <Item
                     key={t.id}
