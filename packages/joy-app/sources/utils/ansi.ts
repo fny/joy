@@ -35,14 +35,16 @@ interface SgrState {
     reverse: boolean;
 }
 
-const BASE_16 = [
+// Default 16-colour ANSI palette (VS Code dark). A terminal theme can pass a
+// replacement palette to parseAnsiLines().
+export const BASE_16 = [
     '#000000', '#cd3131', '#0dbc79', '#e5e510', '#2472c8', '#bc3fbc', '#11a8cd', '#e5e5e5', // 0-7
     '#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#ffffff', // 8-15 (bright)
 ];
 
 // xterm 256-color palette: 16 base + 6×6×6 cube (16-231) + 24 grayscale (232-255).
-function xterm256(n: number): string {
-    if (n < 16) return BASE_16[n];
+function xterm256(n: number, palette: string[]): string {
+    if (n < 16) return palette[n];
     if (n < 232) {
         const i = n - 16;
         const r = Math.floor(i / 36);
@@ -67,7 +69,7 @@ function freshState(): SgrState {
 }
 
 // Apply one SGR sequence's numeric codes to the running state.
-function applySgr(state: SgrState, codes: number[]): void {
+function applySgr(state: SgrState, codes: number[], palette: string[]): void {
     for (let i = 0; i < codes.length; i++) {
         const c = codes[i];
         switch (true) {
@@ -81,22 +83,22 @@ function applySgr(state: SgrState, codes: number[]): void {
             case c === 23: state.italic = false; break;
             case c === 24: state.underline = false; break;
             case c === 27: state.reverse = false; break;
-            case c >= 30 && c <= 37: state.fg = BASE_16[c - 30]; break;
+            case c >= 30 && c <= 37: state.fg = palette[c - 30]; break;
             case c === 38: {
-                if (codes[i + 1] === 5) { state.fg = xterm256(codes[i + 2]); i += 2; }
+                if (codes[i + 1] === 5) { state.fg = xterm256(codes[i + 2], palette); i += 2; }
                 else if (codes[i + 1] === 2) { state.fg = rgbHex(codes[i + 2], codes[i + 3], codes[i + 4]); i += 4; }
                 break;
             }
             case c === 39: state.fg = undefined; break;
-            case c >= 40 && c <= 47: state.bg = BASE_16[c - 40]; break;
+            case c >= 40 && c <= 47: state.bg = palette[c - 40]; break;
             case c === 48: {
-                if (codes[i + 1] === 5) { state.bg = xterm256(codes[i + 2]); i += 2; }
+                if (codes[i + 1] === 5) { state.bg = xterm256(codes[i + 2], palette); i += 2; }
                 else if (codes[i + 1] === 2) { state.bg = rgbHex(codes[i + 2], codes[i + 3], codes[i + 4]); i += 4; }
                 break;
             }
             case c === 49: state.bg = undefined; break;
-            case c >= 90 && c <= 97: state.fg = BASE_16[8 + (c - 90)]; break;
-            case c >= 100 && c <= 107: state.bg = BASE_16[8 + (c - 100)]; break;
+            case c >= 90 && c <= 97: state.fg = palette[8 + (c - 90)]; break;
+            case c >= 100 && c <= 107: state.bg = palette[8 + (c - 100)]; break;
         }
     }
 }
@@ -121,7 +123,7 @@ const ESC = /\x1b\[([0-9;]*)m|\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\
  * Parse ANSI text into an array of lines, each a list of styled spans.
  * SGR state carries across lines (tmux can leave attributes open at EOL).
  */
-export function parseAnsiLines(input: string): AnsiSpan[][] {
+export function parseAnsiLines(input: string, palette: string[] = BASE_16): AnsiSpan[][] {
     const state = freshState();
     const lines: AnsiSpan[][] = [];
 
@@ -139,7 +141,7 @@ export function parseAnsiLines(input: string): AnsiSpan[][] {
             // Only SGR (…m) sequences carry style; m[1] is its numeric body.
             if (m[1] !== undefined) {
                 const codes = m[1] === '' ? [0] : m[1].split(';').map(n => parseInt(n, 10) || 0);
-                applySgr(state, codes);
+                applySgr(state, codes, palette);
             }
         }
         pushText(rawLine.slice(last));
