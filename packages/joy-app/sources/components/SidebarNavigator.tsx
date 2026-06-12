@@ -193,14 +193,15 @@ const PersistentHeader = React.memo(() => {
                 <Pressable
                     onPress={handleZenToggle}
                     hitSlop={10}
-                    style={{ width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }}
+                    style={{ width: 28, height: 28, alignItems: 'center', justifyContent: 'center', opacity: zenMode ? 0.3 : 1 }}
                     accessibilityLabel={t('zen.toggle')}
                 >
-                    {/* Collapse when the sidebar is open, expand when it's collapsed (zen). */}
+                    {/* Collapse when the sidebar is open, expand when it's collapsed (zen).
+                        Dim when collapsed (like the disabled forward button), never blue. */}
                     <Octicons
                         name={zenMode ? 'sidebar-expand' : 'sidebar-collapse'}
                         size={18}
-                        color={zenMode ? theme.colors.textLink : theme.colors.header.tint}
+                        color={theme.colors.header.tint}
                     />
                 </Pressable>
                 <Pressable onPress={handleBack} disabled={!canGoBackEffective} hitSlop={10} style={{ width: 28, height: 28, alignItems: 'center', justifyContent: 'center', opacity: canGoBackEffective ? 1 : 0.3 }}>
