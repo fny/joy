@@ -9,10 +9,11 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { PaletteControls } from './PaletteControls';
 import { AccentControls } from './AccentControls';
 import { FontControls } from './FontControls';
+import { TerminalControls } from './TerminalControls';
 import { useAppearanceHistory } from './appearanceHistory';
 
-type DevPage = 'home' | 'palette' | 'accents' | 'fonts';
-const PAGE_TITLE: Record<DevPage, string> = { home: 'Dev tweaks', palette: 'Color Palette', accents: 'Accent Colors', fonts: 'Font' };
+type DevPage = 'home' | 'palette' | 'accents' | 'fonts' | 'terminal';
+const PAGE_TITLE: Record<DevPage, string> = { home: 'Dev tweaks', palette: 'Color Palette', accents: 'Accent Colors', fonts: 'Font', terminal: 'Terminal' };
 
 const FAB_SIZE = 52;
 const MARGIN = 16;
@@ -140,11 +141,18 @@ export const DevFab = React.memo(function DevFab() {
                                     icon={<Ionicons name="text-outline" size={29} color={theme.colors.accents.green} />}
                                     onPress={() => setPage('fonts')}
                                 />
+                                <Item
+                                    title="Terminal"
+                                    subtitle="Terminal pane + bash output colours"
+                                    icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accents.blue} />}
+                                    onPress={() => setPage('terminal')}
+                                />
                             </ItemGroup>
                         )}
                         {page === 'palette' && <PaletteControls />}
                         {page === 'accents' && <AccentControls />}
                         {page === 'fonts' && <FontControls />}
+                        {page === 'terminal' && <TerminalControls />}
                     </ScrollView>
                 </View>
             )}
