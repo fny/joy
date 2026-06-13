@@ -172,7 +172,7 @@ export class SessionRegistry {
 
   async create(opts: CreateSessionOpts): Promise<Session> {
     const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-    const windowName = `dd-${id}`;
+    const windowName = `j-${id}`;
 
     // Resolve ~, then verify the directory exists. tmux -c silently falls
     // back to the daemon's cwd when the directory is missing, which cascades
@@ -242,14 +242,23 @@ export class SessionRegistry {
     // it afterwards via joy-resize. Set before launch so claude's TUI renders
     // at this width from the start.
     run("tmux", "resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40");
-    run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
+    // Replace the pane shell with a fresh login shell so it re-sources the
+    // user's profile (.bashrc/.zshrc) — a default tmux pane only carries the
+    // tmux server's frozen env, so without this a launch/restart wouldn't pick
+    // up env-var changes. `exec` keeps the same PID, so PID discovery below is
+    // unaffected. claude is sent after a beat to let the profile finish sourcing.
+    const shell = process.env.SHELL || "/bin/bash";
+    run("tmux", "send-keys", "-t", tmuxWindow, `exec ${shell} -l`, "Enter");
 
     // Kick off the relay session creation NOW so its network round-trips
-    // overlap the 1.2s of PID-discovery sleeps below instead of running
-    // after them — shaves ~1s off every create as seen from the app.
+    // overlap the sleeps below instead of running after them.
     const relayPromise = this.relayClient
       ? createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id })
       : null;
+
+    // Give the login shell time to source the profile, then launch claude.
+    await Bun.sleep(900);
+    run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
 
     await Bun.sleep(400);
     const shellPid = parseInt(
@@ -314,6 +323,8 @@ export class SessionRegistry {
       ?? (existing?.transcriptPath ? basename(existing.transcriptPath, ".jsonl") : undefined);
     if (existing && existing.status !== "ended") existing.end("killed");
 
+    // Env is refreshed automatically: create() launches claude through a fresh
+    // login shell, so a restart re-sources the user's profile (.bashrc/.zshrc).
     return this.create({
       cwd,
       resume_id: resumeId,
@@ -323,6 +334,22 @@ export class SessionRegistry {
     });
   }
 
+  /** Kill every session — active or detached — archiving each, then tear down
+   *  the whole tmux session so nothing lingers (the base shell window and any
+   *  orphaned windows the registry didn't track). The tmux session is recreated
+   *  lazily on the next create(). Returns how many sessions were torn down. */
+  killAll(): number {
+    let n = 0;
+    for (const session of [...this.#sessions.values()]) {
+      if (session.forceKill()) n++;
+    }
+    // Nuke the tmux session itself — removes the leftover base window and any
+    // untracked/orphaned windows in one shot.
+    run("tmux", "kill-session", "-t", this.tmuxSession);
+    process.stderr.write(`[killAll] archived ${n} sessions + killed tmux session ${this.tmuxSession}\n`);
+    return n;
+  }
+
   // ── Recovery (joy-tmux restart with live tmux windows) ──────────────────────
 
   recover(): void {
@@ -330,8 +357,8 @@ export class SessionRegistry {
     if (!result.ok) return;
 
     for (const winName of result.out.split("\n").map(l => l.trim()).filter(Boolean)) {
-      if (!/^dd-[0-9a-f]{8}$/.test(winName)) continue;
-      const id = winName.slice(3);
+      if (!/^j-[0-9a-f]{8}$/.test(winName)) continue;
+      const id = winName.slice(2);
       if (this.#sessions.has(id)) continue;
 
       const tmuxWindow = `${this.tmuxSession}:${winName}`;
@@ -362,8 +389,12 @@ export class SessionRegistry {
       if (isAlive) {
         if (transcriptPath) session.startTailer(transcriptPath);
         session.beginWatching();
-        this.#attachRelayAsync(session);
       }
+      // Attach the relay (binds the session RPCs) even for ENDED sessions whose
+      // tmux window still exists — so git status, the file browser, search and
+      // diffs keep working on a finished session's directory (its cwd is still
+      // there). Claude-dependent ops (send/abort) just no-op for a dead pane.
+      this.#attachRelayAsync(session);
       process.stderr.write(`[recover] ${id} cwd=${cwd} alive=${isAlive} transcript=${transcriptPath}\n`);
     }
   }
@@ -371,7 +402,9 @@ export class SessionRegistry {
   /** Re-attach relay sessions orphaned by a socket reconnect. */
   onRelayReconnect(): void {
     for (const session of this.#sessions.values()) {
-      if (session.status !== "active" || session.relayAttached) continue;
+      // Re-attach any session missing a relay — including ended ones, so their
+      // file/git RPCs survive a socket reconnect too.
+      if (session.relayAttached) continue;
       process.stderr.write(`[relay] reconnect: creating session for orphaned ${session.id}\n`);
       this.#attachRelayAsync(session);
     }
@@ -379,10 +412,15 @@ export class SessionRegistry {
 
   #attachRelayAsync(session: Session): void {
     if (!this.relayClient) return;
-    createRelaySession(this.relayClient, { tag: `joy-tmux-${session.id}`, cwd: session.cwd, id: session.id })
+    // A session recovered as ended (window present, Claude dead) is detached;
+    // anything else attaching here is running.
+    const state = session.status === "ended" ? "detached" : "running";
+    createRelaySession(this.relayClient, { tag: `joy-tmux-${session.id}`, cwd: session.cwd, id: session.id, state })
       .then(rs => {
         process.stderr.write(`[relay] session ${session.id} → relay ${rs.relaySessionId}\n`);
-        session.attachRelay(rs);
+        // Recovery/reconnect contexts have no kill-race, so allow ended sessions
+        // to attach (their file/git RPCs stay live; messages won't touch the pane).
+        session.attachRelay(rs, true);
       })
       .catch(e => process.stderr.write(`[relay] failed to create session for ${session.id}: ${e}\n`));
   }

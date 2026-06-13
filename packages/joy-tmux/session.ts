@@ -181,6 +181,9 @@ export class Session {
   #relay: RelaySession | null = null;
   #tailer: TranscriptTailer | null = null;
   #turn: { turnId: string } | null = null;
+  // Throttle: surface at most one api_error note per turn (Claude retries up to
+  // 10×, so a turn can emit several). Reset at turn end.
+  #errorNotedThisTurn = false;
   #delivery: DeliveryState | null = null;
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
   // The most recent `!cmd` command, captured from <bash-input> so it can head
@@ -287,11 +290,19 @@ export class Session {
    * Returns false (and stops the relay session) if this session already ended,
    * guarding against kill racing the async relay creation.
    */
-  attachRelay(rs: RelaySession): boolean {
-    if (this.status === "ended") {
+  attachRelay(rs: RelaySession, allowEnded = false): boolean {
+    // Normally refuse an ended session (guards a kill racing async relay
+    // creation). Recovery passes allowEnded so a finished session's file/git
+    // RPCs still work — but incoming messages are NOT typed into its dead pane
+    // (see #onRelayMessage).
+    if (this.status === "ended" && !allowEnded) {
       rs.stop();
       return false;
     }
+    // A detached session (ended, window still around) KEEPS heartbeating
+    // presence — that per-session liveness is how the app distinguishes "daemon
+    // alive, Claude dead" (red detached) from "daemon gone" (falls back to
+    // offline). The app renders joy__state='detached' as red, not green online.
     this.#relay = rs;
     this.relaySessionId = rs.relaySessionId;
 
@@ -340,17 +351,21 @@ export class Session {
   }
 
   /**
-   * The ONE teardown path. Ordered: stop transcript tailer → stop relay
-   * heartbeats → archive server-side (flips active=false so the app drops
-   * the session from the active list; mirrors happy-cli's deactivateSession)
-   * → kill tmux window (only for explicit kills — process_exited means the
-   * pane already returned to bash, which we leave for inspection) → mark
-   * ended → broadcast.
+   * The ONE teardown path. Two outcomes, by reason:
+   *
+   *  - "process_exited" → ERRORED. Claude died on its own; the tmux window is
+   *    still around at a bash prompt. We stop the tailer and pending work but
+   *    KEEP the relay attached (presence off, joy__state='detached') so the app
+   *    shows a red detached status and file/git RPCs still answer on the cwd.
+   *    Not archived — it's a crash, not a cleanup.
+   *  - "killed" → ARCHIVED. Explicit kill/cleanup: mark archived, archive
+   *    server-side (drops it from the active list), detach the relay and kill
+   *    the window.
    */
   end(reason: "killed" | "process_exited"): boolean {
     if (this.status === "ended") return false;
 
-    // Capture before detaching the relay — needed for the archive POST.
+    // Capture before any relay detach — needed for the archive POST.
     const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
 
     this.#tailer?.close();
@@ -361,20 +376,51 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#queue = [];
     this.#dispatchInFlight = null;
-    this.#relay?.stop();
-    this.#relay = null;
-
-    if (this.#deps.relayClient && relaySessionId) {
-      void this.#deps.relayClient.archiveSession(relaySessionId);
-    }
-
-    if (reason === "killed") {
-      run("tmux", "kill-window", "-t", this.tmuxWindow);
-    }
 
     this.status = "ended";
     this.endReason = reason;
     this.lastActiveAt = Date.now();
+
+    if (reason === "process_exited") {
+      // Detached: keep the relay attached AND keep heartbeating presence (the
+      // session-alive loop keeps running), so the app sees a live presence +
+      // joy__state='detached' → red "detached". When the daemon dies the
+      // heartbeat stops and it lapses to offline. Messages are still ignored
+      // (dead pane) via #onRelayMessage.
+      if (this.#relay) void this.#relay.updateJoyState("detached");
+    } else {
+      // Killed → archived: flag, archive, detach, kill the window.
+      if (this.#relay) void this.#relay.updateJoyState("archived");
+      this.#relay?.stop();
+      this.#relay = null;
+      if (this.#deps.relayClient && relaySessionId) {
+        void this.#deps.relayClient.archiveSession(relaySessionId);
+      }
+      run("tmux", "kill-window", "-t", this.tmuxWindow);
+    }
+
+    this.#deps.broadcast("session_update", this.toJSON());
+    return true;
+  }
+
+  /**
+   * Force this session gone: an active one ends as "killed"; a detached one
+   * (already ended, window still around) gets archived and its window removed.
+   * Returns true if anything was torn down. Used by "kill all sessions".
+   */
+  forceKill(): boolean {
+    if (this.status !== "ended") return this.end("killed");
+    const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
+    if (this.#relay) {
+      void this.#relay.updateJoyState("archived");
+      this.#relay.stop();
+      this.#relay = null;
+    }
+    if (this.#deps.relayClient && relaySessionId) {
+      void this.#deps.relayClient.archiveSession(relaySessionId);
+    }
+    run("tmux", "kill-window", "-t", this.tmuxWindow);
+    this.endReason = "killed";
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
   }
@@ -645,6 +691,14 @@ export class Session {
   // ── Relay message handling ──────────────────────────────────────────────────
 
   async #onRelayMessage(text: string, seq: number): Promise<void> {
+    // An ended session keeps its relay attached only to serve file/git RPCs on
+    // its directory. Its pane is a dead-Claude shell, so typing a relayed
+    // message there would run it as a shell command — drop it instead. (To
+    // continue an ended session, the app uses the explicit restart/resume flow.)
+    if (this.status === "ended") {
+      process.stderr.write(`[relay] ${this.id}: ignoring message for ended session\n`);
+      return;
+    }
     // Drain attachments first so paths can be appended to this turn's text.
     // Atomic swap: take the bucket, replace with an empty one so any
     // late-arriving file event lands in the next batch (matches happy-cli's
@@ -864,8 +918,14 @@ export class Session {
     // Falls back to now() for entries without a parseable timestamp.
     const entryTimeMs = Date.parse(String(entry.timestamp || "")) || Date.now();
 
-    // Turn complete → send turn-end and clear turn state
-    if (entryType === "system" && entry.subtype === "stop_hook_summary") {
+    // Turn complete → send turn-end and clear turn state. Either the Stop hook
+    // ran (stop_hook_summary) or Claude reported the turn's wall-clock
+    // (turn_duration). turn_duration fires at the end of EVERY turn, including
+    // ones that ended in an API error — whose assistant entry carries no
+    // end_turn stop_reason, so the assistant-path turn-end below never fires.
+    // Handling it here is what unsticks `thinking` when a turn errors out.
+    if (entryType === "system" && (entry.subtype === "stop_hook_summary" || entry.subtype === "turn_duration")) {
+      this.#errorNotedThisTurn = false;
       this.#deps.broadcast("stop", { session_id: sid });
       if (this.#relay && this.#turn) {
         this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
@@ -873,6 +933,24 @@ export class Session {
       this.#turn = null;
       this.#relay?.setThinking(false);
       this.#maybeDrainQueue(); // turn done → send the next queued message
+      return;
+    }
+
+    // API error (401, rate limit, network, …). Claude retries up to maxRetries,
+    // so this isn't a turn end (turn_duration handles that) — but it IS normally
+    // invisible: nothing reaches the app and the spinner just hangs. Log every
+    // one for diagnosis, and surface the first per turn as an agent note so the
+    // app shows e.g. "API error: 401 Invalid authentication credentials".
+    if (entryType === "system" && entry.subtype === "api_error") {
+      const err = (entry.error ?? {}) as Record<string, unknown>;
+      const formatted = typeof err.formatted === "string" && err.formatted
+        ? err.formatted
+        : typeof err.message === "string" ? err.message : "API error";
+      process.stderr.write(`[api_error] ${this.id} status=${err.status ?? "?"} retry=${entry.retryAttempt ?? "?"}/${entry.maxRetries ?? "?"}: ${formatted}\n`);
+      if (!this.#errorNotedThisTurn) {
+        this.#errorNotedThisTurn = true;
+        this.#emitAgentNote(`⚠️ API error: ${formatted}`, entryTimeMs, sid);
+      }
       return;
     }
 
@@ -1018,6 +1096,7 @@ export class Session {
         // calls pending (no turn-end yet).
         const stopReason = String(msg.stop_reason || "");
         if (stopReason === "end_turn" || stopReason === "max_tokens") {
+          this.#errorNotedThisTurn = false;
           this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
           this.#turn = null;
           this.#relay.setThinking(false);

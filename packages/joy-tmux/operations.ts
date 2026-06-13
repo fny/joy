@@ -28,8 +28,30 @@ import { computeUsage, periodToRange } from "./usage";
 import { existsSync } from "fs";
 import { basename } from "path";
 import { hostname, platform, release, arch } from "os";
+import { spawn } from "child_process";
 
 export type HttpMethod = "GET" | "POST" | "DELETE";
+
+/**
+ * Re-exec the daemon: spawn a detached replacement that waits for this process
+ * to release port 4997, then exit. There's no supervisor, so the daemon restarts
+ * itself. Claude runs under tmux (not as our child), so live sessions survive and
+ * are re-adopted by the new daemon's recover().
+ */
+function scheduleDaemonRestart(): void {
+  setTimeout(() => {
+    try {
+      const bun = process.execPath;
+      const script = process.argv[1];
+      spawn("sh", ["-c", `sleep 1; exec '${bun}' '${script}'`], {
+        detached: true,
+        stdio: "ignore",
+        cwd: process.cwd(),
+      }).unref();
+    } catch { /* fall through to exit */ }
+    process.exit(0);
+  }, 300);
+}
 
 export interface OpMeta {
   /** Which transport invoked the op — send() maps this to the chat-log source. */
@@ -145,6 +167,41 @@ export const machineOps: MachineOp[] = [
     httpShape: (result) => {
       const ok = (result as { ok: boolean }).ok;
       return { status: ok ? 200 : 404, body: result };
+    },
+  },
+  {
+    name: "killAll",
+    scope: "machine",
+    rpcName: "joy-kill-all-sessions",
+    http: { method: "POST", path: "/sessions/kill-all" },
+    // Kill every session's tmux window (active AND detached) and archive them.
+    handler: (registry) => ({ ok: true, killed: registry.killAll() }),
+  },
+  {
+    name: "restartDaemon",
+    scope: "machine",
+    rpcName: "joy-restart-daemon",
+    http: { method: "POST", path: "/daemon/restart" },
+    // Re-exec the daemon. Running Claude sessions live in tmux and survive;
+    // recover() re-adopts them. Responds first, then restarts shortly after.
+    handler: () => { scheduleDaemonRestart(); return { ok: true }; },
+  },
+  {
+    name: "notify",
+    scope: "machine",
+    rpcName: "joy-notify",
+    http: { method: "POST", path: "/notify" },
+    // Push a notification to the user's devices, via the daemon's authed relay.
+    handler: async (registry, params) => {
+      const title = typeof params.title === "string" && params.title.trim() ? params.title.trim() : "Joy";
+      const body = typeof params.body === "string" ? params.body : "";
+      if (!registry.relayClient) return { ok: false, error: "relay disabled" };
+      try {
+        const { sent } = await registry.relayClient.sendPush(title, body);
+        return { ok: true, sent };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
     },
   },
   {

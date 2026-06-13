@@ -118,3 +118,34 @@ test("summarizeCommandEcho: slash, bash, noise", () => {
   expect(summarizeCommandEcho("<local-command-stdout>line1\nline2</local-command-stdout>")).toBe("$ line1");
   expect(summarizeCommandEcho("<command-name></command-name>")).toBeNull();
 });
+
+// Stuck-thinking fix: a turn that ends in an API error has no end_turn
+// stop_reason, so only `turn_duration` clears `thinking`; and the api_error
+// itself is surfaced once per turn as an agent note instead of hanging silently.
+test("api_error surfaced once per turn; turn_duration clears thinking", () => {
+  const thinkingCalls: boolean[] = [];
+  const notes: string[] = [];
+  const s = new Session(
+    { id: "e1", tmuxWindow: "joy:j-e1", cwd: "/tmp/e", flags: [], status: "active", startedAt: 0, claudeSessionId: "sid-1" } as any,
+    { relayClient: null, broadcast: () => {}, addChatMessage: (m: any) => { if (m.role === "assistant") notes.push(String(m.content)); } } as any,
+  );
+  const rs: any = {
+    relaySessionId: "rs-e1",
+    start() {}, stop() {}, send() {},
+    setThinking(v: boolean) { thinkingCalls.push(v); },
+  };
+  s.attachRelay(rs, true);
+
+  const apiErr = (attempt: number) => s.onTranscriptEntry({
+    type: "system", subtype: "api_error",
+    error: { formatted: "401 Invalid authentication credentials", status: 401 },
+    retryAttempt: attempt, maxRetries: 10,
+  } as any);
+
+  apiErr(1); apiErr(2); // Claude retries — should note only once
+  expect(notes.filter(n => n.includes("API error")).length).toBe(1);
+  expect(thinkingCalls.includes(false)).toBe(false); // not cleared mid-retry
+
+  s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 2000 } as any);
+  expect(thinkingCalls.includes(false)).toBe(true); // turn end clears thinking
+});
