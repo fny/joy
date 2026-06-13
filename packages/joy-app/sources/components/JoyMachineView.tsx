@@ -17,6 +17,9 @@ import { formatOSPlatform } from '@/utils/sessionUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
+import { useHappyAction } from '@/hooks/useHappyAction';
+import { Modal } from '@/modal';
+import { joyKillAllSessions, joyRestartDaemon } from '@/sync/ops';
 
 type JoyStatus = {
     ok?: boolean;
@@ -61,6 +64,20 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     }, [machineId, online]);
 
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || 'machine';
+
+    const [restarting, doRestartDaemon] = useHappyAction(React.useCallback(async () => {
+        await joyRestartDaemon(machineId);
+    }, [machineId]));
+
+    const [killing, doKillAll] = useHappyAction(React.useCallback(async () => {
+        const ok = await Modal.confirm(
+            'Kill all sessions?',
+            'Closes every session and the tmux session on this machine. Running Claude sessions are terminated.',
+            { confirmText: 'Kill all', destructive: true },
+        );
+        if (!ok) return;
+        await joyKillAllSessions(machineId);
+    }, [machineId]));
 
     if (!status && !failed) {
         return (
@@ -139,6 +156,27 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     subtitle="Token usage and cost for this machine"
                     icon={<Ionicons name="flame-outline" size={29} color="#FF6B35" />}
                     onPress={() => router.push('/settings/usage')}
+                />
+            </ItemGroup>
+
+            <ItemGroup title="Daemon actions" footer="Restart re-execs joy-tmux (running sessions survive). Kill all closes every session and the tmux session.">
+                <Item
+                    title="Restart Daemon"
+                    subtitle="Re-exec joy-tmux; running sessions survive"
+                    icon={restarting
+                        ? <ActivityIndicator />
+                        : <Ionicons name="refresh-outline" size={29} color="#007AFF" />}
+                    onPress={doRestartDaemon}
+                    showChevron={false}
+                />
+                <Item
+                    title="Kill all Sessions"
+                    subtitle="Close every session + the tmux session"
+                    icon={killing
+                        ? <ActivityIndicator />
+                        : <Ionicons name="trash-outline" size={29} color="#FF3B30" />}
+                    onPress={doKillAll}
+                    showChevron={false}
                 />
             </ItemGroup>
         </ItemList>

@@ -322,7 +322,6 @@ export function SessionsList() {
         );
     }, []);
 
-    // Footer removed - all sessions now shown inline
 
     return (
         <View style={styles.container}>
@@ -345,6 +344,7 @@ export function SessionsList() {
 
 const STATUS_CONFIG: Record<SessionState, { color: string; dotColor: string; isPulsing: boolean; isConnected: boolean }> = {
     disconnected: { color: '#999', dotColor: '#999', isPulsing: false, isConnected: false },
+    detached: { color: '#FF3B30', dotColor: '#FF3B30', isPulsing: false, isConnected: false },
     thinking: { color: '#007AFF', dotColor: '#007AFF', isPulsing: true, isConnected: true },
     waiting: { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
     permission_required: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
@@ -375,11 +375,13 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
         ? t('status.unread')
         : session.state === 'thinking'
             ? vibingMessage
-            : session.state === 'disconnected'
-                ? t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) })
-                : session.state === 'permission_required'
-                    ? t('status.permissionRequired')
-                    : t('status.online');
+            : session.state === 'detached'
+                ? t('status.detached')
+                : session.state === 'disconnected'
+                    ? t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) })
+                    : session.state === 'permission_required'
+                        ? t('status.permissionRequired')
+                        : t('status.online');
 
     const handlePress = React.useCallback(() => {
         navigateToSession(session.id);

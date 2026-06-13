@@ -62,6 +62,7 @@ export const MetadataSchema = z.object({
     forkedFromMessageId: z.string().optional(),
     joy__source: z.string().optional(), // e.g. 'joy-tmux'
     joy__sessionId: z.string().optional(), // tmux session ID on the joy-tmux server
+    joy__state: z.enum(['running', 'detached', 'archived']).optional(), // joy lifecycle: detached = Claude died (red status)
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;

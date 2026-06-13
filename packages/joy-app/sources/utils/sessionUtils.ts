@@ -3,7 +3,7 @@ import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 
-export type SessionState = 'disconnected' | 'thinking' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'detached' | 'thinking' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
@@ -26,6 +26,21 @@ export function useSessionStatus(session: Session): SessionStatus {
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [isOnline, hasPermissions, session.thinking]);
+
+    // Detached: Claude died but the daemon still serves the window. Shown red.
+    // Only honored while the session's OWN presence is live — joy-tmux keeps
+    // heartbeating a detached session, so when the daemon dies presence lapses
+    // and it falls back to plain offline (we no longer know it's detached).
+    if (isOnline && session.metadata?.joy__state === 'detached') {
+        return {
+            state: 'detached',
+            isConnected: false,
+            statusText: t('status.detached'),
+            shouldShowStatus: true,
+            statusColor: '#FF3B30',
+            statusDotColor: '#FF3B30'
+        };
+    }
 
     if (!isOnline) {
         return {
