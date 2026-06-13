@@ -341,6 +341,29 @@ export async function machineDelete(machineId: string): Promise<{ success: boole
 }
 
 /**
+ * joy-tmux: kill every session on a machine (active + detached tmux windows).
+ */
+export async function joyKillAllSessions(machineId: string): Promise<{ ok: boolean; killed?: number }> {
+    return apiSocket.machineRPC<{ ok: boolean; killed?: number }, {}>(
+        machineId,
+        'joy-kill-all-sessions',
+        {}
+    );
+}
+
+/**
+ * joy-tmux: restart the daemon on a machine. Running sessions live in tmux and
+ * survive the restart (the daemon re-adopts them).
+ */
+export async function joyRestartDaemon(machineId: string): Promise<{ ok: boolean }> {
+    return apiSocket.machineRPC<{ ok: boolean }, {}>(
+        machineId,
+        'joy-restart-daemon',
+        {}
+    );
+}
+
+/**
  * Stop the daemon on a specific machine
  */
 export async function machineStopDaemon(machineId: string): Promise<{ message: string }> {

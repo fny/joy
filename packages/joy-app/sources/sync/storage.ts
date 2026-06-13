@@ -102,7 +102,15 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
     const hasPermissions = !!(session.agentState?.requests && Object.keys(session.agentState.requests).length > 0);
 
     let state: SessionState;
-    if (!isOnline) {
+    // 'detached' = Claude died but the daemon still serves the window. Only honor
+    // it while the session's OWN presence is live: joy-tmux keeps heartbeating a
+    // detached session (session-alive) while the daemon's up, so when the daemon
+    // dies the heartbeat lapses, presence drops, and we fall back to plain offline.
+    // (Per-session presence is joy-tmux-specific — unlike machine.active, which a
+    // co-located happy daemon keeps true.)
+    if (isOnline && session.metadata?.joy__state === 'detached') {
+        state = 'detached'; // Claude died — red status, takes priority over plain online
+    } else if (!isOnline) {
         state = 'disconnected';
     } else if (hasPermissions) {
         state = 'permission_required';
@@ -242,12 +250,15 @@ function buildSessionListViewData(
     sessions: Record<string, Session>,
     unreadSessionIds?: Set<string>,
 ): SessionListViewItem[] {
-    // Separate active and inactive sessions
+    // Separate active and inactive sessions. A detached session (Claude died,
+    // daemon still serving it) keeps a live presence, but we keep it out of the
+    // active group — it belongs in history with its red "detached" status, not
+    // mixed in with truly-running sessions.
     const activeSessions: Session[] = [];
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
-        if (isSessionActive(session)) {
+        if (isSessionActive(session) && session.metadata?.joy__state !== 'detached') {
             activeSessions.push(session);
         } else {
             inactiveSessions.push(session);
@@ -1432,6 +1443,19 @@ export function useSessions() {
 
 export function useSession(id: string): Session | null {
     return storage(useShallow((state) => state.sessions[id] ?? null));
+}
+
+/** Distinct machine ids that host joy-tmux sessions — targets for daemon-level actions. */
+export function useJoyMachineIds(): string[] {
+    return storage(useShallow((state) => {
+        const ids = new Set<string>();
+        for (const s of Object.values(state.sessions)) {
+            if (s.metadata?.joy__source === 'joy-tmux' && s.metadata?.machineId) {
+                ids.add(s.metadata.machineId);
+            }
+        }
+        return [...ids].sort();
+    }));
 }
 
 const emptyArray: unknown[] = [];
