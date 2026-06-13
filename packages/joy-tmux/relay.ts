@@ -246,6 +246,11 @@ export interface CreateSessionResult {
   sessionId: string;
   sessionKey: Uint8Array;
   variant: EncryptionVariant;
+  // The server's CURRENT metadata + version. On tag-dedup the server returns the
+  // EXISTING session (it ignores the POSTed metadata), so this is the source of
+  // truth to merge onto — using it avoids clobbering a previously-set title.
+  metadata: Record<string, unknown> | null;
+  metadataVersion: number;
 }
 
 export class RelayClient {
@@ -496,6 +501,31 @@ export class RelayClient {
     }
   }
 
+  /**
+   * Send a push notification to all the user's devices (mirrors happy-cli's
+   * `notify`): fetch the account's Expo push tokens from the server (authed
+   * with the daemon's bearer), then POST the messages straight to Expo. Returns
+   * how many devices were targeted.
+   */
+  async sendPush(title: string, body: string): Promise<{ sent: number }> {
+    const res = await fetch(this.url('/v1/push-tokens'), { headers: this.headers() });
+    if (!res.ok) throw new Error(`push-tokens: HTTP ${res.status}`);
+    const data = await res.json() as { tokens?: { token: string }[] };
+    const tokens = (data.tokens ?? []).map(t => t.token).filter(Boolean);
+    if (tokens.length === 0) return { sent: 0 };
+    const messages = tokens.map(to => ({
+      to, title, body: body || undefined, sound: 'default',
+      data: { source: 'joy-cli', timestamp: Date.now() },
+    }));
+    const r = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(messages),
+    });
+    if (!r.ok) throw new Error(`expo push: HTTP ${r.status}`);
+    return { sent: tokens.length };
+  }
+
   async createSession(opts: { tag: string; metadata: unknown }): Promise<CreateSessionResult> {
     let sessionKey: Uint8Array;
     let variant: EncryptionVariant;
@@ -527,8 +557,12 @@ export class RelayClient {
       }),
     });
     if (!res.ok) throw new Error(`createSession: HTTP ${res.status}`);
-    const data = await res.json() as { session: { id: string } };
-    return { sessionId: data.session.id, sessionKey, variant };
+    const data = await res.json() as { session: { id: string; metadata?: string | null; metadataVersion?: number } };
+    let serverMeta: Record<string, unknown> | null = null;
+    if (data.session.metadata) {
+      try { serverMeta = decryptWire(variant, sessionKey, b64decode(data.session.metadata)) as Record<string, unknown> | null; } catch { serverMeta = null; }
+    }
+    return { sessionId: data.session.id, sessionKey, variant, metadata: serverMeta, metadataVersion: data.session.metadataVersion ?? 0 };
   }
 
   async append(sessionId: string, encrypted: Uint8Array, localId: string): Promise<{ seq: number }> {
@@ -578,6 +612,9 @@ export class RelayClient {
 
 // ── Relay session (per tmux session) ─────────────────────────────────────────
 
+/** Lifecycle state the app reads from metadata to colour a session's status. */
+export type JoyLifecycleState = 'running' | 'detached' | 'archived';
+
 export class RelaySession {
   private readonly client: RelayClient;
   readonly relaySessionId: string;
@@ -611,6 +648,7 @@ export class RelaySession {
     variant: EncryptionVariant;
     initialSeq?: number;
     metadata?: Record<string, unknown> | null;
+    metadataVersion?: number;
   }) {
     this.client = opts.client;
     this.relaySessionId = opts.relaySessionId;
@@ -618,18 +656,17 @@ export class RelaySession {
     this.variant = opts.variant;
     this.lastSeq = opts.initialSeq ?? 0;
     this.metadata = opts.metadata ?? null;
+    this.metadataVersion = opts.metadataVersion ?? 0;
   }
 
   /**
-   * Set the session's title (summary) — joy uses Claude's ai-title so the app
-   * shows the real conversation title instead of "New Chat". Merges into the
-   * existing metadata (server is version-checked; retry once on mismatch).
+   * Merge a patch into the session metadata and persist it (server is
+   * version-checked; retries on mismatch). The single write path so the title,
+   * lifecycle state, etc. don't clobber each other.
    */
-  async updateSummary(title: string): Promise<void> {
+  private async mergeMetadata(patch: Record<string, unknown>): Promise<void> {
     if (!this.metadata) return;
-    const current = this.metadata.summary as { text?: string } | undefined;
-    if (current?.text === title) return; // unchanged
-    const merged = { ...this.metadata, summary: { text: title, updatedAt: Date.now() } };
+    const merged = { ...this.metadata, ...patch };
     const enc = b64encode(encryptWire(this.variant, this.sessionKey, merged));
     for (let attempt = 0; attempt < 3; attempt++) {
       const ack = await this.client.updateSessionMetadata(this.relaySessionId, this.metadataVersion, enc);
@@ -645,6 +682,26 @@ export class RelaySession {
       }
       return;
     }
+  }
+
+  /**
+   * Set the session's title (summary) — joy uses Claude's ai-title so the app
+   * shows the real conversation title instead of "New Chat".
+   */
+  async updateSummary(title: string): Promise<void> {
+    const current = this.metadata?.summary as { text?: string } | undefined;
+    if (current?.text === title) return; // unchanged
+    await this.mergeMetadata({ summary: { text: title, updatedAt: Date.now() } });
+  }
+
+  /**
+   * Set the joy lifecycle state the app reads to colour the status:
+   * 'running' (alive), 'detached' (Claude died, window still around — red), or
+   * 'archived' (killed/cleaned up). Drives the red detached indicator.
+   */
+  async updateJoyState(state: JoyLifecycleState): Promise<void> {
+    if ((this.metadata?.joy__state as string | undefined) === state) return;
+    await this.mergeMetadata({ joy__state: state });
   }
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -825,9 +882,10 @@ export function initRelay(): RelayClient | null {
 
 export async function createRelaySession(
   client: RelayClient,
-  opts: { tag: string; cwd: string; id: string },
+  opts: { tag: string; cwd: string; id: string; state?: JoyLifecycleState },
 ): Promise<RelaySession> {
-  const metadata = { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id };
+  const state = opts.state ?? 'running';
+  const metadata = { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id, joy__state: state };
   const result = await client.createSession({ tag: opts.tag, metadata });
   // Resume from persisted seq so messages sent during downtime are delivered.
   // On first-ever start (no saved seq), fetch to end to avoid replaying history.
@@ -836,14 +894,21 @@ export async function createRelaySession(
     initialSeq = await client.fetchLastSeq(result.sessionId);
     if (initialSeq > 0) savePersistedSeq(result.sessionId, initialSeq);
   }
-  return new RelaySession({
+  // On tag-dedup the server kept its EXISTING metadata (title, prior joy__state).
+  // Use it as the base so we don't wipe the title; fall back to ours for a
+  // brand-new session. Then push the intended state (a no-op if unchanged).
+  const baseMeta = result.metadata ?? metadata;
+  const rs = new RelaySession({
     client,
     relaySessionId: result.sessionId,
     sessionKey: result.sessionKey,
     variant: result.variant,
     initialSeq,
-    metadata,
+    metadata: baseMeta,
+    metadataVersion: result.metadataVersion,
   });
+  await rs.updateJoyState(state);
+  return rs;
 }
 
 // ── lastSeq persistence ───────────────────────────────────────────────────────
