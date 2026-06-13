@@ -2,8 +2,12 @@
   "name": "joy-webchat",
   "version": "1.0.0",
   "private": true,
+  "bin": {
+    "joy": "./cli.ts"
+  },
   "scripts": {
-    "start": "bun server.ts"
+    "start": "bun server.ts",
+    "joy": "bun cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
