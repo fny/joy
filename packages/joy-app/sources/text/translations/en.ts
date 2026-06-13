@@ -98,6 +98,7 @@ export const en: TranslationStructure = {
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         permissionRequired: 'permission required',
+        detached: 'detached',
         activeNow: 'Active now',
         unknown: 'unknown',
         unread: 'new results',
