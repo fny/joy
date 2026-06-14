@@ -4,6 +4,7 @@
 // re-attaching relays after a socket reconnect, and fanning out events to
 // the debug page (SSE + bounded chat log).
 
+import { setTimeout as sleep } from "timers/promises";
 import { existsSync, mkdirSync, statSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
@@ -257,14 +258,14 @@ export class SessionRegistry {
       : null;
 
     // Give the login shell time to source the profile, then launch claude.
-    await Bun.sleep(900);
+    await sleep(900);
     run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
 
-    await Bun.sleep(400);
+    await sleep(400);
     const shellPid = parseInt(
       run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out,
     );
-    await Bun.sleep(800);
+    await sleep(800);
     let pid: number | undefined;
     if (!isNaN(shellPid)) {
       const child = parseInt(run("pgrep", "-P", String(shellPid)).out.split("\n")[0]);

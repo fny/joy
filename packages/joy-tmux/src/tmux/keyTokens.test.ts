@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "vitest";
 import { parse, canonicalize, toTmuxSegments, ParseError, TmuxKeyError } from "./keyTokens";
 
 // ── parse / canonicalize (token round-trip) ──────────────────────────────────

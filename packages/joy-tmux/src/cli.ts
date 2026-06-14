@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S node --import tsx
 // joy — CLI for the joy-tmux daemon. Mirrors happy-cli's surface (start/stop/
 // restart/status/list/doctor/install/auth/notify) but drives the joy-tmux
 // daemon over its localhost HTTP API. The daemon writes ~/.happy/joy-tmux-state/
@@ -9,6 +9,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync } 
 import { join, dirname } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
+import { moduleDir } from "./esm";
 
 const PORT = parseInt(process.env.PORT ?? "4997");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -18,9 +19,9 @@ const HAPPY_HOME = process.env.HAPPY_HOME_DIR
 const STATE_DIR = join(HAPPY_HOME, "joy-tmux-state");
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
-const PKG_DIR = import.meta.dir;
+const PKG_DIR = moduleDir(import.meta.url);
 const SERVER_TS = join(PKG_DIR, "server.ts");
-const BUN = process.execPath;
+const NODE = process.execPath;
 
 // ── tiny ANSI helpers (no dep) ──────────────────────────────────────────────
 const c = {
@@ -113,7 +114,7 @@ async function cmdStart(): Promise<number> {
   }
   mkdirSync(STATE_DIR, { recursive: true });
   const out = openSync(LOG_FILE, "a");
-  const child = spawn(BUN, [SERVER_TS], {
+  const child = spawn(NODE, ["--import", "tsx", SERVER_TS], {
     detached: true,
     stdio: ["ignore", out, out],
     cwd: PKG_DIR,
@@ -159,8 +160,9 @@ async function cmdDoctor(): Promise<number> {
   const line = (good: boolean, label: string, detail: string) =>
     console.log(`  ${good ? ok : bad} ${label.padEnd(10)} ${c.dim(detail)}`);
 
-  const bunPath = which("bun");
-  line(!!bunPath, "bun", bunPath ?? "not found on PATH");
+  line(true, "node", `${process.execPath} (${process.version})`);
+  const tsxPath = which("tsx");
+  line(!!tsxPath, "tsx", tsxPath ?? "not found — run `pnpm install`");
 
   const tmuxPath = which("tmux");
   const tmuxVer = tmuxPath ? spawnSync("tmux", ["-V"], { encoding: "utf8" }).stdout.trim() : "";
@@ -179,7 +181,7 @@ async function cmdDoctor(): Promise<number> {
   else line(false, "daemon", "not running — `joy start`");
 
   console.log("");
-  return (bunPath && tmuxPath && existsSync(accessKey)) ? 0 : 1;
+  return (tmuxPath && existsSync(accessKey)) ? 0 : 1;
 }
 
 function cmdAuth(): number {
@@ -233,7 +235,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${BUN} ${SERVER_TS}
+ExecStart=${NODE} --import tsx ${SERVER_TS}
 WorkingDirectory=${PKG_DIR}
 Environment=PATH=${process.env.PATH ?? ""}
 Restart=on-failure
@@ -259,7 +261,7 @@ WantedBy=default.target
 <dict>
   <key>Label</key><string>party.voltai.joy-tmux</string>
   <key>ProgramArguments</key>
-  <array><string>${BUN}</string><string>${SERVER_TS}</string></array>
+  <array><string>${NODE}</string><string>--import</string><string>tsx</string><string>${SERVER_TS}</string></array>
   <key>WorkingDirectory</key><string>${PKG_DIR}</string>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>${process.env.PATH ?? ""}</string></dict>
@@ -312,7 +314,7 @@ ${c.b("Usage:")} joy <command>
   ${c.b("restart")}      Restart the daemon (re-exec; running sessions survive)
   ${c.b("status")}       Show daemon status
   ${c.b("list")}         List sessions the daemon is tracking
-  ${c.b("doctor")}       Diagnose the environment (bun, tmux, claude, auth, daemon)
+  ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
   ${c.b("auth")}         Show authentication status (shared with Happy)
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
   ${c.b("install")}      Install autostart service (systemd on Linux, launchd on macOS)

@@ -12,6 +12,7 @@
 //      sent while Claude is still booting are buffered and flushed when the
 //      first transcript entry lands.
 
+import { setTimeout as sleep } from "timers/promises";
 import { existsSync, readFileSync } from "fs";
 import { run } from "./shell";
 import {
@@ -601,9 +602,9 @@ export class Session {
     const steps = (ti - ci + CYCLE.length) % CYCLE.length;
     for (let i = 0; i < steps; i++) {
       run("tmux", "send-keys", "-t", this.tmuxWindow, "BTab");
-      await Bun.sleep(120); // footer needs a beat to repaint between cycles
+      await sleep(120); // footer needs a beat to repaint between cycles
     }
-    await Bun.sleep(250);
+    await sleep(250);
     const after = this.detectPermissionMode();
     return after === target
       ? { ok: true, mode: after }

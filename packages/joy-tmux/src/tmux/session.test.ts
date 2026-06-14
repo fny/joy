@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "vitest";
 import { paneShowsReadyPrompt, parsePermissionModeFromPane } from "./session";
 
 test("ready: bare input prompt", () => {

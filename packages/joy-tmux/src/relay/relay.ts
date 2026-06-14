@@ -3,6 +3,7 @@
  * Self-contained — no deps on joy-daemon internals.
  * External deps: socket.io-client, tweetnacl.
  */
+import { setTimeout as sleep } from "timers/promises";
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -797,7 +798,7 @@ export class RelaySession {
         }
         const delay = Math.min(500 * 2 ** item.attempts, 30_000);
         log(`send failed (attempt ${item.attempts}), retrying in ${delay}ms: ${e}`);
-        await Bun.sleep(delay);
+        await sleep(delay);
       }
     }
     this.draining = false;
