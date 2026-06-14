@@ -6,7 +6,7 @@
 
 import { setTimeout as sleep } from "timers/promises";
 import { existsSync, mkdirSync, statSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, resolve } from "path";
 import { homedir } from "os";
 import { run } from "../tmux/shell";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
@@ -180,6 +180,24 @@ export class SessionRegistry {
     // into the transcript watcher looking in the wrong projects/ folder and
     // Claude's responses never reaching the app.
     const cwd = expandHome(opts.cwd);
+
+    // One session per directory. Two Claude sessions in the same cwd collide on
+    // the same transcript (both resolve to the latest .jsonl there), so we never
+    // run two at once: a live session in this cwd is returned as-is; a detached
+    // one (Claude dead, window still around) is restarted in place.
+    const target = resolve(cwd);
+    for (const s of this.#sessions.values()) {
+      if (resolve(s.cwd) !== target) continue;
+      if (s.status === "starting" || s.status === "active") {
+        process.stderr.write(`[create] ${s.id} already live in ${target} — returning existing\n`);
+        return s;
+      }
+      if (s.status === "ended" && s.endReason === "process_exited") {
+        process.stderr.write(`[create] ${s.id} detached in ${target} — restarting in place\n`);
+        return this.restart({ id: s.id });
+      }
+    }
+
     if (!existsSync(cwd)) {
       if (opts.createDir) {
         mkdirSync(cwd, { recursive: true });
@@ -322,7 +340,7 @@ export class SessionRegistry {
     // cwd (recovery after the daemon lost the session entirely).
     const resumeId = existing?.claudeSessionId
       ?? (existing?.transcriptPath ? basename(existing.transcriptPath, ".jsonl") : undefined);
-    if (existing && existing.status !== "ended") existing.end("killed");
+    if (existing) existing.forceKill();
 
     // Env is refreshed automatically: create() launches claude through a fresh
     // login shell, so a restart re-sources the user's profile (.bashrc/.zshrc).
