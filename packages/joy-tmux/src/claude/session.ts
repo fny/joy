@@ -33,9 +33,9 @@ import {
   consumeReceived,
   type DeliveryState,
   type DeliverySource,
-} from "./receipts";
-import { writeAttachmentToCwd } from "./attachments";
-import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "../claude/transcript";
+} from "../domain/receipts";
+import { writeAttachmentToCwd } from "../domain/attachments";
+import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";
