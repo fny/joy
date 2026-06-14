@@ -1,6 +1,6 @@
-// Usage report via codeburn (getagentseal/codeburn), fetched through the
-// joy-tmux daemon (joy-codeburn + joy-codeburn-sessions ops). Mirrors the
-// codeburn TUI visually: every row carries a proportional bar (scaled to the
+// Usage report fetched through the
+// joy-tmux daemon (joy-usage + joy-session_usage ops). Mirrors the
+// the original TUI visually: every row carries a proportional bar (scaled to the
 // section max), with a heatmap and activity chart up top. Scopes: all
 // machines (aggregated), a single machine, and top sessions by cost.
 //
@@ -75,7 +75,7 @@ function fmtCost(n: number | undefined): string {
 }
 
 // ── Date helpers for the activity rollups ───────────────────────────────────
-// All date strings are codeburn's local YYYY-MM-DD; T12:00 dodges TZ edges.
+// All date strings are the report's local YYYY-MM-DD; T12:00 dodges TZ edges.
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -98,7 +98,7 @@ type DailyRow = { date: string; cost: number; calls: number };
 type ActivityRow = { key: string; label: string; cost: number; calls: number };
 
 // 90 days reads better as 13 weekly bars than 90 daily slivers; same idea
-// for 6 months → monthly. Codeburn only emits days with activity, so the
+// for 6 months → monthly. The report only emits days with activity, so the
 // rollup is a plain group-by (gaps simply contribute nothing).
 function rollupActivity(daily: DailyRow[], period: PeriodKey): ActivityRow[] {
     if (period === '90days') {
@@ -355,10 +355,10 @@ export default React.memo(function UsageSettingsScreen() {
                 ]);
                 const results = await Promise.allSettled(targets.map(async id => {
                     // Sessions fetch is best-effort: an older daemon without
-                    // joy-codeburn-sessions still gets the main report.
+                    // joy-session_usage still gets the main report.
                     const [rep, sess] = await Promise.all([
-                        withTimeout(apiSocket.machineRPC<BurnReport, { period: string }>(id, 'joy-codeburn', { period })),
-                        withTimeout(apiSocket.machineRPC<{ ok?: boolean; sessions?: SessionRow[] }, { period: string }>(id, 'joy-codeburn-sessions', { period })).catch(() => null),
+                        withTimeout(apiSocket.machineRPC<BurnReport, { period: string }>(id, 'joy-usage', { period })),
+                        withTimeout(apiSocket.machineRPC<{ ok?: boolean; sessions?: SessionRow[] }, { period: string }>(id, 'joy-session_usage', { period })).catch(() => null),
                     ]);
                     return { id, rep, sess };
                 }));
@@ -375,7 +375,7 @@ export default React.memo(function UsageSettingsScreen() {
                         .find(Boolean);
                     setState({
                         phase: 'error',
-                        message: firstError || (firstRejected?.reason instanceof Error ? firstRejected.reason.message : 'codeburn query failed'),
+                        message: firstError || (firstRejected?.reason instanceof Error ? firstRejected.reason.message : 'usage query failed'),
                     });
                     return;
                 }
@@ -389,7 +389,7 @@ export default React.memo(function UsageSettingsScreen() {
                     .slice(0, 15);
                 setState({ phase: 'done', report, byMachine, sessions });
             } catch (e) {
-                if (!cancelled) setState({ phase: 'error', message: e instanceof Error ? e.message : 'codeburn query failed' });
+                if (!cancelled) setState({ phase: 'error', message: e instanceof Error ? e.message : 'usage query failed' });
             }
         })();
         return () => { cancelled = true; };
@@ -414,7 +414,7 @@ export default React.memo(function UsageSettingsScreen() {
             <View style={styles.center}>
                 <Ionicons name="cloud-offline-outline" size={48} color={styles.centerText.color} />
                 <Text style={styles.centerText}>
-                    No online machine answered the joy-tmux probe. Codeburn reporting runs through the daemon.
+                    No online machine answered the joy-tmux probe. Usage reporting runs through the daemon.
                 </Text>
             </View>
         );
@@ -474,7 +474,7 @@ export default React.memo(function UsageSettingsScreen() {
             {state.phase === 'loading' && (
                 <View style={{ alignItems: 'center', paddingVertical: 48, gap: 12 }}>
                     <ActivityIndicator />
-                    <Text style={styles.centerText}>running codeburn…</Text>
+                    <Text style={styles.centerText}>computing usage…</Text>
                 </View>
             )}
 
