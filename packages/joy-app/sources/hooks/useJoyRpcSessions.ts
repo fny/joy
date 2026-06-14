@@ -3,9 +3,7 @@
 import * as React from 'react';
 import { useFocusEffect } from 'expo-router';
 import { apiSocket } from '@/sync/apiSocket';
-import { JoySession } from '@/hooks/useJoyTmuxSessions';
-
-export type { JoySession };
+import type { JoySession } from '@/joy/types';
 
 const POLL_INTERVAL_MS = 5000;
 

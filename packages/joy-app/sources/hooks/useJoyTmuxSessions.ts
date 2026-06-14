@@ -1,17 +1,7 @@
 // Polls the joy-tmux server for sessions; provides create and kill actions.
 import * as React from 'react';
 import { useFocusEffect } from 'expo-router';
-
-export interface JoySession {
-    id: string;
-    cwd: string;
-    status: 'starting' | 'active' | 'ended';
-    relay_session_id?: string;
-    claude_session_id?: string;
-    started_at: number;
-    tmux_window: string;
-    end_reason?: string;
-}
+import type { JoySession } from '@/joy/types';
 
 const POLL_INTERVAL_MS = 5000;
 
