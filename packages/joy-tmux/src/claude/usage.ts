@@ -1,6 +1,6 @@
 // Self-contained usage/cost stats computed straight from Claude Code's
 // transcript JSONL — no external tools. This is the backbone behind the
-// joy-usage / joy-session_usage ops.
+// joy-usage / joy-session-usage ops.
 //
 // Methodology (validated against LiteLLM on 2026-06-10 — totals
 // matched within clock drift):
