@@ -163,10 +163,10 @@ export function startHttpServer(opts: {
     return send(404, corsHeaders, "not found");
   });
 
-  // Disable timeouts so long-lived SSE (/events) connections aren't dropped
-  // (the Bun version used idleTimeout: 0).
+  // Disable the idle-socket timeout so long-lived SSE (/events) responses
+  // aren't dropped (the Bun version used idleTimeout: 0). Leave requestTimeout
+  // and headersTimeout at their defaults — SSE is a long *response*, not a long
+  // *request*, so those don't threaten it but do guard stuck request bodies.
   server.timeout = 0;
-  server.requestTimeout = 0;
-  server.headersTimeout = 0;
   server.listen(port, "127.0.0.1");
 }
