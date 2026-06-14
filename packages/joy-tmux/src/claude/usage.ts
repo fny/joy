@@ -1,9 +1,8 @@
 // Self-contained usage/cost stats computed straight from Claude Code's
 // transcript JSONL — no external tools. This is the backbone behind the
-// joy-codeburn ops; the codeburn binary remains an optional extra for the
-// panels we don't replicate (activity classification, one-shot rates).
+// joy-usage / joy-session_usage ops.
 //
-// Methodology (validated against codeburn/LiteLLM on 2026-06-10 — totals
+// Methodology (validated against LiteLLM on 2026-06-10 — totals
 // matched within clock drift):
 //   - Walk ~/.claude/projects/**/*.jsonl, including <session>/subagents/
 //     agent-*.jsonl (subagent burn is attributed to the parent session).

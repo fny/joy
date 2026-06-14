@@ -25,7 +25,7 @@ import { registerMachineOps } from "./transports/relay-machine";
 
 const PORT = parseInt(process.env.PORT ?? "4997");
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
-const PUBLIC_DIR = join(import.meta.dir, "public");
+const PUBLIC_DIR = join(import.meta.dir, "..", "public"); // public/ is at the package root, src/ is one level down
 
 // H3: per-instance token required on all mutating HTTP routes — prevents
 // drive-by cross-origin session creation / prompt injection via no-cors POST.

@@ -34,8 +34,8 @@ import {
   type DeliverySource,
 } from "./receipts";
 import { writeAttachmentToCwd } from "./attachments";
-import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "./transcript";
-import { parseKeyScript } from "./keyTokens";
+import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "./claude/transcript";
+import { toTmuxSegments, ParseError, TmuxKeyError } from "./keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";
 
@@ -634,25 +634,24 @@ export class Session {
       const ok = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, script).ok;
       return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
     }
-    const segments = parseKeyScript(script);
-    let pendingKeys: string[] = [];
-    const flushKeys = () => {
-      if (pendingKeys.length === 0) return true;
-      const ok = run("tmux", "send-keys", "-t", this.tmuxWindow, ...pendingKeys).ok;
-      pendingKeys = [];
-      return ok;
-    };
-    for (const seg of segments) {
-      if (seg.type === "key") {
-        pendingKeys.push(seg.key);
-        continue;
+    // parse the token language → tmux key-name / literal segments (toTmux
+    // already groups consecutive named keys and coalesces literal runs, so each
+    // segment is exactly one send-keys call).
+    let segments;
+    try {
+      segments = toTmuxSegments(script);
+    } catch (e) {
+      if (e instanceof ParseError || e instanceof TmuxKeyError) {
+        return { ok: false, segments: 0, error: e.message };
       }
-      if (!flushKeys()) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
-      if (!run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, seg.text).ok) {
-        return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
-      }
+      throw e;
     }
-    if (!flushKeys()) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
+    for (const seg of segments) {
+      const ok = seg.type === "keys"
+        ? run("tmux", "send-keys", "-t", this.tmuxWindow, ...seg.names).ok
+        : run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, seg.text).ok;
+      if (!ok) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
+    }
     return { ok: true, segments: segments.length };
   }
 
