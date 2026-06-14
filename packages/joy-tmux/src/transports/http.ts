@@ -168,5 +168,15 @@ export function startHttpServer(opts: {
   // and headersTimeout at their defaults — SSE is a long *response*, not a long
   // *request*, so those don't threaten it but do guard stuck request bodies.
   server.timeout = 0;
+  // Belt-and-suspenders to the pidfile lock: if the port is already taken
+  // (another daemon, or an unrelated process), exit cleanly instead of crashing
+  // with an uncaught EADDRINUSE.
+  server.on("error", (e: NodeJS.ErrnoException) => {
+    if (e.code === "EADDRINUSE") {
+      process.stderr.write(`[server] port ${port} already in use — another daemon? exiting.\n`);
+      process.exit(1);
+    }
+    throw e;
+  });
   server.listen(port, "127.0.0.1");
 }
