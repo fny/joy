@@ -19,6 +19,7 @@ import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync } from "fs";
 import { initRelay } from "./relay/relay.ts";
+import { acquireSingleton, SingletonError } from "./singleton";
 import { SessionRegistry } from "./domain/registry";
 import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
@@ -38,6 +39,22 @@ process.stderr.write(`[server] token: ${SERVER_TOKEN}\n`);
 // (the token only otherwise appears on stderr, whose destination depends on how
 // the daemon was launched). Written before listen so a racing CLI sees it.
 const STATE_DIR = join(homedir(), ".happy", "joy-tmux-state");
+
+// Single-instance guard: refuse to start a second daemon on this machine (two
+// would recover() the same tmux windows and attach duplicate relay sessions →
+// duplicate messages). Acquired before any relay/tmux side effects.
+try {
+  const releaseLock = acquireSingleton(join(STATE_DIR, "daemon.lock"));
+  process.on("exit", releaseLock);
+  process.on("SIGINT", () => { releaseLock(); process.exit(0); });
+  process.on("SIGTERM", () => { releaseLock(); process.exit(0); });
+} catch (e) {
+  if (e instanceof SingletonError) {
+    process.stderr.write(`[server] ${e.message}; refusing to start a second daemon.\n`);
+    process.exit(1);
+  }
+  throw e;
+}
 try {
   mkdirSync(STATE_DIR, { recursive: true });
   writeFileSync(join(STATE_DIR, "daemon.json"), JSON.stringify({
