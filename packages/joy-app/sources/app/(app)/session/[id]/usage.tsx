@@ -1,5 +1,5 @@
 // Per-session cost, reported by the joy-tmux daemon on the session's machine
-// via the joy-tmux daemon (joy-session_usage op). Works for any session
+// via the joy-tmux daemon (joy-session-usage op). Works for any session
 // whose machine runs joy-tmux: the conversation is matched by claude session
 // id, which comes from happy metadata or (for joy sessions) the daemon's
 // live record.
@@ -74,7 +74,7 @@ export default React.memo(function SessionUsageScreen() {
                 }
                 const result = await raceTimeout(
                     apiSocket.machineRPC<{ ok?: boolean; entry?: SessionUsage | null; error?: string }, { period: string; claudeSessionId: string }>(
-                        machineId, 'joy-session_usage', { period: 'all', claudeSessionId: claudeId }),
+                        machineId, 'joy-session-usage', { period: 'all', claudeSessionId: claudeId }),
                     60000, 'joy-tmux did not respond — is the daemon running on this machine?',
                 );
                 if (cancelled) return;

@@ -1,5 +1,5 @@
 // Usage report fetched through the
-// joy-tmux daemon (joy-usage + joy-session_usage ops). Mirrors the
+// joy-tmux daemon (joy-usage + joy-session-usage ops). Mirrors the
 // the original TUI visually: every row carries a proportional bar (scaled to the
 // section max), with a heatmap and activity chart up top. Scopes: all
 // machines (aggregated), a single machine, and top sessions by cost.
@@ -355,10 +355,10 @@ export default React.memo(function UsageSettingsScreen() {
                 ]);
                 const results = await Promise.allSettled(targets.map(async id => {
                     // Sessions fetch is best-effort: an older daemon without
-                    // joy-session_usage still gets the main report.
+                    // joy-session-usage still gets the main report.
                     const [rep, sess] = await Promise.all([
                         withTimeout(apiSocket.machineRPC<BurnReport, { period: string }>(id, 'joy-usage', { period })),
-                        withTimeout(apiSocket.machineRPC<{ ok?: boolean; sessions?: SessionRow[] }, { period: string }>(id, 'joy-session_usage', { period })).catch(() => null),
+                        withTimeout(apiSocket.machineRPC<{ ok?: boolean; sessions?: SessionRow[] }, { period: string }>(id, 'joy-session-usage', { period })).catch(() => null),
                     ]);
                     return { id, rep, sess };
                 }));

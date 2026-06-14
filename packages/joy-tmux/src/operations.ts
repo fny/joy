@@ -470,7 +470,7 @@ export const machineOps: MachineOp[] = [
   {
     name: "sessionUsage",
     scope: "machine",
-    rpcName: "joy-session_usage",
+    rpcName: "joy-session-usage",
     http: { method: "GET", path: "/usage/sessions" },
     // Per-session cost rows from usage.ts (keyed by claude session id, with
     // subagent burn rolled into the parent and a per-model breakdown).
