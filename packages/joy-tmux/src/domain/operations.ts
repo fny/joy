@@ -12,7 +12,7 @@
 // routes reuse the same result; the few legacy HTTP divergences (create's
 // unwrapped 201, kill's 404) are expressed via the optional httpShape.
 
-import type { Session } from "../tmux/session";
+import type { Session } from "./session";
 import type { SessionRegistry } from "./registry";
 import type { RelaySession } from "../relay/relay.ts";
 import {
