@@ -632,7 +632,7 @@ export class Session {
     // "git commit<Enter>" lands as those exact characters instead of a
     // command + keypress. Used by the pane's plain-text input toggle.
     if (opts?.literal) {
-      const ok = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, script).ok;
+      const ok = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", script).ok;
       return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
     }
     // parse the token language → tmux key-name / literal segments (toTmux
@@ -650,7 +650,7 @@ export class Session {
     for (const seg of segments) {
       const ok = seg.type === "keys"
         ? run("tmux", "send-keys", "-t", this.tmuxWindow, ...seg.names).ok
-        : run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, seg.text).ok;
+        : run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", seg.text).ok;
       if (!ok) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
     }
     return { ok: true, segments: segments.length };
@@ -681,7 +681,7 @@ export class Session {
 
   transcript(): { lines: unknown[] } {
     if (!this.transcriptPath || !existsSync(this.transcriptPath)) return { lines: [] };
-    const lines = readFileSync(this.transcriptPath, "utf-8").split("\n").slice(0, -1)
+    const lines = readFileSync(this.transcriptPath, "utf-8").split("\n")
       .filter((l) => l.trim())
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean);
@@ -770,7 +770,7 @@ export class Session {
       // restart.
       recordReceived(delivery!, this.relaySessionId!, text, Date.now());
     }
-    const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, text.replace(/\n/g, " "));
+    const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", text.replace(/\n/g, " "));
     if (!r.ok) {
       if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
