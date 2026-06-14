@@ -8,8 +8,8 @@
 
 import { readFileSync } from "fs";
 import { join } from "path";
-import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../operations";
-import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../registry";
+import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
+import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 
 interface CompiledRoute {
   method: HttpMethod;

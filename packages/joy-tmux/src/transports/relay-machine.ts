@@ -2,9 +2,9 @@
 // as a joy-* RPC on the relay's machine-scoped socket. Session-scoped ops are
 // registered per relay session by Session.attachRelay → bindSessionOps.
 
-import { machineOps } from "../operations";
-import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../registry";
-import type { RelayClient } from "../relay.ts";
+import { machineOps } from "../domain/operations";
+import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
+import type { RelayClient } from "../relay/relay.ts";
 
 export function registerMachineOps(relayClient: RelayClient, registry: SessionRegistry): void {
   for (const op of machineOps) {

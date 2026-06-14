@@ -23,7 +23,7 @@ import {
   encodeUserMessage,
   type RelayClient,
   type RelaySession,
-} from "./relay.ts";
+} from "../relay/relay.ts";
 import {
   initDeliveryState,
   recordInboundReceipt,
@@ -32,9 +32,9 @@ import {
   consumeReceived,
   type DeliveryState,
   type DeliverySource,
-} from "./receipts";
-import { writeAttachmentToCwd } from "./attachments";
-import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "./claude/transcript";
+} from "../domain/receipts";
+import { writeAttachmentToCwd } from "../domain/attachments";
+import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "../claude/transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "./keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";

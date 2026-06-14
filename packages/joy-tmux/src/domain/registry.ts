@@ -7,11 +7,11 @@
 import { existsSync, mkdirSync, statSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import { run } from "./shell";
-import { createRelaySession, type RelayClient, type RelaySession } from "./relay.ts";
-import { Session, type ChatMessage, type SessionDeps } from "./session";
-import { cwdToTranscriptDir, findLatestTranscript } from "./claude/transcript";
-import { optionsPromptArg } from "./claude/optionsPrompt";
+import { run } from "../tmux/shell";
+import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
+import { Session, type ChatMessage, type SessionDeps } from "../tmux/session";
+import { cwdToTranscriptDir, findLatestTranscript } from "../claude/transcript";
+import { optionsPromptArg } from "../claude/optionsPrompt";
 
 export interface CreateSessionOpts {
   cwd: string;

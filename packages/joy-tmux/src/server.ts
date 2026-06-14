@@ -17,9 +17,9 @@
 import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync } from "fs";
-import { initRelay } from "./relay.ts";
-import { SessionRegistry } from "./registry";
-import { bindSessionOps } from "./operations";
+import { initRelay } from "./relay/relay.ts";
+import { SessionRegistry } from "./domain/registry";
+import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
 import { registerMachineOps } from "./transports/relay-machine";
 
