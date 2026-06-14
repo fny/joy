@@ -20,6 +20,7 @@ import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync } from "fs";
 import { initRelay } from "./relay/relay.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
+import { happyHomeDir, joyStateDir } from "./paths";
 import { SessionRegistry } from "./domain/registry";
 import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
@@ -38,7 +39,7 @@ process.stderr.write(`[server] token: ${SERVER_TOKEN}\n`);
 // Stable state file the `joy` CLI reads to locate + authenticate to this daemon
 // (the token only otherwise appears on stderr, whose destination depends on how
 // the daemon was launched). Written before listen so a racing CLI sees it.
-const STATE_DIR = join(homedir(), ".happy", "joy-tmux-state");
+const STATE_DIR = joyStateDir();
 
 // Single-instance guard: refuse to start a second daemon on this machine (two
 // would recover() the same tmux windows and attach duplicate relay sessions →
@@ -89,7 +90,7 @@ if (relayClient) {
     platform: osPlatform(),
     happyCliVersion: "joy-tmux/0.1.0",
     homeDir: homedir(),
-    happyHomeDir: join(homedir(), ".happy"),
+    happyHomeDir: happyHomeDir(),
     happyLibDir: __dirname,
   }).then(ok => {
     process.stderr.write(`[relay] machine metadata upsert: ${ok ? "ok" : "failed"}\n`);
