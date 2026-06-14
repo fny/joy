@@ -1,6 +1,7 @@
 packages:
   - "packages/happy-app"
   - "packages/joy-app"
+  - "packages/joy-tmux"
   - "packages/happy-agent"
   - "packages/happy-cli"
   - "packages/happy-server"

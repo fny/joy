@@ -8,6 +8,7 @@
 // All handlers are pure functions of (workingDirectory, params) — transport
 // binding (relay RPC, HTTP) happens in operations.ts.
 
+import { moduleDir } from "../esm";
 import { createHash } from "crypto";
 import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
 import { promisify } from "util";
@@ -21,7 +22,7 @@ const execAsync = promisify(exec);
 // Resolve to happy-cli's bundled tool binaries the same way happy-cli does
 // (postinstall unpacks them into packages/happy-cli/tools/unpacked/). The
 // binaries are platform-specific and live next to joy-tmux in the monorepo.
-const HAPPY_CLI_TOOLS = resolve(import.meta.dir, "..", "happy-cli", "tools", "unpacked");
+const HAPPY_CLI_TOOLS = resolve(moduleDir(import.meta.url), "..", "happy-cli", "tools", "unpacked");
 const DIFFT_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "difft.exe" : "difft");
 const RG_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "rg.exe" : "rg");
 

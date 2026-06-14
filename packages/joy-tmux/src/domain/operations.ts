@@ -25,7 +25,8 @@ import {
   handleDifftastic,
 } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
+import { readFile } from "fs/promises";
 import { basename } from "path";
 import { hostname, platform, release, arch } from "os";
 import { spawn } from "child_process";
@@ -41,9 +42,11 @@ export type HttpMethod = "GET" | "POST" | "DELETE";
 function scheduleDaemonRestart(): void {
   setTimeout(() => {
     try {
-      const bun = process.execPath;
-      const script = process.argv[1];
-      spawn("sh", ["-c", `sleep 1; exec '${bun}' '${script}'`], {
+      // Reconstruct however this process was launched (node + any loader flags
+      // like `--import tsx` + the script path) so the replacement runs the same way.
+      const argv = [process.execPath, ...process.execArgv, ...process.argv.slice(1)];
+      const cmd = argv.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+      spawn("sh", ["-c", `sleep 1; exec ${cmd}`], {
         detached: true,
         stdio: "ignore",
         cwd: process.cwd(),
@@ -443,13 +446,13 @@ export const machineOps: MachineOp[] = [
       if (!session) return { error: "session_not_found" };
       const path = session.transcriptPath;
       if (!path || !existsSync(path)) return { error: "no transcript on disk yet" };
-      const file = Bun.file(path);
+      const size = statSync(path).size;
       const MAX = 25 * 1024 * 1024;
-      if (file.size > MAX) {
-        return { error: `transcript is ${Math.round(file.size / 1048576)}MB (cap 25MB) — copy it from ${path}` };
+      if (size > MAX) {
+        return { error: `transcript is ${Math.round(size / 1048576)}MB (cap 25MB) — copy it from ${path}` };
       }
-      const contentBase64 = Buffer.from(await file.arrayBuffer()).toString("base64");
-      return { ok: true, filename: basename(path), size: file.size, contentBase64 };
+      const contentBase64 = (await readFile(path)).toString("base64");
+      return { ok: true, filename: basename(path), size, contentBase64 };
     },
   },
   {
@@ -520,49 +523,49 @@ export const sessionOps: SessionOp[] = [
     scope: "session",
     rpcName: "bash",
     http: { method: "POST", path: "/sessions/:id/bash" },
-    handler: (session, params) => handleBash(session.cwd, params as Parameters<typeof handleBash>[1]),
+    handler: (session, params) => handleBash(session.cwd, params as unknown as Parameters<typeof handleBash>[1]),
   },
   {
     name: "readFile",
     scope: "session",
     rpcName: "readFile",
     http: { method: "POST", path: "/sessions/:id/readFile" },
-    handler: (session, params) => handleReadFile(session.cwd, params as Parameters<typeof handleReadFile>[1]),
+    handler: (session, params) => handleReadFile(session.cwd, params as unknown as Parameters<typeof handleReadFile>[1]),
   },
   {
     name: "writeFile",
     scope: "session",
     rpcName: "writeFile",
     http: { method: "POST", path: "/sessions/:id/writeFile" },
-    handler: (session, params) => handleWriteFile(session.cwd, params as Parameters<typeof handleWriteFile>[1]),
+    handler: (session, params) => handleWriteFile(session.cwd, params as unknown as Parameters<typeof handleWriteFile>[1]),
   },
   {
     name: "listDirectory",
     scope: "session",
     rpcName: "listDirectory",
     http: { method: "POST", path: "/sessions/:id/listDirectory" },
-    handler: (session, params) => handleListDirectory(session.cwd, params as Parameters<typeof handleListDirectory>[1]),
+    handler: (session, params) => handleListDirectory(session.cwd, params as unknown as Parameters<typeof handleListDirectory>[1]),
   },
   {
     name: "getDirectoryTree",
     scope: "session",
     rpcName: "getDirectoryTree",
     http: { method: "POST", path: "/sessions/:id/getDirectoryTree" },
-    handler: (session, params) => handleGetDirectoryTree(session.cwd, params as Parameters<typeof handleGetDirectoryTree>[1]),
+    handler: (session, params) => handleGetDirectoryTree(session.cwd, params as unknown as Parameters<typeof handleGetDirectoryTree>[1]),
   },
   {
     name: "ripgrep",
     scope: "session",
     rpcName: "ripgrep",
     http: { method: "POST", path: "/sessions/:id/ripgrep" },
-    handler: (session, params) => handleRipgrep(session.cwd, params as Parameters<typeof handleRipgrep>[1]),
+    handler: (session, params) => handleRipgrep(session.cwd, params as unknown as Parameters<typeof handleRipgrep>[1]),
   },
   {
     name: "difftastic",
     scope: "session",
     rpcName: "difftastic",
     http: { method: "POST", path: "/sessions/:id/difftastic" },
-    handler: (session, params) => handleDifftastic(session.cwd, params as Parameters<typeof handleDifftastic>[1]),
+    handler: (session, params) => handleDifftastic(session.cwd, params as unknown as Parameters<typeof handleDifftastic>[1]),
   },
 ];
 

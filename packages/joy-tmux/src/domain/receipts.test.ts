@@ -1,4 +1,4 @@
-import { test, expect, beforeEach, afterEach } from "bun:test";
+import { test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -79,6 +79,7 @@ test("saveReceipts writes atomically via temp + rename", () => {
   const log: ReceiptLog = {
     inbound: [{ seq: 5, uuid: "u-1", text: "hi", source: "relay", at: 1 }],
     outbound: [{ uuid: "u-2", turn: "t-1", at: 2 }],
+    received: [],
   };
   saveReceipts(RID, log, dir);
 
@@ -120,6 +121,7 @@ test("initDeliveryState builds forwardedUuids from outbound", () => {
         { uuid: "u-a", turn: "t-1", at: 1 },
         { uuid: "u-b", turn: "t-2", at: 2 },
       ],
+      received: [],
     },
     dir,
   );
@@ -271,6 +273,7 @@ test("recovery: forwardedUuids prevents re-forwarding old assistant entries", ()
         { uuid: "u-a", turn: "t-1", at: 1 },
         { uuid: "u-b", turn: "t-2", at: 2 },
       ],
+      received: [],
     },
     dir,
   );
@@ -287,7 +290,7 @@ test("recovery: forwardedUuids prevents re-forwarding old assistant entries", ()
 
 test("recovery: direct typing during downtime is detected as not-yet-forwarded", () => {
   // joy-tmux was running, forwarded u-1 (assistant) earlier
-  saveReceipts(RID, { inbound: [], outbound: [{ uuid: "u-1", turn: "t-1", at: 1 }] }, dir);
+  saveReceipts(RID, { inbound: [], outbound: [{ uuid: "u-1", turn: "t-1", at: 1 }], received: [] }, dir);
 
   // joy-tmux was down. User typed directly. Transcript now has a user entry u-2.
   const st = initDeliveryState(RID, dir);

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S node --import tsx
 // joy-tmux entry point: construct the session registry, mount the two
 // transports (HTTP debug surface + relay RPCs — both generated from the same
 // operation catalog in operations.ts), recover any sessions left running in
@@ -14,6 +14,7 @@
 //                   transports
 //   transcript.ts — JSONL tail mechanics; fileOps.ts — bash/file/grep handlers
 
+import { moduleDir } from "./esm";
 import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync } from "fs";
@@ -25,7 +26,8 @@ import { registerMachineOps } from "./transports/relay-machine";
 
 const PORT = parseInt(process.env.PORT ?? "4997");
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
-const PUBLIC_DIR = join(import.meta.dir, "..", "public"); // public/ is at the package root, src/ is one level down
+const __dirname = moduleDir(import.meta.url);
+const PUBLIC_DIR = join(__dirname, "..", "public"); // public/ is at the package root, src/ is one level down
 
 // H3: per-instance token required on all mutating HTTP routes — prevents
 // drive-by cross-origin session creation / prompt injection via no-cors POST.
@@ -71,7 +73,7 @@ if (relayClient) {
     happyCliVersion: "joy-tmux/0.1.0",
     homeDir: homedir(),
     happyHomeDir: join(homedir(), ".happy"),
-    happyLibDir: import.meta.dir,
+    happyLibDir: __dirname,
   }).then(ok => {
     process.stderr.write(`[relay] machine metadata upsert: ${ok ? "ok" : "failed"}\n`);
   });

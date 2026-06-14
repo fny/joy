@@ -13,6 +13,7 @@
 //     snapshot of LiteLLM's model_prices table (matched by family prefix so
 //     point releases inherit their family's pricing).
 
+import { readFile } from "fs/promises";
 import { readdirSync, statSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -121,7 +122,7 @@ async function parseFile(path: string, sessionId: string): Promise<FileAgg> {
   // the last one carries the final token counts).
   const messages = new Map<string, { model: string; usage: Record<string, unknown>; day: string }>();
 
-  const text = await Bun.file(path).text();
+  const text = await readFile(path, "utf-8");
   for (const line of text.split("\n")) {
     if (!line) continue;
     const isAssistant = line.includes('"assistant"');

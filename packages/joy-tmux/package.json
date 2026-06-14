@@ -2,17 +2,28 @@
   "name": "joy-tmux",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "bin": {
     "joy": "./src/cli.ts"
   },
   "scripts": {
-    "start": "bun src/server.ts",
-    "joy": "bun src/cli.ts"
+    "start": "tsx src/server.ts",
+    "joy": "tsx src/cli.ts",
+    "dev": "tsx --watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "socket.io-client": "^4.8.0",
     "tweetnacl": "^1.0.3",
     "zod": "^3.24.4"
-  }
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.3",
+    "tsx": "^4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.0"
+  },
+  "packageManager": "pnpm@10.11.0"
 }
