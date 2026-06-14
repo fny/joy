@@ -10,13 +10,12 @@ import { join, dirname } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
+import { happyHomeDir, joyStateDir } from "./paths";
 
 const PORT = parseInt(process.env.PORT ?? "4997");
 const BASE = `http://127.0.0.1:${PORT}`;
-const HAPPY_HOME = process.env.HAPPY_HOME_DIR
-  ? process.env.HAPPY_HOME_DIR.replace(/^~/, homedir())
-  : join(homedir(), ".happy");
-const STATE_DIR = join(HAPPY_HOME, "joy-tmux-state");
+const HAPPY_HOME = happyHomeDir();
+const STATE_DIR = joyStateDir();
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
 const PKG_DIR = moduleDir(import.meta.url);

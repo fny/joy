@@ -7,7 +7,8 @@ import { setTimeout as sleep } from "timers/promises";
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir, hostname, platform } from 'node:os';
+import { hostname, platform } from 'node:os';
+import { happyHomeDir, joyStateDir } from '../paths';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
 
@@ -154,9 +155,7 @@ function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint
 const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
 
 export function loadCredentials(): Credentials | null {
-  const happyHome = process.env.HAPPY_HOME_DIR
-    ? process.env.HAPPY_HOME_DIR.replace(/^~/, homedir())
-    : join(homedir(), '.happy');
+  const happyHome = happyHomeDir();
 
   const accessKeyPath = join(happyHome, 'access.key');
   if (!existsSync(accessKeyPath)) return null;
@@ -931,7 +930,7 @@ export async function createRelaySession(
 // joy-tmux downtime are delivered on next startup, not silently skipped.
 
 function seqStatePath(relaySessionId: string): string {
-  const dir = join(homedir(), '.happy', 'joy-tmux-state');
+  const dir = joyStateDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   return join(dir, `${relaySessionId}.seq`);
 }
