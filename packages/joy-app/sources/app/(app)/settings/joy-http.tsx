@@ -9,7 +9,8 @@ import { useSettingMutable } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useHappyAction } from '@/hooks/useHappyAction';
-import { useJoyTmuxSessions, type JoySession } from '@/hooks/useJoyTmuxSessions';
+import { useJoyTmuxSessions } from '@/hooks/useJoyTmuxSessions';
+import type { JoySession } from '@/joy/types';
 import { StyleSheet } from 'react-native-unistyles';
 
 const DEFAULT_SERVER_URL = 'http://localhost:4997';

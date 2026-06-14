@@ -26,24 +26,7 @@ import { Session } from '@/sync/storageTypes';
 import { HappyError } from '@/utils/errors';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
-
-// Live record from the joy-tmux daemon (snake_case wire shape of
-// Session.toJSON()). Relay metadata is static after create; this carries
-// what only the daemon knows: claude session id, live status, current model,
-// tmux window, pid, launch flags.
-type JoySessionRecord = {
-    id: string;
-    claude_session_id?: string;
-    tmux_window?: string;
-    cwd?: string;
-    pid?: number;
-    status?: string;
-    current_model?: string;
-    effort?: string;
-    flags?: string[];
-    started_at?: number;
-    end_reason?: string;
-};
+import type { JoySessionRecord } from '@/joy/types';
 
 // Same animated status dot as the stock info page header.
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
