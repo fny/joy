@@ -16,11 +16,12 @@ export function useJoyMachines(): { machines: Machine[]; probing: boolean } {
     const all = useAllMachines({ includeOffline: true });
     const onlineIds = all.filter(isMachineOnline).map(m => m.id);
     const [ids, setIds] = React.useState<Set<string> | null>(cachedJoyMachineIds);
-    const probedRef = React.useRef(false);
 
+    // Re-probe whenever the online-machine set changes (effect dep below), so a
+    // daemon that comes online after first render is discovered. The cached
+    // result keeps rendering meanwhile, so re-probes are silent (no flicker).
     React.useEffect(() => {
-        if (probedRef.current || onlineIds.length === 0) return;
-        probedRef.current = true;
+        if (onlineIds.length === 0) return;
         let cancelled = false;
         (async () => {
             const probe = (id: string) => Promise.race([
