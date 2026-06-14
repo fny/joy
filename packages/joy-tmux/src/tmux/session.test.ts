@@ -35,7 +35,7 @@ test("footer → mode: strings captured from claude 2.1.170", () => {
   expect(parsePermissionModeFromPane("❯ \n? for shortcuts")).toBe("default");
 });
 
-import { encodeUserMessage, encodeTextEvent } from "./relay";
+import { encodeUserMessage, encodeTextEvent } from "../relay/relay";
 
 // Single-clock ordering fix: both sides stamped with Claude's transcript time
 // so a --resume replay sorts chronologically instead of splitting by the
