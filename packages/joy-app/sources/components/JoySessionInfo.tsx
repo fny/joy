@@ -61,6 +61,8 @@ function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: 
 
 function CopyRow({ title, value, icon, short }: { title: string; value: string; icon: React.ReactNode; short?: boolean }) {
     const [copied, setCopied] = React.useState(false);
+    const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    React.useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
     const display = short && value.length > 20
         ? `${value.substring(0, 8)}...${value.substring(value.length - 8)}`
         : value;
@@ -74,7 +76,8 @@ function CopyRow({ title, value, icon, short }: { title: string; value: string; 
             onPress={async () => {
                 await Clipboard.setStringAsync(value);
                 setCopied(true);
-                setTimeout(() => setCopied(false), 2000);
+                if (timerRef.current) clearTimeout(timerRef.current);
+                timerRef.current = setTimeout(() => setCopied(false), 2000);
             }}
         />
     );
@@ -112,7 +115,7 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                 ]);
                 if (cancelled) return;
                 if (result.error) setLiveFailed(true);
-                else setLive(result);
+                else { setLive(result); setLiveFailed(false); }
             } catch {
                 if (!cancelled) setLiveFailed(true);
             }

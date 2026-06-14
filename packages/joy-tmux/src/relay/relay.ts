@@ -281,6 +281,16 @@ export class RelayClient {
     this.socket?.emit('rpc-register', { method: prefixed });
   }
 
+  /** Drop every session-scoped RPC handler for a relay session (called on
+   *  detach/stop) so dead handlers neither linger in the map nor get
+   *  re-registered on the next socket reconnect. */
+  unregisterSessionRpcHandlers(relaySessionId: string): void {
+    const prefix = `${relaySessionId}:`;
+    for (const key of this.rpcHandlers.keys()) {
+      if (key.startsWith(prefix)) this.rpcHandlers.delete(key);
+    }
+  }
+
   registerRpcHandler(method: string, handler: (params: unknown) => Promise<unknown>): void {
     const prefixed = `${this.creds.machineId}:${method}`;
     this.rpcHandlers.set(prefixed, handler);
@@ -706,10 +716,11 @@ export class RelaySession {
   }
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private unsubscribe: (() => void) | null = null;
 
   start(): void {
     this.client.trackSession(this);
-    this.client.subscribe(this.relaySessionId, () => void this.pull());
+    this.unsubscribe = this.client.subscribe(this.relaySessionId, () => void this.pull());
     this.client.emitAlive(this.relaySessionId, false);
     // Poll for incoming messages every 3s (machine-scoped socket doesn't receive update pokes)
     // and send keepalive every 30s
@@ -722,6 +733,9 @@ export class RelaySession {
 
   stop(): void {
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.client.unregisterSessionRpcHandlers(this.relaySessionId);
     this.client.untrackSession(this);
   }
 
