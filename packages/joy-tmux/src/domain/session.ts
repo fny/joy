@@ -14,7 +14,7 @@
 
 import { setTimeout as sleep } from "timers/promises";
 import { existsSync, readFileSync } from "fs";
-import { run } from "./shell";
+import { run } from "../tmux/shell";
 import {
   encodeTurnStart,
   encodeTextEvent,
@@ -33,10 +33,10 @@ import {
   consumeReceived,
   type DeliveryState,
   type DeliverySource,
-} from "../domain/receipts";
-import { writeAttachmentToCwd } from "../domain/attachments";
+} from "./receipts";
+import { writeAttachmentToCwd } from "./attachments";
 import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "../claude/transcript";
-import { toTmuxSegments, ParseError, TmuxKeyError } from "./keyTokens";
+import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";
 

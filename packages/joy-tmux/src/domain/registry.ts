@@ -10,7 +10,7 @@ import { join, basename } from "path";
 import { homedir } from "os";
 import { run } from "../tmux/shell";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
-import { Session, type ChatMessage, type SessionDeps } from "../tmux/session";
+import { Session, type ChatMessage, type SessionDeps } from "./session";
 import { cwdToTranscriptDir, findLatestTranscript } from "../claude/transcript";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 
