@@ -24,7 +24,7 @@ import {
   handleRipgrep,
   handleDifftastic,
 } from "./fileOps";
-import { computeUsage, periodToRange } from "./usage";
+import { computeUsage, periodToRange } from "./claude/usage";
 import { existsSync } from "fs";
 import { basename } from "path";
 import { hostname, platform, release, arch } from "os";
@@ -453,31 +453,28 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
-    name: "codeburn",
+    name: "usage",
     scope: "machine",
-    rpcName: "joy-codeburn",
-    http: { method: "GET", path: "/codeburn" },
-    // Usage report computed by our own usage.ts straight from the transcript
-    // JSONL (cost/tokens, daily, per-project/model/tool/MCP). If the codeburn
-    // binary happens to be installed, its activity/skill/subagent panels are
-    // merged in as optional extras — the backbone has no dependency.
+    rpcName: "joy-usage",
+    http: { method: "GET", path: "/usage" },
+    // Usage report computed by usage.ts straight from the transcript JSONL:
+    // cost/tokens, daily, per-project/model/tool/MCP.
     // period: today | week | 30days (default) | 90days | 6months.
     handler: async (_registry, params) => {
       const period = typeof params.period === "string" ? params.period : "30days";
       const range = periodToRange(period);
       const { sessions: _sessions, ...data } = await computeUsage({ fromDay: range.fromDay, toDay: range.toDay });
-      const extras = await runCodeburnExtras(period);
-      return { ok: true, period: range.label, ...data, ...(extras ?? {}) };
+      return { ok: true, period: range.label, ...data };
     },
   },
   {
-    name: "codeburnSessions",
+    name: "sessionUsage",
     scope: "machine",
-    rpcName: "joy-codeburn-sessions",
-    http: { method: "GET", path: "/codeburn/sessions" },
+    rpcName: "joy-session_usage",
+    http: { method: "GET", path: "/usage/sessions" },
     // Per-session cost rows from usage.ts (keyed by claude session id, with
     // subagent burn rolled into the parent and a per-model breakdown).
-    // period like joy-codeburn plus "all"; claudeSessionId returns just that
+    // period like joy-usage plus "all"; claudeSessionId returns just that
     // conversation's row.
     handler: async (_registry, params) => {
       const period = typeof params.period === "string" ? params.period : "30days";
@@ -491,56 +488,6 @@ export const machineOps: MachineOp[] = [
     },
   },
 ];
-
-// codeburn extras: ONLY when the binary is installed (never bunx — that
-// would silently download and run unpinned code). The own-module backbone
-// covers everything else; these panels (activity classification, one-shot
-// rates, skills) are codeburn heuristics we don't replicate.
-const extrasCache = new Map<string, { at: number; data: Record<string, unknown> | null }>();
-const EXTRAS_CACHE_TTL_MS = 60_000;
-
-function daysAgoISO(days: number): string {
-  const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-async function runCodeburnExtras(period: string): Promise<Record<string, unknown> | null> {
-  const bin = Bun.which("codeburn");
-  if (!bin) return null;
-
-  const key = `extras:${period}`;
-  const hit = extrasCache.get(key);
-  if (hit && Date.now() - hit.at < EXTRAS_CACHE_TTL_MS) return hit.data;
-
-  const periodArgs =
-    period === "today" ? ["-p", "today"]
-    : period === "week" ? ["-p", "week"]
-    : period === "90days" ? ["--from", daysAgoISO(89)]
-    : period === "6months" ? ["--from", daysAgoISO(182)]
-    : ["-p", "30days"];
-
-  let data: Record<string, unknown> | null = null;
-  try {
-    const proc = Bun.spawn([bin, "report", "--format", "json", ...periodArgs], { stdout: "pipe", stderr: "pipe" });
-    const killTimer = setTimeout(() => proc.kill(), 60_000);
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    clearTimeout(killTimer);
-    if (proc.exitCode === 0) {
-      const full = JSON.parse(out) as Record<string, unknown>;
-      const top = (k: string, n: number) => (Array.isArray(full[k]) ? (full[k] as unknown[]).slice(0, n) : []);
-      data = {
-        activities: top("activities", 13),
-        skills: top("skills", 10),
-        subagents: top("subagents", 10),
-      };
-    }
-  } catch {
-    data = null; // extras are strictly optional — never fail the report
-  }
-  extrasCache.set(key, { at: Date.now(), data });
-  return data;
-}
 
 // ── Session-scoped operations ───────────────────────────────────────────────
 // Registered on each session's RelaySession under the bare rpcName (the relay
