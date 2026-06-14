@@ -1,9 +1,13 @@
 {
-  "name": "joy-webchat",
+  "name": "joy-tmux",
   "version": "1.0.0",
   "private": true,
+  "bin": {
+    "joy": "./src/cli.ts"
+  },
   "scripts": {
-    "start": "bun server.ts"
+    "start": "bun src/server.ts",
+    "joy": "bun src/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
