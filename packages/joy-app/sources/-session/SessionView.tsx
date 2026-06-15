@@ -472,8 +472,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const availableModels = React.useMemo(() => (
         isJoyTmux ? JOY_CLAUDE_MODELS : getAvailableModels(flavor, session.metadata, t)
     ), [isJoyTmux, flavor, session.metadata]);
-    const modHideModesEnabled = useSetting('joy__hideModesEnabled');
-    const modXhighEnabled = useSetting('joy__xHighEnabled');
     const availableModes = React.useMemo(() => {
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
@@ -482,11 +480,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         const modes = isJoyTmux
             ? JOY_CLAUDE_PERMISSION_MODES
             : getAvailablePermissionModes(flavor, session.metadata, t);
-        if (modHideModesEnabled && (flavor === 'claude' || !flavor)) {
-            return modes.filter(m => m.key === 'plan' || m.key === 'bypassPermissions');
-        }
         return modes;
-    }, [isJoyTmux, flavor, session.metadata, modHideModesEnabled]);
+    }, [isJoyTmux, flavor, session.metadata]);
     const agentDefaultOverrides = useSetting('agentDefaultOverrides');
     const effectiveAgentDefaults = React.useMemo(() => (
         resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
@@ -510,10 +505,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     // Effort level state
     const modelKey = modelMode?.key ?? 'default';
-    const availableEffortLevels = React.useMemo<EffortLevel[]>(() => {
-        const levels = getEffortLevelsForModel(flavor, modelKey);
-        return modXhighEnabled ? levels : levels.filter(l => l.key !== 'xhigh');
-    }, [flavor, modelKey, modXhighEnabled]);
+    const availableEffortLevels = React.useMemo<EffortLevel[]>(
+        () => getEffortLevelsForModel(flavor, modelKey),
+        [flavor, modelKey],
+    );
     const effortLevel = React.useMemo<EffortLevel | null>(() => (
         resolveCurrentOption(availableEffortLevels, [
             session.effortLevel,

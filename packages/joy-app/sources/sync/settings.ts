@@ -46,8 +46,6 @@ export const SettingsSchema = z.object({
     lastUsedModelMode: z.string().nullable().describe('Last selected model mode for new sessions'),
     agentDefaultOverrides: AgentDefaultOverridesSchema.describe('User-selected agent defaults. Missing values use code defaults and are not sent as agent metadata.'),
     // Dismissed CLI warning banners (supports both per-machine and global dismissal)
-    joy__xHighEnabled: z.boolean().describe('Mod 02: show xhigh effort level between high and max'),
-    joy__hideModesEnabled: z.boolean().describe('Mod 04: show only Plan and Yolo permission modes'),
     joy__chatHistoryLimit: z.number().nullable().describe('Mod 05: max messages to display per conversation (null = unlimited / off)'),
     joy__doubleTapEnabled: z.boolean().describe('Mod 06: require double tap to commit AskUserQuestion option/submit selections'),
     joy__readOpenFileEnabled: z.boolean().describe('Mod 07: show an "Open file" button on Read tool calls'),
@@ -119,8 +117,6 @@ export const settingsDefaults: Settings = {
     lastUsedAgent: null,
     lastUsedPermissionMode: null,
     lastUsedModelMode: null,
-    joy__xHighEnabled: false,
-    joy__hideModesEnabled: false,
     joy__chatHistoryLimit: null,
     joy__doubleTapEnabled: false,
     joy__readOpenFileEnabled: false,
