@@ -99,17 +99,18 @@ export class SessionRegistry {
   }
 
   /**
-   * Is the claude CLI on this machine, and which version? Detected once on
-   * first ask (spawning `claude --version` costs ~100ms) and cached for the
-   * daemon's lifetime — the binary doesn't move while we're running.
+   * Is the claude CLI on this machine, and which version? Spawning
+   * `claude --version` costs ~100ms, so we cache it — but ONLY a successful
+   * detection. A transient miss (e.g. an incomplete PATH during a detached
+   * `joy start` boot) must not stick "not found" for the daemon's whole life,
+   * so we re-probe on every call until claude resolves.
    */
   claudeInfo(): { available: boolean; version: string | null } {
-    if (!this.#claudeInfo) {
-      const r = run("claude", "--version");
-      this.#claudeInfo = r.ok
-        ? { available: true, version: r.out.split("\n")[0].trim() || null }
-        : { available: false, version: null };
-    }
+    if (this.#claudeInfo?.available) return this.#claudeInfo;
+    const r = run("claude", "--version");
+    this.#claudeInfo = r.ok
+      ? { available: true, version: r.out.split("\n")[0].trim() || null }
+      : { available: false, version: null };
     return this.#claudeInfo;
   }
 
