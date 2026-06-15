@@ -11,7 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
-import { useMachine } from '@/sync/storage';
+import { useMachine, storage } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { formatOSPlatform } from '@/utils/sessionUtils';
 import { apiSocket } from '@/sync/apiSocket';
@@ -19,7 +19,7 @@ import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { Modal } from '@/modal';
-import { joyKillAllSessions, joyRestartDaemon } from '@/sync/ops';
+import { joyKillAllSessions, joyRestartDaemon, sessionDelete } from '@/sync/ops';
 
 type JoyStatus = {
     ok?: boolean;
@@ -77,6 +77,31 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         );
         if (!ok) return;
         await joyKillAllSessions(machineId);
+    }, [machineId]));
+
+    // Purge: permanently DELETE every joy session record for this machine (not
+    // just deactivate, which "Kill all" does — those linger in history). Kill
+    // live ones first so their tmux windows aren't re-adopted and re-created
+    // after deletion. Works even on orphaned records the daemon no longer tracks,
+    // since we delete from the app's own synced session list.
+    const [purging, doPurgeAll] = useHappyAction(React.useCallback(async () => {
+        const ok = await Modal.confirm(
+            'Purge all sessions?',
+            'Permanently DELETES every joy-tmux session record for this machine — they vanish from history and cannot be recovered. (Unlike "Kill all", which only ends them.) Live sessions are killed first.',
+            { confirmText: 'Purge all', destructive: true },
+        );
+        if (!ok) return;
+        // Best-effort: end live sessions so the daemon doesn't re-create records.
+        await joyKillAllSessions(machineId).catch(() => { });
+        const targets = Object.values(storage.getState().sessions).filter(
+            (s) => s.metadata?.joy__source === 'joy-tmux' && s.metadata?.machineId === machineId,
+        );
+        let deleted = 0;
+        for (const s of targets) {
+            const r = await sessionDelete(s.id);
+            if (r.success) deleted++;
+        }
+        Modal.alert('Purged', `Deleted ${deleted} session record${deleted === 1 ? '' : 's'} for this machine.`, [{ text: 'OK' }]);
     }, [machineId]));
 
     if (!status && !failed) {
@@ -159,7 +184,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                 />
             </ItemGroup>
 
-            <ItemGroup title="Daemon actions" footer="Restart re-execs joy-tmux (running sessions survive). Kill all closes every session and the tmux session.">
+            <ItemGroup title="Daemon actions" footer="Restart re-execs joy-tmux (running sessions survive). Kill all ends every session + the tmux session (they stay in history). Purge permanently deletes every joy session record for this machine.">
                 <Item
                     title="Restart Daemon"
                     subtitle="Re-exec joy-tmux; running sessions survive"
@@ -176,6 +201,15 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                         ? <ActivityIndicator />
                         : <Ionicons name="trash-outline" size={29} color="#FF3B30" />}
                     onPress={doKillAll}
+                    showChevron={false}
+                />
+                <Item
+                    title="Purge all Sessions"
+                    subtitle="Permanently delete every joy session record for this machine"
+                    icon={purging
+                        ? <ActivityIndicator />
+                        : <Ionicons name="nuclear-outline" size={29} color="#FF3B30" />}
+                    onPress={doPurgeAll}
                     showChevron={false}
                 />
             </ItemGroup>
