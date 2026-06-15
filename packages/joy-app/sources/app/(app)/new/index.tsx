@@ -508,8 +508,6 @@ function NewSessionScreen() {
     const allMachines = useAllMachines({ includeOffline: true });
     const sessions = useSessions();
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
-    const modXhighEnabled = useSetting('joy__xHighEnabled');
-    const modHideModesEnabled = useSetting('joy__hideModesEnabled');
     const agentDefaultOverrides = useSetting('agentDefaultOverrides');
 
     // Persisted draft state (survives navigation).
@@ -685,13 +683,10 @@ function NewSessionScreen() {
     }, [availableAgents, selectedAgent, setSelectedAgent]);
 
     // Derive options from agent type
-    const permissionModes = React.useMemo<PermissionMode[]>(() => {
-        const modes = getHardcodedPermissionModes(selectedAgent, t);
-        if (modHideModesEnabled && (selectedAgent === 'claude' || !selectedAgent)) {
-            return modes.filter(m => m.key === 'plan' || m.key === 'bypassPermissions');
-        }
-        return modes;
-    }, [selectedAgent, modHideModesEnabled]);
+    const permissionModes = React.useMemo<PermissionMode[]>(
+        () => getHardcodedPermissionModes(selectedAgent, t),
+        [selectedAgent],
+    );
     const modelModes = React.useMemo<ModelMode[]>(
         () => getHardcodedModelModes(selectedAgent, t),
         [selectedAgent],
@@ -700,10 +695,10 @@ function NewSessionScreen() {
     const currentModel = modelModes[modelIndex] ?? modelModes[0];
     const currentModelKey = currentModel?.key ?? 'default';
 
-    const effortLevels = React.useMemo<EffortLevel[]>(() => {
-        const levels = getEffortLevelsForModel(selectedAgent, currentModelKey);
-        return modXhighEnabled ? levels : levels.filter(e => e.key !== 'xhigh');
-    }, [selectedAgent, currentModelKey, modXhighEnabled]);
+    const effortLevels = React.useMemo<EffortLevel[]>(
+        () => getEffortLevelsForModel(selectedAgent, currentModelKey),
+        [selectedAgent, currentModelKey],
+    );
     const effectiveAgentDefaults = React.useMemo(() => (
         resolveAgentDefaultConfig(agentDefaultOverrides, selectedAgent)
     ), [agentDefaultOverrides, selectedAgent]);

@@ -16,8 +16,6 @@ import { Modal } from '@/modal';
 
 export default React.memo(function ModsSettingsScreen() {
     const router = useRouter();
-    const [modXhighEnabled, setModXhighEnabled] = useSettingMutable('joy__xHighEnabled');
-    const [modHideModesEnabled, setModHideModesEnabled] = useSettingMutable('joy__hideModesEnabled');
     const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
     const [modDoubleTapEnabled, setModDoubleTapEnabled] = useSettingMutable('joy__doubleTapEnabled');
     const [modReadOpenFileEnabled, setModReadOpenFileEnabled] = useSettingMutable('joy__readOpenFileEnabled');
@@ -50,20 +48,6 @@ export default React.memo(function ModsSettingsScreen() {
     return (
         <ItemList style={{ paddingTop: 0 }}>
             <ItemGroup title="Toggles" footer="Mods that can be switched on and off.">
-                <Item
-                    title="03 · xhigh effort"
-                    subtitle="Adds an xhigh effort level between high and max for Claude"
-                    rightElement={toggle(!!modXhighEnabled, setModXhighEnabled)}
-                    onPress={() => setModXhighEnabled(!modXhighEnabled)}
-                    showChevron={false}
-                />
-                <Item
-                    title="05 · Hide permission modes"
-                    subtitle="Permission selector shows only Plan and Yolo"
-                    rightElement={toggle(!!modHideModesEnabled, setModHideModesEnabled)}
-                    onPress={() => setModHideModesEnabled(!modHideModesEnabled)}
-                    showChevron={false}
-                />
                 <Item
                     title="06 · Chat history limit"
                     subtitle="Caps messages rendered per conversation"
