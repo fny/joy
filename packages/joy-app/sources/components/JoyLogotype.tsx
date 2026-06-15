@@ -172,7 +172,9 @@ const Grid = React.memo(
                   key={c}
                   style={{
                     color: cell,
-                    textShadow: "5px 5px 0px " + PALLETE_LIGHTENED[cell],
+                    textShadowColor: PALLETE_LIGHTENED[cell],
+                    textShadowOffset: { width: 5, height: 5 },
+                    textShadowRadius: 0,
                   }}
                 >
                   {ch}
