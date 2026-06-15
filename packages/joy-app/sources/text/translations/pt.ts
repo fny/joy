@@ -533,6 +533,8 @@ export const pt: TranslationStructure = {
     },
 
     toolGroup: {
+        editedFile: 'Edited file',
+        workedFor: ({ duration }: { duration: string }) => `Worked ${duration}`,
         editedFiles: ({ count }: { count: number }) => count === 1 ? 'Editou 1 arquivo' : `Editou ${count} arquivos`,
         readFiles: ({ count }: { count: number }) => count === 1 ? 'Leu 1 arquivo' : `Leu ${count} arquivos`,
         ranCommands: ({ count }: { count: number }) => count === 1 ? 'Executou 1 comando' : `Executou ${count} comandos`,

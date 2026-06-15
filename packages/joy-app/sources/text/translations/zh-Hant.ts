@@ -534,6 +534,8 @@ export const zhHant: TranslationStructure = {
     },
 
     toolGroup: {
+        editedFile: 'Edited file',
+        workedFor: ({ duration }: { duration: string }) => `Worked ${duration}`,
         editedFiles: ({ count }: { count: number }) => `編輯了 ${count} 個檔案`,
         readFiles: ({ count }: { count: number }) => `讀取了 ${count} 個檔案`,
         ranCommands: ({ count }: { count: number }) => `執行了 ${count} 個指令`,

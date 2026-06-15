@@ -534,6 +534,8 @@ export const ca: TranslationStructure = {
     },
 
     toolGroup: {
+        editedFile: 'Edited file',
+        workedFor: ({ duration }: { duration: string }) => `Worked ${duration}`,
         editedFiles: ({ count }: { count: number }) => count === 1 ? 'S\'ha editat 1 fitxer' : `S'han editat ${count} fitxers`,
         readFiles: ({ count }: { count: number }) => count === 1 ? 'S\'ha llegit 1 fitxer' : `S'han llegit ${count} fitxers`,
         ranCommands: ({ count }: { count: number }) => count === 1 ? 'S\'ha executat 1 comanda' : `S'han executat ${count} comandes`,
