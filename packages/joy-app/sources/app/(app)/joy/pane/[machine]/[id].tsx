@@ -17,6 +17,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
 import { AnsiText } from '@/components/AnsiText';
+import { TerminalKeyBar } from '@/components/TerminalKeyBar';
 
 const POLL_MS = 1500;
 // Pane font metrics — char width ≈ 0.6em for the mono fonts below; used to
@@ -24,21 +25,6 @@ const POLL_MS = 1500;
 const PANE_LINE_HEIGHT = 15; // must match styles.paneText.lineHeight
 const CHAR_WIDTH = 11 * 0.6; // styles.paneText.fontSize (11) × mono advance ≈ 0.6em
 const PANE_H_PADDING = 16; // styles.paneScroll paddingHorizontal (8) × 2
-
-// One-tap keys for the most common interventions.
-const QUICK_KEYS: { label: string; script: string }[] = [
-    { label: 'Enter', script: '<Enter>' },
-    { label: 'Esc', script: '<Esc>' },
-    { label: '^C', script: '<C-c>' },
-    { label: 'Del', script: '<Del>' },
-    { label: 'Tab', script: '<Tab>' },
-    { label: '↑', script: '<Up>' },
-    { label: '↓', script: '<Down>' },
-    { label: 'PgUp', script: '<PgUp>' },
-    { label: 'PgDn', script: '<PgDn>' },
-    { label: '1', script: '1' },
-    { label: '2', script: '2' },
-];
 
 export default React.memo(function JoyPaneScreen() {
     const { theme } = useUnistyles();
@@ -177,19 +163,8 @@ export default React.memo(function JoyPaneScreen() {
                     : <AnsiText text={pane || '…'} style={styles.paneText} />}
             </ScrollView>
 
-            {/* Quick keys */}
-            <View style={styles.quickRow}>
-                {QUICK_KEYS.map(k => (
-                    <Pressable
-                        key={k.label}
-                        onPress={() => void sendScript(k.script)}
-                        style={(p) => [styles.quickKey, p.pressed && styles.quickKeyPressed]}
-                        disabled={sending}
-                    >
-                        <Text style={styles.quickKeyText}>{k.label}</Text>
-                    </Pressable>
-                ))}
-            </View>
+            {/* Quick keys — horizontally scrollable */}
+            <TerminalKeyBar onKey={(script, literal) => void sendScript(script, literal)} disabled={sending} />
 
             {/* Raw input */}
             <View style={styles.inputRow}>
@@ -264,28 +239,8 @@ const styles = StyleSheet.create((theme, runtime) => ({
         lineHeight: 15,
         fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
     },
-    quickRow: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
-        gap: 6,
-        paddingHorizontal: 8,
-        paddingVertical: 6,
-    },
-    quickKey: {
-        paddingHorizontal: 12,
-        paddingVertical: 6,
-        borderRadius: 6,
-        backgroundColor: '#262626',
-        borderWidth: 1,
-        borderColor: '#3a3a3a',
-    },
     quickKeyPressed: {
         opacity: 0.5,
-    },
-    quickKeyText: {
-        color: '#d4d4d4',
-        fontSize: 13,
-        fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
     },
     inputRow: {
         flexDirection: 'row',
