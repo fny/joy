@@ -34,6 +34,7 @@ import { getSessionRouteFromNotificationResponse } from '@/utils/notificationRou
 import { navigateToSession } from '@/hooks/useNavigateToSession';
 import { applyVoiceUpsellOverride } from '@/realtime/voiceExperiment';
 import { useTauriZoom } from '@/hooks/useTauriZoom';
+import { BrowserNavigationShortcuts } from '@/hooks/useBrowserNavigationShortcuts';
 import { useTauriDrag } from '@/hooks/useTauriDrag';
 import { preventInputZoom } from '@/utils/preventInputZoom';
 
@@ -399,6 +400,7 @@ export default function RootLayout() {
                         <ThemeProvider value={navigationTheme}>
                             <StatusBarProvider />
                             <ModalProvider>
+                                <BrowserNavigationShortcuts />
                                 <CommandPaletteProvider>
                                     <RealtimeProvider>
                                         <HorizontalSafeAreaWrapper>
