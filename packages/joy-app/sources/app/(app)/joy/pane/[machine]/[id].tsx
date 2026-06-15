@@ -228,11 +228,6 @@ export default React.memo(function JoyPaneScreen() {
                         : <Ionicons name="arrow-forward" size={18} color={theme.colors.button.primary.tint} />}
                 </Pressable>
             </View>
-            <Text style={styles.hint}>
-                {rawMode
-                    ? 'Raw is ON: <Enter> <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt> are parsed and sent as keystrokes. Tap “Raw” to turn it off and send plain text.'
-                    : 'Your message is typed and submitted with Enter. Tap “Raw” to turn on key tokens like <Enter> or <C-c> instead.'}
-            </Text>
         </View>
     );
 });
@@ -341,12 +336,5 @@ const styles = StyleSheet.create((theme, runtime) => ({
         backgroundColor: theme.colors.button.primary.background,
         alignItems: 'center',
         justifyContent: 'center',
-    },
-    hint: {
-        color: theme.colors.textSecondary,
-        fontSize: 10,
-        paddingHorizontal: 8,
-        paddingBottom: 6,
-        fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
     },
 }));
