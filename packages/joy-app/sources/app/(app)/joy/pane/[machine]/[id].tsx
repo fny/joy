@@ -1,8 +1,9 @@
 // Interactive tmux pane for a joy-tmux session: live-ish view of the
-// terminal (joy-pane poll) plus a raw keyboard input that supports
-// bracketed key tokens (git commit<Enter>oops<C-c>) via the joy-send-keys
-// machine RPC. This is the intervention surface for things the chat path
-// can't reach: folder-trust prompts, TUI menus, a wedged claude.
+// terminal (joy-pane poll) plus a text input that submits messages (typed +
+// Enter) by default. A "Raw" toggle switches to bracketed key tokens
+// (git commit<Enter>oops<C-c>), sent via the joy-send-keys machine RPC. This is
+// the intervention surface for things the chat path can't reach: folder-trust
+// prompts, TUI menus, a wedged claude.
 //
 // Token dialects are parsed server-side (joy-tmux keyTokens.ts):
 // <Enter>/<CR>, <C-c>/<ctrl+c>/<^c>, <alt+x>/<meta-x>/<M-x>,
@@ -49,8 +50,9 @@ export default React.memo(function JoyPaneScreen() {
     const [paneError, setPaneError] = React.useState<string | null>(null);
     const [input, setInput] = React.useState('');
     const [sending, setSending] = React.useState(false);
-    // false = key-token mode (parse <Enter>, <C-c>…); true = plain text sent verbatim.
-    const [literalMode, setLiteralMode] = React.useState(false);
+    // Raw OFF (default) = text mode: input is typed verbatim and submitted with a
+    // real Enter. Raw ON = key-token mode: parse <Enter>, <C-c>… and send as keys.
+    const [rawMode, setRawMode] = React.useState(false);
     const scrollRef = React.useRef<ScrollView>(null);
     const mountedRef = React.useRef(true);
 
@@ -134,18 +136,18 @@ export default React.memo(function JoyPaneScreen() {
         if (!input.trim()) return;
         const script = input;
         setInput('');
-        if (literalMode) {
-            // text mode: type the text verbatim, then submit with a terminating
-            // Enter (a real key — in literal mode "<Enter>" would type as chars).
+        if (rawMode) {
+            // raw keys mode: parse <Enter>/<C-c>/… tokens and send as-is.
+            void sendScript(script, false);
+        } else {
+            // text mode (default): type the message verbatim, then submit with a
+            // real Enter key (in literal mode "<Enter>" would type as characters).
             void (async () => {
                 await sendScript(script, true);
                 await sendScript('<Enter>', false);
             })();
-        } else {
-            // keys mode: parse <Enter>/<C-c>/… tokens, sent as-is.
-            void sendScript(script, false);
         }
-    }, [input, sendScript, literalMode]);
+    }, [input, sendScript, rawMode]);
 
     return (
         <View style={styles.container}>
@@ -179,18 +181,21 @@ export default React.memo(function JoyPaneScreen() {
             {/* Raw input */}
             <View style={styles.inputRow}>
                 <Pressable
-                    onPress={() => setLiteralMode(v => !v)}
-                    style={(p) => [styles.modeToggle, literalMode && styles.modeToggleActive, p.pressed && styles.quickKeyPressed]}
+                    onPress={() => setRawMode(v => !v)}
+                    style={(p) => [styles.modeToggle, rawMode && styles.modeToggleActive, p.pressed && styles.quickKeyPressed]}
                     hitSlop={6}
+                    accessibilityRole="switch"
+                    accessibilityState={{ checked: rawMode }}
+                    accessibilityLabel="Raw key mode"
                 >
-                    <Text style={[styles.modeToggleText, literalMode && styles.modeToggleTextActive]}>
-                        {literalMode ? 'text' : 'keys'}
+                    <Text style={[styles.modeToggleText, rawMode && styles.modeToggleTextActive]}>
+                        {rawMode ? '⌨ Raw' : 'Raw'}
                     </Text>
                 </Pressable>
                 <TextInput
                     value={input}
                     onChangeText={setInput}
-                    placeholder={literalMode ? 'plain text, sent verbatim' : 'git commit<Enter>oops<C-c>'}
+                    placeholder={rawMode ? 'git commit<Enter>oops<C-c>' : 'type a message…'}
                     placeholderTextColor="#666"
                     style={styles.input}
                     autoCapitalize="none"
@@ -211,9 +216,9 @@ export default React.memo(function JoyPaneScreen() {
                 </Pressable>
             </View>
             <Text style={styles.hint}>
-                {literalMode
-                    ? 'text mode (auto-submits with Enter): typed verbatim — <Enter>, <C-c> land as literal characters. Tap “text” to switch back to keys.'
-                    : 'keys mode: <Enter> <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt>. Tap “keys” for plain text.'}
+                {rawMode
+                    ? 'Raw is ON: <Enter> <Esc> <C-c> <ctrl+shift+a> <alt+x> <S-Tab> <Up> <F5> <lt> are parsed and sent as keystrokes. Tap “Raw” to turn it off and send plain text.'
+                    : 'Your message is typed and submitted with Enter. Tap “Raw” to turn on key tokens like <Enter> or <C-c> instead.'}
             </Text>
         </View>
     );
