@@ -535,6 +535,8 @@ export const ja: TranslationStructure = {
     },
 
     toolGroup: {
+        editedFile: 'Edited file',
+        workedFor: ({ duration }: { duration: string }) => `Worked ${duration}`,
         editedFiles: ({ count }: { count: number }) => `${count}個のファイルを編集`,
         readFiles: ({ count }: { count: number }) => `${count}個のファイルを読み取り`,
         ranCommands: ({ count }: { count: number }) => `${count}個のコマンドを実行`,
