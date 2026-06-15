@@ -259,6 +259,7 @@ export class RelayClient {
   private socket: Socket | null = null;
   private listeners = new Map<string, Set<() => void>>();
   private activeSessions = new Set<RelaySession>();
+  private machineAliveTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(creds: Credentials) {
     this.creds = creds;
@@ -299,6 +300,16 @@ export class RelayClient {
     });
   }
 
+  /** Heartbeat machine presence so the app shows this machine online. The
+   *  server marks the machine active on each machine-alive and lapses it to
+   *  offline without one (this is what happy-cli's daemon did — joy now owns
+   *  it). Beats immediately on every (re)connect, then every 20s. */
+  private startMachineAlive(): void {
+    const beat = () => this.socket?.emit('machine-alive', { machineId: this.creds.machineId, time: Date.now() });
+    beat();
+    if (!this.machineAliveTimer) this.machineAliveTimer = setInterval(beat, 20_000);
+  }
+
   connect(): void {
     if (this.socket) return;
     this.socket = io(this.creds.serverUrl, {
@@ -318,6 +329,7 @@ export class RelayClient {
         log(`rpc: re-registering ${method}`);
         this.socket?.emit('rpc-register', { method });
       }
+      this.startMachineAlive();
       if (!firstConnect) this.onReconnect?.();
       firstConnect = false;
     });
