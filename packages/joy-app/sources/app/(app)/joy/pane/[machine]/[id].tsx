@@ -225,7 +225,7 @@ export default React.memo(function JoyPaneScreen() {
                 >
                     {sending
                         ? <ActivityIndicator size="small" color={theme.colors.button.primary.tint} />
-                        : <Ionicons name="arrow-forward" size={18} color={theme.colors.button.primary.tint} />}
+                        : <Ionicons name="arrow-up" size={18} color={theme.colors.button.primary.tint} />}
                 </Pressable>
             </View>
         </View>
