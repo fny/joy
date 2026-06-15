@@ -2,7 +2,7 @@ import * as React from 'react';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
-import { machineResumeSession, sessionArchive, sessionKill, forkAndSpawn, type ForkSource } from '@/sync/ops';
+import { machineResumeSession, sessionArchive, sessionDelete, sessionKill, forkAndSpawn, type ForkSource } from '@/sync/ops';
 import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
 import { storage, useLocalSetting, useMachine, useSetting } from '@/sync/storage';
 import { apiSocket } from '@/sync/apiSocket';
@@ -104,6 +104,7 @@ export function useSessionQuickActions(
 ) {
     const {
         onAfterArchive,
+        onAfterDelete,
         onAfterCopySessionMetadata,
     } = options;
     const router = useRouter();
@@ -221,6 +222,29 @@ export function useSessionQuickActions(
         performArchive();
     }, [performArchive]);
 
+    // Permanent hard-delete (vs archive, which just deactivates and lingers in
+    // history). Confirms first; ends the live session so the daemon/CLI doesn't
+    // re-create the record, then DELETEs it server-side.
+    const [deletingSession, performDelete] = useHappyAction(async () => {
+        const ok = await Modal.confirm(
+            'Delete session?',
+            'Permanently deletes this session and its messages. This cannot be undone.',
+            { confirmText: 'Delete', destructive: true },
+        );
+        if (!ok) return;
+        await maybeCleanupWorktree(session.id, session.metadata?.path, session.metadata?.machineId);
+        await sessionKill(session.id).catch(() => { });
+        const result = await sessionDelete(session.id);
+        if (!result.success) {
+            throw new HappyError(result.message || 'Failed to delete session', false);
+        }
+        onAfterDelete?.();
+    });
+
+    const deleteSession = React.useCallback(() => {
+        performDelete();
+    }, [performDelete]);
+
     const resumeSession = React.useCallback(() => {
         performResume();
     }, [performResume]);
@@ -307,11 +331,13 @@ export function useSessionQuickActions(
             items.push({ id: 'copy-metadata-and-logs', icon: 'document-text-outline', label: t('sessionInfo.copyMetadata') + ' & Client Logs', onPress: copySessionMetadataAndLogs });
         }
 
+        items.push({ id: 'delete', icon: 'trash-outline', label: 'Delete', onPress: deleteSession, destructive: true });
         items.push({ id: 'archive', icon: 'archive-outline', label: 'Archive', onPress: archiveSession, destructive: true });
 
         return items;
     }, [
         archiveSession,
+        deleteSession,
         canCopySessionMetadata,
         canFork,
         canRestart,
@@ -340,6 +366,8 @@ export function useSessionQuickActions(
         showActionAlert,
         archiveSession,
         archivingSession,
+        deleteSession,
+        deletingSession,
         canArchive: true,
         canCopySessionMetadata,
         canResume: resumeAvailability.canResume,
