@@ -358,8 +358,9 @@ export default function RootLayout() {
             <Stack.Screen
                 name="joy/pane/[machine]/[id]"
                 options={{
-                    headerTitle: 'Terminal',
-                    headerBackTitle: t('common.back'),
+                    // Full-height terminal: no header bar. The page renders its own
+                    // floating circular back button on mobile (web has the sidebar).
+                    headerShown: false,
                 }}
             />
         </Stack>

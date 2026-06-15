@@ -11,7 +11,7 @@
 // Unknown tokens pass through as literal text.
 import * as React from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator, Platform } from 'react-native';
-import { useLocalSearchParams, useFocusEffect } from 'expo-router';
+import { useLocalSearchParams, useFocusEffect, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { apiSocket } from '@/sync/apiSocket';
@@ -151,6 +151,19 @@ export default React.memo(function JoyPaneScreen() {
 
     return (
         <View style={styles.container}>
+            {/* Header is hidden for a full-height terminal — keep a back affordance
+                on mobile (web navigates via the sidebar). */}
+            {Platform.OS !== 'web' && (
+                <Pressable
+                    onPress={() => router.back()}
+                    style={(p) => [styles.backButton, p.pressed && styles.quickKeyPressed]}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Back"
+                >
+                    <Ionicons name="chevron-back" size={22} color="#d4d4d4" />
+                </Pressable>
+            )}
             {/* Pane view — vertical scroll only; the window is sized to fit this
                 width (adaptive resize), so there's no horizontal scroll to drift. */}
             <ScrollView
@@ -233,7 +246,22 @@ const styles = StyleSheet.create((theme, runtime) => ({
     paneScroll: {
         flex: 1,
         paddingHorizontal: 8,
-        paddingTop: 8,
+        // Clear the status bar / notch now that there's no header above us.
+        paddingTop: runtime.insets.top + 8,
+    },
+    backButton: {
+        position: 'absolute',
+        top: runtime.insets.top + 6,
+        left: 10,
+        width: 38,
+        height: 38,
+        borderRadius: 19,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(38,38,38,0.92)',
+        borderWidth: 1,
+        borderColor: '#3a3a3a',
+        zIndex: 10,
     },
     paneText: {
         color: '#d4d4d4',
