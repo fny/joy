@@ -14,63 +14,8 @@ const ART = [
   "                        ",
 ];
 
-// Per-cell colors for the static multicolor wordmark (JoyLogoType). Keyed by
-// [row][col]; only painted cells appear — spaces are absent. Lifted verbatim
-// from the confetti render the colors were hand-picked from.
-const STATIC: Record<number, Record<number, string>> = {
-  0: { 21: "#00b3ff", 22: "#ff2d95" },
-  1: {
-    3: "#00b3ff",
-    4: "#2dd4bf",
-    6: "#2dd4bf",
-    7: "#ffe600",
-    8: "#00b3ff",
-    9: "#8a2dff",
-    10: "#00e5a0",
-    11: "#2dd4bf",
-    13: "#ff2d95",
-    14: "#00b3ff",
-    17: "#ff2d95",
-    18: "#00e5a0",
-    21: "#00e5a0",
-    22: "#ff8a00",
-  },
-  2: {
-    3: "#00e5a0",
-    4: "#ff2d95",
-    6: "#00e5a0",
-    7: "#ff4040",
-    10: "#ffe600",
-    11: "#ff8a00",
-    14: "#ff4040",
-    15: "#ff8a00",
-    16: "#ff4040",
-    17: "#8a2dff",
-    21: "#8a2dff",
-    22: "#ff4040",
-  },
-  3: {
-    0: "#8a2dff",
-    1: "#00b3ff",
-    2: "#ff4040",
-    3: "#ff8a00",
-    4: "#8a2dff",
-    6: "#00e5a0",
-    7: "#ff4040",
-    8: "#2dd4bf",
-    9: "#ff8a00",
-    10: "#ff4040",
-    11: "#ff8a00",
-    15: "#ffe600",
-    16: "#00e5a0",
-    21: "#2dd4bf",
-    22: "#ff8a00",
-  },
-  4: {},
-};
-
-// Confetti palette + relative weights (share of cells per color, 0 removes it).
-// Ported from the generator script so JoyLogoTypeDynamic matches its look.
+// Canonical color palette — the single place hex values live. STATIC,
+// BLOCK_COLORS, and the confetti picker all reference PALETTE.<name>.
 const PALETTE: Record<string, string> = {
   magenta: "#ff2d95",
   orange: "#ff8a00",
@@ -82,16 +27,78 @@ const PALETTE: Record<string, string> = {
   darkCyan: "#2dd4bf",
 };
 
-const PALLETE_LIGHTENED: Record<string, string> = {
-  "#ff2d95": "#ffccff",
-  "#8a2dff": "#ffccff",
-  "#ff4040": "#ffccff",
-  "#ff8a00": "#dfdfcc",
-  "#ffe600": "#dfdfcc",
-  "#00e5a0": "#c0dddd",
-  "#00b3ff": "#c0dddd",
-  "#2dd4bf": "#c0dddd",
+// Per-cell colors for the static multicolor wordmark (JoyLogoType). Keyed by
+// [row][col]; only painted cells appear — spaces are absent. Lifted verbatim
+// from the confetti render the colors were hand-picked from.
+const STATIC: Record<number, Record<number, string>> = {
+  0: { 21: PALETTE.blue, 22: PALETTE.magenta },
+  1: {
+    3: PALETTE.blue,
+    4: PALETTE.darkCyan,
+    6: PALETTE.darkCyan,
+    7: PALETTE.yellow,
+    8: PALETTE.blue,
+    9: PALETTE.purple,
+    10: PALETTE.cyan,
+    11: PALETTE.darkCyan,
+    13: PALETTE.magenta,
+    14: PALETTE.blue,
+    17: PALETTE.magenta,
+    18: PALETTE.cyan,
+    21: PALETTE.cyan,
+    22: PALETTE.orange,
+  },
+  2: {
+    3: PALETTE.cyan,
+    4: PALETTE.magenta,
+    6: PALETTE.cyan,
+    7: PALETTE.red,
+    10: PALETTE.yellow,
+    11: PALETTE.orange,
+    14: PALETTE.red,
+    15: PALETTE.orange,
+    16: PALETTE.red,
+    17: PALETTE.purple,
+    21: PALETTE.purple,
+    22: PALETTE.red,
+  },
+  3: {
+    0: PALETTE.purple,
+    1: PALETTE.blue,
+    2: PALETTE.red,
+    3: PALETTE.orange,
+    4: PALETTE.purple,
+    6: PALETTE.cyan,
+    7: PALETTE.red,
+    8: PALETTE.darkCyan,
+    9: PALETTE.orange,
+    10: PALETTE.red,
+    11: PALETTE.orange,
+    15: PALETTE.yellow,
+    16: PALETTE.cyan,
+    21: PALETTE.darkCyan,
+    22: PALETTE.orange,
+  },
+  4: {},
 };
+
+function lightenColor(hex: string, amount: number, gray: number): string {
+  let r = parseInt(hex.slice(1, 3), 16);
+  let g = parseInt(hex.slice(3, 5), 16);
+  let b = parseInt(hex.slice(5, 7), 16);
+  // lerp each channel toward `gray` rather than toward 255
+  r = Math.round(r + (gray - r) * amount);
+  g = Math.round(g + (gray - g) * amount);
+  b = Math.round(b + (gray - b) * amount);
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+
+// Lightened version of every palette color (the drop-shadow tint), derived from
+// PALETTE via the same lightening used in the shadow — keyed by the original hex
+// so a cell color maps straight to its shadow color. Computed once at module load.
+const PALLETE_LIGHTENED: Record<string, string> = Object.fromEntries(
+  Object.values(PALETTE).map((hex) => [hex, lightenColor(hex, 0.7, 250)]),
+);
 
 const WEIGHTS: Record<string, number> = {
   magenta: 3,
@@ -146,7 +153,6 @@ const Grid = React.memo(
     size: number;
     colorAt: ColorAt;
     color?: string;
-    shadow?: boolean;
   }) => {
     const style: TextStyle = {
       fontFamily: getMonoFont(),
@@ -237,9 +243,19 @@ export const JoyLogoTypeJ = React.memo(({ size = 12 }: { size?: number }) => (
 // Solid 4×3 confetti block — a compact, fully-filled app-icon mark.
 const BLOCK_LINES = ["████", "████", "████"];
 const BLOCK_COLORS: Record<number, Record<number, string>> = {
-  0: { 0: "#00e5a0", 1: "#ffe600", 2: "#ff2d95", 3: "#8a2dff" },
-  1: { 0: "#00b3ff", 1: "#2dd4bf", 2: "#00e5a0", 3: "#00b3ff" },
-  2: { 0: "#8a2dff", 1: "#ff4040", 2: "#ff8a00", 3: "#ffe600" },
+  0: {
+    0: PALETTE.cyan,
+    1: PALETTE.yellow,
+    2: PALETTE.magenta,
+    3: PALETTE.purple,
+  },
+  1: { 0: PALETTE.blue, 1: PALETTE.darkCyan, 2: PALETTE.cyan, 3: PALETTE.blue },
+  2: {
+    0: PALETTE.purple,
+    1: PALETTE.red,
+    2: PALETTE.orange,
+    3: PALETTE.yellow,
+  },
 };
 export const BlockLogo = React.memo(({ size = 12 }: { size?: number }) => (
   <Grid
