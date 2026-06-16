@@ -40,6 +40,7 @@ export const TerminalKeyBar = React.memo(({ onKey, disabled }: {
             horizontal
             showsHorizontalScrollIndicator={false}
             keyboardShouldPersistTaps="always"
+            style={styles.bar}
             contentContainerStyle={styles.row}
         >
             {KEYS.map(k => (
@@ -57,15 +58,25 @@ export const TerminalKeyBar = React.memo(({ onKey, disabled }: {
 });
 
 const styles = StyleSheet.create(() => ({
+    // Bound the bar's height and keep it from growing into the column —
+    // otherwise the horizontal ScrollView balloons on web and the keys
+    // stretch to full height (default cross-axis is `stretch`).
+    bar: {
+        flexGrow: 0,
+        flexShrink: 0,
+        maxHeight: 46,
+    },
     row: {
         flexDirection: 'row',
+        alignItems: 'center',
         gap: 6,
         paddingHorizontal: 8,
         paddingVertical: 6,
     },
     key: {
+        height: 32,
+        justifyContent: 'center',
         paddingHorizontal: 12,
-        paddingVertical: 6,
         borderRadius: 6,
         backgroundColor: '#262626',
         borderWidth: 1,
