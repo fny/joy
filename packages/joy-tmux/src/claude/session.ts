@@ -40,6 +40,12 @@ import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";
 
+// Startup watchdog cadence. If Claude shows no sign of life within the deadline
+// (it exited at launch — bad --continue/--resume, crash, missing binary), the
+// session is ended as process_exited so it surfaces as detached, not stuck.
+const STARTUP_POLL_MS = 700;
+const STARTUP_DEADLINE_ATTEMPTS = 30; // ~21s — long enough for cold start / --resume
+
 /**
  * Turn a CLI-wrapped command transcript entry into a clean one-line echo so it
  * can show in chat instead of being dropped (which left no confirmation a
@@ -262,6 +268,28 @@ export class Session {
     this.pollForTranscript();
     this.#pollEnd();
     this.#watchTrustPrompt();
+    this.#watchStartup();
+  }
+
+  /**
+   * Startup watchdog: confirm Claude actually came up after launch. If it
+   * exited immediately (no conversation to --continue, a bad --resume, a crash,
+   * a missing binary), the PID probe can latch onto the immortal login shell —
+   * so #pollEnd never sees a death and the session sits in 'starting' forever,
+   * never detached. Poll the pane for evidence Claude is running; if none
+   * appears within the deadline, end as process_exited so it shows as detached
+   * (red) instead of stuck. Resolves silently once Claude is visibly up.
+   */
+  #watchStartup(attempts = 0): void {
+    if (this.status === "ended" || this.status === "active") return; // already resolved
+    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    if (pane.ok && paneShowsClaudeRunning(pane.out)) return; // Claude is visibly up
+    if (attempts >= STARTUP_DEADLINE_ATTEMPTS) {
+      process.stderr.write(`[startup] ${this.id}: claude never came up within deadline → detached\n`);
+      this.end("process_exited");
+      return;
+    }
+    setTimeout(() => this.#watchStartup(attempts + 1), STARTUP_POLL_MS);
   }
 
   /**
@@ -1138,6 +1166,18 @@ export function paneShowsReadyPrompt(text: string): boolean {
     if (!t.startsWith("❯")) return false;
     return !/^❯\s*\d+\./.test(t);
   });
+}
+
+/**
+ * True when the pane shows ANY sign Claude's TUI is up and running — broader
+ * than paneShowsReadyPrompt: the ready input box, a selector/trust dialog, the
+ * mode footer, or the "esc to interrupt" working line all count. Used by the
+ * startup watchdog to tell "Claude is alive" from "it exited back to the shell"
+ * (a plain shell prompt matches none of these). Exported for tests.
+ */
+export function paneShowsClaudeRunning(text: string): boolean {
+  if (paneShowsReadyPrompt(text)) return true;
+  return /Yes, I trust this folder|Is this a project you (created|trust)|esc to interrupt|\? for shortcuts|shift\+tab to cycle|⏵⏵|⏸/i.test(text);
 }
 
 /** Footer → permission mode. Exported for tests. */

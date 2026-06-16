@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, parsePermissionModeFromPane } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, parsePermissionModeFromPane } from "./session";
 
 test("ready: bare input prompt", () => {
   expect(paneShowsReadyPrompt("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
@@ -25,6 +25,31 @@ test("not ready: bash prompt before claude starts", () => {
 
 test("ready: user message echoed at prompt", () => {
   expect(paneShowsReadyPrompt("● Hi! What can I help with?\n\n❯ hello there\n")).toBe(true);
+});
+
+test("claude running: ready input prompt", () => {
+  expect(paneShowsClaudeRunning("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
+});
+
+test("claude running: footer only (booting, prompt not painted yet)", () => {
+  expect(paneShowsClaudeRunning("  ⏵⏵ bypass permissions on (shift+tab to cycle)")).toBe(true);
+});
+
+test("claude running: working line", () => {
+  expect(paneShowsClaudeRunning("✻ Thinking… (esc to interrupt)")).toBe(true);
+});
+
+test("claude running: trust dialog is still 'up' (not a failed launch)", () => {
+  expect(paneShowsClaudeRunning(" ❯ 1. Yes, I trust this folder")).toBe(true);
+});
+
+test("not running: shell prompt after a failed launch", () => {
+  const pane = [
+    "ubuntu@fny:~/Workspace/unconv$ claude --continue --dangerously-skip-permissions",
+    "No conversation found to continue",
+    "ubuntu@fny:~/Workspace/unconv$ ",
+  ].join("\n");
+  expect(paneShowsClaudeRunning(pane)).toBe(false);
 });
 
 test("footer → mode: strings captured from claude 2.1.170", () => {
