@@ -238,24 +238,35 @@ export class SessionRegistry {
     // session and approving permission prompts via tmux send-keys is fragile.
     // An explicit permissionMode wins; otherwise `yolo: false` opts out.
     const mode = opts.permissionMode ?? ((opts.yolo ?? true) ? "bypassPermissions" : undefined);
-    const flags: string[] = [];
-    // Teach Claude the <options> convention the app renders as a picker (the
-    // happy SDK injects this per-message; a tmux pane can't, so bake it in).
-    flags.push("--append-system-prompt", optionsPromptArg());
-    if (opts.model) flags.push("--model", opts.model);
-    if (opts.fallbackModel) flags.push("--fallback-model", opts.fallbackModel);
-    if (opts.continue) flags.push("--continue");
-    if (opts.resume_id) flags.push("--resume", opts.resume_id);
-    // claude rejects --fork-session without --resume/--continue, so silently
-    // dropping it here beats a dead tmux window with a usage error in it.
-    if (opts.forkSession && (opts.continue || opts.resume_id)) flags.push("--fork-session");
-    if (mode === "bypassPermissions") flags.push("--dangerously-skip-permissions");
-    else if (mode && mode !== "default") flags.push("--permission-mode", mode);
-    if (opts.chrome) flags.push("--chrome");
-    if (opts.extraArgs?.trim()) flags.push(opts.extraArgs.trim());
+    // Flag list builder, parameterized on whether --continue is included.
+    const buildFlags = (withContinue: boolean): string[] => {
+      const f: string[] = [];
+      // Teach Claude the <options> convention the app renders as a picker (the
+      // happy SDK injects this per-message; a tmux pane can't, so bake it in).
+      f.push("--append-system-prompt", optionsPromptArg());
+      if (opts.model) f.push("--model", opts.model);
+      if (opts.fallbackModel) f.push("--fallback-model", opts.fallbackModel);
+      if (withContinue && opts.continue) f.push("--continue");
+      if (opts.resume_id) f.push("--resume", opts.resume_id);
+      // claude rejects --fork-session without --resume/--continue, so silently
+      // dropping it here beats a dead tmux window with a usage error in it.
+      if (opts.forkSession && (opts.resume_id || (withContinue && opts.continue))) f.push("--fork-session");
+      if (mode === "bypassPermissions") f.push("--dangerously-skip-permissions");
+      else if (mode && mode !== "default") f.push("--permission-mode", mode);
+      if (opts.chrome) f.push("--chrome");
+      if (opts.extraArgs?.trim()) f.push(opts.extraArgs.trim());
+      return f;
+    };
 
+    const flags = buildFlags(true);
     const tmuxWindow = `${this.tmuxSession}:${windowName}`;
-    const cmd = [...envParts, "claude", ...flags].join(" ");
+    const primaryCmd = [...envParts, "claude", ...flags].join(" ");
+    // `--continue` exits non-zero ("No conversation found to continue") in a
+    // cwd with no prior conversation, leaving a stuck/dead pane. Fall back to a
+    // fresh launch (no --continue) via `||` so the session still comes up.
+    const cmd = opts.continue
+      ? `${primaryCmd} || ${[...envParts, "claude", ...buildFlags(false)].join(" ")}`
+      : primaryCmd;
     run("tmux", "new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd);
     // Pin a sane default size so the window doesn't inherit whatever terminal
     // last touched the session (could be 182+ cols). A viewing client drives
