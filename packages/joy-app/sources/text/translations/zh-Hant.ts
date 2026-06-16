@@ -85,6 +85,7 @@ export const zhHant: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `最後活躍時間 ${time}`,
         permissionRequired: '需要權限',
         detached: '已分離',
+        retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: '目前活躍',
         unknown: '未知',
         unread: '新結果',

@@ -84,6 +84,7 @@ export const ca: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `vist per última vegada ${time}`,
         permissionRequired: 'permís requerit',
         detached: 'separat',
+        retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
         unread: 'nous resultats',

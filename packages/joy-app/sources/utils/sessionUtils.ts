@@ -3,7 +3,7 @@ import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 
-export type SessionState = 'disconnected' | 'detached' | 'thinking' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'thinking' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
@@ -50,6 +50,21 @@ export function useSessionStatus(session: Session): SessionStatus {
             shouldShowStatus: true,
             statusColor: '#999',
             statusDotColor: '#999'
+        };
+    }
+
+    // 500-error auto-retry in progress: the daemon is re-sending a failed turn
+    // on a backoff schedule. Shown amber + pulsing, with the attempt count.
+    const retry = session.metadata?.joy__retry;
+    if (retry) {
+        return {
+            state: 'retrying',
+            isConnected: true,
+            statusText: t('status.retrying', { attempt: retry.attempt, total: retry.total }),
+            shouldShowStatus: true,
+            statusColor: '#FF9500',
+            statusDotColor: '#FF9500',
+            isPulsing: true,
         };
     }
 

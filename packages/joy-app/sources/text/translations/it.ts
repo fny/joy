@@ -83,6 +83,7 @@ export const it: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `visto l'ultima volta ${time}`,
         permissionRequired: 'permesso richiesto',
         detached: 'scollegato',
+        retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Attivo ora',
         unknown: 'sconosciuto',
         unread: 'nuovi risultati',

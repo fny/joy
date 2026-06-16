@@ -86,6 +86,7 @@ export const ja: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `最終アクセス: ${time}`,
         permissionRequired: '権限が必要です',
         detached: 'デタッチ',
+        retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'アクティブ',
         unknown: '不明',
         unread: '新しい結果',

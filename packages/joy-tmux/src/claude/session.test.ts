@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, parsePermissionModeFromPane } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, parsePermissionModeFromPane, formatRetryDelay } from "./session";
 
 test("ready: bare input prompt", () => {
   expect(paneShowsReadyPrompt("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
@@ -50,6 +50,14 @@ test("not running: shell prompt after a failed launch", () => {
     "ubuntu@fny:~/Workspace/unconv$ ",
   ].join("\n");
   expect(paneShowsClaudeRunning(pane)).toBe(false);
+});
+
+test("formatRetryDelay: seconds under a minute, minutes above", () => {
+  expect(formatRetryDelay(15)).toBe("15s");
+  expect(formatRetryDelay(30)).toBe("30s");
+  expect(formatRetryDelay(60)).toBe("1m");
+  expect(formatRetryDelay(120)).toBe("2m");
+  expect(formatRetryDelay(960)).toBe("16m");
 });
 
 test("footer → mode: strings captured from claude 2.1.170", () => {
