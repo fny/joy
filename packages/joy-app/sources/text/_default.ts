@@ -83,6 +83,7 @@ export const en = {
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         permissionRequired: 'permission required',
         detached: 'detached',
+        retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Active now',
         unknown: 'unknown',
         unread: 'new results',

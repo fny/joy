@@ -63,6 +63,14 @@ export const MetadataSchema = z.object({
     joy__source: z.string().optional(), // e.g. 'joy-tmux'
     joy__sessionId: z.string().optional(), // tmux session ID on the joy-tmux server
     joy__state: z.enum(['running', 'detached', 'archived']).optional(), // joy lifecycle: detached = Claude died (red status)
+    // joy: a 500-error auto-retry is in progress (daemon re-sending a failed
+    // turn on a backoff schedule). Drives the "retrying" status. null/absent = none.
+    joy__retry: z.object({
+        attempt: z.number(),
+        total: z.number(),
+        nextAt: z.number(),
+        status: z.number(),
+    }).nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;

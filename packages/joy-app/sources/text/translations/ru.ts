@@ -420,6 +420,7 @@ export const ru: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
         permissionRequired: 'требуется разрешение',
         detached: 'отключён',
+        retrying: ({ attempt, total }: { attempt: number; total: number }) => `повтор ${attempt}/${total}`,
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
         unread: 'новые результаты',

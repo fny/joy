@@ -46,6 +46,12 @@ export type SessionStatus = "starting" | "active" | "ended";
 const STARTUP_POLL_MS = 700;
 const STARTUP_DEADLINE_ATTEMPTS = 30; // ~21s — long enough for cold start / --resume
 
+// 500-error auto-retry backoff (seconds): paired ramp, then STOP. 14 attempts,
+// ~63 min total. After Claude's OWN retries are exhausted on a 5xx, joy-tmux
+// re-sends the failed turn on this schedule until it succeeds, abort is pressed,
+// or the schedule runs out.
+const RETRY_SCHEDULE_SEC = [15, 15, 30, 30, 60, 60, 120, 120, 240, 240, 480, 480, 960, 960];
+
 /**
  * Turn a CLI-wrapped command transcript entry into a clean one-line echo so it
  * can show in chat instead of being dropped (which left no confirmation a
@@ -191,6 +197,12 @@ export class Session {
   // Throttle: surface at most one api_error note per turn (Claude retries up to
   // 10×, so a turn can emit several). Reset at turn end.
   #errorNotedThisTurn = false;
+  // 500-error auto-retry. #turnExhausted is armed when Claude's own retries run
+  // out on a 5xx; on turn-end we then re-send the failed prompt (#lastUserText)
+  // on RETRY_SCHEDULE_SEC. #retry holds the live backoff timer + attempt count.
+  #retry: { attempts: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
+  #turnExhausted: { status: number } | null = null;
+  #lastUserText: string | null = null;
   #delivery: DeliveryState | null = null;
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
   // The most recent `!cmd` command, captured from <bash-input> so it can head
@@ -400,6 +412,9 @@ export class Session {
     this.#tailer?.close();
     this.#tailer = null;
     this.#turn = null;
+    if (this.#retry?.timer) clearTimeout(this.#retry.timer);
+    this.#retry = null;
+    this.#turnExhausted = null;
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
@@ -641,6 +656,14 @@ export class Session {
 
   /** Escape → Claude Code interactive interprets as "interrupt generation". */
   abort(): { ok: true } {
+    // Abort also cancels an in-progress 500 auto-retry (pressing abort means
+    // "stop trying"), and disarms a pending retry so the next turn-end won't
+    // start one.
+    if (this.#retry) {
+      this.#emitAgentNote(`⏹ Auto-retry cancelled`, Date.now(), this.claudeSessionId);
+      this.#clearRetry();
+    }
+    this.#turnExhausted = null;
     run("tmux", "send-keys", "-t", this.tmuxWindow, "Escape");
     this.#relay?.setThinking(false);
     return { ok: true };
@@ -774,6 +797,52 @@ export class Session {
       }
     }
     this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: sid });
+  }
+
+  // ── 500-error auto-retry ──────────────────────────────────────────────────────
+
+  /**
+   * Schedule the next auto-retry after a 5xx-exhausted turn. Walks
+   * RETRY_SCHEDULE_SEC by attempt count; when it runs out, gives up. Publishes
+   * the retry banner (updateRetry) and an agent note with the countdown.
+   */
+  #scheduleRetry(status: number, sid?: string): void {
+    const made = this.#retry?.attempts ?? 0;
+    if (made >= RETRY_SCHEDULE_SEC.length) {
+      this.#emitAgentNote(`⚠️ API ${status}: auto-retry exhausted after ${RETRY_SCHEDULE_SEC.length} attempts — giving up`, Date.now(), sid);
+      this.#clearRetry();
+      return;
+    }
+    const delaySec = RETRY_SCHEDULE_SEC[made];
+    const attempt = made + 1;
+    const nextAt = Date.now() + delaySec * 1000;
+    if (this.#retry?.timer) clearTimeout(this.#retry.timer);
+    this.#retry = { attempts: attempt, timer: setTimeout(() => this.#fireRetry(sid), delaySec * 1000) };
+    void this.#relay?.updateRetry({ attempt, total: RETRY_SCHEDULE_SEC.length, nextAt, status });
+    this.#emitAgentNote(`⏳ API ${status} — retrying in ${formatRetryDelay(delaySec)} (attempt ${attempt}/${RETRY_SCHEDULE_SEC.length})`, Date.now(), sid);
+  }
+
+  /** Fire a scheduled retry: re-send the failed prompt through the queue. */
+  #fireRetry(sid?: string): void {
+    if (!this.#retry) return;
+    this.#retry.timer = null;
+    const text = this.#lastUserText;
+    if (!text) {
+      this.#emitAgentNote(`⚠️ Auto-retry: no prompt to re-send — giving up`, Date.now(), sid);
+      this.#clearRetry();
+      return;
+    }
+    // Re-send via the queue so it waits for the ready prompt, types, and a fresh
+    // turn confirms it landed. If that turn 5xx-fails again, #turnExhausted is
+    // re-armed and the turn-end handler calls #scheduleRetry for the next step.
+    this.enqueue(text);
+  }
+
+  /** Tear down any pending retry (timer + banner). */
+  #clearRetry(): void {
+    if (this.#retry?.timer) clearTimeout(this.#retry.timer);
+    this.#retry = null;
+    void this.#relay?.updateRetry(null);
   }
 
   #ensureDelivery(): DeliveryState | null {
@@ -960,6 +1029,16 @@ export class Session {
       }
       this.#turn = null;
       this.#relay?.setThinking(false);
+      // 500-error auto-retry: if Claude exhausted its own retries on a 5xx this
+      // turn, re-send on the backoff schedule. A turn that ended cleanly while a
+      // retry was pending means the re-send worked → clear it.
+      if (this.#turnExhausted) {
+        const { status } = this.#turnExhausted;
+        this.#turnExhausted = null;
+        this.#scheduleRetry(status, sid);
+        return; // hold the queue — the retry owns the next dispatch
+      }
+      if (this.#retry) this.#clearRetry();
       this.#maybeDrainQueue(); // turn done → send the next queued message
       return;
     }
@@ -978,6 +1057,13 @@ export class Session {
       if (!this.#errorNotedThisTurn) {
         this.#errorNotedThisTurn = true;
         this.#emitAgentNote(`⚠️ API error: ${formatted}`, entryTimeMs, sid);
+      }
+      // Arm auto-retry when Claude's LAST internal retry just failed on a 5xx —
+      // i.e. it's about to give up on this turn. The turn-end handler then takes
+      // over and re-sends on the backoff schedule.
+      const status = Number(err.status);
+      if (status >= 500 && Number(entry.retryAttempt) >= Number(entry.maxRetries)) {
+        this.#turnExhausted = { status };
       }
       return;
     }
@@ -1077,6 +1163,7 @@ export class Session {
           }
         }
       }
+      this.#lastUserText = content; // the prompt to re-send if this turn 5xx-fails
       this.#deps.addChatMessage({ role: "user", content, source: "cli", session_id: sid });
 
     } else if (role === "assistant") {
@@ -1178,6 +1265,11 @@ export function paneShowsReadyPrompt(text: string): boolean {
 export function paneShowsClaudeRunning(text: string): boolean {
   if (paneShowsReadyPrompt(text)) return true;
   return /Yes, I trust this folder|Is this a project you (created|trust)|esc to interrupt|\? for shortcuts|shift\+tab to cycle|⏵⏵|⏸/i.test(text);
+}
+
+/** Human-readable backoff delay for retry notes: "15s", "2m". Exported for tests. */
+export function formatRetryDelay(sec: number): string {
+  return sec < 60 ? `${sec}s` : `${Math.round(sec / 60)}m`;
 }
 
 /** Footer → permission mode. Exported for tests. */

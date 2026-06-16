@@ -637,6 +637,14 @@ export class RelayClient {
 /** Lifecycle state the app reads from metadata to colour a session's status. */
 export type JoyLifecycleState = 'running' | 'detached' | 'archived';
 
+/** Retry banner the app renders during 500-error auto-retry. */
+export interface JoyRetryInfo {
+  attempt: number;   // 1-based current attempt
+  total: number;     // total attempts before giving up
+  nextAt: number;    // epoch ms when the next re-send fires
+  status: number;    // the HTTP status that triggered the retry (e.g. 500)
+}
+
 export class RelaySession {
   private readonly client: RelayClient;
   readonly relaySessionId: string;
@@ -724,6 +732,14 @@ export class RelaySession {
   async updateJoyState(state: JoyLifecycleState): Promise<void> {
     if ((this.metadata?.joy__state as string | undefined) === state) return;
     await this.mergeMetadata({ joy__state: state });
+  }
+
+  /**
+   * Set (or clear, with null) the 500-error auto-retry banner the app shows
+   * while a failed turn is being re-sent on a backoff schedule.
+   */
+  async updateRetry(info: JoyRetryInfo | null): Promise<void> {
+    await this.mergeMetadata({ joy__retry: info });
   }
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;

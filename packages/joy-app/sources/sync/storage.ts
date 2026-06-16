@@ -112,6 +112,8 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         state = 'detached'; // Claude died — red status, takes priority over plain online
     } else if (!isOnline) {
         state = 'disconnected';
+    } else if (session.metadata?.joy__retry) {
+        state = 'retrying'; // daemon re-sending a 500-failed turn on a backoff schedule
     } else if (hasPermissions) {
         state = 'permission_required';
     } else if (session.thinking) {
