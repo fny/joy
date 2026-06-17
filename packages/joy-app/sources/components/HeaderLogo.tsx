@@ -10,8 +10,9 @@ import { BlockLogo } from '@/components/JoyLogotype';
 export const HeaderLogo = React.memo(() => {
     return (
         <View style={{
-            width: 32,
-            height: 32,
+            width: 42,
+            height: 42,
+            padding: 5,
             alignItems: 'center',
             justifyContent: 'center',
         }}>
