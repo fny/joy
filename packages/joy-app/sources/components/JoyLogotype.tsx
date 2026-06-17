@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Text, type TextStyle } from "react-native";
+import { useUnistyles } from "react-native-unistyles";
 import { getMonoFont } from "@/constants/Typography";
 
 // ASCII-art "joy" wordmark in Unicode block elements, rendered as monospace
@@ -93,13 +94,6 @@ function lightenColor(hex: string, amount: number, gray: number): string {
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
 }
 
-// Lightened version of every palette color (the drop-shadow tint), derived from
-// PALETTE via the same lightening used in the shadow — keyed by the original hex
-// so a cell color maps straight to its shadow color. Computed once at module load.
-const PALLETE_LIGHTENED: Record<string, string> = Object.fromEntries(
-  Object.values(PALETTE).map((hex) => [hex, lightenColor(hex, 0.7, 250)]),
-);
-
 const WEIGHTS: Record<string, number> = {
   magenta: 3,
   orange: 2,
@@ -149,6 +143,7 @@ const Grid = React.memo(
     colorAt,
     color,
     shadow = 5,
+    gray = 250,
   }: {
     lines: string[];
     size: number;
@@ -156,6 +151,8 @@ const Grid = React.memo(
     color?: string;
     /** hard drop-shadow offset in px (no blur). Defaults to the wordmark's 5. */
     shadow?: number;
+    /** graypoint the shadow tint lerps toward (0–255). Default 250 (near-white). */
+    gray?: number;
   }) => {
     const style: TextStyle = {
       fontFamily: getMonoFont(),
@@ -181,7 +178,7 @@ const Grid = React.memo(
                   key={c}
                   style={{
                     color: cell,
-                    textShadowColor: PALLETE_LIGHTENED[cell],
+                    textShadowColor: lightenColor(cell, 0.7, gray),
                     textShadowOffset: { width: shadow, height: shadow },
                     textShadowRadius: 0,
                   }}
@@ -248,6 +245,7 @@ export const JoyLogoTypeJ = React.memo(({ size = 12 }: { size?: number }) => (
 // drop-shadow as the wordmark. Replaces the old solid 4×3 block mark.
 const ANSI_J_LINES = ["     ██", "     ██", "     ██", "██   ██", " █████ "];
 export const BlockLogo = React.memo(({ size = 12, seed = 1 }: { size?: number; seed?: number }) => {
+  const { theme } = useUnistyles();
   // Roll once per seed so colors stay stable across re-renders.
   const grid = React.useMemo(() => {
     const rng = mulberry32(seed);
@@ -258,5 +256,7 @@ export const BlockLogo = React.memo(({ size = 12, seed = 1 }: { size?: number; s
   // Scale the hard shadow with size so it stays subtle at small header sizes
   // (a fixed 5px offset overwhelms an 8px glyph).
   const shadow = Math.max(2, Math.round(size * 0.55));
-  return <Grid lines={ANSI_J_LINES} size={size} colorAt={(r, c) => grid[r]?.[c]} shadow={shadow} />;
+  // Tint the shadow toward a dark graypoint in dark mode, light in light mode.
+  const gray = theme.dark ? 40 : 230;
+  return <Grid lines={ANSI_J_LINES} size={size} colorAt={(r, c) => grid[r]?.[c]} shadow={shadow} gray={gray} />;
 });
