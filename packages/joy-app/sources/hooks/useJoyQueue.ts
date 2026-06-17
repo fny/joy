@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { apiSocket } from '@/sync/apiSocket';
+import { useActiveInterval } from './useActiveInterval';
 
 // Mirrors joy-tmux Session.queueState(). The queue holds messages the user
 // lined up while Claude was busy; the daemon dispatches them one at a time
@@ -29,13 +30,9 @@ export function useJoyQueue(
     }, [machineId, joySessionId, apply]);
 
     // Poll lightly while the session is active so the strip stays live as the
-    // daemon drains items. Stops when the screen/ session goes inactive.
-    React.useEffect(() => {
-        if (!active || !machineId || !joySessionId) return;
-        void refresh();
-        const t = setInterval(() => void refresh(), 1200);
-        return () => clearInterval(t);
-    }, [active, machineId, joySessionId, refresh]);
+    // daemon drains items — but only while the screen is focused AND the app is
+    // foregrounded, so a locked phone doesn't keep hitting the daemon (battery).
+    useActiveInterval(() => void refresh(), 1200, active && !!machineId && !!joySessionId);
 
     const call = React.useCallback(async (rpc: string, params: Record<string, unknown>) => {
         if (!machineId || !joySessionId) return;

@@ -1,9 +1,9 @@
 // Manages joy-tmux sessions via RPC through the relay.
 // Mirrors useJoyTmuxSessions but uses machineRPC instead of direct HTTP.
 import * as React from 'react';
-import { useFocusEffect } from 'expo-router';
 import { apiSocket } from '@/sync/apiSocket';
 import type { JoySession } from '@/joy/types';
+import { useActiveInterval } from './useActiveInterval';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -38,11 +38,8 @@ export function useJoyRpcSessions(machineId: string | null) {
         refresh().finally(() => { if (mountedRef.current) setLoading(false); });
     }, [machineId, refresh]);
 
-    useFocusEffect(React.useCallback(() => {
-        if (!machineId) return;
-        const id = setInterval(refresh, POLL_INTERVAL_MS);
-        return () => clearInterval(id);
-    }, [machineId, refresh]));
+    // Poll only while focused AND foregrounded (battery — see useActiveInterval).
+    useActiveInterval(refresh, POLL_INTERVAL_MS, !!machineId);
 
     const createSession = React.useCallback(async (cwd: string) => {
         if (!machineId) throw new Error('no machine selected');

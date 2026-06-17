@@ -18,6 +18,7 @@ import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
 import { AnsiText } from '@/components/AnsiText';
 import { TerminalKeyBar } from '@/components/TerminalKeyBar';
+import { useActiveInterval } from '@/hooks/useActiveInterval';
 
 const POLL_MS = 1500;
 // Pane font metrics — char width ≈ 0.6em for the mono fonts below; used to
@@ -85,15 +86,12 @@ export default React.memo(function JoyPaneScreen() {
             .catch(() => { /* best-effort */ });
     }, [machineId, sessionId, refresh]);
 
-    // Poll while the screen is focused.
-    useFocusEffect(React.useCallback(() => {
-        // Re-claim the width on focus (the size may have drifted to another
-        // viewer or a real terminal since we last looked).
-        lastColsRef.current = 0;
-        void refresh();
-        const timer = setInterval(() => void refresh(), POLL_MS);
-        return () => clearInterval(timer);
-    }, [refresh]));
+    // Re-claim the width on focus (the size may have drifted to another viewer
+    // or a real terminal since we last looked).
+    useFocusEffect(React.useCallback(() => { lastColsRef.current = 0; }, []));
+    // Poll only while focused AND foregrounded so a locked phone doesn't keep
+    // mirroring the pane every 1.5s (battery — see useActiveInterval).
+    useActiveInterval(() => void refresh(), POLL_MS);
 
     const sendScript = React.useCallback(async (script: string, literal = false) => {
         if (!script) return;
