@@ -1,10 +1,24 @@
 {
-  "name": "joy-tmux",
+  "name": "@fny/joy-tmux",
   "version": "1.0.0",
-  "private": true,
+  "description": "joy-tmux daemon + CLI — run Claude Code sessions in tmux, bridged to the joy/Happy relay.",
   "type": "module",
   "bin": {
     "joy": "./src/cli.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fny/joy.git",
+    "directory": "packages/joy-tmux"
   },
   "scripts": {
     "start": "tsx src/server.ts",
@@ -16,12 +30,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "socket.io-client": "^4.8.0",
+    "tsx": "^4.20.6",
     "tweetnacl": "^1.0.3",
     "zod": "^3.24.4"
   },
   "devDependencies": {
     "@types/node": "^20.12.3",
-    "tsx": "^4.20.6",
     "typescript": "5.9.3",
     "vitest": "^3.2.0"
   },
