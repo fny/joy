@@ -148,11 +148,14 @@ const Grid = React.memo(
     size,
     colorAt,
     color,
+    shadow = 5,
   }: {
     lines: string[];
     size: number;
     colorAt: ColorAt;
     color?: string;
+    /** hard drop-shadow offset in px (no blur). Defaults to the wordmark's 5. */
+    shadow?: number;
   }) => {
     const style: TextStyle = {
       fontFamily: getMonoFont(),
@@ -179,7 +182,7 @@ const Grid = React.memo(
                   style={{
                     color: cell,
                     textShadowColor: PALLETE_LIGHTENED[cell],
-                    textShadowOffset: { width: 5, height: 5 },
+                    textShadowOffset: { width: shadow, height: shadow },
                     textShadowRadius: 0,
                   }}
                 >
@@ -240,27 +243,20 @@ export const JoyLogoTypeJ = React.memo(({ size = 12 }: { size?: number }) => (
   />
 ));
 
-// Solid 4×3 confetti block — a compact, fully-filled app-icon mark.
-const BLOCK_LINES = ["████", "████", "████"];
-const BLOCK_COLORS: Record<number, Record<number, string>> = {
-  0: {
-    0: PALETTE.cyan,
-    1: PALETTE.yellow,
-    2: PALETTE.magenta,
-    3: PALETTE.purple,
-  },
-  1: { 0: PALETTE.blue, 1: PALETTE.darkCyan, 2: PALETTE.cyan, 3: PALETTE.blue },
-  2: {
-    0: PALETTE.purple,
-    1: PALETTE.red,
-    2: PALETTE.orange,
-    3: PALETTE.yellow,
-  },
-};
-export const BlockLogo = React.memo(({ size = 12 }: { size?: number }) => (
-  <Grid
-    lines={BLOCK_LINES}
-    size={size}
-    colorAt={(r, c) => BLOCK_COLORS[r]?.[c]}
-  />
-));
+// ANSI-Shadow "J" — block fill only. Confetti colors are rolled weighted-random
+// per `seed` (seed 1 reproduces the exported PNG), with the same hard
+// drop-shadow as the wordmark. Replaces the old solid 4×3 block mark.
+const ANSI_J_LINES = ["     ██", "     ██", "     ██", "██   ██", " █████ "];
+export const BlockLogo = React.memo(({ size = 12, seed = 1 }: { size?: number; seed?: number }) => {
+  // Roll once per seed so colors stay stable across re-renders.
+  const grid = React.useMemo(() => {
+    const rng = mulberry32(seed);
+    return ANSI_J_LINES.map((line) =>
+      [...line].map((ch) => (ch === " " ? undefined : pickWeighted(rng))),
+    );
+  }, [seed]);
+  // Scale the hard shadow with size so it stays subtle at small header sizes
+  // (a fixed 5px offset overwhelms an 8px glyph).
+  const shadow = Math.max(2, Math.round(size * 0.55));
+  return <Grid lines={ANSI_J_LINES} size={size} colorAt={(r, c) => grid[r]?.[c]} shadow={shadow} />;
+});
