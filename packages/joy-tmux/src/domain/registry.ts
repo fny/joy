@@ -338,7 +338,6 @@ export class SessionRegistry {
 
     this.#sessions.set(id, session);
     this.broadcast("session_update", session.toJSON());
-    session.beginWatching();
 
     if (relayPromise) {
       try {
@@ -348,6 +347,12 @@ export class SessionRegistry {
         process.stderr.write(`[relay] failed to create session for ${id}: ${e}\n`);
       }
     }
+
+    // Start the tailer AFTER the relay is attached. On --resume/restart the
+    // transcript already exists, so startTailer() synchronously replays the
+    // backfill; if we watched before attach, those history entries would be
+    // sent into a null relay and silently dropped (the app showing no history).
+    session.beginWatching();
 
     return session;
   }
