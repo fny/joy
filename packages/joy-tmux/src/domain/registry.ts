@@ -11,7 +11,7 @@ import { homedir } from "os";
 import { run } from "../tmux/shell";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
-import { cwdToTranscriptDir, findLatestTranscript } from "../claude/transcript";
+import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset } from "../claude/transcript";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 
 export interface CreateSessionOpts {
@@ -20,6 +20,8 @@ export interface CreateSessionOpts {
   effort?: string;
   continue?: boolean;
   resume_id?: string;
+  /** Cap the --resume history backfill to ~this many MB (snapped to a turn). Default 2; 0 = full. */
+  resumeLimitMb?: number;
   createDir?: boolean;
   yolo?: boolean;
   /**
@@ -309,6 +311,20 @@ export class SessionRegistry {
       pid = isNaN(child) ? shellPid : child;
     }
 
+    // On --resume we know the exact transcript. Pin it so the tailer replays
+    // its history into the new relay session, instead of relying on the
+    // mtime>=startedAt finder — which misses a resumed file (Claude touches it
+    // before startedAt while loading context, then sits idle at the prompt).
+    // Cap the backfill to the last ~resumeLimitMb (default 2), snapped back to a
+    // turn boundary so a huge transcript doesn't flood the UI on resume.
+    let resumeTranscriptPath: string | undefined;
+    let resumeStartOffset = 0;
+    if (opts.resume_id) {
+      resumeTranscriptPath = join(cwdToTranscriptDir(cwd), `${opts.resume_id}.jsonl`);
+      const capBytes = Math.max(0, opts.resumeLimitMb ?? 2) * 1024 * 1024;
+      resumeStartOffset = cappedTailOffset(resumeTranscriptPath, capBytes);
+    }
+
     const session = new Session({
       id, pid, tmuxWindow, cwd,
       model: opts.model,
@@ -316,13 +332,8 @@ export class SessionRegistry {
       flags,
       status: "starting",
       startedAt: Date.now(),
-      // On --resume we know the exact transcript. Pin it so the tailer replays
-      // its full history into the new relay session, instead of relying on the
-      // mtime>=startedAt finder — which misses a resumed file (Claude touches it
-      // before startedAt while loading context, then sits idle at the prompt).
-      transcriptPath: opts.resume_id
-        ? join(cwdToTranscriptDir(cwd), `${opts.resume_id}.jsonl`)
-        : undefined,
+      transcriptPath: resumeTranscriptPath,
+      transcriptStartOffset: resumeStartOffset,
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);
