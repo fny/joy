@@ -87,7 +87,7 @@ function NewJoyTmuxSessionScreen() {
 
     // Optional prefill (e.g. the per-repo "+" in the session list passes the
     // repo's machine + path when this page is the default New session).
-    const params = useLocalSearchParams<{ machineId?: string; path?: string }>();
+    const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string }>();
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
     const [modelIndex, setModelIndex] = React.useState(0);
@@ -106,6 +106,9 @@ function NewJoyTmuxSessionScreen() {
     // disabled until continue is on.
     const [forkSession, setForkSession] = React.useState(false);
     const [chrome, setChrome] = React.useState(false);
+    // --resume <id>: resume a specific Claude conversation by session id.
+    // Takes precedence over `continue` (which resumes the most recent one).
+    const [resumeId, setResumeId] = React.useState(params.resumeId ?? '');
     // Free-form extra CLI arguments appended verbatim to the claude command.
     const [extraArgs, setExtraArgs] = React.useState('');
     const [prompt, setPrompt] = React.useState('');
@@ -243,6 +246,7 @@ function NewJoyTmuxSessionScreen() {
                 model?: string;
                 effort?: string;
                 continue?: boolean;
+                resume_id?: string;
                 createDir?: boolean;
                 permissionMode?: string;
                 fallbackModel?: string;
@@ -253,11 +257,14 @@ function NewJoyTmuxSessionScreen() {
                 cwd,
                 model: currentModel?.key,
                 effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
-                continue: continueLast || undefined,
+                // resume a specific conversation by id; it takes precedence over
+                // `continue` (most-recent), so don't send both.
+                resume_id: resumeId.trim() || undefined,
+                continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: currentMode.key,
                 fallbackModel: currentFallback.key ?? undefined,
-                forkSession: (continueLast && forkSession) || undefined,
+                forkSession: ((continueLast || resumeId.trim()) && forkSession) || undefined,
                 chrome: chrome || undefined,
                 extraArgs: extraArgs.trim() || undefined,
             }),
@@ -485,6 +492,22 @@ function NewJoyTmuxSessionScreen() {
                                     {continueLast ? 'continue under a new session id' : 'requires continue'}
                                 </Text>
                             </Pressable>
+
+                            {/* Resume a specific Claude conversation by session id
+                                (--resume). Overrides continue when set. */}
+                            <View style={styles.configRow}>
+                                <Ionicons name="refresh-outline" size={15} color={theme.colors.textSecondary} />
+                                <TextInput
+                                    value={resumeId}
+                                    onChangeText={setResumeId}
+                                    placeholder="resume session id"
+                                    placeholderTextColor={theme.colors.textSecondary}
+                                    style={styles.argsInput}
+                                    autoCapitalize="none"
+                                    autoCorrect={false}
+                                    autoComplete="off"
+                                />
+                            </View>
 
                             {/* Chrome integration */}
                             <Pressable
