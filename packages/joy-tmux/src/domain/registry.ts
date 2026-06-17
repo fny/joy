@@ -222,6 +222,13 @@ export class SessionRegistry {
     if (opts.model && !SAFE_ID.test(opts.model)) throw new Error("invalid model");
     if (opts.fallbackModel && !SAFE_ID.test(opts.fallbackModel)) throw new Error("invalid fallbackModel");
     if (opts.resume_id && !SAFE_ID.test(opts.resume_id)) throw new Error("invalid resume_id");
+    // Resume target must actually exist — Claude stores one transcript per
+    // session id under the cwd's project dir. Validate up front so a bad id
+    // surfaces as a clear "session not found" instead of Claude exiting and the
+    // session limping into a detached state.
+    if (opts.resume_id && !existsSync(join(cwdToTranscriptDir(cwd), `${opts.resume_id}.jsonl`))) {
+      throw new Error(`Session "${opts.resume_id}" not found in ${cwd}`);
+    }
     if (opts.effort && !SAFE_EFFORT.test(opts.effort)) throw new Error("invalid effort");
     if (opts.permissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw new Error("invalid permissionMode");
     // extraArgs is appended to the shell line verbatim (the caller may need
