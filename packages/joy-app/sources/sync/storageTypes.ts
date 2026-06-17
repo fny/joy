@@ -71,6 +71,14 @@ export const MetadataSchema = z.object({
         nextAt: z.number(),
         status: z.number(),
     }).nullable().optional(),
+    // joy: the daemon's message queue, pushed via metadata so the app doesn't
+    // have to poll joy-queue-list. queue = lined-up messages; inFlight = the one
+    // typed-but-not-confirmed; paused = auto-drain halted after a failed dispatch.
+    joy__queue: z.object({
+        queue: z.array(z.object({ id: z.string(), text: z.string(), createdAt: z.number() })),
+        inFlight: z.string().nullable(),
+        paused: z.boolean(),
+    }).nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;

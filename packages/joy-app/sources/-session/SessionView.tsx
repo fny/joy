@@ -519,7 +519,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const sessionStatus = useSessionStatus(session);
     // joy message queue: messages sent while Claude is busy line up here and
     // the daemon drains them one at a time. Only meaningful for joy sessions.
-    const joyQueue = useJoyQueue(machineId, joySessionId, isJoyTmux && sessionStatus.isConnected);
+    const joyQueue = useJoyQueue(machineId, joySessionId, session.metadata?.joy__queue);
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const experiments = useSetting('experiments');

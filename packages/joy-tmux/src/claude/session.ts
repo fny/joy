@@ -356,6 +356,8 @@ export class Session {
     // plain socket reconnect keeps #retry (the backoff timer survives in-process),
     // so a genuinely-live banner is preserved. (Idempotent — no-op if unset.)
     if (!this.#retry) void rs.updateRetry(null);
+    // Reflect the current queue on (re)attach — recovery/reconnect included.
+    void rs.updateQueue(this.queueState());
 
     // File events arrive ahead of the user-text message. Kick off the
     // download/decrypt immediately; the next message drains the bucket.
@@ -556,7 +558,10 @@ export class Session {
   }
 
   #broadcastQueue(): void {
-    this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...this.queueState() });
+    const state = this.queueState();
+    this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...state });
+    // Push to the app via session metadata so it doesn't have to poll.
+    void this.#relay?.updateQueue(state);
   }
 
   /**
