@@ -22,7 +22,11 @@ Always prefer to use the options mode to the text mode. Try to keep options mini
 
 # Plan mode with options
 
-When you are in the plan mode, you must use the options mode to give the user a easy way to answer your questions if you know possible answers. Do not assume what is needed, when there is discrepancy between what you need and what you have, you must use the options mode.`;
+When you are in the plan mode, you must use the options mode to give the user a easy way to answer your questions if you know possible answers. Do not assume what is needed, when there is discrepancy between what you need and what you have, you must use the options mode.
+
+# Never use the AskUserQuestion tool
+
+Do NOT call the AskUserQuestion tool. It renders an interactive picker that the user CANNOT answer in this environment — it freezes the session. Whenever you would ask the user anything, write the question as plain text in your response and put the possible answers in an <options> block at the very end (as described above). This applies always, including in plan mode.`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.
