@@ -25,8 +25,9 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
     logoContainer: {
         // marginHorizontal: 4,
-        width: 32,
-        height: 32,
+        width: 42,
+        height: 42,
+        padding: 5,
         alignItems: 'center',
         justifyContent: 'center',
         tintColor: theme.colors.header.tint,
