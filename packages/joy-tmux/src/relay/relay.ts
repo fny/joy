@@ -739,6 +739,9 @@ export class RelaySession {
    * while a failed turn is being re-sent on a backoff schedule.
    */
   async updateRetry(info: JoyRetryInfo | null): Promise<void> {
+    // Idempotent clear: skip the write when there's nothing set, so a recovered
+    // session with no active retry can reconcile its banner without churn.
+    if (info == null && this.metadata?.joy__retry == null) return;
     await this.mergeMetadata({ joy__retry: info });
   }
 

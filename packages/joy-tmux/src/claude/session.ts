@@ -349,6 +349,14 @@ export class Session {
     this.#relay = rs;
     this.relaySessionId = rs.relaySessionId;
 
+    // Reconcile a stale retry banner. If the relay says we were retrying but no
+    // retry is live in memory, clear it. That's the daemon-restart case:
+    // recover() rebuilds the Session with #retry=null, but joy__retry persisted
+    // server-side, so the app would otherwise show a stuck "retrying N/…". A
+    // plain socket reconnect keeps #retry (the backoff timer survives in-process),
+    // so a genuinely-live banner is preserved. (Idempotent — no-op if unset.)
+    if (!this.#retry) void rs.updateRetry(null);
+
     // File events arrive ahead of the user-text message. Kick off the
     // download/decrypt immediately; the next message drains the bucket.
     rs.onFileEvent = (ev) => {
