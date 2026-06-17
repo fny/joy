@@ -642,6 +642,7 @@ export const ja: TranslationStructure = {
         deleted: '削除済み',
         changedFiles: ({ count }: { count: number }) => `${count}件の変更ファイル`,
         allFiles: 'すべてのファイル',
+        collapseAll: 'Collapse all',
         editFile: '編集',
         saveFile: '保存',
         failedToRead: 'ファイルの読み取りに失敗しました',
