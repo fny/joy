@@ -847,7 +847,7 @@ importers:
         version: 11.1.0
       vitest:
         specifier: ^3.2.4
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@24.12.2)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@24.12.2)(jiti@1.21.7)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
       zod:
         specifier: ^4.0.0
         version: 4.4.3
@@ -1703,7 +1703,7 @@ importers:
         version: 11.1.0
       vitest:
         specifier: ^3.2.4
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@24.12.2)(jiti@1.21.7)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@24.12.2)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
       zod:
         specifier: ^4.0.0
         version: 4.4.3
@@ -1756,6 +1756,9 @@ importers:
       socket.io-client:
         specifier: ^4.8.0
         version: 4.8.3
+      tsx:
+        specifier: ^4.20.6
+        version: 4.21.0
       tweetnacl:
         specifier: ^1.0.3
         version: 1.0.3
@@ -1766,9 +1769,6 @@ importers:
       '@types/node':
         specifier: ^20.12.3
         version: 20.19.39
-      tsx:
-        specifier: ^4.20.6
-        version: 4.21.0
       typescript:
         specifier: 5.9.3
         version: 5.9.3
@@ -11110,6 +11110,9 @@ packages:
 
   react-native-enriched@0.1.6:
     resolution: {integrity: sha512-UMNmwbcURb+/CdQv6bNMryvMqZRxKRNvO0C4XAZKe9d/fkif+mAjAe6o/eTBx6ior42464V8L2zBCbkVXERHig==}
+    deprecated: |-
+      react-native-enriched has been renamed to react-native-enriched-html.
+      This package will not receive any further updates. Migrate with no breaking changes to https://github.com/software-mansion/react-native-enriched-html/releases/tag/v1.0.0
     peerDependencies:
       react: '*'
       react-native: '*'
