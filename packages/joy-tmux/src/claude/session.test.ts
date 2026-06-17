@@ -166,6 +166,7 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
     relaySessionId: "rs-e1",
     start() {}, stop() {}, send() {},
     setThinking(v: boolean) { thinkingCalls.push(v); },
+    updateRetry() {},
   };
   s.attachRelay(rs, true);
 
