@@ -87,12 +87,20 @@ export function startHttpServer(opts: {
       res.writeHead(status, headers);
       res.end(body);
     };
-    const html = (file: string) =>
-      send(200, { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" },
-        readFileSync(join(publicDir, file), "utf-8"));
+    const html = (file: string) => {
+      let body: string;
+      try {
+        body = readFileSync(join(publicDir, file), "utf-8");
+      } catch {
+        // Missing static asset must not crash the daemon — 404 instead of throwing.
+        return send(404, { ...corsHeaders, "Content-Type": "text/plain; charset=utf-8" }, "not found");
+      }
+      return send(200, { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" }, body);
+    };
     const json = (data: unknown, status = 200) =>
       send(status, { ...corsHeaders, "Content-Type": "application/json" }, JSON.stringify(data));
 
+    try {
     if (method === "OPTIONS") return send(204, corsHeaders);
 
     // Token check on all mutating routes
@@ -161,6 +169,14 @@ export function startHttpServer(opts: {
     }
 
     return send(404, corsHeaders, "not found");
+    } catch (e) {
+      // Belt-and-suspenders: no single request may take the daemon down. Log
+      // and 500 if the response hasn't started yet.
+      process.stderr.write(`[http] request error: ${e}\n`);
+      if (!res.headersSent) {
+        try { send(500, { ...corsHeaders, "Content-Type": "application/json" }, JSON.stringify({ error: String(e) })); } catch { /* response already gone */ }
+      }
+    }
   });
 
   // Disable the idle-socket timeout so long-lived SSE (/events) responses
