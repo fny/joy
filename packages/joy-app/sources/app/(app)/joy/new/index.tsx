@@ -109,6 +109,9 @@ function NewJoyTmuxSessionScreen() {
     // --resume <id>: resume a specific Claude conversation by session id.
     // Takes precedence over `continue` (which resumes the most recent one).
     const [resumeId, setResumeId] = React.useState(params.resumeId ?? '');
+    // How much history (MB) to backfill on --resume. Big transcripts are mostly
+    // tool calls; 2 MB ≈ the recent conversation. 0 = full history.
+    const [resumeMb, setResumeMb] = React.useState('2');
     // Free-form extra CLI arguments appended verbatim to the claude command.
     const [extraArgs, setExtraArgs] = React.useState('');
     const [prompt, setPrompt] = React.useState('');
@@ -247,6 +250,7 @@ function NewJoyTmuxSessionScreen() {
                 effort?: string;
                 continue?: boolean;
                 resume_id?: string;
+                resume_limit_mb?: number;
                 createDir?: boolean;
                 permissionMode?: string;
                 fallbackModel?: string;
@@ -260,6 +264,8 @@ function NewJoyTmuxSessionScreen() {
                 // resume a specific conversation by id; it takes precedence over
                 // `continue` (most-recent), so don't send both.
                 resume_id: resumeId.trim() || undefined,
+                // history (MB) to backfill on resume; default 2, 0 = full.
+                resume_limit_mb: resumeId.trim() ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 2) : undefined,
                 continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: currentMode.key,
@@ -508,6 +514,25 @@ function NewJoyTmuxSessionScreen() {
                                     autoComplete="off"
                                 />
                             </View>
+
+                            {/* History to backfill on resume (MB). Only relevant
+                                when a resume id is set. 0 = full history. */}
+                            {resumeId.trim() ? (
+                                <View style={styles.configRow}>
+                                    <Ionicons name="time-outline" size={15} color={theme.colors.textSecondary} />
+                                    <TextInput
+                                        value={resumeMb}
+                                        onChangeText={setResumeMb}
+                                        placeholder="2"
+                                        placeholderTextColor={theme.colors.textSecondary}
+                                        style={styles.argsInput}
+                                        keyboardType="numeric"
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                    />
+                                    <Text style={styles.configHint} numberOfLines={1}>MB of history (0 = all)</Text>
+                                </View>
+                            ) : null}
 
                             {/* Chrome integration */}
                             <Pressable

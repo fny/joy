@@ -167,6 +167,8 @@ export interface SessionInit {
   pid?: number;
   claudeSessionId?: string;
   transcriptPath?: string;
+  /** Byte offset to start tailing at (resume backfill cap, snapped to a turn). */
+  transcriptStartOffset?: number;
 }
 
 export class Session {
@@ -205,6 +207,9 @@ export class Session {
   #retry: { attempts: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
   #turn5xxStatus: number | null = null;
   #lastUserText: string | null = null;
+  // Byte offset the tailer starts at — non-zero only for a capped --resume
+  // backfill (snapped to a turn boundary so we don't replay a partial turn).
+  #transcriptStartOffset = 0;
   #delivery: DeliveryState | null = null;
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
   // The most recent `!cmd` command, captured from <bash-input> so it can head
@@ -243,6 +248,7 @@ export class Session {
     this.pid = init.pid;
     this.claudeSessionId = init.claudeSessionId;
     this.transcriptPath = init.transcriptPath;
+    this.#transcriptStartOffset = init.transcriptStartOffset ?? 0;
     this.#deps = deps;
   }
 
@@ -984,6 +990,7 @@ export class Session {
         this.#deps.broadcast("transcript_entry", { session_id: this.claudeSessionId, entry });
       },
       () => this.status !== "ended",
+      this.#transcriptStartOffset,
     );
   }
 

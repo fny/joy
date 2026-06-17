@@ -3,9 +3,46 @@
 // (turns, receipts, relay events) lives in session.ts; this module only
 // knows how to find the file and stream its lines.
 
-import { openSync, readSync, closeSync, statSync, readdirSync, watch } from "fs";
+import { openSync, readSync, closeSync, statSync, readdirSync, readFileSync, watch } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+
+/** True for a real user prompt (turn boundary) — not a tool_result, meta, or CLI wrapper. */
+function isUserPromptLine(line: string): boolean {
+  if (!line.trim()) return false;
+  try {
+    const o = JSON.parse(line);
+    if (o.type !== "user" || o.isMeta) return false;
+    const c = o.message?.content;
+    return typeof c === "string" && c.trim().length > 0 && !c.startsWith("<");
+  } catch { return false; }
+}
+
+/**
+ * Byte offset to start tailing so the backfill is at most ~capBytes, snapped
+ * BACK to a clean turn boundary (a user-prompt line) so we never replay a
+ * partial turn. Returns 0 if the file fits within the cap or has no turns. If
+ * the final turn alone exceeds the cap, we include that whole turn.
+ */
+export function cappedTailOffset(path: string, capBytes: number): number {
+  try {
+    const size = statSync(path).size;
+    if (capBytes <= 0 || size <= capBytes) return 0;
+    const target = size - capBytes;
+    const text = readFileSync(path, "utf-8");
+    let off = 0;
+    let lastPromptBeforeTarget = 0;
+    let firstPromptAtOrAfter = -1;
+    for (const line of text.split("\n")) {
+      if (isUserPromptLine(line)) {
+        if (off < target) lastPromptBeforeTarget = off;
+        else if (firstPromptAtOrAfter < 0) firstPromptAtOrAfter = off;
+      }
+      off += Buffer.byteLength(line, "utf-8") + 1; // + newline
+    }
+    return firstPromptAtOrAfter >= 0 ? firstPromptAtOrAfter : lastPromptBeforeTarget;
+  } catch { return 0; }
+}
 
 /** Claude Code writes transcripts under ~/.claude/projects/<cwd-with-slashes-as-dashes>/ */
 export function cwdToTranscriptDir(cwd: string): string {
@@ -42,8 +79,9 @@ export function tailJsonl(
   path: string,
   onEntry: (entry: Record<string, unknown>) => void,
   shouldRetry: () => boolean = () => true,
+  startOffset = 0,
 ): TranscriptTailer {
-  let byteOffset = 0;
+  let byteOffset = startOffset;
   let leftover = ""; // incomplete line carried across reads
   let fsWatcher: ReturnType<typeof watch> | null = null;
   let closed = false;

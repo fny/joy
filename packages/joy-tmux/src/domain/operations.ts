@@ -125,6 +125,7 @@ export const machineOps: MachineOp[] = [
         yolo: typeof params.yolo === "boolean" ? params.yolo : undefined,
         continue: params.continue === true,
         resume_id: typeof params.resume_id === "string" ? params.resume_id : undefined,
+        resumeLimitMb: typeof params.resume_limit_mb === "number" ? params.resume_limit_mb : undefined,
         permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
         fallbackModel: typeof params.fallbackModel === "string" ? params.fallbackModel : undefined,
         forkSession: params.forkSession === true,
