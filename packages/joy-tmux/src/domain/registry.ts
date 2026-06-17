@@ -316,6 +316,13 @@ export class SessionRegistry {
       flags,
       status: "starting",
       startedAt: Date.now(),
+      // On --resume we know the exact transcript. Pin it so the tailer replays
+      // its full history into the new relay session, instead of relying on the
+      // mtime>=startedAt finder — which misses a resumed file (Claude touches it
+      // before startedAt while loading context, then sits idle at the prompt).
+      transcriptPath: opts.resume_id
+        ? join(cwdToTranscriptDir(cwd), `${opts.resume_id}.jsonl`)
+        : undefined,
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);
