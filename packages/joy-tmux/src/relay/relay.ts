@@ -777,7 +777,9 @@ export class RelaySession {
     let ticks = 0;
     this.heartbeatTimer = setInterval(() => {
       void this.pull();
-      if (++ticks % 10 === 0) this.client.emitAlive(this.relaySessionId, false);
+      // Keepalive every 30s — re-assert the CURRENT thinking state, not a
+      // hardcoded false (which used to stomp "thinking" mid-turn).
+      if (++ticks % 10 === 0) this.client.emitAlive(this.relaySessionId, this.lastThinking);
     }, 3_000);
   }
 
@@ -868,7 +870,12 @@ export class RelaySession {
     this.draining = false;
   }
 
+  /** Last thinking value we emitted — so the keepalive heartbeat re-asserts the
+   *  REAL state instead of stomping it to false every 30s. */
+  private lastThinking = false;
+
   setThinking(thinking: boolean): void {
+    this.lastThinking = thinking;
     this.client.emitAlive(this.relaySessionId, thinking);
   }
 
