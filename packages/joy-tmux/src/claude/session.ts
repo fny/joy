@@ -47,9 +47,9 @@ const STARTUP_POLL_MS = 700;
 const STARTUP_DEADLINE_ATTEMPTS = 30; // ~21s — long enough for cold start / --resume
 
 // 500-error auto-retry backoff (seconds): paired ramp, then STOP. 14 attempts,
-// ~63 min total. After Claude's OWN retries are exhausted on a 5xx, joy-tmux
-// re-sends the failed turn on this schedule until it succeeds, abort is pressed,
-// or the schedule runs out.
+// ~63 min total. When a turn ENDS with an unresolved 5xx (Claude gave up after
+// its own internal retries), joy-tmux re-sends the failed turn on this schedule
+// until it succeeds, abort is pressed, or the schedule runs out.
 const RETRY_SCHEDULE_SEC = [15, 15, 30, 30, 60, 60, 120, 120, 240, 240, 480, 480, 960, 960];
 
 /**
@@ -197,11 +197,13 @@ export class Session {
   // Throttle: surface at most one api_error note per turn (Claude retries up to
   // 10×, so a turn can emit several). Reset at turn end.
   #errorNotedThisTurn = false;
-  // 500-error auto-retry. #turnExhausted is armed when Claude's own retries run
-  // out on a 5xx; on turn-end we then re-send the failed prompt (#lastUserText)
-  // on RETRY_SCHEDULE_SEC. #retry holds the live backoff timer + attempt count.
+  // 500-error auto-retry. #turn5xxStatus holds the last 5xx status seen in the
+  // current turn; it's cleared the moment Claude produces real output (recovery)
+  // and consumed on turn-end — if a turn ENDS with it still set, Claude gave up
+  // on a server error, so we re-send the failed prompt (#lastUserText) on
+  // RETRY_SCHEDULE_SEC. #retry holds the live backoff timer + attempt count.
   #retry: { attempts: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
-  #turnExhausted: { status: number } | null = null;
+  #turn5xxStatus: number | null = null;
   #lastUserText: string | null = null;
   #delivery: DeliveryState | null = null;
   #pendingAttachments: Promise<Uint8Array | null>[] = [];
@@ -414,7 +416,7 @@ export class Session {
     this.#turn = null;
     if (this.#retry?.timer) clearTimeout(this.#retry.timer);
     this.#retry = null;
-    this.#turnExhausted = null;
+    this.#turn5xxStatus = null;
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
@@ -663,7 +665,7 @@ export class Session {
       this.#emitAgentNote(`⏹ Auto-retry cancelled`, Date.now(), this.claudeSessionId);
       this.#clearRetry();
     }
-    this.#turnExhausted = null;
+    this.#turn5xxStatus = null;
     run("tmux", "send-keys", "-t", this.tmuxWindow, "Escape");
     this.#relay?.setThinking(false);
     return { ok: true };
@@ -833,7 +835,7 @@ export class Session {
       return;
     }
     // Re-send via the queue so it waits for the ready prompt, types, and a fresh
-    // turn confirms it landed. If that turn 5xx-fails again, #turnExhausted is
+    // turn confirms it landed. If that turn 5xx-fails again, #turn5xxStatus is
     // re-armed and the turn-end handler calls #scheduleRetry for the next step.
     this.enqueue(text);
   }
@@ -1032,9 +1034,9 @@ export class Session {
       // 500-error auto-retry: if Claude exhausted its own retries on a 5xx this
       // turn, re-send on the backoff schedule. A turn that ended cleanly while a
       // retry was pending means the re-send worked → clear it.
-      if (this.#turnExhausted) {
-        const { status } = this.#turnExhausted;
-        this.#turnExhausted = null;
+      if (this.#turn5xxStatus != null) {
+        const status = this.#turn5xxStatus;
+        this.#turn5xxStatus = null;
         this.#scheduleRetry(status, sid);
         return; // hold the queue — the retry owns the next dispatch
       }
@@ -1058,13 +1060,13 @@ export class Session {
         this.#errorNotedThisTurn = true;
         this.#emitAgentNote(`⚠️ API error: ${formatted}`, entryTimeMs, sid);
       }
-      // Arm auto-retry when Claude's LAST internal retry just failed on a 5xx —
-      // i.e. it's about to give up on this turn. The turn-end handler then takes
-      // over and re-sends on the backoff schedule.
+      // Mark the turn as carrying an unresolved server error. Claude retries 5xx
+      // internally; if it recovers, the assistant-output path clears this. If the
+      // turn ENDS with it still set, Claude gave up → the turn-end handler starts
+      // our backoff retry. (Keyed on a trailing 5xx, not on hitting maxRetries:
+      // observed 529s recover by attempt ~8/10, so they never reach the ceiling.)
       const status = Number(err.status);
-      if (status >= 500 && Number(entry.retryAttempt) >= Number(entry.maxRetries)) {
-        this.#turnExhausted = { status };
-      }
+      if (status >= 500) this.#turn5xxStatus = status;
       return;
     }
 
@@ -1169,6 +1171,9 @@ export class Session {
     } else if (role === "assistant") {
       if (typeof msg.model === "string" && msg.model) this.currentModel = msg.model;
       const blocks = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
+      // Claude produced output → it recovered from any mid-turn 5xx, so this turn
+      // won't trigger an auto-retry.
+      if (blocks.length > 0) this.#turn5xxStatus = null;
       const entryUuid = typeof entry.uuid === "string" ? entry.uuid : "";
       // Skip if we've already forwarded this transcript entry (recovery case).
       if (this.#relay && entryUuid) {
