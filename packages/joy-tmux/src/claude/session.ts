@@ -946,6 +946,13 @@ export class Session {
   // (trust prompts etc.)
   pollForTranscript(attempts = 0): void {
     if (this.#tailer || this.status === "ended") return;
+    // A pinned transcript (e.g. the --resume target) is tailed directly — its
+    // full history replays from byte 0, regardless of mtime. Falls through to
+    // mtime-based discovery for fresh sessions.
+    if (this.transcriptPath && existsSync(this.transcriptPath)) {
+      this.startTailer(this.transcriptPath);
+      return;
+    }
     const path = findLatestTranscript(cwdToTranscriptDir(this.cwd), this.startedAt);
     if (path) {
       this.startTailer(path);
