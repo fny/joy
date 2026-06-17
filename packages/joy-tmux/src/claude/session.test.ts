@@ -167,6 +167,7 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
     start() {}, stop() {}, send() {},
     setThinking(v: boolean) { thinkingCalls.push(v); },
     updateRetry() {},
+    updateQueue() {},
   };
   s.attachRelay(rs, true);
 

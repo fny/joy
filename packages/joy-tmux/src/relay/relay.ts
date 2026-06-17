@@ -645,6 +645,13 @@ export interface JoyRetryInfo {
   status: number;    // the HTTP status that triggered the retry (e.g. 500)
 }
 
+/** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
+export interface JoyQueueInfo {
+  queue: { id: string; text: string; createdAt: number }[];
+  inFlight: string | null;
+  paused: boolean;
+}
+
 export class RelaySession {
   private readonly client: RelayClient;
   readonly relaySessionId: string;
@@ -743,6 +750,19 @@ export class RelaySession {
     // session with no active retry can reconcile its banner without churn.
     if (info == null && this.metadata?.joy__retry == null) return;
     await this.mergeMetadata({ joy__retry: info });
+  }
+
+  /**
+   * Push the message-queue snapshot so the app can read it from metadata instead
+   * of polling. Skips redundant writes: an empty queue when none is set, or a
+   * snapshot identical to the current one (the queue broadcasts can repeat).
+   */
+  async updateQueue(info: JoyQueueInfo): Promise<void> {
+    const empty = info.queue.length === 0 && !info.inFlight && !info.paused;
+    const cur = this.metadata?.joy__queue as JoyQueueInfo | null | undefined;
+    if (empty && cur == null) return;
+    if (cur && JSON.stringify(cur) === JSON.stringify(info)) return;
+    await this.mergeMetadata({ joy__queue: info });
   }
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;

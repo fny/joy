@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { apiSocket } from '@/sync/apiSocket';
-import { useActiveInterval } from './useActiveInterval';
 
 // Mirrors joy-tmux Session.queueState(). The queue holds messages the user
 // lined up while Claude was busy; the daemon dispatches them one at a time
@@ -11,39 +10,30 @@ export interface JoyQueueState { queue: QueuedMessage[]; inFlight: string | null
 
 const EMPTY: JoyQueueState = { queue: [], inFlight: null, paused: false };
 
+/**
+ * Queue state is PUSHED by the daemon via session metadata (`joy__queue`), so
+ * there is no polling — `metaQueue` comes straight from the (reactive) relay
+ * session and updates live. Mutations go out as machineRPCs; we don't apply
+ * their result locally — the daemon re-pushes `joy__queue` and the metadata
+ * update reflects it (resync-safe across reconnects, since metadata is stored
+ * server-side).
+ */
 export function useJoyQueue(
     machineId: string | undefined,
     joySessionId: string | undefined,
-    active: boolean,
+    metaQueue: JoyQueueState | null | undefined,
 ) {
-    const [state, setState] = React.useState<JoyQueueState>(EMPTY);
-
-    const apply = React.useCallback((r: (JoyQueueState & { error?: string }) | undefined) => {
-        if (r && !r.error) setState({ queue: r.queue ?? [], inFlight: r.inFlight ?? null, paused: !!r.paused });
-    }, []);
-
-    const refresh = React.useCallback(async () => {
-        if (!machineId || !joySessionId) return;
-        try {
-            apply(await apiSocket.machineRPC(machineId, 'joy-queue-list', { id: joySessionId }) as any);
-        } catch { /* poll best-effort */ }
-    }, [machineId, joySessionId, apply]);
-
-    // Poll lightly while the session is active so the strip stays live as the
-    // daemon drains items — but only while the screen is focused AND the app is
-    // foregrounded, so a locked phone doesn't keep hitting the daemon (battery).
-    useActiveInterval(() => void refresh(), 1200, active && !!machineId && !!joySessionId);
+    const state = metaQueue ?? EMPTY;
 
     const call = React.useCallback(async (rpc: string, params: Record<string, unknown>) => {
         if (!machineId || !joySessionId) return;
         try {
-            apply(await apiSocket.machineRPC(machineId, rpc, { id: joySessionId, ...params }) as any);
-        } catch { /* best-effort; next poll reconciles */ }
-    }, [machineId, joySessionId, apply]);
+            await apiSocket.machineRPC(machineId, rpc, { id: joySessionId, ...params });
+        } catch { /* best-effort; the daemon re-pushes joy__queue metadata */ }
+    }, [machineId, joySessionId]);
 
     return {
         ...state,
-        refresh,
         add: (text: string) => call('joy-queue-add', { text }),
         edit: (qid: string, text: string) => call('joy-queue-edit', { qid, text }),
         cancel: (qid: string) => call('joy-queue-cancel', { qid }),
