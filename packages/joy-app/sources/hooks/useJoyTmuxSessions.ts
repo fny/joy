@@ -1,7 +1,7 @@
 // Polls the joy-tmux server for sessions; provides create and kill actions.
 import * as React from 'react';
-import { useFocusEffect } from 'expo-router';
 import type { JoySession } from '@/joy/types';
+import { useActiveInterval } from './useActiveInterval';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -43,10 +43,8 @@ export function useJoyTmuxSessions(serverUrl: string) {
         });
     }, [refresh]);
 
-    useFocusEffect(React.useCallback(() => {
-        const id = setInterval(refresh, POLL_INTERVAL_MS);
-        return () => clearInterval(id);
-    }, [refresh]));
+    // Poll only while focused AND foregrounded (battery — see useActiveInterval).
+    useActiveInterval(refresh, POLL_INTERVAL_MS);
 
     const createSession = React.useCallback(async (cwd: string) => {
         const res = await fetch(`${normalizedUrl}/sessions`, {
