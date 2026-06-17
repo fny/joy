@@ -153,7 +153,7 @@ function HeaderLeft() {
     const styles = stylesheet;
     return (
         <View style={styles.logoContainer}>
-            <BlockLogo size={8} />
+            <BlockLogo size={6} />
         </View>
     );
 }

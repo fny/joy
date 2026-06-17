@@ -15,7 +15,7 @@ export const HeaderLogo = React.memo(() => {
             alignItems: 'center',
             justifyContent: 'center',
         }}>
-            <BlockLogo size={8} />
+            <BlockLogo size={6} />
         </View>
     );
 });
