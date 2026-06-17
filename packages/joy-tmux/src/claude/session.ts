@@ -196,6 +196,10 @@ export class Session {
   #relay: RelaySession | null = null;
   #tailer: TranscriptTailer | null = null;
   #turn: { turnId: string } | null = null;
+  // Last "thinking" value pushed to the relay. The pane poll (#pollThinking)
+  // reconciles this against the live pane so the app's status matches the
+  // window; the event-driven setters below give instant feedback in between.
+  #thinking = false;
   // Throttle: surface at most one api_error note per turn (Claude retries up to
   // 10×, so a turn can emit several). Reset at turn end.
   #errorNotedThisTurn = false;
@@ -287,6 +291,7 @@ export class Session {
   beginWatching(): void {
     this.pollForTranscript();
     this.#pollEnd();
+    this.#pollThinking();
     this.#watchTrustPrompt();
     this.#watchStartup();
   }
@@ -686,7 +691,7 @@ export class Session {
     }
     this.#turn5xxStatus = null;
     run("tmux", "send-keys", "-t", this.tmuxWindow, "Escape");
-    this.#relay?.setThinking(false);
+    this.#setThinking(false);
     return { ok: true };
   }
 
@@ -904,7 +909,7 @@ export class Session {
     if (opts.mirrorToRelay) {
       this.#relay?.send(encodeUserMessage(text));
     }
-    this.#relay?.setThinking(true);
+    this.#setThinking(true);
     if (!this.#tailer && this.status !== "ended") this.pollForTranscript();
   }
 
@@ -1011,6 +1016,31 @@ export class Session {
     setTimeout(() => this.#pollEnd(), 5000);
   }
 
+  /** Single funnel for the app's "thinking" status — tracks the last value and
+   *  pushes it to the relay. Lifecycle transitions (send/end_turn/abort) call
+   *  this directly; the pane poll change-gates itself before calling. */
+  #setThinking(thinking: boolean): void {
+    this.#thinking = thinking;
+    this.#relay?.setThinking(thinking);
+  }
+
+  /** Reconcile "thinking" from the live pane every 3s — the pane is the ground
+   *  truth: the "esc to interrupt" line shows iff Claude is actively generating.
+   *  This corrects the event-driven setters for the cases they miss: typing
+   *  directly in the pane, stops at an interactive prompt (no end_turn), and
+   *  interrupts. Runs only while a relay is attached and the session is live. */
+  #pollThinking(): void {
+    if (this.status === "ended") return;
+    if (this.#relay) {
+      const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+      if (pane.ok) {
+        const working = paneShowsWorking(pane.out);
+        if (working !== this.#thinking) this.#setThinking(working); // only on change
+      }
+    }
+    setTimeout(() => this.#pollThinking(), 3000);
+  }
+
   // ── Transcript entry semantics ──────────────────────────────────────────────
 
   onTranscriptEntry(entry: Record<string, unknown>): void {
@@ -1064,7 +1094,7 @@ export class Session {
         this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
       }
       this.#turn = null;
-      this.#relay?.setThinking(false);
+      this.#setThinking(false);
       // 500-error auto-retry: if Claude exhausted its own retries on a 5xx this
       // turn, re-send on the backoff schedule. A turn that ended cleanly while a
       // retry was pending means the re-send worked → clear it.
@@ -1253,7 +1283,7 @@ export class Session {
           this.#errorNotedThisTurn = false;
           this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
           this.#turn = null;
-          this.#relay.setThinking(false);
+          this.#setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
           this.#maybeDrainQueue(); // turn done → send the next queued message
         }
@@ -1304,6 +1334,17 @@ export function paneShowsReadyPrompt(text: string): boolean {
 export function paneShowsClaudeRunning(text: string): boolean {
   if (paneShowsReadyPrompt(text)) return true;
   return /Yes, I trust this folder|Is this a project you (created|trust)|esc to interrupt|\? for shortcuts|shift\+tab to cycle|⏵⏵|⏸/i.test(text);
+}
+
+/**
+ * True when Claude is ACTIVELY generating — narrower than paneShowsClaudeRunning.
+ * Claude prints the "esc to interrupt" hint only while a turn is in flight (text
+ * generation or a running tool); it's absent at the idle ready prompt and at any
+ * input prompt (picker/trust/permission). This is the ground truth the daemon
+ * uses to report the app's "thinking" status, so blue/green tracks the window.
+ */
+export function paneShowsWorking(text: string): boolean {
+  return /esc to interrupt/i.test(text);
 }
 
 /** Human-readable backoff delay for retry notes: "15s", "2m". Exported for tests. */

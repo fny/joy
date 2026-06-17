@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, parsePermissionModeFromPane, formatRetryDelay } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, parsePermissionModeFromPane, formatRetryDelay } from "./session";
 
 test("ready: bare input prompt", () => {
   expect(paneShowsReadyPrompt("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
@@ -41,6 +41,25 @@ test("claude running: working line", () => {
 
 test("claude running: trust dialog is still 'up' (not a failed launch)", () => {
   expect(paneShowsClaudeRunning(" ❯ 1. Yes, I trust this folder")).toBe(true);
+});
+
+test("working: actively generating shows the interrupt hint", () => {
+  expect(paneShowsWorking("✽ Cultivating… (5s · esc to interrupt)")).toBe(true);
+  expect(paneShowsWorking("────\n❯\n────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt")).toBe(true);
+});
+
+test("not working: idle ready prompt is not 'thinking'", () => {
+  expect(paneShowsWorking("────\n❯\n────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents")).toBe(false);
+});
+
+test("not working: an interactive picker is waiting, not generating", () => {
+  const pane = [
+    "How should I roll out the PRs?",
+    " ❯ 1. One at a time",
+    "   2. All at once",
+    "Enter to confirm",
+  ].join("\n");
+  expect(paneShowsWorking(pane)).toBe(false);
 });
 
 test("not running: shell prompt after a failed launch", () => {
