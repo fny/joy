@@ -655,6 +655,7 @@ export const en: TranslationStructure = {
         deleted: 'Deleted',
         changedFiles: ({ count }: { count: number }) => `${count} changed ${count === 1 ? 'file' : 'files'}`,
         allFiles: 'All Files',
+        collapseAll: 'Collapse all',
         editFile: 'Edit',
         saveFile: 'Save',
         failedToRead: 'Failed to read file',

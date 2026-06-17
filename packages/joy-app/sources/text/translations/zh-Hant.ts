@@ -641,6 +641,7 @@ export const zhHant: TranslationStructure = {
         deleted: '已刪除',
         changedFiles: ({ count }: { count: number }) => `${count} 個已變更的檔案`,
         allFiles: '所有檔案',
+        collapseAll: 'Collapse all',
         editFile: '編輯',
         saveFile: '儲存',
         failedToRead: '讀取檔案失敗',

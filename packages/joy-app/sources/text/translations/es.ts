@@ -641,6 +641,7 @@ export const es: TranslationStructure = {
         deleted: 'Eliminado',
         changedFiles: ({ count }: { count: number }) => `${count} ${count === 1 ? 'archivo modificado' : 'archivos modificados'}`,
         allFiles: 'Todos los archivos',
+        collapseAll: 'Collapse all',
         editFile: 'Editar',
         saveFile: 'Guardar',
         failedToRead: 'Error al leer el archivo',

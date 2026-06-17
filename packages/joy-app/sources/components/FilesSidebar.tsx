@@ -145,6 +145,12 @@ function collectDirPaths<T>(nodes: AnyTreeNode<T>[], acc: string[] = []): string
     return acc;
 }
 
+type AllFilesTabHandle = { collapseAll: () => void };
+
+// Stable empty set: while searching we force-expand so matches under
+// otherwise-collapsed folders stay visible.
+const EMPTY_COLLAPSED: Set<string> = new Set<string>();
+
 export const FilesSidebar = React.memo<FilesSidebarProps>(({
     sessionId,
     selectedPath,
@@ -159,6 +165,7 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
     const gitStatus = useSessionGitStatus(sessionId);
 
     const [collapsed, setCollapsed] = React.useState<Set<string>>(() => new Set());
+    const allFilesRef = React.useRef<AllFilesTabHandle>(null);
 
     React.useEffect(() => {
         let cancelled = false;
@@ -252,6 +259,17 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
                         )}
                     </View>
                 ) : null}
+                {mode === 'allFiles' ? (
+                    <Pressable
+                        onPress={() => allFilesRef.current?.collapseAll()}
+                        hitSlop={8}
+                        style={(p) => [styles.collapseAllBtn, p.pressed && { opacity: 0.5 }]}
+                        accessibilityRole="button"
+                        accessibilityLabel={t('files.collapseAll')}
+                    >
+                        <Octicons name="fold" size={16} color={theme.colors.textSecondary} />
+                    </Pressable>
+                ) : null}
             </View>
 
             {mode === 'changes' ? (
@@ -282,6 +300,7 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
                 </ScrollView>
             ) : (
                 <AllFilesTab
+                    ref={allFilesRef}
                     sessionId={sessionId}
                     selectedPath={selectedPath ?? null}
                     onFilePress={onAllFilesFilePress}
@@ -292,15 +311,15 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
 });
 
 /** All-files tab: reads from Zustand store, fetches on mount */
-const AllFilesTab = React.memo(function AllFilesTab({
-    sessionId,
-    selectedPath,
-    onFilePress,
-}: {
+const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
     sessionId: string;
     selectedPath: string | null;
     onFilePress?: (filePath: string) => void;
-}) {
+}>(function AllFilesTab({
+    sessionId,
+    selectedPath,
+    onFilePress,
+}, ref) {
     const { theme } = useUnistyles();
     const [searchQuery, setSearchQuery] = React.useState('');
     const [isLoading, setIsLoading] = React.useState(false);
@@ -342,6 +361,21 @@ const AllFilesTab = React.memo(function AllFilesTab({
             return next;
         });
     }, []);
+
+    // Folders start collapsed: seed the collapse set with every directory the
+    // first time the tree loads (it arrives async). A ref guards re-seeding so
+    // the user's expansions aren't clobbered on later updates.
+    const seededRef = React.useRef(false);
+    React.useEffect(() => {
+        if (seededRef.current || tree.length === 0) return;
+        seededRef.current = true;
+        setCollapsed(new Set(collectDirPaths(tree)));
+    }, [tree]);
+
+    // Collapse-all button in the header drives this.
+    React.useImperativeHandle(ref, () => ({
+        collapseAll: () => setCollapsed(new Set(collectDirPaths(tree))),
+    }), [tree]);
 
     const handleFilePress = React.useCallback((file: ProjectFile) => {
         onFilePress?.(file.fullPath);
@@ -385,7 +419,7 @@ const AllFilesTab = React.memo(function AllFilesTab({
                                 node={node}
                                 depth={0}
                                 selectedPath={selectedPath}
-                                collapsed={collapsed}
+                                collapsed={searchQuery.trim() ? EMPTY_COLLAPSED : collapsed}
                                 onToggleDir={toggleDir}
                                 onFilePress={handleFilePress}
                             />
@@ -395,7 +429,7 @@ const AllFilesTab = React.memo(function AllFilesTab({
             </ScrollView>
         </View>
     );
-});
+}));
 
 /** Tree row for project files (no status badges, clickable) */
 const ProjectTreeNodeRow = React.memo(function ProjectTreeNodeRow({
@@ -584,6 +618,10 @@ const styles = StyleSheet.create((theme) => ({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 4,
+    },
+    collapseAllBtn: {
+        padding: 4,
+        borderRadius: 6,
     },
     headerAdded: {
         fontSize: 12,

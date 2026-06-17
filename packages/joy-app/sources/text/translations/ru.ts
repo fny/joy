@@ -657,6 +657,7 @@ export const ru: TranslationStructure = {
         deleted: 'Удалён',
         changedFiles: ({ count }: { count: number }) => `${count} ${count === 1 ? 'изменённый файл' : count < 5 ? 'изменённых файла' : 'изменённых файлов'}`,
         allFiles: 'Все файлы',
+        collapseAll: 'Свернуть все',
         editFile: 'Редактировать',
         saveFile: 'Сохранить',
         failedToRead: 'Не удалось прочитать файл',
