@@ -881,14 +881,21 @@ export class Session {
     // real message's match, mirroring it as a duplicate.
     const isCommand = /^\s*!/.test(text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(text);
     const tracked = !!delivery && !isCommand;
+    // send-keys can't type newlines, so a multi-line message is typed (and
+    // recorded by Claude in its transcript) with newlines collapsed to spaces.
+    // Track THIS form for dedup so the transcript echo matches — otherwise a
+    // multi-line message's echo fails to match the original and gets mirrored
+    // as a duplicate. The relay mirror still uses the original (with newlines)
+    // so the app shows the message as the user typed it.
+    const typed = text.replace(/\n/g, " ");
     if (tracked) {
-      delivery!.pending.push({ seq: opts.seq, text, source: opts.source, at: Date.now() });
+      delivery!.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
       // Persisted backstop: remember we sent this text so its transcript echo is
       // never mirrored as a duplicate, even if the pending queue is lost to a
       // restart.
-      recordReceived(delivery!, this.relaySessionId!, text, Date.now());
+      recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
-    const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", text.replace(/\n/g, " "));
+    const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", typed);
     if (!r.ok) {
       if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
