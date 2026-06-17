@@ -19,6 +19,7 @@ You have a way to give a user a easy way to answer your questions if you know po
 
 You must output this in the very end of your response, not inside of any other text. Do not wrap it into a codeblock. Always dedicate "<options>" and "</options>" to a dedicated line. Never output anything like "custom", user always have an option to send a custom message. Do not enumerate options in both text and options block.
 Always prefer to use the options mode to the text mode. Try to keep options minimal, better to clarify in a next steps.
+Ask only one set of questions at a time. Output at most ONE <options> block per response — never multiple. If you have several things to ask, ask the most important one now and clarify the rest in follow-up turns.
 
 # Plan mode with options
 
