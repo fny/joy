@@ -12,10 +12,15 @@ import { run } from "../tmux/shell";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset } from "../claude/transcript";
+import { loadWindowRecord, saveWindowRecord } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 
 export interface CreateSessionOpts {
   cwd: string;
+  /** Reuse a specific joy session id (and thus the same relay tag/card) instead
+   *  of minting a fresh one — used when restarting a daemon-forgotten session so
+   *  it reattaches to its existing app card rather than spawning a duplicate. */
+  id?: string;
   model?: string;
   effort?: string;
   continue?: boolean;
@@ -184,7 +189,7 @@ export class SessionRegistry {
   // ── Create ──────────────────────────────────────────────────────────────────
 
   async create(opts: CreateSessionOpts): Promise<Session> {
-    const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+    const id = opts.id ?? crypto.randomUUID().replace(/-/g, "").slice(0, 8);
     const windowName = `j-${id}`;
 
     // Resolve ~, then verify the directory exists. tmux -c silently falls
@@ -346,6 +351,10 @@ export class SessionRegistry {
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);
+    // Persist the window→launch-cwd binding now; the claudeSessionId is merged in
+    // once the first transcript entry reveals it. recover()/restart() prefer this
+    // over the newest-mtime / pane-current-path heuristics (BUG-6/13/15).
+    saveWindowRecord(id, { launchCwd: cwd });
     this.broadcast("session_update", session.toJSON());
 
     if (relayPromise) {
@@ -379,9 +388,13 @@ export class SessionRegistry {
    */
   async restart(opts: { id: string; cwd?: string }): Promise<Session> {
     const existing = this.get(opts.id);
-    if (!existing && !opts.cwd) throw new Error(`unknown session: ${opts.id}`);
+    // A daemon-forgotten session (window already gone after a daemon restart) has
+    // no Session object — fall back to its persisted record so we can resume the
+    // RIGHT conversation and reattach to its existing card (BUG-13).
+    const rec = existing ? null : loadWindowRecord(opts.id);
+    if (!existing && !opts.cwd && !rec) throw new Error(`unknown session: ${opts.id}`);
 
-    const cwd = existing?.cwd ?? opts.cwd!;
+    const cwd = existing?.cwd ?? rec?.launchCwd ?? opts.cwd!;
     // Resume THIS session's specific conversation — its learned Claude id, or
     // failing that the exact transcript file it was tailing (basename = the
     // Claude session uuid). Crucially, do NOT fall back to `--continue` for a
@@ -390,12 +403,18 @@ export class SessionRegistry {
     // WRONG one. `--continue` is only a last resort when we have nothing but a
     // cwd (recovery after the daemon lost the session entirely).
     const resumeId = existing?.claudeSessionId
-      ?? (existing?.transcriptPath ? basename(existing.transcriptPath, ".jsonl") : undefined);
+      ?? (existing?.transcriptPath ? basename(existing.transcriptPath, ".jsonl") : undefined)
+      ?? rec?.claudeSessionId;
     if (existing) existing.forceKill();
 
     // Env is refreshed automatically: create() launches claude through a fresh
     // login shell, so a restart re-sources the user's profile (.bashrc/.zshrc).
     return this.create({
+      // Reuse the joy id for a forgotten session so its stable relay tag
+      // reattaches to the existing app card instead of spawning a duplicate
+      // (BUG-13). A KNOWN session is force-killed + archived above, so it
+      // intentionally gets a fresh id/card.
+      id: existing ? undefined : opts.id,
       cwd,
       resume_id: resumeId,
       continue: (!resumeId && !existing) ? true : undefined,
@@ -432,7 +451,12 @@ export class SessionRegistry {
       if (this.#sessions.has(id)) continue;
 
       const tmuxWindow = `${this.tmuxSession}:${winName}`;
-      const cwd = run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_current_path}").out.trim();
+      // Prefer the persisted launch cwd over the pane's CURRENT dir: the user may
+      // have cd'd inside the pane, and the drifted path would mis-key the dedup
+      // guard / relay path / transcript lookup (BUG-15).
+      const rec = loadWindowRecord(id);
+      const paneCwd = run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_current_path}").out.trim();
+      const cwd = rec?.launchCwd || paneCwd;
       if (!cwd) continue;
 
       const shellPid = parseInt(run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out.trim());
@@ -443,7 +467,16 @@ export class SessionRegistry {
       }
 
       const isAlive = pid !== undefined && run("kill", "-0", String(pid)).ok;
-      const transcriptPath = findLatestTranscript(cwdToTranscriptDir(cwd), 0);
+      // Prefer the persisted claudeSessionId — binding by newest-mtime transcript
+      // adopts an unrelated conversation when this window's transcript isn't the
+      // newest in the dir (detached window, or another claude/codex run touched
+      // it) (BUG-6). Fall back to the heuristic only when there's no record.
+      const recTranscript = rec?.claudeSessionId
+        ? join(cwdToTranscriptDir(cwd), `${rec.claudeSessionId}.jsonl`)
+        : null;
+      const transcriptPath = (recTranscript && existsSync(recTranscript))
+        ? recTranscript
+        : findLatestTranscript(cwdToTranscriptDir(cwd), 0);
       const claudeSessionId = transcriptPath ? basename(transcriptPath, ".jsonl") : undefined;
 
       const session = new Session({
