@@ -122,12 +122,21 @@ export class SessionRegistry {
     return this.#sessions.get(id);
   }
 
+  // Killed sessions are kept in #sessions (recovery/dedup bookkeeping) but should
+  // not count as live: exclude them from the listing/count the debug surfaces use,
+  // else the machine page's "Active Sessions" inflates with every kill until the
+  // next daemon restart. Detached (process_exited) sessions remain listed — their
+  // window/cwd is still around and their file/git RPCs still answer.
+  #isKilled(s: Session): boolean {
+    return s.status === "ended" && s.endReason === "killed";
+  }
+
   list(): Session[] {
-    return [...this.#sessions.values()];
+    return [...this.#sessions.values()].filter(s => !this.#isKilled(s));
   }
 
   get size(): number {
-    return this.#sessions.size;
+    return this.list().length;
   }
 
   // ── Event fan-out (debug page SSE + bounded chat log) ───────────────────────
