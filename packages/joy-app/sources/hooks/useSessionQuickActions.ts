@@ -332,7 +332,7 @@ export function useSessionQuickActions(
         }
 
         items.push({ id: 'delete', icon: 'trash-outline', label: 'Delete', onPress: deleteSession, destructive: true });
-        items.push({ id: 'archive', icon: 'archive-outline', label: 'Archive', onPress: archiveSession, destructive: true });
+        items.push({ id: 'archive', icon: 'archive-outline', label: 'Archive', onPress: archiveSession });
 
         return items;
     }, [
