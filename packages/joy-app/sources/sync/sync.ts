@@ -974,11 +974,17 @@ class Sync {
             // Decrypt agent state using session-specific encryption
             let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
 
-            // Put it all together
+            // Put it all together. REST /sessions does NOT carry live activity —
+            // `thinking` arrives only via `session-alive` ephemerals. Preserve the
+            // last known local value instead of hardcoding false, so a full refresh
+            // (app foreground / reconnect / resync) mid-turn doesn't stomp a live
+            // session to idle until the next ~30s keepalive (which also misroutes
+            // queued sends). The next activity ephemeral corrects it either way.
+            const existing = storage.getState().sessions[session.id];
             const processedSession = {
                 ...session,
-                thinking: false,
-                thinkingAt: 0,
+                thinking: existing?.thinking ?? false,
+                thinkingAt: existing?.thinkingAt ?? 0,
                 metadata,
                 agentState
             };
