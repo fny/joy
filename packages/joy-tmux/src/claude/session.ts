@@ -204,6 +204,11 @@ export class Session {
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
   #archivePromise: Promise<boolean> | null = null;
+  // tool_use_id → turnId for tools whose start was forwarded but whose end hasn't
+  // been seen. Lets us emit tool-call-end even after #turn is nulled, and
+  // synthesize ends for tools left open by an abort/turn-close/teardown — else
+  // the app's tool card spins "running" forever (no matching tool-result).
+  #openTools = new Map<string, string>();
   // Throttle: surface at most one api_error note per turn (Claude retries up to
   // 10×, so a turn can emit several). Reset at turn end.
   #errorNotedThisTurn = false;
@@ -438,6 +443,7 @@ export class Session {
 
     this.#tailer?.close();
     this.#tailer = null;
+    this.#closeOpenTools(); // before the relay detaches below — don't strand tool spinners
     this.#turn = null;
     if (this.#retry?.timer) clearTimeout(this.#retry.timer);
     this.#retry = null;
@@ -718,6 +724,9 @@ export class Session {
     this.#turn5xxStatus = null;
     run("tmux", "send-keys", "-t", this.tmuxWindow, "Escape");
     this.#setThinking(false);
+    // Interrupting mid-tool means Claude won't write that tool's result — close
+    // any open tools so their cards don't spin forever.
+    this.#closeOpenTools();
     return { ok: true };
   }
 
@@ -1042,6 +1051,19 @@ export class Session {
     setTimeout(() => this.#pollEnd(), 5000);
   }
 
+  /** Synthesize tool-call-end for every tool whose start we forwarded but whose
+   *  result never arrived (turn force-closed, aborted, or session torn down) —
+   *  otherwise the app's tool card spins "running" forever. */
+  #closeOpenTools(timeMs?: number): void {
+    if (this.#openTools.size === 0) return;
+    if (this.#relay) {
+      for (const [id, turn] of this.#openTools) {
+        this.#relay.send(encodeToolCallEnd(id, { turn, time: timeMs }));
+      }
+    }
+    this.#openTools.clear();
+  }
+
   /** Single funnel for the app's "thinking" status — tracks the last value and
    *  pushes it to the relay. Lifecycle transitions (send/end_turn/abort) call
    *  this directly; the pane poll change-gates itself before calling. */
@@ -1119,6 +1141,7 @@ export class Session {
       if (this.#relay && this.#turn) {
         this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
       }
+      this.#closeOpenTools(entryTimeMs); // a tool abandoned by an errored turn shouldn't spin forever
       this.#turn = null;
       this.#setThinking(false);
       // 500-error auto-retry: if Claude exhausted its own retries on a 5xx this
@@ -1171,11 +1194,19 @@ export class Session {
     if (role === "user") {
       if (entry.isMeta) return;
       if (typeof content !== "string") {
-        // Emit tool-call-end events for tool results
-        if (this.#relay && this.#turn && Array.isArray(content)) {
+        // Emit tool-call-end for tool results. NOT gated on this.#turn: the turn
+        // may have been nulled (turn_duration/error) before the result lands, and
+        // gating used to drop the end → a tool card stuck "running". Use the turn
+        // id remembered when the start was forwarded (fall back to the live turn).
+        if (this.#relay && Array.isArray(content)) {
           for (const item of content as Array<Record<string, unknown>>) {
             if (item.type === "tool_result" && typeof item.tool_use_id === "string") {
-              this.#relay.send(encodeToolCallEnd(item.tool_use_id, { turn: this.#turn.turnId, time: entryTimeMs }));
+              const id = item.tool_use_id;
+              const turn = this.#openTools.get(id) ?? this.#turn?.turnId;
+              if (turn) {
+                this.#relay.send(encodeToolCallEnd(id, { turn, time: entryTimeMs }));
+                this.#openTools.delete(id);
+              }
             }
           }
         }
@@ -1312,8 +1343,10 @@ export class Session {
             const text = String(block.text || "").trim();
             if (text) this.#relay.send(encodeTextEvent(text, opts));
           } else if (blockType === "tool_use") {
+            const callId = String(block.id || crypto.randomUUID());
+            this.#openTools.set(callId, this.#turn.turnId); // track for tool-call-end
             this.#relay.send(encodeToolCallStart({
-              call: String(block.id || crypto.randomUUID()),
+              call: callId,
               name: String(block.name || "tool"),
               input: block.input,
               ...opts,
@@ -1333,6 +1366,7 @@ export class Session {
         const stopReason = String(msg.stop_reason || "");
         if (stopReason === "end_turn" || stopReason === "max_tokens") {
           this.#errorNotedThisTurn = false;
+          this.#closeOpenTools(entryTimeMs); // safety: any tool without a result
           this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
           this.#turn = null;
           this.#setThinking(false);
