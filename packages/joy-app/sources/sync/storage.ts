@@ -177,6 +177,7 @@ interface StorageState {
     pathGitStatus: Record<string, GitStatus | null>;        // keyed by "machineId:path"
     pathGitStatusFiles: Record<string, GitStatusFiles | null>; // keyed by "machineId:path"
     pathProjectFiles: Record<string, ProjectFilesList | null>;  // keyed by "machineId:path"
+    pathExpandedDirs: Record<string, string[]>;                 // All Files: open folders, keyed by "machineId:path" (survives navigation)
     sessionFileCache: Record<string, Record<string, { content: string | null; diff: string | null; isBinary: boolean; cachedAt: number }>>;
     machines: Record<string, Machine>;
     artifacts: Record<string, DecryptedArtifact>;  // New artifacts storage
@@ -216,6 +217,7 @@ interface StorageState {
     applyGitStatus: (pathKey: string, status: GitStatus | null) => void;
     applyGitStatusFiles: (pathKey: string, files: GitStatusFiles | null) => void;
     applyProjectFiles: (pathKey: string, files: ProjectFilesList | null) => void;
+    setExpandedDirs: (pathKey: string, dirs: string[]) => void;
     getSessionPathKey: (sessionId: string) => string | null;
     applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => void;
     applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => void;
@@ -394,6 +396,7 @@ export const storage = create<StorageState>()((set, get) => {
         pathGitStatus: {},
         pathGitStatusFiles: {},
         pathProjectFiles: {},
+        pathExpandedDirs: {},
         sessionFileCache: {},
         realtimeStatus: 'disconnected',
         realtimeMode: 'idle',
@@ -977,6 +980,13 @@ export const storage = create<StorageState>()((set, get) => {
             pathProjectFiles: {
                 ...state.pathProjectFiles,
                 [pathKey]: files
+            }
+        })),
+        setExpandedDirs: (pathKey: string, dirs: string[]) => set((state) => ({
+            ...state,
+            pathExpandedDirs: {
+                ...state.pathExpandedDirs,
+                [pathKey]: dirs
             }
         })),
         applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => set((state) => ({
@@ -1678,6 +1688,14 @@ export function useSessionProjectFiles(sessionId: string): ProjectFilesList | nu
     return storage(useShallow((state) => {
         const pathKey = state.getSessionPathKey(sessionId);
         return pathKey ? state.pathProjectFiles[pathKey] ?? null : null;
+    }));
+}
+
+const EMPTY_EXPANDED_DIRS: string[] = [];
+export function useSessionExpandedDirs(sessionId: string): string[] {
+    return storage(useShallow((state) => {
+        const pathKey = state.getSessionPathKey(sessionId);
+        return pathKey ? state.pathExpandedDirs[pathKey] ?? EMPTY_EXPANDED_DIRS : EMPTY_EXPANDED_DIRS;
     }));
 }
 
