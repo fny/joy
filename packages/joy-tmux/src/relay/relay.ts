@@ -844,7 +844,16 @@ export class RelaySession {
     this.client.untrackSession(this);
   }
 
+  private pulling = false;
+
   private async pull(): Promise<void> {
+    // Re-entrancy guard (like drain()): pull() fires from both the 3s heartbeat
+    // and the poke subscription. Without this, a second pull could read the next
+    // seq window and inject a later text message into the pane while an earlier
+    // message is still parked awaiting its attachment download — reordering
+    // app→Claude messages. Serialize so onMessage runs strictly in seq order.
+    if (this.pulling) return;
+    this.pulling = true;
     try {
       let { messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq);
       if (messages.length > 0) log(`pull ${this.relaySessionId}: got ${messages.length} msgs, lastSeq=${this.lastSeq}`);
@@ -899,6 +908,7 @@ export class RelaySession {
       // Low: only write to disk when seq actually changed
       if (advanced) savePersistedSeq(this.relaySessionId, this.lastSeq);
     } catch (e) { log(`pull error for ${this.relaySessionId}: ${e}`); }
+    finally { this.pulling = false; }
   }
 
   send(wire: WireRecord): void {
