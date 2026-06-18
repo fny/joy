@@ -1212,6 +1212,12 @@ export class Session {
           recordInboundReceipt(delivery, this.relaySessionId, {
             seq: matched.seq, uuid, text: content, source: matched.source, at: Date.now(),
           });
+          // #typeIntoTmux records BOTH a pending entry and a persisted `received`
+          // backstop. Now that pending matched, drop the backstop twin too — else
+          // it dangles for 15 min and a later identical message typed directly in
+          // the pane finds no pending match, hits this stale `received`, and gets
+          // wrongly swallowed (the app's history loses a real "yes"/"continue").
+          consumeReceived(delivery, this.relaySessionId, content, Date.now());
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
         }
         // No queue match. Before assuming this was typed directly in the pane,
