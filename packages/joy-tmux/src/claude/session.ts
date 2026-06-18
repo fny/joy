@@ -209,6 +209,10 @@ export class Session {
   // synthesize ends for tools left open by an abort/turn-close/teardown — else
   // the app's tool card spins "running" forever (no matching tool-result).
   #openTools = new Map<string, string>();
+  // The latest token-usage object seen on an assistant entry this turn (Claude
+  // reports cumulative usage per message). Attached to the turn-end event so the
+  // app shows real tokens/cost; reset at turn-start.
+  #turnUsage: Record<string, unknown> | null = null;
   // Throttle: surface at most one api_error note per turn (Claude retries up to
   // 10×, so a turn can emit several). Reset at turn end.
   #errorNotedThisTurn = false;
@@ -1139,8 +1143,9 @@ export class Session {
       this.#errorNotedThisTurn = false;
       this.#deps.broadcast("stop", { session_id: sid });
       if (this.#relay && this.#turn) {
-        this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
+        this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs, usage: this.#turnUsage ?? undefined }));
       }
+      this.#turnUsage = null;
       this.#closeOpenTools(entryTimeMs); // a tool abandoned by an errored turn shouldn't spin forever
       this.#turn = null;
       this.#setThinking(false);
@@ -1331,11 +1336,15 @@ export class Session {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {
           this.#turn = { turnId: crypto.randomUUID() };
+          this.#turnUsage = null; // fresh turn → reset usage accumulator
           this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
           // A fresh turn starting is the proof a dispatched queue message
           // landed — Claude is now responding to it.
           this.#confirmDispatchIfAwaiting();
         }
+        // Capture token usage (cumulative per message) to report at turn-end —
+        // AFTER the turn-start reset above so the first entry's usage isn't wiped.
+        if (msg.usage && typeof msg.usage === "object") this.#turnUsage = msg.usage as Record<string, unknown>;
         const opts = { turn: this.#turn.turnId, claudeUuid: entryUuid || undefined, time: entryTimeMs };
         for (const block of blocks) {
           const blockType = String(block.type || "");
@@ -1367,7 +1376,8 @@ export class Session {
         if (stopReason === "end_turn" || stopReason === "max_tokens") {
           this.#errorNotedThisTurn = false;
           this.#closeOpenTools(entryTimeMs); // safety: any tool without a result
-          this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs }));
+          this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs, usage: this.#turnUsage ?? undefined }));
+          this.#turnUsage = null;
           this.#turn = null;
           this.#setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
