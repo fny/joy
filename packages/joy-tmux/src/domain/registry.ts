@@ -447,15 +447,17 @@ export class SessionRegistry {
       }, this.#sessionDeps());
 
       this.#sessions.set(id, session);
-      if (isAlive) {
-        if (transcriptPath) session.startTailer(transcriptPath);
-        session.beginWatching();
-      }
       // Attach the relay (binds the session RPCs) even for ENDED sessions whose
       // tmux window still exists — so git status, the file browser, search and
       // diffs keep working on a finished session's directory (its cwd is still
       // there). Claude-dependent ops (send/abort) just no-op for a dead pane.
-      this.#attachRelayAsync(session);
+      //
+      // Start watching (which replays the transcript from offset 0) ONLY after
+      // the relay attaches — otherwise the synchronous backfill is forwarded
+      // into a null relay and dropped (the same ordering bug create() avoids).
+      // forwardedUuids (rebuilt from receipts.json) dedups already-sent history,
+      // so only the downtime delta reaches the app.
+      this.#attachRelayAsync(session, isAlive ? () => session.beginWatching() : undefined);
       process.stderr.write(`[recover] ${id} cwd=${cwd} alive=${isAlive} transcript=${transcriptPath}\n`);
     }
   }
@@ -471,8 +473,11 @@ export class SessionRegistry {
     }
   }
 
-  #attachRelayAsync(session: Session): void {
-    if (!this.relayClient) return;
+  // afterAttach runs once the relay is attached (or immediately if there's no
+  // relay / attach fails) — recovery uses it to start the transcript tailer only
+  // AFTER the relay is live, so the replay-from-0 backfill has somewhere to go.
+  #attachRelayAsync(session: Session, afterAttach?: () => void): void {
+    if (!this.relayClient) { afterAttach?.(); return; }
     // A session recovered as ended (window present, Claude dead) is detached;
     // anything else attaching here is running.
     const state = session.status === "ended" ? "detached" : "running";
@@ -482,7 +487,11 @@ export class SessionRegistry {
         // Recovery/reconnect contexts have no kill-race, so allow ended sessions
         // to attach (their file/git RPCs stay live; messages won't touch the pane).
         session.attachRelay(rs, true);
+        afterAttach?.();
       })
-      .catch(e => process.stderr.write(`[relay] failed to create session for ${session.id}: ${e}\n`));
+      .catch(e => {
+        process.stderr.write(`[relay] failed to create session for ${session.id}: ${e}\n`);
+        afterAttach?.(); // still start watching (death detection, etc.) without a relay
+      });
   }
 }
