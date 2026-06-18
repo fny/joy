@@ -35,6 +35,7 @@ import {
   type DeliverySource,
 } from "../domain/receipts";
 import { writeAttachmentToCwd } from "../domain/attachments";
+import { saveWindowRecord } from "../domain/windowRecord";
 import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
@@ -1106,6 +1107,9 @@ export class Session {
         this.claudeSessionId = sid;
         this.status = "active";
         this.lastActiveAt = Date.now();
+        // Persist the window→conversation binding so a daemon restart's recover()
+        // can re-attach the RIGHT transcript instead of the newest-mtime one.
+        saveWindowRecord(this.id, { claudeSessionId: sid });
         this.#deps.broadcast("session_update", this.toJSON());
         this.#flushPrelaunch();
       }
