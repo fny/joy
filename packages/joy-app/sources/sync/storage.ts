@@ -260,7 +260,12 @@ function buildSessionListViewData(
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
-        if (isSessionActive(session) && session.metadata?.joy__state !== 'detached') {
+        // joy__state is a metadata-driven safety net independent of the server's
+        // `active` flag: 'detached' (Claude died) and 'archived' (killed/cleaned
+        // up) both belong out of the active group even if a dropped archive POST
+        // left the server still reporting active=true.
+        const joyState = session.metadata?.joy__state;
+        if (isSessionActive(session) && joyState !== 'detached' && joyState !== 'archived') {
             activeSessions.push(session);
         } else {
             inactiveSessions.push(session);
