@@ -510,13 +510,19 @@ export const sessionOps: SessionOp[] = [
     scope: "session",
     rpcName: "killSession",
     http: null, // covered by DELETE /sessions/:id
-    handler: (session) => {
+    handler: async (session) => {
       // Idempotent: the op is bound to an existing session, so killing one
       // that already ended still reports success (matches the app's
       // archive flow, which treats success=false as "CLI unreachable" and
-      // falls back to a server-side archive it doesn't need here).
+      // falls back to a server-side archive).
       session.end("killed");
-      return { success: true, message: "killed" };
+      // Await the (retrying) archive POST and report its real result: a genuine
+      // failure now surfaces success:false so the app runs its fallback archive
+      // instead of leaving the killed session in the active list.
+      const archived = await session.awaitArchive();
+      return archived
+        ? { success: true, message: "killed" }
+        : { success: false, error: "archive failed" };
     },
   },
   {

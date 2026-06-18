@@ -467,7 +467,14 @@ export class SessionRegistry {
     for (const session of this.#sessions.values()) {
       // Re-attach any session missing a relay — including ended ones, so their
       // file/git RPCs survive a socket reconnect too.
-      if (session.relayAttached) continue;
+      if (session.relayAttached) {
+        // A detached session keeps its relay, so it's skipped here — but a
+        // one-shot joy__state:'detached' write lost to a merge timeout at the
+        // moment of death would never be re-driven, leaving a dead session shown
+        // green. Re-assert it on reconnect (no-ops if it already stuck).
+        session.reassertLifecycle();
+        continue;
+      }
       process.stderr.write(`[relay] reconnect: creating session for orphaned ${session.id}\n`);
       this.#attachRelayAsync(session);
     }
