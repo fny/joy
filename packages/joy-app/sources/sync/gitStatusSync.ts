@@ -47,7 +47,11 @@ export class GitStatusSync {
 
         let sync = this.projectSyncMap.get(projectKey);
         if (!sync) {
-            sync = new InvalidateSync(() => this.fetchGitStatusForProject(sessionId, projectKey));
+            // Bind the PROJECT, not the first session: the bash route is resolved to
+            // a currently-online session at fetch time. Baking in `sessionId` froze
+            // git status forever once that session detached, even with another live
+            // session in the same repo (BUG-14).
+            sync = new InvalidateSync(() => this.fetchGitStatusForProject(projectKey));
             this.projectSyncMap.set(projectKey, sync);
         }
         return sync;
@@ -121,11 +125,29 @@ export class GitStatusSync {
     }
 
     /**
-     * Fetch git status for a project using any session in that project
+     * Pick a currently-online session for a project (machineId:path) to route bash
+     * through, so a detached session can't freeze the repo's git status. Prefers an
+     * online session; returns null if none is live (we then keep the last good
+     * status rather than clearing or failing).
      */
-    private async fetchGitStatusForProject(sessionId: string, projectKey: string): Promise<void> {
+    private resolveLiveSessionForProject(projectKey: string): string | null {
+        const sessions = storage.getState().sessions;
+        for (const s of Object.values(sessions)) {
+            if (!s.metadata?.machineId || !s.metadata?.path) continue;
+            if (`${s.metadata.machineId}:${s.metadata.path}` !== projectKey) continue;
+            if (s.presence === 'online') return s.id;
+        }
+        return null;
+    }
+
+    /**
+     * Fetch git status for a project using a currently-online session in that project
+     */
+    private async fetchGitStatusForProject(projectKey: string): Promise<void> {
         try {
-            // Check if we have a session with valid metadata
+            // Route through a live session resolved NOW (not a frozen first session).
+            const sessionId = this.resolveLiveSessionForProject(projectKey);
+            if (!sessionId) return; // no online session → keep last good status
             const session = storage.getState().sessions[sessionId];
             if (!session?.metadata?.path) {
                 return;
@@ -182,7 +204,7 @@ export class GitStatusSync {
             storage.getState().applyGitStatus(projectKey, gitStatus);
 
         } catch (error) {
-            console.error('Error fetching git status for session', sessionId, ':', error);
+            console.error('Error fetching git status for project', projectKey, ':', error);
             // Don't apply error state, just skip this update
         }
     }

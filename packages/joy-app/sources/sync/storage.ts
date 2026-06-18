@@ -933,13 +933,26 @@ export const storage = create<StorageState>()((set, get) => {
                 profile
             };
         }),
-        applyGitStatus: (pathKey: string, status: GitStatus | null) => set((state) => ({
-            ...state,
-            pathGitStatus: {
-                ...state.pathGitStatus,
-                [pathKey]: status
+        applyGitStatus: (pathKey: string, status: GitStatus | null) => set((state) => {
+            // Short-circuit no-op writes, like applyGitStatusFiles. gitStatusSync
+            // stamps lastUpdatedAt: Date.now() on every parse, so an unchanged repo
+            // would otherwise push a fresh reference each fetch → git-badge
+            // subscribers re-render and FilesSidebar (keyed on lastUpdatedAt) fires
+            // a redundant getGitStatusFiles RPC. Compare ignoring lastUpdatedAt.
+            const prev = state.pathGitStatus[pathKey] ?? null;
+            if (prev === status || (prev && status && equal(
+                { ...prev, lastUpdatedAt: 0 }, { ...status, lastUpdatedAt: 0 }
+            ))) {
+                return state;
             }
-        })),
+            return {
+                ...state,
+                pathGitStatus: {
+                    ...state.pathGitStatus,
+                    [pathKey]: status
+                }
+            };
+        }),
         applyGitStatusFiles: (pathKey: string, files: GitStatusFiles | null) => set((state) => {
             // Short-circuit on no-op writes. gitStatusSync.invalidate fires on every
             // mutable-tool message and on every update-session, but most of those

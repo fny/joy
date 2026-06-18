@@ -109,14 +109,10 @@ function UserTextBlock(props: {
   // <local-command-caveat>…</local-command-caveat> and
   // <command-message>…</command-message><command-name>/foo</command-name>
   // whenever a slash command runs. The plain MarkdownView renders these as
-  // literal text, which looks broken. Collapse them into chips or hide
-  // them entirely depending on what kind of wrapper this is.
-  // The user's own slash-command input is shown optimistically (carries a
-  // localId); the SDK then injects the canonical wrapper chip. Hide the raw
-  // echo so we don't render the command twice. Gated to Claude flavor only:
-  // Codex/Gemini don't reliably emit the <command-*> wrapper, so hiding the
-  // echo there would drop the command with nothing to replace it. (Absent
-  // flavor == Claude, matching the convention used elsewhere.)
+  // literal text, which looks broken. parseLocalCommandMessage below hides pure
+  // caveats and reconstructs a readable line if a <command-*> wrapper slips
+  // through; the user's own typed slash commands render as plain messages (no
+  // chips, no echo-hiding — that design was removed, see parseLocalCommandMessage).
   // Harness-injected pseudo-XML blocks (task notifications, system reminders,
   // unknown tags) — render as cards/chips or strip, so raw XML never shows.
   const rawText = props.message.displayText || props.message.text;
