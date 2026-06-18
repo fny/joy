@@ -9,7 +9,7 @@ import Animated, {
     withTiming,
     Easing,
 } from 'react-native-reanimated';
-import { storage, useSessionGitStatus, useSessionGitStatusFiles, useSessionProjectFiles } from '@/sync/storage';
+import { storage, useSessionGitStatus, useSessionGitStatusFiles, useSessionProjectFiles, useSessionExpandedDirs } from '@/sync/storage';
 import { getGitStatusFiles, GitFileStatus } from '@/sync/gitStatusFiles';
 import { getProjectFiles, ProjectFile } from '@/sync/projectFiles';
 import { FileIcon } from '@/components/FileIcon';
@@ -373,21 +373,25 @@ const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
         [tree, deferredQuery, isSearching]
     );
 
-    // expanded set (default empty = all collapsed) decided during render — no
-    // post-paint seed effect, so no expand→collapse flicker on open.
-    const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set());
+    // Expanded folders live in the store (keyed by project path), so they survive
+    // navigating away and back. Default empty = all collapsed, decided during
+    // render — no post-paint seed effect, so no expand→collapse flicker on open.
+    const expandedArr = useSessionExpandedDirs(sessionId);
+    const expanded = React.useMemo(() => new Set(expandedArr), [expandedArr]);
     const toggleDir = React.useCallback((path: string) => {
-        setExpanded((prev) => {
-            const next = new Set(prev);
-            if (next.has(path)) next.delete(path);
-            else next.add(path);
-            return next;
-        });
-    }, []);
+        const pathKey = storage.getState().getSessionPathKey(sessionId);
+        if (!pathKey) return;
+        const cur = storage.getState().pathExpandedDirs[pathKey] ?? [];
+        const next = cur.includes(path) ? cur.filter((p) => p !== path) : [...cur, path];
+        storage.getState().setExpandedDirs(pathKey, next);
+    }, [sessionId]);
 
     React.useImperativeHandle(ref, () => ({
-        collapseAll: () => setExpanded(new Set()), // empty = everything collapsed
-    }), []);
+        collapseAll: () => {
+            const pathKey = storage.getState().getSessionPathKey(sessionId);
+            if (pathKey) storage.getState().setExpandedDirs(pathKey, []); // empty = all collapsed
+        },
+    }), [sessionId]);
 
     const rows = React.useMemo(
         () => flattenVisible(filteredTree, expanded, isSearching),
