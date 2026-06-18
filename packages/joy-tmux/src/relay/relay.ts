@@ -596,7 +596,11 @@ export class RelayClient {
       headers: this.headers(),
       body: JSON.stringify({ messages: [{ content: b64encode(encrypted), localId }] }),
     });
-    if (!res.ok) throw new Error(`append: HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(`append: HTTP ${res.status}`) as Error & { status?: number };
+      err.status = res.status; // lets drain() distinguish permanent (4xx) from transient
+      throw err;
+    }
     const data = await res.json() as { messages: Array<{ seq: number }> };
     if (!data.messages?.[0]) throw new Error('append: empty response');
     return data.messages[0];
@@ -668,7 +672,7 @@ export class RelaySession {
   private metadata: Record<string, unknown> | null;
   private metadataVersion = 0;
 
-  onMessage: (text: string, seq: number) => void = () => {};
+  onMessage: (text: string, seq: number) => void | Promise<void> = () => {};
   /**
    * Fires for each file/attachment event the app sends ahead of a user
    * message (envelope `role:'session'`, `ev.t:'file'`). The handler is
@@ -850,7 +854,17 @@ export class RelaySession {
           if (meta?.sentFrom === 'joy') continue;
           const c = dec['content'] as { type?: string; text?: string } | undefined;
           if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
-            this.onMessage(c.text.trim(), msg.seq);
+            // Await delivery (tmux injection + any attachment download) before the
+            // loop falls through to savePersistedSeq below — so we only persist
+            // lastSeq AFTER the message is delivered (a crash mid-batch re-pulls
+            // it) and messages inject in seq order (an earlier message awaiting an
+            // attachment can't be overtaken by a later text-only one). A failed
+            // injection is logged, not retried, to avoid a poison-pill pull loop.
+            try {
+              await this.onMessage(c.text.trim(), msg.seq);
+            } catch (e) {
+              log(`pull: onMessage failed for seq=${msg.seq}: ${e}`);
+            }
           }
         }
         if (!hasMore) break;
@@ -879,9 +893,15 @@ export class RelaySession {
         this.queue.shift();
       } catch (e) {
         item.attempts++;
-        // H2: cap retries so a permanent failure (401/404) doesn't wedge the queue forever
-        if (item.attempts >= RelaySession.MAX_SEND_ATTEMPTS) {
-          log(`send failed after ${item.attempts} attempts, dropping: ${e}`);
+        // A permanent (4xx) failure — e.g. the session was archived (404/410) or
+        // auth rejected (401/403) — will never succeed, so drop it IMMEDIATELY
+        // instead of backing off ~2.5min × 10 on it AND head-of-line-blocking every
+        // queued message behind it. 408/429 are retryable. (H2: cap retries too so
+        // a transient failure can't wedge the queue forever.)
+        const status = (e as { status?: number }).status;
+        const permanent = typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
+        if (permanent || item.attempts >= RelaySession.MAX_SEND_ATTEMPTS) {
+          log(`send ${permanent ? `permanently failed (HTTP ${status})` : `failed after ${item.attempts} attempts`}, dropping: ${e}`);
           this.queue.shift();
           continue;
         }
