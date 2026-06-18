@@ -35,21 +35,31 @@ import { FeedItem } from "./feedTypes";
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const REALTIME_MODE_DEBOUNCE_MS = 150;
 
+// Client-side liveness window. The server keeps a session active:true until its
+// own ~10-min reaper runs, so when a daemon dies the app would show "online" for
+// up to 10 min. The joy-tmux keepalive beats every 30s, so treat a session whose
+// last activity is older than this as offline — far above the cadence to avoid
+// flapping an idle-but-alive session.
+const SESSION_STALE_AFTER_MS = 90_000;
+
+function isFresh(session: { activeAt: number }): boolean {
+    return Date.now() - session.activeAt < SESSION_STALE_AFTER_MS;
+}
+
 /**
  * Centralized session online state resolver
  * Returns either "online" (string) or a timestamp (number) for last seen
  */
 function resolveSessionOnlineState(session: { active: boolean; activeAt: number }): "online" | number {
-    // Session is online if the active flag is true
-    return session.active ? "online" : session.activeAt;
+    // Online only if the server says active AND we've heard from it recently.
+    return session.active && isFresh(session) ? "online" : session.activeAt;
 }
 
 /**
  * Checks if a session should be shown in the active sessions group
  */
 function isSessionActive(session: { active: boolean; activeAt: number }): boolean {
-    // Use the active flag directly, no timeout checks
-    return session.active;
+    return session.active && isFresh(session);
 }
 
 // Known entitlement IDs

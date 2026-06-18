@@ -19,8 +19,13 @@ export interface SessionStatus {
  * Get the current state of a session based on presence and thinking status.
  * Uses centralized session state from storage.ts
  */
+// Mirror of storage.ts SESSION_STALE_AFTER_MS — a dead daemon stays server-side
+// active:true until the ~10-min reaper, so treat activity older than this (well
+// above the 30s keepalive) as offline at render time too.
+const SESSION_STALE_AFTER_MS = 90_000;
+
 export function useSessionStatus(session: Session): SessionStatus {
-    const isOnline = session.presence === "online";
+    const isOnline = session.presence === "online" && (Date.now() - session.activeAt < SESSION_STALE_AFTER_MS);
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
 
     const vibingMessage = React.useMemo(() => {
