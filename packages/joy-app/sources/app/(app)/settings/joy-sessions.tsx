@@ -159,7 +159,9 @@ export default React.memo(function JoySessionsScreen() {
                         {visibleMachines.map(machine => {
                             const isOnline = isMachineOnline(machine);
                             const isSelected = machine.id === selectedMachineId;
-                            const name = machine.metadata?.displayName || machine.metadata?.host || machine.id;
+                            // Before metadata is known (first-ever load, no cache yet) show a short
+                            // id rather than a jarring full UUID; the real name fills in on fetch.
+                            const name = machine.metadata?.displayName || machine.metadata?.host || machine.id.slice(0, 8);
                             const platform = machine.metadata?.platform || '';
                             const status = isOnline ? t('settingsSessions.statusOnline') : t('settingsSessions.statusOffline');
                             const subtitle = platform ? `${platform} • ${status}` : status;

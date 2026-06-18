@@ -4,8 +4,11 @@ import { LocalSettings, localSettingsDefaults, localSettingsParse } from './loca
 import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
+import type { Machine } from './storageTypes';
 
 const mmkv = new MMKV();
+const CACHED_MACHINES_KEY = 'cached-machines-v1';
+const MAX_CACHED_MACHINES = 50;
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
 const REGISTERED_PUSH_TOKEN_KEY = 'registered-push-token-v1';
 const VOICE_SOFT_PAYWALL_SHOWN_KEY = 'voice-soft-paywall-shown';
@@ -25,6 +28,32 @@ export interface NewSessionDraft {
     sessionType: NewSessionSessionType;
     worktreeKey: string | null;
     updatedAt: number;
+}
+
+// Cache the machine list (with already-decrypted names) so the machine pickers
+// paint real names instantly on cold start instead of showing raw UUIDs until
+// fetchMachines completes. fetchMachines still runs and reconciles truth.
+export function loadCachedMachines(): Machine[] {
+    const raw = mmkv.getString(CACHED_MACHINES_KEY);
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed as Machine[] : [];
+    } catch (e) {
+        console.error('Failed to parse cached machines', e);
+        return [];
+    }
+}
+
+export function saveCachedMachines(machines: Machine[]): void {
+    try {
+        const trimmed = [...machines]
+            .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+            .slice(0, MAX_CACHED_MACHINES);
+        mmkv.set(CACHED_MACHINES_KEY, JSON.stringify(trimmed));
+    } catch (e) {
+        console.error('Failed to save cached machines', e);
+    }
 }
 
 export function loadSettings(): { settings: Settings, version: number | null } {
