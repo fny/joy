@@ -364,13 +364,13 @@ export class RelayClient {
   close(): void { this.socket?.close(); this.socket = null; }
 
   /** Emit the server's version-checked session metadata update (used for summaries). */
-  updateSessionMetadata(sid: string, expectedVersion: number, metadataB64: string): Promise<{ result: string; version?: number } | null> {
+  updateSessionMetadata(sid: string, expectedVersion: number, metadataB64: string): Promise<{ result: string; version?: number; metadata?: string } | null> {
     return new Promise((resolve) => {
       if (!this.socket) { resolve(null); return; }
       let done = false;
-      const finish = (v: { result: string; version?: number } | null) => { if (!done) { done = true; resolve(v); } };
+      const finish = (v: { result: string; version?: number; metadata?: string } | null) => { if (!done) { done = true; resolve(v); } };
       this.socket.emit('update-metadata', { sid, expectedVersion, metadata: metadataB64 }, (ack: unknown) => {
-        finish(isObj(ack) ? (ack as { result: string; version?: number }) : null);
+        finish(isObj(ack) ? (ack as { result: string; version?: number; metadata?: string }) : null);
       });
       setTimeout(() => finish(null), 5000);
     });
@@ -742,6 +742,14 @@ export class RelaySession {
       }
       if (ack.result === 'version-mismatch' && typeof ack.version === 'number') {
         this.metadataVersion = ack.version;
+        if (ack.metadata) {
+          try {
+            const dec = decryptWire(this.variant, this.sessionKey, b64decode(ack.metadata));
+            if (dec && typeof dec === 'object') {
+              this.metadata = dec as Record<string, unknown>;
+            }
+          } catch {}
+        }
         continue; // retry with the server's current version
       }
       return;
@@ -756,6 +764,16 @@ export class RelaySession {
     const current = this.metadata?.summary as { text?: string } | undefined;
     if (current?.text === title) return; // unchanged
     await this.mergeMetadata({ summary: { text: title, updatedAt: Date.now() } });
+  }
+
+  /**
+   * Mirror the active model the app reads (session.metadata.currentModelCode) so
+   * the composer's model selector reflects the real pane state — including model
+   * switches the user makes interactively in the tmux pane (/model …).
+   */
+  async updateModelCode(code: string): Promise<void> {
+    if ((this.metadata?.currentModelCode as string | undefined) === code) return;
+    await this.mergeMetadata({ currentModelCode: code });
   }
 
   /**
