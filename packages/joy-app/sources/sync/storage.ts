@@ -448,6 +448,17 @@ export const storage = create<StorageState>()((set, get) => {
                 const existingEffortLevel = state.sessions[session.id]?.effortLevel ?? null;
                 const resolvedEffortLevel = existingEffortLevel ?? savedEffortLevels[session.id] ?? session.effortLevel ?? null;
 
+                // Version guard: a stale socket update (e.g. a delayed `update-session`)
+                // must not downgrade fresher REST-fetched state. Keep whichever of
+                // existing/incoming has the higher version, PER FIELD on its OWN version
+                // (metadataVersion / agentStateVersion) — not on `seq`, since metadata-only
+                // and activity-only updates carry heterogeneous, independently-versioned data.
+                const existing = state.sessions[session.id];
+                const keepMeta = existing && typeof existing.metadataVersion === 'number'
+                    && (typeof session.metadataVersion !== 'number' || existing.metadataVersion > session.metadataVersion);
+                const keepAgent = existing && typeof existing.agentStateVersion === 'number'
+                    && (typeof session.agentStateVersion !== 'number' || existing.agentStateVersion > session.agentStateVersion);
+
                 mergedSessions[session.id] = {
                     ...session,
                     presence,
@@ -455,6 +466,10 @@ export const storage = create<StorageState>()((set, get) => {
                     permissionMode: resolvedPermissionMode,
                     modelMode: resolvedModelMode,
                     effortLevel: resolvedEffortLevel,
+                    metadata: keepMeta ? existing!.metadata : session.metadata,
+                    metadataVersion: keepMeta ? existing!.metadataVersion : session.metadataVersion,
+                    agentState: keepAgent ? existing!.agentState : session.agentState,
+                    agentStateVersion: keepAgent ? existing!.agentStateVersion : session.agentStateVersion,
                 };
             });
 
