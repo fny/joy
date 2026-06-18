@@ -156,12 +156,15 @@ class ApiSocket {
         
         if (result.ok) {
             const decrypted = await sessionEncryption.decryptRaw(result.result);
-            // The daemon returns its error envelope ({ error: string }) with a
-            // transport-level ok:true (e.g. an unregistered method, or a handler
-            // that threw). Surface it as a real error instead of returning the
-            // envelope as a false-success result.
-            if (decrypted && typeof (decrypted as { error?: unknown }).error === 'string') {
-                throw new Error((decrypted as { error: string }).error);
+            // The daemon's RPC dispatch returns a transport envelope ({ error: string },
+            // no `success` field) when a method is unregistered or a handler throws —
+            // surface that as a real error. But routine op results legitimately carry
+            // { success: false, error } (e.g. a non-zero bash exit, a write hash
+            // mismatch); those must pass through so the caller can handle them. So only
+            // throw on the envelope: an `error` string WITHOUT a `success` field.
+            const d = decrypted as { error?: unknown; success?: unknown } | null | undefined;
+            if (d && typeof d.error === 'string' && d.success === undefined) {
+                throw new Error(d.error);
             }
             return decrypted as R;
         }
