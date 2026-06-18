@@ -323,7 +323,10 @@ export class RelayClient {
     let firstConnect = true;
     this.socket.on('connect', () => {
       log('socket connected');
-      for (const rs of this.activeSessions) rs.setThinking(false);
+      // Re-assert each session's CURRENT thinking value (not a blanket false —
+      // that desynced from Session.#thinking, so the pane poll's change-gate
+      // never re-asserted a true mid-turn and the app stuck on "not working").
+      for (const rs of this.activeSessions) rs.reassertAlive();
       // Re-register all RPC handlers on (re)connect
       for (const method of this.rpcHandlers.keys()) {
         log(`rpc: re-registering ${method}`);
@@ -696,18 +699,38 @@ export class RelaySession {
     this.metadataVersion = opts.metadataVersion ?? 0;
   }
 
+  // Serializes metadata writes for this session (see mergeMetadata).
+  private metadataChain: Promise<void> = Promise.resolve();
+
   /**
    * Merge a patch into the session metadata and persist it (server is
    * version-checked; retries on mismatch). The single write path so the title,
    * lifecycle state, etc. don't clobber each other.
+   *
+   * Calls are SERIALIZED per session: concurrent patches (joy__state / joy__queue
+   * / joy__retry / summary all fire near-simultaneously from the Session) used to
+   * each read the same base metadata and race — the loser re-sent its stale blob
+   * on the version-mismatch retry and erased the winner's field (e.g. a `detached`
+   * state wiped by a queue update, leaving a dead session shown as live). The
+   * daemon is the only writer of session metadata, so serializing here means each
+   * merge reads an already-updated `this.metadata` and no field is lost.
    */
-  private async mergeMetadata(patch: Record<string, unknown>): Promise<void> {
+  private mergeMetadata(patch: Record<string, unknown>): Promise<void> {
+    const run = this.metadataChain.then(() => this.doMergeMetadata(patch));
+    this.metadataChain = run.catch(() => {}); // keep the chain alive past a failure
+    return run;
+  }
+
+  private async doMergeMetadata(patch: Record<string, unknown>): Promise<void> {
     if (!this.metadata) return;
-    const merged = { ...this.metadata, ...patch };
-    const enc = b64encode(encryptWire(this.variant, this.sessionKey, merged));
     for (let attempt = 0; attempt < 3; attempt++) {
+      // Recompute merged + enc from CURRENT metadata each attempt, so a
+      // version bump re-merges the patch onto fresh state instead of re-sending
+      // a stale blob.
+      const merged = { ...this.metadata, ...patch };
+      const enc = b64encode(encryptWire(this.variant, this.sessionKey, merged));
       const ack = await this.client.updateSessionMetadata(this.relaySessionId, this.metadataVersion, enc);
-      if (!ack) return;
+      if (!ack) continue; // timeout/no-ack — retry rather than silently dropping the transition
       if (ack.result === 'success') {
         this.metadata = merged;
         if (typeof ack.version === 'number') this.metadataVersion = ack.version;
@@ -877,6 +900,12 @@ export class RelaySession {
   setThinking(thinking: boolean): void {
     this.lastThinking = thinking;
     this.client.emitAlive(this.relaySessionId, thinking);
+  }
+
+  /** Re-emit presence with the CURRENT thinking value — used on socket
+   *  reconnect to refresh the app without clobbering the real state. */
+  reassertAlive(): void {
+    this.client.emitAlive(this.relaySessionId, this.lastThinking);
   }
 
   /** Register a session-scoped RPC handler bound to this relay session. */
