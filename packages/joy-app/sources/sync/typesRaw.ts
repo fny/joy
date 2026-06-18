@@ -83,6 +83,7 @@ const sessionStartEventSchema = z.object({
 const sessionTurnEndEventSchema = z.object({
     t: z.literal('turn-end'),
     status: z.enum(['completed', 'failed', 'cancelled']),
+    usage: usageDataSchema.optional(), // joy-tmux carries the turn's token usage here
 });
 
 const sessionStopEventSchema = z.object({
@@ -569,6 +570,9 @@ function normalizeSessionEnvelope(
             role: 'event',
             isSidechain: false,
             content: { type: 'ready' },
+            // Fold the turn's token usage (joy-tmux sessions show 0 otherwise) — the
+            // reducer reads msg.usage regardless of role.
+            usage: envelope.ev.usage,
             meta
         } satisfies NormalizedMessage;
     }

@@ -1013,8 +1013,12 @@ export function encodeToolCallEnd(call: string, opts: { turn: string; claudeUuid
   return sessionEnvelope({ t: 'tool-call-end', call }, opts);
 }
 
-export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts: { turn: string; time?: number }): WireRecord {
-  return sessionEnvelope({ t: 'turn-end', status }, opts);
+export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts: { turn: string; time?: number; usage?: unknown }): WireRecord {
+  // Carry the turn's final token usage so the app can show real tokens/cost for
+  // joy sessions (the raw transcript assistant entries report it as msg.usage).
+  const ev: Record<string, unknown> = { t: 'turn-end', status };
+  if (opts.usage) ev.usage = opts.usage;
+  return sessionEnvelope(ev, opts);
 }
 
 // User messages are sorted by the relay's server-assigned createdAt, NOT an
