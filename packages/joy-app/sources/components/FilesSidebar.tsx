@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { View, Text, ScrollView, Pressable, Platform, TextInput, ActivityIndicator } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
 import { Octicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import Animated, {
@@ -135,21 +136,33 @@ function filterTree<T>(nodes: AnyTreeNode<T>[], query: string): AnyTreeNode<T>[]
     return result;
 }
 
-function collectDirPaths<T>(nodes: AnyTreeNode<T>[], acc: string[] = []): string[] {
-    for (const node of nodes) {
-        if (node.kind === 'dir') {
-            acc.push(node.path);
-            collectDirPaths(node.children, acc);
-        }
-    }
-    return acc;
-}
-
 type AllFilesTabHandle = { collapseAll: () => void };
 
-// Stable empty set: while searching we force-expand so matches under
-// otherwise-collapsed folders stay visible.
-const EMPTY_COLLAPSED: Set<string> = new Set<string>();
+type FlatRow<T> = { node: AnyTreeNode<T>; depth: number };
+
+// Flatten the tree to ONLY the visible rows (children of collapsed dirs are
+// skipped) so a virtualized list mounts just the on-screen rows instead of the
+// whole repo at once. `expanded` is the set of open dir paths (default: all
+// collapsed); during search everything is force-expanded so matches under closed
+// folders stay visible.
+function flattenVisible<T>(
+    nodes: AnyTreeNode<T>[],
+    expanded: Set<string>,
+    forceExpand: boolean,
+    depth = 0,
+    out: FlatRow<T>[] = [],
+): FlatRow<T>[] {
+    for (const node of nodes) {
+        out.push({ node, depth });
+        if (node.kind === 'dir' && (forceExpand || expanded.has(node.path))) {
+            flattenVisible(node.children, expanded, forceExpand, depth + 1, out);
+        }
+    }
+    return out;
+}
+
+// Skip the git ls-files round-trip when the cached listing is this fresh.
+const PROJECT_FILES_FRESH_MS = 30_000;
 
 export const FilesSidebar = React.memo<FilesSidebarProps>(({
     sessionId,
@@ -310,7 +323,7 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
     );
 });
 
-/** All-files tab: reads from Zustand store, fetches on mount */
+/** All-files tab: virtualized, cache-first, deferred-search file tree. */
 const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
     sessionId: string;
     selectedPath: string | null;
@@ -322,20 +335,28 @@ const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
 }, ref) {
     const { theme } = useUnistyles();
     const [searchQuery, setSearchQuery] = React.useState('');
+    // Defer the expensive filter/flatten off the keystroke so typing stays smooth.
+    const deferredQuery = React.useDeferredValue(searchQuery);
+    const isSearching = deferredQuery.trim().length > 0;
     const [isLoading, setIsLoading] = React.useState(false);
 
     const projectFiles = useSessionProjectFiles(sessionId);
-    const gitStatus = useSessionGitStatus(sessionId);
     const allFiles = projectFiles?.files ?? [];
 
-    // Fetch project files into Zustand on mount
+    // Cache-first fetch: render the cached listing immediately and only hit the
+    // relay when there's no cache or it's stale. Decoupled from
+    // gitStatus.lastUpdatedAt (which the daemon's poll bumps) so revisiting the
+    // tab doesn't re-run `git ls-files` over the relay every time.
     React.useEffect(() => {
         let cancelled = false;
         const pathKey = storage.getState().getSessionPathKey(sessionId);
         if (!pathKey) return;
 
         const existing = storage.getState().pathProjectFiles[pathKey];
+        const fresh = !!existing && existing.files.length > 0
+            && (Date.now() - existing.fetchedAt < PROJECT_FILES_FRESH_MS);
         setIsLoading(!existing || existing.files.length === 0);
+        if (fresh) return; // cache is fresh → skip the round-trip
         (async () => {
             const result = await getProjectFiles(sessionId);
             if (!cancelled) {
@@ -344,17 +365,19 @@ const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
             }
         })();
         return () => { cancelled = true; };
-    }, [sessionId, gitStatus?.lastUpdatedAt]);
+    }, [sessionId]);
 
     const tree = React.useMemo(() => buildTree(allFiles), [allFiles]);
     const filteredTree = React.useMemo(
-        () => searchQuery.trim() ? filterTree(tree, searchQuery) : tree,
-        [tree, searchQuery]
+        () => isSearching ? filterTree(tree, deferredQuery) : tree,
+        [tree, deferredQuery, isSearching]
     );
 
-    const [collapsed, setCollapsed] = React.useState<Set<string>>(() => new Set());
+    // expanded set (default empty = all collapsed) decided during render — no
+    // post-paint seed effect, so no expand→collapse flicker on open.
+    const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set());
     const toggleDir = React.useCallback((path: string) => {
-        setCollapsed((prev) => {
+        setExpanded((prev) => {
             const next = new Set(prev);
             if (next.has(path)) next.delete(path);
             else next.add(path);
@@ -362,24 +385,29 @@ const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
         });
     }, []);
 
-    // Folders start collapsed: seed the collapse set with every directory the
-    // first time the tree loads (it arrives async). A ref guards re-seeding so
-    // the user's expansions aren't clobbered on later updates.
-    const seededRef = React.useRef(false);
-    React.useEffect(() => {
-        if (seededRef.current || tree.length === 0) return;
-        seededRef.current = true;
-        setCollapsed(new Set(collectDirPaths(tree)));
-    }, [tree]);
-
-    // Collapse-all button in the header drives this.
     React.useImperativeHandle(ref, () => ({
-        collapseAll: () => setCollapsed(new Set(collectDirPaths(tree))),
-    }), [tree]);
+        collapseAll: () => setExpanded(new Set()), // empty = everything collapsed
+    }), []);
+
+    const rows = React.useMemo(
+        () => flattenVisible(filteredTree, expanded, isSearching),
+        [filteredTree, expanded, isSearching]
+    );
 
     const handleFilePress = React.useCallback((file: ProjectFile) => {
         onFilePress?.(file.fullPath);
     }, [onFilePress]);
+
+    const renderItem = React.useCallback(({ item }: { item: FlatRow<ProjectFile> }) => (
+        <FlatProjectRow
+            node={item.node}
+            depth={item.depth}
+            isExpanded={item.node.kind === 'dir' && (isSearching || expanded.has(item.node.path))}
+            isSelected={selectedPath === item.node.path}
+            onToggleDir={toggleDir}
+            onFilePress={handleFilePress}
+        />
+    ), [expanded, isSearching, selectedPath, toggleDir, handleFilePress]);
 
     return (
         <View style={{ flex: 1 }}>
@@ -397,48 +425,42 @@ const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
                 />
             </View>
 
-            <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
-                {isLoading && allFiles.length === 0 ? (
-                    <View style={styles.emptyState}>
-                        <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+            {isLoading && allFiles.length === 0 ? (
+                <View style={styles.emptyState}>
+                    <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                </View>
+            ) : rows.length === 0 ? (
+                <View style={styles.emptyState}>
+                    <View style={styles.emptyIconWrap}>
+                        <Octicons name="file" size={28} color={theme.colors.textSecondary} />
                     </View>
-                ) : filteredTree.length === 0 ? (
-                    <View style={styles.emptyState}>
-                        <View style={styles.emptyIconWrap}>
-                            <Octicons name="file" size={28} color={theme.colors.textSecondary} />
-                        </View>
-                        <Text style={styles.emptyTitle}>
-                            {searchQuery ? t('files.noFilesFound') : t('files.noFilesInProject')}
-                        </Text>
-                    </View>
-                ) : (
-                    <View style={styles.tree}>
-                        {filteredTree.map((node) => (
-                            <ProjectTreeNodeRow
-                                key={node.path}
-                                node={node}
-                                depth={0}
-                                selectedPath={selectedPath}
-                                collapsed={searchQuery.trim() ? EMPTY_COLLAPSED : collapsed}
-                                onToggleDir={toggleDir}
-                                onFilePress={handleFilePress}
-                            />
-                        ))}
-                    </View>
-                )}
-            </ScrollView>
+                    <Text style={styles.emptyTitle}>
+                        {searchQuery ? t('files.noFilesFound') : t('files.noFilesInProject')}
+                    </Text>
+                </View>
+            ) : (
+                <View style={{ flex: 1 }}>
+                    <FlashList
+                        data={rows}
+                        keyExtractor={(item) => item.node.path}
+                        renderItem={renderItem}
+                        contentContainerStyle={styles.flashContent}
+                        keyboardShouldPersistTaps="handled"
+                    />
+                </View>
+            )}
         </View>
     );
 }));
 
-/** Tree row for project files (no status badges, clickable) */
-const ProjectTreeNodeRow = React.memo(function ProjectTreeNodeRow({
-    node, depth, selectedPath, collapsed, onToggleDir, onFilePress,
+/** Single (non-recursive) row for the virtualized All-Files list. */
+const FlatProjectRow = React.memo(function FlatProjectRow({
+    node, depth, isExpanded, isSelected, onToggleDir, onFilePress,
 }: {
     node: AnyTreeNode<ProjectFile>;
     depth: number;
-    selectedPath: string | null;
-    collapsed: Set<string>;
+    isExpanded: boolean;
+    isSelected: boolean;
     onToggleDir: (path: string) => void;
     onFilePress: (file: ProjectFile) => void;
 }) {
@@ -446,36 +468,19 @@ const ProjectTreeNodeRow = React.memo(function ProjectTreeNodeRow({
     const leftPad = 8 + depth * INDENT_PX;
 
     if (node.kind === 'dir') {
-        const isCollapsed = collapsed.has(node.path);
         return (
-            <View>
-                <Pressable
-                    onPress={() => onToggleDir(node.path)}
-                    style={({ pressed }) => [styles.row, { paddingLeft: leftPad }, pressed && styles.rowPressed]}
-                >
-                    <View style={styles.chevron}>
-                        <AnimatedChevron collapsed={isCollapsed} color={theme.colors.textSecondary} />
-                    </View>
-                    <Text style={styles.dirName} numberOfLines={1}>{node.name}</Text>
-                </Pressable>
-                {!isCollapsed
-                    ? node.children.map((child) => (
-                        <ProjectTreeNodeRow
-                            key={child.path}
-                            node={child}
-                            depth={depth + 1}
-                            selectedPath={selectedPath}
-                            collapsed={collapsed}
-                            onToggleDir={onToggleDir}
-                            onFilePress={onFilePress}
-                        />
-                    ))
-                    : null}
-            </View>
+            <Pressable
+                onPress={() => onToggleDir(node.path)}
+                style={({ pressed }) => [styles.row, { paddingLeft: leftPad }, pressed && styles.rowPressed]}
+            >
+                <View style={styles.chevron}>
+                    <AnimatedChevron collapsed={!isExpanded} color={theme.colors.textSecondary} />
+                </View>
+                <Text style={styles.dirName} numberOfLines={1}>{node.name}</Text>
+            </Pressable>
         );
     }
 
-    const isSelected = selectedPath === node.path;
     return (
         <Pressable
             onPress={() => onFilePress(node.file)}
@@ -668,6 +673,10 @@ const styles = StyleSheet.create((theme) => ({
     },
     tree: {
         paddingHorizontal: 4,
+    },
+    flashContent: {
+        paddingHorizontal: 4,
+        paddingBottom: 16,
     },
     row: {
         flexDirection: 'row',
