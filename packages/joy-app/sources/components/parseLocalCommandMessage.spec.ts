@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseLocalCommandMessage, isUserSlashCommandEcho } from './parseLocalCommandMessage';
+import { parseLocalCommandMessage } from './parseLocalCommandMessage';
 
 describe('parseLocalCommandMessage', () => {
     it('hides the local-command caveat wrapper', () => {
@@ -58,39 +58,5 @@ describe('parseLocalCommandMessage', () => {
     it('passes ordinary user text through untouched', () => {
         const text = 'just a normal message';
         expect(parseLocalCommandMessage(text)).toEqual({ kind: 'text', text });
-    });
-});
-
-describe('isUserSlashCommandEcho', () => {
-    it('detects a bare command echo with a localId', () => {
-        expect(isUserSlashCommandEcho('/compact', true)).toBe(true);
-    });
-
-    it('detects a command-with-args echo with a localId', () => {
-        expect(isUserSlashCommandEcho('/superpowers:brainstorming make me rich', true)).toBe(true);
-    });
-
-    it('ignores echoes without a localId (SDK-originated, not user-sent)', () => {
-        expect(isUserSlashCommandEcho('/compact', false)).toBe(false);
-    });
-
-    it('does not treat the SDK wrapper itself as a raw echo', () => {
-        const wrapper =
-            '<command-message>x</command-message><command-name>/x</command-name><command-args>a</command-args>';
-        expect(isUserSlashCommandEcho(wrapper, true)).toBe(false);
-    });
-
-    it('does not match unix-style paths', () => {
-        expect(isUserSlashCommandEcho('/etc/hosts is the file', true)).toBe(false);
-        expect(isUserSlashCommandEcho('/usr/local/bin', true)).toBe(false);
-    });
-
-    it('does not match a lone slash or ordinary text', () => {
-        expect(isUserSlashCommandEcho('/', true)).toBe(false);
-        expect(isUserSlashCommandEcho('please run /compact later', true)).toBe(false);
-    });
-
-    it('tolerates surrounding whitespace', () => {
-        expect(isUserSlashCommandEcho('  /clear  ', true)).toBe(true);
     });
 });

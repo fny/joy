@@ -63,45 +63,7 @@ export function parseLocalCommandMessage(text: string): LocalCommandMessage {
     return { kind: 'text', text };
 }
 
-// A pure slash-command invocation: starts with `/`, a command token
-// (letters, digits, `:`, `-`, `_`), optionally followed by whitespace +
-// args. Deliberately strict so paths like `/etc/hosts` or a lone `/`
-// do NOT match.
-const SLASH_COMMAND_RE = /^\/[a-zA-Z][\w:-]*(?:\s[\s\S]*)?$/;
-
-/**
- * True when this user-text message is the user's OWN echoed slash-command
- * input (e.g. `/superpowers:brainstorming do the thing`) that the Claude
- * Agent SDK will re-emit as a `<command-message>/<command-name>` wrapper.
- *
- * Happy shows the user's sent message optimistically (it carries a
- * `localId`); the SDK then injects the canonical wrapper (no `localId`,
- * rendered as a chip). Showing both looks like a duplicate, so we hide
- * the raw echo and let the wrapper chip stand in — matching how the
- * Claude Code terminal renders slash commands.
- *
- * Gated on `hasLocalId` so we only ever hide a message the user actually
- * sent from Happy, never an agent/SDK-originated one.
- */
-// A raw, pure slash-command line ("/model opus") with no wrapper tags — the
-// canonical representation is the <command-name> wrapper chip, so the raw line
-// (whether the user's optimistic echo or a daemon-mirrored duplicate) should
-// not also render. Unlike isUserSlashCommandEcho this ignores localId, so it
-// also catches daemon-mirrored duplicates.
-export function isPureSlashCommandLine(text: string): boolean {
-    const trimmed = text.trim();
-    return SLASH_COMMAND_RE.test(trimmed) && parseLocalCommandMessage(trimmed).kind === 'text';
-}
-
-export function isUserSlashCommandEcho(text: string, hasLocalId: boolean): boolean {
-    if (!hasLocalId) {
-        return false;
-    }
-    const trimmed = text.trim();
-    if (!SLASH_COMMAND_RE.test(trimmed)) {
-        return false;
-    }
-    // Guard: a real wrapper message also contains <command-name>; never
-    // treat that as a raw echo.
-    return parseLocalCommandMessage(trimmed).kind === 'text';
-}
+// NOTE: isPureSlashCommandLine / isUserSlashCommandEcho were removed (agy-4) —
+// they implemented an abandoned "hide the raw slash echo, show a wrapper chip"
+// design. MessageView now renders typed slash commands as plain messages, so the
+// helpers were dead code. parseLocalCommandMessage above is the live entry point.
