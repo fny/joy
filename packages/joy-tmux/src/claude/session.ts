@@ -454,6 +454,10 @@ export class Session {
       // joy__state='detached' → red "detached". When the daemon dies the
       // heartbeat stops and it lapses to offline. Messages are still ignored
       // (dead pane) via #onRelayMessage.
+      // Clear thinking first: #pollThinking stops the instant status==='ended',
+      // so without this the keepalive would re-assert a stale thinking:true
+      // (Claude usually died mid-turn) forever on the dead session.
+      this.#setThinking(false);
       if (this.#relay) void this.#relay.updateJoyState("detached");
     } else {
       // Killed → archived: flag, archive, detach, kill the window.
@@ -1193,8 +1197,7 @@ export class Session {
       if (content.startsWith("<command-name>") ||
           content.startsWith("<command-message>") ||
           content.startsWith("<local-command") ||
-          content.startsWith("<bash-") ||
-          /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(content)) {
+          content.startsWith("<bash-")) {
         return;
       }
 
@@ -1239,7 +1242,14 @@ export class Session {
       this.#deps.addChatMessage({ role: "user", content, source: "cli", session_id: sid });
 
     } else if (role === "assistant") {
-      if (typeof msg.model === "string" && msg.model) this.currentModel = msg.model;
+      if (typeof msg.model === "string" && msg.model) {
+        if (this.currentModel !== msg.model) {
+          this.currentModel = msg.model;
+          if (this.#relay) {
+            this.#relay.updateModelCode(msg.model).catch(() => {});
+          }
+        }
+      }
       const blocks = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
       // Claude produced output → it recovered from any mid-turn 5xx, so this turn
       // won't trigger an auto-retry.
