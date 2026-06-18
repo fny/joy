@@ -513,17 +513,25 @@ export class RelayClient {
    * cleans up local state — it doesn't tell the server to archive.
    */
   async archiveSession(relaySessionId: string): Promise<boolean> {
-    try {
-      const r = await fetch(this.url(`/v1/sessions/${relaySessionId}/archive`), {
-        method: 'POST',
-        headers: this.headers(),
-        body: '{}',
-      });
-      return r.ok;
-    } catch (e) {
-      log(`archiveSession failed for ${relaySessionId}: ${e}`);
-      return false;
+    // Retry: a transient 5xx/network blip used to drop the archive entirely
+    // (it was fire-and-forget), leaving a killed session stuck in the app's
+    // active list. 404/410 = already gone = success; other 4xx = permanent.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const r = await fetch(this.url(`/v1/sessions/${relaySessionId}/archive`), {
+          method: 'POST',
+          headers: this.headers(),
+          body: '{}',
+        });
+        if (r.ok || r.status === 404 || r.status === 410) return true;
+        if (r.status >= 400 && r.status < 500) { log(`archiveSession ${relaySessionId}: HTTP ${r.status} (permanent)`); return false; }
+        log(`archiveSession ${relaySessionId}: HTTP ${r.status} (attempt ${attempt + 1})`);
+      } catch (e) {
+        log(`archiveSession failed for ${relaySessionId} (attempt ${attempt + 1}): ${e}`);
+      }
+      if (attempt < 3) await sleep(500 * 2 ** attempt);
     }
+    return false;
   }
 
   /**

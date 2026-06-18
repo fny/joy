@@ -200,6 +200,10 @@ export class Session {
   // reconciles this against the live pane so the app's status matches the
   // window; the event-driven setters below give instant feedback in between.
   #thinking = false;
+  // The (retrying) archive POST fired when this session is killed — awaited by
+  // the killSession op so it can report a genuine failure to the app instead of
+  // an unconditional success (which would suppress the app's fallback archive).
+  #archivePromise: Promise<boolean> | null = null;
   // Throttle: surface at most one api_error note per turn (Claude retries up to
   // 10×, so a turn can emit several). Reset at turn end.
   #errorNotedThisTurn = false;
@@ -465,13 +469,31 @@ export class Session {
       this.#relay?.stop();
       this.#relay = null;
       if (this.#deps.relayClient && relaySessionId) {
-        void this.#deps.relayClient.archiveSession(relaySessionId);
+        // Keep the (retrying) promise so killSession can await the real result.
+        this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
       }
       run("tmux", "kill-window", "-t", this.tmuxWindow);
     }
 
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
+  }
+
+  /** Resolve once the kill-path archive POST settles (true if archived or there
+   *  was nothing to archive). Lets killSession report a real failure so the app
+   *  runs its own fallback archive instead of trusting an unconditional success. */
+  async awaitArchive(): Promise<boolean> {
+    return this.#archivePromise ? await this.#archivePromise : true;
+  }
+
+  /** Re-assert lifecycle metadata the app reads, on relay reconnect — so a
+   *  one-shot transition (notably joy__state:'detached') lost to a merge timeout
+   *  at the moment of death reconciles instead of leaving a dead session green.
+   *  updateJoyState no-ops if the value already stuck, so this is cheap. */
+  reassertLifecycle(): void {
+    if (this.status === "ended" && this.endReason === "process_exited") {
+      void this.#relay?.updateJoyState("detached");
+    }
   }
 
   /**
@@ -488,7 +510,7 @@ export class Session {
       this.#relay = null;
     }
     if (this.#deps.relayClient && relaySessionId) {
-      void this.#deps.relayClient.archiveSession(relaySessionId);
+      this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
     }
     run("tmux", "kill-window", "-t", this.tmuxWindow);
     this.endReason = "killed";
@@ -1221,6 +1243,20 @@ export class Session {
           // the pane finds no pending match, hits this stale `received`, and gets
           // wrongly swallowed (the app's history loses a real "yes"/"continue").
           consumeReceived(delivery, this.relaySessionId, content, Date.now());
+          // codex-4: record the prompt for 5xx auto-retry BEFORE returning —
+          // app/queue/RPC sends match here and used to skip the #lastUserText
+          // assignment below, so #fireRetry had nothing to re-send.
+          this.#lastUserText = content;
+          // codex-3: the echo proves the dispatched prompt landed. Confirm it now
+          // instead of waiting for assistant output — a turn that errors before any
+          // output (api_error → turn_duration with no assistant blocks) would
+          // otherwise leave #dispatchInFlight set until the 20s timeout requeues +
+          // pauses an already-delivered message.
+          if (this.#dispatchInFlight &&
+              (this.#dispatchInFlight.text === content ||
+               this.#dispatchInFlight.text.replace(/\n/g, " ") === content)) {
+            this.#confirmDispatchIfAwaiting();
+          }
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
         }
         // No queue match. Before assuming this was typed directly in the pane,
