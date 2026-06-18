@@ -22,7 +22,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionEffortLevels, saveSessionEffortLevels } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionEffortLevels, saveSessionEffortLevels, loadCachedMachines, saveCachedMachines } from "./persistence";
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
 import { sync } from "./sync";
@@ -380,7 +380,9 @@ export const storage = create<StorageState>()((set, get) => {
         purchases,
         profile,
         sessions: {},
-        machines: {},
+        // Hydrate machines from the on-disk cache so pickers show real names
+        // immediately on cold start (fetchMachines reconciles truth shortly after).
+        machines: loadCachedMachines().reduce((acc, m) => { acc[m.id] = m; return acc; }, {} as Record<string, Machine>),
         artifacts: {},  // Initialize artifacts
         friends: {},  // Initialize relationships cache
         users: {},  // Initialize global user cache
@@ -1233,6 +1235,9 @@ export const storage = create<StorageState>()((set, get) => {
                 state.sessions
             );
 
+            // Persist for fast first paint next cold start.
+            saveCachedMachines(Object.values(mergedMachines));
+
             return {
                 ...state,
                 machines: mergedMachines,
@@ -1244,6 +1249,7 @@ export const storage = create<StorageState>()((set, get) => {
                 return state;
             }
             const { [machineId]: _removed, ...remaining } = state.machines;
+            saveCachedMachines(Object.values(remaining));
             return {
                 ...state,
                 machines: remaining,
