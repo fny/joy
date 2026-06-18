@@ -155,9 +155,17 @@ class ApiSocket {
         });
         
         if (result.ok) {
-            return await sessionEncryption.decryptRaw(result.result) as R;
+            const decrypted = await sessionEncryption.decryptRaw(result.result);
+            // The daemon returns its error envelope ({ error: string }) with a
+            // transport-level ok:true (e.g. an unregistered method, or a handler
+            // that threw). Surface it as a real error instead of returning the
+            // envelope as a false-success result.
+            if (decrypted && typeof (decrypted as { error?: unknown }).error === 'string') {
+                throw new Error((decrypted as { error: string }).error);
+            }
+            return decrypted as R;
         }
-        throw new Error('RPC call failed');
+        throw new Error(result.error || 'RPC call failed');
     }
 
     /**
