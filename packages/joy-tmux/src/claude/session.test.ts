@@ -62,6 +62,17 @@ test("not working: an interactive picker is waiting, not generating", () => {
   expect(paneShowsWorking(pane)).toBe(false);
 });
 
+test("working: idle prompt but background shells still running", () => {
+  // Turn ended (ready prompt), but a bg task runs → footer shows "· N shell · ↓ to manage".
+  expect(paneShowsWorking("────\n❯\n────\n  ⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage")).toBe(true);
+  expect(paneShowsWorking("  ⏵⏵ bypass · 3 shells · ↓ to manage")).toBe(true);
+});
+
+test("not working: prose mentioning shells doesn't false-positive", () => {
+  // The footer anchors (middle dot / ↓ to manage) keep ordinary output from matching.
+  expect(paneShowsWorking("● I ran 3 shell commands to set things up.\n\n❯ \n  ⏵⏵ bypass · ← for agents")).toBe(false);
+});
+
 test("not running: shell prompt after a failed launch", () => {
   const pane = [
     "ubuntu@fny:~/Workspace/unconv$ claude --continue --dangerously-skip-permissions",
