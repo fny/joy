@@ -130,6 +130,7 @@ export const machineOps: MachineOp[] = [
         fallbackModel: typeof params.fallbackModel === "string" ? params.fallbackModel : undefined,
         forkSession: params.forkSession === true,
         chrome: params.chrome === true,
+        detached: params.detached === true,
         extraArgs: typeof params.extraArgs === "string" ? params.extraArgs : undefined,
       });
       return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };
