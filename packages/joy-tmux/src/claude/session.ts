@@ -1437,14 +1437,21 @@ export function paneShowsClaudeRunning(text: string): boolean {
 }
 
 /**
- * True when Claude is ACTIVELY generating — narrower than paneShowsClaudeRunning.
- * Claude prints the "esc to interrupt" hint only while a turn is in flight (text
- * generation or a running tool); it's absent at the idle ready prompt and at any
- * input prompt (picker/trust/permission). This is the ground truth the daemon
- * uses to report the app's "thinking" status, so blue/green tracks the window.
+ * True when Claude is doing (or waiting on) work — the daemon's ground truth for
+ * the app's "thinking" status. Two cases:
+ *   1. Actively generating: Claude prints the "esc to interrupt" hint while a turn
+ *      is in flight (text or a running tool). Absent at the idle prompt / dialogs.
+ *   2. Background work still running even though the turn ended and the pane is
+ *      back at the ready prompt: Claude's footer shows "· N shell(s) · … · ↓ to
+ *      manage" while background tasks/agents run. Without this the status would
+ *      flip to idle/green while a background task is still working.
+ * The middle-dot/arrow anchors keep #2 from matching prose like "ran 3 shell
+ * commands" — they only appear in the status footer.
  */
 export function paneShowsWorking(text: string): boolean {
-  return /esc to interrupt/i.test(text);
+  return /esc to interrupt/i.test(text)
+    || /·\s*\d+\s+shells?\b/i.test(text)
+    || /↓\s*to manage/i.test(text);
 }
 
 /** Human-readable backoff delay for retry notes: "15s", "2m". Exported for tests. */
