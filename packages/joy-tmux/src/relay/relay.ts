@@ -559,6 +559,32 @@ export class RelayClient {
     return { sent: tokens.length };
   }
 
+  /**
+   * Auto-notification for a session (mirrors happy-cli's sendSessionNotification):
+   * POST a push-event to the server, which decides whether to actually push —
+   * suppressing it when the app is focused on this session. This is why we go
+   * through the server instead of sendPush (which always blasts every device).
+   */
+  async sendSessionPushEvent(sessionId: string, kind: 'done' | 'permission' | 'question', title: string, body: string): Promise<void> {
+    const body_ = JSON.stringify({ kind, title, body, data: { kind, sessionId, source: 'joy-tmux' } });
+    // One retry: the very first outbound request after a daemon restart can hit a
+    // transient "fetch failed" before the network/undici pool warms; a dropped
+    // notification is user-visible, so give it a second shot.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(this.url(`/v1/sessions/${encodeURIComponent(sessionId)}/push-event`), {
+          method: 'POST', headers: this.headers(), body: body_,
+        });
+        if (res.ok) return;
+        if (res.status >= 400 && res.status < 500) { log(`push-event ${kind} for ${sessionId}: HTTP ${res.status}`); return; }
+        log(`push-event ${kind} for ${sessionId}: HTTP ${res.status} (attempt ${attempt + 1})`);
+      } catch (e) {
+        log(`push-event ${kind} failed for ${sessionId} (attempt ${attempt + 1}): ${e}`);
+      }
+      if (attempt === 0) await sleep(1000);
+    }
+  }
+
   async createSession(opts: { tag: string; metadata: unknown }): Promise<CreateSessionResult> {
     let sessionKey: Uint8Array;
     let variant: EncryptionVariant;
@@ -962,6 +988,28 @@ export class RelaySession {
    *  reconnect to refresh the app without clobbering the real state. */
   reassertAlive(): void {
     this.client.emitAlive(this.relaySessionId, this.lastThinking);
+  }
+
+  /** Fire an auto push-notification for this session (done/permission/question).
+   *  Title is fixed per kind; body is the session's title (its summary, or the
+   *  launch folder name) so the user knows which session. The server suppresses
+   *  it when the app is focused on this session. */
+  notify(kind: 'done' | 'permission' | 'question'): void {
+    const title = kind === 'done' ? "It's ready!"
+      : kind === 'permission' ? 'Permission request'
+      : 'Clarification needed';
+    void this.client.sendSessionPushEvent(this.relaySessionId, kind, title, this.#sessionTitle());
+  }
+
+  #sessionTitle(): string {
+    const summary = (this.metadata?.summary as { text?: string } | undefined)?.text?.trim();
+    if (summary) return summary;
+    const path = (this.metadata?.path as string | undefined)?.trim();
+    if (path) {
+      const segs = path.split(/[\\/]/).filter(Boolean);
+      if (segs.length) return segs[segs.length - 1];
+    }
+    return 'Joy session';
   }
 
   /** Register a session-scoped RPC handler bound to this relay session. */

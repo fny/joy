@@ -1386,6 +1386,11 @@ export class Session {
           this.#setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
           this.#maybeDrainQueue(); // turn done → send the next queued message
+          // Claude finished responding and isn't about to drain a queued message
+          // → push a "done" notification (the server suppresses it if you're
+          // already looking at this session). This is what makes joy sessions
+          // notify at all — nothing was firing one before.
+          if (!this.#dispatchInFlight) this.#relay?.notify("done");
         }
       }
       for (const block of blocks) {
