@@ -189,6 +189,11 @@ class Sync {
                 this.friendsSync.invalidate();
                 this.friendRequestsSync.invalidate();
                 this.feedSync.invalidate();
+                // Refetch the session the user is looking at. sessionsSync above
+                // restores metadata but NOT messages (and it preserves thinking),
+                // so a chat that missed `update`/`ephemeral` events while the app
+                // was backgrounded would otherwise stay stale until remounted.
+                this.refetchViewedSession();
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
                 this.maybeStartBackgroundSendWatchdog();
@@ -202,10 +207,29 @@ class Sync {
         if (Platform.OS === 'web' && typeof document !== 'undefined') {
             const broadcast = () => {
                 apiSocket.sendAppState(getCurrentAppState());
+                // On web, RN AppState doesn't reliably fire 'active' on tab/window
+                // refocus, so the became-active refetch above can be skipped. When
+                // we regain focus, pull the viewed session so a chat that missed
+                // socket events while the tab was hidden catches up automatically.
+                if (getCurrentAppState() === 'active') {
+                    this.refetchViewedSession();
+                }
             };
             document.addEventListener('visibilitychange', broadcast);
             window.addEventListener('focus', broadcast);
             window.addEventListener('blur', broadcast);
+        }
+    }
+
+    // Refetch messages + git status for the session the user is currently viewing,
+    // independent of the socket. Used as a self-heal on reconnect / app-foreground
+    // so a missed `update`/`ephemeral` event doesn't leave the open chat frozen
+    // until it's manually remounted. Cheap when already up to date (forward sync
+    // from the last seq returns nothing).
+    private refetchViewedSession = () => {
+        const viewing = storage.getState().currentViewingSessionId;
+        if (viewing) {
+            this.onSessionVisible(viewing);
         }
     }
 
@@ -2097,9 +2121,15 @@ class Sync {
             this.friendsSync.invalidate();
             this.friendRequestsSync.invalidate();
             this.feedSync.invalidate();
-            // Messages are fetched lazily per-session via onSessionVisible (called by SessionView
-            // when realtimeStatus changes). Session metadata + agentState (including permission
-            // requests) are already refreshed by sessionsSync.invalidate() above.
+            // Session metadata + agentState (including permission requests) are
+            // refreshed by sessionsSync.invalidate() above. Messages are normally
+            // fetched lazily per-session via onSessionVisible (SessionView's effect
+            // keyed on realtimeStatus) — but a fast socket.io transport reconnect
+            // that never flipped our stored realtimeStatus to 'disconnected' would
+            // skip that, leaving the open chat stale (it missed every `update` /
+            // `ephemeral` while the socket was down) until the user navigates away
+            // and back. Refetch the viewed session explicitly so it self-heals.
+            this.refetchViewedSession();
             for (const sync of this.sendSync.values()) {
                 sync.invalidate();
             }
