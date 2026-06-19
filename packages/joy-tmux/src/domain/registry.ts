@@ -44,6 +44,10 @@ export interface CreateSessionOpts {
   chrome?: boolean;
   /** Raw extra CLI arguments appended verbatim to the claude command line. */
   extraArgs?: string;
+  /** Create the session detached: make the tmux window + relay (so file/git/diff
+   *  RPCs work on the cwd) but DON'T launch Claude. Lands as joy__state='detached'
+   *  (red). Starting it later (create/restart for the same cwd) launches Claude. */
+  detached?: boolean;
 }
 
 const PERMISSION_MODES = new Set([
@@ -322,8 +326,12 @@ export class SessionRegistry {
       : null;
 
     // Give the login shell time to source the profile, then launch claude.
-    await sleep(900);
-    run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
+    // (Skipped for a detached create — the window stays at the shell prompt and
+    // the session is marked detached below.)
+    if (!opts.detached) {
+      await sleep(900);
+      run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
+    }
 
     await sleep(400);
     const shellPid = parseInt(
@@ -375,6 +383,15 @@ export class SessionRegistry {
       } catch (e) {
         process.stderr.write(`[relay] failed to create session for ${id}: ${e}\n`);
       }
+    }
+
+    // Detached create: don't launch/watch Claude — mark the session detached
+    // (relay stays attached so file/git/diff RPCs work on the cwd; the window
+    // sits at a shell). Starting it later (create/restart for this cwd) launches
+    // Claude in place via the one-session-per-cwd guard.
+    if (opts.detached) {
+      session.end("process_exited");
+      return session;
     }
 
     // Start the tailer AFTER the relay is attached. On --resume/restart the

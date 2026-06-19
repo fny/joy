@@ -106,6 +106,7 @@ function NewJoyTmuxSessionScreen() {
     // disabled until continue is on.
     const [forkSession, setForkSession] = React.useState(false);
     const [chrome, setChrome] = React.useState(false);
+    const [detached, setDetached] = React.useState(false);
     // --resume <id>: resume a specific Claude conversation by session id.
     // Takes precedence over `continue` (which resumes the most recent one).
     const [resumeId, setResumeId] = React.useState(params.resumeId ?? '');
@@ -256,6 +257,7 @@ function NewJoyTmuxSessionScreen() {
                 fallbackModel?: string;
                 forkSession?: boolean;
                 chrome?: boolean;
+                detached?: boolean;
                 extraArgs?: string;
             }>(selectedMachineId, 'joy-create-session', {
                 cwd,
@@ -272,6 +274,7 @@ function NewJoyTmuxSessionScreen() {
                 fallbackModel: currentFallback.key ?? undefined,
                 forkSession: ((continueLast || resumeId.trim()) && forkSession) || undefined,
                 chrome: chrome || undefined,
+                detached: detached || undefined,
                 extraArgs: extraArgs.trim() || undefined,
             }),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s — is the daemon running on the selected machine?')), 30000)),
@@ -319,9 +322,10 @@ function NewJoyTmuxSessionScreen() {
             await sync.refreshSessions();
 
             // Send the initial prompt if any. joy-tmux's onMessage handler types
-            // it into the tmux pane.
+            // it into the tmux pane. Skip for a detached session — there's no
+            // Claude running to receive it (it would be dropped at the dead pane).
             const trimmedPrompt = prompt.trim();
-            if (trimmedPrompt) {
+            if (trimmedPrompt && !detached) {
                 await sync.sendMessage(result.relaySessionId, trimmedPrompt, { source: 'new_session' });
             }
 
@@ -333,7 +337,7 @@ function NewJoyTmuxSessionScreen() {
         } finally {
             setIsSpawning(false);
         }
-    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, chrome, extraArgs, prompt, router, navigateToSession]);
+    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, chrome, detached, extraArgs, prompt, router, navigateToSession]);
 
     const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
 
@@ -547,6 +551,22 @@ function NewJoyTmuxSessionScreen() {
                                 <Text style={styles.configLabel} numberOfLines={1}>chrome</Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
                                     claude in chrome integration
+                                </Text>
+                            </Pressable>
+
+                            {/* Detached: create the session/window without launching claude */}
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={() => setDetached(v => !v)}
+                            >
+                                <Ionicons
+                                    name={detached ? 'checkbox' : 'square-outline'}
+                                    size={15}
+                                    color={detached ? theme.colors.button.primary.background : theme.colors.textSecondary}
+                                />
+                                <Text style={styles.configLabel} numberOfLines={1}>detached</Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
+                                    {detached ? "create without launching claude" : "launch claude now"}
                                 </Text>
                             </Pressable>
 
