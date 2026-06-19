@@ -245,6 +245,17 @@ export class SessionRegistry {
     if (opts.resume_id && !existsSync(join(cwdToTranscriptDir(cwd), `${opts.resume_id}.jsonl`))) {
       throw new Error(`Session "${opts.resume_id}" not found in ${cwd}`);
     }
+    // Don't resume a conversation that's ALREADY running — Claude locks a session
+    // id while live, so a second `claude --resume <id>` would collide/fork. Report
+    // it clearly instead. (restart() force-kills the old session before reaching
+    // here, so it won't trip this.)
+    if (opts.resume_id) {
+      for (const s of this.#sessions.values()) {
+        if ((s.status === "active" || s.status === "starting") && s.claudeSessionId === opts.resume_id) {
+          throw new Error(`Session "${opts.resume_id}" is already running in ${s.cwd} (window ${s.id})`);
+        }
+      }
+    }
     if (opts.effort && !SAFE_EFFORT.test(opts.effort)) throw new Error("invalid effort");
     if (opts.permissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw new Error("invalid permissionMode");
     // extraArgs is appended to the shell line verbatim (the caller may need
