@@ -19,7 +19,7 @@ import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { Modal } from '@/modal';
-import { joyKillAllSessions, joyRestartDaemon, sessionDelete } from '@/sync/ops';
+import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineDelete } from '@/sync/ops';
 
 type JoyStatus = {
     ok?: boolean;
@@ -103,6 +103,29 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         }
         Modal.alert('Purged', `Deleted ${deleted} session record${deleted === 1 ? '' : 's'} for this machine.`, [{ text: 'OK' }]);
     }, [machineId]));
+
+    // Delete the machine itself (removes it from the machines list). Also delete
+    // its joy session records so they don't orphan once the machine is gone. A
+    // still-running machine will re-register on its next heartbeat, so this is
+    // really for retiring old/offline machines.
+    const [deletingMachine, doDeleteMachine] = useHappyAction(React.useCallback(async () => {
+        const ok = await Modal.confirm(
+            'Delete this machine?',
+            'Removes this machine from your list along with its joy-tmux session records. Cannot be undone. (A machine that is still running will reappear on its next heartbeat.)',
+            { confirmText: 'Delete', destructive: true },
+        );
+        if (!ok) return;
+        const targets = Object.values(storage.getState().sessions).filter(
+            (s) => s.metadata?.machineId === machineId,
+        );
+        for (const s of targets) { await sessionDelete(s.id).catch(() => { }); }
+        const r = await machineDelete(machineId);
+        if (!r.success) {
+            Modal.alert('Delete failed', r.message || 'Could not delete machine.', [{ text: 'OK' }]);
+            return;
+        }
+        router.back();
+    }, [machineId, router]));
 
     if (!status && !failed) {
         return (
@@ -210,6 +233,18 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                         ? <ActivityIndicator />
                         : <Ionicons name="nuclear-outline" size={29} color="#FF3B30" />}
                     onPress={doPurgeAll}
+                    showChevron={false}
+                />
+            </ItemGroup>
+
+            <ItemGroup title="Danger zone" footer="Removes this machine (and its joy session records) from your list. Use it to retire an old machine — a running one reappears on its next heartbeat.">
+                <Item
+                    title="Delete Machine"
+                    subtitle="Remove this machine from your list"
+                    icon={deletingMachine
+                        ? <ActivityIndicator />
+                        : <Ionicons name="close-circle-outline" size={29} color="#FF3B30" />}
+                    onPress={doDeleteMachine}
                     showChevron={false}
                 />
             </ItemGroup>
