@@ -150,6 +150,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/cleanup"
+                options={{
+                    headerTitle: 'Cleanup',
+                }}
+            />
+            <Stack.Screen
                 name="settings/joy-http"
                 options={{
                     headerTitle: t('settings.joyHttp'),
