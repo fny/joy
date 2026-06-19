@@ -73,6 +73,21 @@ test("not working: prose mentioning shells doesn't false-positive", () => {
   expect(paneShowsWorking("● I ran 3 shell commands to set things up.\n\n❯ \n  ⏵⏵ bypass · ← for agents")).toBe(false);
 });
 
+test("not working: stale '· N shell still running' in scrollback (regression)", () => {
+  // A finished bg task leaves its progress line ("✻ Baked for 4s · 1 shell still
+  // running") in scrollback. Only the live ⏵⏵ footer is idle → must NOT read as
+  // working, or the session is stuck "thinking" forever.
+  const pane = [
+    "  Ran 1 shell command",
+    "✻ Baked for 4s · 1 shell still running",
+    "● Done.",
+    "❯ ",
+    "────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+  ].join("\n");
+  expect(paneShowsWorking(pane)).toBe(false);
+});
+
 test("not running: shell prompt after a failed launch", () => {
   const pane = [
     "ubuntu@fny:~/Workspace/unconv$ claude --continue --dangerously-skip-permissions",

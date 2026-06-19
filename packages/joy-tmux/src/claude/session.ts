@@ -1447,16 +1447,18 @@ export function paneShowsClaudeRunning(text: string): boolean {
  *   1. Actively generating: Claude prints the "esc to interrupt" hint while a turn
  *      is in flight (text or a running tool). Absent at the idle prompt / dialogs.
  *   2. Background work still running even though the turn ended and the pane is
- *      back at the ready prompt: Claude's footer shows "· N shell(s) · … · ↓ to
- *      manage" while background tasks/agents run. Without this the status would
- *      flip to idle/green while a background task is still working.
- * The middle-dot/arrow anchors keep #2 from matching prose like "ran 3 shell
- * commands" — they only appear in the status footer.
+ *      back at the ready prompt: Claude's LIVE status footer (the bottom bar with
+ *      the ⏵⏵ mode indicator) shows "· N shell(s) · … · ↓ to manage" while
+ *      background tasks/agents run. Without this the status flips to idle/green
+ *      while a background task is still working.
+ * The shell/manage check is restricted to the ⏵⏵ footer line — NOT the whole
+ * pane — because old "· N shell still running" progress output lingers in
+ * scrollback and would otherwise read as working forever (stuck "thinking").
  */
 export function paneShowsWorking(text: string): boolean {
-  return /esc to interrupt/i.test(text)
-    || /·\s*\d+\s+shells?\b/i.test(text)
-    || /↓\s*to manage/i.test(text);
+  if (/esc to interrupt/i.test(text)) return true;
+  const footer = text.split("\n").filter((l) => l.includes("⏵⏵")).join("\n");
+  return /·\s*\d+\s+shells?\b/i.test(footer) || /↓\s*to manage/i.test(footer);
 }
 
 /** Human-readable backoff delay for retry notes: "15s", "2m". Exported for tests. */
