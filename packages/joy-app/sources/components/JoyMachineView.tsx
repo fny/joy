@@ -12,7 +12,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useMachine, storage } from '@/sync/storage';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatOSPlatform } from '@/utils/sessionUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { Typography } from '@/constants/Typography';
@@ -45,7 +45,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     const { theme } = useUnistyles();
     const router = useRouter();
     const machine = useMachine(machineId ?? '');
-    const online = machine ? isMachineOnline(machine) : false;
+    const online = useMachineOnline(machine);
 
     const [status, setStatus] = React.useState<JoyStatus | null>(null);
     const [failed, setFailed] = React.useState(false);

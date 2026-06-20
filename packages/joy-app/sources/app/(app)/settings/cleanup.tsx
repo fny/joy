@@ -13,8 +13,9 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useAllMachines, storage } from '@/sync/storage';
-import { isMachineOnline } from '@/utils/machineUtils';
+import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatLastSeen } from '@/utils/sessionUtils';
+import type { Machine } from '@/sync/storageTypes';
 import { Modal } from '@/modal';
 import { joyKillAllSessions, sessionDelete, machineDelete } from '@/sync/ops';
 
@@ -100,48 +101,72 @@ export default React.memo(function CleanupScreen() {
                 <ItemGroup>
                     <Item title="No registered machines" showChevron={false} />
                 </ItemGroup>
-            ) : machines.map((machine) => {
-                const online = isMachineOnline(machine);
-                const name = machine.metadata?.displayName || machine.metadata?.host || machine.id.slice(0, 8);
-                const status = online ? 'online' : `last seen ${formatLastSeen(machine.activeAt, false)}`;
-                const folders = [...(byMachine.get(machine.id) ?? new Map<string, string[]>()).entries()]
-                    .sort((a, b) => a[0].localeCompare(b[0]));
-                return (
-                    <ItemGroup key={machine.id} title={`${name} · ${status}`}>
-                        {folders.length === 0 ? (
-                            <Item title="No remembered folders" showChevron={false} />
-                        ) : folders.map(([folder, ids]) => (
-                            <Item
-                                key={folder}
-                                title={folderName(folder)}
-                                subtitle={folder}
-                                detail={`${ids.length}`}
-                                icon={<Ionicons name="folder-outline" size={29} color="#5856D6" />}
-                                rightElement={
-                                    <Pressable onPress={() => onDeleteFolder(folder, ids)} hitSlop={10} style={(p) => [{ padding: 4 }, p.pressed && { opacity: 0.5 }]}>
-                                        <Ionicons name="trash-outline" size={20} color="#FF3B30" />
-                                    </Pressable>
-                                }
-                                showChevron={false}
-                            />
-                        ))}
-                        <Item
-                            title="Purge all sessions"
-                            subtitle="Delete every joy-tmux session record for this machine"
-                            icon={<Ionicons name="nuclear-outline" size={29} color="#FF3B30" />}
-                            onPress={() => onPurgeMachine(machine.id, online)}
-                            showChevron={false}
-                        />
-                        <Item
-                            title="Delete machine"
-                            subtitle="Remove this machine from your list"
-                            icon={<Ionicons name="close-circle-outline" size={29} color="#FF3B30" />}
-                            onPress={() => onDeleteMachine(machine.id, name)}
-                            showChevron={false}
-                        />
-                    </ItemGroup>
-                );
-            })}
+            ) : machines.map((machine) => (
+                <MachineCleanupGroup
+                    key={machine.id}
+                    machine={machine}
+                    folders={[...(byMachine.get(machine.id) ?? new Map<string, string[]>()).entries()].sort((a, b) => a[0].localeCompare(b[0]))}
+                    onDeleteFolder={onDeleteFolder}
+                    onPurgeMachine={onPurgeMachine}
+                    onDeleteMachine={onDeleteMachine}
+                />
+            ))}
         </ItemList>
+    );
+});
+
+// One machine's cleanup group. Pulled out so it can use useMachineOnline, which
+// schedules a re-render when the 60s online window expires (an inline map can't
+// call a hook, and would otherwise show a silent machine as "online" forever).
+const MachineCleanupGroup = React.memo(function MachineCleanupGroup({
+    machine,
+    folders,
+    onDeleteFolder,
+    onPurgeMachine,
+    onDeleteMachine,
+}: {
+    machine: Machine;
+    folders: [string, string[]][];
+    onDeleteFolder: (folder: string, ids: string[]) => void;
+    onPurgeMachine: (machineId: string, online: boolean) => void;
+    onDeleteMachine: (machineId: string, name: string) => void;
+}) {
+    const online = useMachineOnline(machine);
+    const name = machine.metadata?.displayName || machine.metadata?.host || machine.id.slice(0, 8);
+    const status = online ? 'online' : `last seen ${formatLastSeen(machine.activeAt, false)}`;
+    return (
+        <ItemGroup title={`${name} · ${status}`}>
+            {folders.length === 0 ? (
+                <Item title="No remembered folders" showChevron={false} />
+            ) : folders.map(([folder, ids]) => (
+                <Item
+                    key={folder}
+                    title={folderName(folder)}
+                    subtitle={folder}
+                    detail={`${ids.length}`}
+                    icon={<Ionicons name="folder-outline" size={29} color="#5856D6" />}
+                    rightElement={
+                        <Pressable onPress={() => onDeleteFolder(folder, ids)} hitSlop={10} style={(p) => [{ padding: 4 }, p.pressed && { opacity: 0.5 }]}>
+                            <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+                        </Pressable>
+                    }
+                    showChevron={false}
+                />
+            ))}
+            <Item
+                title="Purge all sessions"
+                subtitle="Delete every joy-tmux session record for this machine"
+                icon={<Ionicons name="nuclear-outline" size={29} color="#FF3B30" />}
+                onPress={() => onPurgeMachine(machine.id, online)}
+                showChevron={false}
+            />
+            <Item
+                title="Delete machine"
+                subtitle="Remove this machine from your list"
+                icon={<Ionicons name="close-circle-outline" size={29} color="#FF3B30" />}
+                onPress={() => onDeleteMachine(machine.id, name)}
+                showChevron={false}
+            />
+        </ItemGroup>
     );
 });

@@ -54,6 +54,7 @@ import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES } from '@/sync/joyModels';
 import { apiSocket } from '@/sync/apiSocket';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
+import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
 import { JoyQueueStrip } from '@/components/JoyQueueStrip';
 
 export const SessionView = React.memo((props: { id: string }) => {
@@ -454,6 +455,16 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isTablet = useIsTablet();
     const realtimeStatus = useRealtimeStatus();
     const { messages, isLoaded } = useSessionMessages(sessionId);
+    // Newest user-sent message timestamp — drives the backstop's "recently sent"
+    // trigger (messages are sorted newest-first, so the first user-text wins).
+    const lastUserSentAt = React.useMemo(() => {
+        for (const m of messages) {
+            if (m.kind === 'user-text') return m.createdAt;
+        }
+        return null;
+    }, [messages]);
+    // Repair loop against silently-dropped socket events while watching a live turn.
+    useSessionMessageBackstop(sessionId, session.thinking === true, lastUserSentAt);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
     const zenMode = useLocalSetting('zenMode');
     const sessionInputHorizontalPadding = Platform.OS === 'web' || isRunningOnMac() || isTablet ? 12 : 8;
