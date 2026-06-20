@@ -722,6 +722,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
         // Trigger session sync
         sync.onSessionVisible(sessionId);
+        // Refresh session metadata once on open so a title that missed its live
+        // update (stuck on "New chat") is corrected on open / switch-back.
+        sync.refreshOpenSessionMeta();
 
         // Mark session as currently being viewed (clears unread)
         storage.getState().setCurrentViewingSession(sessionId);

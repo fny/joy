@@ -345,12 +345,26 @@ class Sync {
         }
     }
 
-    // Lightweight forward-sync for the open-session backstop repair loop:
-    // messages only (no git-status RPC / voice hooks), since it may fire every
-    // ~10–15s during a live turn. Forward sync is bounded and cheap when current.
+    // Forward-sync for the open-session backstop repair loop. Refreshes BOTH the
+    // messages AND the session-list metadata, since a dropped socket event can
+    // strand either: messages (no streamed reply) or metadata (title stuck on
+    // "New chat", stale joy__state). No single-session GET exists, so the title
+    // refresh piggybacks on the global sessions fetch — InvalidateSync coalesces
+    // it and it only runs while the user watches a live turn. No git/voice (too
+    // heavy for a ~10–15s loop).
     backstopSyncSession = (sessionId: string) => {
         if (isDemoSession(sessionId)) return;
         this.getMessagesSync(sessionId).invalidate();
+        this.sessionsSync.invalidate();
+    }
+
+    // One-shot session-metadata refresh when a chat is opened, so a title that
+    // missed its live `update-session` event (stuck on "New chat") is corrected
+    // on open / switch-back. onSessionVisible refreshes messages+git but is also
+    // called per incoming message, so the heavier sessions fetch can't live
+    // there. Coalesced by InvalidateSync.
+    refreshOpenSessionMeta = () => {
+        this.sessionsSync.invalidate();
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
