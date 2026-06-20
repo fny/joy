@@ -23,8 +23,27 @@ test("not ready: bash prompt before claude starts", () => {
   expect(paneShowsReadyPrompt("claude@host:/tmp/proj$ claude --dangerously-skip-permissions\n")).toBe(false);
 });
 
-test("ready: user message echoed at prompt", () => {
-  expect(paneShowsReadyPrompt("● Hi! What can I help with?\n\n❯ hello there\n")).toBe(true);
+test("ready: live box ignored among scrollback echoes of past messages", () => {
+  // Real-world shape: Claude echoes past user inputs as "❯ …" in history; only the
+  // live box has a rule directly above it. Must match the box, not the echoes.
+  const pane = [
+    "❯ say hi in one short sentence",   // scrollback echo — must be ignored
+    "● done",
+    "─────────────────",
+    "❯ ",                                // the LIVE input box
+    "─────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+  ].join("\n");
+  expect(paneShowsReadyPrompt(pane)).toBe(true);
+});
+
+test("not ready: only scrollback echoes, no live box (no border above ❯)", () => {
+  const pane = [
+    "● Hi! What can I help with?",
+    "",
+    "❯ hello there",                     // echoed past message, no border → not live
+  ].join("\n");
+  expect(paneShowsReadyPrompt(pane)).toBe(false);
 });
 
 test("claude running: ready input prompt", () => {
