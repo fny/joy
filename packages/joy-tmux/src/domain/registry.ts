@@ -207,13 +207,36 @@ export class SessionRegistry {
     // run two at once: a live session in this cwd is returned as-is; a detached
     // one (Claude dead, window still around) is restarted in place.
     const target = resolve(cwd);
+    // Identity of the session occupying a cwd, resolved the way restart() does:
+    // its learned Claude id, else the basename of the transcript it's tailing
+    // (= the Claude session uuid). Lets us compare an explicit resume target even
+    // before claudeSessionId is populated on a still-starting session.
+    const sessionIdentity = (s: Session): string | undefined =>
+      s.claudeSessionId ?? (s.transcriptPath ? basename(s.transcriptPath, ".jsonl") : undefined);
     for (const s of this.#sessions.values()) {
       if (resolve(s.cwd) !== target) continue;
       if (s.status === "starting" || s.status === "active") {
+        // An explicit resume target must BE the session already in this cwd, or
+        // we'd silently hand back a different conversation (one session per cwd).
+        // Surface the conflict instead of resuming the wrong transcript.
+        if (opts.resume_id) {
+          const liveId = sessionIdentity(s);
+          if (liveId && liveId !== opts.resume_id) {
+            throw new Error(`${target} is busy with session "${liveId}" (window ${s.id}); cannot resume "${opts.resume_id}" there`);
+          }
+        }
         process.stderr.write(`[create] ${s.id} already live in ${target} — returning existing\n`);
         return s;
       }
       if (s.status === "ended" && s.endReason === "process_exited") {
+        // restart() resumes THIS detached session's own conversation; if the
+        // caller asked for a different one, don't silently override it.
+        if (opts.resume_id) {
+          const detId = sessionIdentity(s);
+          if (detId && detId !== opts.resume_id) {
+            throw new Error(`${target} has a detached session "${detId}" (window ${s.id}); kill it before resuming a different "${opts.resume_id}" there`);
+          }
+        }
         process.stderr.write(`[create] ${s.id} detached in ${target} — restarting in place\n`);
         return this.restart({ id: s.id });
       }
