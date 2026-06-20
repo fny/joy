@@ -88,6 +88,21 @@ test("not working: stale '· N shell still running' in scrollback (regression)",
   expect(paneShowsWorking(pane)).toBe(false);
 });
 
+test("working: background tasks detected mode-agnostically (plan / default)", () => {
+  // Plan mode uses ⏸ instead of ⏵⏵ — the footer must still be recognised.
+  expect(paneShowsWorking("❯\n────\n  ⏸ plan mode on (shift+tab to cycle) · 1 shell · ↓ to manage")).toBe(true);
+  // Default mode shows no permission glyph at all; the "for agents" / "to manage"
+  // hints still mark it as the live footer.
+  expect(paneShowsWorking("❯\n────\n  · 2 shells · ← for agents · ↓ to manage")).toBe(true);
+});
+
+test("not working: narrow-pane truncated footer under-reports (accepted)", () => {
+  // At ~20 cols the footer truncates and drops the shell/manage tokens. We accept
+  // the false-negative (status briefly idle) over a stuck-working false-positive.
+  const pane = ["❯", "────", "  ⏵⏵ bypass ·"].join("\n");
+  expect(paneShowsWorking(pane)).toBe(false);
+});
+
 test("not running: shell prompt after a failed launch", () => {
   const pane = [
     "ubuntu@fny:~/Workspace/unconv$ claude --continue --dangerously-skip-permissions",

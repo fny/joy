@@ -1386,11 +1386,20 @@ export class Session {
           this.#setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
           this.#maybeDrainQueue(); // turn done → send the next queued message
-          // Claude finished responding and isn't about to drain a queued message
+          // Claude finished responding AND there's genuinely no more queued work
           // → push a "done" notification (the server suppresses it if you're
           // already looking at this session). This is what makes joy sessions
           // notify at all — nothing was firing one before.
-          if (!this.#dispatchInFlight) this.#relay?.notify("done");
+          //
+          // Guard on all three: nothing dispatched awaiting echo, an empty queue,
+          // AND no pending drain-retry. At turn-end the pane often hasn't
+          // repainted, so #maybeDrainQueue() arms a #drainRetry (a queued message
+          // about to send) WITHOUT yet setting #dispatchInFlight — checking only
+          // #dispatchInFlight would fire a premature "done" for an intermediate
+          // turn while more queued messages are still about to run.
+          if (!this.#dispatchInFlight && this.#queue.length === 0 && !this.#drainRetry) {
+            this.#relay?.notify("done");
+          }
         }
       }
       for (const block of blocks) {
@@ -1447,17 +1456,24 @@ export function paneShowsClaudeRunning(text: string): boolean {
  *   1. Actively generating: Claude prints the "esc to interrupt" hint while a turn
  *      is in flight (text or a running tool). Absent at the idle prompt / dialogs.
  *   2. Background work still running even though the turn ended and the pane is
- *      back at the ready prompt: Claude's LIVE status footer (the bottom bar with
- *      the ⏵⏵ mode indicator) shows "· N shell(s) · … · ↓ to manage" while
- *      background tasks/agents run. Without this the status flips to idle/green
- *      while a background task is still working.
- * The shell/manage check is restricted to the ⏵⏵ footer line — NOT the whole
- * pane — because old "· N shell still running" progress output lingers in
- * scrollback and would otherwise read as working forever (stuck "thinking").
+ *      back at the ready prompt: Claude's LIVE status footer (the bottom bar)
+ *      shows "· N shell(s) · … · ↓ to manage" while background tasks/agents run.
+ *      Without this the status flips to idle/green while a background task is
+ *      still working.
+ * The shell/manage check is restricted to the live status-footer line(s) — NOT
+ * the whole pane — because old "· N shell still running" progress output lingers
+ * in scrollback and would otherwise read as working forever (stuck "thinking").
+ * Footer lines are identified by their signature, mode-agnostically: the
+ * permission-mode glyph (⏵⏵ bypass/auto/accept, ⏸ plan) OR the footer hints
+ * ("← for agents", "↓ to manage") which also appear in default mode (no glyph).
+ * Narrow panes truncate the footer and drop the shell/manage tokens — that's an
+ * accepted false-negative (under-report), never a stuck-working false-positive.
  */
 export function paneShowsWorking(text: string): boolean {
   if (/esc to interrupt/i.test(text)) return true;
-  const footer = text.split("\n").filter((l) => l.includes("⏵⏵")).join("\n");
+  const footer = text.split("\n")
+    .filter((l) => /⏵⏵|⏸|↓\s*to manage|for agents/i.test(l))
+    .join("\n");
   return /·\s*\d+\s+shells?\b/i.test(footer) || /↓\s*to manage/i.test(footer);
 }
 
