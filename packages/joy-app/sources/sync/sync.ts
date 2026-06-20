@@ -92,6 +92,32 @@ type SendMessageOptions = {
     attachments?: AttachmentPreview[];
 };
 
+/**
+ * Thinking state implied by a message's embedded turn-lifecycle event:
+ * `true` on turn/task start, `false` on turn/task end or abort, `null` if the
+ * message carries no lifecycle signal. Single source of truth shared by the live
+ * websocket handler and the HTTP refetch path, so a refetch (reconnect/focus)
+ * corrects a missed thinking transition instead of waiting for the next ~20s
+ * activity heartbeat.
+ */
+function deriveThinkingFromContent(content: unknown): boolean | null {
+    const rc = content as {
+        content?: { type?: string; data?: { type?: string; ev?: { t?: string } } };
+    } | null;
+    const contentType = rc?.content?.type;
+    const dataType = rc?.content?.data?.type;
+    const evt = rc?.content?.data?.ev?.t;
+    const isComplete =
+        ((contentType === 'acp' || contentType === 'codex') && (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
+        (contentType === 'session' && evt === 'turn-end');
+    const isStarted =
+        ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
+        (contentType === 'session' && evt === 'turn-start');
+    if (isComplete) return false;
+    if (isStarted) return true;
+    return null;
+}
+
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
     encryption!: Encryption;
@@ -317,6 +343,14 @@ class Sync {
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
+    }
+
+    // Lightweight forward-sync for the open-session backstop repair loop:
+    // messages only (no git-status RPC / voice hooks), since it may fire every
+    // ~10–15s during a live turn. Forward sync is bounded and cheap when current.
+    backstopSyncSession = (sessionId: string) => {
+        if (isDemoSession(sessionId)) return;
+        this.getMessagesSync(sessionId).invalidate();
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
@@ -1953,7 +1987,7 @@ class Sync {
         const data = await response.json() as V3GetSessionMessagesResponse;
         const messages = Array.isArray(data.messages) ? data.messages : [];
 
-        await this.applyFetchedMessages(sessionId, encryption, messages);
+        await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
 
         // Anchor both ends so future incremental forward sync resumes from
         // maxSeq, and loadOlderMessages can page backward from minSeq.
@@ -1986,7 +2020,7 @@ class Sync {
             const data = await response.json() as V3GetSessionMessagesResponse;
             const messages = Array.isArray(data.messages) ? data.messages : [];
 
-            await this.applyFetchedMessages(sessionId, encryption, messages);
+            await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
 
             let maxSeq = afterSeq;
             for (const message of messages) {
@@ -2006,11 +2040,18 @@ class Sync {
     private applyFetchedMessages = async (
         sessionId: string,
         encryption: ReturnType<Encryption['getSessionEncryption']> & {},
-        messages: ApiMessage[]
+        messages: ApiMessage[],
+        // Forward/initial fetches carry the newest messages, so a turn-start/
+        // turn-end embedded in them reflects the CURRENT turn state — mirror it
+        // onto the session (closes the gap codex flagged: the HTTP path updated
+        // messages but not thinking). MUST stay false for older-history loads,
+        // whose stale lifecycle events would wrongly flip the live thinking flag.
+        opts?: { deriveThinking?: boolean }
     ) => {
         if (messages.length === 0) return;
         const decryptedMessages = await encryption.decryptMessages(messages);
         const normalizedMessages: NormalizedMessage[] = [];
+        let latestThinking: { seq: number; thinking: boolean } | null = null;
         for (let i = 0; i < decryptedMessages.length; i++) {
             const decrypted = decryptedMessages[i];
             if (!decrypted) continue;
@@ -2018,9 +2059,24 @@ class Sync {
             if (normalized) {
                 normalizedMessages.push(normalized);
             }
+            if (opts?.deriveThinking) {
+                const t = deriveThinkingFromContent(decrypted.content);
+                if (t !== null) {
+                    const seq = messages[i]?.seq ?? -1;
+                    if (!latestThinking || seq >= latestThinking.seq) {
+                        latestThinking = { seq, thinking: t };
+                    }
+                }
+            }
         }
         if (normalizedMessages.length > 0) {
             this.applyMessages(sessionId, normalizedMessages);
+        }
+        if (latestThinking) {
+            const session = storage.getState().sessions[sessionId];
+            if (session && session.thinking !== latestThinking.thinking) {
+                this.applySessions([{ ...session, thinking: latestThinking.thinking, thinkingAt: Date.now() }]);
+            }
         }
     }
 
@@ -2167,39 +2223,13 @@ class Sync {
                 if (decrypted) {
                     lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
 
-                    // Check for task lifecycle events to update thinking state
-                    // This ensures UI updates even if volatile activity updates are lost
-                    const rawContent = decrypted.content as {
-                        role?: string;
-                        content?: {
-                            type?: string;
-                            data?: {
-                                type?: string;
-                                ev?: { t?: string };
-                            }
-                        }
-                    } | null;
-                    const contentType = rawContent?.content?.type;
-                    const dataType = rawContent?.content?.data?.type;
-                    const sessionEventType = rawContent?.content?.data?.ev?.t;
-                    
-                    // Debug logging to trace lifecycle events
-                    if (dataType === 'task_complete' || dataType === 'turn_aborted' || dataType === 'task_started' || sessionEventType === 'turn-start' || sessionEventType === 'turn-end') {
-                        console.log(`🔄 [Sync] Lifecycle event detected: contentType=${contentType}, dataType=${dataType}, sessionEventType=${sessionEventType}`);
-                    }
-                    
-                    const isTaskComplete = 
-                        ((contentType === 'acp' || contentType === 'codex') && 
-                            (dataType === 'task_complete' || dataType === 'turn_aborted')) ||
-                        (contentType === 'session' && sessionEventType === 'turn-end');
-                    
-                    const isTaskStarted = 
-                        ((contentType === 'acp' || contentType === 'codex') && dataType === 'task_started') ||
-                        (contentType === 'session' && sessionEventType === 'turn-start');
-                    
-                    if (isTaskComplete || isTaskStarted) {
-                        console.log(`🔄 [Sync] Updating thinking state: isTaskComplete=${isTaskComplete}, isTaskStarted=${isTaskStarted}`);
-                    }
+                    // Task lifecycle events embedded in the message stream update
+                    // the thinking state even if the volatile activity ephemerals
+                    // were lost. Shared with the HTTP refetch path via
+                    // deriveThinkingFromContent so reconnect/focus refetches also
+                    // correct a missed transition instead of waiting for the next
+                    // ~20s heartbeat.
+                    const lifecycleThinking = deriveThinkingFromContent(decrypted.content);
 
                     // Update session
                     const session = storage.getState().sessions[updateData.body.sid];
@@ -2208,9 +2238,7 @@ class Sync {
                             ...session,
                             updatedAt: updateData.createdAt,
                             seq: updateData.seq,
-                            // Update thinking state based on task lifecycle events
-                            ...(isTaskComplete ? { thinking: false } : {}),
-                            ...(isTaskStarted ? { thinking: true } : {})
+                            ...(lifecycleThinking !== null ? { thinking: lifecycleThinking } : {})
                         }])
                     } else {
                         // Fetch sessions again if we don't have this session
