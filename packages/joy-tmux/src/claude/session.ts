@@ -1425,17 +1425,31 @@ export class Session {
 }
 
 /**
- * True when the pane shows Claude's interactive input prompt: a line whose
- * trimmed content starts with "❯" — EXCLUDING selector dialogs (folder-trust
- * prompt, /model picker, etc.) which render options as "❯ 1. Yes, …".
- * Ghost-text suggestions like `❯ Try "refactor <filepath>"` count as ready.
+ * True when the pane shows Claude's LIVE interactive input box.
+ *
+ * The input box is a "❯" line drawn between two horizontal rules:
+ *     ─────────────────────
+ *     ❯ <your text or empty>
+ *     ─────────────────────
+ *       ⏵⏵ bypass permissions on …            ← footer
+ *
+ * We require the rule directly ABOVE the "❯" — NOT just any "❯" line — because
+ * Claude echoes every PAST user message in scrollback as "❯ say hi…", and a bare
+ * "❯" match can't tell those history echoes from the one live box (they have no
+ * border above them). Also excludes selector dialogs, whose options render as
+ * "❯ 1. Yes, …". Ghost-text suggestions like `❯ Try "refactor <filepath>"` count
+ * as ready (the live box with placeholder text).
  */
 export function paneShowsReadyPrompt(text: string): boolean {
-  return text.split("\n").some(line => {
-    const t = line.trim();
-    if (!t.startsWith("❯")) return false;
-    return !/^❯\s*\d+\./.test(t);
-  });
+  const lines = text.split("\n");
+  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  for (let i = 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t.startsWith("❯")) continue;
+    if (/^❯\s*\d+\./.test(t)) continue;     // selector option row, not the input
+    if (isRule(lines[i - 1])) return true;  // the live box's top border
+  }
+  return false;
 }
 
 /**
