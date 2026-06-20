@@ -940,6 +940,13 @@ export class Session {
       // restart.
       recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
+    // Clear the input box first, so a half-entered answer typed directly in the
+    // pane isn't appended to our message and submitted as one garbled line (e.g.
+    // "git com" + "run the tests"). Ctrl+U (kill-line) is a no-op on an empty
+    // box — verified — unlike Ctrl+C, which arms Claude's "press again to exit"
+    // on an empty box. Clearing also keeps the transcript echo equal to `typed`
+    // so dedup still matches.
+    run("tmux", "send-keys", "-t", this.tmuxWindow, "C-u");
     const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", typed);
     if (!r.ok) {
       if (tracked) delivery!.pending.pop();
