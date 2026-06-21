@@ -1,8 +1,11 @@
 {
   "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Happy",
+  "productName": "Joy",
   "identifier": "vip.faraz.joy",
   "bundle": {
+    "macOS": {
+      "signingIdentity": "Apple Development: faraz.yashar@gmail.com (7V3D8E46BH)"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

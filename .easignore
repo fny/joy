@@ -1,0 +1,21 @@
+# EAS upload excludes (no-VCS archive). Keep source; drop deps + build artifacts.
+
+# dependencies
+**/node_modules/
+
+# Expo / Metro
+.expo/
+**/.expo/
+**/dist/
+**/dist-web/
+
+# Tauri / Rust desktop build (3+ GB, not needed for the iOS build)
+packages/joy-app/src-tauri/target/
+**/target/
+
+# misc build output / logs / OS
+**/*.log
+.DS_Store
+**/.DS_Store
+coverage/
+**/coverage/

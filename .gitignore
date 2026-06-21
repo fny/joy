@@ -83,3 +83,9 @@ happy-workspaces/
 
 # Expo web bundle output (large WASM files)
 packages/happy-app/dist-web/
+
+# Build artifacts (added for EAS snapshot)
+**/dist/
+**/dist-web/
+**/target/
+packages/joy-app/src-tauri/target/
