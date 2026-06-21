@@ -2,9 +2,9 @@ const { execFileSync } = require('node:child_process');
 
 const variant = process.env.APP_ENV || 'development';
 const name = {
-    development: "Happy (dev)",
-    preview: "Happy (preview)",
-    production: "Happy"
+    development: "Joy",
+    preview: "Joy",
+    production: "Joy"
 }[variant];
 const bundleId = {
     development: "vip.faraz.joy.dev",
@@ -58,7 +58,7 @@ const buildMetadata = loadBuildMetadata();
 export default {
     expo: {
         name,
-        slug: "happy",
+        slug: "joy",
         version: "1.7.0",
         runtimeVersion: "21",
         orientation: "default",
