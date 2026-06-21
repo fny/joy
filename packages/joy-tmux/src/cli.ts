@@ -18,7 +18,15 @@ const HAPPY_HOME = happyHomeDir();
 const STATE_DIR = joyStateDir();
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
-const PKG_DIR = moduleDir(import.meta.url);
+// pnpm global installs resolve import.meta.url into pnpm's versioned content-addressed
+// store (…/.pnpm/@fny+joy-tmux@1.0.15_…/node_modules/@fny/joy-tmux). Baking THAT into a
+// launchd/systemd service breaks on the next `pnpm add -g`: pnpm makes a fresh store dir
+// for the new version and deletes the old one, so the service's server.ts path vanishes
+// and the daemon crash-loops. Collapse it to pnpm's stable top-level node_modules symlink
+// (always repointed at the current version). No-op for source checkouts / npm-global,
+// which have no .pnpm segment. (NODE = process.execPath is already a stable, canonical
+// version-install path — verified — so it needs no such treatment.)
+const PKG_DIR = moduleDir(import.meta.url).replace(/\/\.pnpm\/[^/]+\/node_modules\//, "/node_modules/");
 const SERVER_TS = join(PKG_DIR, "server.ts");
 const NODE = process.execPath;
 
