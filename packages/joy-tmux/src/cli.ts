@@ -233,8 +233,25 @@ async function cmdNotify(args: string[]): Promise<number> {
 function systemdUnitPath(): string { return join(homedir(), ".config", "systemd", "user", "joy-tmux.service"); }
 function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", "party.voltai.joy-tmux.plist"); }
 
+// Tear down whatever service is currently installed, quietly. Shared by uninstall
+// (which then reports) and install (which calls it first, so install is idempotent:
+// a changed unit actually takes effect, and a stale or hand-rolled plist migrates
+// cleanly instead of lingering next to the new one).
+function removeService(): void {
+  const plat = osPlatform();
+  if (plat === "linux") {
+    spawnSync("systemctl", ["--user", "disable", "--now", "joy-tmux.service"], { stdio: "ignore" });
+    try { rmSync(systemdUnitPath()); } catch {}
+    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
+  } else if (plat === "darwin") {
+    spawnSync("launchctl", ["unload", launchdPlistPath()], { stdio: "ignore" });
+    try { rmSync(launchdPlistPath()); } catch {}
+  }
+}
+
 function cmdInstall(): number {
   const plat = osPlatform();
+  removeService(); // idempotent: start from a clean slate so the new config takes effect
   if (plat === "linux") {
     const unit = `[Unit]
 Description=joy-tmux daemon
@@ -282,7 +299,6 @@ WantedBy=default.target
     const path = launchdPlistPath();
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, plist);
-    spawnSync("launchctl", ["unload", path], { stdio: "ignore" });
     const r = spawnSync("launchctl", ["load", "-w", path], { stdio: "inherit" });
     if (r.status !== 0) { console.log(`${bad} launchctl load failed`); return 1; }
     console.log(`${ok} installed launchd agent → ${path}`);
@@ -292,23 +308,26 @@ WantedBy=default.target
   return 1;
 }
 
+// Update the global package to the latest published version, then reinstall the
+// service so the daemon restarts onto the new code — migrating a stale baked path
+// along the way. For pnpm-global installs; a source checkout updates via git pull
+// + `joy restart` instead.
+function cmdUpdate(): number {
+  console.log("updating @fny/joy-tmux…");
+  const r = spawnSync("pnpm", ["add", "-g", "@fny/joy-tmux@latest"], { stdio: "inherit" });
+  if (r.status !== 0) { console.log(`${bad} pnpm add -g failed (is pnpm on PATH?)`); return 1; }
+  return cmdInstall();
+}
+
 function cmdUninstall(): number {
   const plat = osPlatform();
-  if (plat === "linux") {
-    spawnSync("systemctl", ["--user", "disable", "--now", "joy-tmux.service"], { stdio: "inherit" });
-    try { rmSync(systemdUnitPath()); } catch {}
-    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
-    console.log(`${ok} uninstalled systemd user service`);
-    return 0;
+  if (plat !== "linux" && plat !== "darwin") {
+    console.log(`${bad} uninstall not supported on ${plat}`);
+    return 1;
   }
-  if (plat === "darwin") {
-    spawnSync("launchctl", ["unload", launchdPlistPath()], { stdio: "ignore" });
-    try { rmSync(launchdPlistPath()); } catch {}
-    console.log(`${ok} uninstalled launchd agent`);
-    return 0;
-  }
-  console.log(`${bad} uninstall not supported on ${plat}`);
-  return 1;
+  removeService();
+  console.log(`${ok} uninstalled joy-tmux service`);
+  return 0;
 }
 
 function help(): void {
@@ -324,6 +343,7 @@ ${c.b("Usage:")} joy <command>
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
   ${c.b("auth")}         Show authentication status (shared with the Joy app)
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
+  ${c.b("update")}       Update @fny/joy-tmux to latest, then reinstall + restart
   ${c.b("install")}      Install autostart service (systemd on Linux, launchd on macOS)
   ${c.b("uninstall")}    Remove the autostart service
 `);
@@ -341,6 +361,7 @@ async function main(): Promise<void> {
     case "doctor": code = await cmdDoctor(); break;
     case "auth": code = cmdAuth(); break;
     case "notify": code = await cmdNotify(rest); break;
+    case "update": code = cmdUpdate(); break;
     case "install": code = cmdInstall(); break;
     case "uninstall": code = cmdUninstall(); break;
     case undefined: case "help": case "-h": case "--help": help(); break;
