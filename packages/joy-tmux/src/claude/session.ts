@@ -225,6 +225,12 @@ export class Session {
   #retry: { attempts: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
   #turn5xxStatus: number | null = null;
   #lastUserText: string | null = null;
+  // joy: Claude is compacting its context (the PreCompact hook fired). Surfaced
+  // as a "compacting" status; cleared by the compact_boundary transcript record
+  // or, as a backstop, by #compactingTimer — a boundary we never see (e.g. the
+  // session died mid-compaction) would otherwise leave the banner stuck.
+  #compacting: { trigger: string; since: number } | null = null;
+  #compactingTimer: ReturnType<typeof setTimeout> | null = null;
   // Byte offset the tailer starts at — non-zero only for a capped --resume
   // backfill (snapped to a turn boundary so we don't replay a partial turn).
   #transcriptStartOffset = 0;
@@ -381,6 +387,11 @@ export class Session {
     // plain socket reconnect keeps #retry (the backoff timer survives in-process),
     // so a genuinely-live banner is preserved. (Idempotent — no-op if unset.)
     if (!this.#retry) void rs.updateRetry(null);
+    // Same reconcile for the compacting banner: a daemon restart mid-compaction
+    // rebuilds the Session with #compacting=null while joy__compacting persisted
+    // server-side. The in-memory backstop timer is also gone, so without this the
+    // banner could stick until the next compaction. (Idempotent — no-op if unset.)
+    if (!this.#compacting) void rs.updateCompacting(null);
     // Reflect the current queue on (re)attach — recovery/reconnect included.
     void rs.updateQueue(this.queueState());
 
@@ -473,6 +484,7 @@ export class Session {
       // so without this the keepalive would re-assert a stale thinking:true
       // (Claude usually died mid-turn) forever on the dead session.
       this.#setThinking(false);
+      this.#clearCompacting();
       if (this.#relay) void this.#relay.updateJoyState("detached");
     } else {
       // Killed → archived: flag, archive, detach, kill the window.
@@ -1084,6 +1096,26 @@ export class Session {
     this.#relay?.setThinking(thinking);
   }
 
+  /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
+   *  status and arm a backstop timeout in case the compact_boundary record that
+   *  normally clears it never arrives (compaction can run for minutes — see the
+   *  174s observed — so the window is generous). */
+  markCompacting(trigger: string): void {
+    if (this.status === "ended") return;
+    this.#compacting = { trigger: trigger === "manual" ? "manual" : "auto", since: Date.now() };
+    void this.#relay?.updateCompacting(this.#compacting as { trigger: "auto" | "manual"; since: number });
+    if (this.#compactingTimer) clearTimeout(this.#compactingTimer);
+    this.#compactingTimer = setTimeout(() => this.#clearCompacting(), 10 * 60_000);
+  }
+
+  /** Clear the "compacting" status (compact_boundary seen, abort, or teardown). */
+  #clearCompacting(): void {
+    if (this.#compactingTimer) { clearTimeout(this.#compactingTimer); this.#compactingTimer = null; }
+    if (this.#compacting == null) return;
+    this.#compacting = null;
+    void this.#relay?.updateCompacting(null);
+  }
+
   /** Reconcile "thinking" from the live pane every 3s — the pane is the ground
    *  truth: the "esc to interrupt" line shows iff Claude is actively generating.
    *  This corrects the event-driven setters for the cases they miss: typing
@@ -1171,6 +1203,15 @@ export class Session {
       }
       if (this.#retry) this.#clearRetry();
       this.#maybeDrainQueue(); // turn done → send the next queued message
+      return;
+    }
+
+    // Compaction finished: Claude writes a compact_boundary marker after
+    // summarizing the conversation (it carries durationMs/postTokens, so it's
+    // the authoritative COMPLETION signal). Clear the "compacting" status the
+    // PreCompact hook set when it started.
+    if (entryType === "system" && entry.subtype === "compact_boundary") {
+      this.#clearCompacting();
       return;
     }
 

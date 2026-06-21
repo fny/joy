@@ -507,6 +507,19 @@ export const sessionOps: SessionOp[] = [
     handler: (session) => session.abort(),
   },
   {
+    // Hit by the Claude PreCompact hook when compaction starts, so the app can
+    // show a "compacting" status. Cleared by the compact_boundary transcript
+    // record (no clear route needed). trigger = "manual" | "auto".
+    name: "compacting",
+    scope: "session",
+    rpcName: "compacting",
+    http: { method: "POST", path: "/sessions/:id/compacting" },
+    handler: (session, params) => {
+      session.markCompacting(typeof params.trigger === "string" ? params.trigger : "auto");
+      return { ok: true };
+    },
+  },
+  {
     name: "killSession",
     scope: "session",
     rpcName: "killSession",
