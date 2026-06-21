@@ -6,7 +6,7 @@
 // authenticates to it.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, resolve, basename, sep } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
@@ -330,6 +330,63 @@ function cmdUninstall(): number {
   return 0;
 }
 
+function expandTilde(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+// Attach (or, when already inside tmux, switch) to a session's tmux window.
+//   joy jump            → the session in the current dir (or its nearest ancestor)
+//   joy jump <id|pfx>   → by joy session id or a unique prefix of it
+//   joy jump <path>     → by the session's cwd (also matches a bare folder name)
+async function cmdJump(rest: string[]): Promise<number> {
+  const r = await api("GET", "/sessions").catch(() => null);
+  if (!r || !r.ok) { console.log(`${bad} daemon not running (joy start)`); return 1; }
+  const sessions = ((await r.json()) as any[]).filter((s) => s.tmux_window);
+  if (sessions.length === 0) { console.log("no sessions with a tmux window"); return 1; }
+
+  const arg = rest[0];
+  let matches: any[];
+  let how: string;
+  if (!arg) {
+    const here = resolve(process.cwd());
+    how = `cwd ${here}`;
+    matches = sessions.filter((s) => resolve(s.cwd) === here);
+    if (matches.length === 0) {
+      // nearest ancestor: the deepest session cwd that contains `here`
+      matches = sessions
+        .filter((s) => { const cwd = resolve(s.cwd); return here === cwd || here.startsWith(cwd + sep); })
+        .sort((a, b) => resolve(b.cwd).length - resolve(a.cwd).length)
+        .slice(0, 1);
+    }
+  } else {
+    how = `"${arg}"`;
+    const asPath = resolve(expandTilde(arg));
+    matches = sessions.filter((s) => s.id === arg);                                      // exact id
+    if (!matches.length) matches = sessions.filter((s) => resolve(s.cwd) === asPath);    // exact cwd path
+    if (!matches.length) matches = sessions.filter((s) => String(s.id).startsWith(arg)); // id prefix
+    if (!matches.length) matches = sessions.filter((s) => basename(resolve(s.cwd)) === arg); // folder name
+  }
+
+  if (matches.length === 0) { console.log(`${bad} no session matching ${how}`); return 1; }
+  if (matches.length > 1) {
+    console.log(`${bad} ${matches.length} sessions match ${how} — be more specific:`);
+    for (const s of matches) console.log(`    ${c.b(s.id)}  ${s.cwd}`);
+    return 1;
+  }
+
+  const win = String(matches[0].tmux_window);   // e.g. "joy:j-9214e0a2"
+  const tmuxSession = win.split(":")[0];
+  // select-window both validates the window still exists and makes it active.
+  const sel = spawnSync("tmux", ["select-window", "-t", win], { stdio: "ignore" });
+  if (sel.status !== 0) { console.log(`${bad} tmux window ${win} not found (session ended?)`); return 1; }
+  const sub = process.env.TMUX
+    ? spawnSync("tmux", ["switch-client", "-t", win], { stdio: "inherit" })      // already in tmux
+    : spawnSync("tmux", ["attach-session", "-t", tmuxSession], { stdio: "inherit" });
+  return sub.status === 0 ? 0 : 1;
+}
+
 function help(): void {
   console.log(`${c.b("joy")} — joy-tmux daemon control
 
@@ -340,6 +397,7 @@ ${c.b("Usage:")} joy <command>
   ${c.b("restart")}      Restart the daemon (re-exec; running sessions survive)
   ${c.b("status")}       Show daemon status
   ${c.b("list")}         List sessions the daemon is tracking
+  ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
   ${c.b("auth")}         Show authentication status (shared with the Joy app)
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
@@ -355,6 +413,7 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "status": code = await cmdStatus(); break;
     case "list": case "ls": code = await cmdList(); break;
+    case "jump": case "j": code = await cmdJump(rest); break;
     case "start": code = await cmdStart(); break;
     case "stop": code = await cmdStop(); break;
     case "restart": code = await cmdRestart(); break;
