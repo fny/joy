@@ -1,5 +1,5 @@
 /**
- * English translations for the Happy app
+ * English translations for the Joy app
  * Values can be:
  * - String constants for static text
  * - Functions with typed object parameters for dynamic text
@@ -83,6 +83,7 @@ export const en = {
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         permissionRequired: 'permission required',
         detached: 'detached',
+        compacting: 'compacting',
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Active now',
         unknown: 'unknown',
@@ -126,7 +127,7 @@ export const en = {
         developer: 'Developer',
         developerTools: 'Developer Tools',
         about: 'About',
-        aboutFooter: 'Happy Coder is a Codex and Claude Code mobile client. It\'s fully end-to-end encrypted and your account is stored only on your device. Not affiliated with Anthropic.',
+        aboutFooter: 'Joy is a Codex and Claude Code mobile client. It\'s fully end-to-end encrypted and your account is stored only on your device. Not affiliated with Anthropic.',
         whatsNew: 'What\'s New',
         whatsNewSubtitle: 'See the latest updates and improvements',
         reportIssue: 'Report an Issue',
@@ -247,7 +248,7 @@ export const en = {
         mod06Title: '06 · Double Tap',
         mod06Description: 'Require a second tap within 2 seconds to commit a multiple-choice answer from the assistant. Helps prevent accidental selections.',
         mod07Title: '07 · Read Open File',
-        mod07Description: 'Show an "Open file" button on Read tool calls. The button uses Happy\'s in-app file viewer route which fetches from the Claude host — works whether the app and Claude are on the same machine or not.',
+        mod07Description: 'Show an "Open file" button on Read tool calls. The button uses Joy\'s in-app file viewer route which fetches from the Claude host — works whether the app and Claude are on the same machine or not.',
     },
 
     settingsFeatures: {
@@ -394,7 +395,7 @@ export const en = {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Server Configuration',
         enterServerUrl: 'Please enter a server URL',
-        notValidHappyServer: 'Not a valid Happy Server',
+        notValidHappyServer: 'Not a valid Joy Server',
         changeServer: 'Change Server',
         continueWithServer: 'Continue with this server?',
         resetToDefault: 'Reset to Default',
@@ -414,9 +415,9 @@ export const en = {
         killSessionConfirm: 'Are you sure you want to terminate this session?',
         archiveSession: 'Archive Session',
         archiveSessionConfirm: 'Are you sure you want to archive this session?',
-        happySessionIdCopied: 'Happy Session ID copied to clipboard',
-        failedToCopySessionId: 'Failed to copy Happy Session ID',
-        happySessionId: 'Happy Session ID',
+        happySessionIdCopied: 'Joy Session ID copied to clipboard',
+        failedToCopySessionId: 'Failed to copy Joy Session ID',
+        happySessionId: 'Joy Session ID',
         claudeCodeSessionId: 'Claude Code Session ID',
         claudeCodeSessionIdCopied: 'Claude Code Session ID copied to clipboard',
         codexThreadId: 'Codex Thread ID',
@@ -450,7 +451,7 @@ export const en = {
         path: 'Path',
         operatingSystem: 'Operating System',
         processId: 'Process ID',
-        happyHome: 'Happy Home',
+        happyHome: 'Joy Home',
         copyMetadata: 'Copy session metadata',
         agentState: 'Agent State',
         controlledByUser: 'Controlled by User',
@@ -480,7 +481,7 @@ export const en = {
         emptyMainScreen: {
             // Used by EmptyMainScreen component
             readyToCode: 'Ready to code?',
-            installCli: 'Install the Happy CLI',
+            installCli: 'Install the Joy CLI',
             runIt: 'Run it',
             scanQrCode: 'Scan the QR code',
             openCamera: 'Open Camera',
@@ -708,13 +709,13 @@ export const en = {
         },
         // Bring your own agent
         byoTitle: 'Bring Your Own Agent',
-        byoDescription: 'Use your own ElevenLabs agent instead of the Happy default. No subscription required — connect directly with your own ElevenLabs account. Your agent must define two client tools: messageClaudeCode (sends text to the coding agent) and processPermissionRequest (allows or denies tool use). It receives session context via the {{initialConversationContext}} dynamic variable.',
+        byoDescription: 'Use your own ElevenLabs agent instead of the Joy default. No subscription required — connect directly with your own ElevenLabs account. Your agent must define two client tools: messageClaudeCode (sends text to the coding agent) and processPermissionRequest (allows or denies tool use). It receives session context via the {{initialConversationContext}} dynamic variable.',
         customAgentId: 'ElevenLabs Agent ID',
         customAgentIdNotSet: 'Not configured',
-        customAgentIdDescription: 'Enter your ElevenLabs agent ID. Leave empty to use the Happy default.',
+        customAgentIdDescription: 'Enter your ElevenLabs agent ID. Leave empty to use the Joy default.',
         customAgentIdPlaceholder: 'e.g. abc123def456',
         bypassToken: 'Direct Connection',
-        bypassTokenSubtitle: 'Skip Happy server, connect straight to ElevenLabs',
+        bypassTokenSubtitle: 'Skip Joy server, connect straight to ElevenLabs',
         promptGuideTitle: 'Agent Prompt Guide',
         promptGuideDescription: 'Your ElevenLabs agent needs:\n\n• Tool: messageClaudeCode — parameter: message (string). Sends a message to the active coding session.\n• Tool: processPermissionRequest — parameter: decision ("allow" or "deny"). Approves or denies a pending tool permission.\n• Dynamic variable: {{initialConversationContext}} — receives session history and context on start.\n\nThe agent acts as a voice bridge between the user and coding agents. It should be concise, only respond when addressed, and report when a coding agent finishes work.',
         // Voice usage
@@ -804,7 +805,7 @@ export const en = {
         invalidConnectionLink: 'Invalid Connection Link',
         invalidConnectionLinkDescription: 'The connection link is missing or invalid. Please check the URL and try again.',
         connectTerminal: 'Connect Terminal',
-        terminalRequestDescription: 'A terminal is requesting to connect to your Happy Coder account. This will allow the terminal to send and receive messages securely.',
+        terminalRequestDescription: 'A terminal is requesting to connect to your Joy account. This will allow the terminal to send and receive messages securely.',
         connectionDetails: 'Connection Details',
         publicKey: 'Public Key',
         encryption: 'Encryption',

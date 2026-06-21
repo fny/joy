@@ -71,7 +71,7 @@ export default React.memo(function ModsSettingsScreen() {
             </ItemGroup>
 
             <ItemGroup title="Always on" footer="Baked-in mods with no toggle.">
-                <Item title="00 · joy App" subtitle="Separate app identifier + icon from stock Happy" showChevron={false} />
+                <Item title="00 · joy App" subtitle="Separate app identifier + icon from stock Joy" showChevron={false} />
                 <Item title="01 · Mods page" subtitle="This page (replaces the old Personal page)" showChevron={false} />
                 <Item title="02 · Audio" subtitle="macOS microphone entitlement for voice in the Tauri build" showChevron={false} />
                 <Item title="09 · Dev tools" subtitle="WebKit inspector enabled in release Tauri builds" showChevron={false} />

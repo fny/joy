@@ -187,8 +187,8 @@ function cmdAuth(): number {
   const accessKey = join(HAPPY_HOME, "access.key");
   if (!existsSync(accessKey)) {
     console.log(`${bad} not authenticated`);
-    console.log(`  joy-tmux shares Happy's credentials (${c.dim(accessKey)}).`);
-    console.log(`  Run ${c.b("happy auth login")} (or set up the Happy app) to create them.`);
+    console.log(`  joy-tmux shares the Joy app's credentials (${c.dim(accessKey)}).`);
+    console.log(`  Run ${c.b("happy auth login")} (or set up the Joy app) to create them.`);
     return 1;
   }
   let machineId = "?", server = "?";
@@ -314,7 +314,7 @@ ${c.b("Usage:")} joy <command>
   ${c.b("status")}       Show daemon status
   ${c.b("list")}         List sessions the daemon is tracking
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
-  ${c.b("auth")}         Show authentication status (shared with Happy)
+  ${c.b("auth")}         Show authentication status (shared with the Joy app)
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
   ${c.b("install")}      Install autostart service (systemd on Linux, launchd on macOS)
   ${c.b("uninstall")}    Remove the autostart service

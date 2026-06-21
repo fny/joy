@@ -1,5 +1,5 @@
 /**
- * Japanese translations for the Happy app
+ * Japanese translations for the Joy app
  * Values can be:
  * - String constants for static text
  * - Functions with typed object parameters for dynamic text
@@ -86,6 +86,7 @@ export const ja: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `最終アクセス: ${time}`,
         permissionRequired: '権限が必要です',
         detached: 'デタッチ',
+        compacting: '圧縮中',
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'アクティブ',
         unknown: '不明',
@@ -129,7 +130,7 @@ export const ja: TranslationStructure = {
         developer: '開発者',
         developerTools: '開発者ツール',
         about: 'このアプリについて',
-        aboutFooter: 'Happy CoderはCodexとClaude Codeのモバイルクライアントです。完全なエンドツーエンド暗号化を採用し、アカウントはデバイスにのみ保存されます。Anthropicとは提携していません。',
+        aboutFooter: 'JoyはCodexとClaude Codeのモバイルクライアントです。完全なエンドツーエンド暗号化を採用し、アカウントはデバイスにのみ保存されます。Anthropicとは提携していません。',
         whatsNew: '新機能',
         whatsNewSubtitle: '最新のアップデートと改善を確認',
         reportIssue: '問題を報告',
@@ -222,7 +223,7 @@ export const ja: TranslationStructure = {
         mod06Title: '06 · ダブルタップ',
         mod06Description: 'アシスタントからの選択式回答を確定するには、2秒以内に2回目のタップが必要です。誤選択を防ぐのに役立ちます。',
         mod07Title: '07 · Read ファイルを開く',
-        mod07Description: 'Read ツール呼び出しに「ファイルを開く」ボタンを表示します。このボタンは Happy のアプリ内ファイルビューアを使用し、Claude ホストから取得します — アプリと Claude が同じマシン上にあってもなくても動作します。',
+        mod07Description: 'Read ツール呼び出しに「ファイルを開く」ボタンを表示します。このボタンは Joy のアプリ内ファイルビューアを使用し、Claude ホストから取得します — アプリと Claude が同じマシン上にあってもなくても動作します。',
     },
 
     settingsFeatures: {
@@ -353,7 +354,7 @@ export const ja: TranslationStructure = {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'サーバー設定',
         enterServerUrl: 'サーバーURLを入力してください',
-        notValidHappyServer: '有効なHappy Serverではありません',
+        notValidHappyServer: '有効なJoy Serverではありません',
         changeServer: 'サーバーを変更',
         continueWithServer: 'このサーバーで続行しますか？',
         resetToDefault: 'デフォルトにリセット',
@@ -373,9 +374,9 @@ export const ja: TranslationStructure = {
         killSessionConfirm: 'このセッションを終了してもよろしいですか？',
         archiveSession: 'セッションをアーカイブ',
         archiveSessionConfirm: 'このセッションをアーカイブしてもよろしいですか？',
-        happySessionIdCopied: 'Happy Session IDがクリップボードにコピーされました',
-        failedToCopySessionId: 'Happy Session IDのコピーに失敗しました',
-        happySessionId: 'Happy Session ID',
+        happySessionIdCopied: 'Joy Session IDがクリップボードにコピーされました',
+        failedToCopySessionId: 'Joy Session IDのコピーに失敗しました',
+        happySessionId: 'Joy Session ID',
         claudeCodeSessionId: 'Claude Code Session ID',
         claudeCodeSessionIdCopied: 'Claude Code Session IDがクリップボードにコピーされました',
         codexThreadId: 'Codex Thread ID',
@@ -409,7 +410,7 @@ export const ja: TranslationStructure = {
         path: 'パス',
         operatingSystem: 'オペレーティングシステム',
         processId: 'プロセスID',
-        happyHome: 'Happy Home',
+        happyHome: 'Joy Home',
         copyMetadata: 'メタデータをコピー',
         agentState: 'エージェント状態',
         controlledByUser: 'ユーザーによる制御',
@@ -439,7 +440,7 @@ export const ja: TranslationStructure = {
         emptyMainScreen: {
             // Used by EmptyMainScreen component
             readyToCode: 'コーディングを始めますか？',
-            installCli: 'Happy CLIをインストール',
+            installCli: 'Joy CLIをインストール',
             runIt: '実行する',
             scanQrCode: 'QRコードをスキャン',
             openCamera: 'カメラを開く',
@@ -667,13 +668,13 @@ export const ja: TranslationStructure = {
         },
         // Bring your own agent
         byoTitle: '自分のエージェントを使う',
-        byoDescription: 'Happy のデフォルトの代わりに、独自の ElevenLabs エージェントを使用します。サブスクリプション不要 — 自分の ElevenLabs アカウントで直接接続できます。エージェントには2つのクライアントツールを定義する必要があります: messageClaudeCode（コーディングエージェントにテキストを送信）と processPermissionRequest（ツール使用を許可または拒否）。セッションコンテキストは {{initialConversationContext}} 動的変数を通じて受信されます。',
+        byoDescription: 'Joy のデフォルトの代わりに、独自の ElevenLabs エージェントを使用します。サブスクリプション不要 — 自分の ElevenLabs アカウントで直接接続できます。エージェントには2つのクライアントツールを定義する必要があります: messageClaudeCode（コーディングエージェントにテキストを送信）と processPermissionRequest（ツール使用を許可または拒否）。セッションコンテキストは {{initialConversationContext}} 動的変数を通じて受信されます。',
         customAgentId: 'ElevenLabs Agent ID',
         customAgentIdNotSet: '未設定',
-        customAgentIdDescription: 'ElevenLabs Agent ID を入力してください。空のままにすると Happy のデフォルトが使用されます。',
+        customAgentIdDescription: 'ElevenLabs Agent ID を入力してください。空のままにすると Joy のデフォルトが使用されます。',
         customAgentIdPlaceholder: 'e.g. abc123def456',
         bypassToken: '直接接続',
-        bypassTokenSubtitle: 'Happy サーバーをスキップし、ElevenLabs に直接接続',
+        bypassTokenSubtitle: 'Joy サーバーをスキップし、ElevenLabs に直接接続',
         promptGuideTitle: 'エージェントプロンプトガイド',
         promptGuideDescription: 'ElevenLabs エージェントには以下が必要です:\n\n• ツール: messageClaudeCode — パラメータ: message (string)。アクティブなコーディングセッションにメッセージを送信します。\n• ツール: processPermissionRequest — パラメータ: decision ("allow" または "deny")。保留中のツール許可を承認または拒否します。\n• 動的変数: {{initialConversationContext}} — 開始時にセッション履歴とコンテキストを受信します。\n\nエージェントはユーザーとコーディングエージェント間の音声ブリッジとして機能します。簡潔に、話しかけられた時のみ応答し、コーディングエージェントが作業を完了したら報告する必要があります。',
         usageTitle: '使用状況（過去30日間）',
@@ -762,7 +763,7 @@ export const ja: TranslationStructure = {
         invalidConnectionLink: '無効な接続リンク',
         invalidConnectionLinkDescription: '接続リンクが見つからないか無効です。URLを確認して再試行してください。',
         connectTerminal: 'ターミナルを接続',
-        terminalRequestDescription: 'ターミナルがHappy Coderアカウントへの接続を要求しています。これにより、ターミナルは安全にメッセージを送受信できるようになります。',
+        terminalRequestDescription: 'ターミナルがJoyアカウントへの接続を要求しています。これにより、ターミナルは安全にメッセージを送受信できるようになります。',
         connectionDetails: '接続の詳細',
         publicKey: '公開鍵',
         encryption: '暗号化',

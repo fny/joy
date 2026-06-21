@@ -1,5 +1,5 @@
 /**
- * Chinese (Simplified) translations for the Happy app
+ * Chinese (Simplified) translations for the Joy app
  * Values can be:
  * - String constants for static text
  * - Functions with typed object parameters for dynamic text
@@ -86,6 +86,7 @@ export const zhHans: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `最后活跃时间 ${time}`,
         permissionRequired: '需要权限',
         detached: '已分离',
+        compacting: '压缩中',
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: '当前活跃',
         unknown: '未知',
@@ -129,7 +130,7 @@ export const zhHans: TranslationStructure = {
         developer: '开发者',
         developerTools: '开发者工具',
         about: '关于',
-        aboutFooter: 'Happy Coder 是一个 Codex 和 Claude Code 移动客户端。它采用端到端加密，您的账户仅存储在本地设备上。与 Anthropic 无关联。',
+        aboutFooter: 'Joy 是一个 Codex 和 Claude Code 移动客户端。它采用端到端加密，您的账户仅存储在本地设备上。与 Anthropic 无关联。',
         whatsNew: '更新日志',
         whatsNewSubtitle: '查看最新更新和改进',
         reportIssue: '报告问题',
@@ -222,7 +223,7 @@ export const zhHans: TranslationStructure = {
         mod06Title: '06 · 双击确认',
         mod06Description: '需要在 2 秒内再次点击以提交助手的多选答案。有助于防止误选。',
         mod07Title: '07 · 打开 Read 文件',
-        mod07Description: '在 Read 工具调用上显示"打开文件"按钮。该按钮使用 Happy 的应用内文件查看器路由,从 Claude 主机获取文件 — 无论应用和 Claude 是否在同一台机器上都能工作。',
+        mod07Description: '在 Read 工具调用上显示"打开文件"按钮。该按钮使用 Joy 的应用内文件查看器路由,从 Claude 主机获取文件 — 无论应用和 Claude 是否在同一台机器上都能工作。',
     },
 
     settingsFeatures: {
@@ -353,7 +354,7 @@ export const zhHans: TranslationStructure = {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: '服务器配置',
         enterServerUrl: '请输入服务器 URL',
-        notValidHappyServer: '不是有效的 Happy 服务器',
+        notValidHappyServer: '不是有效的 Joy 服务器',
         changeServer: '更改服务器',
         continueWithServer: '继续使用此服务器？',
         resetToDefault: '重置为默认',
@@ -373,9 +374,9 @@ export const zhHans: TranslationStructure = {
         killSessionConfirm: '您确定要终止此会话吗？',
         archiveSession: '归档会话',
         archiveSessionConfirm: '您确定要归档此会话吗？',
-        happySessionIdCopied: 'Happy 会话 ID 已复制到剪贴板',
-        failedToCopySessionId: '复制 Happy 会话 ID 失败',
-        happySessionId: 'Happy 会话 ID',
+        happySessionIdCopied: 'Joy 会话 ID 已复制到剪贴板',
+        failedToCopySessionId: '复制 Joy 会话 ID 失败',
+        happySessionId: 'Joy 会话 ID',
         claudeCodeSessionId: 'Claude Code 会话 ID',
         claudeCodeSessionIdCopied: 'Claude Code 会话 ID 已复制到剪贴板',
         codexThreadId: 'Codex 线程 ID',
@@ -409,7 +410,7 @@ export const zhHans: TranslationStructure = {
         path: '路径',
         operatingSystem: '操作系统',
         processId: '进程 ID',
-        happyHome: 'Happy 主目录',
+        happyHome: 'Joy 主目录',
         copyMetadata: '复制元数据',
         agentState: 'Agent 状态',
         controlledByUser: '用户控制',
@@ -439,7 +440,7 @@ export const zhHans: TranslationStructure = {
         emptyMainScreen: {
             // Used by EmptyMainScreen component
             readyToCode: '准备开始编程？',
-            installCli: '安装 Happy CLI',
+            installCli: '安装 Joy CLI',
             runIt: '运行它',
             scanQrCode: '扫描二维码',
             openCamera: '打开相机',
@@ -667,13 +668,13 @@ export const zhHans: TranslationStructure = {
         },
         // Bring your own agent
         byoTitle: '使用自己的代理',
-        byoDescription: '使用您自己的 ElevenLabs 代理代替 Happy 默认代理。无需订阅 — 直接使用您自己的 ElevenLabs 账户连接。您的代理必须定义两个客户端工具：messageClaudeCode（向编码代理发送文本）和 processPermissionRequest（允许或拒绝工具使用）。通过 {{initialConversationContext}} 动态变量接收会话上下文。',
+        byoDescription: '使用您自己的 ElevenLabs 代理代替 Joy 默认代理。无需订阅 — 直接使用您自己的 ElevenLabs 账户连接。您的代理必须定义两个客户端工具：messageClaudeCode（向编码代理发送文本）和 processPermissionRequest（允许或拒绝工具使用）。通过 {{initialConversationContext}} 动态变量接收会话上下文。',
         customAgentId: 'ElevenLabs Agent ID',
         customAgentIdNotSet: '未配置',
-        customAgentIdDescription: '输入您的 ElevenLabs Agent ID。留空则使用 Happy 默认代理。',
+        customAgentIdDescription: '输入您的 ElevenLabs Agent ID。留空则使用 Joy 默认代理。',
         customAgentIdPlaceholder: 'e.g. abc123def456',
         bypassToken: '直接连接',
-        bypassTokenSubtitle: '跳过 Happy 服务器，直接连接到 ElevenLabs',
+        bypassTokenSubtitle: '跳过 Joy 服务器，直接连接到 ElevenLabs',
         promptGuideTitle: '代理提示词指南',
         promptGuideDescription: '您的 ElevenLabs 代理需要：\n\n• 工具：messageClaudeCode — 参数：message (string)。向活跃的编码会话发送消息。\n• 工具：processPermissionRequest — 参数：decision ("allow" 或 "deny")。批准或拒绝待处理的工具权限。\n• 动态变量：{{initialConversationContext}} — 启动时接收会话历史和上下文。\n\n代理充当用户和编码代理之间的语音桥梁。它应该简洁，仅在被呼叫时回应，并在编码代理完成工作时进行报告。',
         usageTitle: '使用量（过去 30 天）',
@@ -762,7 +763,7 @@ export const zhHans: TranslationStructure = {
         invalidConnectionLink: '无效的连接链接',
         invalidConnectionLinkDescription: '连接链接缺失或无效。请检查 URL 并重试。',
         connectTerminal: '连接终端',
-        terminalRequestDescription: '有终端正在请求连接到您的 Happy Coder 账户。这将允许终端安全地发送和接收消息。',
+        terminalRequestDescription: '有终端正在请求连接到您的 Joy 账户。这将允许终端安全地发送和接收消息。',
         connectionDetails: '连接详情',
         publicKey: '公钥',
         encryption: '加密',
