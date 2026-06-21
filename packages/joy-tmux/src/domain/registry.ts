@@ -14,6 +14,7 @@ import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
+import { ensureCompactHookSettings, daemonFilePath } from "../claude/compactHook";
 
 export interface CreateSessionOpts {
   cwd: string;
@@ -294,6 +295,15 @@ export class SessionRegistry {
 
     const envParts: string[] = [];
     if (opts.effort && opts.effort !== "default") envParts.push(`CLAUDE_EFFORT=${opts.effort}`);
+    // PreCompact hook reaches the daemon via these: the daemon.json path (fresh
+    // port+token, so it survives daemon restarts that rotate the token) and this
+    // session's id, which the hook POSTs to /sessions/:id/compacting.
+    envParts.push(`JOY_DAEMON_FILE='${daemonFilePath()}'`);
+    envParts.push(`JOY_SESSION_ID='${id}'`);
+    // joy-managed Claude settings, merged on top of the user's own: adds the
+    // PreCompact hook that drives the app's "compacting" status. "" = generation
+    // failed → skip the flag rather than pass claude a broken --settings path.
+    const claudeSettings = ensureCompactHookSettings();
 
     // YOLO mode is the default for joy-tmux sessions — the app drives the
     // session and approving permission prompts via tmux send-keys is fragile.
@@ -305,6 +315,7 @@ export class SessionRegistry {
       // Teach Claude the <options> convention the app renders as a picker (the
       // happy SDK injects this per-message; a tmux pane can't, so bake it in).
       f.push("--append-system-prompt", optionsPromptArg());
+      if (claudeSettings) f.push("--settings", `'${claudeSettings}'`);
       if (opts.model) f.push("--model", opts.model);
       if (opts.fallbackModel) f.push("--fallback-model", opts.fallbackModel);
       if (withContinue && opts.continue) f.push("--continue");

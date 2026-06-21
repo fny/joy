@@ -686,6 +686,12 @@ export interface JoyRetryInfo {
   status: number;    // the HTTP status that triggered the retry (e.g. 500)
 }
 
+/** Compaction banner the app renders while Claude summarizes the conversation. */
+export interface JoyCompactingInfo {
+  trigger: 'auto' | 'manual'; // what kicked off the compaction
+  since: number;              // epoch ms when compaction started
+}
+
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
 export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
@@ -829,6 +835,16 @@ export class RelaySession {
     // session with no active retry can reconcile its banner without churn.
     if (info == null && this.metadata?.joy__retry == null) return;
     await this.mergeMetadata({ joy__retry: info });
+  }
+
+  /**
+   * Set (or clear, with null) the "compacting" banner the app shows while Claude
+   * summarizes its context. Set by the PreCompact hook, cleared by the
+   * compact_boundary transcript marker (or a backstop timeout in the Session).
+   */
+  async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
+    if (info == null && this.metadata?.joy__compacting == null) return;
+    await this.mergeMetadata({ joy__compacting: info });
   }
 
   /**

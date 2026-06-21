@@ -247,6 +247,7 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
     setThinking(v: boolean) { thinkingCalls.push(v); },
     updateRetry() {},
     updateQueue() {},
+    updateCompacting() {},
     notify() {},
   };
   s.attachRelay(rs, true);
@@ -263,4 +264,30 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
 
   s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 2000 } as any);
   expect(thinkingCalls.includes(false)).toBe(true); // turn end clears thinking
+});
+
+test("compacting: PreCompact mark sets the banner, compact_boundary clears it", () => {
+  const compactingCalls: (object | null)[] = [];
+  const s = new Session(
+    { id: "c1", tmuxWindow: "joy:j-c1", cwd: "/tmp/c", flags: [], status: "active", startedAt: 0, claudeSessionId: "sid-c1" } as any,
+    { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
+  );
+  const rs: any = {
+    relaySessionId: "rs-c1",
+    start() {}, stop() {}, send() {},
+    setThinking() {}, updateRetry() {}, updateQueue() {},
+    updateCompacting(info: any) { compactingCalls.push(info); },
+    notify() {},
+  };
+  s.attachRelay(rs, true);
+  // attach reconciles a stale banner — none is live, so it clears (null).
+  expect(compactingCalls).toEqual([null]);
+
+  // PreCompact hook fired → /compacting route → markCompacting.
+  s.markCompacting("auto");
+  expect(compactingCalls.at(-1)).toMatchObject({ trigger: "auto" });
+
+  // Claude writes the compact_boundary marker on completion → clears the banner.
+  s.onTranscriptEntry({ type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "auto" } } as any);
+  expect(compactingCalls.at(-1)).toBe(null);
 });

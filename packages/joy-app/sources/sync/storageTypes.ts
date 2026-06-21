@@ -79,6 +79,13 @@ export const MetadataSchema = z.object({
         inFlight: z.string().nullable(),
         paused: z.boolean(),
     }).nullable().optional(),
+    // joy: Claude is compacting its context (summarizing the conversation to free
+    // tokens). Set by the daemon's PreCompact hook, cleared by the compact_boundary
+    // transcript marker. Drives the "compacting" status. null/absent = none.
+    joy__compacting: z.object({
+        trigger: z.enum(['auto', 'manual']),
+        since: z.number(),
+    }).nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
