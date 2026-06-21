@@ -339,7 +339,8 @@ function expandTilde(p: string): string {
 // Attach (or, when already inside tmux, switch) to a session's tmux window.
 //   joy jump            → the session in the current dir (or its nearest ancestor)
 //   joy jump <id|pfx>   → by joy session id or a unique prefix of it
-//   joy jump <path>     → by the session's cwd (also matches a bare folder name)
+//   joy jump <path>     → by the session's cwd, or a full/partial folder name
+// Ambiguous matches (e.g. a partial name hitting several dirs) error with the list.
 async function cmdJump(rest: string[]): Promise<number> {
   const r = await api("GET", "/sessions").catch(() => null);
   if (!r || !r.ok) { console.log(`${bad} daemon not running (joy start)`); return 1; }
@@ -366,7 +367,11 @@ async function cmdJump(rest: string[]): Promise<number> {
     matches = sessions.filter((s) => s.id === arg);                                      // exact id
     if (!matches.length) matches = sessions.filter((s) => resolve(s.cwd) === asPath);    // exact cwd path
     if (!matches.length) matches = sessions.filter((s) => String(s.id).startsWith(arg)); // id prefix
-    if (!matches.length) matches = sessions.filter((s) => basename(resolve(s.cwd)) === arg); // folder name
+    if (!matches.length) matches = sessions.filter((s) => basename(resolve(s.cwd)) === arg); // exact folder name
+    if (!matches.length) {                                                                   // partial folder name (case-insensitive)
+      const q = arg.toLowerCase();
+      matches = sessions.filter((s) => basename(resolve(s.cwd)).toLowerCase().includes(q));
+    }
   }
 
   if (matches.length === 0) { console.log(`${bad} no session matching ${how}`); return 1; }
