@@ -30,6 +30,7 @@ import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/Realtim
 import { isMutableTool } from "@/components/tools/knownTools";
 import { DecryptedArtifact } from "./artifactTypes";
 import { FeedItem } from "./feedTypes";
+import { compareMessagesNewestFirst } from "./messageOrdering";
 
 // Debounce timer for realtimeMode changes
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -590,7 +591,7 @@ export const storage = create<StorageState>()((set, get) => {
                     });
 
                     const messagesArray = Object.values(mergedMessagesMap)
-                        .sort((a, b) => b.createdAt - a.createdAt);
+                        .sort(compareMessagesNewestFirst);
 
                     updatedSessionMessages[session.id] = {
                         messages: messagesArray,
@@ -720,7 +721,7 @@ export const storage = create<StorageState>()((set, get) => {
 
                 // Convert to array and sort by createdAt
                 const messagesArray = Object.values(mergedMessagesMap)
-                    .sort((a, b) => b.createdAt - a.createdAt);
+                    .sort(compareMessagesNewestFirst);
 
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
@@ -800,7 +801,7 @@ export const storage = create<StorageState>()((set, get) => {
                     });
 
                     messages = Object.values(messagesMap)
-                        .sort((a, b) => b.createdAt - a.createdAt);
+                        .sort(compareMessagesNewestFirst);
                 }
 
                 // Extract latestUsage from reducerState if available and update session

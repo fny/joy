@@ -120,6 +120,7 @@ import { parseMessageAsEvent } from "./messageToEvent";
 type ReducerMessage = {
     id: string;
     realID: string | null;
+    seq: number | null;
     createdAt: number;
     role: 'user' | 'agent';
     text: string | null;
@@ -257,6 +258,28 @@ function updateLatestTodos(state: ReducerState, value: unknown, timestamp: numbe
     }
 }
 
+/**
+ * The server echo of an optimistic local send (matched by localId) carries the
+ * authoritative `seq` that the locally-rendered copy never had. Upgrade the
+ * existing reducer message's seq in place and re-emit it so it settles into
+ * server-log order. Without this, a client's own sends keep seq=null forever
+ * and the seq-based display sort can't place them correctly once messages
+ * start arriving out of createdAt order.
+ */
+function reconcileSeq(state: ReducerState, changed: Set<string>, msg: NormalizedMessage): void {
+    const internalId = (msg.role === 'user' && msg.localId ? state.localIds.get(msg.localId) : undefined)
+        ?? state.messageIds.get(msg.id);
+    if (!internalId) return;
+    const existing = state.messages.get(internalId);
+    if (!existing) return;
+    if (msg.seq != null && existing.seq !== msg.seq) {
+        existing.seq = msg.seq;
+        existing.realID = msg.id;
+        state.messageIds.set(msg.id, internalId);
+        changed.add(internalId);
+    }
+}
+
 export function reducer(state: ReducerState, messages: NormalizedMessage[], agentState?: AgentState | null): ReducerResult {
     if (ENABLE_LOGGING) {
         console.log(`[REDUCER] Called with ${messages.length} messages, agentState: ${agentState ? 'YES' : 'NO'}`);
@@ -294,9 +317,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     for (const msg of nonSidechainMessages) {
         // Check if we've already processed this message
         if (msg.role === 'user' && msg.localId && state.localIds.has(msg.localId)) {
+            reconcileSeq(state, changed, msg);
             continue;
         }
         if (state.messageIds.has(msg.id)) {
+            reconcileSeq(state, changed, msg);
             continue;
         }
 
@@ -369,6 +394,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         state.messages.set(mid, {
             id: mid,
             realID: message.id,
+            seq: message.seq ?? null,
             role: 'agent',
             createdAt: message.createdAt,
             event: event,
@@ -450,6 +476,10 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     state.messages.set(mid, {
                         id: mid,
                         realID: null,
+                        // Permission placeholder from agentState — no server row
+                        // yet, so it has no seq and sorts as newest until the
+                        // matching tool-call event arrives with one.
+                        seq: null,
                         role: 'agent',
                         createdAt: request.createdAt || Date.now(),
                         text: null,
@@ -612,6 +642,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     state.messages.set(mid, {
                         id: mid,
                         realID: null,
+                        seq: null,
                         role: 'agent',
                         createdAt: completed.createdAt || Date.now(),
                         text: null,
@@ -648,10 +679,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         if (msg.role === 'user') {
             // Check if we've seen this localId before
             if (msg.localId && state.localIds.has(msg.localId)) {
+                reconcileSeq(state, changed, msg);
                 continue;
             }
             // Check if we've seen this message ID before
             if (state.messageIds.has(msg.id)) {
+                reconcileSeq(state, changed, msg);
                 continue;
             }
 
@@ -660,6 +693,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             state.messages.set(mid, {
                 id: mid,
                 realID: msg.id,
+                seq: msg.seq ?? null,
                 role: 'user',
                 createdAt: msg.createdAt,
                 text: msg.content.text,
@@ -698,6 +732,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     state.messages.set(mid, {
                         id: mid,
                         realID: msg.id,
+                        seq: msg.seq ?? null,
                         role: 'agent',
                         createdAt: msg.createdAt,
                         text: isThinking ? `*${c.thinking}*` : c.text,
@@ -792,6 +827,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         state.messages.set(mid, {
                             id: mid,
                             realID: msg.id,
+                            seq: msg.seq ?? null,
                             role: 'agent',
                             createdAt: msg.createdAt,
                             text: null,
@@ -904,6 +940,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             let userMsg: ReducerMessage = {
                 id: mid,
                 realID: msg.id,
+                seq: msg.seq ?? null,
                 role: 'user',
                 createdAt: msg.createdAt,
                 text: msg.content[0].prompt,
@@ -926,6 +963,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     let textMsg: ReducerMessage = {
                         id: mid,
                         realID: msg.id,
+                        seq: msg.seq ?? null,
                         role: 'agent',
                         createdAt: msg.createdAt,
                         text: isThinking ? `*${c.thinking}*` : c.text,
@@ -970,6 +1008,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     let toolMsg: ReducerMessage = {
                         id: mid,
                         realID: msg.id,
+                        seq: msg.seq ?? null,
                         role: 'agent',
                         createdAt: msg.createdAt,
                         text: null,
@@ -1087,6 +1126,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             state.messages.set(mid, {
                 id: mid,
                 realID: msg.id,
+                seq: msg.seq ?? null,
                 role: 'agent',
                 createdAt: msg.createdAt,
                 event: msg.content,
@@ -1162,6 +1202,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
     if (reducerMsg.role === 'user' && reducerMsg.text !== null) {
         return {
             id: reducerMsg.id,
+            seq: reducerMsg.seq,
             localId: null,
             createdAt: reducerMsg.createdAt,
             kind: 'user-text',
@@ -1173,6 +1214,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
     } else if (reducerMsg.role === 'agent' && reducerMsg.text !== null) {
         return {
             id: reducerMsg.id,
+            seq: reducerMsg.seq,
             localId: null,
             createdAt: reducerMsg.createdAt,
             kind: 'agent-text',
@@ -1193,6 +1235,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
 
         return {
             id: reducerMsg.id,
+            seq: reducerMsg.seq,
             localId: null,
             createdAt: reducerMsg.createdAt,
             kind: 'tool-call',
@@ -1203,6 +1246,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
     } else if (reducerMsg.role === 'agent' && reducerMsg.event !== null) {
         return {
             id: reducerMsg.id,
+            seq: reducerMsg.seq,
             createdAt: reducerMsg.createdAt,
             kind: 'agent-event',
             event: reducerMsg.event,

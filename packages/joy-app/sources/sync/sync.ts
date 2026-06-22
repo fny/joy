@@ -2071,6 +2071,9 @@ class Sync {
             if (!decrypted) continue;
             const normalized = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
             if (normalized) {
+                // Carry the authoritative server log order onto the message so
+                // the display sort can use it instead of the (skew-prone) createdAt.
+                normalized.seq = decrypted.seq;
                 normalizedMessages.push(normalized);
             }
             if (opts?.deriveThinking) {
@@ -2236,6 +2239,9 @@ class Sync {
                 const decrypted = await encryption.decryptMessage(updateData.body.message);
                 if (decrypted) {
                     lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
+                    if (lastMessage) {
+                        lastMessage.seq = decrypted.seq;
+                    }
 
                     // Task lifecycle events embedded in the message stream update
                     // the thinking state even if the volatile activity ephemerals

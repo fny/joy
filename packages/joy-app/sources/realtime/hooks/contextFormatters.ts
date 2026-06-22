@@ -1,5 +1,6 @@
 import { Session } from "@/sync/storageTypes";
 import { Message } from "@/sync/typesMessage";
+import { compareMessagesOldestFirst } from "@/sync/messageOrdering";
 import { trimIdent } from "@/utils/trimIdent";
 import { VOICE_CONFIG } from "../voiceConfig";
 
@@ -66,7 +67,7 @@ export function formatNewSingleMessage(sessionId: string, message: Message): str
 }
 
 export function formatNewMessages(sessionId: string, messages: Message[]): string | null {
-    let formatted = [...messages].sort((a, b) => a.createdAt - b.createdAt).map(formatMessage).filter(Boolean);
+    let formatted = [...messages].sort(compareMessagesOldestFirst).map(formatMessage).filter(Boolean);
     if (formatted.length === 0) {
         return null;
     }

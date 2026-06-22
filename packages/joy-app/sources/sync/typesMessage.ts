@@ -25,6 +25,13 @@ export type ToolCall = {
 export type UserTextMessage = {
     kind: 'user-text';
     id: string;
+    /**
+     * Authoritative server log order for this message. Used as the primary
+     * display sort key (createdAt mixes transcript-time and relay-time clocks
+     * and is unreliable for ordering). Null for optimistic local sends that
+     * have not yet been acked by the server.
+     */
+    seq?: number | null;
     localId: string | null;
     createdAt: number;
     text: string;
@@ -41,6 +48,7 @@ export type UserTextMessage = {
 export type ModeSwitchMessage = {
     kind: 'agent-event';
     id: string;
+    seq?: number | null;
     createdAt: number;
     event: AgentEvent;
     meta?: MessageMeta;
@@ -49,6 +57,7 @@ export type ModeSwitchMessage = {
 export type AgentTextMessage = {
     kind: 'agent-text';
     id: string;
+    seq?: number | null;
     localId: string | null;
     createdAt: number;
     text: string;
@@ -59,6 +68,7 @@ export type AgentTextMessage = {
 export type ToolCallMessage = {
     kind: 'tool-call';
     id: string;
+    seq?: number | null;
     localId: string | null;
     createdAt: number;
     tool: ToolCall;

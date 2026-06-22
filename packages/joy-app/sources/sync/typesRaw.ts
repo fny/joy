@@ -524,6 +524,14 @@ export type NormalizedMessage = ({
     id: string,
     localId: string | null,
     createdAt: number,
+    /**
+     * Authoritative server log sequence for this message (monotonic, gap-free
+     * per session). Threaded through to the display sort key so ordering does
+     * not depend on createdAt, which mixes transcript-time (agent envelopes)
+     * and joyTime/relay-time (user messages). Null/undefined for locally
+     * generated messages with no server row yet (optimistic sends, files).
+     */
+    seq?: number | null,
     isSidechain: boolean,
     meta?: MessageMeta,
     usage?: UsageData,
