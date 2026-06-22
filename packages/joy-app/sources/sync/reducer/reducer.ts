@@ -155,6 +155,7 @@ export type ReducerState = {
     latestTodos?: {
         todos: TodoItem[];
         timestamp: number;
+        seq?: number | null;
     };
     latestUsage?: {
         inputTokens: number;
@@ -163,6 +164,7 @@ export type ReducerState = {
         cacheRead: number;
         contextSize: number;
         timestamp: number;
+        seq?: number | null;
     };
 };
 
@@ -244,16 +246,32 @@ export type ReducerResult = {
     hasReadyEvent?: boolean;
 };
 
-function updateLatestTodos(state: ReducerState, value: unknown, timestamp: number) {
+/**
+ * latestUsage/latestTodos track the most RECENT turn's snapshot. Prefer the
+ * server seq (monotonic, gap-free) over createdAt when deciding "is this
+ * newer?": an agent envelope's createdAt is transcript-production time and can
+ * be backfilled/skewed (and a Date.parse miss falls back to a wall-clock now),
+ * so a createdAt-only check can wrongly reject the actually-latest snapshot
+ * when a turn is relayed late. Falls back to timestamp when either side has no
+ * seq (e.g. context-reset markers, locally generated messages).
+ */
+function isLaterSnapshot(latest: { seq?: number | null; timestamp: number } | undefined, seq: number | null, timestamp: number): boolean {
+    if (!latest) return true;
+    if (seq != null && latest.seq != null) return seq > latest.seq;
+    return timestamp > latest.timestamp;
+}
+
+function updateLatestTodos(state: ReducerState, value: unknown, timestamp: number, seq: number | null) {
     const parsed = TodoItemsSchema.safeParse(value);
     if (!parsed.success) {
         return;
     }
 
-    if (!state.latestTodos || timestamp > state.latestTodos.timestamp) {
+    if (isLaterSnapshot(state.latestTodos, seq, timestamp)) {
         state.latestTodos = {
             todos: parsed.data,
             timestamp,
+            seq,
         };
     }
 }
@@ -344,7 +362,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Reset todos to empty array and reset usage to zero
             state.latestTodos = {
                 todos: [],
-                timestamp: msg.createdAt  // Use message timestamp, not current time
+                timestamp: msg.createdAt,  // Use message timestamp, not current time
+                seq: msg.seq ?? null
             };
             state.latestUsage = {
                 inputTokens: 0,
@@ -352,7 +371,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 cacheCreation: 0,
                 cacheRead: 0,
                 contextSize: 0,
-                timestamp: msg.createdAt  // Use message timestamp to avoid blocking older usage data
+                timestamp: msg.createdAt,  // Use message timestamp to avoid blocking older usage data
+                seq: msg.seq ?? null
             };
             // Don't continue - let the event be processed normally to create a message
         }
@@ -366,7 +386,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 cacheCreation: 0,
                 cacheRead: 0,
                 contextSize: 0,
-                timestamp: msg.createdAt  // Use message timestamp to avoid blocking older usage data
+                timestamp: msg.createdAt,  // Use message timestamp to avoid blocking older usage data
+                seq: msg.seq ?? null
             };
             // Don't continue - let the event be processed normally to create a message
         }
@@ -721,7 +742,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
             // Process usage data if present
             if (msg.usage) {
-                processUsageData(state, msg.usage, msg.createdAt);
+                processUsageData(state, msg.usage, msg.createdAt, msg.seq ?? null);
             }
 
             // Process text and thinking content (tool calls handled in Phase 2)
@@ -901,7 +922,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     }
 
                     if (message.tool.name === 'TodoWrite' && !c.is_error) {
-                        updateLatestTodos(state, message.tool.result?.newTodos, msg.createdAt);
+                        updateLatestTodos(state, message.tool.result?.newTodos, msg.createdAt, msg.seq ?? null);
                     }
 
                     changed.add(messageId);
@@ -1183,16 +1204,17 @@ function allocateId() {
     return Math.random().toString(36).substring(2, 15);
 }
 
-function processUsageData(state: ReducerState, usage: UsageData, timestamp: number) {
-    // Only update if this is newer than the current latest usage
-    if (!state.latestUsage || timestamp > state.latestUsage.timestamp) {
+function processUsageData(state: ReducerState, usage: UsageData, timestamp: number, seq: number | null) {
+    // Only update if this is newer than the current latest usage (seq-first).
+    if (isLaterSnapshot(state.latestUsage, seq, timestamp)) {
         state.latestUsage = {
             inputTokens: usage.input_tokens,
             outputTokens: usage.output_tokens,
             cacheCreation: usage.cache_creation_input_tokens || 0,
             cacheRead: usage.cache_read_input_tokens || 0,
             contextSize: (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) + usage.input_tokens,
-            timestamp: timestamp
+            timestamp: timestamp,
+            seq,
         };
     }
 }

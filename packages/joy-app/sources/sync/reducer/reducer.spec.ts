@@ -3167,3 +3167,27 @@ describe('reducer', () => {
         });
     });
 });
+
+describe('reducer latestUsage seq-first freshness', () => {
+    const usageMsg = (id: string, seq: number, createdAt: number, input: number): NormalizedMessage => ({
+        id, localId: null, createdAt, seq, role: 'agent', isSidechain: false,
+        content: [{ type: 'text', text: 'x', uuid: id, parentUUID: null }],
+        usage: { input_tokens: input, output_tokens: 0 },
+    });
+
+    it('prefers the higher-seq usage even when its createdAt is earlier (late relay)', () => {
+        const state = createReducer();
+        // Turn A: lower seq, LATER createdAt. Turn B: higher seq, EARLIER createdAt
+        // (produced after A but relayed carrying transcript-production time).
+        reducer(state, [usageMsg('a', 100, 5000, 111)]);
+        const r = reducer(state, [usageMsg('b', 200, 1000, 222)]);
+        expect(r.usage?.inputTokens).toBe(222); // seq wins; createdAt-only would keep 111
+    });
+
+    it('does not let a lower-seq backfill override newer usage', () => {
+        const state = createReducer();
+        reducer(state, [usageMsg('b', 200, 1000, 222)]);
+        const r = reducer(state, [usageMsg('a', 100, 5000, 111)]);
+        expect(r.usage?.inputTokens).toBe(222); // backfilled older turn rejected
+    });
+});
