@@ -349,3 +349,48 @@ visibility + generating-gate tests).
   show a dup) — pre-existing, low.
 - The deployed app is still old code (fix #5 lands on the user's next app rebuild); the daemon
   fixes are live now and cover both the relay and `/send` paths.
+
+---
+
+## 10. Post-fix scenario sweep (2026-06-23, after the dispatch + status commits)
+
+Re-ran the deferred scenarios against the harness now that dispatch is solid. Daemon
+fixes are live; the deployed app is still origin/main (app-side bits land on its next rebuild).
+
+- **S2 — status timing:** PASS. App shows `mulling…/cogitating…` within ~1-2s of the pane
+  starting; clears to `online` within ~3s of turn-end. No stuck thinking on a normal turn.
+- **S5 — abort-then-send:** PASS (Test D). Long task → abort (clean idle) → next send → answered.
+- **S6 — burst:** PASS (Test B). 3 long msgs → 3 turns in order, distinct replies, no concat/loss.
+- **S7 — queue edit/cancel:** PASS. Edited a queued item (its NEW text dispatched), cancelled
+  another (never dispatched); reorder covered by unit test.
+- **S8 — subagents (Task tool):** PASS (rendering). App renders each subagent as a "Background
+  task completed" card + the final synthesis. ⚠️ Found+fixed a status bug (below).
+- **S9 — background/long bash:** PASS. Renders as a live `Terminal` card (elapsed + spinner →
+  done); status stays "working" through it, then clears.
+- **S10 — concurrency:** PASS. 2 sessions in different cwds, simultaneous sends → zero cross-talk
+  (each transcript has only its own msg+reply). 2nd session cold-booted and bootstrapped its first
+  message through the queue (the starting-drain).
+
+### Bug found + FIXED (committed eb936bb0): status stuck "working" after subagents/bg
+`paneShowsWorking` matched the `· N shells · ↓ to manage` footer ANYWHERE in the pane; after a
+subagent/bg run that footer lingers in SCROLLBACK above the idle box → stuck "working". Fix: scope
+the scan to the LIVE footer (below the input box). See §9 / the commit.
+
+### Bug found, NOT fixed (belongs in the in-progress slash-commands/machine work): S3 machine name
+The session list shows the machine as its raw UUID (`a561aa62-…`) instead of `faraz.vip`.
+- The app is NOT at fault: SessionsList.tsx:288 and JoyMachineView.tsx:66 already use
+  `metadata.displayName || metadata.host || id` (in origin/main).
+- Root cause: joy-tmux never sends `host`. `getOrCreateMachine(...)` (the only call that upserts the
+  machine row's metadata, incl. `host`) is invoked from EXACTLY one place — `commands.ts:181`
+  (`pushMachineIfChanged`) — and that method early-returns when the slash-command union is empty
+  (`union().join("\n") === #lastPushed`, both `""`). A machine with no project/personal/plugin
+  commands (the common case) therefore never upserts `host`, so the app has no name to show.
+- Recommended fix (in the machine work, not done here): upsert the base machine metadata (with
+  `host`) UNCONDITIONALLY on relay-connect/startup, independent of the slash-commands push — e.g. a
+  one-time `relayClient.getOrCreateMachine(baseMachineMetadata)` on connect, or don't skip the first
+  push in `pushMachineIfChanged` even when the union is empty.
+
+### Still deferred
+- **S11 (reconnect / "doesn't show until you leave & return"):** app sync-layer (forward-sync
+  cursor / `flushOutbox`), not the daemon dispatch path. Needs a sync-layer unit test + the new app
+  build to verify; out of scope for this daemon-focused pass.
