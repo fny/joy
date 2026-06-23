@@ -1802,10 +1802,23 @@ export function paneShowsClaudeRunning(text: string): boolean {
  */
 export function paneShowsWorking(text: string): boolean {
   if (paneShowsGenerating(text)) return true;
-  const footer = text.split("\n")
+  // Only the LIVE footer counts. Old "· N shells · ↓ to manage" / completed-agent
+  // footers linger in SCROLLBACK above the input box after a turn ends; matching
+  // them anywhere reads as work-forever (stuck "thinking" — observed right after a
+  // subagent/background run). The live footer sits BELOW the live input box, so
+  // scope the scan to the lines after it (fall back to the last few lines if no
+  // box is on screen, e.g. a dialog).
+  const lines = text.split("\n");
+  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  let boxLine = -1;
+  for (let i = 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith("❯") && !/^❯\s*\d+\./.test(t) && isRule(lines[i - 1])) boxLine = i;
+  }
+  const region = (boxLine >= 0 ? lines.slice(boxLine + 1) : lines.slice(-4))
     .filter((l) => /⏵⏵|⏸|↓\s*to manage|for agents/i.test(l))
     .join("\n");
-  return /·\s*\d+\s+shells?\b/i.test(footer) || /↓\s*to manage/i.test(footer);
+  return /·\s*\d+\s+shells?\b/i.test(region) || /↓\s*to manage/i.test(region);
 }
 
 /**

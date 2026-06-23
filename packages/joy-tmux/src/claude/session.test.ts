@@ -164,6 +164,36 @@ test("not working: stale '· N shell still running' in scrollback (regression)",
   expect(paneShowsWorking(pane)).toBe(false);
 });
 
+test("not working: completed-agent '↓ to manage' footer lingering in SCROLLBACK (regression)", () => {
+  // After a subagent/Task run finishes, the live footer goes idle (← for agents)
+  // but the old "↓ to manage" agent footer scrolls into history ABOVE the input
+  // box. Matching it anywhere left the session stuck "thinking"; scoping to the
+  // live footer (below the box) fixes it. (Observed live in S8.)
+  const pane = [
+    "✻ Waiting for 1 background agent to finish · ↓ to manage", // scrollback (old footer)
+    "● Agent \"Count files in cwd\" came to rest · 14s",
+    "● SUBAGENTS file_count=1 SUBDONE",
+    "────────",
+    "❯ ",                                                         // live idle box (rule above)
+    "────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+  ].join("\n");
+  expect(paneShowsWorking(pane)).toBe(false);
+});
+
+test("working: live background footer BELOW the idle box still counts", () => {
+  // Genuine background work after a turn ends: the LIVE footer (below the box)
+  // shows the shells/manage markers → still working.
+  const pane = [
+    "● finished the foreground reply",
+    "────────",
+    "❯ ",
+    "────────",
+    "  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage",
+  ].join("\n");
+  expect(paneShowsWorking(pane)).toBe(true);
+});
+
 test("working: background tasks detected mode-agnostically (plan / default)", () => {
   // Plan mode uses ⏸ instead of ⏵⏵ — the footer must still be recognised.
   expect(paneShowsWorking("❯\n────\n  ⏸ plan mode on (shift+tab to cycle) · 1 shell · ↓ to manage")).toBe(true);
