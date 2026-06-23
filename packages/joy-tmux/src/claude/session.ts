@@ -47,6 +47,16 @@ export type SessionStatus = "starting" | "active" | "ended";
 const STARTUP_POLL_MS = 700;
 const STARTUP_DEADLINE_ATTEMPTS = 30; // ~21s — long enough for cold start / --resume
 
+// Delay between typing a message and the Enter that submits it. send-keys -l
+// types the whole message as one fast burst, which claude's TUI treats as a
+// PASTE; an Enter that lands inside claude's paste-detection window is absorbed
+// as a literal newline instead of submitting, leaving the message stuck unsent
+// in the box (the "typed but not submitted" bug). This delay lets paste-detection
+// settle so Enter submits cleanly. (verified live: back-to-back does NOT submit a
+// long message; +~350ms does.) A genuine non-submit is caught by the dispatch
+// timeout (requeue + pause), not a blind re-Enter.
+const ENTER_SUBMIT_DELAY_MS = 350;
+
 // 500-error auto-retry backoff (seconds): paired ramp, then STOP. 14 attempts,
 // ~63 min total. When a turn ENDS with an unresolved 5xx (Claude gave up after
 // its own internal retries), joy-tmux re-sends the failed turn on this schedule
@@ -142,18 +152,39 @@ interface BufferedMessage extends SendOptions {
   text: string;
 }
 
+/** Slim wire shape pushed to the app (joy__queue) and returned by queue ops. */
 export interface QueuedMessage {
   id: string;
   text: string;
   createdAt: number;
 }
 
+/** Why auto-drain is currently halted — surfaced to the app for a precise banner. */
+export type QueuePauseReason = "input_dirty" | "dispatch_timeout" | "dispatch_mismatch" | "dispatch_failed";
+
+/**
+ * Internal queue item. Carries the dispatch options so EVERY app→Claude path
+ * (relay app-send, HTTP/RPC /send, explicit queue-add, 5xx auto-retry) funnels
+ * through the one verified dispatch queue with its original semantics intact.
+ * `visible` controls whether it shows as an editable chip in joy__queue:
+ * relay/`/send`/retry items already have (or will get) a chat bubble, so they
+ * stay hidden — only an explicit queue-add is a visible, editable chip.
+ */
+export interface QueuedItem extends QueuedMessage {
+  source: DeliverySource;
+  mirrorToRelay: boolean;
+  seq?: number;
+  visible: boolean;
+}
+
 export interface QueueState {
   queue: QueuedMessage[];
-  /** Text of the message dispatched but not yet confirmed, or null. */
+  /** Text of the (visible) message dispatched but not yet confirmed, or null. */
   inFlight: string | null;
-  /** True when auto-drain is halted after a failed dispatch. */
+  /** True when auto-drain is halted after a failed dispatch / dirty input. */
   paused: boolean;
+  /** When paused, why — lets the app distinguish "junk in the box" from a timeout. */
+  pauseReason?: QueuePauseReason;
 }
 
 export interface SessionInit {
@@ -244,20 +275,32 @@ export class Session {
   #trustHandled = false;
 
   // ── Message queue ──────────────────────────────────────────────────────────
-  // Messages the user lined up while Claude was busy. They stay editable here
-  // until the daemon DISPATCHES one (types it into the pane), at which point it
-  // leaves the queue and becomes a normal turn. So the queue never contains the
+  // The ONE verified dispatch queue. EVERY app→Claude text — relay app-send,
+  // HTTP/RPC /send, explicit queue-add, 5xx auto-retry — funnels through here so
+  // nothing types into the pane until Claude is genuinely idle AND the input box
+  // is empty. Visible (user-queued) items stay editable until dispatched; hidden
+  // (relay/send/retry) items just serialize. The queue never contains the
   // in-flight message — edit/cancel/reorder are plain array ops.
-  #queue: QueuedMessage[] = [];
+  #queue: QueuedItem[] = [];
   // The message typed-but-not-yet-confirmed. Treated as busy: nothing else
   // dispatches until Claude starts a turn in response (echo confirmation) or we
-  // time out. Confirmed when the next turn-start fires; failed on timeout.
-  #dispatchInFlight: { id: string; text: string; at: number } | null = null;
+  // time out. Confirmed when the next turn-start fires; failed on timeout. Holds
+  // the whole item so a timeout re-queues it with its original seq/source/opts.
+  #dispatchInFlight: QueuedItem | null = null;
   #dispatchTimer: ReturnType<typeof setTimeout> | null = null;
   #drainRetry: ReturnType<typeof setTimeout> | null = null;
-  // Set when a dispatch failed to land (no turn started) — stops auto-draining
-  // so we don't shovel messages into a wedged/odd state. Cleared by resume.
+  // The pending delayed-Enter (submit) for a just-typed message. Cancellable so an
+  // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
+  // into the pane (re-submitting an aborted message, or submitting into a turn).
+  #submitTimer: ReturnType<typeof setTimeout> | null = null;
+  // Count of consecutive clear-the-input attempts for the current drain. Escalates
+  // C-u → C-c across ticks, then pauses. Reset once the box is empty / on dispatch.
+  #clearAttempts = 0;
+  // Set when a dispatch failed to land (no turn started) or the input box is
+  // dirty and unclearable — stops auto-draining so we don't shovel messages into
+  // a wedged/odd state. Cleared by resume. #pauseReason says why (for the app).
   #queuePaused = false;
+  #pauseReason: QueuePauseReason | undefined;
 
   constructor(init: SessionInit, deps: SessionDeps) {
     this.id = init.id;
@@ -467,6 +510,7 @@ export class Session {
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
+    this.#clearSubmitTimer();
     this.#queue = [];
     this.#dispatchInFlight = null;
 
@@ -544,38 +588,57 @@ export class Session {
   // ── Op verbs ────────────────────────────────────────────────────────────────
 
   /**
-   * The ONE send path. Buffers while Claude is still booting (status
-   * 'starting') — send-keys during that window would land in bash or a
-   * trust-prompt dialog and be lost/misinterpreted. Buffered messages flush
-   * when Claude's ready prompt appears in the pane (see #pollPromptReady) or
-   * when the first transcript entry lands, whichever comes first.
+   * Compatibility shim. The ONE send path is now the verified dispatch queue
+   * (#maybeDrainQueue): it serializes every app→Claude message behind any
+   * in-flight turn and only types into an empty, ready box — so no caller can
+   * inject straight into the pane and race a busy turn or stuck text (the
+   * lost/merged-send bugs). This delegates to enqueue() with visible:false (a
+   * direct sendText caller isn't an explicit, editable queue chip). It also
+   * subsumes the old 'starting' buffering: the queue drains from 'starting' once
+   * the pane shows an empty ready box (bootstrapping the first transcript).
    */
   sendText(text: string, opts: SendOptions): { buffered: boolean } {
-    if (this.status === "starting") {
-      this.#prelaunchBuffer.push({ text, ...opts });
-      this.#pollPromptReady();
-      return { buffered: true };
-    }
-    this.#typeIntoTmux(text, opts);
+    this.enqueue(text, { seq: opts.seq, source: opts.source, mirrorToRelay: opts.mirrorToRelay, visible: false });
     return { buffered: false };
   }
 
   // ── Message queue API ───────────────────────────────────────────────────────
 
   queueState(): QueueState {
+    // Only VISIBLE items are user-facing chips. Hidden (relay/send/retry) items
+    // already have a chat bubble, so showing them as editable chips would be a
+    // duplicate with false edit/cancel semantics — they serialize silently.
+    const visible = this.#queue.filter(q => q.visible);
+    const inFlight = this.#dispatchInFlight?.visible ? this.#dispatchInFlight.text : null;
     return {
-      queue: this.#queue.map(q => ({ ...q })),
-      inFlight: this.#dispatchInFlight?.text ?? null,
+      queue: visible.map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt })),
+      inFlight,
       paused: this.#queuePaused,
+      pauseReason: this.#queuePaused ? this.#pauseReason : undefined,
     };
   }
 
-  enqueue(text: string): QueuedMessage {
-    const msg: QueuedMessage = { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
-    this.#queue.push(msg);
+  /**
+   * Add a message to the verified dispatch queue. opts default to an explicit,
+   * visible queue-add (mirrored to the relay so it shows in chat). The other
+   * callers override: relay app-sends pass {source:"relay",mirrorToRelay:false,
+   * seq,visible:false} (the app already has the bubble); /send passes
+   * {mirrorToRelay:true,visible:false}; 5xx retry passes {visible:false}.
+   */
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
+    const item: QueuedItem = {
+      id: crypto.randomUUID().slice(0, 8),
+      text,
+      createdAt: Date.now(),
+      source: opts?.source ?? "rpc",
+      mirrorToRelay: opts?.mirrorToRelay ?? true,
+      seq: opts?.seq,
+      visible: opts?.visible ?? true,
+    };
+    this.#queue.push(item);
     this.#broadcastQueue();
     this.#maybeDrainQueue(); // drains immediately if Claude is idle
-    return msg;
+    return { id: item.id, text: item.text, createdAt: item.createdAt };
   }
 
   editQueued(id: string, text: string): boolean {
@@ -605,11 +668,21 @@ export class Session {
     return true;
   }
 
-  /** Re-enable auto-drain after a paused (failed) dispatch. */
+  /** Re-enable auto-drain after a paused (failed/dirty) dispatch. */
   resumeQueue(): void {
     this.#queuePaused = false;
+    this.#pauseReason = undefined;
+    this.#clearAttempts = 0;
     this.#broadcastQueue();
     this.#maybeDrainQueue();
+  }
+
+  /** Halt auto-drain and record why, so the app can show a precise banner. */
+  #pauseDispatch(reason: QueuePauseReason): void {
+    this.#queuePaused = true;
+    this.#pauseReason = reason;
+    this.#clearAttempts = 0;
+    this.#broadcastQueue();
   }
 
   clearQueue(): void {
@@ -624,40 +697,101 @@ export class Session {
     void this.#relay?.updateQueue(state);
   }
 
+  // Input-clearing escalation: a few C-u (kill-line) attempts, then ONE C-c
+  // (which clears a multi-line box C-u won't), then pause. C-c is sent at most
+  // once and ONLY while the box is confirmed non-empty, so it can never land on
+  // an empty box (where it would arm claude's "press again to exit").
+  static readonly #CLEAR_CTRL_C_AT = 5;
+  static readonly #CLEAR_MAX_ATTEMPTS = 5;
+
   /**
-   * Dispatch the head of the queue IF Claude is genuinely idle. The decision
-   * does NOT trust the GUI alone — it gates on the authoritative transcript
-   * turn state (#turn) and the in-flight echo confirmation, then confirms the
-   * pane is at the ready prompt (not a dialog/spinner) before typing.
+   * Dispatch the head of the queue IF Claude is genuinely idle AND the input box
+   * is empty. The decision does NOT trust the GUI alone — it gates on the
+   * authoritative transcript turn state (#turn) and the in-flight echo
+   * confirmation, confirms the pane shows the ready prompt (not a dialog/spinner),
+   * and REQUIRES an empty input box. A non-empty box (stuck text from a failed
+   * dispatch, or something typed directly in the pane) is cleared first — else
+   * the next message would be typed on top and the two would concatenate into one
+   * garbled turn. Runs while "starting" too (gated on the empty ready box) so a
+   * fresh session's first message bootstraps the transcript instead of
+   * deadlocking. Stays fully synchronous + tick-driven via #drainRetry — no async
+   * window for a parallel dispatch to slip through.
    */
   #maybeDrainQueue(): void {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
-    if (this.status !== "active") return;
+    if (this.status === "ended") return;
     if (this.#queuePaused) return;
     if (this.#dispatchInFlight) return; // one dispatch awaiting echo confirmation
     if (this.#turn) return;             // a turn is open → Claude is busy (authoritative)
     if (this.#queue.length === 0) return;
 
-    // Idle per the transcript — now confirm the pane actually shows the ready
-    // input prompt. At the instant a turn ends the prompt may not have
-    // repainted yet, so recheck shortly rather than dispatching blind.
+    // Idle per the transcript — now confirm against the pane. Two pane checks:
+    //   1. NOT generating: claude shows "esc to interrupt" while a turn is in
+    //      flight. #turn (above) is the transcript signal but LAGS — it isn't set
+    //      until the first assistant entry, so between "claude starts thinking" and
+    //      that entry the pane reads ready+empty while claude is actually busy.
+    //      Dispatching then types into a live turn and relies on claude's OWN input
+    //      queue (double-queuing → the exact messiness we're killing). The pane's
+    //      "esc to interrupt" is the real-time truth, so gate on it too.
+    //   2. AT the ready input prompt (not a dialog/spinner). At the instant a turn
+    //      ends the prompt may not have repainted, so recheck shortly, not blind.
+    // (Background shells alone do NOT block — claude is idle at the prompt and can
+    // take a new message — so we check "esc to interrupt", not paneShowsWorking.)
     const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
-    if (!pane.ok || !paneShowsReadyPrompt(pane.out)) {
+    if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
+      this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
       this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 500);
       return;
     }
 
+    // REQUIRE an empty box. If there's stuck text, clear it (escalating C-u →
+    // C-c) and re-check next tick. After the budget, pause as input_dirty rather
+    // than typing on top of it.
+    const inputText = paneInputText(pane.out);
+    if (inputText !== "" && inputText !== null) {
+      this.#clearAttempts += 1;
+      if (this.#clearAttempts > Session.#CLEAR_MAX_ATTEMPTS) {
+        process.stderr.write(`[queue] input box dirty + unclearable for ${this.id} — paused\n`);
+        this.#pauseDispatch("input_dirty");
+        return;
+      }
+      if (this.#clearAttempts >= Session.#CLEAR_CTRL_C_AT) {
+        // The ONE C-c attempt. Belt-and-suspenders: re-capture immediately before
+        // sending it and bail unless the box is STILL non-empty AND we're still
+        // idle (a human or Claude may have cleared it / started a turn since the
+        // top-of-fn capture). C-c on an empty box arms claude's "press again to
+        // exit", so this guarantees it only ever lands on real stuck text.
+        const fresh = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+        const freshText = fresh.ok ? paneInputText(fresh.out) : null;
+        if (!fresh.ok || this.#turn || this.#dispatchInFlight ||
+            paneShowsGenerating(fresh.out) || !paneShowsReadyPrompt(fresh.out) ||
+            freshText === "" || freshText === null) {
+          this.#clearAttempts = 0; // conditions changed — re-evaluate from scratch
+          this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 200);
+          return;
+        }
+        run("tmux", "send-keys", "-t", this.tmuxWindow, "C-c");
+      } else {
+        run("tmux", "send-keys", "-t", this.tmuxWindow, "C-u");
+      }
+      this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 200);
+      return;
+    }
+    this.#clearAttempts = 0;
+
     const next = this.#queue.shift()!;
-    this.#dispatchInFlight = { id: next.id, text: next.text, at: Date.now() };
+    this.#dispatchInFlight = next; // whole item — timeout re-queues it intact
     this.#broadcastQueue();
     try {
-      this.sendText(next.text, { source: "rpc", mirrorToRelay: true });
+      // Type DIRECTLY (not via sendText) — the queue has already proven the pane
+      // is ready + empty, and a "starting" session must type now to bootstrap its
+      // transcript instead of being re-buffered by sendText's starting guard.
+      this.#typeIntoTmux(next.text, { seq: next.seq, source: next.source, mirrorToRelay: next.mirrorToRelay });
     } catch (e) {
       // Send failed outright — put it back at the head and pause.
       this.#queue.unshift(next);
       this.#dispatchInFlight = null;
-      this.#queuePaused = true;
-      this.#broadcastQueue();
+      this.#pauseDispatch("dispatch_failed");
       process.stderr.write(`[queue] dispatch send failed for ${this.id}: ${e}\n`);
       return;
     }
@@ -671,6 +805,7 @@ export class Session {
     if (!this.#dispatchInFlight) return;
     this.#dispatchInFlight = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    this.#clearSubmitTimer(); // the turn already started → the submit Enter is done/moot
     this.#broadcastQueue();
   }
 
@@ -679,12 +814,15 @@ export class Session {
     const inflight = this.#dispatchInFlight;
     if (!inflight) return;
     // No turn started in time → the message didn't land (a dialog ate it, or
-    // Claude wasn't actually ready). Re-queue at the head and pause so we don't
-    // pile more into a bad state; the user resumes once it's sorted.
+    // Claude wasn't actually ready). Re-queue the WHOLE item at the head (so its
+    // seq/source/mirror/visible survive) and pause so we don't pile more into a
+    // bad state; resume re-clears the box and re-types it. Drop the stale pending
+    // entry first so the re-type doesn't double it / suppress it as a self-echo.
     this.#dispatchInFlight = null;
-    this.#queue.unshift({ id: inflight.id, text: inflight.text, createdAt: Date.now() });
-    this.#queuePaused = true;
-    this.#broadcastQueue();
+    this.#clearSubmitTimer();
+    this.#neutralizePending(inflight.text);
+    this.#queue.unshift(inflight);
+    this.#pauseDispatch("dispatch_timeout");
     process.stderr.write(`[queue] dispatch for ${this.id} never echoed — paused\n`);
   }
 
@@ -739,6 +877,9 @@ export class Session {
       this.#clearRetry();
     }
     this.#turn5xxStatus = null;
+    // Cancel a just-typed message's pending submit Enter — abort means "stop", so
+    // it must NOT fire after the Escape (which would re-submit into the cleared box).
+    this.#clearSubmitTimer();
     run("tmux", "send-keys", "-t", this.tmuxWindow, "Escape");
     this.#setThinking(false);
     // Interrupting mid-tool means Claude won't write that tool's result — close
@@ -851,9 +992,14 @@ export class Session {
         augmented = text + " " + paths.join(" ");
       }
     }
-    // mirrorToRelay: false — the message came FROM the relay; the app already
-    // has it in the chat history.
-    this.sendText(augmented, { seq, source: "relay", mirrorToRelay: false });
+    // Route through the verified dispatch queue (NOT sendText directly): the app
+    // send is serialized behind any in-flight turn and only typed into an empty,
+    // ready box — never on top of a busy turn or stuck text (the lost/merged-send
+    // bugs). visible:false — the app already has this message in its chat history,
+    // so it must not also appear as an editable queue chip. mirrorToRelay:false —
+    // it came FROM the relay. seq is carried so receipt-matching still pairs the
+    // transcript echo with this send.
+    this.enqueue(augmented, { seq, source: "relay", mirrorToRelay: false, visible: false });
   }
 
   /**
@@ -913,7 +1059,9 @@ export class Session {
     // Re-send via the queue so it waits for the ready prompt, types, and a fresh
     // turn confirms it landed. If that turn 5xx-fails again, #turn5xxStatus is
     // re-armed and the turn-end handler calls #scheduleRetry for the next step.
-    this.enqueue(text);
+    // mirrorToRelay so the re-sent prompt shows in chat (its bubble was the prior
+    // turn's); visible:false — it's a system re-send, not an editable queue chip.
+    this.enqueue(text, { source: "rpc", mirrorToRelay: true, visible: false });
   }
 
   /** Tear down any pending retry (timer + banner). */
@@ -927,6 +1075,22 @@ export class Session {
     if (!this.relaySessionId) return null;
     if (!this.#delivery) this.#delivery = initDeliveryState(this.relaySessionId);
     return this.#delivery;
+  }
+
+  /**
+   * Drop the pending-match entry + persisted `received` backstop for `text`.
+   * Called when a dispatch times out (re-queued for re-type) or mismatches — its
+   * #typeIntoTmux already recorded a pending+received twin keyed on the typed
+   * (newline-collapsed) form, and leaving that behind would (a) double up on
+   * re-dispatch and (b) wrongly suppress a later identical prompt as a self-echo.
+   */
+  #neutralizePending(text: string): void {
+    const delivery = this.#delivery;
+    if (!delivery || !this.relaySessionId) return;
+    const typed = text.replace(/\n/g, " ");
+    const i = delivery.pending.findIndex(p => p.text === typed);
+    if (i >= 0) delivery.pending.splice(i, 1);
+    consumeReceived(delivery, this.relaySessionId, typed, Date.now());
   }
 
   /** Type a message into the pane + record receipt + bump thinking. */
@@ -952,26 +1116,61 @@ export class Session {
       // restart.
       recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
-    // Clear the input box first, so a half-entered answer typed directly in the
-    // pane isn't appended to our message and submitted as one garbled line (e.g.
-    // "git com" + "run the tests"). Ctrl+U (kill-line) is a no-op on an empty
-    // box — verified — unlike Ctrl+C, which arms Claude's "press again to exit"
-    // on an empty box. Clearing also keeps the transcript echo equal to `typed`
-    // so dedup still matches.
+    // Belt-and-suspenders clear (the queue's empty-input gate already guarantees
+    // the box is empty before dispatch): Ctrl+U kills any half-entered answer so
+    // it can't be appended to our message and submitted as one garbled line.
+    // Ctrl+U is a no-op on an empty box — unlike Ctrl+C, which arms Claude's
+    // "press again to exit". Keeping the echo equal to `typed` so dedup matches.
     run("tmux", "send-keys", "-t", this.tmuxWindow, "C-u");
     const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", typed);
     if (!r.ok) {
       if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
     }
-    run("tmux", "send-keys", "-t", this.tmuxWindow, "Enter");
-    if (opts.mirrorToRelay) {
-      this.#relay?.send(encodeUserMessage(text));
-    }
-    this.#setThinking(true);
+    // Submit on a delay — NOT back-to-back. The fast send-keys -l burst reads as a
+    // paste to claude; an immediate Enter is swallowed as a newline and the message
+    // sits unsent (the core "typed but not submitted" bug). See ENTER_SUBMIT_DELAY_MS.
+    // mirrorToRelay + thinking are deferred into the submit callback so the app's
+    // chat doesn't show "sent" before the pane has actually submitted.
+    this.#armSubmit({ text, mirrorToRelay: opts.mirrorToRelay });
     if (!this.#tailer && this.status !== "ended") this.pollForTranscript();
   }
 
+  /** Cancel a pending delayed-Enter (abort/kill/confirm/timeout/mismatch). */
+  #clearSubmitTimer(): void {
+    if (this.#submitTimer) { clearTimeout(this.#submitTimer); this.#submitTimer = null; }
+  }
+
+  /**
+   * Submit a just-typed message: send Enter after a settle delay so claude's
+   * paste-detection doesn't swallow it (see ENTER_SUBMIT_DELAY_MS), then — only
+   * once the Enter has actually gone out — mirror it to the relay and flip
+   * thinking, so the app never shows "sent" before the pane submitted. The timer
+   * is cancellable (#clearSubmitTimer) and the callback is strictly guarded: the
+   * session must still be live, the SAME dispatch must still be in flight (so an
+   * abort+new-dispatch can't fire a stale Enter), and no turn may already be open.
+   * No automatic re-Enter: a genuine non-submit is caught by the dispatch timeout
+   * (paused + surfaced), which is safer than blindly re-pressing Enter.
+   */
+  #armSubmit(opts: { text: string; mirrorToRelay: boolean }): void {
+    this.#clearSubmitTimer();
+    const target = this.#dispatchInFlight; // the dispatch this Enter belongs to (may be null)
+    this.#submitTimer = setTimeout(() => {
+      this.#submitTimer = null;
+      if (this.status === "ended") return;
+      if (this.#turn) return;                                    // a turn is already in flight
+      if (!target || this.#dispatchInFlight !== target) return;  // require the same dispatch still in flight
+      run("tmux", "send-keys", "-t", this.tmuxWindow, "Enter");
+      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
+      this.#setThinking(true);
+    }, ENTER_SUBMIT_DELAY_MS);
+  }
+
+  // VESTIGIAL: since sendText() now delegates to the verified dispatch queue (which
+  // drains from 'starting' once the pane shows an empty ready box), nothing fills
+  // #prelaunchBuffer anymore, so this is a no-op kept only as a safety net. Do NOT
+  // route new sends here — use enqueue()/the queue. (Slated for removal once the
+  // queue path has soaked.)
   #flushPrelaunch(): void {
     const buffered = this.#prelaunchBuffer;
     this.#prelaunchBuffer = [];
@@ -985,12 +1184,15 @@ export class Session {
   }
 
   /**
-   * Resolve the chicken-and-egg of a brand-new project directory: the
-   * transcript JSONL only appears after Claude receives its first message,
-   * but buffered messages only flushed on the first transcript entry — so a
-   * fresh session would deadlock in 'starting' forever. Poll the pane for
-   * Claude's ready input prompt and flush the buffer the moment it shows.
-   * Transcript-entry activation remains the authoritative status flip.
+   * VESTIGIAL (see #flushPrelaunch): the verified dispatch queue now owns the
+   * brand-new-project bootstrap — #maybeDrainQueue drains from 'starting' once the
+   * pane shows an empty ready box, which is what types the first message and makes
+   * the transcript appear. Nothing fills #prelaunchBuffer anymore, so this poller
+   * is no longer started. Kept temporarily; do not add new callers.
+   *
+   * (Original purpose: the transcript JSONL only appears after Claude receives its
+   * first message, but buffered messages only flushed on the first transcript
+   * entry — so a fresh session would deadlock in 'starting' forever.)
    */
   #pollPromptReady(): void {
     if (this.#promptPollActive) return;
@@ -1356,6 +1558,38 @@ export class Session {
             recordInboundReceipt(delivery, this.relaySessionId, {
               uuid, text: content, source: "relay", at: Date.now(),
             });
+          } else if (this.#dispatchInFlight || delivery.pending.length > 0) {
+            // A dispatch is in flight / still pending, yet this transcript user
+            // entry matched NONE of them — the pane likely concatenated or
+            // garbled the send (the S5/S8 bug). Do NOT mirror it: re-mirroring an
+            // unmatched echo is exactly the seq-43 duplicate. Mark the uuid
+            // handled, clear the in-flight (so an upcoming turn-start can't
+            // FALSELY confirm a send that didn't land as typed), and pause with a
+            // mismatch reason so the app shows a real banner instead of silently
+            // losing or duplicating the message.
+            recordInboundReceipt(delivery, this.relaySessionId, {
+              uuid, text: content, source: "relay", at: Date.now(),
+            });
+            if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+            this.#clearSubmitTimer(); // don't let a stale Enter submit the garbled text
+            // Clear the stale pending twin(s) so they can't later suppress a real
+            // identical prompt as a phantom self-echo, or keep forcing mismatch
+            // pauses. If a dispatch is still in flight, neutralize its text; if
+            // turn-start already confirmed (cleared) the in-flight item but a
+            // garbled echo still arrived, the leftover pending entries are the
+            // culprit — drop them all (with their persisted received twins).
+            if (this.#dispatchInFlight) {
+              this.#neutralizePending(this.#dispatchInFlight.text);
+            } else {
+              for (const p of [...delivery.pending]) {
+                consumeReceived(delivery, this.relaySessionId, p.text, Date.now());
+              }
+              delivery.pending.length = 0;
+            }
+            this.#dispatchInFlight = null;
+            this.#pauseDispatch("dispatch_mismatch");
+            process.stderr.write(`[dispatch] mismatch for ${this.id}: transcript user entry matched no pending send — paused (not mirrored)\n`);
+            return;
           } else {
             this.#relay!.send(encodeUserMessage(content, entryTimeMs));
             recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "", at: Date.now() });
@@ -1501,6 +1735,41 @@ export function paneShowsReadyPrompt(text: string): boolean {
 }
 
 /**
+ * Extract the text currently sitting in Claude's LIVE input box — the "❯" line
+ * with a horizontal rule directly above it (the same line paneShowsReadyPrompt
+ * keys on). Returns:
+ *   - "" when the box is empty (just the prompt + cursor),
+ *   - the typed text (prompt glyph, cursor's non-breaking-space padding and ANSI
+ *     stripped) when something is in it,
+ *   - null when no live input box is on screen.
+ * Ghost-text placeholders (e.g. `Try "refactor <filepath>"`, shown dimmed when
+ * the box is empty) count as empty — they are not user content. This is the
+ * primitive the dispatch gate uses to refuse typing into a non-empty box (which
+ * is how two messages used to concatenate into one garbled turn).
+ */
+export function paneInputText(text: string): string | null {
+  const lines = text.split("\n");
+  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  for (let i = 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t.startsWith("❯")) continue;
+    if (/^❯\s*\d+\./.test(t)) continue;     // selector option row, not the input
+    if (!isRule(lines[i - 1])) continue;    // not the live box (scrollback echo)
+    // Drop the prompt glyph, any ANSI, and the cursor's nbsp padding, then trim.
+    const after = stripAnsi(t.replace(/^❯/, "")).replace(/\s+/g, " ").trim();
+    if (!after) return "";
+    if (/^Try\s+["“']/.test(after)) return ""; // ghost-text placeholder, not input
+    return after;
+  }
+  return null;
+}
+
+/** True when the live input box is present AND empty — safe to type into. */
+export function paneShowsEmptyReadyPrompt(text: string): boolean {
+  return paneInputText(text) === "";
+}
+
+/**
  * True when the pane shows ANY sign Claude's TUI is up and running — broader
  * than paneShowsReadyPrompt: the ready input box, a selector/trust dialog, the
  * mode footer, or the "esc to interrupt" working line all count. Used by the
@@ -1532,11 +1801,23 @@ export function paneShowsClaudeRunning(text: string): boolean {
  * accepted false-negative (under-report), never a stuck-working false-positive.
  */
 export function paneShowsWorking(text: string): boolean {
-  if (/esc to interrupt/i.test(text)) return true;
+  if (paneShowsGenerating(text)) return true;
   const footer = text.split("\n")
     .filter((l) => /⏵⏵|⏸|↓\s*to manage|for agents/i.test(l))
     .join("\n");
   return /·\s*\d+\s+shells?\b/i.test(footer) || /↓\s*to manage/i.test(footer);
+}
+
+/**
+ * True ONLY when Claude is ACTIVELY generating a turn — it prints "esc to
+ * interrupt" while text/tool output is streaming. Narrower than paneShowsWorking
+ * (which also counts background shells): this is the dispatch gate's real-time
+ * "a turn is in flight" signal, used to avoid typing a queued message into a live
+ * turn before the transcript's #turn flag catches up. A lingering background shell
+ * must NOT count here — Claude is idle at the prompt and can take the next message.
+ */
+export function paneShowsGenerating(text: string): boolean {
+  return /esc to interrupt/i.test(text);
 }
 
 /** Human-readable backoff delay for retry notes: "15s", "2m". Exported for tests. */
