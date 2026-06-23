@@ -620,20 +620,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         if (!liveMessage.trim() && !hasImages) return;
         const attachments = expImageUpload ? selectedImages : undefined;
 
-        // The queue is purely additive: only when Claude is BUSY does a joy
-        // text send line up in the daemon queue (to drain after the turn).
-        // When idle, it takes the original immediate path — instant optimistic
-        // chat message, no extra round-trip — so normal sends feel unchanged.
-        if (isJoyTmux && session.thinking && liveMessage.trim() && !hasImages) {
-            composerHandleRef.current?.clearMessage();
-            void joyQueue.add(liveMessage.trim());
-            return;
-        }
-
+        // joy text sends ALWAYS take the durable relay path (sync.sendMessage).
+        // The daemon now serializes every app→Claude message through its verified
+        // dispatch queue — typing only into an empty, ready box, behind any
+        // in-flight turn — so the app must NOT decide queue-vs-direct from the
+        // stale/volatile session.thinking flag (the old joyQueue.add RPC branch
+        // raced that flag and swallowed failures → lost/merged sends). A message
+        // sent while Claude is busy shows as an optimistic bubble immediately and
+        // the daemon dispatches it in order after the current turn finishes.
         composerHandleRef.current?.clearMessage();
         if (expImageUpload) clearImages();
         sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
-    }, [sessionId, isJoyTmux, session.thinking, joyQueue, expImageUpload, selectedImages, clearImages]);
+    }, [sessionId, expImageUpload, selectedImages, clearImages]);
 
     const handleAbort = React.useCallback(() => {
         storage.getState().resetSessionAgentOverrides(sessionId);

@@ -223,9 +223,13 @@ export const machineOps: MachineOp[] = [
       const source = meta.via === "http" ? "web" as const : "rpc" as const;
       const chat_id = registry.nextChatId();
       registry.addChatMessage({ role: "user", content: trimmed, source, chat_id, session_id: session.claudeSessionId });
-      // mirrorToRelay so the app's chat history shows the message even though
-      // it didn't originate from the relay.
-      session.sendText(trimmed, { source, mirrorToRelay: true });
+      // Route through the verified dispatch queue (not sendText directly) so a
+      // /send while Claude is busy is serialized behind the turn and only typed
+      // into an empty, ready box — same robustness as relay app-sends. visible:
+      // true — unlike a relay app-send, a /send has NO chat bubble until dispatch
+      // mirrors it, so showing it as a queued chip is real "not sent yet" state,
+      // not a duplicate. mirrorToRelay so it reaches the app's history on dispatch.
+      session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true });
       return { ok: true, chat_id };
     },
     httpShape: (result) => {

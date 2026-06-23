@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, parsePermissionModeFromPane, formatRetryDelay } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay } from "./session";
 
 test("ready: bare input prompt", () => {
   expect(paneShowsReadyPrompt("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
@@ -44,6 +44,63 @@ test("not ready: only scrollback echoes, no live box (no border above ❯)", () 
     "❯ hello there",                     // echoed past message, no border → not live
   ].join("\n");
   expect(paneShowsReadyPrompt(pane)).toBe(false);
+});
+
+// ── paneInputText / paneShowsEmptyReadyPrompt (dispatch empty-input gate) ──────
+
+test("input text: empty box (real claude shape: ❯ + nbsp cursor) → ''", () => {
+  // Live-pane empty box: "❯" followed only by whitespace (a space + the cursor's
+  // non-breaking space). Whitespace collapses to nothing → reads as empty.
+  const pane = "────────\n❯  \n────────\n  ⏵⏵ bypass permissions on";
+  expect(paneInputText(pane)).toBe("");
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(true);
+});
+
+test("input text: bare ❯ box → ''", () => {
+  expect(paneInputText("────\n❯\n────")).toBe("");
+  expect(paneShowsEmptyReadyPrompt("────\n❯\n────")).toBe(true);
+});
+
+test("input text: stuck text in the box is returned (concat-bug trigger)", () => {
+  // The S5 repro: a long message typed-but-not-submitted sits in the box. The
+  // gate must see it as NON-empty so it never types a second message on top.
+  const pane = [
+    "✻ Brewed for 43s",
+    "────────",
+    "❯ ABORTTEST: Write a detailed 8-paragraph essay",
+    "────────",
+    "  ⏵⏵ bypass permissions on · ← for agents",
+  ].join("\n");
+  expect(paneInputText(pane)).toBe("ABORTTEST: Write a detailed 8-paragraph essay");
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(false);
+});
+
+test("input text: ghost-text placeholder counts as empty", () => {
+  const pane = '────\n❯ Try "refactor <filepath>"\n────';
+  expect(paneInputText(pane)).toBe("");
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(true);
+});
+
+test("generating: esc-to-interrupt true; idle prompt + bg shells false (dispatch gate)", () => {
+  // The dispatch gate must hold while a turn streams, even before #turn is set...
+  expect(paneShowsGenerating("✻ Ruminating… (esc to interrupt)")).toBe(true);
+  expect(paneShowsGenerating("────\n❯ \n────\n  ⏵⏵ bypass · esc to interrupt")).toBe(true);
+  // ...but an idle prompt is dispatchable, and a lingering BACKGROUND shell must
+  // NOT block dispatch (Claude is idle at the prompt, can take the next message).
+  expect(paneShowsGenerating("────\n❯ \n────\n  ⏵⏵ bypass permissions on · ← for agents")).toBe(false);
+  expect(paneShowsGenerating("────\n❯ \n────\n  ⏵⏵ bypass · 1 shell · ↓ to manage")).toBe(false);
+});
+
+test("input text: no live box → null (and not 'empty')", () => {
+  const pane = ["● Hi! What can I help with?", "", "❯ hello there"].join("\n");
+  expect(paneInputText(pane)).toBe(null);
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(false); // null !== "" → not safe to type
+});
+
+test("input text: selector option row is not the input box", () => {
+  const pane = ["Is this a project you trust?", "────", "❯ 1. Yes", "   2. No"].join("\n");
+  // The "❯ 1." line is a selector option, skipped; no real input box → null.
+  expect(paneInputText(pane)).toBe(null);
 });
 
 test("claude running: ready input prompt", () => {
@@ -175,9 +232,12 @@ test("agent event falls back to a fresh timestamp when time omitted", () => {
 import { Session } from "./session";
 
 function qSession() {
-  // status 'starting' so enqueue's drain check short-circuits before any tmux call.
+  // status 'ended' so #maybeDrainQueue short-circuits before any tmux call —
+  // these tests exercise only the queue array ops (enqueue/list/edit/cancel/
+  // reorder/resume/clear), not dispatch. ('starting' now drains too, gated on the
+  // empty ready box, so it would attempt a tmux capture here.)
   return new Session(
-    { id: "q1", tmuxWindow: "joy:dd-q1", cwd: "/tmp/q", flags: [], status: "starting", startedAt: 0 },
+    { id: "q1", tmuxWindow: "joy:dd-q1", cwd: "/tmp/q", flags: [], status: "ended", startedAt: 0 },
     { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
   );
 }
@@ -198,6 +258,19 @@ test("queue: enqueue / list / edit / cancel", () => {
   expect(s.queueState().queue.map(q => q.text)).toEqual(["second"]);
   expect(s.cancelQueued(a.id)).toBe(false); // already gone
   void b;
+});
+
+test("queue: hidden (relay/send/retry) items don't surface as editable chips", () => {
+  const s = qSession();
+  s.enqueue("visible one");                                                  // default visible:true
+  s.enqueue("hidden relay msg", { visible: false, source: "relay", mirrorToRelay: false, seq: 7 });
+  s.enqueue("visible two");
+  // Only visible items appear in the wire queue state — a relay app-send already
+  // has its own chat bubble, so showing it as an editable chip would be a dup.
+  expect(s.queueState().queue.map(q => q.text)).toEqual(["visible one", "visible two"]);
+  // enqueue still returns the slim wire shape for every item.
+  const r = s.enqueue("another", { visible: false });
+  expect(Object.keys(r).sort()).toEqual(["createdAt", "id", "text"]);
 });
 
 test("queue: reorder clamps and moves", () => {

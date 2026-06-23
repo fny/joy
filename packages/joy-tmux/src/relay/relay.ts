@@ -931,12 +931,19 @@ export class RelaySession {
           if (meta?.sentFrom === 'joy') continue;
           const c = dec['content'] as { type?: string; text?: string } | undefined;
           if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
-            // Await delivery (tmux injection + any attachment download) before the
-            // loop falls through to savePersistedSeq below — so we only persist
-            // lastSeq AFTER the message is delivered (a crash mid-batch re-pulls
-            // it) and messages inject in seq order (an earlier message awaiting an
-            // attachment can't be overtaken by a later text-only one). A failed
-            // injection is logged, not retried, to avoid a poison-pill pull loop.
+            // onMessage now hands the text to the session's in-memory verified
+            // dispatch queue (it no longer types straight into tmux); the queue
+            // does the actual ready+empty-box gated typing afterward. We still
+            // AWAIT it so messages enter the queue in strict seq order (an earlier
+            // one awaiting an attachment can't be overtaken by a later text-only
+            // one). NOTE: lastSeq is advanced earlier, right after decrypt (see
+            // above) — i.e. before this delivery is even attempted — so the
+            // persisted cursor means "read + decrypted + handed off attempted",
+            // NOT "delivered to Claude". Caveat (B1): a crash between that advance
+            // and the enqueue (or items still queued-but-untyped) loses those
+            // messages; a durable replay (B2) that re-pulls from a confirmed-seq
+            // watermark and skips already-delivered ones is a separate project. A
+            // failed hand-off is logged, not retried, to avoid a poison-pill loop.
             try {
               await this.onMessage(c.text.trim(), msg.seq);
             } catch (e) {

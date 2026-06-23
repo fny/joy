@@ -20,6 +20,15 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
     const hasItems = queue.queue.length > 0 || queue.paused;
     if (!hasItems) return null;
 
+    // Reason-specific paused banner — distinguishes "the pane input has stray
+    // text blocking dispatch" from a plain failed/timed-out send.
+    const pausedMessage =
+        queue.pauseReason === 'input_dirty'
+            ? 'The session’s input box has stray text — tap to clear and resume'
+            : queue.pauseReason === 'dispatch_mismatch'
+                ? 'A send may not have gone through cleanly — tap to resume'
+                : 'A queued message didn’t send — tap to resume';
+
     const editItem = async (id: string, current: string) => {
         const next = await Modal.prompt('Edit queued message', '', { defaultValue: current });
         if (next != null && next.trim() && next.trim() !== current) queue.edit(id, next.trim());
@@ -38,8 +47,8 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
             {queue.paused && (
                 <Pressable style={styles.pausedRow} onPress={() => queue.resume()}>
                     <Ionicons name="warning-outline" size={15} color="#FF9500" />
-                    <Text style={styles.pausedText} numberOfLines={1}>
-                        A queued message didn’t send — tap to resume
+                    <Text style={styles.pausedText} numberOfLines={2}>
+                        {pausedMessage}
                     </Text>
                 </Pressable>
             )}

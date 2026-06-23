@@ -6,7 +6,8 @@ import { apiSocket } from '@/sync/apiSocket';
 // (see Session #maybeDrainQueue). `inFlight` is the message typed but not yet
 // confirmed; `paused` means a dispatch failed and auto-drain is halted.
 export interface QueuedMessage { id: string; text: string; createdAt: number; }
-export interface JoyQueueState { queue: QueuedMessage[]; inFlight: string | null; paused: boolean; }
+export type QueuePauseReason = 'input_dirty' | 'dispatch_timeout' | 'dispatch_mismatch' | 'dispatch_failed';
+export interface JoyQueueState { queue: QueuedMessage[]; inFlight: string | null; paused: boolean; pauseReason?: QueuePauseReason; }
 
 const EMPTY: JoyQueueState = { queue: [], inFlight: null, paused: false };
 
