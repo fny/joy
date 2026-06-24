@@ -15,7 +15,18 @@
 //
 // See CONTROL-MODE-MIGRATION.md.
 import { spawn, type ChildProcess } from "child_process";
+import { run } from "./shell";
 import type { TmuxResult } from "./driver";
+
+/**
+ * The `client-attached` hook the daemon installs. It sets `window-size latest` ONLY
+ * for NON-control clients — so a real human `tmux attach` reclaims the size, but the
+ * daemon's persistent CONTROL client attaching does NOT resize the app's manually
+ * sized window. (`#{client_control_mode}` is 1 for a control client → the empty
+ * true-branch runs; a human's is 0 → the resize runs.) Set BEFORE the control client
+ * attaches so its own attach is already filtered.
+ */
+export const CLIENT_ATTACHED_HOOK = 'if -F "#{client_control_mode}" "" "setw window-size latest"';
 
 /** Events the pure line-parser emits. The client correlates block-ends to commands. */
 export type ControlEvent =
@@ -89,6 +100,10 @@ export class TmuxControlClient {
     this.#ready = false;
     this.#parser = new ControlParser();
     this.#buf = "";
+    // Filter the client-attached hook BEFORE we attach, so our own control attach
+    // doesn't resize the window. Harmless if the session doesn't exist yet (the
+    // attach below then fails → reconnect once the registry has created it).
+    run("tmux", "set-hook", "-t", this.#session, "client-attached", CLIENT_ATTACHED_HOOK);
     let proc: ChildProcess;
     try {
       proc = spawn("tmux", ["-C", "attach-session", "-t", this.#session], { stdio: ["pipe", "pipe", "ignore"] });
