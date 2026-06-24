@@ -88,7 +88,11 @@ interleaved, `capture-pane -p` + `send-keys` work over the connection.
     `#inputEpoch` (bumped on each type) abandons a guarded `C-c` if a fresh message
     landed mid-capture, the dispatch-gate guards (`#turn`/`#dispatchInFlight`) are
     re-evaluated post-await, and a stale `abort()` returns before Escape if a genuinely
-    new send appeared during its capture (a fired submit still interrupts).
+    new send appeared during its capture (a fired submit still interrupts). A codex
+    re-review caught the same await-window race on the **drain's empty-box→type gate**
+    (`#drainOnce`): it now snapshots the epoch before its capture and re-drains if it
+    changed, so a `sendRawKeys` intervention typed mid-capture isn't wiped by the
+    racing dispatch's `C-u`.
   - Verified flag-on: window stayed manual-sized; dispatch / send-during-busy /
     abort+clear / status all round-trip over control mode; no client errors. Re-verified
     flag-on after 1d end-to-end (dispatch → reply, abort → clean box, fresh-window

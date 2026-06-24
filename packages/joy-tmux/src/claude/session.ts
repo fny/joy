@@ -802,8 +802,16 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     if (!this.#canDrain()) return;
 
+    const epoch = this.#inputEpoch; // snapshot before the await (see the re-check below)
     const pane = await tmux.captureFresh(this.tmuxWindow);
     if (!this.#canDrain()) return; // re-check after the await
+    // A concurrent type (a sendRawKeys intervention, say) landed while this capture
+    // was in flight → our about-to-be-trusted "empty box" read is stale. Committing a
+    // dispatch now would let #typeIntoTmux's C-u wipe that fresh text. Re-drain so the
+    // next capture sees the real box and routes it through the guarded clear/pause
+    // path — the same await-window race the #inputEpoch guard closes for clears, here
+    // protecting the "empty box, safe to type" gate.
+    if (this.#inputEpoch !== epoch) { this.#clearAttempts = 0; this.#armDrainRetry(200); return; }
     if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
       this.#armDrainRetry(500);
