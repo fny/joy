@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, statSync } from "fs";
 import { join, basename, resolve } from "path";
 import { homedir } from "os";
 import { run } from "../tmux/shell";
+import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
 import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
@@ -266,8 +267,9 @@ export class SessionRegistry {
       // When a real terminal attaches, let it drive the window size (tmux's
       // default `latest` behavior). The app's resize-window flips windows to
       // `manual`; this hook hands control back on attach so the most recent
-      // connector — app or terminal — owns the width.
-      run("tmux", "set-hook", "-t", this.tmuxSession, "client-attached", "setw window-size latest");
+      // connector — app or terminal — owns the width. Filtered so the daemon's own
+      // control-mode client (Phase 1) does NOT count as an attach that resizes.
+      run("tmux", "set-hook", "-t", this.tmuxSession, "client-attached", CLIENT_ATTACHED_HOOK);
     }
 
     // Validate user-supplied fields to prevent shell injection via send-keys
