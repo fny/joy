@@ -1,17 +1,21 @@
-// The ONE seam for all tmux interaction. Session and Registry call these methods
-// instead of run("tmux", …) directly, so the transport can change in one place.
+// The ONE seam for all tmux interaction. Session calls these methods instead of
+// run("tmux", …) directly, so the transport can change in one place. (Registry
+// still calls run() directly — its rare lifecycle ops are Phase 4.)
 //
 // Phase 0 (here): a thin SYNCHRONOUS wrapper over the spawn helper (run) — no
-// behavior change, every tmux call just routed through this object.
+// behavior change, every Session tmux call just routed through this object.
 //
-// Later phases swap the internals for a persistent control-mode client
-// (tmux -CC attach-session): captureCached() reads a %output-invalidated snapshot,
+// Later phases add a persistent control-mode client (tmux -C attach-session) as a
+// private delegate: captureCached() reads a %output-invalidated snapshot,
 // captureFresh() awaits a control command, send/resize become writes — all with
 // this spawn path kept as the reconnect/while-disconnected fallback. Callers never
 // touch run("tmux") or spawn, and never branch on which transport is active.
 //
 // See CONTROL-MODE-MIGRATION.md for the full plan.
 import { run } from "./shell";
+
+/** Shared result shape. `error` carries a %error / disconnect reason (control mode). */
+export interface TmuxResult { ok: boolean; out: string; error?: string }
 
 export class TmuxDriver {
   /** Capture a pane's visible text. color=true keeps ANSI SGR (the app's colour view). */
