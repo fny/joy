@@ -63,21 +63,61 @@ interleaved, `capture-pane -p` + `send-keys` work over the connection.
    critical ops fall back to spawnSync** rather than stall dispatch.
 
 ## Phased rollout (incremental, behind one abstraction)
-- **Phase 0** — Introduce `TmuxDriver` with the **spawn implementation only**. Route
-  `session.ts` (and optionally `registry.ts`) through it. **No behavior change.**
-  Verify: typecheck + 101 tests + daemon still drives the live harness.
-- **Phase 1** — Add the control client behind `JOY_TMUX_CONTROL=1`. Update the
-  sizing hook to ignore control clients. Migrate capture-pane reads: `#pollThinking`
-  → cached snapshot; dispatch-gate/abort/clear → `captureFresh` (async pump).
+- **Phase 0 — DONE** (`2dd11538`). `TmuxDriver` seam, spawn impl, `session.ts` routed.
+  No behavior change.
+- **Phase 1 — DONE + verified flag-on** (`db92c25d` client, `7e82758b` driver+pump,
+  `e84ce8ef` hook):
+  - **1a** `TmuxControlClient` — `tmux -C attach-session` (pipes; `-CC` needs a TTY),
+    `%begin/%end/%error` framing keyed on the command-number, FIFO command queue with
+    ready-gating, `%output` invalidation, reconnect w/ backoff. Pure parser unit-tested.
+  - **1b** driver `captureCached` (snapshot, spawn-filled once, refreshed by a 1s timer
+    + debounced `%output`) / `captureFresh` (awaited command, spawn fallback) behind
+    `JOY_TMUX_CONTROL`; `tmuxArg()` target quoting. `session.ts`: destructive reads →
+    `captureFresh`; watchers → `captureCached`; the dispatch gate → an async pump
+    (`#kickDrain`/`#drainOnce`) with `#draining`+`#drainRequested`, re-check-after-await,
+    dispatch only on `paneInputText === ""` (null → retry); `abort()` async with a
+    stale-abort submit guard.
+  - **1c** `client-attached` hook filtered for control clients (set by the client before
+    it attaches); `registry.ts` uses the same constant on new-session.
+  - **1d — hardening** (codex xhigh review): the control client now keeps **one command
+    on the wire at a time** (true FIFO — writes the next only after the current `%end`,
+    so a single lost/extra block can't mis-pair every later response); the driver's
+    snapshot refresh **coalesces** (`#refreshInFlight`/`#refreshRequested` — an
+    `%output`/1s-tick mid-sweep collapses to one trailing sweep instead of overlapping
+    2N captures); and the clear/abort paths re-check **after** every awaited capture: an
+    `#inputEpoch` (bumped on each type) abandons a guarded `C-c` if a fresh message
+    landed mid-capture, the dispatch-gate guards (`#turn`/`#dispatchInFlight`) are
+    re-evaluated post-await, and a stale `abort()` returns before Escape if a genuinely
+    new send appeared during its capture (a fired submit still interrupts).
+  - Verified flag-on: window stayed manual-sized; dispatch / send-during-busy /
+    abort+clear / status all round-trip over control mode; no client errors. Re-verified
+    flag-on after 1d end-to-end (dispatch → reply, abort → clean box, fresh-window
+    capture; zero control errors). Flag-off = spawn path unchanged, covered by tests.
 - **Phase 2** — Migrate safe non-literal commands: `resize-window`, `display-message`,
-  `kill-window`.
-- **Phase 3** — Migrate `send-keys` after the command-quoting test suite passes; keep
-  the raw `send-keys -l` spawn fallback until confident.
+  `kill-window`. (Infrequent — low value.)
+- **Phase 3** — Migrate `send-keys` after a command-quoting test suite; keep the raw
+  `send-keys -l` spawn fallback until confident. (The frequent typing path; the literal
+  message text is the real quoting risk.) Approach (codex): one `tmuxCommand(args: string[])`
+  serializer that quotes argv→command-line in ONE place, with a test corpus of nasty
+  literals before any call site switches — empty, spaces, embedded newlines, single/double
+  quotes, backslash, `$`/backtick, `;`, `#{…}` format-text, leading `-`, `%begin`/`%end`-
+  looking text, Unicode/emoji, control chars, very long, trailing backslash/quote.
 - **Phase 4** — Lifecycle ops (`new-session`/`new-window`/`has-session`/…). Rare; no
   rush; can stay on spawn indefinitely.
 
-## Open coordination
-- `registry.ts` carries **uncommitted slash-commands work**; Phase 1's hook change
-  touches it. Either commit that first or seam the hook change carefully. (Phase 0
-  can stay in `session.ts` to avoid the entanglement.)
-- Keep the env flag default OFF until Phase 1 soaks on the harness.
+### Scope decision (codex)
+**Phase 1 (+1d) is the recommended complete state — stop here.** The scale win was
+removing the per-poll/per-read spawns (now one persistent connection + `%output`); the
+remaining spawns are infrequent typing/lifecycle ops where spawn cost is negligible and
+quoting risk is highest. Phases 2–4 are opportunistic, not required. Leaving `send-keys`
+on spawn is the right tradeoff.
+
+## Status / notes
+- Flag default OFF; turn on with `JOY_TMUX_CONTROL=1`. Soaking on the harness.
+- The `registry.ts` slash-commands entanglement is resolved — that feature is committed,
+  so the hook change landed clean.
+- Deferred within Phase 1: pane→window targeting for `%output` (the coalesced sweep still
+  refreshes ALL tracked windows on any output — correct, just not minimal); snapshot
+  max-age eviction; a per-command watchdog timeout in the control client (a lost `%end`
+  can't wedge the queue in practice — `capture-pane` always answers, and a dead proc →
+  `%exit`/EOF → reconnect fails everything — but a timeout would be belt-and-suspenders).
