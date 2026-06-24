@@ -93,6 +93,15 @@ export const machineOps: MachineOp[] = [
     handler: (registry) => registry.list().map(s => s.toJSON()),
   },
   {
+    name: "refreshCommands",
+    scope: "machine",
+    rpcName: "joy-refresh-commands",
+    http: { method: "POST", path: "/commands/refresh" },
+    // Machine-page refresh: re-scan personal + plugins + every known project
+    // (prunes removed ones), push the union to machine metadata, and return it.
+    handler: (registry) => registry.commands.refresh(),
+  },
+  {
     name: "get",
     scope: "machine",
     rpcName: "joy-get-session",

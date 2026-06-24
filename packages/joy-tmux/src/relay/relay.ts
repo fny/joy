@@ -817,6 +817,18 @@ export class RelaySession {
   }
 
   /**
+   * Mirror the slash commands available to this session so the app's "/"
+   * autocomplete (sync/suggestionCommands.ts reads metadata.slashCommands)
+   * lists the real project + personal commands, not just the built-in
+   * defaults. Caller passes a sorted list; skip the write when unchanged.
+   */
+  async updateSlashCommands(commands: string[]): Promise<void> {
+    const current = this.metadata?.slashCommands as string[] | undefined;
+    if (current && current.length === commands.length && current.every((c, i) => c === commands[i])) return;
+    await this.mergeMetadata({ slashCommands: commands });
+  }
+
+  /**
    * Set the joy lifecycle state the app reads to colour the status:
    * 'running' (alive), 'detached' (Claude died, window still around — red), or
    * 'archived' (killed/cleaned up). Drives the red detached indicator.

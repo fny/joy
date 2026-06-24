@@ -68,35 +68,54 @@ try {
 
 const relayClient = initRelay();
 
+// Machine-metadata blob upserted server-side: homeDir lets the app's path
+// picker format ~/foo, and slashCommands (folded in by the command registry)
+// powers the machine page's command list.
+const machineMetadata = {
+  host: hostname(),
+  platform: osPlatform(),
+  happyCliVersion: "joy-tmux/0.1.0",
+  homeDir: homedir(),
+  happyHomeDir: happyHomeDir(),
+  happyLibDir: __dirname,
+};
+
 const registry = new SessionRegistry({
   tmuxSession: TMUX_SESSION,
   relayClient,
+  baseMachineMetadata: machineMetadata,
   // Whenever a session gets a relay session attached (launch, recover, or
-  // reconnect), register the session-scoped catalog ops on it.
-  onRelayAttached: (session, rs) => bindSessionOps(session, rs),
+  // reconnect), register the session-scoped catalog ops AND push its slash
+  // commands (project ∪ machine), folding the project into machine knowledge.
+  onRelayAttached: (session, rs) => {
+    bindSessionOps(session, rs);
+    void registry.commands.onSessionAttached(session.cwd, rs);
+  },
 });
 
 startHttpServer({ registry, port: PORT, publicDir: PUBLIC_DIR, token: SERVER_TOKEN });
 process.stderr.write(`webchat server running on http://0.0.0.0:${PORT}\n`);
 
+// Populate the machine-wide command set before recover() adopts sessions, so
+// the first per-session push already includes personal + plugin commands.
+registry.commands.rescanMachine();
 registry.recover();
 
 if (relayClient) {
-  // Upsert this machine's metadata server-side so the app's path picker can
-  // format ~/foo nicely. homeDir is the field we actually care about; the
-  // rest satisfy the schema. Best-effort — failures only degrade picker UX.
-  void relayClient.getOrCreateMachine({
-    host: hostname(),
-    platform: osPlatform(),
-    happyCliVersion: "joy-tmux/0.1.0",
-    homeDir: homedir(),
-    happyHomeDir: happyHomeDir(),
-    happyLibDir: __dirname,
-  }).then(ok => {
-    process.stderr.write(`[relay] machine metadata upsert: ${ok ? "ok" : "failed"}\n`);
-  });
+  // Upsert machine metadata (homeDir for the picker + the discovered slash
+  // commands for the machine page). pushMachineIfChanged sends the full blob,
+  // so homeDir is preserved. Best-effort — failures only degrade those UIs.
+  void registry.commands.pushMachineIfChanged();
 
   registerMachineOps(relayClient, registry);
+
+  // Personal/plugin commands change rarely; re-scan on a coarse interval and
+  // push only when the set actually changes (no fs.watch). Sessions refresh
+  // their project portion on attach; the machine page has an explicit refresh.
+  setInterval(() => {
+    registry.commands.rescanMachine();
+    void registry.commands.pushMachineIfChanged();
+  }, 5 * 60 * 1000).unref();
 
   relayClient.onReconnect = () => registry.onRelayReconnect();
 }

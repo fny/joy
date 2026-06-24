@@ -104,6 +104,13 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         Modal.alert('Purged', `Deleted ${deleted} session record${deleted === 1 ? '' : 's'} for this machine.`, [{ text: 'OK' }]);
     }, [machineId]));
 
+    // Force the daemon to re-scan commands/skills/plugins now. It pushes the
+    // refreshed list into machine metadata, so machine.metadata.slashCommands
+    // updates without a separate fetch.
+    const [refreshingCommands, doRefreshCommands] = useHappyAction(React.useCallback(async () => {
+        await apiSocket.machineRPC(machineId, 'joy-refresh-commands', {});
+    }, [machineId]));
+
     if (!status && !failed) {
         return (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
@@ -163,6 +170,25 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     <Item title="Home" subtitle={machine.metadata.homeDir} icon={<Ionicons name="home-outline" size={29} color="#5856D6" />} showChevron={false} />
                 </ItemGroup>
             )}
+
+            <ItemGroup title="Slash commands" footer="Commands & skills joy-tmux found on this machine — personal, plugins, and every project it has scanned. They appear in the composer's / menu.">
+                <Item
+                    title="Available"
+                    detail={String((machine?.metadata?.slashCommands ?? []).length)}
+                    subtitle="Shown in the composer's / autocomplete"
+                    icon={<Ionicons name="terminal-outline" size={29} color="#34C759" />}
+                    showChevron={false}
+                />
+                <Item
+                    title="Refresh"
+                    subtitle="Re-scan commands, skills & plugins now"
+                    icon={refreshingCommands
+                        ? <ActivityIndicator />
+                        : <Ionicons name="refresh-outline" size={29} color="#007AFF" />}
+                    onPress={doRefreshCommands}
+                    showChevron={false}
+                />
+            </ItemGroup>
 
             <ItemGroup title="Go to">
                 <Item
