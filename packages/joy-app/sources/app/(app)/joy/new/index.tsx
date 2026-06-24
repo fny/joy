@@ -24,8 +24,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
-import Constants from 'expo-constants';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { Typography } from '@/constants/Typography';
 import { layout } from '@/components/layout';
 import {
@@ -34,7 +33,6 @@ import {
     type KeyPressEvent,
     type MultiTextInputHandle,
 } from '@/components/MultiTextInput';
-import { useHeaderHeight } from '@/utils/responsive';
 import { t } from '@/text';
 import { useAllMachines, useSessions, useSetting, storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
@@ -77,7 +75,6 @@ type JoyCreateResult =
 function NewJoyTmuxSessionScreen() {
     const { theme } = useUnistyles();
     const safeArea = useSafeAreaInsets();
-    const headerHeight = useHeaderHeight();
     const router = useRouter();
     const navigateToSession = useNavigateToSession();
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
@@ -363,12 +360,15 @@ function NewJoyTmuxSessionScreen() {
         : '~/';
 
     return (
-        <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            keyboardVerticalOffset={Platform.OS === 'ios' ? Constants.statusBarHeight + headerHeight : 0}
-            style={styles.container}
-        >
-            <View style={styles.inner}>
+        <View style={styles.container}>
+            <KeyboardAwareScrollView
+                style={styles.inner}
+                contentContainerStyle={[styles.scrollContent, { paddingBottom: safeArea.bottom + 24 }]}
+                keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="interactive"
+                bottomOffset={16}
+                showsVerticalScrollIndicator={false}
+            >
                 <View style={{ maxWidth: layout.maxWidth, width: '100%', alignSelf: 'center', paddingHorizontal: 12, gap: 8, paddingTop: 12 }}>
 
                     {/* Config box */}
@@ -619,7 +619,7 @@ function NewJoyTmuxSessionScreen() {
                         </View>
                     </View>
                 </View>
-            </View>
+            </KeyboardAwareScrollView>
 
             {/* Machine picker modal */}
             <RNModal visible={machinePickerOpen} transparent animationType="fade" onRequestClose={() => setMachinePickerOpen(false)}>
@@ -693,7 +693,7 @@ function NewJoyTmuxSessionScreen() {
                     </Pressable>
                 </Pressable>
             </RNModal>
-        </KeyboardAvoidingView>
+        </View>
     );
 }
 
@@ -704,6 +704,9 @@ const styles = StyleSheet.create((theme) => ({
     },
     inner: {
         flex: 1,
+    },
+    scrollContent: {
+        flexGrow: 1,
     },
     configBox: {
         backgroundColor: theme.colors.input.background,

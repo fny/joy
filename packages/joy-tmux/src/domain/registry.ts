@@ -10,6 +10,7 @@ import { join, basename, resolve } from "path";
 import { homedir } from "os";
 import { run } from "../tmux/shell";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
+import { CommandRegistry } from "./commands.ts";
 import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord } from "./windowRecord";
@@ -89,6 +90,8 @@ const MAX_MESSAGES = 500;
 export class SessionRegistry {
   readonly tmuxSession: string;
   readonly relayClient: RelayClient | null;
+  /** Slash-command discovery: machine-wide set + per-session projections. */
+  readonly commands: CommandRegistry;
   /** Daemon boot time — exposed via the status op as uptime. */
   readonly startedAt = Date.now();
   #claudeInfo: { available: boolean; version: string | null } | null = null;
@@ -104,10 +107,17 @@ export class SessionRegistry {
     relayClient: RelayClient | null;
     /** Hook for transports to register session-scoped ops on a fresh relay session. */
     onRelayAttached?: SessionDeps["onRelayAttached"];
+    /** The machine-metadata blob server.ts upserts; the command registry
+     *  re-sends it (full-blob upsert) with slashCommands folded in. */
+    baseMachineMetadata?: Record<string, unknown>;
   }) {
     this.tmuxSession = opts.tmuxSession;
     this.relayClient = opts.relayClient;
     this.#onRelayAttached = opts.onRelayAttached;
+    this.commands = new CommandRegistry({
+      relayClient: opts.relayClient,
+      baseMachineMetadata: opts.baseMachineMetadata ?? {},
+    });
   }
 
   /**
