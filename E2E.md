@@ -226,10 +226,11 @@ Each: **targets** (the symptom), **setup**, **steps**, **expect**, **observe**, 
    always route through the daemon's serialized dispatch, or require an authoritative daemon ack.
 
 ### S3 / machine shows raw UUID instead of a name
-The session list renders the machine as `a561aa62-…` (raw machineId), not `faraz.vip`. The daemon's
-machine-metadata upsert sets `host` but no `displayName`, and the session-list label doesn't fall
-back to `host`. Fix: daemon set `displayName` (e.g. host) in the machine upsert, and/or the app use
-`displayName || host || id` consistently in the session-list grouping (not just `JoyMachineView`).
+The session list renders the machine as `a561aa62-…` (raw machineId), not `faraz.vip`. SUPERSEDED —
+see §10 "S3 machine name — REDIAGNOSED". Short version: the daemon DOES upsert `host` (verified
+status=200) and the app DOES fall back `displayName || host || id`; the real cause is the app failing
+to DECRYPT machine metadata on the **legacy** harness account. The default `dataKey` account decrypts
+fine, so it's a harness artifact, not a real-user bug.
 
 ## 8. Summary — confirmed bugs + fix order
 
@@ -376,19 +377,24 @@ fixes are live; the deployed app is still origin/main (app-side bits land on its
 subagent/bg run that footer lingers in SCROLLBACK above the idle box → stuck "working". Fix: scope
 the scan to the LIVE footer (below the input box). See §9 / the commit.
 
-### Bug found, NOT fixed (belongs in the in-progress slash-commands/machine work): S3 machine name
-The session list shows the machine as its raw UUID (`a561aa62-…`) instead of `faraz.vip`.
-- The app is NOT at fault: SessionsList.tsx:288 and JoyMachineView.tsx:66 already use
-  `metadata.displayName || metadata.host || id` (in origin/main).
-- Root cause: joy-tmux never sends `host`. `getOrCreateMachine(...)` (the only call that upserts the
-  machine row's metadata, incl. `host`) is invoked from EXACTLY one place — `commands.ts:181`
-  (`pushMachineIfChanged`) — and that method early-returns when the slash-command union is empty
-  (`union().join("\n") === #lastPushed`, both `""`). A machine with no project/personal/plugin
-  commands (the common case) therefore never upserts `host`, so the app has no name to show.
-- Recommended fix (in the machine work, not done here): upsert the base machine metadata (with
-  `host`) UNCONDITIONALLY on relay-connect/startup, independent of the slash-commands push — e.g. a
-  one-time `relayClient.getOrCreateMachine(baseMachineMetadata)` on connect, or don't skip the first
-  push in `pushMachineIfChanged` even when the union is empty.
+### S3 machine name — REDIAGNOSED (2026-06-24): legacy-test-account artifact, not a daemon bug
+On the harness the session list shows the machine as its raw UUID (`a561aa62-…`) instead of
+`faraz.vip`. My first root-cause (below, "the empty-union push skip") was **WRONG**: `#lastPushed`
+starts as `null`, so `"" === null` is false and the first push DOES fire even with no commands.
+- **The daemon is fine.** Instrumented `getOrCreateMachine` and confirmed live:
+  `status=200 ok=true id=a561aa62-… host=faraz.vip variant=legacy keys=host,…,slashCommands`. So the
+  relay genuinely holds the machine record with `host` (and `slashCommands`), for both variants.
+- **The app is fine too** — `SessionsList.tsx:288` / `JoyMachineView.tsx:66` already use
+  `displayName || host || id`.
+- **Actual cause: machine-metadata DECRYPTION.** The app fetches `/v1/machines`, decrypts via
+  `machineEncryption.decryptMetadata`, and on failure adds the machine with **null metadata**
+  (`sync.ts:1453`) → falls to the UUID. That decrypt fails on the **legacy** harness account.
+- **Not a bug for real users.** The E2E account is `legacy` (`{secret}`); the real account
+  (`~/.happy`) is `dataKey` (`{publicKey, machineKey}`), where machine metadata decrypts on the same
+  path sessions already use — so `host`/`slashCommands` show normally. S3 is a harness artifact.
+- **Optional follow-up:** make the app's machine-metadata decryption also handle the `legacy`
+  variant (so legacy users / the harness show the name + commands). Not needed for the dataKey
+  default account.
 
 ### Still deferred
 - **S11 (reconnect / "doesn't show until you leave & return"):** app sync-layer (forward-sync
