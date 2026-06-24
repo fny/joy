@@ -308,6 +308,11 @@ export class Session {
   // Count of clear-the-input attempts for the current drain: one guarded C-c, then
   // pause. Reset once the box is empty / on dispatch / when the pane isn't ready.
   #clearAttempts = 0;
+  // Async drain pump (control-mode captures are awaited). #draining serializes one
+  // drain at a time; #drainRequested re-runs once if a trigger (turn-end / enqueue)
+  // arrives while a drain is mid-await, so it isn't dropped.
+  #draining = false;
+  #drainRequested = false;
   // Set when a dispatch failed to land (no turn started) or the input box is
   // dirty and unclearable — stops auto-draining so we don't shovel messages into
   // a wedged/odd state. Cleared by resume. #pauseReason says why (for the app).
@@ -382,7 +387,7 @@ export class Session {
    */
   #watchStartup(attempts = 0): void {
     if (this.status === "ended" || this.status === "active") return; // already resolved
-    const pane = tmux.capture(this.tmuxWindow);
+    const pane = tmux.captureCached(this.tmuxWindow);
     if (pane.ok && paneShowsClaudeRunning(pane.out)) return; // Claude is visibly up
     if (attempts >= STARTUP_DEADLINE_ATTEMPTS) {
       process.stderr.write(`[startup] ${this.id}: claude never came up within deadline → detached\n`);
@@ -401,7 +406,7 @@ export class Session {
    */
   #watchTrustPrompt(attempts = 0): void {
     if (this.status === "ended" || this.status === "active" || this.#trustHandled) return;
-    const pane = tmux.capture(this.tmuxWindow);
+    const pane = tmux.captureCached(this.tmuxWindow);
     if (pane.ok && /Yes, I trust this folder|Is this a project you (created|trust)/i.test(pane.out)) {
       // "1" selects "Yes, I trust this folder"; Enter confirms (harmless empty
       // submit if "1" already activated it).
@@ -721,87 +726,101 @@ export class Session {
    * because it intentionally clears right after interrupting a turn. Returns true
    * iff a `C-c` was sent.
    */
-  #clearInputIfDirty(idleOnly: boolean): boolean {
+  async #clearInputIfDirty(idleOnly: boolean): Promise<boolean> {
     if (idleOnly && (this.#turn || this.#dispatchInFlight)) return false;
-    const pane = tmux.capture(this.tmuxWindow);
+    const pane = await tmux.captureFresh(this.tmuxWindow); // FRESH — stale here = concatenation
     if (!pane.ok) return false;
     if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return false;
     const box = paneInputText(pane.out);
     if (box === "" || box === null) return false; // empty / no box → nothing to clear (never C-c empty)
-    tmux.key(this.tmuxWindow,"C-c");
+    tmux.key(this.tmuxWindow, "C-c");
     return true;
   }
 
+  /** True when a drain could proceed by the transcript/queue state alone (pane
+   *  readiness is checked separately, after a fresh capture). */
+  #canDrain(): boolean {
+    return this.status !== "ended" && !this.#queuePaused && !this.#dispatchInFlight
+      && !this.#turn && this.#queue.length > 0;
+  }
+
+  #armDrainRetry(ms: number): void {
+    if (this.#drainRetry) clearTimeout(this.#drainRetry);
+    this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, ms);
+  }
+
   /**
-   * Dispatch the head of the queue IF Claude is genuinely idle AND the input box
-   * is empty. The decision does NOT trust the GUI alone — it gates on the
-   * authoritative transcript turn state (#turn) and the in-flight echo
-   * confirmation, confirms the pane shows the ready prompt (not a dialog/spinner),
-   * and REQUIRES an empty input box. A non-empty box (stuck text from a failed
-   * dispatch, or something typed directly in the pane) is cleared first — else
-   * the next message would be typed on top and the two would concatenate into one
-   * garbled turn. Runs while "starting" too (gated on the empty ready box) so a
-   * fresh session's first message bootstraps the transcript instead of
-   * deadlocking. Stays fully synchronous + tick-driven via #drainRetry — no async
-   * window for a parallel dispatch to slip through.
+   * Drain the queue's head IF Claude is genuinely idle AND the input box is empty.
+   * The gate AWAITS a FRESH pane capture (control mode) where a stale read would
+   * cause data loss, so it runs as a serialized async PUMP, not a sync tick:
+   * #draining lets one drain run at a time; a trigger (turn-end / enqueue / resume /
+   * #drainRetry) arriving mid-await sets #drainRequested so it re-runs once instead
+   * of being dropped. The sync entry point is kept since many callers fire it.
    */
   #maybeDrainQueue(): void {
-    if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
-    if (this.status === "ended") return;
-    if (this.#queuePaused) return;
-    if (this.#dispatchInFlight) return; // one dispatch awaiting echo confirmation
-    if (this.#turn) return;             // a turn is open → Claude is busy (authoritative)
-    if (this.#queue.length === 0) return;
+    if (this.#draining) { this.#drainRequested = true; return; }
+    void this.#kickDrain();
+  }
 
-    // Idle per the transcript — now confirm against the pane. Two pane checks:
-    //   1. NOT generating: claude shows "esc to interrupt" while a turn is in
-    //      flight. #turn (above) is the transcript signal but LAGS — it isn't set
-    //      until the first assistant entry, so between "claude starts thinking" and
-    //      that entry the pane reads ready+empty while claude is actually busy.
-    //      Dispatching then types into a live turn and relies on claude's OWN input
-    //      queue (double-queuing → the exact messiness we're killing). The pane's
-    //      "esc to interrupt" is the real-time truth, so gate on it too.
-    //   2. AT the ready input prompt (not a dialog/spinner). At the instant a turn
-    //      ends the prompt may not have repainted, so recheck shortly, not blind.
-    // (Background shells alone do NOT block — claude is idle at the prompt and can
-    // take a new message — so we check "esc to interrupt", not paneShowsWorking.)
-    const pane = tmux.capture(this.tmuxWindow);
+  async #kickDrain(): Promise<void> {
+    this.#draining = true;
+    try {
+      await this.#drainOnce();
+    } finally {
+      this.#draining = false;
+      if (this.#drainRequested) { this.#drainRequested = false; this.#maybeDrainQueue(); }
+    }
+  }
+
+  /**
+   * One drain attempt. Re-checks #canDrain() after EVERY await (queue/turn/pause can
+   * change while a capture is in flight). Pane gating mirrors the sync version:
+   *   1. NOT generating ("esc to interrupt") — #turn lags turn-start, so the pane's
+   *      real-time signal is what stops a dispatch into a live turn (double-queue).
+   *   2. AT the ready prompt (not a dialog/spinner) — repaint lag → recheck shortly.
+   * Then REQUIRE an EMPTY box: dispatch ONLY when paneInputText === "" — a null box
+   * (no live input box detected) is "not ready", NOT "empty", so it retries; stuck
+   * TEXT is cleared with one guarded C-c (a 2nd dirty read pauses, never a blind 2nd
+   * C-c). (Background shells alone don't block — that's why it's "esc to interrupt",
+   * not paneShowsWorking.)
+   */
+  async #drainOnce(): Promise<void> {
+    if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
+    if (!this.#canDrain()) return;
+
+    const pane = await tmux.captureFresh(this.tmuxWindow);
+    if (!this.#canDrain()) return; // re-check after the await
     if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
-      this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 500);
+      this.#armDrainRetry(500);
       return;
     }
 
-    // REQUIRE an empty box (clear-before-send). Stuck text → one guarded C-c
-    // (#clearInputIfDirty re-captures + only fires on a confirmed non-empty box),
-    // then re-check next tick: if it cleared we dispatch; if it's STILL dirty we
-    // pause as input_dirty rather than send a 2nd C-c (which could hit a now-empty
-    // box and arm exit) or type on top of it.
-    const inputText = paneInputText(pane.out);
-    if (inputText !== "" && inputText !== null) {
-      // If we already sent the one C-c last tick and it's STILL dirty, pause —
-      // don't send a 2nd C-c (could hit a now-empty box and arm exit) or type on
-      // top. Count the attempt ONLY when a C-c actually went out: if the helper
-      // declines (a race cleared the box / changed state) we must re-evaluate next
-      // tick, not burn the single allowance and pause without ever clearing.
+    const box = paneInputText(pane.out);
+    if (box !== "") {
+      if (box === null) { this.#clearAttempts = 0; this.#armDrainRetry(500); return; } // not-ready, not empty
+      // Stuck text → one guarded C-c, re-check next tick; a 2nd dirty read pauses
+      // (never a blind 2nd C-c). Count the attempt ONLY when a C-c actually went out.
       if (this.#clearAttempts >= 1) {
         process.stderr.write(`[queue] input box dirty + unclearable for ${this.id} — paused\n`);
         this.#pauseDispatch("input_dirty");
         return;
       }
-      if (this.#clearInputIfDirty(true)) this.#clearAttempts += 1; // count only a real C-c
-      this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 200);
+      if (await this.#clearInputIfDirty(true)) this.#clearAttempts += 1;
+      this.#armDrainRetry(200);
       return;
     }
+
+    // box === "" → empty, safe to type.
     this.#clearAttempts = 0;
+    if (!this.#canDrain()) return; // final re-check before committing the dispatch
 
     const next = this.#queue.shift()!;
     this.#dispatchInFlight = next; // whole item — timeout re-queues it intact
     this.#broadcastQueue();
     try {
-      // Type DIRECTLY (not via sendText) — the queue has already proven the pane
-      // is ready + empty, and a "starting" session must type now to bootstrap its
-      // transcript instead of being re-buffered by sendText's starting guard.
+      // Type DIRECTLY (not via sendText) — the gate proved the pane is ready + empty,
+      // and a "starting" session must type now to bootstrap its transcript.
       this.#typeIntoTmux(next.text, { seq: next.seq, source: next.source, mirrorToRelay: next.mirrorToRelay });
     } catch (e) {
       // Send failed outright — put it back at the head and pause.
@@ -811,8 +830,8 @@ export class Session {
       process.stderr.write(`[queue] dispatch send failed for ${this.id}: ${e}\n`);
       return;
     }
-    // Arm the echo-confirmation timeout: a successful dispatch produces a new
-    // turn (Claude responds). If none appears, the message didn't land.
+    // Arm the echo-confirmation timeout: a successful dispatch produces a new turn.
+    // If none appears, the message didn't land.
     this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), 20000);
   }
 
@@ -852,7 +871,7 @@ export class Session {
    *   "⏸ plan mode on"            → plan
    */
   detectPermissionMode(): string | null {
-    const pane = tmux.capture(this.tmuxWindow);
+    const pane = tmux.captureCached(this.tmuxWindow);
     if (!pane.ok) return null;
     return parsePermissionModeFromPane(pane.out);
   }
@@ -884,51 +903,54 @@ export class Session {
   }
 
   /** Escape → Claude Code interactive interprets as "interrupt generation". */
-  abort(): { ok: true } {
-    // Block abort only when the session is unambiguously IDLE: the pane shows an
-    // EMPTY ready box AND isn't generating, and the daemon has no open turn /
-    // in-flight dispatch. The empty-box requirement is what makes this robust: a
-    // turn that's thinking/working either shows "esc to interrupt" (empty box) OR
-    // has text in the box — so it never reads as empty+not-generating. (Neither
-    // #turn — which lags the turn start — nor "esc to interrupt" — which the box
-    // text HIDES, verified — is reliable on its own.) We bias toward NOT blocking:
-    // a stray Escape on an idle session is a harmless no-op (Escape doesn't clear
-    // the box), whereas a wrong block means "Stop did nothing" — the worse failure.
-    // #submitTimer too: during the ~350ms delayed-submit window the box holds the
-    // just-typed (not-yet-submitted) message, so the empty-box test already keeps
-    // us from blocking — but check #submitTimer explicitly so a racy box read can't
-    // let abort no-op and leave the pending Enter to submit the message the user
-    // just tried to stop (it falls through to #clearSubmitTimer below, cancelling it).
-    const pane = tmux.capture(this.tmuxWindow);
+  async abort(): Promise<{ ok: true }> {
+    // Snapshot the pending submit BEFORE the awaited capture: if a NEW dispatch
+    // starts during that await, this (now possibly stale) abort must not cancel it.
+    const submitBefore = this.#submitTimer;
+
+    // Block abort only when the session is unambiguously IDLE: an EMPTY ready box,
+    // not generating, and no open turn / in-flight dispatch / pending submit. The
+    // empty-box requirement is what makes this robust — a turn that's thinking either
+    // shows "esc to interrupt" (empty box) OR holds text in the box, so it never
+    // reads empty+idle. (#turn lags turn-start, and "esc to interrupt" is HIDDEN by
+    // box text, both verified — neither is reliable alone.) Bias toward NOT blocking:
+    // a stray Escape on idle is a no-op (Escape doesn't clear the box), whereas a
+    // wrong block means "Stop did nothing". FRESH capture — a stale read here could
+    // wrongly block a real abort.
+    const pane = await tmux.captureFresh(this.tmuxWindow);
     if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && pane.ok &&
         paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
       return { ok: true };
     }
-    // Abort also cancels an in-progress 500 auto-retry (pressing abort means
-    // "stop trying"), and disarms a pending retry so the next turn-end won't
-    // start one.
+    // Abort also cancels an in-progress 500 auto-retry (pressing abort = "stop
+    // trying") and disarms a pending retry so the next turn-end won't start one.
     if (this.#retry) {
       this.#emitAgentNote(`⏹ Auto-retry cancelled`, Date.now(), this.claudeSessionId);
       this.#clearRetry();
     }
     this.#turn5xxStatus = null;
-    // Cancel a just-typed message's pending submit Enter — abort means "stop", so
-    // it must NOT fire after the Escape (which would re-submit into the cleared box).
-    this.#clearSubmitTimer();
-    tmux.key(this.tmuxWindow,"Escape");
+    // Cancel the pending submit Enter — but ONLY the one that was pending when abort
+    // BEGAN. If a NEW dispatch started during the awaited capture, #submitTimer is a
+    // different timer; cancelling it (or scheduling an abort-clear over its box) would
+    // kill a send the user never aborted. So gate both on "nothing new appeared".
+    const sameSubmit = this.#submitTimer === submitBefore;
+    if (sameSubmit) this.#clearSubmitTimer();
+    tmux.key(this.tmuxWindow, "Escape");
     this.#setThinking(false);
-    // Interrupting mid-tool means Claude won't write that tool's result — close
-    // any open tools so their cards don't spin forever.
+    // Interrupting mid-tool means Claude won't write that tool's result — close any
+    // open tools so their cards don't spin forever.
     this.#closeOpenTools();
     // Clear after abort: Escape interrupts but does NOT clear the box (verified), so
-    // anything typed while Claude was generating lingers. Once the interrupt settles
-    // and the ready prompt repaints, drop it with one guarded C-c. Cancelled if a
-    // new send starts first (so it can't C-c the freshly-typed message).
-    if (this.#abortClearTimer) clearTimeout(this.#abortClearTimer);
-    this.#abortClearTimer = setTimeout(() => {
-      this.#abortClearTimer = null;
-      if (this.status !== "ended") this.#clearInputIfDirty(false);
-    }, ABORT_CLEAR_DELAY_MS);
+    // anything typed while Claude was generating lingers. Once the interrupt settles +
+    // the prompt repaints, drop it with one guarded C-c. Cancelled if a new send
+    // starts first (so it can't C-c the fresh message).
+    if (sameSubmit) {
+      if (this.#abortClearTimer) clearTimeout(this.#abortClearTimer);
+      this.#abortClearTimer = setTimeout(() => {
+        this.#abortClearTimer = null;
+        if (this.status !== "ended") void this.#clearInputIfDirty(false);
+      }, ABORT_CLEAR_DELAY_MS);
+    }
     return { ok: true };
   }
 
@@ -1255,7 +1277,7 @@ export class Session {
         this.#flushPrelaunch();
         return;
       }
-      const pane = tmux.capture(this.tmuxWindow);
+      const pane = tmux.captureCached(this.tmuxWindow);
       if (pane.ok && paneShowsReadyPrompt(pane.out)) {
         this.#promptPollActive = false;
         this.#flushPrelaunch();
@@ -1373,7 +1395,7 @@ export class Session {
   #pollThinking(): void {
     if (this.status === "ended") return;
     if (this.#relay) {
-      const pane = tmux.capture(this.tmuxWindow);
+      const pane = tmux.captureCached(this.tmuxWindow);
       if (pane.ok) {
         const working = paneShowsWorking(pane.out);
         if (working !== this.#thinking) this.#setThinking(working); // only on change

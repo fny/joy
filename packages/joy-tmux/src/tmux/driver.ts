@@ -13,33 +13,127 @@
 //
 // See CONTROL-MODE-MIGRATION.md for the full plan.
 import { run } from "./shell";
+import { TmuxControlClient } from "./controlClient";
 
 /** Shared result shape. `error` carries a %error / disconnect reason (control mode). */
 export interface TmuxResult { ok: boolean; out: string; error?: string }
 
+// Phase 1: opt-in. Off (default) → every method is the spawn path = Phase 0 behavior.
+const CONTROL = process.env.JOY_TMUX_CONTROL === "1";
+const SNAPSHOT_REFRESH_MS = 1000; // periodic backstop refresh of tracked windows
+const OUTPUT_DEBOUNCE_MS = 75;    // coalesce %output bursts before re-snapshotting
+
 export class TmuxDriver {
+  // Control-mode delegate + per-window snapshot cache (control mode only). The spawn
+  // methods below are the disconnected/while-unready fallback and the only path when
+  // the flag is off — so callers never branch on transport.
+  #client: TmuxControlClient | null = null;
+  #snapshots = new Map<string, { text: string; ts: number }>();
+  #targets = new Set<string>();
+  #outputTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor() {
+    if (CONTROL) {
+      const session = process.env.TMUX_SESSION ?? "joy";
+      this.#client = new TmuxControlClient(session, { onOutput: () => this.#onOutput() });
+      const t = setInterval(() => { void this.#refreshTracked(); }, SNAPSHOT_REFRESH_MS);
+      t.unref?.();
+    }
+  }
+
+  // ── Spawn path (Phase 0 — fallback + flag-off) ──────────────────────────────
+
   /** Capture a pane's visible text. color=true keeps ANSI SGR (the app's colour view). */
-  capture(target: string, opts?: { color?: boolean }): { ok: boolean; out: string } {
+  capture(target: string, opts?: { color?: boolean }): TmuxResult {
     return opts?.color
       ? run("tmux", "capture-pane", "-p", "-e", "-t", target)
       : run("tmux", "capture-pane", "-p", "-t", target);
   }
 
   /** Send one or more NAMED keys (e.g. "C-u", "Escape", "Enter", "BTab"). */
-  key(target: string, ...names: string[]): { ok: boolean } {
+  key(target: string, ...names: string[]): TmuxResult {
     return run("tmux", "send-keys", "-t", target, ...names);
   }
 
   /** Send LITERAL text verbatim (send-keys -l --) — no key-name interpretation. */
-  literal(target: string, text: string): { ok: boolean } {
+  literal(target: string, text: string): TmuxResult {
     return run("tmux", "send-keys", "-l", "-t", target, "--", text);
   }
 
   /** Escape hatch for the rarer / lifecycle commands (resize, kill, display, …). */
-  runSync(...args: string[]): { ok: boolean; out: string } {
+  runSync(...args: string[]): TmuxResult {
     return run("tmux", ...args);
+  }
+
+  // ── Control-mode reads (snapshot cache + fresh command), spawn fallback ──────
+
+  /**
+   * SYNC read of the latest known pane text — for status/watcher paths (#pollThinking,
+   * startup, trust) where a slightly stale read is fine. Control mode: the cached
+   * snapshot (filled by a one-off spawn the first time, then kept fresh by the
+   * periodic + %output refresh). Flag off / disconnected / color: a plain spawn
+   * capture. (Colour is spawn-only — snapshots are plain text.)
+   */
+  captureCached(target: string, opts?: { color?: boolean }): TmuxResult {
+    if (this.#client?.connected && !opts?.color) {
+      this.#targets.add(target);
+      const s = this.#snapshots.get(target);
+      if (s) return { ok: true, out: s.text };
+      const r = this.capture(target); // no snapshot yet → spawn once, then refresh takes over
+      if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
+      return r;
+    }
+    return this.capture(target, opts);
+  }
+
+  /**
+   * FRESH awaited capture — for the decisions where a stale read causes data loss
+   * (the dispatch gate's empty-box check, abort, clear). Control mode: a capture-pane
+   * command over the connection; updates the cache. Falls back to a spawn capture on
+   * disconnect/error or when the flag is off.
+   */
+  async captureFresh(target: string, opts?: { color?: boolean }): Promise<TmuxResult> {
+    if (this.#client?.connected && !opts?.color) {
+      this.#targets.add(target);
+      const r = await this.#client.command(`capture-pane -p -t ${tmuxArg(target)}`);
+      if (r.ok) { this.#snapshots.set(target, { text: r.out, ts: nowMs() }); return r; }
+      // disconnect / %error → fall through to spawn
+    }
+    return this.capture(target, opts);
+  }
+
+  #onOutput(): void {
+    if (this.#outputTimer) return; // debounce a burst into one refresh
+    const t = setTimeout(() => { this.#outputTimer = null; void this.#refreshTracked(); }, OUTPUT_DEBOUNCE_MS);
+    t.unref?.();
+    this.#outputTimer = t;
+  }
+
+  // Re-snapshot every tracked window over the connection (no spawn). Phase 1 refreshes
+  // ALL tracked windows on any %output (simple, correct; Phase 1.5 can map pane→window
+  // to refresh only the one that changed). A window that's gone stops being tracked.
+  async #refreshTracked(): Promise<void> {
+    if (!this.#client?.connected) return;
+    for (const target of [...this.#targets]) {
+      const r = await this.#client.command(`capture-pane -p -t ${tmuxArg(target)}`);
+      if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
+      else if (r.error && /can't find/i.test(r.error)) { this.#targets.delete(target); this.#snapshots.delete(target); }
+    }
   }
 }
 
-/** Process-wide driver. Phase 0 = spawn; later phases swap the internals here. */
+function nowMs(): number { return Date.now(); }
+
+/**
+ * Quote one argument for a control-mode command STRING (control mode takes a
+ * command line, not argv). Safe identifiers (incl. tmux window targets like
+ * `joy:j-abc123`) pass through; anything else is single-quoted with ' → '\'' .
+ * The window targets we pass today are generated + safe — this just guards the
+ * seam before broader inputs (the send-keys quoting work is Phase 3).
+ */
+export function tmuxArg(s: string): string {
+  return /^[A-Za-z0-9_:.@/=+-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/** Process-wide driver. Flag off = spawn (Phase 0). Flag on = control client + fallback. */
 export const tmux = new TmuxDriver();
