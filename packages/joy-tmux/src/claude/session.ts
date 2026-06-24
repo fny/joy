@@ -15,6 +15,7 @@
 import { setTimeout as sleep } from "timers/promises";
 import { existsSync, readFileSync } from "fs";
 import { run } from "../tmux/shell";
+import { tmux } from "../tmux/driver";
 import {
   encodeTurnStart,
   encodeTextEvent,
@@ -381,7 +382,7 @@ export class Session {
    */
   #watchStartup(attempts = 0): void {
     if (this.status === "ended" || this.status === "active") return; // already resolved
-    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    const pane = tmux.capture(this.tmuxWindow);
     if (pane.ok && paneShowsClaudeRunning(pane.out)) return; // Claude is visibly up
     if (attempts >= STARTUP_DEADLINE_ATTEMPTS) {
       process.stderr.write(`[startup] ${this.id}: claude never came up within deadline → detached\n`);
@@ -400,11 +401,11 @@ export class Session {
    */
   #watchTrustPrompt(attempts = 0): void {
     if (this.status === "ended" || this.status === "active" || this.#trustHandled) return;
-    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    const pane = tmux.capture(this.tmuxWindow);
     if (pane.ok && /Yes, I trust this folder|Is this a project you (created|trust)/i.test(pane.out)) {
       // "1" selects "Yes, I trust this folder"; Enter confirms (harmless empty
       // submit if "1" already activated it).
-      run("tmux", "send-keys", "-t", this.tmuxWindow, "1", "Enter");
+      tmux.key(this.tmuxWindow,"1", "Enter");
       this.#trustHandled = true;
       return;
     }
@@ -551,7 +552,7 @@ export class Session {
         // Keep the (retrying) promise so killSession can await the real result.
         this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
       }
-      run("tmux", "kill-window", "-t", this.tmuxWindow);
+      tmux.runSync("kill-window", "-t", this.tmuxWindow);
     }
 
     this.#deps.broadcast("session_update", this.toJSON());
@@ -591,7 +592,7 @@ export class Session {
     if (this.#deps.relayClient && relaySessionId) {
       this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
     }
-    run("tmux", "kill-window", "-t", this.tmuxWindow);
+    tmux.runSync("kill-window", "-t", this.tmuxWindow);
     this.endReason = "killed";
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
@@ -722,12 +723,12 @@ export class Session {
    */
   #clearInputIfDirty(idleOnly: boolean): boolean {
     if (idleOnly && (this.#turn || this.#dispatchInFlight)) return false;
-    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    const pane = tmux.capture(this.tmuxWindow);
     if (!pane.ok) return false;
     if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return false;
     const box = paneInputText(pane.out);
     if (box === "" || box === null) return false; // empty / no box → nothing to clear (never C-c empty)
-    run("tmux", "send-keys", "-t", this.tmuxWindow, "C-c");
+    tmux.key(this.tmuxWindow,"C-c");
     return true;
   }
 
@@ -764,7 +765,7 @@ export class Session {
     //      ends the prompt may not have repainted, so recheck shortly, not blind.
     // (Background shells alone do NOT block — claude is idle at the prompt and can
     // take a new message — so we check "esc to interrupt", not paneShowsWorking.)
-    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    const pane = tmux.capture(this.tmuxWindow);
     if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
       this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 500);
@@ -851,7 +852,7 @@ export class Session {
    *   "⏸ plan mode on"            → plan
    */
   detectPermissionMode(): string | null {
-    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    const pane = tmux.capture(this.tmuxWindow);
     if (!pane.ok) return null;
     return parsePermissionModeFromPane(pane.out);
   }
@@ -872,7 +873,7 @@ export class Session {
     if (ci < 0) return { ok: false, error: `unrecognized current mode: ${current}` };
     const steps = (ti - ci + CYCLE.length) % CYCLE.length;
     for (let i = 0; i < steps; i++) {
-      run("tmux", "send-keys", "-t", this.tmuxWindow, "BTab");
+      tmux.key(this.tmuxWindow,"BTab");
       await sleep(120); // footer needs a beat to repaint between cycles
     }
     await sleep(250);
@@ -898,7 +899,7 @@ export class Session {
     // us from blocking — but check #submitTimer explicitly so a racy box read can't
     // let abort no-op and leave the pending Enter to submit the message the user
     // just tried to stop (it falls through to #clearSubmitTimer below, cancelling it).
-    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    const pane = tmux.capture(this.tmuxWindow);
     if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && pane.ok &&
         paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
       return { ok: true };
@@ -914,7 +915,7 @@ export class Session {
     // Cancel a just-typed message's pending submit Enter — abort means "stop", so
     // it must NOT fire after the Escape (which would re-submit into the cleared box).
     this.#clearSubmitTimer();
-    run("tmux", "send-keys", "-t", this.tmuxWindow, "Escape");
+    tmux.key(this.tmuxWindow,"Escape");
     this.#setThinking(false);
     // Interrupting mid-tool means Claude won't write that tool's result — close
     // any open tools so their cards don't spin forever.
@@ -948,7 +949,7 @@ export class Session {
     // "git commit<Enter>" lands as those exact characters instead of a
     // command + keypress. Used by the pane's plain-text input toggle.
     if (opts?.literal) {
-      const ok = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", script).ok;
+      const ok = tmux.literal(this.tmuxWindow,script).ok;
       return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
     }
     // parse the token language → tmux key-name / literal segments (toTmux
@@ -965,8 +966,8 @@ export class Session {
     }
     for (const seg of segments) {
       const ok = seg.type === "keys"
-        ? run("tmux", "send-keys", "-t", this.tmuxWindow, ...seg.names).ok
-        : run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", seg.text).ok;
+        ? tmux.key(this.tmuxWindow,...seg.names).ok
+        : tmux.literal(this.tmuxWindow,seg.text).ok;
       if (!ok) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
     }
     return { ok: true, segments: segments.length };
@@ -975,10 +976,7 @@ export class Session {
   pane(color = false): { ok: true; text: string } {
     // -e includes ANSI SGR escape sequences (colors, bold, …) so the app can
     // render the TUI in color; without it the capture is plain text.
-    const args = color
-      ? ["capture-pane", "-p", "-e", "-t", this.tmuxWindow]
-      : ["capture-pane", "-p", "-t", this.tmuxWindow];
-    return { ok: true, text: run("tmux", ...args).out };
+    return { ok: true, text: tmux.capture(this.tmuxWindow, { color }).out };
   }
 
   /**
@@ -992,7 +990,7 @@ export class Session {
     const c = Math.max(20, Math.min(500, Math.floor(cols)));
     const r = Math.max(10, Math.min(200, Math.floor(rows)));
     if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false };
-    return { ok: run("tmux", "resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)).ok };
+    return { ok: tmux.runSync("resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)).ok };
   }
 
   transcript(): { lines: unknown[] } {
@@ -1170,8 +1168,8 @@ export class Session {
     // it can't be appended to our message and submitted as one garbled line.
     // Ctrl+U is a no-op on an empty box — unlike Ctrl+C, which arms Claude's
     // "press again to exit". Keeping the echo equal to `typed` so dedup matches.
-    run("tmux", "send-keys", "-t", this.tmuxWindow, "C-u");
-    const r = run("tmux", "send-keys", "-l", "-t", this.tmuxWindow, "--", typed);
+    tmux.key(this.tmuxWindow,"C-u");
+    const r = tmux.literal(this.tmuxWindow,typed);
     if (!r.ok) {
       if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
@@ -1209,7 +1207,7 @@ export class Session {
       if (this.status === "ended") return;
       if (this.#turn) return;                                    // a turn is already in flight
       if (!target || this.#dispatchInFlight !== target) return;  // require the same dispatch still in flight
-      run("tmux", "send-keys", "-t", this.tmuxWindow, "Enter");
+      tmux.key(this.tmuxWindow,"Enter");
       if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
       this.#setThinking(true);
     }, ENTER_SUBMIT_DELAY_MS);
@@ -1257,7 +1255,7 @@ export class Session {
         this.#flushPrelaunch();
         return;
       }
-      const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+      const pane = tmux.capture(this.tmuxWindow);
       if (pane.ok && paneShowsReadyPrompt(pane.out)) {
         this.#promptPollActive = false;
         this.#flushPrelaunch();
@@ -1375,7 +1373,7 @@ export class Session {
   #pollThinking(): void {
     if (this.status === "ended") return;
     if (this.#relay) {
-      const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+      const pane = tmux.capture(this.tmuxWindow);
       if (pane.ok) {
         const working = paneShowsWorking(pane.out);
         if (working !== this.#thinking) this.#setThinking(working); // only on change
