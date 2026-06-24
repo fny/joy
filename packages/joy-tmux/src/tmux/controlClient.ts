@@ -81,9 +81,15 @@ export class TmuxControlClient {
   #proc: ChildProcess | null = null;
   #parser = new ControlParser();
   #buf = "";
-  #queue: Pending[] = [];        // FIFO of awaited commands (serial)
-  #ready = false;                // seen the initial attach block yet?
-  #preReady: Array<{ cmd: string; p: Pending }> = []; // commands issued before ready
+  // True one-active-command FIFO: at most ONE command is on the wire awaiting its
+  // %end/%error (#active); everything else waits in #writeQueue. tmux processes
+  // commands serially and emits %begin/%end in order, but writing them all at once
+  // would let a single lost/extra block mis-pair every later response — so we write
+  // the next only after the current one resolves. Commands issued before the attach
+  // block (or while reconnecting) simply wait in the queue until #ready.
+  #writeQueue: Array<{ cmd: string; p: Pending }> = [];
+  #active: Pending | null = null; // the single command currently on the wire
+  #ready = false;                 // seen the initial attach block yet?
   #attempt = 0;
   #stopped = false;
 
@@ -131,30 +137,40 @@ export class TmuxControlClient {
   #handle(ev: ControlEvent): void {
     if (ev.type === "output") { this.#onOutput(ev.paneId); return; }
     if (ev.type === "exit") { this.#onExit(); return; }
-    // block-end: resolve the head pending command, or mark ready (the attach block).
-    const p = this.#queue.shift();
-    if (p) { p.resolve({ ok: ev.ok, out: ev.out, error: ev.ok ? undefined : ev.out }); return; }
+    // block-end: the response to the one active command, else the attach block.
+    const active = this.#active;
+    if (active) {
+      this.#active = null;
+      active.resolve({ ok: ev.ok, out: ev.out, error: ev.ok ? undefined : ev.out });
+      this.#pump();
+      return;
+    }
     if (!this.#ready) {
       this.#ready = true;
       this.#attempt = 0;
-      for (const { cmd, p: pp } of this.#preReady.splice(0)) this.#write(cmd, pp);
+      this.#pump(); // attach done → start draining anything queued meanwhile
     }
-    // else: an unsolicited block with nothing pending — ignore.
+    // else: an unsolicited block with nothing active — ignore.
   }
 
-  #write(cmd: string, p: Pending): void {
-    if (!this.#proc?.stdin?.writable) { p.resolve({ ok: false, out: "", error: "disconnected" }); return; }
-    this.#queue.push(p);
-    this.#proc.stdin.write(cmd + "\n");
+  // Write the next queued command iff nothing is in flight and we're attached.
+  #pump(): void {
+    if (this.#active || !this.#ready || this.#writeQueue.length === 0) return;
+    if (!this.#proc?.stdin?.writable) {
+      for (const { p } of this.#writeQueue.splice(0)) p.resolve({ ok: false, out: "", error: "disconnected" });
+      return;
+    }
+    const next = this.#writeQueue.shift()!;
+    this.#active = next.p;
+    this.#proc.stdin.write(next.cmd + "\n");
   }
 
-  /** Run a tmux command, await its framed response. Serialized FIFO; buffered until ready. */
+  /** Run a tmux command, await its framed response. One command on the wire at a time; buffered until ready. */
   command(cmd: string): Promise<TmuxResult> {
     if (this.#stopped) return Promise.resolve({ ok: false, out: "", error: "stopped" });
     return new Promise<TmuxResult>((resolve) => {
-      const p: Pending = { resolve };
-      if (!this.#ready) this.#preReady.push({ cmd, p });
-      else this.#write(cmd, p);
+      this.#writeQueue.push({ cmd, p: { resolve } });
+      this.#pump();
     });
   }
 
@@ -163,9 +179,9 @@ export class TmuxControlClient {
     this.#proc = null;
     proc?.removeAllListeners();
     this.#ready = false;
-    // Fail every in-flight + queued command so awaiters fall back instead of hanging.
-    for (const p of this.#queue.splice(0)) p.resolve({ ok: false, out: "", error: "disconnected" });
-    for (const { p } of this.#preReady.splice(0)) p.resolve({ ok: false, out: "", error: "disconnected" });
+    // Fail the in-flight + every queued command so awaiters fall back instead of hanging.
+    if (this.#active) { this.#active.resolve({ ok: false, out: "", error: "disconnected" }); this.#active = null; }
+    for (const { p } of this.#writeQueue.splice(0)) p.resolve({ ok: false, out: "", error: "disconnected" });
     this.#scheduleReconnect();
   }
 
@@ -184,7 +200,7 @@ export class TmuxControlClient {
     proc?.removeAllListeners();
     try { proc?.stdin?.end(); } catch { /* ignore */ }
     try { proc?.kill(); } catch { /* ignore */ }
-    for (const p of this.#queue.splice(0)) p.resolve({ ok: false, out: "", error: "stopped" });
-    for (const { p } of this.#preReady.splice(0)) p.resolve({ ok: false, out: "", error: "stopped" });
+    if (this.#active) { this.#active.resolve({ ok: false, out: "", error: "stopped" }); this.#active = null; }
+    for (const { p } of this.#writeQueue.splice(0)) p.resolve({ ok: false, out: "", error: "stopped" });
   }
 }

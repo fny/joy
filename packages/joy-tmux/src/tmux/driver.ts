@@ -31,6 +31,8 @@ export class TmuxDriver {
   #snapshots = new Map<string, { text: string; ts: number }>();
   #targets = new Set<string>();
   #outputTimer: ReturnType<typeof setTimeout> | null = null;
+  #refreshInFlight = false;   // a sweep is currently running
+  #refreshRequested = false;  // another %output/tick landed mid-sweep → run once more
 
   constructor() {
     if (CONTROL) {
@@ -112,12 +114,25 @@ export class TmuxDriver {
   // Re-snapshot every tracked window over the connection (no spawn). Phase 1 refreshes
   // ALL tracked windows on any %output (simple, correct; Phase 1.5 can map pane→window
   // to refresh only the one that changed). A window that's gone stops being tracked.
+  //
+  // Coalesced: the %output debounce and the 1s ticker both call this, and each sweep
+  // awaits N capture commands — so without a guard they'd interleave into 2N+ queued
+  // commands. At most ONE sweep runs; anything that fires mid-sweep sets a flag that
+  // triggers exactly one more sweep when the current finishes (so the final state is
+  // never missed, but bursts collapse to a single trailing refresh).
   async #refreshTracked(): Promise<void> {
-    if (!this.#client?.connected) return;
-    for (const target of [...this.#targets]) {
-      const r = await this.#client.command(`capture-pane -p -t ${tmuxArg(target)}`);
-      if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
-      else if (r.error && /can't find/i.test(r.error)) { this.#targets.delete(target); this.#snapshots.delete(target); }
+    if (this.#refreshInFlight) { this.#refreshRequested = true; return; }
+    this.#refreshInFlight = true;
+    try {
+      if (!this.#client?.connected) return;
+      for (const target of [...this.#targets]) {
+        const r = await this.#client.command(`capture-pane -p -t ${tmuxArg(target)}`);
+        if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
+        else if (r.error && /can't find/i.test(r.error)) { this.#targets.delete(target); this.#snapshots.delete(target); }
+      }
+    } finally {
+      this.#refreshInFlight = false;
+      if (this.#refreshRequested) { this.#refreshRequested = false; void this.#refreshTracked(); }
     }
   }
 }
