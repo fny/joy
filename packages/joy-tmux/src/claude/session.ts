@@ -57,6 +57,13 @@ const STARTUP_DEADLINE_ATTEMPTS = 30; // ~21s — long enough for cold start / -
 // timeout (requeue + pause), not a blind re-Enter.
 const ENTER_SUBMIT_DELAY_MS = 350;
 
+// After an abort (Escape interrupts the turn), wait this long before clearing any
+// text left in the input box. Escape does NOT clear the box (verified live) — e.g.
+// text the user typed while Claude was generating stays put — so we follow up with
+// a guarded C-c once the interrupt has settled and the ready prompt has repainted
+// (paneInputText needs the box drawn to read it). Cancelled if a new send starts.
+const ABORT_CLEAR_DELAY_MS = 400;
+
 // 500-error auto-retry backoff (seconds): paired ramp, then STOP. 14 attempts,
 // ~63 min total. When a turn ENDS with an unresolved 5xx (Claude gave up after
 // its own internal retries), joy-tmux re-sends the failed turn on this schedule
@@ -293,8 +300,12 @@ export class Session {
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
   // into the pane (re-submitting an aborted message, or submitting into a turn).
   #submitTimer: ReturnType<typeof setTimeout> | null = null;
-  // Count of consecutive clear-the-input attempts for the current drain. Escalates
-  // C-u → C-c across ticks, then pauses. Reset once the box is empty / on dispatch.
+  // Pending delayed clear of leftover input-box text after an abort (see
+  // ABORT_CLEAR_DELAY_MS). Cancelled when a new send starts (so it can't C-c the
+  // freshly-typed message) or on teardown.
+  #abortClearTimer: ReturnType<typeof setTimeout> | null = null;
+  // Count of clear-the-input attempts for the current drain: one guarded C-c, then
+  // pause. Reset once the box is empty / on dispatch / when the pane isn't ready.
   #clearAttempts = 0;
   // Set when a dispatch failed to land (no turn started) or the input box is
   // dirty and unclearable — stops auto-draining so we don't shovel messages into
@@ -511,6 +522,7 @@ export class Session {
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#clearSubmitTimer();
+    if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
     this.#queue = [];
     this.#dispatchInFlight = null;
 
@@ -697,12 +709,27 @@ export class Session {
     void this.#relay?.updateQueue(state);
   }
 
-  // Input-clearing escalation: a few C-u (kill-line) attempts, then ONE C-c
-  // (which clears a multi-line box C-u won't), then pause. C-c is sent at most
-  // once and ONLY while the box is confirmed non-empty, so it can never land on
-  // an empty box (where it would arm claude's "press again to exit").
-  static readonly #CLEAR_CTRL_C_AT = 5;
-  static readonly #CLEAR_MAX_ATTEMPTS = 5;
+  /**
+   * Clear the live input box IF it currently holds real text — ONE guarded `C-c`.
+   * `C-c` reliably clears even a wrapped multi-line box (which `C-u` can't), but on
+   * an EMPTY box it arms claude's "press again to exit" — so this re-captures and
+   * fires ONLY when the box is confirmed non-empty (real text, not the empty/ghost
+   * state). Single-shot by design: callers must never blind-retry a 2nd `C-c` (it
+   * could land on a now-empty box). `idleOnly` adds the dispatch-gate guards (no
+   * open turn / in-flight dispatch / generating) — the abort path passes false
+   * because it intentionally clears right after interrupting a turn. Returns true
+   * iff a `C-c` was sent.
+   */
+  #clearInputIfDirty(idleOnly: boolean): boolean {
+    if (idleOnly && (this.#turn || this.#dispatchInFlight)) return false;
+    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    if (!pane.ok) return false;
+    if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return false;
+    const box = paneInputText(pane.out);
+    if (box === "" || box === null) return false; // empty / no box → nothing to clear (never C-c empty)
+    run("tmux", "send-keys", "-t", this.tmuxWindow, "C-c");
+    return true;
+  }
 
   /**
    * Dispatch the head of the queue IF Claude is genuinely idle AND the input box
@@ -744,36 +771,24 @@ export class Session {
       return;
     }
 
-    // REQUIRE an empty box. If there's stuck text, clear it (escalating C-u →
-    // C-c) and re-check next tick. After the budget, pause as input_dirty rather
-    // than typing on top of it.
+    // REQUIRE an empty box (clear-before-send). Stuck text → one guarded C-c
+    // (#clearInputIfDirty re-captures + only fires on a confirmed non-empty box),
+    // then re-check next tick: if it cleared we dispatch; if it's STILL dirty we
+    // pause as input_dirty rather than send a 2nd C-c (which could hit a now-empty
+    // box and arm exit) or type on top of it.
     const inputText = paneInputText(pane.out);
     if (inputText !== "" && inputText !== null) {
-      this.#clearAttempts += 1;
-      if (this.#clearAttempts > Session.#CLEAR_MAX_ATTEMPTS) {
+      // If we already sent the one C-c last tick and it's STILL dirty, pause —
+      // don't send a 2nd C-c (could hit a now-empty box and arm exit) or type on
+      // top. Count the attempt ONLY when a C-c actually went out: if the helper
+      // declines (a race cleared the box / changed state) we must re-evaluate next
+      // tick, not burn the single allowance and pause without ever clearing.
+      if (this.#clearAttempts >= 1) {
         process.stderr.write(`[queue] input box dirty + unclearable for ${this.id} — paused\n`);
         this.#pauseDispatch("input_dirty");
         return;
       }
-      if (this.#clearAttempts >= Session.#CLEAR_CTRL_C_AT) {
-        // The ONE C-c attempt. Belt-and-suspenders: re-capture immediately before
-        // sending it and bail unless the box is STILL non-empty AND we're still
-        // idle (a human or Claude may have cleared it / started a turn since the
-        // top-of-fn capture). C-c on an empty box arms claude's "press again to
-        // exit", so this guarantees it only ever lands on real stuck text.
-        const fresh = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
-        const freshText = fresh.ok ? paneInputText(fresh.out) : null;
-        if (!fresh.ok || this.#turn || this.#dispatchInFlight ||
-            paneShowsGenerating(fresh.out) || !paneShowsReadyPrompt(fresh.out) ||
-            freshText === "" || freshText === null) {
-          this.#clearAttempts = 0; // conditions changed — re-evaluate from scratch
-          this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 200);
-          return;
-        }
-        run("tmux", "send-keys", "-t", this.tmuxWindow, "C-c");
-      } else {
-        run("tmux", "send-keys", "-t", this.tmuxWindow, "C-u");
-      }
+      if (this.#clearInputIfDirty(true)) this.#clearAttempts += 1; // count only a real C-c
       this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, 200);
       return;
     }
@@ -869,6 +884,25 @@ export class Session {
 
   /** Escape → Claude Code interactive interprets as "interrupt generation". */
   abort(): { ok: true } {
+    // Block abort only when the session is unambiguously IDLE: the pane shows an
+    // EMPTY ready box AND isn't generating, and the daemon has no open turn /
+    // in-flight dispatch. The empty-box requirement is what makes this robust: a
+    // turn that's thinking/working either shows "esc to interrupt" (empty box) OR
+    // has text in the box — so it never reads as empty+not-generating. (Neither
+    // #turn — which lags the turn start — nor "esc to interrupt" — which the box
+    // text HIDES, verified — is reliable on its own.) We bias toward NOT blocking:
+    // a stray Escape on an idle session is a harmless no-op (Escape doesn't clear
+    // the box), whereas a wrong block means "Stop did nothing" — the worse failure.
+    // #submitTimer too: during the ~350ms delayed-submit window the box holds the
+    // just-typed (not-yet-submitted) message, so the empty-box test already keeps
+    // us from blocking — but check #submitTimer explicitly so a racy box read can't
+    // let abort no-op and leave the pending Enter to submit the message the user
+    // just tried to stop (it falls through to #clearSubmitTimer below, cancelling it).
+    const pane = run("tmux", "capture-pane", "-p", "-t", this.tmuxWindow);
+    if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && pane.ok &&
+        paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
+      return { ok: true };
+    }
     // Abort also cancels an in-progress 500 auto-retry (pressing abort means
     // "stop trying"), and disarms a pending retry so the next turn-end won't
     // start one.
@@ -885,6 +919,15 @@ export class Session {
     // Interrupting mid-tool means Claude won't write that tool's result — close
     // any open tools so their cards don't spin forever.
     this.#closeOpenTools();
+    // Clear after abort: Escape interrupts but does NOT clear the box (verified), so
+    // anything typed while Claude was generating lingers. Once the interrupt settles
+    // and the ready prompt repaints, drop it with one guarded C-c. Cancelled if a
+    // new send starts first (so it can't C-c the freshly-typed message).
+    if (this.#abortClearTimer) clearTimeout(this.#abortClearTimer);
+    this.#abortClearTimer = setTimeout(() => {
+      this.#abortClearTimer = null;
+      if (this.status !== "ended") this.#clearInputIfDirty(false);
+    }, ABORT_CLEAR_DELAY_MS);
     return { ok: true };
   }
 
@@ -898,6 +941,9 @@ export class Session {
    * doesn't interpret them.
    */
   sendRawKeys(script: string, opts?: { literal?: boolean }): { ok: boolean; segments: number; error?: string } {
+    // A raw intervention may type fresh text into the box — cancel a pending
+    // abort-clear so its delayed C-c can't wipe it (same reason #typeIntoTmux does).
+    if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
     // Literal mode: type the string verbatim, no token parsing — so
     // "git commit<Enter>" lands as those exact characters instead of a
     // command + keypress. Used by the pane's plain-text input toggle.
@@ -1095,6 +1141,9 @@ export class Session {
 
   /** Type a message into the pane + record receipt + bump thinking. */
   #typeIntoTmux(text: string, opts: SendOptions): void {
+    // A new send supersedes any pending abort-clear: cancel it so its C-c can't
+    // fire mid-type and wipe the message we're about to send.
+    if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
     const delivery = this.#ensureDelivery();
     // Commands (`!bash`, `/slash`) never produce a user-text transcript entry —
     // their synthetic wrappers are suppressed — so they must NOT go on the
