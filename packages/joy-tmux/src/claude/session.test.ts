@@ -1,5 +1,13 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch } from "./session";
+
+test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
+  expect(flattenForMatch("a\nb")).toBe("a b");
+  expect(flattenForMatch("a\r\nb")).toBe("a b");
+  expect(flattenForMatch("a\rb")).toBe("a b");
+  expect(flattenForMatch("line1\nline2\nline3")).toBe("line1 line2 line3");
+  expect(flattenForMatch("no newlines")).toBe("no newlines");
+});
 
 test("parseJoyCommand: /steer splits name + args", () => {
   expect(parseJoyCommand("/steer while you're at it do X")).toEqual({ name: "steer", args: "while you're at it do X" });
