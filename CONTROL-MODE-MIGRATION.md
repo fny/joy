@@ -1,6 +1,11 @@
 # joy-tmux → tmux control mode (`tmux -C`) migration
 
-Designed with codex (gpt-5.5 xhigh). Goal: replace the 33 per-call `spawnSync`
+**STATUS: COMPLETE** (Phases 0-4). Every steady-state tmux interaction goes over one
+persistent `tmux -C` connection per server; spawn remains only as the disconnected
+fallback and for four bootstrap/teardown ops that can't use the connection. See the
+phased section below for the per-phase commits.
+
+Designed + reviewed with codex (gpt-5.5 xhigh). Goal: replace the per-call `spawnSync`
 `run("tmux", …)` invocations with **one persistent control-mode connection per
 tmux server**, to kill the ~8ms-per-call spawn + event-loop blocking and replace
 `#pollThinking`'s 3s poll with `%output` events. **UX is unchanged** (same app,
@@ -97,24 +102,39 @@ interleaved, `capture-pane -p` + `send-keys` work over the connection.
     abort+clear / status all round-trip over control mode; no client errors. Re-verified
     flag-on after 1d end-to-end (dispatch → reply, abort → clean box, fresh-window
     capture; zero control errors). Flag-off = spawn path unchanged, covered by tests.
-- **Phase 2** — Migrate safe non-literal commands: `resize-window`, `display-message`,
-  `kill-window`. (Infrequent — low value.)
-- **Phase 3** — Migrate `send-keys` after a command-quoting test suite; keep the raw
-  `send-keys -l` spawn fallback until confident. (The frequent typing path; the literal
-  message text is the real quoting risk.) Approach (codex): one `tmuxCommand(args: string[])`
-  serializer that quotes argv→command-line in ONE place, with a test corpus of nasty
-  literals before any call site switches — empty, spaces, embedded newlines, single/double
-  quotes, backslash, `$`/backtick, `;`, `#{…}` format-text, leading `-`, `%begin`/`%end`-
-  looking text, Unicode/emoji, control chars, very long, trailing backslash/quote.
-- **Phase 4** — Lifecycle ops (`new-session`/`new-window`/`has-session`/…). Rare; no
-  rush; can stay on spawn indefinitely.
+- **Phases 2-4 — DONE** (`3c01b3ce` port, `2e02d1e2` hardening). Every steady-state tmux
+  op now goes over control mode; spawn remains only as the disconnected fallback and for
+  the bootstrap/teardown that can't use the connection.
+  - **Serializer** (`src/tmux/serialize.ts`) — `tmuxCommand(args)` quotes argv→command
+    line: single-quote (`'\''`) everything that isn't a safe bareword, reject raw
+    `\n`/`\r`/NUL, callers insert `--` before user positionals (quoting doesn't stop
+    option parsing). 22 unit tests + an empirical round-trip through a real `tmux -C` into
+    a `cat` pane (`$HOME`/`;`/backtick/`#{}`/quotes/unicode land verbatim, none executed).
+  - **Phase 3 — send-keys.** Driver `key()`/`literal()` are async via `commandOnce()` (the
+    NON-IDEMPOTENT no-retry policy: control only when connected at entry, never a spawn
+    retry after a control attempt — replaying a keystroke could double-type). `#typeIntoTmux`
+    /`sendRawKeys`/`resize` are async with awaited writes + rollback; the submit timer awaits
+    the Enter (then re-validates) before mirroring; fire-and-forget writes are `void`-ed.
+  - **Phase 2 — resize/display/kill.** Generic idempotent `command(args)` (control when
+    connected, spawn fallback on any failure).
+  - **Phase 4 — lifecycle.** `new-window` (via `commandOnce` — non-idempotent), `set-hook`,
+    `list-windows`, `display-message` routed through the driver. `has-session`/`new-session`/
+    `kill-session`/`recover()`'s startup scan stay spawn (`runSync`) — they bracket the
+    connection's lifetime (create/destroy the very session it attaches to, or run before
+    attach), so they inherently can't use it.
+  - **Control client** is now RESOLVE-ONLY: `#pump` try/catch + a stdin `error` listener
+    funnel to `#onExit` (guarded against double-reconnect), so a fire-and-forget
+    `void tmux.key(...)` can't crash or leak clients.
+  - Verified flag-on live: session creation (the heavy-quote claude launch typed over
+    control), dispatch→reply, special-char raw keys verbatim, abort, resize, kill — one
+    stable control client, zero errors. Flag-off spawn path verified end-to-end.
 
-### Scope decision (codex)
-**Phase 1 (+1d) is the recommended complete state — stop here.** The scale win was
-removing the per-poll/per-read spawns (now one persistent connection + `%output`); the
-remaining spawns are infrequent typing/lifecycle ops where spawn cost is negligible and
-quoting risk is highest. Phases 2–4 are opportunistic, not required. Leaving `send-keys`
-on spawn is the right tradeoff.
+### Scope outcome
+The port is **complete** — control mode is the path for all steady-state interaction. The
+only spawns left are (a) the disconnected fallback inside the driver and (b) the four
+bootstrap/teardown ops above, which can't go through a connection to the session they
+create or destroy. Non-idempotent writes (keystrokes, `new-window`) never spawn-retry
+after a control attempt; idempotent ops (capture/resize/display/kill/hook) do.
 
 ## Status / notes
 - Flag default OFF; turn on with `JOY_TMUX_CONTROL=1`. Soaking on the harness.

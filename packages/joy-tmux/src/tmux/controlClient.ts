@@ -172,9 +172,14 @@ export class TmuxControlClient {
     } catch {
       // The write threw (EPIPE on a dying pipe). Resolve this command as disconnected
       // so command() stays RESOLVE-ONLY — a fire-and-forget `void tmux.key(...)` must
-      // never surface an unhandledRejection. onExit will fire and drain the rest.
+      // never surface an unhandledRejection — THEN treat it as a disconnect directly:
+      // a sync write throw may not be followed by a stdin/proc 'error' event, so we
+      // can't rely on that to drain the queue + reconnect, or queued commands would
+      // hang. #onExit fails the rest and schedules the reconnect (its guard makes the
+      // later real exit event a no-op).
       this.#active = null;
       next.p.resolve({ ok: false, out: "", error: "disconnected" });
+      this.#onExit();
     }
   }
 
@@ -195,6 +200,11 @@ export class TmuxControlClient {
     this.#proc = null;
     proc.removeAllListeners();
     proc.stdin?.removeAllListeners();
+    // Kill the abandoned client. On the normal exit path it's already dead (no-op);
+    // on the SYNTHETIC path (a sync write threw but the process may still be alive)
+    // this stops the old `tmux -C` from lingering as an orphan.
+    try { proc.stdin?.destroy(); } catch { /* ignore */ }
+    try { proc.kill(); } catch { /* ignore */ }
     this.#ready = false;
     // Fail the in-flight + every queued command so awaiters fall back instead of hanging.
     if (this.#active) { this.#active.resolve({ ok: false, out: "", error: "disconnected" }); this.#active = null; }
