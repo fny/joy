@@ -1,5 +1,29 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand } from "./session";
+
+test("parseJoyCommand: /steer splits name + args", () => {
+  expect(parseJoyCommand("/steer while you're at it do X")).toEqual({ name: "steer", args: "while you're at it do X" });
+});
+test("parseJoyCommand: /title splits name + args", () => {
+  expect(parseJoyCommand("/title My Session Name")).toEqual({ name: "title", args: "My Session Name" });
+});
+test("parseJoyCommand: name is lowercased, args keep their case", () => {
+  expect(parseJoyCommand("/Steer DO This")).toEqual({ name: "steer", args: "DO This" });
+});
+test("parseJoyCommand: bare /steer has empty args", () => {
+  expect(parseJoyCommand("/steer")).toEqual({ name: "steer", args: "" });
+});
+test("parseJoyCommand: a NON-joy slash command passes through (null)", () => {
+  expect(parseJoyCommand("/compact")).toBeNull();       // Claude's own command
+  expect(parseJoyCommand("/clear extra")).toBeNull();   // Claude's own command
+  expect(parseJoyCommand("/usr/local/bin")).toBeNull(); // not a joy command name
+  expect(parseJoyCommand("//steer x")).toBeNull();      // double slash is not the syntax
+});
+test("parseJoyCommand: plain text / mid-text slashes are not commands", () => {
+  expect(parseJoyCommand("hello /steer is cool")).toBeNull();
+  expect(parseJoyCommand("see http://x")).toBeNull();
+  expect(parseJoyCommand("")).toBeNull();
+});
 
 test("ready: bare input prompt", () => {
   expect(paneShowsReadyPrompt("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
