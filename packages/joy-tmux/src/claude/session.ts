@@ -971,9 +971,11 @@ export class Session {
    * doesn't interpret them.
    */
   async sendRawKeys(script: string, opts?: { literal?: boolean }): Promise<{ ok: boolean; segments: number; error?: string }> {
-    // A raw intervention may type fresh text into the box — cancel a pending
-    // abort-clear so its delayed C-c can't wipe it (same reason #typeIntoTmux does).
-    if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
+    // NB: raw keys are an escape hatch for manual intervention, NOT a primary input
+    // path, so we deliberately DON'T coordinate them with the dispatch/abort-clear
+    // machinery — if a manual poke lands in the ~400ms after an abort and gets cleared,
+    // whoever's hands-on the pane can see it and redo it. (The primary queued path does
+    // cancel the abort-clear, in #typeIntoTmux.)
     // Literal mode: type the string verbatim, no token parsing — so
     // "git commit<Enter>" lands as those exact characters instead of a
     // command + keypress. Used by the pane's plain-text input toggle.
