@@ -128,6 +128,8 @@ export interface SessionRecord {
   end_reason?: string;
   transcript_path?: string;
   relay_session_id?: string;
+  /** Conversation title (Claude's ai-title or a manual /title), aka the relay summary. */
+  summary?: string;
 }
 
 export interface ChatMessage {
@@ -154,6 +156,22 @@ export interface SendOptions {
   source: DeliverySource;
   /** Mirror the message to the relay so the app's chat history shows it (web/rpc sends). */
   mirrorToRelay: boolean;
+}
+
+/** Slash commands joy handles itself, before the text reaches Claude (`/steer`, `/title`). */
+const JOY_COMMANDS = new Set(["steer", "title"]);
+
+/**
+ * Parse a joy-owned slash command the daemon intercepts BEFORE the text reaches Claude:
+ * `/<name> <args>`. Only the names in JOY_COMMANDS are ours — every OTHER slash command
+ * (`/compact`, project commands, …) returns null and passes straight through to Claude
+ * untouched. Returns the lowercased name + remaining args, or null.
+ */
+export function parseJoyCommand(text: string): { name: string; args: string } | null {
+  const m = /^\/([a-zA-Z][\w-]*)[ \t]*([\s\S]*)$/.exec(text);
+  if (!m) return null;
+  const name = m[1].toLowerCase();
+  return JOY_COMMANDS.has(name) ? { name, args: m[2] } : null;
 }
 
 /** Slim wire shape pushed to the app (joy__queue) and returned by queue ops. */
@@ -299,6 +317,9 @@ export class Session {
   // ABORT_CLEAR_DELAY_MS). Cancelled when a new send starts (so it can't C-c the
   // freshly-typed message) or on teardown.
   #abortClearTimer: ReturnType<typeof setTimeout> | null = null;
+  // Pending delayed-Enter for a /steer send — separate from #submitTimer so steering
+  // (which submits mid-turn) and the dispatch submit don't cancel each other.
+  #steerSubmitTimer: ReturnType<typeof setTimeout> | null = null;
   // Count of clear-the-input attempts for the current drain: one guarded C-c, then
   // pause. Reset once the box is empty / on dispatch / when the pane isn't ready.
   #clearAttempts = 0;
@@ -356,6 +377,7 @@ export class Session {
       transcript_path: this.transcriptPath,
       relay_session_id: this.relaySessionId,
       current_model: this.currentModel,
+      summary: this.summary,
     };
   }
 
@@ -523,6 +545,7 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#clearSubmitTimer();
     if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
+    if (this.#steerSubmitTimer) { clearTimeout(this.#steerSubmitTimer); this.#steerSubmitTimer = null; }
     this.#queue = [];
     this.#dispatchInFlight = null;
 
@@ -638,6 +661,26 @@ export class Session {
    * {mirrorToRelay:true,visible:false}; 5xx retry passes {visible:false}.
    */
   enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
+    // Joy-owned commands are handled HERE — before the text is queued or reaches Claude.
+    //   /steer <msg>  type <msg> straight into the pane and submit it now, BYPASSING the
+    //                 queue + its idle gate, so it lands immediately (mid-turn if a turn
+    //                 is running) instead of waiting behind the queue.
+    //   /title <text> set the session's conversation title (the summary the app shows).
+    // None are queued or sent to Claude; we return a synthetic record so queue-add
+    // callers still get an id.
+    const cmd = parseJoyCommand(text);
+    if (cmd) {
+      if (cmd.name === "steer" && cmd.args.trim()) {
+        void this.#steer(cmd.args, {
+          seq: opts?.seq,
+          source: opts?.source ?? "rpc",
+          mirrorToRelay: opts?.mirrorToRelay ?? true,
+        });
+      } else if (cmd.name === "title") {
+        this.#setTitle(cmd.args);
+      }
+      return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
+    }
     const item: QueuedItem = {
       id: crypto.randomUUID().slice(0, 8),
       text,
@@ -1224,6 +1267,56 @@ export class Session {
     // chat doesn't show "sent" before the pane has actually submitted.
     this.#armSubmit({ text, mirrorToRelay: opts.mirrorToRelay });
     if (!this.#tailer && this.status !== "ended") this.pollForTranscript();
+  }
+
+  /**
+   * /steer: type a message straight into the pane and submit it NOW, bypassing the
+   * dispatch queue and its empty-box/idle gate — so it reaches Claude immediately, even
+   * while a turn is in flight (Claude takes it as its next input). Unlike #armSubmit this
+   * submits WITHOUT the #turn / #dispatchInFlight guards — submitting mid-turn is the
+   * whole point. Records a receipt so the transcript echo is deduped (not re-mirrored),
+   * and mirrors to the relay once the Enter actually lands.
+   */
+  async #steer(text: string, opts: SendOptions): Promise<void> {
+    if (this.status === "ended") return;
+    const typed = text.replace(/\n/g, " "); // send-keys can't type newlines (see #typeIntoTmux)
+    const delivery = this.#ensureDelivery();
+    const tracked = !!delivery && !!this.relaySessionId;
+    if (tracked) {
+      delivery!.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
+      recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
+    }
+    // Type now — C-u drops any half-entered text, then the message. No empty-box gate:
+    // steering deliberately types alongside an in-flight turn. Awaited + rolled back on
+    // failure, like #typeIntoTmux.
+    const cu = await tmux.key(this.tmuxWindow, "C-u");
+    if (!cu.ok) { if (tracked) delivery!.pending.pop(); return; }
+    const r = await tmux.literal(this.tmuxWindow, typed);
+    if (!r.ok) { if (tracked) delivery!.pending.pop(); return; }
+    // Submit after the settle delay (paste-detection swallows an immediate Enter).
+    // Coalesce rapid steers; mirror only once the Enter has gone out.
+    if (this.#steerSubmitTimer) clearTimeout(this.#steerSubmitTimer);
+    this.#steerSubmitTimer = setTimeout(async () => {
+      this.#steerSubmitTimer = null;
+      if (this.status === "ended") return;
+      const e = await tmux.key(this.tmuxWindow, "Enter");
+      if (e.ok && opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
+    }, ENTER_SUBMIT_DELAY_MS);
+  }
+
+  /**
+   * /title <text>: set the session's conversation title directly. Titles are the relay
+   * "summary" (normally Claude's generated ai-title); this overrides it with the user's
+   * text and pushes it the same way — relay summary + a local session_update broadcast —
+   * so the app shows it instead of "New Chat". A later ai-title entry can still overwrite
+   * it (same as renaming in Claude). Bare `/title` (no text) is a no-op.
+   */
+  #setTitle(title: string): void {
+    const t = title.trim();
+    if (!t) return;
+    this.summary = t;
+    void this.#relay?.updateSummary(t);
+    this.#deps.broadcast("session_update", this.toJSON());
   }
 
   /** Cancel a pending delayed-Enter (abort/kill/confirm/timeout/mismatch). */
