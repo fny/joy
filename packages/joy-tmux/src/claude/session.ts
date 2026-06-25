@@ -1030,10 +1030,12 @@ export class Session {
     return { ok: true, segments: segments.length };
   }
 
-  pane(color = false): { ok: true; text: string } {
+  async pane(color = false): Promise<{ ok: true; text: string }> {
     // -e includes ANSI SGR escape sequences (colors, bold, …) so the app can
-    // render the TUI in color; without it the capture is plain text.
-    return { ok: true, text: tmux.capture(this.tmuxWindow, { color }).out };
+    // render the TUI in color; without it the capture is plain text. A FRESH read
+    // over control mode (colour stays uncached) — falls back to spawn while
+    // disconnected / flag-off.
+    return { ok: true, text: (await tmux.captureFresh(this.tmuxWindow, { color })).out };
   }
 
   /**
