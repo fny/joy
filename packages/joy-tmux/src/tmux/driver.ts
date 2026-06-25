@@ -63,24 +63,26 @@ export class TmuxDriver {
     return run("tmux", ...args);
   }
 
-  // ── Control-mode writes (NON-IDEMPOTENT keystrokes), spawn only when not connected ─
-  // A keystroke must never be replayed: if control drops AFTER a send-keys is on the
-  // wire we can't know whether it landed, so a spawn retry could DOUBLE-type. Policy:
-  // route to control ONLY when connected at call entry and return its result verbatim
-  // (no spawn fallback after a control attempt). Spawn ONLY when the flag is off or the
-  // client isn't connected — there, nothing was ever sent over control, so it's safe.
+  // ── Control-mode NON-IDEMPOTENT writes (keystrokes, new-window) ──────────────
+  // These must never be replayed: if control drops AFTER the command is on the wire we
+  // can't know whether it landed, so a spawn retry could DOUBLE-apply (double-type, or
+  // create a duplicate window). Policy: route to control ONLY when connected at call
+  // entry and return its result verbatim — NO spawn fallback after a control attempt.
+  // Spawn ONLY when the flag is off / not connected (nothing ever went over control,
+  // so it's safe). Callers MUST check .ok and not assume the write landed.
 
   /** Send one or more NAMED keys (e.g. "C-u", "Escape", "Enter", "BTab"). */
   async key(target: string, ...names: string[]): Promise<TmuxResult> {
-    return this.#sendKeys(["send-keys", "-t", target, "--", ...names]);
+    return this.commandOnce(["send-keys", "-t", target, "--", ...names]);
   }
 
   /** Send LITERAL text verbatim (send-keys -l --) — no key-name interpretation. */
   async literal(target: string, text: string): Promise<TmuxResult> {
-    return this.#sendKeys(["send-keys", "-l", "-t", target, "--", text]);
+    return this.commandOnce(["send-keys", "-l", "-t", target, "--", text]);
   }
 
-  async #sendKeys(args: string[]): Promise<TmuxResult> {
+  /** Run a NON-IDEMPOTENT tmux command (keystrokes, new-window) with the no-retry policy above. */
+  async commandOnce(args: string[]): Promise<TmuxResult> {
     if (this.#client?.connected) {
       let line: string;
       try { line = tmuxCommand(args); }

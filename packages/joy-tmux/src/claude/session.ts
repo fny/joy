@@ -1281,6 +1281,13 @@ export class Session {
       // Enter (disconnect) leaves it unsent; the 20s dispatch timeout surfaces it.
       const e = await tmux.key(this.tmuxWindow, "Enter");
       if (!e.ok) return;
+      // Re-validate AFTER the awaited Enter (it may have queued behind other control
+      // commands): a kill / dispatch-timeout / abort that flipped state mid-await must
+      // not let us publish stale "sent/thinking". (#turn can't have flipped from our
+      // own Enter yet — the turn isn't detected until claude writes turn-start — so
+      // this only catches an externally-changed state.)
+      const st: string = this.status; // re-read: it may have flipped to "ended" during the await
+      if (st === "ended" || this.#turn || !target || this.#dispatchInFlight !== target) return;
       if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
       this.#setThinking(true);
     }, ENTER_SUBMIT_DELAY_MS);
