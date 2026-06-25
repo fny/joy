@@ -136,10 +136,16 @@ export class TmuxDriver {
    * disconnect/error or when the flag is off.
    */
   async captureFresh(target: string, opts?: { color?: boolean }): Promise<TmuxResult> {
-    if (this.#client?.connected && !opts?.color) {
+    if (this.#client?.connected) {
       this.#targets.add(target);
-      const r = await this.#client.command(tmuxCommand(["capture-pane", "-p", "-t", target]));
-      if (r.ok) { this.#snapshots.set(target, { text: r.out, ts: nowMs() }); return r; }
+      // -e keeps ANSI for the app's colour pane view; that text must NOT pollute the
+      // plain-text snapshot cache (the watchers read plain), so colour reads go over
+      // control but stay UNcached. Plain reads update the cache as before.
+      const args = opts?.color
+        ? ["capture-pane", "-p", "-e", "-t", target]
+        : ["capture-pane", "-p", "-t", target];
+      const r = await this.#client.command(tmuxCommand(args));
+      if (r.ok) { if (!opts?.color) this.#snapshots.set(target, { text: r.out, ts: nowMs() }); return r; }
       // disconnect / %error → fall through to spawn
     }
     return this.capture(target, opts);
