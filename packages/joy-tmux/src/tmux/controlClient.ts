@@ -2,7 +2,7 @@
 // `tmux -C attach-session -t <session>` (pipes — NOT -CC, which needs a TTY),
 // parses the line protocol, serializes commands (FIFO, one outstanding), and
 // surfaces %output as a snapshot-invalidation signal. Reconnects with backoff on
-// EOF. Used as a private delegate of TmuxDriver behind JOY_TMUX_CONTROL.
+// EOF. Used as a private delegate of TmuxDriver (the default tmux transport).
 //
 // Protocol (verified live, tmux 3.4):
 //   %begin <seconds> <command-number> <flags>
