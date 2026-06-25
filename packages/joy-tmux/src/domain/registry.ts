@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, statSync } from "fs";
 import { join, basename, resolve } from "path";
 import { homedir } from "os";
 import { run } from "../tmux/shell";
+import { tmux } from "../tmux/driver";
 import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
@@ -262,14 +263,17 @@ export class SessionRegistry {
       }
     }
 
-    if (!run("tmux", "has-session", "-t", this.tmuxSession).ok) {
-      run("tmux", "new-session", "-d", "-s", this.tmuxSession, "-c", cwd);
+    // BOOTSTRAP — spawn, never control: has-session gates creation, new-session creates
+    // the very session the control client attaches to (chicken-and-egg), and this
+    // set-hook runs only when there's no session yet (so the client can't be connected).
+    if (!tmux.runSync("has-session", "-t", this.tmuxSession).ok) {
+      tmux.runSync("new-session", "-d", "-s", this.tmuxSession, "-c", cwd);
       // When a real terminal attaches, let it drive the window size (tmux's
       // default `latest` behavior). The app's resize-window flips windows to
       // `manual`; this hook hands control back on attach so the most recent
       // connector — app or terminal — owns the width. Filtered so the daemon's own
-      // control-mode client (Phase 1) does NOT count as an attach that resizes.
-      run("tmux", "set-hook", "-t", this.tmuxSession, "client-attached", CLIENT_ATTACHED_HOOK);
+      // control-mode client does NOT count as an attach that resizes.
+      tmux.runSync("set-hook", "-t", this.tmuxSession, "client-attached", CLIENT_ATTACHED_HOOK);
     }
 
     // Validate user-supplied fields to prevent shell injection via send-keys
@@ -351,19 +355,26 @@ export class SessionRegistry {
     const cmd = opts.continue
       ? `${primaryCmd} || ${[...envParts, "claude", ...buildFlags(false)].join(" ")}`
       : primaryCmd;
-    run("tmux", "new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd);
+    // STEADY STATE — control mode when the client is connected (spawn fallback while
+    // not). The session exists now, so new-window/resize/send-keys all target it over
+    // the live control connection; the first-ever session is the only one likely to
+    // fall back (its new-session above just ran, the client hasn't re-attached yet).
+    await tmux.command(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd]);
     // Pin a sane default size so the window doesn't inherit whatever terminal
     // last touched the session (could be 182+ cols). A viewing client drives
     // it afterwards via joy-resize. Set before launch so claude's TUI renders
     // at this width from the start.
-    run("tmux", "resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40");
+    await tmux.command(["resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40"]);
     // Replace the pane shell with a fresh login shell so it re-sources the
     // user's profile (.bashrc/.zshrc) — a default tmux pane only carries the
     // tmux server's frozen env, so without this a launch/restart wouldn't pick
     // up env-var changes. `exec` keeps the same PID, so PID discovery below is
     // unaffected. claude is sent after a beat to let the profile finish sourcing.
+    // (literal text + a named Enter — same as `send-keys "<cmd>" Enter`, but -l forces
+    // the text literal so a command that looks like a key name can't be misread.)
     const shell = process.env.SHELL || "/bin/bash";
-    run("tmux", "send-keys", "-t", tmuxWindow, `exec ${shell} -l`, "Enter");
+    await tmux.literal(tmuxWindow, `exec ${shell} -l`);
+    await tmux.key(tmuxWindow, "Enter");
 
     // Kick off the relay session creation NOW so its network round-trips
     // overlap the sleeps below instead of running after them.
@@ -376,12 +387,13 @@ export class SessionRegistry {
     // the session is marked detached below.)
     if (!opts.detached) {
       await sleep(900);
-      run("tmux", "send-keys", "-t", tmuxWindow, cmd, "Enter");
+      await tmux.literal(tmuxWindow, cmd);
+      await tmux.key(tmuxWindow, "Enter");
     }
 
     await sleep(400);
     const shellPid = parseInt(
-      run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out,
+      (await tmux.command(["display-message", "-t", tmuxWindow, "-p", "#{pane_pid}"])).out,
     );
     await sleep(800);
     let pid: number | undefined;
@@ -507,8 +519,9 @@ export class SessionRegistry {
       if (session.forceKill()) n++;
     }
     // Nuke the tmux session itself — removes the leftover base window and any
-    // untracked/orphaned windows in one shot.
-    run("tmux", "kill-session", "-t", this.tmuxSession);
+    // untracked/orphaned windows in one shot. Spawn (teardown of the very session the
+    // control client is attached to — killing it over the client would race its %exit).
+    tmux.runSync("kill-session", "-t", this.tmuxSession);
     process.stderr.write(`[killAll] archived ${n} sessions + killed tmux session ${this.tmuxSession}\n`);
     return n;
   }
@@ -516,7 +529,9 @@ export class SessionRegistry {
   // ── Recovery (joy-tmux restart with live tmux windows) ──────────────────────
 
   recover(): void {
-    const result = run("tmux", "list-windows", "-t", this.tmuxSession, "-F", "#{window_name}");
+    // Startup scan — spawn (runs before the control client is reliably attached; kept
+    // synchronous so daemon boot doesn't depend on the connection coming up first).
+    const result = tmux.runSync("list-windows", "-t", this.tmuxSession, "-F", "#{window_name}");
     if (!result.ok) return;
 
     for (const winName of result.out.split("\n").map(l => l.trim()).filter(Boolean)) {
@@ -529,11 +544,11 @@ export class SessionRegistry {
       // have cd'd inside the pane, and the drifted path would mis-key the dedup
       // guard / relay path / transcript lookup (BUG-15).
       const rec = loadWindowRecord(id);
-      const paneCwd = run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_current_path}").out.trim();
+      const paneCwd = tmux.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_current_path}").out.trim();
       const cwd = rec?.launchCwd || paneCwd;
       if (!cwd) continue;
 
-      const shellPid = parseInt(run("tmux", "display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out.trim());
+      const shellPid = parseInt(tmux.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out.trim());
       let pid: number | undefined;
       if (!isNaN(shellPid)) {
         const child = parseInt(run("pgrep", "-P", String(shellPid)).out.split("\n")[0]);
