@@ -1,7 +1,7 @@
 // Session: one Claude Code instance running in a tmux window, bridged to the
 // Happy relay. Owns ALL per-session state that used to be scattered across
 // eight parallel Maps in server.ts (relay session, transcript watcher, turn
-// state, delivery receipts, pending attachments, prelaunch message buffer).
+// state, delivery receipts, pending attachments).
 //
 // The two invariants this class exists to enforce:
 //   1. There is exactly ONE teardown path — end(reason). Every way a session
@@ -156,10 +156,6 @@ export interface SendOptions {
   mirrorToRelay: boolean;
 }
 
-interface BufferedMessage extends SendOptions {
-  text: string;
-}
-
 /** Slim wire shape pushed to the app (joy__queue) and returned by queue ops. */
 export interface QueuedMessage {
   id: string;
@@ -278,8 +274,6 @@ export class Session {
   // The most recent `!cmd` command, captured from <bash-input> so it can head
   // the bash-output card.
   #pendingBashCmd?: string;
-  #prelaunchBuffer: BufferedMessage[] = [];
-  #promptPollActive = false;
   #trustHandled = false;
 
   // ── Message queue ──────────────────────────────────────────────────────────
@@ -1271,58 +1265,6 @@ export class Session {
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
-  // VESTIGIAL: since sendText() now delegates to the verified dispatch queue (which
-  // drains from 'starting' once the pane shows an empty ready box), nothing fills
-  // #prelaunchBuffer anymore, so this is a no-op kept only as a safety net. Do NOT
-  // route new sends here — use enqueue()/the queue. (Slated for removal once the
-  // queue path has soaked.)
-  #flushPrelaunch(): void {
-    const buffered = this.#prelaunchBuffer;
-    this.#prelaunchBuffer = [];
-    for (const m of buffered) {
-      // Vestigial path (buffer is never filled); fire-and-forget the now-async type.
-      void this.#typeIntoTmux(m.text, m).catch((e) => {
-        process.stderr.write(`[prelaunch] flush failed for ${this.id}: ${e}\n`);
-      });
-    }
-  }
-
-  /**
-   * VESTIGIAL (see #flushPrelaunch): the verified dispatch queue now owns the
-   * brand-new-project bootstrap — #maybeDrainQueue drains from 'starting' once the
-   * pane shows an empty ready box, which is what types the first message and makes
-   * the transcript appear. Nothing fills #prelaunchBuffer anymore, so this poller
-   * is no longer started. Kept temporarily; do not add new callers.
-   *
-   * (Original purpose: the transcript JSONL only appears after Claude receives its
-   * first message, but buffered messages only flushed on the first transcript
-   * entry — so a fresh session would deadlock in 'starting' forever.)
-   */
-  #pollPromptReady(): void {
-    if (this.#promptPollActive) return;
-    this.#promptPollActive = true;
-    const tick = () => {
-      if (this.status === "ended" || this.#prelaunchBuffer.length === 0) {
-        this.#promptPollActive = false;
-        return;
-      }
-      if (this.status === "active") {
-        // Transcript entry beat us to it — its activation already flushed.
-        this.#promptPollActive = false;
-        this.#flushPrelaunch();
-        return;
-      }
-      const pane = tmux.captureCached(this.tmuxWindow);
-      if (pane.ok && paneShowsReadyPrompt(pane.out)) {
-        this.#promptPollActive = false;
-        this.#flushPrelaunch();
-        return;
-      }
-      setTimeout(tick, 700);
-    };
-    setTimeout(tick, 700);
-  }
-
   // ── Transcript watching ─────────────────────────────────────────────────────
 
   // M4: 120 attempts × 500ms = 60s window, enough for slow first-runs
@@ -1444,8 +1386,7 @@ export class Session {
   onTranscriptEntry(entry: Record<string, unknown>): void {
     const entryType = String(entry.type || "");
 
-    // First entry activates the session — Claude is now reading the pane,
-    // so flush any messages buffered during boot.
+    // First entry activates the session — Claude is now reading the pane.
     if (this.status === "starting") {
       const sid = String(entry.sessionId || "");
       if (sid) {
@@ -1456,7 +1397,6 @@ export class Session {
         // can re-attach the RIGHT transcript instead of the newest-mtime one.
         saveWindowRecord(this.id, { claudeSessionId: sid });
         this.#deps.broadcast("session_update", this.toJSON());
-        this.#flushPrelaunch();
       }
     }
 
