@@ -416,7 +416,7 @@ export class Session {
     if (pane.ok && /Yes, I trust this folder|Is this a project you (created|trust)/i.test(pane.out)) {
       // "1" selects "Yes, I trust this folder"; Enter confirms (harmless empty
       // submit if "1" already activated it).
-      tmux.key(this.tmuxWindow,"1", "Enter");
+      void tmux.key(this.tmuxWindow,"1", "Enter"); // fire-and-forget (sync watcher)
       this.#trustHandled = true;
       return;
     }
@@ -563,7 +563,7 @@ export class Session {
         // Keep the (retrying) promise so killSession can await the real result.
         this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
       }
-      tmux.runSync("kill-window", "-t", this.tmuxWindow);
+      void tmux.command(["kill-window", "-t", this.tmuxWindow]); // teardown, fire-and-forget
     }
 
     this.#deps.broadcast("session_update", this.toJSON());
@@ -603,7 +603,7 @@ export class Session {
     if (this.#deps.relayClient && relaySessionId) {
       this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
     }
-    tmux.runSync("kill-window", "-t", this.tmuxWindow);
+    void tmux.command(["kill-window", "-t", this.tmuxWindow]); // teardown, fire-and-forget
     this.endReason = "killed";
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
@@ -747,8 +747,8 @@ export class Session {
     if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return false;
     const box = paneInputText(pane.out);
     if (box === "" || box === null) return false; // empty / no box → nothing to clear (never C-c empty)
-    tmux.key(this.tmuxWindow, "C-c");
-    return true;
+    const cc = await tmux.key(this.tmuxWindow, "C-c");
+    return cc.ok;
   }
 
   /** True when a drain could proceed by the transcript/queue state alone (pane
@@ -842,8 +842,9 @@ export class Session {
     this.#broadcastQueue();
     try {
       // Type DIRECTLY (not via sendText) — the gate proved the pane is ready + empty,
-      // and a "starting" session must type now to bootstrap its transcript.
-      this.#typeIntoTmux(next.text, { seq: next.seq, source: next.source, mirrorToRelay: next.mirrorToRelay });
+      // and a "starting" session must type now to bootstrap its transcript. Awaited:
+      // the keystrokes go over control mode and a failure must reach the catch below.
+      await this.#typeIntoTmux(next.text, { seq: next.seq, source: next.source, mirrorToRelay: next.mirrorToRelay });
     } catch (e) {
       // Send failed outright — put it back at the head and pause.
       this.#queue.unshift(next);
@@ -914,7 +915,7 @@ export class Session {
     if (ci < 0) return { ok: false, error: `unrecognized current mode: ${current}` };
     const steps = (ti - ci + CYCLE.length) % CYCLE.length;
     for (let i = 0; i < steps; i++) {
-      tmux.key(this.tmuxWindow,"BTab");
+      await tmux.key(this.tmuxWindow,"BTab");
       await sleep(120); // footer needs a beat to repaint between cycles
     }
     await sleep(250);
@@ -964,7 +965,7 @@ export class Session {
     // there's nothing to cancel and the box is empty, so skip the cancel + abort-clear.
     const sameSubmit = this.#submitTimer === submitBefore;
     if (sameSubmit) this.#clearSubmitTimer();
-    tmux.key(this.tmuxWindow, "Escape");
+    await tmux.key(this.tmuxWindow, "Escape");
     this.#setThinking(false);
     // Interrupting mid-tool means Claude won't write that tool's result — close any
     // open tools so their cards don't spin forever.
@@ -994,7 +995,7 @@ export class Session {
    * are batched into one tmux call; literal runs are sent with -l so tmux
    * doesn't interpret them.
    */
-  sendRawKeys(script: string, opts?: { literal?: boolean }): { ok: boolean; segments: number; error?: string } {
+  async sendRawKeys(script: string, opts?: { literal?: boolean }): Promise<{ ok: boolean; segments: number; error?: string }> {
     // A raw intervention may type fresh text into the box — cancel a pending
     // abort-clear so its delayed C-c can't wipe it (same reason #typeIntoTmux does),
     // and bump the epoch so a clear already awaiting its capture abandons its C-c.
@@ -1004,7 +1005,7 @@ export class Session {
     // "git commit<Enter>" lands as those exact characters instead of a
     // command + keypress. Used by the pane's plain-text input toggle.
     if (opts?.literal) {
-      const ok = tmux.literal(this.tmuxWindow,script).ok;
+      const ok = (await tmux.literal(this.tmuxWindow,script)).ok;
       return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
     }
     // parse the token language → tmux key-name / literal segments (toTmux
@@ -1019,10 +1020,11 @@ export class Session {
       }
       throw e;
     }
+    // Await each segment IN ORDER so a failed one stops the rest from being enqueued.
     for (const seg of segments) {
       const ok = seg.type === "keys"
-        ? tmux.key(this.tmuxWindow,...seg.names).ok
-        : tmux.literal(this.tmuxWindow,seg.text).ok;
+        ? (await tmux.key(this.tmuxWindow,...seg.names)).ok
+        : (await tmux.literal(this.tmuxWindow,seg.text)).ok;
       if (!ok) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
     }
     return { ok: true, segments: segments.length };
@@ -1041,11 +1043,12 @@ export class Session {
    * client-attached hook (window-size latest), giving "last connector drives
    * the width". cols/rows are clamped to sane terminal bounds.
    */
-  resize(cols: number, rows: number): { ok: boolean } {
+  async resize(cols: number, rows: number): Promise<{ ok: boolean }> {
     const c = Math.max(20, Math.min(500, Math.floor(cols)));
     const r = Math.max(10, Math.min(200, Math.floor(rows)));
     if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false };
-    return { ok: tmux.runSync("resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)).ok };
+    const res = await tmux.command(["resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)]);
+    return { ok: res.ok };
   }
 
   transcript(): { lines: unknown[] } {
@@ -1193,7 +1196,7 @@ export class Session {
   }
 
   /** Type a message into the pane + record receipt + bump thinking. */
-  #typeIntoTmux(text: string, opts: SendOptions): void {
+  async #typeIntoTmux(text: string, opts: SendOptions): Promise<void> {
     // A new send supersedes any pending abort-clear: cancel it so its C-c can't
     // fire mid-type and wipe the message we're about to send. Bumping the epoch also
     // invalidates a clear whose capture is already in flight (the timer-cancel above
@@ -1226,8 +1229,16 @@ export class Session {
     // it can't be appended to our message and submitted as one garbled line.
     // Ctrl+U is a no-op on an empty box — unlike Ctrl+C, which arms Claude's
     // "press again to exit". Keeping the echo equal to `typed` so dedup matches.
-    tmux.key(this.tmuxWindow,"C-u");
-    const r = tmux.literal(this.tmuxWindow,typed);
+    // Both keystrokes are awaited so a failure rolls the pending entry back. They go
+    // over control mode (or spawn when the flag's off) IN ORDER via the FIFO. If C-u
+    // fails we throw BEFORE typing so we never split the message across transports
+    // (control C-u then a spawn literal) — the drain re-queues + retries cleanly.
+    const cu = await tmux.key(this.tmuxWindow, "C-u");
+    if (!cu.ok) {
+      if (tracked) delivery!.pending.pop();
+      throw new Error("tmux send-keys failed");
+    }
+    const r = await tmux.literal(this.tmuxWindow, typed);
     if (!r.ok) {
       if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
@@ -1260,12 +1271,16 @@ export class Session {
   #armSubmit(opts: { text: string; mirrorToRelay: boolean }): void {
     this.#clearSubmitTimer();
     const target = this.#dispatchInFlight; // the dispatch this Enter belongs to (may be null)
-    this.#submitTimer = setTimeout(() => {
+    this.#submitTimer = setTimeout(async () => {
       this.#submitTimer = null;
       if (this.status === "ended") return;
       if (this.#turn) return;                                    // a turn is already in flight
       if (!target || this.#dispatchInFlight !== target) return;  // require the same dispatch still in flight
-      tmux.key(this.tmuxWindow,"Enter");
+      // Mirror + flip thinking ONLY after the Enter has actually gone out over the
+      // wire — so the app never shows "sent" before the pane submitted. A failed
+      // Enter (disconnect) leaves it unsent; the 20s dispatch timeout surfaces it.
+      const e = await tmux.key(this.tmuxWindow, "Enter");
+      if (!e.ok) return;
       if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
       this.#setThinking(true);
     }, ENTER_SUBMIT_DELAY_MS);
@@ -1280,11 +1295,10 @@ export class Session {
     const buffered = this.#prelaunchBuffer;
     this.#prelaunchBuffer = [];
     for (const m of buffered) {
-      try {
-        this.#typeIntoTmux(m.text, m);
-      } catch (e) {
+      // Vestigial path (buffer is never filled); fire-and-forget the now-async type.
+      void this.#typeIntoTmux(m.text, m).catch((e) => {
         process.stderr.write(`[prelaunch] flush failed for ${this.id}: ${e}\n`);
-      }
+      });
     }
   }
 

@@ -14,6 +14,7 @@
 // See CONTROL-MODE-MIGRATION.md for the full plan.
 import { run } from "./shell";
 import { TmuxControlClient } from "./controlClient";
+import { tmuxCommand } from "./serialize";
 
 /** Shared result shape. `error` carries a %error / disconnect reason (control mode). */
 export interface TmuxResult { ok: boolean; out: string; error?: string }
@@ -43,7 +44,7 @@ export class TmuxDriver {
     }
   }
 
-  // ── Spawn path (Phase 0 — fallback + flag-off) ──────────────────────────────
+  // ── Spawn path (flag-off + reconnect fallback + bootstrap/teardown) ──────────
 
   /** Capture a pane's visible text. color=true keeps ANSI SGR (the app's colour view). */
   capture(target: string, opts?: { color?: boolean }): TmuxResult {
@@ -52,18 +53,56 @@ export class TmuxDriver {
       : run("tmux", "capture-pane", "-p", "-t", target);
   }
 
+  /**
+   * Explicit SPAWN, never control mode — for the bootstrap/teardown ops that bracket
+   * the control connection's lifetime and inherently can't go through it: has-session
+   * (gates creation), new-session (creates the very session the client attaches to),
+   * kill-session (destroys it), and recover()'s startup scan (runs before attach).
+   */
+  runSync(...args: string[]): TmuxResult {
+    return run("tmux", ...args);
+  }
+
+  // ── Control-mode writes (NON-IDEMPOTENT keystrokes), spawn only when not connected ─
+  // A keystroke must never be replayed: if control drops AFTER a send-keys is on the
+  // wire we can't know whether it landed, so a spawn retry could DOUBLE-type. Policy:
+  // route to control ONLY when connected at call entry and return its result verbatim
+  // (no spawn fallback after a control attempt). Spawn ONLY when the flag is off or the
+  // client isn't connected — there, nothing was ever sent over control, so it's safe.
+
   /** Send one or more NAMED keys (e.g. "C-u", "Escape", "Enter", "BTab"). */
-  key(target: string, ...names: string[]): TmuxResult {
-    return run("tmux", "send-keys", "-t", target, ...names);
+  async key(target: string, ...names: string[]): Promise<TmuxResult> {
+    return this.#sendKeys(["send-keys", "-t", target, "--", ...names]);
   }
 
   /** Send LITERAL text verbatim (send-keys -l --) — no key-name interpretation. */
-  literal(target: string, text: string): TmuxResult {
-    return run("tmux", "send-keys", "-l", "-t", target, "--", text);
+  async literal(target: string, text: string): Promise<TmuxResult> {
+    return this.#sendKeys(["send-keys", "-l", "-t", target, "--", text]);
   }
 
-  /** Escape hatch for the rarer / lifecycle commands (resize, kill, display, …). */
-  runSync(...args: string[]): TmuxResult {
+  async #sendKeys(args: string[]): Promise<TmuxResult> {
+    if (this.#client?.connected) {
+      let line: string;
+      try { line = tmuxCommand(args); }
+      catch (e) { return { ok: false, out: "", error: String(e) }; } // un-encodable (newline/NUL)
+      return this.#client.command(line); // verbatim result — NO spawn retry (non-idempotent)
+    }
+    return run("tmux", ...args); // flag off / not connected → spawn (nothing went over control)
+  }
+
+  // ── Control-mode generic command (IDEMPOTENT: resize/display/list/kill/has/hook) ──
+  // Safe to retry, so on any control failure (or while disconnected) we fall back to
+  // spawn. Returns data (list-windows / display-message) as well as ok/fail.
+
+  /** Run an arbitrary tmux command — control when connected, spawn fallback otherwise. */
+  async command(args: string[]): Promise<TmuxResult> {
+    if (this.#client?.connected) {
+      let line: string;
+      try { line = tmuxCommand(args); } catch { return run("tmux", ...args); }
+      const r = await this.#client.command(line);
+      if (r.ok) return r;
+      // %error / disconnect → idempotent, fall through to a spawn retry
+    }
     return run("tmux", ...args);
   }
 
@@ -97,7 +136,7 @@ export class TmuxDriver {
   async captureFresh(target: string, opts?: { color?: boolean }): Promise<TmuxResult> {
     if (this.#client?.connected && !opts?.color) {
       this.#targets.add(target);
-      const r = await this.#client.command(`capture-pane -p -t ${tmuxArg(target)}`);
+      const r = await this.#client.command(tmuxCommand(["capture-pane", "-p", "-t", target]));
       if (r.ok) { this.#snapshots.set(target, { text: r.out, ts: nowMs() }); return r; }
       // disconnect / %error → fall through to spawn
     }
@@ -126,7 +165,7 @@ export class TmuxDriver {
     try {
       if (!this.#client?.connected) return;
       for (const target of [...this.#targets]) {
-        const r = await this.#client.command(`capture-pane -p -t ${tmuxArg(target)}`);
+        const r = await this.#client.command(tmuxCommand(["capture-pane", "-p", "-t", target]));
         if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
         else if (r.error && /can't find/i.test(r.error)) { this.#targets.delete(target); this.#snapshots.delete(target); }
       }
@@ -139,16 +178,5 @@ export class TmuxDriver {
 
 function nowMs(): number { return Date.now(); }
 
-/**
- * Quote one argument for a control-mode command STRING (control mode takes a
- * command line, not argv). Safe identifiers (incl. tmux window targets like
- * `joy:j-abc123`) pass through; anything else is single-quoted with ' → '\'' .
- * The window targets we pass today are generated + safe — this just guards the
- * seam before broader inputs (the send-keys quoting work is Phase 3).
- */
-export function tmuxArg(s: string): string {
-  return /^[A-Za-z0-9_:.@/=+-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
-}
-
-/** Process-wide driver. Flag off = spawn (Phase 0). Flag on = control client + fallback. */
+/** Process-wide driver. Flag off = spawn. Flag on = control client + spawn fallback. */
 export const tmux = new TmuxDriver();

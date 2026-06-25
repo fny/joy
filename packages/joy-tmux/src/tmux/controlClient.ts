@@ -162,7 +162,15 @@ export class TmuxControlClient {
     }
     const next = this.#writeQueue.shift()!;
     this.#active = next.p;
-    this.#proc.stdin.write(next.cmd + "\n");
+    try {
+      this.#proc.stdin.write(next.cmd + "\n");
+    } catch {
+      // The write threw (EPIPE on a dying pipe). Resolve this command as disconnected
+      // so command() stays RESOLVE-ONLY — a fire-and-forget `void tmux.key(...)` must
+      // never surface an unhandledRejection. onExit will fire and drain the rest.
+      this.#active = null;
+      next.p.resolve({ ok: false, out: "", error: "disconnected" });
+    }
   }
 
   /** Run a tmux command, await its framed response. One command on the wire at a time; buffered until ready. */
