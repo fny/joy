@@ -305,12 +305,6 @@ export class Session {
   // ABORT_CLEAR_DELAY_MS). Cancelled when a new send starts (so it can't C-c the
   // freshly-typed message) or on teardown.
   #abortClearTimer: ReturnType<typeof setTimeout> | null = null;
-  // Monotonic counter bumped every time fresh text is typed into the box
-  // (#typeIntoTmux / sendRawKeys). A guarded clear captures it before its awaited
-  // capture and re-checks after: if it changed, a new message landed mid-await, so
-  // the C-c is abandoned rather than wiping that fresh text. Closes the abort-clear-
-  // vs-new-message and gate-clear-vs-concurrent-send races across the await.
-  #inputEpoch = 0;
   // Count of clear-the-input attempts for the current drain: one guarded C-c, then
   // pause. Reset once the box is empty / on dispatch / when the pane isn't ready.
   #clearAttempts = 0;
@@ -734,14 +728,10 @@ export class Session {
    */
   async #clearInputIfDirty(idleOnly: boolean): Promise<boolean> {
     if (idleOnly && (this.#turn || this.#dispatchInFlight)) return false;
-    const epoch = this.#inputEpoch; // snapshot BEFORE the await
     const pane = await tmux.captureFresh(this.tmuxWindow); // FRESH — stale here = concatenation
-    // captureFresh can take a control-mode round-trip; re-check everything that may
-    // have changed while it was queued. A bumped epoch means fresh text was typed
-    // (a new send) since we snapshotted — C-c now would wipe it. The idle guards are
-    // re-evaluated too: a turn / dispatch may have begun, in which case the text in
-    // the box is no longer stale leftover and must not be cleared.
-    if (this.#inputEpoch !== epoch) return false;
+    // captureFresh can take a control-mode round-trip; re-check the idle guards after
+    // it: a turn / dispatch may have begun while it was in flight, in which case the
+    // text in the box is no longer stale leftover and must not be cleared.
     if (idleOnly && (this.#turn || this.#dispatchInFlight)) return false;
     if (!pane.ok) return false;
     if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return false;
@@ -802,16 +792,8 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     if (!this.#canDrain()) return;
 
-    const epoch = this.#inputEpoch; // snapshot before the await (see the re-check below)
     const pane = await tmux.captureFresh(this.tmuxWindow);
     if (!this.#canDrain()) return; // re-check after the await
-    // A concurrent type (a sendRawKeys intervention, say) landed while this capture
-    // was in flight → our about-to-be-trusted "empty box" read is stale. Committing a
-    // dispatch now would let #typeIntoTmux's C-u wipe that fresh text. Re-drain so the
-    // next capture sees the real box and routes it through the guarded clear/pause
-    // path — the same await-window race the #inputEpoch guard closes for clears, here
-    // protecting the "empty box, safe to type" gate.
-    if (this.#inputEpoch !== epoch) { this.#clearAttempts = 0; this.#armDrainRetry(200); return; }
     if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
       this.#armDrainRetry(500);
@@ -972,10 +954,9 @@ export class Session {
     this.#closeOpenTools();
     // Clear after abort: Escape interrupts but does NOT clear the box (verified), so
     // anything typed while Claude was generating lingers. Once the interrupt settles +
-    // the prompt repaints, drop it with one guarded C-c. Cancelled if a new send
-    // starts first; and if one slips in WHILE the clear awaits its capture, the
-    // #inputEpoch check inside #clearInputIfDirty abandons the C-c (the timer-cancel
-    // can't reach a clear that's already past setTimeout).
+    // the prompt repaints, drop it with one guarded C-c. Cancelled if a new queued send
+    // starts first (#typeIntoTmux clears the timer). The clear only ever C-c's a box it
+    // re-confirms non-empty, so an idle/already-clear box is a no-op.
     if (sameSubmit) {
       if (this.#abortClearTimer) clearTimeout(this.#abortClearTimer);
       this.#abortClearTimer = setTimeout(() => {
@@ -997,9 +978,7 @@ export class Session {
    */
   async sendRawKeys(script: string, opts?: { literal?: boolean }): Promise<{ ok: boolean; segments: number; error?: string }> {
     // A raw intervention may type fresh text into the box — cancel a pending
-    // abort-clear so its delayed C-c can't wipe it (same reason #typeIntoTmux does),
-    // and bump the epoch so a clear already awaiting its capture abandons its C-c.
-    this.#inputEpoch += 1;
+    // abort-clear so its delayed C-c can't wipe it (same reason #typeIntoTmux does).
     if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
     // Literal mode: type the string verbatim, no token parsing — so
     // "git commit<Enter>" lands as those exact characters instead of a
@@ -1200,10 +1179,7 @@ export class Session {
   /** Type a message into the pane + record receipt + bump thinking. */
   async #typeIntoTmux(text: string, opts: SendOptions): Promise<void> {
     // A new send supersedes any pending abort-clear: cancel it so its C-c can't
-    // fire mid-type and wipe the message we're about to send. Bumping the epoch also
-    // invalidates a clear whose capture is already in flight (the timer-cancel above
-    // can't reach one that's past its setTimeout and awaiting captureFresh).
-    this.#inputEpoch += 1;
+    // fire mid-type and wipe the message we're about to send.
     if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
     const delivery = this.#ensureDelivery();
     // Commands (`!bash`, `/slash`) never produce a user-text transcript entry —
