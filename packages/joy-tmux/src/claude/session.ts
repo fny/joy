@@ -64,6 +64,11 @@ const ENTER_SUBMIT_DELAY_MS = 350;
 // a guarded C-c once the interrupt has settled and the ready prompt has repainted
 // (paneInputText needs the box drawn to read it). Cancelled if a new send starts.
 const ABORT_CLEAR_DELAY_MS = 400;
+// After the C-u clear, wait this long before typing a MULTI-LINE message. The C-j
+// burst trips Claude's paste-detection, which otherwise captures the just-sent C-u
+// (\x15) into the pasted content — corrupting the message + breaking dedup. The delay
+// lets the kill-line be processed first. Single-line sends skip it (no paste trigger).
+const CLEAR_SETTLE_MS = 120;
 
 // 500-error auto-retry backoff (seconds): paired ramp, then STOP. 14 attempts,
 // ~63 min total. When a turn ENDS with an unresolved 5xx (Claude gave up after
@@ -172,6 +177,17 @@ export function parseJoyCommand(text: string): { name: string; args: string } | 
   if (!m) return null;
   const name = m[1].toLowerCase();
   return JOY_COMMANDS.has(name) ? { name, args: m[2] } : null;
+}
+
+/**
+ * Collapse any newline form to a single space — the canonical form for DEDUP matching.
+ * We type real newlines into the pane (one C-j per line break, see #typeLines), so
+ * Claude echoes a multi-line user message in its transcript; we record + compare the
+ * flattened form on BOTH sides so that echo still matches our send and isn't mirrored
+ * as a duplicate. (The relay mirror always uses the original, newlines intact.)
+ */
+export function flattenForMatch(text: string): string {
+  return text.replace(/\r\n|\r|\n/g, " ");
 }
 
 /** Slim wire shape pushed to the app (joy__queue) and returned by queue ops. */
@@ -1209,10 +1225,30 @@ export class Session {
   #neutralizePending(text: string): void {
     const delivery = this.#delivery;
     if (!delivery || !this.relaySessionId) return;
-    const typed = text.replace(/\n/g, " ");
+    const typed = flattenForMatch(text);
     const i = delivery.pending.findIndex(p => p.text === typed);
     if (i >= 0) delivery.pending.splice(i, 1);
     consumeReceived(delivery, this.relaySessionId, typed, Date.now());
+  }
+
+  /**
+   * Clear the box (C-u) then type `text` PRESERVING newlines: one `literal` per line
+   * with a C-j (a real in-box linefeed, NOT a submit) between them. A single-line
+   * message is C-u + one `literal` — unchanged from before. For a MULTI-line message we
+   * let the C-u settle (CLEAR_SETTLE_MS) before the C-j burst, so Claude's paste-detection
+   * doesn't fold the kill-line into the pasted content (the \x15 corruption). Awaited in
+   * order via the FIFO; returns false if any send fails (caller rolls back). Does NOT
+   * submit — the caller owns the delayed Enter.
+   */
+  async #clearAndType(text: string): Promise<boolean> {
+    if (!(await tmux.key(this.tmuxWindow, "C-u")).ok) return false;
+    const lines = text.split(/\r\n|\r|\n/);
+    if (lines.length > 1) await sleep(CLEAR_SETTLE_MS);
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0 && !(await tmux.key(this.tmuxWindow, "C-j")).ok) return false;
+      if (lines[i] !== "" && !(await tmux.literal(this.tmuxWindow, lines[i])).ok) return false;
+    }
+    return true;
   }
 
   /** Type a message into the pane + record receipt + bump thinking. */
@@ -1227,13 +1263,12 @@ export class Session {
     // real message's match, mirroring it as a duplicate.
     const isCommand = /^\s*!/.test(text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(text);
     const tracked = !!delivery && !isCommand;
-    // send-keys can't type newlines, so a multi-line message is typed (and
-    // recorded by Claude in its transcript) with newlines collapsed to spaces.
-    // Track THIS form for dedup so the transcript echo matches — otherwise a
-    // multi-line message's echo fails to match the original and gets mirrored
-    // as a duplicate. The relay mirror still uses the original (with newlines)
-    // so the app shows the message as the user typed it.
-    const typed = text.replace(/\n/g, " ");
+    // Dedup key: the flattened (newline→space) form. We type REAL newlines into the
+    // pane (#typeLines), so Claude echoes a multi-line user message — but we record +
+    // match the flattened form on both sides (flattenForMatch on the echo too) so that
+    // echo still pairs with this send and isn't mirrored as a duplicate. The relay
+    // mirror uses the original `text` (newlines intact) so the app shows it verbatim.
+    const typed = flattenForMatch(text);
     if (tracked) {
       delivery!.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
       // Persisted backstop: remember we sent this text so its transcript echo is
@@ -1241,22 +1276,11 @@ export class Session {
       // restart.
       recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
-    // Belt-and-suspenders clear (the queue's empty-input gate already guarantees
-    // the box is empty before dispatch): Ctrl+U kills any half-entered answer so
-    // it can't be appended to our message and submitted as one garbled line.
-    // Ctrl+U is a no-op on an empty box — unlike Ctrl+C, which arms Claude's
-    // "press again to exit". Keeping the echo equal to `typed` so dedup matches.
-    // Both keystrokes are awaited so a failure rolls the pending entry back. They go
-    // over control mode (or spawn while disconnected) IN ORDER via the FIFO. If C-u
-    // fails we throw BEFORE typing so we never split the message across transports
-    // (control C-u then a spawn literal) — the drain re-queues + retries cleanly.
-    const cu = await tmux.key(this.tmuxWindow, "C-u");
-    if (!cu.ok) {
-      if (tracked) delivery!.pending.pop();
-      throw new Error("tmux send-keys failed");
-    }
-    const r = await tmux.literal(this.tmuxWindow, typed);
-    if (!r.ok) {
+    // Clear-then-type (C-u kills any half-entered answer so it can't be appended to our
+    // message; the gate already guarantees an empty box, this is belt-and-suspenders).
+    // Goes over control mode (or spawn while disconnected) IN ORDER via the FIFO; on any
+    // failure roll the pending entry back and throw so the drain re-queues + retries.
+    if (!(await this.#clearAndType(text))) {
       if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
     }
@@ -1279,20 +1303,16 @@ export class Session {
    */
   async #steer(text: string, opts: SendOptions): Promise<void> {
     if (this.status === "ended") return;
-    const typed = text.replace(/\n/g, " "); // send-keys can't type newlines (see #typeIntoTmux)
+    const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeIntoTmux)
     const delivery = this.#ensureDelivery();
     const tracked = !!delivery && !!this.relaySessionId;
     if (tracked) {
       delivery!.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
       recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
-    // Type now — C-u drops any half-entered text, then the message. No empty-box gate:
-    // steering deliberately types alongside an in-flight turn. Awaited + rolled back on
-    // failure, like #typeIntoTmux.
-    const cu = await tmux.key(this.tmuxWindow, "C-u");
-    if (!cu.ok) { if (tracked) delivery!.pending.pop(); return; }
-    const r = await tmux.literal(this.tmuxWindow, typed);
-    if (!r.ok) { if (tracked) delivery!.pending.pop(); return; }
+    // Clear-then-type (newlines preserved). No empty-box gate: steering deliberately
+    // types alongside an in-flight turn, so the C-u clears any half-entered text first.
+    if (!(await this.#clearAndType(text))) { if (tracked) delivery!.pending.pop(); return; }
     // Submit after the settle delay (paste-detection swallows an immediate Enter).
     // Coalesce rapid steers; mirror only once the Enter has gone out.
     if (this.#steerSubmitTimer) clearTimeout(this.#steerSubmitTimer);
@@ -1658,9 +1678,13 @@ export class Session {
       const uuid = typeof entry.uuid === "string" ? entry.uuid : "";
       const delivery = this.#relay && uuid ? this.#ensureDelivery() : null;
       if (delivery && this.relaySessionId) {
+        // We type real newlines but record the flattened form (see #typeIntoTmux), and
+        // Claude echoes the message multi-line — so MATCH on the flattened echo. `content`
+        // itself (newlines intact) is kept for the inbound receipt + retry text below.
+        const matchContent = flattenForMatch(content);
         // Match anywhere in the queue (not just the front) so an out-of-order or
         // stale entry can't block a real match.
-        const idx = delivery.pending.findIndex((p) => p.text === content);
+        const idx = delivery.pending.findIndex((p) => p.text === matchContent);
         if (idx >= 0) {
           const matched = delivery.pending.splice(idx, 1)[0];
           recordInboundReceipt(delivery, this.relaySessionId, {
@@ -1671,7 +1695,7 @@ export class Session {
           // it dangles for 15 min and a later identical message typed directly in
           // the pane finds no pending match, hits this stale `received`, and gets
           // wrongly swallowed (the app's history loses a real "yes"/"continue").
-          consumeReceived(delivery, this.relaySessionId, content, Date.now());
+          consumeReceived(delivery, this.relaySessionId, matchContent, Date.now());
           // codex-4: record the prompt for 5xx auto-retry BEFORE returning —
           // app/queue/RPC sends match here and used to skip the #lastUserText
           // assignment below, so #fireRetry had nothing to re-send.
@@ -1682,8 +1706,7 @@ export class Session {
           // otherwise leave #dispatchInFlight set until the 20s timeout requeues +
           // pauses an already-delivered message.
           if (this.#dispatchInFlight &&
-              (this.#dispatchInFlight.text === content ||
-               this.#dispatchInFlight.text.replace(/\n/g, " ") === content)) {
+              flattenForMatch(this.#dispatchInFlight.text) === matchContent) {
             this.#confirmDispatchIfAwaiting();
           }
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
@@ -1693,7 +1716,7 @@ export class Session {
         // recently, the pending match was just lost (e.g. a daemon restart) —
         // suppress it instead of mirroring a duplicate.
         if (!delivery.forwardedUuids.has(uuid)) {
-          if (consumeReceived(delivery, this.relaySessionId, content, Date.now())) {
+          if (consumeReceived(delivery, this.relaySessionId, matchContent, Date.now())) {
             recordInboundReceipt(delivery, this.relaySessionId, {
               uuid, text: content, source: "relay", at: Date.now(),
             });
