@@ -1,17 +1,14 @@
-// The ONE seam for all tmux interaction. Session calls these methods instead of
-// run("tmux", …) directly, so the transport can change in one place. (Registry
-// still calls run() directly — its rare lifecycle ops are Phase 4.)
+// The ONE seam for all tmux interaction. Session + Registry call these methods
+// instead of run("tmux", …) directly, so the transport lives in one place.
 //
-// Phase 0 (here): a thin SYNCHRONOUS wrapper over the spawn helper (run) — no
-// behavior change, every Session tmux call just routed through this object.
+// A persistent control-mode client (tmux -C attach-session) is the DEFAULT and only
+// transport: captureCached() reads a %output-invalidated snapshot, captureFresh()
+// awaits a control command, key/literal/command become control writes. The spawn
+// methods (run) remain as the reconnect/while-disconnected fallback and for the
+// bootstrap/teardown ops (runSync) that bracket the connection's lifetime. Callers
+// never touch run("tmux") or spawn directly and never branch on which is active.
 //
-// Later phases add a persistent control-mode client (tmux -C attach-session) as a
-// private delegate: captureCached() reads a %output-invalidated snapshot,
-// captureFresh() awaits a control command, send/resize become writes — all with
-// this spawn path kept as the reconnect/while-disconnected fallback. Callers never
-// touch run("tmux") or spawn, and never branch on which transport is active.
-//
-// See CONTROL-MODE-MIGRATION.md for the full plan.
+// See CONTROL-MODE-MIGRATION.md for the history.
 import { run } from "./shell";
 import { TmuxControlClient } from "./controlClient";
 import { tmuxCommand } from "./serialize";
@@ -19,15 +16,19 @@ import { tmuxCommand } from "./serialize";
 /** Shared result shape. `error` carries a %error / disconnect reason (control mode). */
 export interface TmuxResult { ok: boolean; out: string; error?: string }
 
-// Phase 1: opt-in. Off (default) → every method is the spawn path = Phase 0 behavior.
-const CONTROL = process.env.JOY_TMUX_CONTROL === "1";
+// Control mode is on in production. The only place it's skipped is the unit-test
+// runner (vitest), where there's no tmux server to attach to and we don't want to
+// spawn real subprocesses — the driver then uses its spawn methods, which the
+// pure-function tests don't exercise. (Not a feature flag: the daemon never runs
+// under vitest, so production is always control mode.)
+const ENABLE_CONTROL = process.env.VITEST !== "true";
 const SNAPSHOT_REFRESH_MS = 1000; // periodic backstop refresh of tracked windows
 const OUTPUT_DEBOUNCE_MS = 75;    // coalesce %output bursts before re-snapshotting
 
 export class TmuxDriver {
-  // Control-mode delegate + per-window snapshot cache (control mode only). The spawn
-  // methods below are the disconnected/while-unready fallback and the only path when
-  // the flag is off — so callers never branch on transport.
+  // Control-mode delegate + per-window snapshot cache. The spawn methods below are the
+  // disconnected/while-unready fallback (and the bootstrap path), so callers never
+  // branch on transport.
   #client: TmuxControlClient | null = null;
   #snapshots = new Map<string, { text: string; ts: number }>();
   #targets = new Set<string>();
@@ -36,7 +37,7 @@ export class TmuxDriver {
   #refreshRequested = false;  // another %output/tick landed mid-sweep → run once more
 
   constructor() {
-    if (CONTROL) {
+    if (ENABLE_CONTROL) {
       const session = process.env.TMUX_SESSION ?? "joy";
       this.#client = new TmuxControlClient(session, { onOutput: () => this.#onOutput() });
       const t = setInterval(() => { void this.#refreshTracked(); }, SNAPSHOT_REFRESH_MS);
@@ -44,7 +45,7 @@ export class TmuxDriver {
     }
   }
 
-  // ── Spawn path (flag-off + reconnect fallback + bootstrap/teardown) ──────────
+  // ── Spawn path (reconnect/while-disconnected fallback + bootstrap/teardown) ──
 
   /** Capture a pane's visible text. color=true keeps ANSI SGR (the app's colour view). */
   capture(target: string, opts?: { color?: boolean }): TmuxResult {
@@ -68,8 +69,8 @@ export class TmuxDriver {
   // can't know whether it landed, so a spawn retry could DOUBLE-apply (double-type, or
   // create a duplicate window). Policy: route to control ONLY when connected at call
   // entry and return its result verbatim — NO spawn fallback after a control attempt.
-  // Spawn ONLY when the flag is off / not connected (nothing ever went over control,
-  // so it's safe). Callers MUST check .ok and not assume the write landed.
+  // Spawn ONLY when not connected (nothing ever went over control, so it's safe).
+  // Callers MUST check .ok and not assume the write landed.
 
   /** Send one or more NAMED keys (e.g. "C-u", "Escape", "Enter", "BTab"). */
   async key(target: string, ...names: string[]): Promise<TmuxResult> {
@@ -89,7 +90,7 @@ export class TmuxDriver {
       catch (e) { return { ok: false, out: "", error: String(e) }; } // un-encodable (newline/NUL)
       return this.#client.command(line); // verbatim result — NO spawn retry (non-idempotent)
     }
-    return run("tmux", ...args); // flag off / not connected → spawn (nothing went over control)
+    return run("tmux", ...args); // not connected → spawn (nothing went over control)
   }
 
   // ── Control-mode generic command (IDEMPOTENT: resize/display/list/kill/has/hook) ──
@@ -114,8 +115,8 @@ export class TmuxDriver {
    * SYNC read of the latest known pane text — for status/watcher paths (#pollThinking,
    * startup, trust) where a slightly stale read is fine. Control mode: the cached
    * snapshot (filled by a one-off spawn the first time, then kept fresh by the
-   * periodic + %output refresh). Flag off / disconnected / color: a plain spawn
-   * capture. (Colour is spawn-only — snapshots are plain text.)
+   * periodic + %output refresh). Disconnected / color: a plain spawn capture.
+   * (Colour is uncached — snapshots are plain text.)
    */
   captureCached(target: string, opts?: { color?: boolean }): TmuxResult {
     if (this.#client?.connected && !opts?.color) {
@@ -133,7 +134,7 @@ export class TmuxDriver {
    * FRESH awaited capture — for the decisions where a stale read causes data loss
    * (the dispatch gate's empty-box check, abort, clear). Control mode: a capture-pane
    * command over the connection; updates the cache. Falls back to a spawn capture on
-   * disconnect/error or when the flag is off.
+   * disconnect/error (or under the test runner, where there's no client).
    */
   async captureFresh(target: string, opts?: { color?: boolean }): Promise<TmuxResult> {
     if (this.#client?.connected) {
@@ -158,9 +159,9 @@ export class TmuxDriver {
     this.#outputTimer = t;
   }
 
-  // Re-snapshot every tracked window over the connection (no spawn). Phase 1 refreshes
-  // ALL tracked windows on any %output (simple, correct; Phase 1.5 can map pane→window
-  // to refresh only the one that changed). A window that's gone stops being tracked.
+  // Re-snapshot every tracked window over the connection (no spawn). Refreshes ALL
+  // tracked windows on any %output (simple, correct; a future refinement could map
+  // pane→window to refresh only the one that changed). A gone window stops tracking.
   //
   // Coalesced: the %output debounce and the 1s ticker both call this, and each sweep
   // awaits N capture commands — so without a guard they'd interleave into 2N+ queued
@@ -186,5 +187,5 @@ export class TmuxDriver {
 
 function nowMs(): number { return Date.now(); }
 
-/** Process-wide driver. Flag off = spawn. Flag on = control client + spawn fallback. */
+/** Process-wide driver: control client + spawn fallback (spawn-only under vitest). */
 export const tmux = new TmuxDriver();

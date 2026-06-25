@@ -1034,7 +1034,7 @@ export class Session {
     // -e includes ANSI SGR escape sequences (colors, bold, …) so the app can
     // render the TUI in color; without it the capture is plain text. A FRESH read
     // over control mode (colour stays uncached) — falls back to spawn while
-    // disconnected / flag-off.
+    // disconnected.
     return { ok: true, text: (await tmux.captureFresh(this.tmuxWindow, { color })).out };
   }
 
@@ -1232,7 +1232,7 @@ export class Session {
     // Ctrl+U is a no-op on an empty box — unlike Ctrl+C, which arms Claude's
     // "press again to exit". Keeping the echo equal to `typed` so dedup matches.
     // Both keystrokes are awaited so a failure rolls the pending entry back. They go
-    // over control mode (or spawn when the flag's off) IN ORDER via the FIFO. If C-u
+    // over control mode (or spawn while disconnected) IN ORDER via the FIFO. If C-u
     // fails we throw BEFORE typing so we never split the message across transports
     // (control C-u then a spawn literal) — the drain re-queues + retries cleanly.
     const cu = await tmux.key(this.tmuxWindow, "C-u");

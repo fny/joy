@@ -137,7 +137,9 @@ create or destroy. Non-idempotent writes (keystrokes, `new-window`) never spawn-
 after a control attempt; idempotent ops (capture/resize/display/kill/hook) do.
 
 ## Status / notes
-- Flag default OFF; turn on with `JOY_TMUX_CONTROL=1`. Soaking on the harness.
+- **Control mode is the DEFAULT** — the `JOY_TMUX_CONTROL` flag was removed; the driver
+  instantiates the control client unconditionally (skipped only under the vitest runner,
+  which has no tmux server). Revert to the flagged commit if a regression surfaces.
 - The `registry.ts` slash-commands entanglement is resolved — that feature is committed,
   so the hook change landed clean.
 - Deferred within Phase 1: pane→window targeting for `%output` (the coalesced sweep still
