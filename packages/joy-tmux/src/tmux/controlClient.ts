@@ -122,6 +122,11 @@ export class TmuxControlClient {
     proc.stdout?.on("data", (chunk: string) => this.#onData(chunk));
     proc.once("exit", () => this.#onExit());
     proc.once("error", () => this.#onExit());
+    // Stream write errors (EPIPE, etc.) can surface ASYNCHRONOUSLY on stdin — without a
+    // listener that's an unhandled 'error' that crashes the process, and it also leaves
+    // command() promises hanging. Funnel it to #onExit (which fails active+queued and
+    // reconnects), completing the resolve-only guarantee the #pump try/catch starts.
+    proc.stdin?.on("error", () => this.#onExit());
   }
 
   #onData(chunk: string): void {
@@ -184,8 +189,12 @@ export class TmuxControlClient {
 
   #onExit(): void {
     const proc = this.#proc;
+    if (!proc) return; // already torn down — the exit/error/stdin-error listeners can
+                       // all fire for one proc; without this we'd schedule N reconnects
+                       // (→ N control clients). First call wins; the rest no-op.
     this.#proc = null;
-    proc?.removeAllListeners();
+    proc.removeAllListeners();
+    proc.stdin?.removeAllListeners();
     this.#ready = false;
     // Fail the in-flight + every queued command so awaiters fall back instead of hanging.
     if (this.#active) { this.#active.resolve({ ok: false, out: "", error: "disconnected" }); this.#active = null; }

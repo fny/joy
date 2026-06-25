@@ -356,40 +356,52 @@ export class SessionRegistry {
       ? `${primaryCmd} || ${[...envParts, "claude", ...buildFlags(false)].join(" ")}`
       : primaryCmd;
     // STEADY STATE — control mode when the client is connected (spawn fallback while
-    // not). The session exists now, so new-window/resize/send-keys all target it over
-    // the live control connection; the first-ever session is the only one likely to
-    // fall back (its new-session above just ran, the client hasn't re-attached yet).
-    await tmux.command(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd]);
-    // Pin a sane default size so the window doesn't inherit whatever terminal
-    // last touched the session (could be 182+ cols). A viewing client drives
-    // it afterwards via joy-resize. Set before launch so claude's TUI renders
-    // at this width from the start.
+    // not). The session exists now, so these target it over the live control
+    // connection; the first-ever session is the only one likely to fall back (its
+    // new-session above just ran, the client hasn't re-attached yet).
+    //
+    // Every NON-IDEMPOTENT step is checked. new-window goes through commandOnce (no
+    // spawn retry), so a control failure can't create a DUPLICATE j-<id>. Each launch
+    // keystroke is checked too: on any failure we best-effort kill the (possibly
+    // half-created) window and throw, rather than march on through Enter / PID
+    // discovery / relay attach on a window that may not hold a live shell. (A relay
+    // session isn't created until after these succeed, so a failure here can't orphan
+    // one.)
+    const abortCreate = (why: string): never => {
+      void tmux.command(["kill-window", "-t", tmuxWindow]); // idempotent cleanup of any half-made window
+      throw new Error(`session create failed: ${why}`);
+    };
+    if (!(await tmux.commandOnce(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd])).ok) {
+      abortCreate("new-window");
+    }
+    // Pin a sane default size so the window doesn't inherit whatever terminal last
+    // touched the session (could be 182+ cols). Idempotent + cosmetic, so a failure
+    // here is non-fatal — claude just renders at the default size until joy-resize.
     await tmux.command(["resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40"]);
-    // Replace the pane shell with a fresh login shell so it re-sources the
-    // user's profile (.bashrc/.zshrc) — a default tmux pane only carries the
-    // tmux server's frozen env, so without this a launch/restart wouldn't pick
-    // up env-var changes. `exec` keeps the same PID, so PID discovery below is
-    // unaffected. claude is sent after a beat to let the profile finish sourcing.
-    // (literal text + a named Enter — same as `send-keys "<cmd>" Enter`, but -l forces
-    // the text literal so a command that looks like a key name can't be misread.)
+    // Replace the pane shell with a fresh login shell so it re-sources the user's
+    // profile (.bashrc/.zshrc) — a default tmux pane only carries the tmux server's
+    // frozen env, so without this a launch/restart wouldn't pick up env-var changes.
+    // `exec` keeps the same PID, so PID discovery below is unaffected. (literal text +
+    // a named Enter — -l forces the text literal so a command that looks like a key
+    // name can't be misread.)
     const shell = process.env.SHELL || "/bin/bash";
-    await tmux.literal(tmuxWindow, `exec ${shell} -l`);
-    await tmux.key(tmuxWindow, "Enter");
+    if (!(await tmux.literal(tmuxWindow, `exec ${shell} -l`)).ok) abortCreate("exec-shell");
+    if (!(await tmux.key(tmuxWindow, "Enter")).ok) abortCreate("exec-shell-enter");
 
-    // Kick off the relay session creation NOW so its network round-trips
-    // overlap the sleeps below instead of running after them.
+    // Give the login shell time to source the profile, then launch claude. (Skipped
+    // for a detached create — the window stays at the shell prompt and the session is
+    // marked detached below.)
+    if (!opts.detached) {
+      await sleep(900);
+      if (!(await tmux.literal(tmuxWindow, cmd)).ok) abortCreate("launch-claude");
+      if (!(await tmux.key(tmuxWindow, "Enter")).ok) abortCreate("launch-claude-enter");
+    }
+
+    // Kick off the relay session creation now (after the window is confirmed live) so
+    // its network round-trips overlap the PID-discovery sleeps below.
     const relayPromise = this.relayClient
       ? createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id })
       : null;
-
-    // Give the login shell time to source the profile, then launch claude.
-    // (Skipped for a detached create — the window stays at the shell prompt and
-    // the session is marked detached below.)
-    if (!opts.detached) {
-      await sleep(900);
-      await tmux.literal(tmuxWindow, cmd);
-      await tmux.key(tmuxWindow, "Enter");
-    }
 
     await sleep(400);
     const shellPid = parseInt(
