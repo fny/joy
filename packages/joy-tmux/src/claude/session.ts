@@ -1700,39 +1700,14 @@ export class Session {
             recordInboundReceipt(delivery, this.relaySessionId, {
               uuid, text: content, source: "relay", at: Date.now(),
             });
-          } else if (this.#dispatchInFlight || delivery.pending.length > 0) {
-            // A dispatch is in flight / still pending, yet this transcript user
-            // entry matched NONE of them — the pane likely concatenated or
-            // garbled the send (the S5/S8 bug). Do NOT mirror it: re-mirroring an
-            // unmatched echo is exactly the seq-43 duplicate. Mark the uuid
-            // handled, clear the in-flight (so an upcoming turn-start can't
-            // FALSELY confirm a send that didn't land as typed), and pause with a
-            // mismatch reason so the app shows a real banner instead of silently
-            // losing or duplicating the message.
-            recordInboundReceipt(delivery, this.relaySessionId, {
-              uuid, text: content, source: "relay", at: Date.now(),
-            });
-            if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-            this.#clearSubmitTimer(); // don't let a stale Enter submit the garbled text
-            // Clear the stale pending twin(s) so they can't later suppress a real
-            // identical prompt as a phantom self-echo, or keep forcing mismatch
-            // pauses. If a dispatch is still in flight, neutralize its text; if
-            // turn-start already confirmed (cleared) the in-flight item but a
-            // garbled echo still arrived, the leftover pending entries are the
-            // culprit — drop them all (with their persisted received twins).
-            if (this.#dispatchInFlight) {
-              this.#neutralizePending(this.#dispatchInFlight.text);
-            } else {
-              for (const p of [...delivery.pending]) {
-                consumeReceived(delivery, this.relaySessionId, p.text, Date.now());
-              }
-              delivery.pending.length = 0;
-            }
-            this.#dispatchInFlight = null;
-            this.#pauseDispatch("dispatch_mismatch");
-            process.stderr.write(`[dispatch] mismatch for ${this.id}: transcript user entry matched no pending send — paused (not mirrored)\n`);
-            return;
           } else {
+            // Unmatched = direct input (pane view, `tmux attach`, …). Trust the log: it's a
+            // real message Claude received, so mirror it to every client. Single user, one
+            // device at a time → no concurrent writes to Claude's one input box → no
+            // collision that could garble a dispatch into a mismatched echo, so an unmatched
+            // entry is never a corrupted app send (that's why there's no longer a
+            // dispatch_mismatch suppress+pause here). Any in-flight dispatch is left
+            // untouched: its own clean echo matches later, or the 20s timeout re-queues it.
             this.#relay!.send(encodeUserMessage(content, entryTimeMs));
             recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "", at: Date.now() });
           }
