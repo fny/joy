@@ -7,6 +7,9 @@ test("flattenForMatch: collapses every newline form to a space (dedup key)", () 
   expect(flattenForMatch("a\rb")).toBe("a b");
   expect(flattenForMatch("line1\nline2\nline3")).toBe("line1 line2 line3");
   expect(flattenForMatch("no newlines")).toBe("no newlines");
+  // collapse repeated whitespace + trim, so trailing/normalized echo whitespace matches
+  expect(flattenForMatch("foo\n\n")).toBe("foo");
+  expect(flattenForMatch("  a   b\t\nc  ")).toBe("a b c");
 });
 
 test("parseJoyCommand: /steer splits name + args", () => {

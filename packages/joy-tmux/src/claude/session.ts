@@ -187,7 +187,10 @@ export function parseJoyCommand(text: string): { name: string; args: string } | 
  * as a duplicate. (The relay mirror always uses the original, newlines intact.)
  */
 export function flattenForMatch(text: string): string {
-  return text.replace(/\r\n|\r|\n/g, " ");
+  // Collapse ALL whitespace runs (newlines, tabs, repeated spaces) to a single space and
+  // trim — so a multi-line send still matches Claude's echo even if it normalizes/ trims
+  // whitespace (e.g. drops a trailing blank line) differently than we typed it.
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /** Slim wire shape pushed to the app (joy__queue) and returned by queue ops. */
@@ -1304,11 +1307,17 @@ export class Session {
   async #steer(text: string, opts: SendOptions): Promise<void> {
     if (this.status === "ended") return;
     const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeIntoTmux)
-    const delivery = this.#ensureDelivery();
-    const tracked = !!delivery && !!this.relaySessionId;
-    if (tracked) {
-      delivery!.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
-      recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
+    // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
+    // pending), steer's C-c below would wipe that text AND its stale submit Enter would
+    // then fire under our steer — corrupting both. Put that dispatch back on the queue
+    // head (neutralizing its receipt) and cancel its submit, so it re-dispatches cleanly
+    // after steer settles, instead of being clobbered.
+    if (this.#submitTimer && this.#dispatchInFlight) {
+      this.#clearSubmitTimer();
+      this.#queue.unshift(this.#dispatchInFlight);
+      this.#neutralizePending(this.#dispatchInFlight.text);
+      this.#dispatchInFlight = null;
+      this.#broadcastQueue();
     }
     // No dispatch gate here (steering types alongside an in-flight turn), so clear any
     // leftover ourselves — but with a GUARDED C-c, never a blind one: C-c on an empty
@@ -1320,15 +1329,23 @@ export class Session {
       await tmux.key(this.tmuxWindow, "C-c");
       await sleep(CLEAR_SETTLE_MS);
     }
-    if (!(await this.#typeLines(text))) { if (tracked) delivery!.pending.pop(); return; }
+    if (!(await this.#typeLines(text))) return;
     // Submit after the settle delay (paste-detection swallows an immediate Enter).
-    // Coalesce rapid steers; mirror only once the Enter has gone out.
+    // Coalesce rapid steers; record the receipt + mirror only once the Enter actually
+    // lands — so a steer that got superseded (its C-j burst cleared by a later steer)
+    // never leaves a stale receipt that would suppress a later identical real message.
     if (this.#steerSubmitTimer) clearTimeout(this.#steerSubmitTimer);
     this.#steerSubmitTimer = setTimeout(async () => {
       this.#steerSubmitTimer = null;
       if (this.status === "ended") return;
       const e = await tmux.key(this.tmuxWindow, "Enter");
-      if (e.ok && opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
+      if (!e.ok) return;
+      const delivery = this.#ensureDelivery();
+      if (delivery && this.relaySessionId) {
+        delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
+        recordReceived(delivery, this.relaySessionId, typed, Date.now());
+      }
+      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
@@ -1369,8 +1386,14 @@ export class Session {
     this.#submitTimer = setTimeout(async () => {
       this.#submitTimer = null;
       if (this.status === "ended") return;
-      if (this.#turn) return;                                    // a turn is already in flight
-      if (!target || this.#dispatchInFlight !== target) return;  // require the same dispatch still in flight
+      if (!target || this.#dispatchInFlight !== target) return;  // dispatch gone (timeout/abort) → abandon
+      // A turn flag is set at the submit mark. Our message hasn't submitted yet (this IS
+      // the submit), so it can't have started a turn — this is almost always a stale /
+      // lagging turn flag. Don't ONE-SHOT abandon (that strands the typed text until the
+      // 20s timeout); RESCHEDULE and submit once the turn clears. Bounded by the dispatch
+      // timeout: if it never clears, the item is re-queued and #dispatchInFlight changes,
+      // so the guard above then abandons this chain.
+      if (this.#turn) { this.#armSubmit(opts); return; }
       // Mirror + flip thinking ONLY after the Enter has actually gone out over the
       // wire — so the app never shows "sent" before the pane submitted. A failed
       // Enter (disconnect) leaves it unsent; the 20s dispatch timeout surfaces it.
@@ -1933,9 +1956,10 @@ export function paneInputText(text: string): string | null {
     const first = stripAnsi(t.replace(/^❯/, "")).replace(/\s+/g, " ").trim();
     if (first) parts.push(first);
     for (let j = i + 1; j < lines.length && !isRule(lines[j]); j++) {
-      // Defensive bound: the footer (permission hint) lives below the bottom rule, but
-      // if a capture is missing that rule, don't run past it into footer text.
-      if (/⏵|bypass permissions|shift\+tab/i.test(lines[j])) break;
+      // Defensive bound: the footer (permission hint / shortcut row) lives below the
+      // bottom rule, but if a capture is missing that rule, don't run past it into footer
+      // text. Covers the known footer forms across permission modes.
+      if (/⏵|⏸|shift\+tab|bypass permissions|accept edits|plan mode|for shortcuts|for agents|to manage/i.test(lines[j])) break;
       const cont = stripAnsi(lines[j]).replace(/\s+/g, " ").trim();
       if (cont) parts.push(cont);
     }
