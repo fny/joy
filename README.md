@@ -1,86 +1,91 @@
 <div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="/.github/logotype-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="/.github/logotype-light.png">
-    <img src="/.github/logotype-dark.png" width="400" alt="Happy">
-  </picture>
+  <img src="/.github/joy-logo.png" width="180" alt="joy" />
 </div>
 
-<h1 align="center">
-  Mobile and Web Client for Claude Code & Codex
-</h1>
+<h1 align="center">joy</h1>
 
 <h4 align="center">
-Use Claude Code or Codex from anywhere with end-to-end encryption.
+Control your Claude Code sessions from your phone, web, or desktop — end-to-end encrypted.
 </h4>
 
-<div align="center">
-  
-[📱 **iOS App**](https://apps.apple.com/us/app/happy-claude-code-client/id6748571505) • [🤖 **Android App**](https://play.google.com/store/apps/details?id=com.ex3ndr.happy) • [🌐 **Web App**](https://app.happy.engineering) • [🎥 **See a Demo**](https://youtu.be/GCS0OG9QMSE) • [📚 **Documentation**](https://happy.engineering/docs/) • [💬 **Discord**](https://discord.gg/fX9WBAhyfD)
+---
 
-</div>
+`joy` is a personal fork of [Happy Coder](https://github.com/slopus/happy). It pairs a
+client app with a tmux-based daemon so you can drive Claude Code from anywhere: the daemon
+runs your sessions on your machine, the app mirrors them in real time over an end-to-end
+encrypted relay, and you can take over from any device.
 
-<img width="5178" height="2364" alt="github" src="/.github/header.png" />
+The two packages that make up joy are:
 
+- **[joy-app](packages/joy-app)** - the client. Mobile (iOS/Android via Expo), web, and
+  macOS desktop (Tauri). This is the real app you interact with.
+- **[joy-tmux](packages/joy-tmux)** - the daemon + `joy` CLI. Runs Claude Code sessions
+  inside tmux, drives them over tmux control mode, tails their transcripts, and bridges
+  everything to the relay. This replaces the happy-cli wrapper.
 
-<h3 align="center">
-Step 1: Download App
-</h3>
-
-<div align="center">
-<a href="https://apps.apple.com/us/app/happy-claude-code-client/id6748571505"><img width="135" height="39" alt="appstore" src="https://github.com/user-attachments/assets/45e31a11-cf6b-40a2-a083-6dc8d1f01291" /></a>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://play.google.com/store/apps/details?id=com.ex3ndr.happy"><img width="135" height="39" alt="googleplay" src="https://github.com/user-attachments/assets/acbba639-858f-4c74-85c7-92a4096efbf5" /></a>
-</div>
-
-<h3 align="center">
-Step 2: Install CLI on your computer
-</h3>
-
-```bash
-npm install -g happy
-```
-
-> Migrated from the `happy-coder` package. Thanks to [@franciscop](https://github.com/franciscop) for donating the `happy` package name!
-
-<h3 align="center">
-Step 3: Start using `happy` instead of `claude` or `codex`
-</h3>
-
-```bash
-# Instead of claude, use:
-happy claude
-# or
-happy codex
-```
+The `happy-*` packages in this repo are a pristine mirror of upstream
+[slopus/happy](https://github.com/slopus/happy), kept around for reference and for porting
+upstream changes — joy's own code lives only in `joy-app` and `joy-tmux`.
 
 ## How does it work?
 
-On your computer, run `happy` instead of `claude` or `happy codex` instead of `codex` to start your AI through our wrapper. When you want to control your coding agent from your phone, it restarts the session in remote mode. To switch back to your computer, just press any key on your keyboard.
+The `joy-tmux` daemon launches `claude` inside a tmux window and manages it for you —
+scraping the pane, queuing input, and streaming the transcript to the relay. The app
+connects to the same relay and shows your sessions live; anything you send from the app is
+typed into the real Claude session, and anything you type directly is mirrored back to the
+app. Because every session runs in tmux, the daemon can restart and re-adopt live sessions
+without losing your work.
 
-## 🔥 Why Happy Coder?
+## Why Joy?
 
-- 📱 **Mobile access to Claude Code and Codex** - Check what your AI is building while away from your desk
-- 🔔 **Push notifications** - Get alerted when Claude Code and Codex needs permission or encounters errors  
-- ⚡ **Switch devices instantly** - Take control from phone or desktop with one keypress
-- 🔐 **End-to-end encrypted** - Your code never leaves your devices unencrypted
-- 🛠️ **Open source** - Audit the code yourself. No telemetry, no tracking
+- **Mobile access to Claude Code** - check and steer what your agent is doing from anywhere
+- **Switch devices instantly** - pick up from phone, web, or desktop; the tmux session keeps running
+- **Everything mirrors** - app, web, and direct terminal input all propagate to every client
+- **End-to-end encrypted** - your code never leaves your devices unencrypted
+- **Yours to hack** - a small, readable daemon and a single app, no telemetry
 
-## 📦 Project Components
+## Quick build
 
-- **[Happy App](https://github.com/slopus/happy/tree/main/packages/happy-app)** - Web UI + mobile client (Expo)
-- **[Happy CLI](https://github.com/slopus/happy/tree/main/packages/happy-cli)** - Command-line interface for Claude Code and Codex
-- **[Happy Agent](https://github.com/slopus/happy/tree/main/packages/happy-agent)** - Remote agent control CLI (create, send, monitor sessions)
-- **[Happy Server](https://github.com/slopus/happy/tree/main/packages/happy-server)** - Backend server for encrypted sync
+Prerequisites: **Node 20+**, **[pnpm](https://pnpm.io) 10+**, and **tmux** (for the daemon).
 
-## 🏠 Who We Are
+```bash
+# 1. Install all workspace dependencies
+pnpm install
+```
 
-We're engineers scattered across Bay Area coffee shops and hacker houses, constantly checking how our AI coding agents are progressing on our pet projects during lunch breaks. Happy Coder was born from the frustration of not being able to peek at our AI coding tools building our side hustles while we're away from our keyboards. We believe the best tools come from scratching your own itch and sharing with the community.
+### Run the daemon (joy-tmux)
 
-## 📚 Documentation & Contributing
+The daemon reads your Happy/joy account credential from `~/.happy/access.key`
+(set `HAPPY_HOME_DIR` to point elsewhere). Provision it once with the upstream happy CLI
+login flow if you don't have one yet.
 
-- **[Documentation Website](https://happy.engineering/docs/)** - Learn how to use Happy Coder effectively
-- **[Contributing Guide](docs/CONTRIBUTING.md)** - How to contribute, PR guidelines, and development setup
-- **[Edit docs at github.com/slopus/slopus.github.io](https://github.com/slopus/slopus.github.io)** - Help improve our documentation and guides
+```bash
+cd packages/joy-tmux
+
+pnpm typecheck && pnpm test   # verify the build
+pnpm start                    # run the daemon (tsx src/server.ts)
+```
+
+Or install the published CLI globally and run `joy`:
+
+```bash
+pnpm install -g @fny/joy-tmux
+joy
+```
+
+### Run the app (joy-app)
+
+```bash
+cd packages/joy-app
+
+pnpm web            # web client at http://localhost:8081
+pnpm ios            # iOS (Expo)
+pnpm android        # Android (Expo)
+pnpm tauri:dev      # macOS desktop (Tauri)
+```
+
+Log in with your account secret key, and your daemon's sessions will appear in the app.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.
