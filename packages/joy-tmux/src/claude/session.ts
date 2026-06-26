@@ -64,11 +64,6 @@ const ENTER_SUBMIT_DELAY_MS = 350;
 // a guarded C-c once the interrupt has settled and the ready prompt has repainted
 // (paneInputText needs the box drawn to read it). Cancelled if a new send starts.
 const ABORT_CLEAR_DELAY_MS = 400;
-// After the C-u clear, wait this long before typing a MULTI-LINE message. The C-j
-// burst trips Claude's paste-detection, which otherwise captures the just-sent C-u
-// (\x15) into the pasted content — corrupting the message + breaking dedup. The delay
-// lets the kill-line be processed first. Single-line sends skip it (no paste trigger).
-const CLEAR_SETTLE_MS = 120;
 
 // 500-error auto-retry backoff (seconds): paired ramp, then STOP. 14 attempts,
 // ~63 min total. When a turn ENDS with an unresolved 5xx (Claude gave up after
@@ -163,8 +158,8 @@ export interface SendOptions {
   mirrorToRelay: boolean;
 }
 
-/** Slash commands joy handles itself, before the text reaches Claude (`/steer`, `/title`). */
-const JOY_COMMANDS = new Set(["steer", "title"]);
+/** Slash commands joy handles itself, before the text reaches Claude (today: `/title`). */
+const JOY_COMMANDS = new Set(["title"]);
 
 /**
  * Parse a joy-owned slash command the daemon intercepts BEFORE the text reaches Claude:
@@ -336,9 +331,6 @@ export class Session {
   // ABORT_CLEAR_DELAY_MS). Cancelled when a new send starts (so it can't C-c the
   // freshly-typed message) or on teardown.
   #abortClearTimer: ReturnType<typeof setTimeout> | null = null;
-  // Pending delayed-Enter for a /steer send — separate from #submitTimer so steering
-  // (which submits mid-turn) and the dispatch submit don't cancel each other.
-  #steerSubmitTimer: ReturnType<typeof setTimeout> | null = null;
   // Count of clear-the-input attempts for the current drain: one guarded C-c, then
   // pause. Reset once the box is empty / on dispatch / when the pane isn't ready.
   #clearAttempts = 0;
@@ -564,7 +556,6 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#clearSubmitTimer();
     if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
-    if (this.#steerSubmitTimer) { clearTimeout(this.#steerSubmitTimer); this.#steerSubmitTimer = null; }
     this.#queue = [];
     this.#dispatchInFlight = null;
 
@@ -681,23 +672,12 @@ export class Session {
    */
   enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
     // Joy-owned commands are handled HERE — before the text is queued or reaches Claude.
-    //   /steer <msg>  type <msg> straight into the pane and submit it now, BYPASSING the
-    //                 queue + its idle gate, so it lands immediately (mid-turn if a turn
-    //                 is running) instead of waiting behind the queue.
     //   /title <text> set the session's conversation title (the summary the app shows).
-    // None are queued or sent to Claude; we return a synthetic record so queue-add
-    // callers still get an id.
+    // Not queued or sent to Claude; we return a synthetic record so queue-add callers
+    // still get an id.
     const cmd = parseJoyCommand(text);
     if (cmd) {
-      if (cmd.name === "steer" && cmd.args.trim()) {
-        void this.#steer(cmd.args, {
-          seq: opts?.seq,
-          source: opts?.source ?? "rpc",
-          mirrorToRelay: opts?.mirrorToRelay ?? true,
-        });
-      } else if (cmd.name === "title") {
-        this.#setTitle(cmd.args);
-      }
+      if (cmd.name === "title") this.#setTitle(cmd.args);
       return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
     }
     const item: QueuedItem = {
@@ -1237,9 +1217,9 @@ export class Session {
   /**
    * Type `text` into the pane PRESERVING newlines: one `literal` per line with a C-j
    * (a real in-box linefeed, NOT a submit) between them. A single-line message is one
-   * `literal` — unchanged. Does NOT clear or submit: callers ensure the box is empty
-   * first (the dispatch gate, or #steer's guarded C-c) and own the delayed Enter. NB no
-   * pre-clear control char (C-u/C-c) is sent right before the C-j burst — that's what
+   * `literal` — unchanged. Does NOT clear or submit: the dispatch gate ensures the box
+   * is empty first and #armSubmit owns the delayed Enter. NB no pre-clear control char
+   * (C-u/C-c) is sent right before the C-j burst — that's what
    * Claude's paste-detection used to fold into the message as a stray \x15. Awaited in
    * order via the FIFO; returns false if any send fails (caller rolls back).
    */
@@ -1294,62 +1274,6 @@ export class Session {
     // chat doesn't show "sent" before the pane has actually submitted.
     this.#armSubmit({ text, mirrorToRelay: opts.mirrorToRelay });
     if (!this.#tailer && this.status !== "ended") this.pollForTranscript();
-  }
-
-  /**
-   * /steer: type a message straight into the pane and submit it NOW, bypassing the
-   * dispatch queue and its empty-box/idle gate — so it reaches Claude immediately, even
-   * while a turn is in flight (Claude takes it as its next input). Unlike #armSubmit this
-   * submits WITHOUT the #turn / #dispatchInFlight guards — submitting mid-turn is the
-   * whole point. Records a receipt so the transcript echo is deduped (not re-mirrored),
-   * and mirrors to the relay once the Enter actually lands.
-   */
-  async #steer(text: string, opts: SendOptions): Promise<void> {
-    if (this.status === "ended") return;
-    const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeIntoTmux)
-    // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
-    // pending), steer's C-c below would wipe that text AND its stale submit Enter would
-    // then fire under our steer — corrupting both. Put that dispatch back on the queue
-    // head (neutralizing its receipt) and cancel its submit, so it re-dispatches cleanly
-    // after steer settles, instead of being clobbered.
-    if (this.#submitTimer && this.#dispatchInFlight) {
-      this.#clearSubmitTimer();
-      // Also kill that dispatch's 20s echo-timeout — otherwise it stays live and could
-      // prematurely time out the message once it RE-dispatches after the steer.
-      if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-      this.#queue.unshift(this.#dispatchInFlight);
-      this.#neutralizePending(this.#dispatchInFlight.text);
-      this.#dispatchInFlight = null;
-      this.#broadcastQueue();
-    }
-    // No dispatch gate here (steering types alongside an in-flight turn), so clear any
-    // leftover ourselves — but with a GUARDED C-c, never a blind one: C-c on an empty
-    // box arms Claude's "press again to exit", so we only send it when the box actually
-    // holds text. C-c (unlike C-u) clears a wrapped multi-line box. Let it settle before
-    // the type so it can't be folded into a multi-line paste (the \x15-class bug).
-    const pane = await tmux.captureFresh(this.tmuxWindow);
-    if (pane.ok && paneInputText(pane.out)) {
-      await tmux.key(this.tmuxWindow, "C-c");
-      await sleep(CLEAR_SETTLE_MS);
-    }
-    if (!(await this.#typeLines(text))) return;
-    // Submit after the settle delay (paste-detection swallows an immediate Enter).
-    // Coalesce rapid steers; record the receipt + mirror only once the Enter actually
-    // lands — so a steer that got superseded (its C-j burst cleared by a later steer)
-    // never leaves a stale receipt that would suppress a later identical real message.
-    if (this.#steerSubmitTimer) clearTimeout(this.#steerSubmitTimer);
-    this.#steerSubmitTimer = setTimeout(async () => {
-      this.#steerSubmitTimer = null;
-      if (this.status === "ended") return;
-      const e = await tmux.key(this.tmuxWindow, "Enter");
-      if (!e.ok) return;
-      const delivery = this.#ensureDelivery();
-      if (delivery && this.relaySessionId) {
-        delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
-        recordReceived(delivery, this.relaySessionId, typed, Date.now());
-      }
-      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
-    }, ENTER_SUBMIT_DELAY_MS);
   }
 
   /**
