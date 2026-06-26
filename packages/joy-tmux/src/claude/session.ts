@@ -1264,8 +1264,13 @@ export class Session {
     // echo still pairs with this send and isn't mirrored as a duplicate. The relay
     // mirror uses the original `text` (newlines intact) so the app shows it verbatim.
     const typed = flattenForMatch(text);
-    if (tracked) {
-      delivery!.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
+    // Keep a reference to THIS pending entry so a rollback below removes exactly it —
+    // not whatever happens to be last. Between the push and the awaited type, another
+    // path (a transcript echo match, or abort's #neutralizePending) can splice the
+    // array, so `.pop()` could drop the wrong entry.
+    const pendingEntry = tracked ? { seq: opts.seq, text: typed, source: opts.source, at: Date.now() } : null;
+    if (pendingEntry) {
+      delivery!.pending.push(pendingEntry);
       // Persisted backstop: remember we sent this text so its transcript echo is
       // never mirrored as a duplicate, even if the pending queue is lost to a
       // restart.
@@ -1278,7 +1283,10 @@ export class Session {
     // disconnected) IN ORDER via the FIFO; on failure roll back + throw so the drain
     // re-queues + retries.
     if (!(await this.#typeLines(text))) {
-      if (tracked) delivery!.pending.pop();
+      if (pendingEntry) {
+        const i = delivery!.pending.indexOf(pendingEntry); // splice THIS entry, not the last one
+        if (i >= 0) delivery!.pending.splice(i, 1);
+      }
       throw new Error("tmux send-keys failed");
     }
     // Submit on a delay — NOT back-to-back. The fast send-keys -l burst reads as a

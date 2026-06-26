@@ -72,6 +72,12 @@ export class ControlParser {
 }
 
 const RECONNECT_BACKOFF_MS = [250, 500, 1000, 2000, 5000];
+// Watchdog for the one in-flight command. capture-pane/send-keys frame a %end in
+// milliseconds; if none arrives within this window the response was lost (or tmux
+// wedged), which would otherwise strand #active and freeze the whole FIFO. On timeout
+// we treat the connection as broken and reconnect (the driver spawn-falls-back
+// meanwhile). Generous vs normal latency, below the 20s dispatch echo-timeout.
+const COMMAND_TIMEOUT_MS = 8000;
 
 type Pending = { resolve: (r: TmuxResult) => void };
 
@@ -89,6 +95,7 @@ export class TmuxControlClient {
   // block (or while reconnecting) simply wait in the queue until #ready.
   #writeQueue: Array<{ cmd: string; p: Pending }> = [];
   #active: Pending | null = null; // the single command currently on the wire
+  #activeTimer: ReturnType<typeof setTimeout> | null = null; // watchdog for #active
   #ready = false;                 // seen the initial attach block yet?
   #attempt = 0;
   #stopped = false;
@@ -146,6 +153,7 @@ export class TmuxControlClient {
     const active = this.#active;
     if (active) {
       this.#active = null;
+      if (this.#activeTimer) { clearTimeout(this.#activeTimer); this.#activeTimer = null; }
       active.resolve({ ok: ev.ok, out: ev.out, error: ev.ok ? undefined : ev.out });
       this.#pump();
       return;
@@ -169,6 +177,12 @@ export class TmuxControlClient {
     this.#active = next.p;
     try {
       this.#proc.stdin.write(next.cmd + "\n");
+      // Watchdog: a lost %end would strand #active forever and wedge the FIFO.
+      this.#activeTimer = setTimeout(() => {
+        process.stderr.write("[tmux-control] active command timed out (no %end) — reconnecting\n");
+        this.#onExit();
+      }, COMMAND_TIMEOUT_MS);
+      this.#activeTimer.unref?.();
     } catch {
       // The write threw (EPIPE on a dying pipe). Resolve this command as disconnected
       // so command() stays RESOLVE-ONLY — a fire-and-forget `void tmux.key(...)` must
@@ -206,6 +220,7 @@ export class TmuxControlClient {
     try { proc.stdin?.destroy(); } catch { /* ignore */ }
     try { proc.kill(); } catch { /* ignore */ }
     this.#ready = false;
+    if (this.#activeTimer) { clearTimeout(this.#activeTimer); this.#activeTimer = null; }
     // Fail the in-flight + every queued command so awaiters fall back instead of hanging.
     if (this.#active) { this.#active.resolve({ ok: false, out: "", error: "disconnected" }); this.#active = null; }
     for (const { p } of this.#writeQueue.splice(0)) p.resolve({ ok: false, out: "", error: "disconnected" });
@@ -227,6 +242,7 @@ export class TmuxControlClient {
     proc?.removeAllListeners();
     try { proc?.stdin?.end(); } catch { /* ignore */ }
     try { proc?.kill(); } catch { /* ignore */ }
+    if (this.#activeTimer) { clearTimeout(this.#activeTimer); this.#activeTimer = null; }
     if (this.#active) { this.#active.resolve({ ok: false, out: "", error: "stopped" }); this.#active = null; }
     for (const { p } of this.#writeQueue.splice(0)) p.resolve({ ok: false, out: "", error: "stopped" });
   }
