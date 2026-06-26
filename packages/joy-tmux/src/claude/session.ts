@@ -982,7 +982,21 @@ export class Session {
     // ONLY when that pre-abort submit FIRED mid-capture (#submitTimer went null): then
     // there's nothing to cancel and the box is empty, so skip the cancel + abort-clear.
     const sameSubmit = this.#submitTimer === submitBefore;
-    if (sameSubmit) this.#clearSubmitTimer();
+    if (sameSubmit) {
+      // Aborting a message that was typed but NOT yet submitted (its Enter was still
+      // pending): cancel that Enter AND discard the dispatch — Stop means the message is
+      // gone, not re-queued. Clear the 20s echo-timeout (else it would fire, re-queue the
+      // aborted message, and pause the queue) and neutralize its receipt (it never
+      // submitted, so it'll never echo — leaving the receipt would wrongly suppress a
+      // later identical real message). The abort-clear below wipes the leftover text.
+      this.#clearSubmitTimer();
+      if (this.#dispatchInFlight) {
+        if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+        this.#neutralizePending(this.#dispatchInFlight.text);
+        this.#dispatchInFlight = null;
+        this.#broadcastQueue();
+      }
+    }
     await tmux.key(this.tmuxWindow, "Escape");
     this.#setThinking(false);
     // Interrupting mid-tool means Claude won't write that tool's result — close any
