@@ -113,6 +113,28 @@ test("input text: ghost-text placeholder counts as empty", () => {
   expect(paneShowsEmptyReadyPrompt(pane)).toBe(true);
 });
 
+test("input text: MULTI-line box reads the whole box, not just the ❯ line", () => {
+  const pane = ["────────", "❯ line one", "  line two", "  line three", "────────", "  ⏵⏵ bypass permissions on"].join("\n");
+  expect(paneInputText(pane)).toBe("line one line two line three");
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(false);
+});
+
+test("input text: multi-line box with a BLANK first line is still NON-empty (blind-spot fix)", () => {
+  // A message starting with a newline: ❯ line is blank, content is below. Must NOT read
+  // as empty (else the gate would dispatch + concatenate on top).
+  const pane = ["────────", "❯ ", "  second line", "────────", "  ⏵⏵ bypass permissions on"].join("\n");
+  expect(paneInputText(pane)).toBe("second line");
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(false);
+});
+
+test("input text: empty box stays empty — footer below the rule is NOT collected", () => {
+  // Regression guard: the whole-box read must stop at the bottom rule and never treat
+  // the permission footer as box content (a false non-empty → a spurious C-c on empty).
+  const pane = ["────────", "❯ ", "────────", "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"].join("\n");
+  expect(paneInputText(pane)).toBe("");
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(true);
+});
+
 test("generating: esc-to-interrupt true; idle prompt + bg shells false (dispatch gate)", () => {
   // The dispatch gate must hold while a turn streams, even before #turn is set...
   expect(paneShowsGenerating("✻ Ruminating… (esc to interrupt)")).toBe(true);

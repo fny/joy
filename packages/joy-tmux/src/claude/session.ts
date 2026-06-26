@@ -1232,18 +1232,16 @@ export class Session {
   }
 
   /**
-   * Clear the box (C-u) then type `text` PRESERVING newlines: one `literal` per line
-   * with a C-j (a real in-box linefeed, NOT a submit) between them. A single-line
-   * message is C-u + one `literal` — unchanged from before. For a MULTI-line message we
-   * let the C-u settle (CLEAR_SETTLE_MS) before the C-j burst, so Claude's paste-detection
-   * doesn't fold the kill-line into the pasted content (the \x15 corruption). Awaited in
-   * order via the FIFO; returns false if any send fails (caller rolls back). Does NOT
-   * submit — the caller owns the delayed Enter.
+   * Type `text` into the pane PRESERVING newlines: one `literal` per line with a C-j
+   * (a real in-box linefeed, NOT a submit) between them. A single-line message is one
+   * `literal` — unchanged. Does NOT clear or submit: callers ensure the box is empty
+   * first (the dispatch gate, or #steer's guarded C-c) and own the delayed Enter. NB no
+   * pre-clear control char (C-u/C-c) is sent right before the C-j burst — that's what
+   * Claude's paste-detection used to fold into the message as a stray \x15. Awaited in
+   * order via the FIFO; returns false if any send fails (caller rolls back).
    */
-  async #clearAndType(text: string): Promise<boolean> {
-    if (!(await tmux.key(this.tmuxWindow, "C-u")).ok) return false;
+  async #typeLines(text: string): Promise<boolean> {
     const lines = text.split(/\r\n|\r|\n/);
-    if (lines.length > 1) await sleep(CLEAR_SETTLE_MS);
     for (let i = 0; i < lines.length; i++) {
       if (i > 0 && !(await tmux.key(this.tmuxWindow, "C-j")).ok) return false;
       if (lines[i] !== "" && !(await tmux.literal(this.tmuxWindow, lines[i])).ok) return false;
@@ -1276,11 +1274,13 @@ export class Session {
       // restart.
       recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
-    // Clear-then-type (C-u kills any half-entered answer so it can't be appended to our
-    // message; the gate already guarantees an empty box, this is belt-and-suspenders).
-    // Goes over control mode (or spawn while disconnected) IN ORDER via the FIFO; on any
-    // failure roll the pending entry back and throw so the drain re-queues + retries.
-    if (!(await this.#clearAndType(text))) {
+    // No pre-clear: the drain gate only dispatches into a box it has confirmed EMPTY
+    // (clearing any leftover with a guarded C-c first), so a C-u here is redundant — and
+    // a control char right before the C-j burst is exactly what paste-detection folded
+    // into the message as a stray \x15. Type goes over control mode (or spawn while
+    // disconnected) IN ORDER via the FIFO; on failure roll back + throw so the drain
+    // re-queues + retries.
+    if (!(await this.#typeLines(text))) {
       if (tracked) delivery!.pending.pop();
       throw new Error("tmux send-keys failed");
     }
@@ -1310,9 +1310,17 @@ export class Session {
       delivery!.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
       recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
-    // Clear-then-type (newlines preserved). No empty-box gate: steering deliberately
-    // types alongside an in-flight turn, so the C-u clears any half-entered text first.
-    if (!(await this.#clearAndType(text))) { if (tracked) delivery!.pending.pop(); return; }
+    // No dispatch gate here (steering types alongside an in-flight turn), so clear any
+    // leftover ourselves — but with a GUARDED C-c, never a blind one: C-c on an empty
+    // box arms Claude's "press again to exit", so we only send it when the box actually
+    // holds text. C-c (unlike C-u) clears a wrapped multi-line box. Let it settle before
+    // the type so it can't be folded into a multi-line paste (the \x15-class bug).
+    const pane = await tmux.captureFresh(this.tmuxWindow);
+    if (pane.ok && paneInputText(pane.out)) {
+      await tmux.key(this.tmuxWindow, "C-c");
+      await sleep(CLEAR_SETTLE_MS);
+    }
+    if (!(await this.#typeLines(text))) { if (tracked) delivery!.pending.pop(); return; }
     // Submit after the settle delay (paste-detection swallows an immediate Enter).
     // Coalesce rapid steers; mirror only once the Enter has gone out.
     if (this.#steerSubmitTimer) clearTimeout(this.#steerSubmitTimer);
@@ -1917,11 +1925,24 @@ export function paneInputText(text: string): string | null {
     if (!t.startsWith("❯")) continue;
     if (/^❯\s*\d+\./.test(t)) continue;     // selector option row, not the input
     if (!isRule(lines[i - 1])) continue;    // not the live box (scrollback echo)
-    // Drop the prompt glyph, any ANSI, and the cursor's nbsp padding, then trim.
-    const after = stripAnsi(t.replace(/^❯/, "")).replace(/\s+/g, " ").trim();
-    if (!after) return "";
-    if (/^Try\s+["“']/.test(after)) return ""; // ghost-text placeholder, not input
-    return after;
+    // Read the WHOLE box: the ❯ line PLUS any continuation lines down to the bottom
+    // rule. A wrapped / multi-line (C-j) input box spans several lines between the
+    // rules; reading only the ❯ line would miss text on a blank-first-line box and
+    // wrongly report "empty", letting a dispatch concatenate on top of it.
+    const parts: string[] = [];
+    const first = stripAnsi(t.replace(/^❯/, "")).replace(/\s+/g, " ").trim();
+    if (first) parts.push(first);
+    for (let j = i + 1; j < lines.length && !isRule(lines[j]); j++) {
+      // Defensive bound: the footer (permission hint) lives below the bottom rule, but
+      // if a capture is missing that rule, don't run past it into footer text.
+      if (/⏵|bypass permissions|shift\+tab/i.test(lines[j])) break;
+      const cont = stripAnsi(lines[j]).replace(/\s+/g, " ").trim();
+      if (cont) parts.push(cont);
+    }
+    const joined = parts.join(" ");
+    if (!joined) return "";
+    if (/^Try\s+["“']/.test(joined)) return ""; // ghost-text placeholder, not input
+    return joined;
   }
   return null;
 }
