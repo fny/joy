@@ -1314,6 +1314,9 @@ export class Session {
     // after steer settles, instead of being clobbered.
     if (this.#submitTimer && this.#dispatchInFlight) {
       this.#clearSubmitTimer();
+      // Also kill that dispatch's 20s echo-timeout — otherwise it stays live and could
+      // prematurely time out the message once it RE-dispatches after the steer.
+      if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
       this.#queue.unshift(this.#dispatchInFlight);
       this.#neutralizePending(this.#dispatchInFlight.text);
       this.#dispatchInFlight = null;
