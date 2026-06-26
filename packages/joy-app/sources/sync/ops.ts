@@ -375,6 +375,55 @@ export async function machineStopDaemon(machineId: string): Promise<{ message: s
     return result;
 }
 
+// A Claude transcript file on disk for a project directory (one per conversation).
+export interface JoyLogEntry {
+    sessionId: string;   // the .jsonl basename = Claude session UUID
+    sizeBytes: number;
+    mtimeMs: number;
+}
+
+// A single back-and-forth message previewed from a transcript.
+export interface JoyLogMessage {
+    role: 'user' | 'assistant';
+    text: string;
+    ts: number | null;
+}
+
+/**
+ * joy-tmux: list the Claude session logs (transcript JSONLs) for a project
+ * directory on a machine, newest first.
+ */
+export async function machineListLogs(machineId: string, directory: string): Promise<JoyLogEntry[]> {
+    const result = await apiSocket.machineRPC<{ ok: boolean; logs?: JoyLogEntry[]; error?: string }, { directory: string }>(
+        machineId,
+        'joy-list-logs',
+        { directory }
+    );
+    if (!result.ok) throw new Error(result.error || 'Failed to list logs');
+    return result.logs ?? [];
+}
+
+/**
+ * joy-tmux: read the last `limit` back-and-forth messages from one transcript log.
+ */
+export async function machineReadLog(
+    machineId: string,
+    directory: string,
+    sessionId: string,
+    limit = 10
+): Promise<JoyLogMessage[]> {
+    const result = await apiSocket.machineRPC<
+        { ok: boolean; messages?: JoyLogMessage[]; error?: string },
+        { directory: string; sessionId: string; limit: number }
+    >(
+        machineId,
+        'joy-read-log',
+        { directory, sessionId, limit }
+    );
+    if (!result.ok) throw new Error(result.error || 'Failed to read log');
+    return result.messages ?? [];
+}
+
 /**
  * Execute a bash command on a specific machine
  */

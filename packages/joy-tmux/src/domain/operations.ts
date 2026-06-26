@@ -25,9 +25,10 @@ import {
   handleDifftastic,
 } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
-import { existsSync, statSync } from "fs";
+import { cwdToTranscriptDir } from "../claude/transcript";
+import { existsSync, statSync, readdirSync, readFileSync } from "fs";
 import { readFile } from "fs/promises";
-import { basename } from "path";
+import { basename, join } from "path";
 import { hostname, platform, release, arch } from "os";
 import { spawn } from "child_process";
 
@@ -59,6 +60,50 @@ function scheduleDaemonRestart(): void {
 export interface OpMeta {
   /** Which transport invoked the op — send() maps this to the chat-log source. */
   via: "http" | "rpc";
+}
+
+/** Per-message text cap so a few huge turns can't bloat the RPC envelope. */
+const LOG_MESSAGE_CHARS = 4000;
+
+/** Flatten a transcript entry's content into plain text (string or text blocks). */
+function transcriptEntryText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .filter((b): b is { type: string; text: string } =>
+        !!b && typeof b === "object" && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+  }
+  return "";
+}
+
+/**
+ * Read the last `limit` real back-and-forth messages (user prompts + assistant
+ * replies) from a Claude transcript JSONL — skipping meta, tool-result, and CLI
+ * wrapper lines. Newest last. Each message text is capped at LOG_MESSAGE_CHARS.
+ */
+function readLastLogMessages(file: string, limit: number): Array<{ role: "user" | "assistant"; text: string; ts: number | null }> {
+  const out: Array<{ role: "user" | "assistant"; text: string; ts: number | null }> = [];
+  try {
+    for (const line of readFileSync(file, "utf-8").split("\n")) {
+      if (!line.trim()) continue;
+      let o: Record<string, unknown>;
+      try { o = JSON.parse(line); } catch { continue; }
+      if (o.isMeta) continue;
+      const role = o.type === "user" ? "user" : o.type === "assistant" ? "assistant" : null;
+      if (!role) continue;
+      let text = transcriptEntryText((o.message as { content?: unknown } | undefined)?.content);
+      if (!text) continue;
+      // A user line starting with "<" is a tool_result / command wrapper, not a real prompt.
+      if (role === "user" && text.startsWith("<")) continue;
+      if (text.length > LOG_MESSAGE_CHARS) text = text.slice(0, LOG_MESSAGE_CHARS) + "…";
+      const tsRaw = typeof o.timestamp === "string" ? Date.parse(o.timestamp) : NaN;
+      out.push({ role, text, ts: Number.isNaN(tsRaw) ? null : tsRaw });
+    }
+  } catch { /* unreadable → whatever we collected */ }
+  return out.slice(-limit);
 }
 
 export interface MachineOp {
@@ -503,6 +548,55 @@ export const machineOps: MachineOp[] = [
         return { ok: true, entry: sessions.find((s) => s.id === claudeSessionId) ?? null };
       }
       return { ok: true, sessions: sessions.slice(0, 20) };
+    },
+  },
+  {
+    name: "listLogs",
+    scope: "machine",
+    rpcName: "joy-list-logs",
+    http: { method: "GET", path: "/logs" },
+    // List every Claude transcript JSONL for a project directory (one per
+    // conversation Claude has had in that cwd), newest first. `directory` is the
+    // absolute cwd; we map it to ~/.claude/projects/<encoded>/ ourselves. Just
+    // stats (id + size + mtime) — no file reads, so it stays fast.
+    handler: (_registry, params) => {
+      const directory = String(params.directory ?? "");
+      if (!directory) return { ok: false, error: "directory required", directory: "", logs: [] };
+      const dir = cwdToTranscriptDir(directory);
+      const logs: Array<{ sessionId: string; sizeBytes: number; mtimeMs: number }> = [];
+      try {
+        for (const f of readdirSync(dir)) {
+          if (!f.endsWith(".jsonl")) continue;
+          try {
+            const st = statSync(join(dir, f));
+            logs.push({ sessionId: f.slice(0, -".jsonl".length), sizeBytes: st.size, mtimeMs: st.mtimeMs });
+          } catch { /* vanished mid-scan */ }
+        }
+      } catch { /* no transcript dir for this cwd yet → empty */ }
+      logs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      return { ok: true, directory, logs };
+    },
+  },
+  {
+    name: "readLog",
+    scope: "machine",
+    rpcName: "joy-read-log",
+    http: { method: "GET", path: "/logs/messages" },
+    // Last N back-and-forth messages (user + assistant) from one transcript, for
+    // a quick preview without shipping the whole file (see joy-session-log for the
+    // full download). `sessionId` is the bare .jsonl basename under the project's
+    // transcript dir — validated against path traversal.
+    handler: (_registry, params) => {
+      const directory = String(params.directory ?? "");
+      const sessionId = String(params.sessionId ?? "");
+      const limit = Math.max(1, Math.min(100, Math.floor(Number(params.limit)) || 10));
+      if (!directory || !sessionId) return { ok: false, error: "directory and sessionId required", messages: [] };
+      if (sessionId.includes("/") || sessionId.includes("\\") || sessionId.includes("..")) {
+        return { ok: false, error: "invalid sessionId", messages: [] };
+      }
+      const file = join(cwdToTranscriptDir(directory), `${sessionId}.jsonl`);
+      if (!existsSync(file)) return { ok: false, error: "log not found", messages: [] };
+      return { ok: true, sessionId, messages: readLastLogMessages(file, limit) };
     },
   },
 ];
