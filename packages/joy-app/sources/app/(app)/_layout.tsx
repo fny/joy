@@ -362,6 +362,27 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="joy/logs/index"
+                options={{
+                    headerTitle: 'Session Logs',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
+            <Stack.Screen
+                name="joy/logs/[machine]"
+                options={{
+                    headerTitle: 'Project Logs',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
+            <Stack.Screen
+                name="joy/logs/view"
+                options={{
+                    headerTitle: 'Log Preview',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
+            <Stack.Screen
                 name="joy/pane/[machine]/[id]"
                 options={{
                     // Full-height terminal: no header bar. The page renders its own
