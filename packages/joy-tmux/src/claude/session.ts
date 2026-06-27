@@ -268,6 +268,13 @@ export class Session {
   // reconciles this against the live pane so the app's status matches the
   // window; the event-driven setters below give instant feedback in between.
   #thinking = false;
+  // Outstanding background tasks (run_in_background bash + background agents),
+  // keyed by Claude's backgroundTaskId, derived from the transcript. Keeps the
+  // session "working" with an N/M count until they finish — survives turn-end,
+  // unlike the pane-footer poll which flickers idle for ~3s at turn-end.
+  #bgTasks = new Set<string>();
+  #bgTotal = 0;
+  #bgDone = 0;
   // The (retrying) archive POST fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -479,6 +486,9 @@ export class Session {
     // server-side. The in-memory backstop timer is also gone, so without this the
     // banner could stick until the next compaction. (Idempotent — no-op if unset.)
     if (!this.#compacting) void rs.updateCompacting(null);
+    // Clear a stale background-task count after a daemon restart (in-memory
+    // #bgTasks rebuilt empty while joy__tasks persisted server-side).
+    if (this.#bgTasks.size === 0) void rs.updateTasks(null);
     // Reflect the current queue on (re)attach — recovery/reconnect included.
     void rs.updateQueue(this.queueState());
 
@@ -1439,6 +1449,28 @@ export class Session {
     this.#relay?.setThinking(thinking);
   }
 
+  /** A background task (run_in_background bash / agent) launched — start or
+   *  extend the current batch and push the live N/M count. */
+  #taskLaunched(id: string): void {
+    if (this.#bgTasks.has(id)) return;
+    if (this.#bgTasks.size === 0) { this.#bgTotal = 0; this.#bgDone = 0; } // fresh batch
+    this.#bgTasks.add(id);
+    this.#bgTotal++;
+    this.#pushTasks();
+  }
+
+  /** A background task reached a terminal state (its task-notification arrived). */
+  #taskCompleted(id: string): void {
+    if (!this.#bgTasks.delete(id)) return;
+    this.#bgDone++;
+    this.#pushTasks();
+  }
+
+  /** Push batch progress to the app (cleared to null when none outstanding). */
+  #pushTasks(): void {
+    void this.#relay?.updateTasks(this.#bgTasks.size > 0 ? { done: this.#bgDone, total: this.#bgTotal } : null);
+  }
+
   /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
    *  status and arm a backstop timeout in case the compact_boundary record that
    *  normally clears it never arrives (compaction can run for minutes — see the
@@ -1592,6 +1624,12 @@ export class Session {
     if (role === "user") {
       if (entry.isMeta) return;
       if (typeof content !== "string") {
+        // A run_in_background bash / background agent just launched — its
+        // tool_result carries Claude's backgroundTaskId. Track it so the session
+        // stays "working (N/M)" until the matching task-notification arrives,
+        // even though this foreground turn is about to end.
+        const tur = entry.toolUseResult as Record<string, unknown> | undefined;
+        if (tur && typeof tur.backgroundTaskId === "string") this.#taskLaunched(tur.backgroundTaskId);
         // Emit tool-call-end for tool results. NOT gated on this.#turn: the turn
         // may have been nulled (turn_duration/error) before the result lands, and
         // gating used to drop the end → a tool card stuck "running". Use the turn
@@ -1609,6 +1647,14 @@ export class Session {
           }
         }
         return;
+      }
+      // Background task finished: Claude Code injects a <task-notification> with
+      // the same id when a run_in_background bash / background agent reaches a
+      // terminal state. Clear it from the live count (any terminal status, so a
+      // failed/killed task can't leak a stuck "working").
+      if (content.includes("<task-notification>")) {
+        const m = /<task-id>([^<]+)<\/task-id>/.exec(content);
+        if (m) this.#taskCompleted(m[1]);
       }
       // Command/bash machinery from the CLI generates a flood of synthetic
       // user entries. The user's typed command already reaches the relay as

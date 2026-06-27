@@ -127,6 +127,8 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         state = 'retrying'; // daemon re-sending a 500-failed turn on a backoff schedule
     } else if (hasPermissions) {
         state = 'permission_required';
+    } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
+        state = 'tasks'; // background work in flight — yellow, outlives the turn
     } else if (session.thinking) {
         state = 'thinking';
     } else {

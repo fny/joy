@@ -89,6 +89,13 @@ export const MetadataSchema = z.object({
         trigger: z.enum(['auto', 'manual']),
         since: z.number(),
     }).nullable().optional(),
+    // joy: background tasks (run_in_background bash / agents) in flight, tracked
+    // by the daemon from the transcript. Drives a continuous "N/M completed"
+    // working status that outlives the foreground turn. null/absent = none.
+    joy__tasks: z.object({
+        done: z.number(),
+        total: z.number(),
+    }).nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
