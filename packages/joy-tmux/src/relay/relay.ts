@@ -692,6 +692,18 @@ export interface JoyCompactingInfo {
   since: number;              // epoch ms when compaction started
 }
 
+/**
+ * Background-task progress ("N/M completed") the app shows while
+ * run_in_background bash / background agents are in flight. Tracked from the
+ * transcript so "working" stays continuous across turn-end (the foreground turn
+ * ends the moment a background task launches) — independent of the brittle pane
+ * footer poll.
+ */
+export interface JoyTasksInfo {
+  done: number;   // finished in this batch
+  total: number;  // launched in this batch
+}
+
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
 export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
@@ -854,6 +866,11 @@ export class RelaySession {
    * summarizes its context. Set by the PreCompact hook, cleared by the
    * compact_boundary transcript marker (or a backstop timeout in the Session).
    */
+  async updateTasks(info: JoyTasksInfo | null): Promise<void> {
+    if (info == null && this.metadata?.joy__tasks == null) return;
+    await this.mergeMetadata({ joy__tasks: info });
+  }
+
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__compacting == null) return;
     await this.mergeMetadata({ joy__compacting: info });

@@ -3,7 +3,7 @@ import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 
-export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'tasks' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
@@ -97,6 +97,23 @@ export function useSessionStatus(session: Session): SessionStatus {
             shouldShowStatus: true,
             statusColor: '#FF9500',
             statusDotColor: '#FF9500',
+            isPulsing: true
+        };
+    }
+
+    // Background tasks (run_in_background bash / agents) in flight: the daemon
+    // tracks them from the transcript and pushes a live count that outlives the
+    // foreground turn. Shown YELLOW with "N/M completed" — ranks above plain
+    // thinking so the count wins when a turn is also running.
+    const tasks = session.metadata?.joy__tasks;
+    if (tasks && tasks.total > 0) {
+        return {
+            state: 'tasks',
+            isConnected: true,
+            statusText: `${tasks.done}/${tasks.total} completed`,
+            shouldShowStatus: true,
+            statusColor: '#FFCC00',
+            statusDotColor: '#FFCC00',
             isPulsing: true
         };
     }
