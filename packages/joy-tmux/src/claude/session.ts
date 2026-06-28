@@ -1012,6 +1012,20 @@ export class Session {
     // Interrupting mid-tool means Claude won't write that tool's result — close any
     // open tools so their cards don't spin forever.
     this.#closeOpenTools();
+    // Escape ends the current turn, but an INTERRUPTED turn never produces a
+    // turn-end in the transcript — so #turn would stay set forever. The drain gate
+    // (#canDrain requires !#turn) would then block every following message, and
+    // #drainOnce returns BEFORE arming a retry when #canDrain is false, so nothing
+    // ever re-attempts: the next message the user sends hangs undispatched. Close
+    // the turn explicitly here — emit a 'cancelled' turn-end (so the app closes the
+    // turn too) and clear local turn state — then kick the queue so a message sent
+    // right after the abort goes through.
+    if (this.#turn) {
+      this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn.turnId, time: Date.now() }));
+      this.#turnUsage = null;
+      this.#turn = null;
+      this.#maybeDrainQueue();
+    }
     // Clear after abort: Escape interrupts but does NOT clear the box (verified), so
     // anything typed while Claude was generating lingers. Once the interrupt settles +
     // the prompt repaints, drop it with one guarded C-c. Cancelled if a new queued send
