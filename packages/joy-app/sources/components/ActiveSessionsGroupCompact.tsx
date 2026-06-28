@@ -30,7 +30,7 @@ const STATUS_CONFIG: Record<SessionState, { color: string; dotColor: string; isP
     retrying: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
     compacting: { color: '#AF52DE', dotColor: '#AF52DE', isPulsing: true, isConnected: true },
     thinking: { color: '#007AFF', dotColor: '#007AFF', isPulsing: true, isConnected: true },
-    tasks: { color: '#FFCC00', dotColor: '#FFCC00', isPulsing: true, isConnected: true },
+    tasks: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
     waiting: { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
     permission_required: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
 };
