@@ -1250,6 +1250,20 @@ export const storage = create<StorageState>()((set, get) => {
             return `${session.metadata.machineId}:${session.metadata.path}`;
         },
         applyMachines: (machines: Machine[], replace: boolean = false) => set((state) => {
+            // Preserve a machine's last-known (decrypted) metadata when an update
+            // arrives with metadata:null. fetchMachines returns null metadata when
+            // a machine's key/metadata decryption fails or hasn't landed yet
+            // (see sync.ts) — clobbering the store with that reverts the sidebar to
+            // the raw machine id until a later fetch succeeds (the "name shows its
+            // id and takes a long time to come up" bug). Keep the cached name; a
+            // real later update carries decrypted metadata and applies normally.
+            const reconcile = (m: Machine): Machine => {
+                const prev = state.machines[m.id];
+                return (!m.metadata && prev?.metadata)
+                    ? { ...m, metadata: prev.metadata, metadataVersion: prev.metadataVersion }
+                    : m;
+            };
+
             // Either replace all machines or merge updates
             let mergedMachines: Record<string, Machine>;
 
@@ -1257,13 +1271,13 @@ export const storage = create<StorageState>()((set, get) => {
                 // Replace entire machine state (used by fetchMachines)
                 mergedMachines = {};
                 machines.forEach(machine => {
-                    mergedMachines[machine.id] = machine;
+                    mergedMachines[machine.id] = reconcile(machine);
                 });
             } else {
                 // Merge individual updates (used by update-machine)
                 mergedMachines = { ...state.machines };
                 machines.forEach(machine => {
-                    mergedMachines[machine.id] = machine;
+                    mergedMachines[machine.id] = reconcile(machine);
                 });
             }
 
