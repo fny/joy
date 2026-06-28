@@ -215,45 +215,45 @@ export class SessionRegistry {
     // Claude's responses never reaching the app.
     const cwd = expandHome(opts.cwd);
 
-    // One session per directory. Two Claude sessions in the same cwd collide on
-    // the same transcript (both resolve to the latest .jsonl there), so we never
-    // run two at once: a live session in this cwd is returned as-is; a detached
-    // one (Claude dead, window still around) is restarted in place.
+    // Multiple sessions per directory are allowed: each fresh session is pinned to
+    // its own Claude session id (--session-id, below), so they no longer collide
+    // on "the latest .jsonl". What we still avoid is *recreating the same session*
+    // — a second `claude --resume <id>` on a live conversation collides/forks.
     const target = resolve(cwd);
-    // Identity of the session occupying a cwd, resolved the way restart() does:
-    // its learned Claude id, else the basename of the transcript it's tailing
-    // (= the Claude session uuid). Lets us compare an explicit resume target even
-    // before claudeSessionId is populated on a still-starting session.
+    // Identity of a session, resolved the way restart() does: its learned Claude id,
+    // else the basename of the transcript it's tailing (= the Claude session uuid).
     const sessionIdentity = (s: Session): string | undefined =>
       s.claudeSessionId ?? (s.transcriptPath ? basename(s.transcriptPath, ".jsonl") : undefined);
-    for (const s of this.#sessions.values()) {
-      if (resolve(s.cwd) !== target) continue;
-      if (s.status === "starting" || s.status === "active") {
-        // An explicit resume target must BE the session already in this cwd, or
-        // we'd silently hand back a different conversation (one session per cwd).
-        // Surface the conflict instead of resuming the wrong transcript.
-        if (opts.resume_id) {
-          const liveId = sessionIdentity(s);
-          if (liveId && liveId !== opts.resume_id) {
-            throw new Error(`${target} is busy with session "${liveId}" (window ${s.id}); cannot resume "${opts.resume_id}" there`);
-          }
-        }
-        process.stderr.write(`[create] ${s.id} already live in ${target} — returning existing\n`);
-        return s;
+    const inCwd = [...this.#sessions.values()].filter((s) => resolve(s.cwd) === target);
+    const liveInCwd = inCwd.find((s) => s.status === "active" || s.status === "starting");
+    const detachedInCwd = inCwd.find((s) => s.status === "ended" && s.endReason === "process_exited");
+
+    if (opts.resume_id) {
+      // Resuming a specific conversation: if it's the one already here, open/revive
+      // it instead of recreating it. A different (not-live) id falls through and
+      // gets its own new window — its transcript is distinct, so it coexists.
+      const liveMatch = inCwd.find(
+        (s) => (s.status === "active" || s.status === "starting") && sessionIdentity(s) === opts.resume_id,
+      );
+      if (liveMatch) {
+        process.stderr.write(`[create] resume ${opts.resume_id} already live (window ${liveMatch.id}) — returning existing\n`);
+        return liveMatch;
       }
-      if (s.status === "ended" && s.endReason === "process_exited") {
-        // restart() resumes THIS detached session's own conversation; if the
-        // caller asked for a different one, don't silently override it.
-        if (opts.resume_id) {
-          const detId = sessionIdentity(s);
-          if (detId && detId !== opts.resume_id) {
-            throw new Error(`${target} has a detached session "${detId}" (window ${s.id}); kill it before resuming a different "${opts.resume_id}" there`);
-          }
-        }
-        process.stderr.write(`[create] ${s.id} detached in ${target} — restarting in place\n`);
-        return this.restart({ id: s.id });
+      if (detachedInCwd && sessionIdentity(detachedInCwd) === opts.resume_id) {
+        process.stderr.write(`[create] resume ${opts.resume_id} detached (window ${detachedInCwd.id}) — restarting in place\n`);
+        return this.restart({ id: detachedInCwd.id });
       }
+    } else if (detachedInCwd) {
+      // Auto-revive a detached session (Claude died, window lingering) rather than
+      // leave a dead window — restart() resumes its own conversation.
+      process.stderr.write(`[create] ${detachedInCwd.id} detached in ${target} — restarting in place\n`);
+      return this.restart({ id: detachedInCwd.id });
+    } else if (opts.continue && liveInCwd) {
+      // continue-most-recent with a session already live here → open the running one.
+      process.stderr.write(`[create] continue with ${liveInCwd.id} live in ${target} — returning existing\n`);
+      return liveInCwd;
     }
+    // Otherwise fall through and create a NEW session below.
 
     if (!existsSync(cwd)) {
       if (opts.createDir) {
@@ -325,6 +325,15 @@ export class SessionRegistry {
     // session and approving permission prompts via tmux send-keys is fragile.
     // An explicit permissionMode wins; otherwise `yolo: false` opts out.
     const mode = opts.permissionMode ?? ((opts.yolo ?? true) ? "bypassPermissions" : undefined);
+    // Fresh sessions (no resume/continue) get a daemon-generated Claude session id
+    // so their transcript path is deterministic — multiple sessions can then run in
+    // the same cwd without racing on findLatestTranscript. Claude writes the
+    // transcript at <cwd-projects>/<id>.jsonl; we pin the session to it and the
+    // tailer (pollForTranscript) waits for that exact file to appear.
+    const freshClaudeId = (!opts.resume_id && !opts.continue) ? crypto.randomUUID() : undefined;
+    const freshTranscriptPath = freshClaudeId
+      ? join(cwdToTranscriptDir(cwd), `${freshClaudeId}.jsonl`)
+      : undefined;
     // Flag list builder, parameterized on whether --continue is included.
     const buildFlags = (withContinue: boolean): string[] => {
       const f: string[] = [];
@@ -336,6 +345,7 @@ export class SessionRegistry {
       if (opts.fallbackModel) f.push("--fallback-model", opts.fallbackModel);
       if (withContinue && opts.continue) f.push("--continue");
       if (opts.resume_id) f.push("--resume", opts.resume_id);
+      if (freshClaudeId) f.push("--session-id", freshClaudeId);
       // claude rejects --fork-session without --resume/--continue, so silently
       // dropping it here beats a dead tmux window with a usage error in it.
       if (opts.forkSession && (opts.resume_id || (withContinue && opts.continue))) f.push("--fork-session");
@@ -435,7 +445,7 @@ export class SessionRegistry {
       flags,
       status: "starting",
       startedAt: Date.now(),
-      transcriptPath: resumeTranscriptPath,
+      transcriptPath: resumeTranscriptPath ?? freshTranscriptPath,
       transcriptStartOffset: resumeStartOffset,
     }, this.#sessionDeps());
 
