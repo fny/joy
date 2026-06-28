@@ -35,6 +35,7 @@ export const ja: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'キャンセル',
+        stop: '停止',
         tapAgainToConfirm: ({ label }: { label: string }) => `もう一度タップ: ${label}`,
         authenticate: '認証',
         save: '保存',

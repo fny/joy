@@ -34,6 +34,7 @@ export const zhHans: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: '取消',
+        stop: '停止',
         tapAgainToConfirm: ({ label }: { label: string }) => `再次点击: ${label}`,
         authenticate: '认证',
         save: '保存',
