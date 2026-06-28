@@ -13,6 +13,7 @@ import { Session, Machine, GitStatus } from "./storageTypes";
 import type { GitStatusFiles } from "./gitStatusFiles";
 import type { ProjectFilesList } from "./projectFiles";
 import { createReducer, reducer, reconcileSentSeqs, ReducerState } from "./reducer/reducer";
+import { reconcileMachineMetadata } from "./machineReconcile";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -1251,18 +1252,10 @@ export const storage = create<StorageState>()((set, get) => {
         },
         applyMachines: (machines: Machine[], replace: boolean = false) => set((state) => {
             // Preserve a machine's last-known (decrypted) metadata when an update
-            // arrives with metadata:null. fetchMachines returns null metadata when
-            // a machine's key/metadata decryption fails or hasn't landed yet
-            // (see sync.ts) — clobbering the store with that reverts the sidebar to
-            // the raw machine id until a later fetch succeeds (the "name shows its
-            // id and takes a long time to come up" bug). Keep the cached name; a
-            // real later update carries decrypted metadata and applies normally.
-            const reconcile = (m: Machine): Machine => {
-                const prev = state.machines[m.id];
-                return (!m.metadata && prev?.metadata)
-                    ? { ...m, metadata: prev.metadata, metadataVersion: prev.metadataVersion }
-                    : m;
-            };
+            // arrives with metadata:null (failed/pending decryption) — see
+            // reconcileMachineMetadata. Without this the sidebar reverts to the raw
+            // machine id until a later fetch succeeds.
+            const reconcile = (m: Machine): Machine => reconcileMachineMetadata(m, state.machines[m.id]);
 
             // Either replace all machines or merge updates
             let mergedMachines: Record<string, Machine>;
