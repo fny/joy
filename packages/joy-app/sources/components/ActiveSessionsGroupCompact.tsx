@@ -522,8 +522,8 @@ const stylesheet = StyleSheet.create((theme) => ({
     projectCard: {
         backgroundColor: theme.colors.surface,
         marginBottom: 8,
-        marginHorizontal: Platform.select({ ios: 16, default: 12 }),
-        borderRadius: Platform.select({ ios: 10, default: 16 }),
+        marginHorizontal: 16,
+        borderRadius: 10,
         overflow: 'hidden',
         shadowColor: theme.colors.shadow.color,
         shadowOffset: { width: 0, height: 0.33 },
@@ -531,12 +531,13 @@ const stylesheet = StyleSheet.create((theme) => ({
         shadowRadius: 0,
         elevation: 1,
     },
-    // Session row styles
+    // Session row styles — padding-driven to match the new-session button
+    // (paddingVertical 10 / paddingHorizontal 14) instead of a fixed 56px row.
     sessionRow: {
-        height: 56,
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: 16,
+        paddingVertical: 10,
+        paddingHorizontal: 14,
         backgroundColor: theme.colors.surface,
     },
     sessionRowWithBorder: {
