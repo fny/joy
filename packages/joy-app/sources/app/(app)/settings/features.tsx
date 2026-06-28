@@ -5,6 +5,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useSettingMutable, useLocalSettingMutable } from '@/sync/storage';
 import { Switch } from '@/components/Switch';
+import { Modal } from '@/modal';
 import { t } from '@/text';
 
 export default function FeaturesSettingsScreen() {
@@ -18,6 +19,31 @@ export default function FeaturesSettingsScreen() {
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
     const [groupToolCalls, setGroupToolCalls] = useSettingMutable('groupToolCalls');
     const [expImageUpload, setExpImageUpload] = useSettingMutable('expImageUpload');
+    // Joy-specific toggles (relocated from the mods page). Plain strings — these
+    // are personal-build features, matching the other plain-string rows above.
+    const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
+    const [doubleTapEnabled, setDoubleTapEnabled] = useSettingMutable('joy__doubleTapEnabled');
+
+    const handleChatHistoryLimit = async () => {
+        const value = await Modal.prompt(
+            'Chat history limit',
+            'Max messages rendered per conversation. Empty to disable.',
+            {
+                defaultValue: chatHistoryLimit != null ? String(chatHistoryLimit) : '',
+                placeholder: 'e.g. 100',
+            }
+        );
+        if (value === null) return;
+        const trimmed = value.trim();
+        if (trimmed === '') {
+            setChatHistoryLimit(null);
+        } else {
+            const parsed = parseInt(trimmed, 10);
+            if (!isNaN(parsed) && parsed > 0) {
+                setChatHistoryLimit(parsed);
+            }
+        }
+    };
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
@@ -46,6 +72,32 @@ export default function FeaturesSettingsScreen() {
                         <Switch
                             value={groupToolCalls}
                             onValueChange={setGroupToolCalls}
+                        />
+                    }
+                    showChevron={false}
+                />
+            </ItemGroup>
+
+            {/* Joy — personal-build toggles (relocated from the mods page) */}
+            <ItemGroup
+                title="Joy"
+                footer="Personal-build behaviour toggles."
+            >
+                <Item
+                    title="Chat history limit"
+                    subtitle="Caps messages rendered per conversation"
+                    icon={<Ionicons name="filter-outline" size={29} color="#5AC8FA" />}
+                    detail={chatHistoryLimit != null ? `${chatHistoryLimit}` : 'off'}
+                    onPress={handleChatHistoryLimit}
+                />
+                <Item
+                    title="Double tap"
+                    subtitle="Second tap within 2s required to commit choice selections"
+                    icon={<Ionicons name="finger-print-outline" size={29} color="#FF9500" />}
+                    rightElement={
+                        <Switch
+                            value={!!doubleTapEnabled}
+                            onValueChange={setDoubleTapEnabled}
                         />
                     }
                     showChevron={false}

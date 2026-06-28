@@ -6,7 +6,7 @@ import { CodeView } from '../CodeView';
 import { Metadata } from '@/sync/storageTypes';
 import { getToolFullViewComponent } from './views/_all';
 import { layout } from '../layout';
-import { useLocalSetting, useSetting } from '@/sync/storage';
+import { useLocalSetting } from '@/sync/storage';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
@@ -25,9 +25,9 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolF
     const devModeEnabled = (useLocalSetting('devModeEnabled') || __DEV__);
     const { theme } = useUnistyles();
     const router = useRouter();
-    const readOpenFileEnabled = !!useSetting('joy__readOpenFileEnabled');
+    // Mod 08 (Read → Open file) is permanent — the button always shows for Read calls.
     const readFilePath = tool.name === 'Read' && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
-    const showOpenFileButton = readOpenFileEnabled && readFilePath && sessionId;
+    const showOpenFileButton = readFilePath && sessionId;
     const handleOpenReadFile = React.useCallback(() => {
         if (!sessionId || !readFilePath) return;
         router.push(`/session/${sessionId}/file?path=${btoa(readFilePath)}`);

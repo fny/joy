@@ -150,6 +150,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/machines"
+                options={{
+                    headerTitle: t('settings.machines'),
+                }}
+            />
+            <Stack.Screen
                 name="settings/cleanup"
                 options={{
                     headerTitle: 'Cleanup',
