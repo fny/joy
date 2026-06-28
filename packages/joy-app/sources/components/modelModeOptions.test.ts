@@ -49,7 +49,9 @@ describe('modelModeOptions', () => {
     it('uses code defaults for agent defaults', () => {
         expect(getDefaultPermissionModeKey('claude')).toBe('bypassPermissions');
         expect(getDefaultModelKey('claude')).toBe('opus');
-        expect(getDefaultEffortKey('claude')).toBe('medium');
+        // Claude pins no effort — null defers to the CLI's own DEFAULT_CLAUDE_EFFORT
+        // ('medium'), mirroring `claude --model opus` run on its own.
+        expect(getDefaultEffortKey('claude')).toBeNull();
         expect(getDefaultPermissionModeKey('codex')).toBe('yolo');
         expect(getDefaultModelKey('codex')).toBe('gpt-5.5');
         expect(getDefaultEffortKey('codex')).toBe('medium');
@@ -97,8 +99,8 @@ describe('modelModeOptions', () => {
         } as any, translate);
 
         expect(modes).toEqual([
-            { key: 'build', name: 'Build', description: 'Do build steps' },
-            { key: 'plan', name: 'Plan', description: 'Plan first' },
+            { key: 'build', name: 'build', description: 'Do build steps' },
+            { key: 'plan', name: 'plan', description: 'Plan first' },
         ]);
     });
 
