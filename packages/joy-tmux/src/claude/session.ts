@@ -1643,12 +1643,17 @@ export class Session {
     if (role === "user") {
       if (entry.isMeta) return;
       if (typeof content !== "string") {
-        // A run_in_background bash / background agent just launched — its
-        // tool_result carries Claude's backgroundTaskId. Track it so the session
-        // stays "working (N/M)" until the matching task-notification arrives,
-        // even though this foreground turn is about to end.
+        // A background task just launched — track it so the session stays
+        // "working (N/M)" until the matching <task-notification> arrives, even
+        // though this foreground turn is about to end. Two launch shapes:
+        //  - run_in_background bash → toolUseResult.backgroundTaskId
+        //  - async agent (Agent tool) → toolUseResult { isAsync, agentId }
+        // Both complete via <task-notification><task-id>…</task-id> where the
+        // task-id is that same backgroundTaskId / agentId, so tracking the id
+        // here is enough for #taskCompleted (below) to clear it.
         const tur = entry.toolUseResult as Record<string, unknown> | undefined;
         if (tur && typeof tur.backgroundTaskId === "string") this.#taskLaunched(tur.backgroundTaskId);
+        else if (tur && tur.isAsync === true && typeof tur.agentId === "string") this.#taskLaunched(tur.agentId);
         // Emit tool-call-end for tool results. NOT gated on this.#turn: the turn
         // may have been nulled (turn_duration/error) before the result lands, and
         // gating used to drop the end → a tool card stuck "running". Use the turn
