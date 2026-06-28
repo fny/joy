@@ -43,6 +43,7 @@ export const ru: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Отмена',
+        stop: 'Остановить',
         tapAgainToConfirm: ({ label }: { label: string }) => `Нажмите ещё раз: ${label}`,
         authenticate: 'Авторизация',
         save: 'Сохранить',

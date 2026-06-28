@@ -32,6 +32,7 @@ export const ca: TranslationStructure = {
     common: {
         // Simple string constants
         cancel: 'Cancel·la',
+        stop: 'Atura',
         tapAgainToConfirm: ({ label }: { label: string }) => `Toca de nou: ${label}`,
         authenticate: 'Autentica',
         save: 'Desa',

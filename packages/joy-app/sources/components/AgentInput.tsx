@@ -1303,6 +1303,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
                                             onPress={handleAbortPress}
                                             disabled={isAborting}
+                                            accessibilityRole="button"
+                                            accessibilityLabel={t('common.stop')}
+                                            testID="composer-abort-button"
                                         >
                                             {isAborting ? (
                                                 <ActivityIndicator
