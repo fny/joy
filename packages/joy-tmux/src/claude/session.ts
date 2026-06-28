@@ -1390,17 +1390,22 @@ export class Session {
   // (trust prompts etc.)
   pollForTranscript(attempts = 0): void {
     if (this.#tailer || this.status === "ended") return;
-    // A pinned transcript (e.g. the --resume target) is tailed directly — its
-    // full history replays from byte 0, regardless of mtime. Falls through to
-    // mtime-based discovery for fresh sessions.
-    if (this.transcriptPath && existsSync(this.transcriptPath)) {
-      this.startTailer(this.transcriptPath);
-      return;
-    }
-    const path = findLatestTranscript(cwdToTranscriptDir(this.cwd), this.startedAt);
-    if (path) {
-      this.startTailer(path);
-      return;
+    if (this.transcriptPath) {
+      // A pinned transcript — the --resume target, or a fresh session's own
+      // --session-id file. Tail it once it appears (a fresh one is created by
+      // Claude on first turn). Do NOT fall back to mtime discovery: that's the
+      // race that let two sessions in one cwd tail each other's transcript.
+      if (existsSync(this.transcriptPath)) {
+        this.startTailer(this.transcriptPath);
+        return;
+      }
+    } else {
+      // Unpinned legacy path: discover the newest transcript in the cwd.
+      const path = findLatestTranscript(cwdToTranscriptDir(this.cwd), this.startedAt);
+      if (path) {
+        this.startTailer(path);
+        return;
+      }
     }
     if (attempts < 120) {
       setTimeout(() => this.pollForTranscript(attempts + 1), 500);
