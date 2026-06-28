@@ -352,10 +352,14 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                     color={theme.colors.textSecondary}
                 />
             );
-        } else if (session.state === 'permission_required' || session.state === 'thinking') {
-            indicator = <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />;
         } else if (session.state === 'waiting') {
             indicator = <StatusDot color={theme.colors.textSecondary} isPulsing={false} />;
+        } else {
+            // Every other state (thinking=blue, tasks=orange, compacting=purple,
+            // retrying/permission=orange, detached=red, …) shows its configured
+            // STATUS_CONFIG color. Previously only thinking/permission got a dot,
+            // so background-task and compaction sessions showed NO indicator.
+            indicator = <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />;
         }
 
         return (
