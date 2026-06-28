@@ -66,10 +66,13 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default(),
     },
     sessionItem: {
-        height: 88,
+        // Padding-driven height to match the new-session button (paddingVertical
+        // 10 / paddingHorizontal 14) instead of a fixed 88px row. The 48px avatar
+        // keeps a consistent minimum, so rows land ~68px.
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: 16,
+        paddingVertical: 10,
+        paddingHorizontal: 14,
         backgroundColor: theme.colors.surface,
     },
     sessionItemContainer: {
@@ -106,13 +109,13 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     sessionContent: {
         flex: 1,
-        marginLeft: 16,
+        marginLeft: 12,
         justifyContent: 'center',
     },
     sessionTitleRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: 2,
+        marginBottom: 1,
     },
     sessionTitle: {
         fontSize: 15,
@@ -137,7 +140,7 @@ const stylesheet = StyleSheet.create((theme) => ({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 4,
-        marginBottom: 4,
+        marginBottom: 2,
     },
     sessionSubtitle: {
         fontSize: 13,
@@ -164,8 +167,8 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     avatarContainer: {
         position: 'relative',
-        width: 48,
-        height: 48,
+        width: 32,
+        height: 32,
     },
     draftIconContainer: {
         position: 'absolute',
@@ -431,7 +434,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
             {...menuProps}
         >
             <View style={styles.avatarContainer}>
-                <Avatar id={session.avatarId} size={48} monochrome={!status.isConnected} flavor={session.flavor} />
+                <Avatar id={session.avatarId} size={32} monochrome={!status.isConnected} flavor={session.flavor} />
                 {session.hasDraft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
