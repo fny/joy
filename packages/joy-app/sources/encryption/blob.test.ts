@@ -52,7 +52,11 @@ describe('blob encryption', () => {
         const decrypted = decryptBlob(encrypted, TEST_KEY);
 
         expect(decrypted).not.toBeNull();
-        expect(new Uint8Array(decrypted!)).toEqual(data);
+        // Fast byte-compare: vitest's toEqual on a 1M-element typed array does an
+        // element-by-element structural diff that takes seconds and trips the
+        // default test timeout — Buffer.compare is a single native memcmp.
+        expect(decrypted!.length).toBe(data.length);
+        expect(Buffer.compare(Buffer.from(decrypted!), Buffer.from(data))).toBe(0);
     });
 
     it('should handle binary data with null bytes', () => {
