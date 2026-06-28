@@ -401,6 +401,8 @@ function NewJoyTmuxSessionScreen() {
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={() => setPathPickerOpen(true)}
+                                accessibilityRole="button"
+                                testID="joy-new-path-picker"
                             >
                                 <Ionicons name="folder-outline" size={15} color={theme.colors.textSecondary} />
                                 <Text style={styles.configLabel} numberOfLines={1}>{displayPath}</Text>
@@ -473,6 +475,9 @@ function NewJoyTmuxSessionScreen() {
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={() => setContinueLast(v => !v)}
+                                accessibilityRole="button"
+                                accessibilityState={{ checked: continueLast }}
+                                testID="joy-new-continue-toggle"
                             >
                                 <Ionicons
                                     name={continueLast ? 'checkbox' : 'square-outline'}
@@ -511,6 +516,7 @@ function NewJoyTmuxSessionScreen() {
                                     value={resumeId}
                                     onChangeText={setResumeId}
                                     placeholder="resume session id"
+                                    testID="joy-new-resume-id-input"
                                     placeholderTextColor={theme.colors.textSecondary}
                                     style={styles.argsInput}
                                     autoCapitalize="none"
@@ -605,6 +611,8 @@ function NewJoyTmuxSessionScreen() {
                             <Pressable
                                 onPress={() => void handleCreate()}
                                 disabled={!canSend}
+                                accessibilityRole="button"
+                                testID="joy-new-create-button"
                                 style={[
                                     styles.sendButton,
                                     canSend ? styles.sendButtonActive : styles.sendButtonInactive,
@@ -662,6 +670,7 @@ function NewJoyTmuxSessionScreen() {
                             value={pathInput}
                             onChangeText={setPathInput}
                             placeholder="~/"
+                            testID="joy-new-path-input"
                             placeholderTextColor={theme.colors.textSecondary}
                             style={styles.pathTextInput}
                             autoCapitalize="none"
