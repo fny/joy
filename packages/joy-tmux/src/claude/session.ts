@@ -275,6 +275,11 @@ export class Session {
   #bgTasks = new Set<string>();
   #bgTotal = 0;
   #bgDone = 0;
+  // Coalesces task-count pushes (see #pushTasks). Transcript backfill on recovery
+  // replays a whole batch's launches+completions in milliseconds — pushing each
+  // (0/3,1/3,2/3,null) as a separate metadata RPC let an intermediate value win
+  // and the final `null` lose under restart contention, leaving a stuck "2/3".
+  #tasksPushTimer: ReturnType<typeof setTimeout> | null = null;
   // The (retrying) archive POST fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -560,6 +565,7 @@ export class Session {
     this.#turn = null;
     if (this.#retry?.timer) clearTimeout(this.#retry.timer);
     this.#retry = null;
+    if (this.#tasksPushTimer) { clearTimeout(this.#tasksPushTimer); this.#tasksPushTimer = null; }
     this.#turn5xxStatus = null;
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
@@ -1485,9 +1491,18 @@ export class Session {
     this.#pushTasks();
   }
 
-  /** Push batch progress to the app (cleared to null when none outstanding). */
+  /** Push batch progress to the app (cleared to null when none outstanding).
+   *  Coalesced on a short trailing timer: a burst of changes (notably the
+   *  transcript backfill replay on recovery, which fires a whole batch in
+   *  milliseconds) collapses to ONE push of the final value, so the terminal
+   *  state can't be overtaken by a stale intermediate. Live changes are seconds
+   *  apart, so each still pushes its own step. */
   #pushTasks(): void {
-    void this.#relay?.updateTasks(this.#bgTasks.size > 0 ? { done: this.#bgDone, total: this.#bgTotal } : null);
+    if (this.#tasksPushTimer) clearTimeout(this.#tasksPushTimer);
+    this.#tasksPushTimer = setTimeout(() => {
+      this.#tasksPushTimer = null;
+      void this.#relay?.updateTasks(this.#bgTasks.size > 0 ? { done: this.#bgDone, total: this.#bgTotal } : null);
+    }, 150);
   }
 
   /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
