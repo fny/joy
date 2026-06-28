@@ -11,7 +11,6 @@ import { ToolError } from './ToolError';
 import { knownTools } from '@/components/tools/knownTools';
 import { Metadata } from '@/sync/storageTypes';
 import { useRouter } from 'expo-router';
-import { useSetting } from '@/sync/storage';
 import { PermissionFooter } from './PermissionFooter';
 import { parseToolUseError } from '@/utils/toolErrorParser';
 import { formatMCPTitle } from './views/MCPToolView';
@@ -48,9 +47,8 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
         }
     }, [onPress, sessionId, messageId, filePath, router]);
 
-    // joy: optional "Open file" affordance for Read tools (gated by setting).
+    // joy mod 08 (permanent): "Open file" affordance for Read tools.
     // Read has no SpecificToolView, so this renders in the default content branch.
-    const readOpenFileEnabled = !!useSetting('joy__readOpenFileEnabled');
     const readFilePath = tool.name === 'Read' && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
     const handleOpenReadFile = React.useCallback(() => {
         if (!sessionId || !readFilePath) return;
@@ -292,7 +290,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                             </ToolSectionView>
                         )}
 
-                        {readOpenFileEnabled && readFilePath && sessionId && (
+                        {readFilePath && sessionId && (
                             <ToolSectionView>
                                 <TouchableOpacity
                                     style={styles.openFileButton}

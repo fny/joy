@@ -196,7 +196,6 @@ describe('settings', () => {
                 joy__chatHistoryLimit: null,
                 joy__doubleTapEnabled: false,
                 joy__newSessionDefault: false,
-                joy__readOpenFileEnabled: false,
                 joy__tmuxServerUrl: null,
                 reviewPromptAnswered: false,
                 reviewPromptLikedApp: null,

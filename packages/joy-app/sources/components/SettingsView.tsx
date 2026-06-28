@@ -180,30 +180,15 @@ export const SettingsView = React.memo(function SettingsView() {
                 />
             </ItemGroup> */}
 
-            {/* Machines — only boxes running the joy-tmux daemon */}
-            {joyMachines.length > 0 && (
-                <ItemGroup title={t('settings.machines')}>
-                    {joyMachines.map((machine) => {
-                        const host = machine.metadata?.host || 'Unknown';
-                        const displayName = machine.metadata?.displayName;
-                        const platform = machine.metadata?.platform || '';
-                        const title = displayName || host;
-                        let subtitle = displayName && displayName !== host ? host : '';
-                        if (platform) subtitle = subtitle ? `${subtitle} • ${platform}` : platform;
-                        subtitle = subtitle ? `${subtitle} • joy-tmux` : 'joy-tmux';
-
-                        return (
-                            <Item
-                                key={machine.id}
-                                title={title}
-                                subtitle={subtitle}
-                                icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.status.connected} />}
-                                onPress={() => router.push(`/machine/${machine.id}`)}
-                            />
-                        );
-                    })}
-                </ItemGroup>
-            )}
+            {/* Machines — boxes running the joy-tmux daemon, on their own page */}
+            <ItemGroup>
+                <Item
+                    title={t('settings.machines')}
+                    subtitle={joyMachines.length > 0 ? `${joyMachines.length} connected` : 'None connected'}
+                    icon={<Ionicons name="hardware-chip-outline" size={29} color={theme.colors.status.connected} />}
+                    onPress={() => router.push('/settings/machines' as any)}
+                />
+            </ItemGroup>
 
             {/* Cleanup — manage ALL registered machines (incl. offline) + folders */}
             <ItemGroup>
@@ -228,12 +213,6 @@ export const SettingsView = React.memo(function SettingsView() {
                     subtitle={t('settings.sessionsSubtitle')}
                     icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accents.blue} />}
                     onPress={() => router.push('/settings/joy-sessions')}
-                />
-                <Item
-                    title={t('settings.mods')}
-                    subtitle={t('settings.modsSubtitle')}
-                    icon={<Ionicons name="construct-outline" size={29} color={theme.colors.accents.orange} />}
-                    onPress={() => router.push('/settings/mods')}
                 />
                 <Item
                     title={t('settings.appearance')}
@@ -279,6 +258,14 @@ export const SettingsView = React.memo(function SettingsView() {
                     title={t('settings.developerTools')}
                     icon={<Ionicons name="construct-outline" size={29} color={theme.colors.accents.indigo} />}
                     onPress={() => router.push('/dev')}
+                />
+                {/* Raw settings JSON editor (relocated from the mods page). Joy
+                    dev tool — plain string, matching the raw editor page itself. */}
+                <Item
+                    title="Raw settings"
+                    subtitle="View and edit the raw settings JSON"
+                    icon={<Ionicons name="code-slash-outline" size={29} color={theme.colors.textSecondary} />}
+                    onPress={() => router.push('/settings/raw')}
                 />
             </ItemGroup>
 
