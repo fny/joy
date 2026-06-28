@@ -1887,6 +1887,15 @@ class Sync {
                     }
                 }
                 this.sessionLastSeq.set(sessionId, maxSeq);
+                // The POST ack is the ONLY place a sender learns the authoritative
+                // seq of its own messages — the live socket broadcast never echoes
+                // the sender's own rows back. Feed them to the reducer so optimistic
+                // sends settle into server-log order instead of floating to "now".
+                storage.getState().reconcileSentMessages(sessionId, data.messages.map((m) => ({
+                    id: m.id,
+                    seq: m.seq,
+                    localId: m.localId
+                })));
             }
         } catch (error) {
             this.maybeStartBackgroundSendWatchdog();

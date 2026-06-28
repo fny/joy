@@ -12,7 +12,7 @@ function useDeepEqual<T>(selector: (state: StorageState) => T): (state: StorageS
 import { Session, Machine, GitStatus } from "./storageTypes";
 import type { GitStatusFiles } from "./gitStatusFiles";
 import type { ProjectFilesList } from "./projectFiles";
-import { createReducer, reducer, ReducerState } from "./reducer/reducer";
+import { createReducer, reducer, reconcileSentSeqs, ReducerState } from "./reducer/reducer";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -206,6 +206,7 @@ interface StorageState {
     applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
+    reconcileSentMessages: (sessionId: string, acks: Array<{ id: string; seq: number; localId: string | null }>) => void;
     applyMessagesLoaded: (sessionId: string) => void;
     applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
@@ -776,6 +777,39 @@ export const storage = create<StorageState>()((set, get) => {
             }
 
             return { changed: Array.from(changed), hasReadyEvent };
+        },
+        reconcileSentMessages: (sessionId, acks) => {
+            if (acks.length === 0) {
+                return;
+            }
+            set((state) => {
+                const existingSession = state.sessionMessages[sessionId];
+                if (!existingSession) {
+                    return state;
+                }
+                const changedMessages = reconcileSentSeqs(existingSession.reducerState, acks);
+                if (changedMessages.length === 0) {
+                    return state;
+                }
+                const mergedMessagesMap = { ...existingSession.messagesMap };
+                for (const m of changedMessages) {
+                    mergedMessagesMap[m.id] = m;
+                }
+                const messagesArray = Object.values(mergedMessagesMap)
+                    .sort(compareMessagesNewestFirst);
+                return {
+                    ...state,
+                    sessionMessages: {
+                        ...state.sessionMessages,
+                        [sessionId]: {
+                            ...existingSession,
+                            messages: messagesArray,
+                            messagesMap: mergedMessagesMap,
+                            reducerState: existingSession.reducerState,
+                        }
+                    }
+                };
+            });
         },
         applyMessagesLoaded: (sessionId: string) => set((state) => {
             const existingSession = state.sessionMessages[sessionId];

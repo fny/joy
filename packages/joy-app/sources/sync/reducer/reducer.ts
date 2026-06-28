@@ -298,6 +298,40 @@ function reconcileSeq(state: ReducerState, changed: Set<string>, msg: Normalized
     }
 }
 
+/**
+ * Reconcile the authoritative `seq` of the client's OWN sends from the POST
+ * /messages ack — the only place a sender learns its messages' seq, since the
+ * live socket broadcast never echoes the sender's own rows back. Without this,
+ * an optimistic user send keeps seq=null until a full reload and the seq-based
+ * display sort floats it to "now" (newest), detaching it from the agent turn it
+ * triggered. Safe by construction: reconcileSeq no-ops on any localId/id the
+ * reducer hasn't seen, so a stray ack can never materialise a phantom message.
+ * Returns the reducer's Message objects whose seq changed, for the caller to
+ * re-merge and re-sort.
+ */
+export function reconcileSentSeqs(
+    state: ReducerState,
+    acks: Array<{ id: string; seq: number; localId: string | null }>
+): Message[] {
+    const changed = new Set<string>();
+    for (const ack of acks) {
+        reconcileSeq(state, changed, {
+            role: 'user',
+            id: ack.id,
+            localId: ack.localId,
+            seq: ack.seq,
+        } as unknown as NormalizedMessage);
+    }
+    const result: Message[] = [];
+    for (const internalId of changed) {
+        const m = state.messages.get(internalId);
+        if (!m) continue;
+        const converted = convertReducerMessageToMessage(m, state);
+        if (converted) result.push(converted);
+    }
+    return result;
+}
+
 export function reducer(state: ReducerState, messages: NormalizedMessage[], agentState?: AgentState | null): ReducerResult {
     if (ENABLE_LOGGING) {
         console.log(`[REDUCER] Called with ${messages.length} messages, agentState: ${agentState ? 'YES' : 'NO'}`);
