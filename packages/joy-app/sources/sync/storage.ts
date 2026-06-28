@@ -126,6 +126,8 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         state = 'disconnected';
     } else if (session.metadata?.joy__retry) {
         state = 'retrying'; // daemon re-sending a 500-failed turn on a backoff schedule
+    } else if (session.metadata?.joy__compacting) {
+        state = 'compacting'; // Claude summarizing context — purple, ranks above a paused turn
     } else if (hasPermissions) {
         state = 'permission_required';
     } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
