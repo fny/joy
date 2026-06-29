@@ -7,8 +7,6 @@ import {
     type ApiMessage,
 } from '@slopus/happy-wire';
 import { GitHubProfileSchema, ImageRefSchema } from './profile';
-import { RelationshipStatusSchema, UserProfileSchema } from './friendTypes';
-import { FeedBodySchema } from './feedTypes';
 
 export {
     ApiMessageSchema,
@@ -106,28 +104,6 @@ export const ApiDeleteArtifactSchema = z.object({
     artifactId: z.string()
 });
 
-// Relationship update schema
-export const ApiRelationshipUpdatedSchema = z.object({
-    t: z.literal('relationship-updated'),
-    fromUserId: z.string(),
-    toUserId: z.string(),
-    status: RelationshipStatusSchema,
-    action: z.enum(['created', 'updated', 'deleted']),
-    fromUser: UserProfileSchema.optional(),
-    toUser: UserProfileSchema.optional(),
-    timestamp: z.number()
-});
-
-// Feed update schema
-export const ApiNewFeedPostSchema = z.object({
-    t: z.literal('new-feed-post'),
-    id: z.string(),
-    body: FeedBodySchema,
-    cursor: z.string(),
-    createdAt: z.number(),
-    repeatKey: z.string().nullable()
-});
-
 // KV batch update schema for real-time KV updates
 export const ApiKvBatchUpdateSchema = z.object({
     t: z.literal('kv-batch-update'),
@@ -152,13 +128,10 @@ export const ApiUpdateSchema = z.union([
     ApiNewArtifactSchema,
     ApiUpdateArtifactSchema,
     ApiDeleteArtifactSchema,
-    ApiRelationshipUpdatedSchema,
-    ApiNewFeedPostSchema,
     ApiKvBatchUpdateSchema
 ]);
 
 export type ApiUpdateNewMessage = z.infer<typeof ApiUpdateNewMessageSchema>;
-export type ApiRelationshipUpdated = z.infer<typeof ApiRelationshipUpdatedSchema>;
 export type ApiKvBatchUpdate = z.infer<typeof ApiKvBatchUpdateSchema>;
 export type ApiUpdate = z.infer<typeof ApiUpdateSchema>;
 
