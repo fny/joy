@@ -1109,26 +1109,24 @@ export class RelaySession {
   }
 
   /** Fire an auto push-notification for this session (done/permission/question).
-   *  Title is fixed per kind; body locates the session as "<host>/<folder> <summary>"
-   *  e.g. "faraz.vip/proj Fix login". The server suppresses it when the app is
-   *  focused on this session. */
+   *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
+   *  WHICH session at a glance; body is the AI summary (or the per-kind reason).
+   *  The server suppresses it when the app is focused on this session. */
   notify(kind: 'done' | 'permission' | 'question'): void {
-    const title = kind === 'done' ? "It's ready"
-      : kind === 'permission' ? 'Permission request'
-      : 'Clarification needed';
-    void this.client.sendSessionPushEvent(this.relaySessionId, kind, title, this.#notifyBody());
+    const summary = (this.metadata?.summary as { text?: string } | undefined)?.text?.trim();
+    const body = kind === 'done' ? (summary || 'Finished')
+      : kind === 'permission' ? (summary ? `Permission needed · ${summary}` : 'Permission needed')
+      : (summary ? `Clarification needed · ${summary}` : 'Clarification needed');
+    void this.client.sendSessionPushEvent(this.relaySessionId, kind, this.#notifyLocation(), body);
   }
 
-  /** "<host>/<folder> <summary>" — host + folder say WHERE, summary (the AI title)
-   *  says WHAT. Metadata only — push title/body are NOT end-to-end encrypted, so
-   *  no conversation content goes here. */
-  #notifyBody(): string {
+  /** "<host>/<folder>" — e.g. "faraz.vip/proj". Metadata only (push title/body
+   *  are NOT end-to-end encrypted, so no conversation content here). */
+  #notifyLocation(): string {
     const host = (this.metadata?.host as string | undefined)?.trim();
     const path = (this.metadata?.path as string | undefined)?.trim();
     const folder = path ? path.split(/[\\/]/).filter(Boolean).pop() : undefined;
-    const summary = (this.metadata?.summary as { text?: string } | undefined)?.text?.trim();
-    const loc = [host, folder].filter(Boolean).join('/');
-    return [loc, summary].filter(Boolean).join(' ') || 'Joy session';
+    return [host, folder].filter(Boolean).join('/') || 'Joy session';
   }
 
   /** Register a session-scoped RPC handler bound to this relay session. */
