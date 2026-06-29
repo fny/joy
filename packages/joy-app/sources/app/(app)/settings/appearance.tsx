@@ -2,7 +2,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
-import { useSettingMutable, useLocalSettingMutable } from '@/sync/storage';
+import { useSettingMutable, useLocalSettingMutable, storage } from '@/sync/storage';
+import { applyAppearance, applyDarkAppearance } from '@/palettes';
 import { useRouter } from 'expo-router';
 import * as Localization from 'expo-localization';
 import { useUnistyles, UnistylesRuntime } from 'react-native-unistyles';
@@ -85,6 +86,18 @@ export default function AppearanceSettingsScreen() {
                             const color = nextTheme === 'dark' ? darkTheme.colors.groupped.background : lightTheme.colors.groupped.background;
                             UnistylesRuntime.setRootViewBackgroundColor(color);
                             SystemUI.setBackgroundColorAsync(color);
+                        }
+
+                        // Re-apply the resolved theme's palette so it follows the
+                        // appearance mode (and overrides the stock background above).
+                        const ls = storage.getState().localSettings;
+                        const resolved = nextTheme === 'adaptive'
+                            ? (Appearance.getColorScheme() === 'dark' ? 'dark' : 'light')
+                            : nextTheme;
+                        if (resolved === 'dark') {
+                            applyDarkAppearance(ls.themePaletteDark);
+                        } else {
+                            applyAppearance(ls.themePalette, ls.customPalette, ls.accentOverrides);
                         }
                     }}
                 />
