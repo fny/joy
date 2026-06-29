@@ -1,5 +1,5 @@
 import { UnistylesRuntime } from 'react-native-unistyles';
-import { lightTheme } from './theme';
+import { lightTheme, darkTheme } from './theme';
 
 // A palette is a small curated set of "shell" colors that override the most
 // visible tokens of the light theme at runtime (page background, surfaces,
@@ -263,11 +263,12 @@ function shade(hex: string, factor: number): string {
     return `#${to2(ch(0))}${to2(ch(2))}${to2(ch(4))}`;
 }
 
-// Build a full light-theme object with the palette's colors patched in.
-export function buildPaletteTheme(p: Palette): typeof lightTheme {
-    const c = lightTheme.colors;
+// Build a full theme object with the palette's colors patched in. `base` is the
+// theme being re-skinned — lightTheme for light palettes, darkTheme for dark.
+export function buildPaletteTheme(p: Palette, base: typeof lightTheme = lightTheme): typeof lightTheme {
+    const c = base.colors;
     return {
-        ...lightTheme,
+        ...base,
         colors: {
             ...c,
             text: p.text,
@@ -332,8 +333,8 @@ export function coerceAccentOverrides(stored: Record<string, string> | null | un
 
 // Compose the live light theme: palette shell + accent overrides layered onto
 // the theme's accent defaults. Only valid hex overrides are applied.
-export function buildLiveTheme(palette: Palette | null, accents?: Record<string, string> | null): typeof lightTheme {
-    const base = palette ? buildPaletteTheme(palette) : lightTheme;
+export function buildLiveTheme(palette: Palette | null, accents?: Record<string, string> | null, baseTheme: typeof lightTheme = lightTheme): typeof lightTheme {
+    const base = palette ? buildPaletteTheme(palette, baseTheme) : baseTheme;
     if (!accents) return base;
     const merged: Record<AccentKey, string> = { ...base.colors.accents };
     for (const k of ACCENT_KEYS) {
@@ -358,6 +359,125 @@ export function applyAppearance(
     UnistylesRuntime.updateTheme('light', () => buildLiveTheme(palette, accents));
     if (UnistylesRuntime.themeName === 'light') {
         const bg = palette ? palette.background : lightTheme.colors.groupped.background;
+        UnistylesRuntime.setRootViewBackgroundColor(bg);
+    }
+}
+
+//
+// Dark palettes — the same shell idea, but re-skinning the DARK theme. Selected
+// independently of the light palette (setting `themePaletteDark`) and shown when
+// Appearance is Dark (or system-dark). Presets only — no custom dark editor.
+//
+
+export const DARK_PALETTES: NamedPalette[] = [
+    {
+        // Neutral graphite dark, iOS-system-like surfaces.
+        id: 'carbon',
+        name: 'Carbon',
+        background: '#1c1c1e',
+        surface: '#2c2c2e',
+        surfaceAlt: '#3a3a3c',
+        text: '#ffffff',
+        textSecondary: '#8e8e93',
+        accent: '#0a84ff',
+        border: '#38383a',
+        userBubble: '#2c2c2e',
+    },
+    {
+        id: 'solarized-dark',
+        name: 'Solarized Dark',
+        background: '#002b36', // base03
+        surface: '#073642',    // base02
+        surfaceAlt: '#0a3f4d',
+        text: '#93a1a1',       // base1
+        textSecondary: '#586e75', // base01
+        accent: '#268bd2',
+        border: '#0a3f4d',
+        userBubble: '#073642',
+        accents: { blue: '#268bd2', indigo: '#6c71c4', green: '#859900', orange: '#cb4b16', red: '#dc322f', pink: '#d33682' },
+    },
+    {
+        id: 'nord',
+        name: 'Nord',
+        background: '#2e3440', // nord0
+        surface: '#3b4252',    // nord1
+        surfaceAlt: '#434c5e', // nord2
+        text: '#eceff4',       // nord6
+        textSecondary: '#81a1c1', // nord9
+        accent: '#88c0d0',     // nord8
+        border: '#434c5e',
+        userBubble: '#3b4252',
+        accents: { blue: '#81a1c1', indigo: '#b48ead', green: '#a3be8c', orange: '#d08770', red: '#bf616a', pink: '#b48ead' },
+    },
+    {
+        id: 'dracula',
+        name: 'Dracula',
+        background: '#282a36',
+        surface: '#343746',
+        surfaceAlt: '#424450',
+        text: '#f8f8f2',
+        textSecondary: '#6272a4',
+        accent: '#bd93f9',
+        border: '#44475a',
+        userBubble: '#343746',
+        accents: { blue: '#8be9fd', indigo: '#bd93f9', green: '#50fa7b', orange: '#ffb86c', red: '#ff5555', pink: '#ff79c6' },
+    },
+    {
+        id: 'gruvbox-dark',
+        name: 'Gruvbox Dark',
+        background: '#282828',
+        surface: '#32302f',
+        surfaceAlt: '#3c3836',
+        text: '#ebdbb2',
+        textSecondary: '#a89984',
+        accent: '#fabd2f',
+        border: '#3c3836',
+        userBubble: '#32302f',
+        accents: { blue: '#83a598', indigo: '#d3869b', green: '#b8bb26', orange: '#fe8019', red: '#fb4934', pink: '#d3869b' },
+    },
+    {
+        id: 'one-dark',
+        name: 'One Dark',
+        background: '#21252b',
+        surface: '#282c34',
+        surfaceAlt: '#2c313a',
+        text: '#abb2bf',
+        textSecondary: '#5c6370',
+        accent: '#61afef',
+        border: '#3a3f4b',
+        userBubble: '#2c313a',
+        accents: { blue: '#61afef', indigo: '#c678dd', green: '#98c379', orange: '#d19a66', red: '#e06c75', pink: '#c678dd' },
+    },
+    {
+        id: 'tokyo-night',
+        name: 'Tokyo Night',
+        background: '#1a1b26',
+        surface: '#1f2335',
+        surfaceAlt: '#24283b',
+        text: '#c0caf5',
+        textSecondary: '#565f89',
+        accent: '#7aa2f7',
+        border: '#2a2e42',
+        userBubble: '#1f2335',
+        accents: { blue: '#7aa2f7', indigo: '#bb9af7', green: '#9ece6a', orange: '#e0af68', red: '#f7768e', pink: '#bb9af7' },
+    },
+];
+
+// Resolve a dark selection to the palette to apply, or null for the stock dark
+// theme (DEFAULT_PALETTE_ID). Presets only.
+export function resolveDarkPalette(id: string): Palette | null {
+    if (id === DEFAULT_PALETTE_ID) return null;
+    return DARK_PALETTES.find((p) => p.id === id) ?? null;
+}
+
+// Apply a dark palette selection to the live 'dark' theme. Rebuilt from the
+// pristine darkTheme each time so nothing compounds.
+export function applyDarkAppearance(id: string): void {
+    const palette = resolveDarkPalette(id);
+    const presetAccents = DARK_PALETTES.find((p) => p.id === id)?.accents;
+    UnistylesRuntime.updateTheme('dark', () => buildLiveTheme(palette, presetAccents, darkTheme));
+    if (UnistylesRuntime.themeName === 'dark') {
+        const bg = palette ? palette.background : (darkTheme.colors.groupped.background as string);
         UnistylesRuntime.setRootViewBackgroundColor(bg);
     }
 }
