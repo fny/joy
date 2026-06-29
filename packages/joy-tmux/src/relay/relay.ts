@@ -5,9 +5,9 @@
  */
 import { setTimeout as sleep } from "timers/promises";
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
-import { hostname, platform, cpus, freemem, totalmem, loadavg } from 'node:os';
+import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
 import { happyHomeDir, joyStateDir } from '../paths';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
@@ -349,9 +349,27 @@ export class RelayClient {
   private pushDaemonState(): void {
     if (!this.socket) return;
     const cpu = this.sampleCpuPercent();
-    const ram = Math.max(0, Math.min(100, Math.round((1 - freemem() / totalmem()) * 100)));
+    const memTotal = totalmem();
+    const memFree = freemem();
+    const ram = Math.max(0, Math.min(100, Math.round((1 - memFree / memTotal) * 100)));
+    const list = cpus();
+    // Disk for the home filesystem (best-effort — statfs can fail on odd mounts).
+    let diskFree = 0, diskTotal = 0;
+    try {
+      const s = statfsSync(homedir());
+      diskFree = Number(s.bavail) * Number(s.bsize);
+      diskTotal = Number(s.blocks) * Number(s.bsize);
+    } catch { /* leave 0 — app shows cpu/ram regardless */ }
     const { variant, key } = this.machineCrypto();
-    const daemonState = b64encode(encryptWire(variant, key, { cpu, ram, time: Date.now() }));
+    const daemonState = b64encode(encryptWire(variant, key, {
+      cpu, ram, time: Date.now(),
+      // Detail for the machine page (bytes + cpu info); the sidebar still uses cpu/ram %.
+      cpuCount: list.length,
+      cpuModel: list[0]?.model,
+      load: loadavg()[0],
+      memFree, memTotal,
+      diskFree, diskTotal,
+    }));
     this.socket.emit(
       'machine-update-state',
       { machineId: this.creds.machineId, daemonState, expectedVersion: this.daemonStateVersion },
@@ -525,7 +543,32 @@ export class RelayClient {
    * wipes them until happy-cli re-upserts on its next session spawn.
    * Acceptable trade-off for the picker reliability gain.
    */
+  /** GET this machine's current (decrypted) metadata, so a re-upsert can carry
+   *  forward app-owned fields instead of clobbering them. Best-effort → null. */
+  private async fetchOwnMachineMetadata(): Promise<Record<string, unknown> | null> {
+    try {
+      const res = await fetch(this.url('/v1/machines'), { headers: this.headers() });
+      if (!res.ok) return null;
+      const rows = await res.json() as Array<{ id: string; metadata?: string }>;
+      const row = Array.isArray(rows) ? rows.find((m) => m.id === this.creds.machineId) : undefined;
+      if (!row?.metadata) return null;
+      const { variant, key } = this.machineCrypto();
+      return decryptWire(variant, key, b64decode(row.metadata)) as Record<string, unknown> | null;
+    } catch { return null; }
+  }
+
   async getOrCreateMachine(metadata: Record<string, unknown>): Promise<boolean> {
+    // Always report the LIVE hostname (an OS rename shouldn't need a daemon
+    // restart), and never clobber an app-set displayName: this is a full-blob
+    // upsert, so carry the current displayName forward when the caller didn't
+    // supply one (the daemon's base blob never has it → it would otherwise wipe
+    // a rename on every command-scan push).
+    const blob: Record<string, unknown> = { ...metadata, host: hostname() };
+    if (blob.displayName === undefined) {
+      const current = await this.fetchOwnMachineMetadata();
+      const dn = current?.displayName;
+      if (typeof dn === 'string' && dn.length > 0) blob.displayName = dn;
+    }
     try {
       let encryptionKey: Uint8Array;
       let variant: EncryptionVariant;
@@ -551,7 +594,7 @@ export class RelayClient {
         headers: this.headers(),
         body: JSON.stringify({
           id: this.creds.machineId,
-          metadata: b64encode(encryptWire(variant, encryptionKey, metadata)),
+          metadata: b64encode(encryptWire(variant, encryptionKey, blob)),
           dataEncryptionKey: dataEncryptionKeyB64,
         }),
       });
