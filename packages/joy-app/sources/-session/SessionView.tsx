@@ -55,6 +55,8 @@ import { apiSocket } from '@/sync/apiSocket';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
 import { JoyQueueStrip } from '@/components/JoyQueueStrip';
+import { DraftQueueStrip } from './DraftQueueStrip';
+import { useDraftQueueStore } from './draftQueue';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -632,6 +634,16 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
     }, [sessionId, expImageUpload, selectedImages, clearImages]);
 
+    // Stash the current input as an on-device draft (queued at the bottom of the
+    // chat) and clear the box so the user can compose the next one. Drafts are
+    // never sent to joy-tmux until the user sends them from the draft strip.
+    const handleSaveDraft = React.useCallback(() => {
+        const text = composerHandleRef.current?.getMessage() ?? '';
+        if (!text.trim()) return;
+        useDraftQueueStore.getState().add(sessionId, text);
+        composerHandleRef.current?.clearMessage();
+    }, [sessionId]);
+
     const handleAbort = React.useCallback(() => {
         storage.getState().resetSessionAgentOverrides(sessionId);
         sessionAbort(sessionId);
@@ -738,6 +750,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const composer = (
         <>
         {isJoyTmux && <JoyQueueStrip queue={joyQueue} />}
+        <DraftQueueStrip sessionId={sessionId} />
         <ChatComposer
             composerHandleRef={composerHandleRef}
             placeholder={t('session.inputPlaceholder')}
@@ -755,6 +768,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             connectionStatus={connectionStatus}
             blockSend={false}
             onSend={handleSend}
+            onSaveDraft={handleSaveDraft}
             onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
             onAbort={isDisconnected ? undefined : handleAbort}
