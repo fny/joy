@@ -59,6 +59,19 @@ export const DEFAULT_SHELL: Palette = {
     userBubble: lightTheme.colors.userMessageBackground,
 };
 
+// The stock dark theme as a shell palette — used to preview the "Default" dark
+// selection (no dark custom editor, so this is preview-only).
+export const DARK_SHELL: Palette = {
+    background: darkTheme.colors.groupped.background as string,
+    surface: darkTheme.colors.surface,
+    surfaceAlt: darkTheme.colors.surfaceHigh,
+    text: darkTheme.colors.text,
+    textSecondary: darkTheme.colors.textSecondary as string,
+    accent: darkTheme.colors.textLink,
+    border: darkTheme.colors.divider as string,
+    userBubble: darkTheme.colors.userMessageBackground,
+};
+
 // Seed for the custom editor when the user hasn't set one yet.
 export const CUSTOM_PALETTE_DEFAULT: Palette = { ...PALETTES[0] };
 // The editable shell colours (excludes the optional `button`).
