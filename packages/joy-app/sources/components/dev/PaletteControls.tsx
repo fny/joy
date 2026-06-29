@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { View, Text, TextInput } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
@@ -25,12 +25,20 @@ import {
 const HEX_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
 // A row of color dots previewing a palette (background / surface / accent / text).
-function Swatches({ p }: { p: Pick<Palette, 'background' | 'surface' | 'accent' | 'text'> }) {
+// When `selected`, the row gets an accent ring + a checkmark so the last-chosen
+// palette is unmistakable.
+function Swatches({ p, selected }: { p: Pick<Palette, 'background' | 'surface' | 'accent' | 'text'>; selected?: boolean }) {
+    const { theme } = useUnistyles();
     return (
-        <View style={styles.swatchRow}>
-            {[p.background, p.surface, p.accent, p.text].map((c, i) => (
-                <View key={i} style={[styles.swatch, { backgroundColor: c }]} />
-            ))}
+        <View style={styles.swatchWrap}>
+            {selected && (
+                <Ionicons name="checkmark-circle" size={18} color={theme.colors.textLink} style={{ marginRight: 6 }} />
+            )}
+            <View style={[styles.swatchRow, selected && { borderColor: theme.colors.textLink }]}>
+                {[p.background, p.surface, p.accent, p.text].map((c, i) => (
+                    <View key={i} style={[styles.swatch, { backgroundColor: c }]} />
+                ))}
+            </View>
         </View>
     );
 }
@@ -112,7 +120,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
                     <Item
                         key={p.id}
                         title={p.name}
-                        rightElement={<Swatches p={p} />}
+                        rightElement={<Swatches p={p} selected={selectedId === p.id} />}
                         selected={selectedId === p.id}
                         onPress={() => select(p.id)}
                     />
@@ -120,7 +128,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
                 <Item
                     title="Custom"
                     subtitle="Your colors (edit below)"
-                    rightElement={<Swatches p={draft} />}
+                    rightElement={<Swatches p={draft} selected={selectedId === CUSTOM_PALETTE_ID} />}
                     selected={selectedId === CUSTOM_PALETTE_ID}
                     onPress={() => select(CUSTOM_PALETTE_ID)}
                 />
@@ -144,7 +152,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
                     <Item
                         key={p.id}
                         title={p.name}
-                        rightElement={<Swatches p={p} />}
+                        rightElement={<Swatches p={p} selected={darkId === p.id} />}
                         selected={darkId === p.id}
                         onPress={() => selectDark(p.id)}
                     />
@@ -179,9 +187,19 @@ export const PaletteControls = React.memo(function PaletteControls() {
 });
 
 const styles = StyleSheet.create((theme) => ({
+    swatchWrap: {
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
     swatchRow: {
         flexDirection: 'row',
         gap: 4,
+        // Border reserved (transparent) so selecting doesn't shift row height;
+        // the selected swatch row turns it accent-coloured.
+        borderWidth: 2,
+        borderColor: 'transparent',
+        borderRadius: 8,
+        padding: 3,
     },
     swatch: {
         width: 16,
