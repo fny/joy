@@ -14,11 +14,21 @@
  */
 import { useState, useCallback, useRef, useEffect } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
-import { Image } from 'react-native';
+import { Image, Platform } from 'react-native';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { Modal } from '@/modal';
 import { generateThumbhash } from '@/utils/thumbhash';
 import { t } from '@/text';
 import type { AttachmentPreview } from '@/sync/attachmentTypes';
+
+// iOS hands back HEIC from the photo library, which Claude's API rejects (and
+// the daemon's magic-byte sniff doesn't recognize → it'd be written as a generic
+// file, not an inline image). Transcode picked images to JPEG on iOS so they
+// upload + render as images. (Mirrors upstream's normalizePickedAssetForUpload.)
+const IOS_JPEG_QUALITY = 0.92;
+function withJpegExtension(name: string): string {
+    return name.replace(/\.[^./\\]*$/, '') + '.jpg';
+}
 
 export const MAX_IMAGES_PER_MESSAGE = 20;
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
@@ -90,8 +100,10 @@ export function useImagePicker(): UseImagePickerResult {
                 continue;
             }
 
-            const mimeType = asset.mimeType ?? 'application/octet-stream';
+            let mimeType = asset.mimeType ?? 'application/octet-stream';
             const isImage = mimeType.startsWith('image/');
+            let uri = asset.uri;
+            let name = asset.name ?? `file_${Date.now()}`;
 
             // For images, resolve dimensions + thumbhash so the message renders
             // the picture inline; non-images stay a plain attachment.
@@ -99,22 +111,32 @@ export function useImagePicker(): UseImagePickerResult {
             let height = 0;
             let thumbhash: string | undefined;
             if (isImage) {
-                const dims = await getImageSize(asset.uri);
+                // iOS: transcode HEIC/etc → JPEG (Claude rejects HEIC; the daemon
+                // can't sniff it). Best-effort: keep the original on failure.
+                if (Platform.OS === 'ios') {
+                    try {
+                        const jpeg = await manipulateAsync(uri, [], { compress: IOS_JPEG_QUALITY, format: SaveFormat.JPEG });
+                        uri = jpeg.uri;
+                        mimeType = 'image/jpeg';
+                        name = withJpegExtension(name);
+                    } catch { /* keep original */ }
+                }
+                const dims = await getImageSize(uri);
                 if (dims && dims.width > 0 && dims.height > 0) {
                     width = dims.width;
                     height = dims.height;
-                    thumbhash = await generateThumbhash(asset.uri, width, height);
+                    thumbhash = await generateThumbhash(uri, width, height);
                 }
             }
 
             previews.push({
                 id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
-                uri: asset.uri,
+                uri,
                 width,
                 height,
                 mimeType,
                 size,
-                name: asset.name ?? `file_${Date.now()}`,
+                name,
                 thumbhash,
             });
         }
