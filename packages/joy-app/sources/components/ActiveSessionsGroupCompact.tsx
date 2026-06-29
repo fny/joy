@@ -167,15 +167,11 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram }: { mac
         router.navigate(`/machine/${machineId}` as any);
     }, [router, machineId]);
 
-    // Live host load (from the daemon's daemonState). Colour by the busier of the
-    // two so it reads as a launch-risk cue: green calm, orange busy, red maxed.
-    const hasLoad = typeof cpu === 'number' || typeof ram === 'number';
-    const peak = Math.max(cpu ?? 0, ram ?? 0);
-    const loadColor = peak >= 90 ? '#FF3B30' : peak >= 70 ? '#FF9500' : '#34C759';
-    const loadText = [
-        typeof cpu === 'number' ? `CPU ${cpu}%` : null,
-        typeof ram === 'number' ? `RAM ${ram}%` : null,
-    ].filter(Boolean).join(' · ');
+    // Live host load (from the daemon's daemonState): a speedometer before CPU%
+    // and a chip before RAM%. Plain secondary-text style — matches the machine
+    // name, no risk colouring.
+    const showCpu = typeof cpu === 'number';
+    const showRam = typeof ram === 'number';
 
     return (
         <Pressable onPress={handlePress} style={styles.machineSeparator} hitSlop={{ top: 8, bottom: 8 }}>
@@ -184,10 +180,17 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram }: { mac
             <Text style={styles.machineSeparatorText} numberOfLines={1}>
                 {machineName}
             </Text>
-            {hasLoad && (
-                <Text style={[styles.machineLoadText, { color: loadColor }]} numberOfLines={1}>
-                    {loadText}
-                </Text>
+            {showCpu && (
+                <View style={styles.machineLoadItem}>
+                    <Ionicons name="speedometer-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 3 }} />
+                    <Text style={styles.machineLoadText} numberOfLines={1}>{cpu}%</Text>
+                </View>
+            )}
+            {showRam && (
+                <View style={styles.machineLoadItem}>
+                    <Ionicons name="hardware-chip-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 3 }} />
+                    <Text style={styles.machineLoadText} numberOfLines={1}>{ram}%</Text>
+                </View>
             )}
             <View style={styles.machineSeparatorLine} />
         </Pressable>
@@ -545,10 +548,15 @@ const stylesheet = StyleSheet.create((theme) => ({
         ...Typography.default('regular'),
         marginRight: 4,
     },
+    machineLoadItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginLeft: 8,
+    },
     machineLoadText: {
-        fontSize: 10,
-        ...Typography.mono(),
-        marginRight: 6,
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default('regular'),
     },
     // Project card styles
     projectCard: {
