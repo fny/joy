@@ -1622,7 +1622,10 @@ export function useAllMachines(options?: { includeOffline?: boolean }): Machine[
     const includeOffline = options?.includeOffline ?? false;
     return storage(useShallow((state) => {
         if (!state.isDataReady) return [];
-        const machines = Object.values(state.machines).sort((a, b) => b.createdAt - a.createdAt);
+        // Sort by display name everywhere (displayName → host → id), case-insensitive.
+        const machineName = (m: Machine) => (m.metadata?.displayName || m.metadata?.host || m.id);
+        const machines = Object.values(state.machines).sort((a, b) =>
+            machineName(a).localeCompare(machineName(b), undefined, { sensitivity: 'base' }));
         return includeOffline ? machines : machines.filter((v) => v.active);
     }));
 }

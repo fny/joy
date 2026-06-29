@@ -34,7 +34,7 @@ import {
     type MultiTextInputHandle,
 } from '@/components/MultiTextInput';
 import { t } from '@/text';
-import { useAllMachines, useSessions, useSetting, storage } from '@/sync/storage';
+import { useAllMachines, useSessions, useSetting, useSettingMutable, storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { apiSocket } from '@/sync/apiSocket';
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -80,6 +80,9 @@ function NewJoyTmuxSessionScreen() {
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
 
     const allMachines = useAllMachines({ includeOffline: true });
+    // Remembered machine+path pairs (most-recent first) — pre-selects the last
+    // machine/folder on a fresh new-session page.
+    const [recentMachinePaths, setRecentMachinePaths] = useSettingMutable('recentMachinePaths');
     const sessions = useSessions();
 
     // Optional prefill (e.g. the per-repo "+" in the session list passes the
@@ -128,6 +131,15 @@ function NewJoyTmuxSessionScreen() {
     const probedRef = React.useRef(false);
     React.useEffect(() => {
         if (probedRef.current || selectedMachineId) return;
+        // Prefer the last-used machine when it's online; pre-fill its folder too
+        // (unless a path was passed in via params).
+        const recentId = recentMachinePaths[0]?.machineId;
+        const recent = recentId ? allMachines.find(m => m.id === recentId) : undefined;
+        if (recent && isMachineOnline(recent)) {
+            setSelectedMachineId(recent.id);
+            if (!params.path && recentMachinePaths[0]?.path) setPathInput(recentMachinePaths[0].path);
+            return;
+        }
         const online = allMachines.filter(isMachineOnline);
         if (online.length === 0) {
             if (allMachines.length > 0) setSelectedMachineId(allMachines[0].id);
@@ -151,7 +163,7 @@ function NewJoyTmuxSessionScreen() {
             );
         })();
         return () => { cancelled = true; };
-    }, [allMachines.map(m => m.id).join(','), selectedMachineId]);
+    }, [allMachines.map(m => m.id).join(','), selectedMachineId, recentMachinePaths]);
 
     const selectedMachine = React.useMemo(
         () => allMachines.find(m => m.id === selectedMachineId) ?? null,
@@ -318,6 +330,13 @@ function NewJoyTmuxSessionScreen() {
 
             await sync.refreshSessions();
 
+            // Remember this machine+folder so the next new-session pre-selects it.
+            const usedPath = trimPathInput(pathInput) || '~/';
+            setRecentMachinePaths([
+                { machineId: selectedMachineId, path: usedPath },
+                ...recentMachinePaths.filter(r => !(r.machineId === selectedMachineId && r.path === usedPath)),
+            ].slice(0, 10));
+
             // Send the initial prompt if any. joy-tmux's onMessage handler types
             // it into the tmux pane. Skip for a detached session — there's no
             // Claude running to receive it (it would be dropped at the dead pane).
@@ -334,7 +353,7 @@ function NewJoyTmuxSessionScreen() {
         } finally {
             setIsSpawning(false);
         }
-    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, chrome, detached, extraArgs, prompt, router, navigateToSession]);
+    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, chrome, detached, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
 
     const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
 
