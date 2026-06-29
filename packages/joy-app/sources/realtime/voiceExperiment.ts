@@ -1,5 +1,3 @@
-import { tracking } from '@/track';
-
 export const VOICE_UPSELL_FLAG_KEY = 'voice-upsell';
 
 export type VoiceUpsellVariant =
@@ -10,14 +8,6 @@ export type VoiceUpsellVariant =
 export type VoiceUpsellVariantSource = 'override' | 'posthog' | 'default';
 
 export type VoiceGatingMode = 'direct-byo-agent' | 'happy-server';
-
-type PostHogFeatureFlagOverrideClient = {
-    featureFlags?: {
-        overrideFeatureFlags?: (options: {
-            flags: Record<string, string | boolean>;
-        }) => void;
-    };
-};
 
 function isVoiceUpsellVariant(value: unknown): value is Exclude<VoiceUpsellVariant, 'control'> {
     return value === 'show-paywall-before-first-voice-chat' || value === 'voice-onboarding-and-upsell';
@@ -34,17 +24,9 @@ export function getVoiceUpsellVariantLabel(variant: VoiceUpsellVariant): string 
     }
 }
 
-export function applyVoiceUpsellOverride(override: VoiceUpsellVariant | null) {
-    if (!override) {
-        return;
-    }
-
-    const client = tracking as PostHogFeatureFlagOverrideClient | null;
-    client?.featureFlags?.overrideFeatureFlags?.({
-        flags: {
-            [VOICE_UPSELL_FLAG_KEY]: override,
-        },
-    });
+export function applyVoiceUpsellOverride(_override: VoiceUpsellVariant | null) {
+    // Feature-flag overrides were applied through the analytics client, which has
+    // been removed. Without a flag provider there is nothing to override.
 }
 
 export function getVoiceUpsellVariant(options?: {
@@ -56,7 +38,7 @@ export function getVoiceUpsellVariant(options?: {
         return options.override;
     }
 
-    const rawVariant = options?.rawVariant ?? tracking?.getFeatureFlag(VOICE_UPSELL_FLAG_KEY);
+    const rawVariant = options?.rawVariant ?? undefined;
     if (isVoiceUpsellVariant(rawVariant)) {
         return rawVariant;
     }
@@ -73,7 +55,7 @@ export function getVoiceExperimentStatus(options: {
     upsellVariantSource: VoiceUpsellVariantSource;
     gatingMode: VoiceGatingMode;
 } {
-    const rawVariant = tracking?.getFeatureFlag(VOICE_UPSELL_FLAG_KEY);
+    const rawVariant = undefined;
     const gatingMode: VoiceGatingMode = options.voiceBypassToken && !!options.voiceCustomAgentId
         ? 'direct-byo-agent'
         : 'happy-server';

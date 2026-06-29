@@ -10,7 +10,6 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { getRandomBytesAsync } from "expo-crypto";
 import { useIsLandscape } from "@/utils/responsive";
 import { Typography } from "@/constants/Typography";
-import { trackAccountCreated, trackAccountRestored } from '@/track';
 import { HomeHeaderNotAuth } from "@/components/HomeHeader";
 import { MainView } from "@/components/MainView";
 import { JoyLogoTypeDynamic } from "@/components/JoyLogotype";
@@ -43,7 +42,6 @@ function NotAuthenticated() {
             const token = await authGetToken(secret);
             if (token && secret) {
                 await auth.login(token, encodeBase64(secret, 'base64url'));
-                trackAccountCreated();
             }
         } catch (error) {
             console.error('Error creating account', error);
@@ -65,7 +63,6 @@ function NotAuthenticated() {
                         <RoundButton
                             title={t('welcome.loginWithMobileApp')}
                             onPress={() => {
-                                trackAccountRestored();
                                 router.push('/restore');
                             }}
                         />
@@ -92,7 +89,6 @@ function NotAuthenticated() {
                             size="normal"
                             title={t('welcome.linkOrRestoreAccount')}
                             onPress={() => {
-                                trackAccountRestored();
                                 router.push('/restore');
                             }}
                             display="inverted"
@@ -122,7 +118,6 @@ function NotAuthenticated() {
                                 <RoundButton
                                     title={t('welcome.loginWithMobileApp')}
                                     onPress={() => {
-                                        trackAccountRestored();
                                         router.push('/restore');
                                     }}
                                 />
@@ -148,7 +143,6 @@ function NotAuthenticated() {
                                     size="normal"
                                     title={t('welcome.linkOrRestoreAccount')}
                                     onPress={() => {
-                                        trackAccountRestored();
                                         router.push('/restore');
                                     }}
                                     display="inverted"

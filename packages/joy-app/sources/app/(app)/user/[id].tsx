@@ -15,7 +15,6 @@ import { layout } from '@/components/layout';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { Modal } from '@/modal';
 import { t } from '@/text';
-import { trackFriendsConnect } from '@/track';
 import { Ionicons } from '@expo/vector-icons';
 
 export default function UserProfileScreen() {
@@ -57,7 +56,6 @@ export default function UserProfileScreen() {
 
         const updatedProfile = await sendFriendRequest(credentials, userProfile.id);
         if (updatedProfile) {
-            trackFriendsConnect();
             setUserProfile(updatedProfile);
         } else {
             Modal.alert(t('friends.bothMustHaveGithub'));
