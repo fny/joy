@@ -231,7 +231,11 @@ async function cmdNotify(args: string[]): Promise<number> {
 // ── install (systemd on Linux, launchd on macOS) ────────────────────────────
 
 function systemdUnitPath(): string { return join(homedir(), ".config", "systemd", "user", "joy-tmux.service"); }
-function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", "party.voltai.joy-tmux.plist"); }
+const LAUNCHD_LABEL = "vip.voltai.joy-tmux";
+function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`); }
+// Earlier builds shipped this label; removeService() tears it down too so a
+// re-install migrates cleanly instead of leaving two launchd agents running.
+const LEGACY_LAUNCHD_LABELS = ["party.voltai.joy-tmux"];
 
 // Tear down whatever service is currently installed, quietly. Shared by uninstall
 // (which then reports) and install (which calls it first, so install is idempotent:
@@ -244,8 +248,13 @@ function removeService(): void {
     try { rmSync(systemdUnitPath()); } catch {}
     spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
   } else if (plat === "darwin") {
-    spawnSync("launchctl", ["unload", launchdPlistPath()], { stdio: "ignore" });
-    try { rmSync(launchdPlistPath()); } catch {}
+    // Current label + any legacy labels (migration), so re-install never leaves
+    // a stale agent loaded alongside the new one.
+    for (const label of [LAUNCHD_LABEL, ...LEGACY_LAUNCHD_LABELS]) {
+      const path = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+      spawnSync("launchctl", ["unload", path], { stdio: "ignore" });
+      try { rmSync(path); } catch {}
+    }
   }
 }
 
@@ -283,7 +292,7 @@ WantedBy=default.target
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>party.voltai.joy-tmux</string>
+  <key>Label</key><string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array><string>${NODE}</string><string>--import</string><string>tsx</string><string>${SERVER_TS}</string></array>
   <key>WorkingDirectory</key><string>${PKG_DIR}</string>
