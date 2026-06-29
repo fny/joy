@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { useSession, useSessionMessages, useSetting } from "@/sync/storage";
 import { sync } from '@/sync/sync';
-import { ActivityIndicator, AppState, FlatList, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
+import { ActivityIndicator, AppState, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useCallback } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -37,10 +38,9 @@ export const ChatList = React.memo((props: { session: Session }) => {
 const ListHeader = React.memo((props: { isLoadingOlder: boolean }) => {
     const headerHeight = useHeaderHeight();
     const safeArea = useSafeAreaInsets();
-    // ListFooterComponent on an inverted FlatList renders at the visual top
-    // — that is exactly where the spinner for "loading older messages"
-    // belongs. The spacer below keeps the header bar from clipping the
-    // oldest message.
+    // Rendered at the visual top (ListHeaderComponent on the non-inverted
+    // FlashList) — exactly where the "loading older messages" spinner belongs.
+    // The spacer below keeps the nav header from clipping the oldest message.
     return (
         <View>
             {props.isLoadingOlder && (
@@ -68,7 +68,7 @@ const ChatListInternal = React.memo((props: {
     isLoadingOlder: boolean,
 }) => {
     const { theme } = useUnistyles();
-    const flatListRef = React.useRef<FlatList>(null);
+    const flatListRef = React.useRef<FlashListRef<DisplayItem>>(null);
     const [showScrollButton, setShowScrollButton] = React.useState(false);
     // Tracks whether the scroll-button is currently shown, so we only call
     // setShowScrollButton when the threshold is actually crossed instead of
@@ -89,6 +89,11 @@ const ChatListInternal = React.memo((props: {
         [collapseCurrentTurn],
     );
     const displayItems = useGroupedMessages(props.messages, groupToolCalls, groupingOptions);
+    // displayItems is newest-first (messages are sorted newest-first). FlashList
+    // renders top→bottom, so feed it oldest→newest and let
+    // maintainVisibleContentPosition.startRenderingFromBottom pin the newest at
+    // the bottom — the v2 chat idiom (no `inverted`; see dev/inverted-list).
+    const orderedItems = React.useMemo(() => [...displayItems].reverse(), [displayItems]);
 
     // Tracks which groups are explicitly collapsed. Groups start collapsed;
     // pending approval groups are the only ones we auto-expand.
@@ -259,15 +264,15 @@ const ChatListInternal = React.memo((props: {
         );
     }, [props.metadata, props.sessionId, canFork, handleForkFromMessage, collapsedGroups, handleToggleGroup]);
 
-    // In inverted FlatList, offset 0 = latest messages (visual bottom).
-    // Offset increases as user scrolls up to see older messages.
-    // Auto-stick-to-bottom on new messages is handled natively by FlatList's
-    // maintainVisibleContentPosition.autoscrollToBottomThreshold — no JS-side
-    // scrollToOffset is needed (and running both produces a fight that drags
-    // the user's viewport when reading older messages mid-stream).
+    // Non-inverted list: the newest messages sit at the visual bottom. Show the
+    // scroll-to-bottom button once the user has scrolled UP far enough from the
+    // bottom. Auto-stick-to-bottom on new messages is handled natively by
+    // FlashList's maintainVisibleContentPosition.autoscrollToBottomThreshold —
+    // no JS-side scroll is needed (running both fights the viewport mid-stream).
     const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-        const offsetY = e.nativeEvent.contentOffset.y;
-        const next = offsetY > SCROLL_THRESHOLD;
+        const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+        const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+        const next = distanceFromBottom > SCROLL_THRESHOLD;
         if (next !== showScrollButtonRef.current) {
             showScrollButtonRef.current = next;
             setShowScrollButton(next);
@@ -275,13 +280,14 @@ const ChatListInternal = React.memo((props: {
     }, []);
 
     const scrollToBottom = useCallback(() => {
-        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+        flatListRef.current?.scrollToEnd({ animated: true });
     }, []);
 
-    // In an inverted FlatList, `onEndReached` fires when the user scrolls
-    // past the visual top — i.e. when they want to see older history.
-    // Initial fetch only loads the latest 100 messages (see
-    // sync.fetchInitialLatestPage), so we lazy-load earlier pages here.
+    // Older history lives at the visual TOP now, so `onStartReached` fires when
+    // the user scrolls up toward it. Initial fetch only loads the latest 100
+    // messages (see sync.fetchInitialLatestPage), so we lazy-load earlier pages
+    // here; maintainVisibleContentPosition.autoscrollToTopThreshold keeps the
+    // viewport anchored as older pages prepend (no jump).
     const sessionId = props.sessionId;
     const hasMoreOlder = props.hasMoreOlder;
     const isLoadingOlder = props.isLoadingOlder;
@@ -307,34 +313,31 @@ const ChatListInternal = React.memo((props: {
 
     return (
         <View style={{ flex: 1 }}>
-            <FlatList
+            <FlashList
                 ref={flatListRef}
-                data={displayItems}
-                inverted={true}
+                data={orderedItems}
                 keyExtractor={keyExtractor}
                 maintainVisibleContentPosition={{
-                    // Anchor on the second-newest message (index 1), not the
-                    // newest. The newest slot (index 0) gets a brand-new item
-                    // each agent token, which would otherwise destabilise the
-                    // anchor and drag the viewport up.
-                    //
-                    // autoscrollToTopThreshold: for INVERTED lists this is
-                    // actually the auto-stick-to-visual-bottom threshold —
-                    // contentOffset 0 is at the visual bottom in an inverted
-                    // list, and this prop sticks the viewport to offset 0
-                    // when the user is within N units of it.
-                    minIndexForVisible: 1,
-                    autoscrollToTopThreshold: 50,
+                    // startRenderingFromBottom: first paint starts at the bottom
+                    // (newest) — the fast path; FlashList only mounts the visible
+                    // window instead of every message.
+                    startRenderingFromBottom: true,
+                    // Stick to the bottom on new messages when the user is near it
+                    // (streaming tokens / new turns), but don't yank them up when
+                    // they're reading older history.
+                    autoscrollToBottomThreshold: 0.2,
+                    // Anchor the viewport when older pages prepend at the top.
+                    autoscrollToTopThreshold: 100,
                 }}
                 keyboardShouldPersistTaps="handled"
                 keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
                 renderItem={renderItem}
                 onScroll={handleScroll}
                 scrollEventThrottle={16}
-                ListHeaderComponent={<ListFooter sessionId={props.sessionId} />}
-                ListFooterComponent={<ListHeader isLoadingOlder={props.isLoadingOlder} />}
-                onEndReached={handleLoadOlder}
-                onEndReachedThreshold={0.5}
+                ListHeaderComponent={<ListHeader isLoadingOlder={props.isLoadingOlder} />}
+                ListFooterComponent={<ListFooter sessionId={props.sessionId} />}
+                onStartReached={handleLoadOlder}
+                onStartReachedThreshold={0.5}
             />
             {showScrollButton && (
                 <View style={styles.scrollButtonContainer}>
