@@ -1,20 +1,24 @@
 import * as React from 'react';
 import { View, Text, Pressable } from 'react-native';
 import { StyleSheet, UnistylesRuntime } from 'react-native-unistyles';
-import * as SystemUI from 'expo-system-ui';
 import { ItemList } from '@/components/ItemList';
 import { PaletteControls } from '@/components/dev/PaletteControls';
-import { useLocalSettingMutable } from '@/sync/storage';
-import { lightTheme, darkTheme } from '@/theme';
+import { useLocalSettingMutable, storage } from '@/sync/storage';
+import { applyAppearance, applyDarkAppearance } from '@/palettes';
 
 // Switch the live theme immediately (and disable adaptive so it sticks), mirroring
-// Settings > Appearance. Lets you flip Light/Dark right here to preview palettes.
+// Settings > Appearance. Crucially, RE-APPLY the selected palette for the target
+// theme so the switch shows it (and uses the palette's background) — setTheme
+// alone reverts to the stock theme without the palette override.
 function applyMode(mode: 'light' | 'dark') {
     UnistylesRuntime.setAdaptiveThemes(false);
     UnistylesRuntime.setTheme(mode);
-    const color = mode === 'dark' ? darkTheme.colors.groupped.background : lightTheme.colors.groupped.background;
-    UnistylesRuntime.setRootViewBackgroundColor(color);
-    void SystemUI.setBackgroundColorAsync(color);
+    const ls = storage.getState().localSettings;
+    if (mode === 'dark') {
+        applyDarkAppearance(ls.themePaletteDark);
+    } else {
+        applyAppearance(ls.themePalette, ls.customPalette, ls.accentOverrides);
+    }
 }
 
 const MODES = [

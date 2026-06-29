@@ -98,8 +98,10 @@ if (Platform.OS === 'web' && themePreference === 'adaptive') {
             UnistylesRuntime.setAdaptiveThemes(false);
             UnistylesRuntime.setTheme(themeName);
             UnistylesRuntime.setAdaptiveThemes(true);
-            const color = appThemes[themeName].colors.groupped.background;
-            UnistylesRuntime.setRootViewBackgroundColor(color);
+            // Re-apply the resolved theme's palette (and its background) — setTheme
+            // alone reverts to the stock theme without the palette override.
+            if (themeName === 'dark') applyDarkAppearance(themePaletteDark);
+            else applyAppearance(themePalette, customPalette, accentOverrides);
         }
     });
 }
