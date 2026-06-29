@@ -45,7 +45,15 @@ function Swatches({ p, selected }: { p: Pick<Palette, 'background' | 'surface' |
 
 // Palette selector + custom hex editor. Self-contained (renders ItemGroups);
 // wrap it in an ItemList (settings) or a ScrollView (dev FAB panel).
-export const PaletteControls = React.memo(function PaletteControls() {
+//
+// `mode` scopes which list shows: 'light' → light palettes + custom editor,
+// 'dark' → dark palettes only. Omitted (dev FAB) → everything. Picking a palette
+// applies to that theme and persists; it does NOT change the app's appearance
+// mode — that's chosen on the Appearance page. The settings page renders a live
+// preview above this, so toggling the mode here is a preview, not a switch.
+export const PaletteControls = React.memo(function PaletteControls({ mode }: { mode?: 'light' | 'dark' }) {
+    const showLight = mode === 'light' || mode === undefined;
+    const showDark = mode === 'dark' || mode === undefined;
     const [selectedId, setSelectedId] = useLocalSettingMutable('themePalette');
     const [darkId, setDarkId] = useLocalSettingMutable('themePaletteDark');
     const [storedCustom, setStoredCustom] = useLocalSettingMutable('customPalette');
@@ -108,7 +116,8 @@ export const PaletteControls = React.memo(function PaletteControls() {
 
     return (
         <>
-            <ItemGroup title="Light palettes" footer="Re-skins background, surfaces, text and accent for the light theme — switch Appearance to Light to see it.">
+            {showLight && (
+            <ItemGroup title="Light palettes" footer="Re-skins background, surfaces, text and accent for the light theme.">
                 <Item
                     title="Default"
                     subtitle="Original theme"
@@ -139,8 +148,10 @@ export const PaletteControls = React.memo(function PaletteControls() {
                     onPress={copyToCustom}
                 />
             </ItemGroup>
+            )}
 
-            <ItemGroup title="Dark palettes" footer="Re-skins the dark theme — switch Appearance to Dark to see it. Presets only.">
+            {showDark && (
+            <ItemGroup title="Dark palettes" footer="Re-skins the dark theme. Presets only.">
                 <Item
                     title="Default"
                     subtitle="Stock dark theme"
@@ -158,7 +169,9 @@ export const PaletteControls = React.memo(function PaletteControls() {
                     />
                 ))}
             </ItemGroup>
+            )}
 
+            {showLight && (
             <ItemGroup title="Custom colors" footer="Enter hex like #fffdf8. Saves as the Custom palette; select Custom above to apply.">
                 <View style={styles.editor}>
                     {PALETTE_FIELDS.map(({ key, label }) => {
@@ -182,6 +195,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
                     })}
                 </View>
             </ItemGroup>
+            )}
         </>
     );
 });
