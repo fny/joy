@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="/.github/joy-logo.png" width="180" alt="joy" />
+  <img src="/.github/joy-logo.png" width="260" alt="joy" />
 </div>
 
 <h1 align="center">joy</h1>
