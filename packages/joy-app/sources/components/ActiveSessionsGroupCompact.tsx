@@ -551,7 +551,7 @@ const stylesheet = StyleSheet.create((theme) => ({
     machineLoadItem: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginLeft: 8,
+        marginLeft: 4,
     },
     machineLoadText: {
         fontSize: 11,
