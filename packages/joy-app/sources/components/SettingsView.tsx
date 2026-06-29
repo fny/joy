@@ -169,16 +169,6 @@ export const SettingsView = React.memo(function SettingsView() {
                 </ItemGroup>
             )}
 
-            {/* Social */}
-            {/* <ItemGroup title={t('settings.social')}>
-                <Item
-                    title={t('navigation.friends')}
-                    subtitle={t('friends.manageFriends')}
-                    icon={<Ionicons name="people-outline" size={29} color={theme.colors.accents.blue} />}
-                    onPress={() => router.push('/friends')}
-                />
-            </ItemGroup> */}
-
             {/* Cleanup — manage ALL registered machines (incl. offline) + folders */}
             <ItemGroup>
                 <Item
