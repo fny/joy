@@ -5,6 +5,7 @@ import { useFocusEffect } from 'expo-router';
 import * as SystemUI from 'expo-system-ui';
 import { ItemList } from '@/components/ItemList';
 import { PaletteControls } from '@/components/dev/PaletteControls';
+import { PalettePreview } from '@/components/dev/PalettePreview';
 import { storage } from '@/sync/storage';
 import { lightTheme, darkTheme } from '@/theme';
 import { applyAppearance, applyDarkAppearance } from '@/palettes';
@@ -83,6 +84,7 @@ export default React.memo(function PaletteSettingsScreen() {
                     </Pressable>
                 ))}
             </View>
+            <PalettePreview />
             <PaletteControls mode={previewMode} />
         </ItemList>
     );
