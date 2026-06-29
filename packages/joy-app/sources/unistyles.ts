@@ -2,7 +2,7 @@ import { StyleSheet, UnistylesRuntime } from 'react-native-unistyles';
 import { darkTheme, lightTheme } from './theme';
 import { loadThemePreference, loadPaletteState } from './sync/persistence';
 import { applyAppearance, applyDarkAppearance } from './palettes';
-import { setDefaultFontFamily, setMonoFontFamily } from './constants/Typography';
+import { setDefaultFontFamily } from './constants/Typography';
 import { Appearance, Platform } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 
@@ -84,9 +84,8 @@ const setRootBackgroundColor = () => {
 setRootBackgroundColor();
 
 // Apply the saved appearance (palette shell + accent overrides) to the light theme.
-const { themePalette, themePaletteDark, customPalette, accentOverrides, fontOverride, monoOverride } = loadPaletteState();
+const { themePalette, themePaletteDark, customPalette, accentOverrides, fontOverride } = loadPaletteState();
 setDefaultFontFamily(fontOverride);
-setMonoFontFamily(monoOverride);
 applyAppearance(themePalette, customPalette, accentOverrides);
 applyDarkAppearance(themePaletteDark);
 
