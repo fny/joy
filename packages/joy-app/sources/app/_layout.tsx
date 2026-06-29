@@ -13,7 +13,6 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { initialWindowMetrics, SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SidebarNavigator } from '@/components/SidebarNavigator';
-import { DevFab } from '@/components/dev/DevFab';
 import sodium from '@/encryption/libsodium.lib';
 import { View, Platform, AppState } from 'react-native';
 import { ModalProvider } from '@/modal';
@@ -400,8 +399,6 @@ export default function RootLayout() {
                                         <HorizontalSafeAreaWrapper>
                                             <SidebarNavigator />
                                         </HorizontalSafeAreaWrapper>
-                                        {/* Mounted above the sidebar/content so it floats on every page. */}
-                                        <DevFab />
                                     </RealtimeProvider>
                                 </CommandPaletteProvider>
                             </ModalProvider>
