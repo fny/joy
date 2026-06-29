@@ -4,7 +4,7 @@
  * Uses thumbhash as a blurry placeholder while the full image loads.
  */
 import * as React from 'react';
-import { ScrollView, View, Pressable } from 'react-native';
+import { ScrollView, View, Pressable, Text } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -60,18 +60,31 @@ function AttachmentThumbnail({
         return uri ? { uri } : undefined;
     }, [image.thumbhash]);
 
+    const isImage = image.mimeType.startsWith('image/');
+
     return (
         <View style={[
             styles.thumbContainer,
-            { borderColor: theme.colors.divider }
+            { borderColor: theme.colors.divider },
+            !isImage && { backgroundColor: theme.colors.surfaceHigh },
         ]}>
-            <Image
-                source={{ uri: image.uri }}
-                placeholder={placeholder}
-                style={[{ width: THUMB_SIZE, height: THUMB_SIZE }, styles.thumb]}
-                contentFit="cover"
-                transition={150}
-            />
+            {isImage ? (
+                <Image
+                    source={{ uri: image.uri }}
+                    placeholder={placeholder}
+                    style={[{ width: THUMB_SIZE, height: THUMB_SIZE }, styles.thumb]}
+                    contentFit="cover"
+                    transition={150}
+                />
+            ) : (
+                // Non-image: a compact file chip (icon + truncated name).
+                <View style={styles.fileChip}>
+                    <Ionicons name="document-outline" size={24} color={theme.colors.textSecondary} />
+                    <Text style={[styles.fileName, { color: theme.colors.textSecondary }]} numberOfLines={2}>
+                        {image.name}
+                    </Text>
+                </View>
+            )}
             {/* Remove button */}
             <Pressable
                 onPress={() => onRemove(image.id)}
@@ -107,6 +120,19 @@ const styles = StyleSheet.create(() => ({
     },
     thumb: {
         borderRadius: BORDER_RADIUS,
+    },
+    fileChip: {
+        width: THUMB_SIZE,
+        height: THUMB_SIZE,
+        borderRadius: BORDER_RADIUS,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingHorizontal: 4,
+        gap: 2,
+    },
+    fileName: {
+        fontSize: 9,
+        textAlign: 'center',
     },
     removeButton: {
         position: 'absolute',

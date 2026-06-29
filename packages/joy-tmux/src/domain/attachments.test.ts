@@ -1,5 +1,8 @@
 import { test, expect } from "vitest";
-import { sniffMimeAndExt, formatPasteFilename } from "./attachments";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { sniffMimeAndExt, formatPasteFilename, safeAttachmentFilename, writeAttachmentToCwd } from "./attachments";
 
 test("sniffMimeAndExt: detects PNG magic", () => {
   // PNG magic: 89 50 4E 47 0D 0A 1A 0A
@@ -58,4 +61,43 @@ test("formatPasteFilename: short ids collide-resist (probabilistic spot check)",
   // around 300 samples, much higher for 200; this is a sanity-check rather
   // than a guarantee. We allow a few collisions but expect mostly unique.
   expect(names.size).toBeGreaterThan(180);
+});
+
+test("writeAttachmentToCwd: image bytes → paste-* filename", () => {
+  const dir = mkdtempSync(join(tmpdir(), "joy-att-"));
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+  const ref = writeAttachmentToCwd(dir, png, "screenshot.png");
+  expect(ref).toMatch(/^\.\/paste-\d{8}-\d{6}-[0-9a-f]{4}\.png$/);
+  expect(existsSync(join(dir, ref!.slice(2)))).toBe(true);
+});
+
+test("writeAttachmentToCwd: non-image keeps the original filename", () => {
+  const dir = mkdtempSync(join(tmpdir(), "joy-att-"));
+  const bytes = new TextEncoder().encode("col1,col2\n1,2\n");
+  const ref = writeAttachmentToCwd(dir, bytes, "report.csv");
+  expect(ref).toBe("./report.csv");
+  expect(readFileSync(join(dir, "report.csv"), "utf8")).toContain("col1,col2");
+});
+
+test("writeAttachmentToCwd: empty bytes → null", () => {
+  const dir = mkdtempSync(join(tmpdir(), "joy-att-"));
+  expect(writeAttachmentToCwd(dir, new Uint8Array(0), "x.txt")).toBeNull();
+});
+
+test("safeAttachmentFilename: strips directory components + control chars", () => {
+  const dir = mkdtempSync(join(tmpdir(), "joy-att-"));
+  // A path-traversal-ish name collapses to its basename.
+  expect(safeAttachmentFilename(dir, "../../etc/passwd")).toBe("passwd");
+  // Control chars (below 0x20) are stripped; printables incl. spaces are kept.
+  expect(safeAttachmentFilename(dir, "a\u0009b.txt")).toBe("ab.txt");
+  // Nameless → paste-*.bin fallback.
+  expect(safeAttachmentFilename(dir, undefined)).toMatch(/^paste-\d{8}-\d{6}-[0-9a-f]{4}\.bin$/);
+});
+
+test("safeAttachmentFilename: avoids clobbering an existing file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "joy-att-"));
+  writeAttachmentToCwd(dir, new TextEncoder().encode("first"), "data.json");
+  const second = safeAttachmentFilename(dir, "data.json");
+  expect(second).not.toBe("data.json");
+  expect(second).toMatch(/^data-[0-9a-f]{4}\.json$/);
 });

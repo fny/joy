@@ -1,17 +1,20 @@
 /**
- * Image picker hook for attaching images to messages.
+ * File picker hook for attaching files to messages.
  *
- * Wraps expo-image-picker with permission handling and thumbhash generation.
- * Enforces limits: max 20 images per message, 10MB per file.
+ * Wraps expo-document-picker (any file type). For image files it also resolves
+ * pixel dimensions + a thumbhash so the chat bubble can render them inline;
+ * non-image files are carried as a generic attachment (the daemon writes them
+ * into the session cwd and appends the path for the agent to read).
  *
- * Note: fileSize from expo-image-picker is optional — some platforms do not
+ * Enforces limits: max 20 files per message, 10MB per file.
+ *
+ * Note: size from expo-document-picker is optional — some platforms do not
  * provide it (returns undefined → size=0). Such files pass the client-side
- * size check; the server enforces the limit on upload. Phase 5 should handle
- * 413 responses gracefully.
+ * size check; the server enforces the limit on upload.
  */
 import { useState, useCallback, useRef, useEffect } from 'react';
-import * as ImagePicker from 'expo-image-picker';
-import { Platform } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import { Image } from 'react-native';
 import { Modal } from '@/modal';
 import { generateThumbhash } from '@/utils/thumbhash';
 import { t } from '@/text';
@@ -30,6 +33,18 @@ type UseImagePickerResult = {
     addImages: (images: AttachmentPreview[]) => void;
 };
 
+// Resolve an image's pixel dimensions, or null if it can't be loaded (e.g. the
+// file isn't really an image). Used to drive inline rendering + thumbhash.
+function getImageSize(uri: string): Promise<{ width: number; height: number } | null> {
+    return new Promise((resolve) => {
+        Image.getSize(
+            uri,
+            (width, height) => resolve({ width, height }),
+            () => resolve(null),
+        );
+    });
+}
+
 export function useImagePicker(): UseImagePickerResult {
     const [selectedImages, setSelectedImages] = useState<AttachmentPreview[]>([]);
     // Ref tracks current count to avoid stale closures on rapid taps.
@@ -38,25 +53,7 @@ export function useImagePicker(): UseImagePickerResult {
         selectedCountRef.current = selectedImages.length;
     }, [selectedImages]);
 
-    const requestPermission = useCallback(async (): Promise<boolean> => {
-        if (Platform.OS === 'web') return true;
-
-        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (status !== 'granted') {
-            Modal.alert(
-                t('imageUpload.permissionTitle'),
-                t('imageUpload.permissionMessage'),
-                [{ text: t('common.ok') }],
-            );
-            return false;
-        }
-        return true;
-    }, []);
-
     const pickImages = useCallback(async () => {
-        const hasPermission = await requestPermission();
-        if (!hasPermission) return;
-
         const remaining = MAX_IMAGES_PER_MESSAGE - selectedCountRef.current;
         if (remaining <= 0) {
             Modal.alert(
@@ -67,45 +64,57 @@ export function useImagePicker(): UseImagePickerResult {
             return;
         }
 
-        const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ['images'], // expo-image-picker ~55: MediaTypeOptions deprecated
-            allowsMultipleSelection: true,
-            selectionLimit: remaining,
-            quality: 1, // no recompression — preserve original for Claude
-            exif: false,
+        // Any file type. The system file picker handles its own access — no
+        // media-library permission needed (unlike the old image-library flow).
+        const result = await DocumentPicker.getDocumentAsync({
+            type: '*/*',
+            multiple: true,
+            copyToCacheDirectory: true,
         });
 
-        if (result.canceled || !result.assets.length) return;
+        if (result.canceled || !result.assets?.length) return;
 
-        // On web, selectionLimit is not enforced by the browser — clamp here.
+        // On web, the multiple-select limit is not enforced — clamp here.
         const assets = result.assets.slice(0, remaining);
         const previews: AttachmentPreview[] = [];
 
         for (const asset of assets) {
-            const size = asset.fileSize ?? 0;
+            const size = asset.size ?? 0;
 
             if (size > MAX_FILE_SIZE) {
                 Modal.alert(
                     t('imageUpload.fileTooLargeTitle'),
-                    t('imageUpload.fileTooLargeMessage', { name: asset.fileName ?? 'image', maxMb: 10 }),
+                    t('imageUpload.fileTooLargeMessage', { name: asset.name ?? 'file', maxMb: 10 }),
                     [{ text: t('common.ok') }],
                 );
                 continue;
             }
 
-            // Skip thumbhash if dimensions are unavailable (prevents divide-by-zero).
-            const thumbhash = (asset.width > 0 && asset.height > 0)
-                ? await generateThumbhash(asset.uri, asset.width, asset.height)
-                : undefined;
+            const mimeType = asset.mimeType ?? 'application/octet-stream';
+            const isImage = mimeType.startsWith('image/');
+
+            // For images, resolve dimensions + thumbhash so the message renders
+            // the picture inline; non-images stay a plain attachment.
+            let width = 0;
+            let height = 0;
+            let thumbhash: string | undefined;
+            if (isImage) {
+                const dims = await getImageSize(asset.uri);
+                if (dims && dims.width > 0 && dims.height > 0) {
+                    width = dims.width;
+                    height = dims.height;
+                    thumbhash = await generateThumbhash(asset.uri, width, height);
+                }
+            }
 
             previews.push({
                 id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
                 uri: asset.uri,
-                width: asset.width,
-                height: asset.height,
-                mimeType: asset.mimeType ?? 'image/jpeg',
+                width,
+                height,
+                mimeType,
                 size,
-                name: asset.fileName ?? `image_${Date.now()}.jpg`,
+                name: asset.name ?? `file_${Date.now()}`,
                 thumbhash,
             });
         }
@@ -113,7 +122,7 @@ export function useImagePicker(): UseImagePickerResult {
         if (previews.length > 0) {
             setSelectedImages(prev => [...prev, ...previews].slice(0, MAX_IMAGES_PER_MESSAGE));
         }
-    }, [requestPermission]);
+    }, []);
 
     const removeImage = useCallback((id: string) => {
         setSelectedImages(prev => prev.filter(img => img.id !== id));
