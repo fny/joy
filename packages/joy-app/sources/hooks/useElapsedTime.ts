@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 
 export function useElapsedTime(date: Date | number | null | undefined): number {
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -20,15 +21,27 @@ export function useElapsedTime(date: Date | number | null | undefined): number {
             setElapsedSeconds(elapsed);
         };
 
-        // Initial update
-        updateElapsed();
+        // Tick every second — but only while the app is foregrounded. A
+        // backgrounded/locked device doesn't need a 1s timer keeping the CPU
+        // awake; recompute immediately on return so the value stays correct.
+        let interval: ReturnType<typeof setInterval> | null = null;
+        const start = () => {
+            if (interval !== null) return;
+            updateElapsed();
+            interval = setInterval(updateElapsed, 1000);
+        };
+        const stop = () => {
+            if (interval !== null) { clearInterval(interval); interval = null; }
+        };
 
-        // Set up interval to update every second
-        const interval = setInterval(updateElapsed, 1000);
+        if (AppState.currentState === 'active') start(); else updateElapsed();
+        const sub = AppState.addEventListener('change', (s: AppStateStatus) => {
+            if (s === 'active') start(); else stop();
+        });
 
-        // Cleanup
         return () => {
-            clearInterval(interval);
+            stop();
+            sub.remove();
         };
     }, [date]);
 

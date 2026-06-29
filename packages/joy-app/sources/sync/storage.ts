@@ -178,6 +178,7 @@ interface StorageState {
     sessionsData: SessionListItem[] | null;  // Legacy - to be removed
     sessionListViewData: SessionListViewItem[] | null;
     sessionMessages: Record<string, SessionMessages>;
+    sessionMessageMru: string[];  // session ids, most-recently-viewed first (for memory eviction)
     pathGitStatus: Record<string, GitStatus | null>;        // keyed by "machineId:path"
     pathGitStatusFiles: Record<string, GitStatusFiles | null>; // keyed by "machineId:path"
     pathProjectFiles: Record<string, ProjectFilesList | null>;  // keyed by "machineId:path"
@@ -201,6 +202,7 @@ interface StorageState {
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     reconcileSentMessages: (sessionId: string, acks: Array<{ id: string; seq: number; localId: string | null }>) => void;
     applyMessagesLoaded: (sessionId: string) => void;
+    noteSessionVisible: (sessionId: string) => void;
     applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
     applySettings: (settings: Settings, version: number) => void;
@@ -349,6 +351,49 @@ function buildSessionListViewData(
     return listData;
 }
 
+// ── Cached-file LRU ─────────────────────────────────────────────────────────
+// sessionFileCache holds decoded file contents + diffs the file viewer has
+// fetched. Cap the total payload so browsing many/large files can't grow it
+// unbounded; evict least-recently-cached entries (by cachedAt) when over.
+const FILE_CACHE_MAX_BYTES = 20 * 1024 * 1024; // 20 MB
+
+type FileCacheEntry = { content: string | null; diff: string | null; isBinary: boolean; cachedAt: number };
+type FileCacheBySession = Record<string, Record<string, FileCacheEntry>>;
+
+const fileCacheEntryBytes = (e: FileCacheEntry) => (e.content?.length ?? 0) + (e.diff?.length ?? 0);
+
+function pruneFileCache(cache: FileCacheBySession, cap: number): FileCacheBySession {
+    const entries: { sid: string; fp: string; bytes: number; cachedAt: number }[] = [];
+    let total = 0;
+    for (const sid of Object.keys(cache)) {
+        for (const fp of Object.keys(cache[sid])) {
+            const bytes = fileCacheEntryBytes(cache[sid][fp]);
+            total += bytes;
+            entries.push({ sid, fp, bytes, cachedAt: cache[sid][fp].cachedAt });
+        }
+    }
+    if (total <= cap) return cache;
+    entries.sort((a, b) => a.cachedAt - b.cachedAt); // oldest first
+    const removeBySession = new Map<string, Set<string>>();
+    for (const e of entries) {
+        if (total <= cap) break;
+        total -= e.bytes;
+        if (!removeBySession.has(e.sid)) removeBySession.set(e.sid, new Set());
+        removeBySession.get(e.sid)!.add(e.fp);
+    }
+    const next: FileCacheBySession = {};
+    for (const sid of Object.keys(cache)) {
+        const toRemove = removeBySession.get(sid);
+        if (!toRemove) { next[sid] = cache[sid]; continue; }
+        const kept: Record<string, FileCacheEntry> = {};
+        for (const fp of Object.keys(cache[sid])) {
+            if (!toRemove.has(fp)) kept[fp] = cache[sid][fp];
+        }
+        if (Object.keys(kept).length > 0) next[sid] = kept;
+    }
+    return next;
+}
+
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
     let localSettings = loadLocalSettings();
@@ -372,6 +417,7 @@ export const storage = create<StorageState>()((set, get) => {
         sessionsData: null,  // Legacy - to be removed
         sessionListViewData: null,
         sessionMessages: {},
+        sessionMessageMru: [],
         pathGitStatus: {},
         pathGitStatusFiles: {},
         pathProjectFiles: {},
@@ -855,6 +901,31 @@ export const storage = create<StorageState>()((set, get) => {
 
             return result;
         }),
+        // Record a session as most-recently-viewed and (when limitSessionMemory is
+        // on) unload the message history of sessions beyond the 5 most-recent — so
+        // browsing many chats doesn't keep every history resident. Never unloads
+        // the visible session or any session with a live turn (thinking) so an
+        // in-flight reducer state is preserved; an unloaded session is refetched
+        // when reopened (onSessionVisible invalidates its message sync).
+        noteSessionVisible: (sessionId: string) => set((state) => {
+            const mru = [sessionId, ...state.sessionMessageMru.filter((id) => id !== sessionId)];
+            if (!state.localSettings.limitSessionMemory) {
+                return { ...state, sessionMessageMru: mru };
+            }
+            const KEEP = 5;
+            const keep = new Set(mru.slice(0, KEEP));
+            const loadedIds = Object.keys(state.sessionMessages);
+            const next: Record<string, SessionMessages> = {};
+            for (const sid of loadedIds) {
+                if (keep.has(sid) || state.sessions[sid]?.thinking === true) {
+                    next[sid] = state.sessionMessages[sid];
+                }
+            }
+            if (Object.keys(next).length === loadedIds.length) {
+                return { ...state, sessionMessageMru: mru }; // nothing evicted
+            }
+            return { ...state, sessionMessageMru: mru, sessionMessages: next };
+        }),
         applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => set((state) => {
             const existing = state.sessionMessages[sessionId];
             if (!existing) {
@@ -1001,16 +1072,16 @@ export const storage = create<StorageState>()((set, get) => {
                 [pathKey]: dirs
             }
         })),
-        applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => set((state) => ({
-            ...state,
-            sessionFileCache: {
+        applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => set((state) => {
+            const withNew: FileCacheBySession = {
                 ...state.sessionFileCache,
                 [sessionId]: {
                     ...(state.sessionFileCache[sessionId] || {}),
                     [filePath]: { content, diff, isBinary, cachedAt: Date.now() }
                 }
-            }
-        })),
+            };
+            return { ...state, sessionFileCache: pruneFileCache(withNew, FILE_CACHE_MAX_BYTES) };
+        }),
         applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => set((state) => ({
             ...state,
             nativeUpdateStatus: status

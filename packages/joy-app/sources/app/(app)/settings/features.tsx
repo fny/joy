@@ -13,6 +13,7 @@ export default function FeaturesSettingsScreen() {
     const [agentInputEnterToSend, setAgentInputEnterToSend] = useSettingMutable('agentInputEnterToSend');
     const [commandPaletteEnabled, setCommandPaletteEnabled] = useLocalSettingMutable('commandPaletteEnabled');
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
+    const [limitSessionMemory, setLimitSessionMemory] = useLocalSettingMutable('limitSessionMemory');
     const [hideInactiveSessions, setHideInactiveSessions] = useSettingMutable('hideInactiveSessions');
     const [expResumeSession, setExpResumeSession] = useSettingMutable('expResumeSession');
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
@@ -164,6 +165,18 @@ export default function FeaturesSettingsScreen() {
                         <Switch
                             value={expImageUpload}
                             onValueChange={setExpImageUpload}
+                        />
+                    }
+                    showChevron={false}
+                />
+                <Item
+                    title="Limit session memory"
+                    subtitle="Keep only the 5 most-recent sessions in memory (reloaded on revisit)"
+                    icon={<Ionicons name="hardware-chip-outline" size={29} color="#34C759" />}
+                    rightElement={
+                        <Switch
+                            value={limitSessionMemory}
+                            onValueChange={setLimitSessionMemory}
                         />
                     }
                     showChevron={false}
