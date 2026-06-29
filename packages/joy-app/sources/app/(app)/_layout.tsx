@@ -156,6 +156,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/notifications"
+                options={{
+                    headerTitle: 'Notifications',
+                }}
+            />
+            <Stack.Screen
                 name="settings/usage/index"
                 options={{
                     headerTitle: 'Usage',
