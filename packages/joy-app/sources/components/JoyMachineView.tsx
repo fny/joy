@@ -208,6 +208,12 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     icon={<Ionicons name="flame-outline" size={29} color="#FF6B35" />}
                     onPress={() => router.push(`/settings/usage/${machineId}` as any)}
                 />
+                <Item
+                    title="Projects"
+                    subtitle="Browse this machine's projects & session logs"
+                    icon={<Ionicons name="folder-outline" size={29} color="#34C759" />}
+                    onPress={() => router.push(`/machine/${machineId}/projects` as any)}
+                />
             </ItemGroup>
 
             <ItemGroup title="Daemon actions" footer="Restart re-execs joy-tmux (running sessions survive). Kill all ends every session + the tmux session (they stay in history). Purge permanently deletes every joy session record for this machine.">
