@@ -56,6 +56,7 @@ import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
 import { JoyQueueStrip } from '@/components/JoyQueueStrip';
 import { DraftQueueStrip } from './DraftQueueStrip';
+import { GoalBar } from './GoalBar';
 import { useDraftQueueStore } from './draftQueue';
 
 export const SessionView = React.memo((props: { id: string }) => {
@@ -730,6 +731,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     let content = (
         <>
+            <GoalBar sessionId={sessionId} />
             <Deferred>
                 {messages.length > 0 && (
                     <ChatList session={session} />

@@ -96,6 +96,12 @@ export const MetadataSchema = z.object({
         done: z.number(),
         total: z.number(),
     }).nullable().optional(),
+    // The agent's active /goal (Claude goal_status), surfaced by joy-tmux. Drives
+    // the goal bar. Present while a goal is in progress; cleared when met.
+    joy__goal: z.object({
+        condition: z.string(),
+        since: z.number().optional(),
+    }).nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
