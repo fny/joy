@@ -25,6 +25,7 @@ import {
   encodeUserMessage,
   type RelayClient,
   type RelaySession,
+  type JoyGoalInfo,
 } from "../relay/relay.ts";
 import {
   initDeliveryState,
@@ -219,6 +220,19 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
   return null;
 }
 
+/**
+ * Detect a Claude `/goal` status in a transcript entry. Claude emits an
+ * `attachment` entry `{ type:'attachment', attachment:{ type:'goal_status',
+ * met, sentinel, condition } }`. The goal is ACTIVE while met=false; met=true
+ * means it was satisfied/cleared. Returns the condition + met, or null.
+ */
+export function goalStatusFromEntry(entry: any): { condition: string; met: boolean } | null {
+  if (entry?.type !== "attachment") return null;
+  const att = entry.attachment as Record<string, unknown> | undefined;
+  if (!att || att.type !== "goal_status" || typeof att.met !== "boolean") return null;
+  return { condition: typeof att.condition === "string" ? att.condition : "", met: att.met };
+}
+
 /** Slim wire shape pushed to the app (joy__queue) and returned by queue ops. */
 export interface QueuedMessage {
   id: string;
@@ -316,6 +330,9 @@ export class Session {
   // (a missed completion, a lost push) clears itself without a daemon restart.
   // Gated on an outstanding count, so idle sessions do zero work.
   #taskReconcileTimer: ReturnType<typeof setInterval> | null = null;
+  // The agent's active /goal (null when none / met / cleared). Surfaced as
+  // joy__goal so the app can show a goal bar.
+  #goal: JoyGoalInfo | null = null;
   // The (retrying) archive POST fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -537,6 +554,8 @@ export class Session {
     // task's count (which a blanket clear would have wrongly dropped). Runs on
     // every (re)attach — recovery and plain reconnect both heal.
     this.#reconcileBgTasks();
+    // Re-derive the active /goal from the transcript (restart/reconnect safe).
+    this.#reconcileGoal();
     // Low-frequency self-heal while a count is outstanding, so a stuck count
     // clears without waiting for a restart/reconnect (no-op when none outstanding).
     if (this.#taskReconcileTimer) clearInterval(this.#taskReconcileTimer);
@@ -1669,6 +1688,38 @@ export class Session {
     void this.#relay?.updateTasks(d.outstanding.size > 0 ? { done: d.done, total: d.total } : null);
   }
 
+  /** Apply a parsed /goal status: a met=false goal is ACTIVE (push it, keeping
+   *  `since` stable while the condition is unchanged); met=true clears it. */
+  #applyGoalStatus(status: { condition: string; met: boolean }, atMs: number): void {
+    const next: JoyGoalInfo | null = status.met
+      ? null
+      : { condition: status.condition, since: this.#goal?.condition === status.condition ? this.#goal.since : atMs };
+    if (next?.condition === this.#goal?.condition && next?.since === this.#goal?.since) return; // no change
+    this.#goal = next;
+    void this.#relay?.updateGoal(next);
+  }
+
+  /** Re-derive the active goal from the transcript (the LAST goal_status wins)
+   *  and push it — used on (re)attach so a restart doesn't drop/stick the bar. */
+  #reconcileGoal(): void {
+    let latest: { condition: string; met: boolean } | null = null;
+    let latestAt = Date.now();
+    if (this.transcriptPath && existsSync(this.transcriptPath)) {
+      try {
+        for (const line of readFileSync(this.transcriptPath, "utf-8").split("\n")) {
+          if (!line.trim() || !line.includes("goal_status")) continue;
+          let entry: unknown;
+          try { entry = JSON.parse(line); } catch { continue; }
+          const g = goalStatusFromEntry(entry);
+          if (g) { latest = g; latestAt = Date.parse(String((entry as { timestamp?: string }).timestamp || "")) || Date.now(); }
+        }
+      } catch { /* best-effort */ }
+    }
+    this.#goal = null; // force #applyGoalStatus to treat the derived value as fresh
+    if (latest) this.#applyGoalStatus(latest, latestAt);
+    else void this.#relay?.updateGoal(null);
+  }
+
   /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
    *  status and arm a backstop timeout in case the compact_boundary record that
    *  normally clears it never arrives (compaction can run for minutes — see the
@@ -1746,6 +1797,11 @@ export class Session {
     // splitting into "all agent, then all user" from daemon/relay clock skew.
     // Falls back to now() for entries without a parseable timestamp.
     const entryTimeMs = Date.parse(String(entry.timestamp || "")) || Date.now();
+
+    // /goal status (an `attachment` entry, filtered out below) → surface the
+    // active goal as joy__goal so the app can show a goal bar.
+    const goal = goalStatusFromEntry(entry);
+    if (goal) { this.#applyGoalStatus(goal, entryTimeMs); return; }
 
     // Turn complete → send turn-end and clear turn state. Either the Stop hook
     // ran (stop_hook_summary) or Claude reported the turn's wall-clock

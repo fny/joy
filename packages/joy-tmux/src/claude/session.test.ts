@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -409,6 +409,7 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
     updateQueue() {},
     updateTasks() {},
     updateCompacting() {},
+    updateGoal() {},
     notify() {},
   };
   s.attachRelay(rs, true);
@@ -436,7 +437,7 @@ test("compacting: PreCompact mark sets the banner, compact_boundary clears it", 
   const rs: any = {
     relaySessionId: "rs-c1",
     start() {}, stop() {}, send() {},
-    setThinking() {}, updateRetry() {}, updateQueue() {}, updateTasks() {},
+    setThinking() {}, updateRetry() {}, updateQueue() {}, updateTasks() {}, updateGoal() {},
     updateCompacting(info: any) { compactingCalls.push(info); },
     notify() {},
   };
@@ -506,4 +507,20 @@ test("derive semantics: a fully-drained batch clears (next launch resets the cou
     { kind: "launch", id: "a" }, { kind: "complete", id: "a" },
     { kind: "launch", id: "b" },
   ])).toEqual({ outstanding: ["b"], total: 1, done: 0 });
+});
+
+// ── goalStatusFromEntry: /goal transcript attachment detection ───────────────
+test("goalStatusFromEntry: active goal (met=false)", () => {
+  const e = { type: "attachment", attachment: { type: "goal_status", met: false, sentinel: true, condition: "keep going until I clear it" } };
+  expect(goalStatusFromEntry(e)).toEqual({ condition: "keep going until I clear it", met: false });
+});
+test("goalStatusFromEntry: satisfied/cleared goal (met=true)", () => {
+  const e = { type: "attachment", attachment: { type: "goal_status", met: true, condition: "analyze the project", reason: "done" } };
+  expect(goalStatusFromEntry(e)).toEqual({ condition: "analyze the project", met: true });
+});
+test("goalStatusFromEntry: ignores non-goal / non-attachment entries", () => {
+  expect(goalStatusFromEntry({ type: "attachment", attachment: { type: "image" } })).toBeNull();
+  expect(goalStatusFromEntry({ type: "user", message: { role: "user", content: "x" } })).toBeNull();
+  expect(goalStatusFromEntry({ type: "attachment" })).toBeNull();
+  expect(goalStatusFromEntry({})).toBeNull();
 });
