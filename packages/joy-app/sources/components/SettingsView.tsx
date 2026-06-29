@@ -10,7 +10,6 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useConnectTerminal } from '@/hooks/useConnectTerminal';
 import { useLocalSettingMutable } from '@/sync/storage';
-import { trackWhatsNewClicked } from '@/track';
 import { Modal } from '@/modal';
 import { useMultiClick } from '@/hooks/useMultiClick';
 import { JoyLogoType } from '@/components/JoyLogotype';
@@ -180,16 +179,6 @@ export const SettingsView = React.memo(function SettingsView() {
                 />
             </ItemGroup> */}
 
-            {/* Machines — boxes running the joy-tmux daemon, on their own page */}
-            <ItemGroup>
-                <Item
-                    title={t('settings.machines')}
-                    subtitle={joyMachines.length > 0 ? `${joyMachines.length} connected` : 'None connected'}
-                    icon={<Ionicons name="hardware-chip-outline" size={29} color={theme.colors.status.connected} />}
-                    onPress={() => router.push('/settings/machines' as any)}
-                />
-            </ItemGroup>
-
             {/* Cleanup — manage ALL registered machines (incl. offline) + folders */}
             <ItemGroup>
                 <Item
@@ -200,8 +189,8 @@ export const SettingsView = React.memo(function SettingsView() {
                 />
             </ItemGroup>
 
-            {/* Features */}
-            <ItemGroup title={t('settings.features')}>
+            {/* General */}
+            <ItemGroup title="General">
                 <Item
                     title={t('settings.account')}
                     subtitle={t('settings.accountSubtitle')}
@@ -213,6 +202,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     subtitle={t('settings.sessionsSubtitle')}
                     icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accents.blue} />}
                     onPress={() => router.push('/settings/joy-sessions')}
+                />
+                <Item
+                    title={t('settings.machines')}
+                    subtitle={joyMachines.length > 0 ? `${joyMachines.length} connected` : 'None connected'}
+                    icon={<Ionicons name="hardware-chip-outline" size={29} color={theme.colors.status.connected} />}
+                    onPress={() => router.push('/settings/machines' as any)}
                 />
                 <Item
                     title={t('settings.appearance')}
@@ -276,7 +271,6 @@ export const SettingsView = React.memo(function SettingsView() {
                     subtitle={t('settings.whatsNewSubtitle')}
                     icon={<Ionicons name="sparkles-outline" size={29} color={theme.colors.accents.orange} />}
                     onPress={() => {
-                        trackWhatsNewClicked();
                         router.push('/changelog');
                     }}
                 />
