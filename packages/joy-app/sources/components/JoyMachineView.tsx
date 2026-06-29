@@ -192,6 +192,12 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
 
             <ItemGroup title="Go to">
                 <Item
+                    title="Projects"
+                    subtitle="Browse this machine's projects & session logs"
+                    icon={<Ionicons name="folder-outline" size={29} color="#34C759" />}
+                    onPress={() => router.push(`/machine/${machineId}/projects` as any)}
+                />
+                <Item
                     title="Sessions"
                     subtitle="Manage joy-tmux sessions on this machine"
                     icon={<Ionicons name="terminal-outline" size={29} color="#007AFF" />}
@@ -207,12 +213,6 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     subtitle="Token usage and cost for this machine"
                     icon={<Ionicons name="flame-outline" size={29} color="#FF6B35" />}
                     onPress={() => router.push(`/settings/usage/${machineId}` as any)}
-                />
-                <Item
-                    title="Projects"
-                    subtitle="Browse this machine's projects & session logs"
-                    icon={<Ionicons name="folder-outline" size={29} color="#34C759" />}
-                    onPress={() => router.push(`/machine/${machineId}/projects` as any)}
                 />
             </ItemGroup>
 

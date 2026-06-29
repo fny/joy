@@ -169,16 +169,6 @@ export const SettingsView = React.memo(function SettingsView() {
                 </ItemGroup>
             )}
 
-            {/* Cleanup — manage ALL registered machines (incl. offline) + folders */}
-            <ItemGroup>
-                <Item
-                    title="Cleanup"
-                    subtitle="Manage all registered machines & remembered folders"
-                    icon={<Ionicons name="trash-bin-outline" size={29} color={theme.colors.textSecondary} />}
-                    onPress={() => router.push('/settings/cleanup')}
-                />
-            </ItemGroup>
-
             {/* General */}
             <ItemGroup title="General">
                 <Item
