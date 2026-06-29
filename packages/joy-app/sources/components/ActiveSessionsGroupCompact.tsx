@@ -158,7 +158,7 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
 });
 
 // Full-width separator between machine groups: ——— 🖥 name ———
-const MachineSeparator = React.memo(({ machineName, machineId }: { machineName: string; machineId: string }) => {
+const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram }: { machineName: string; machineId: string; cpu?: number; ram?: number }) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -167,6 +167,16 @@ const MachineSeparator = React.memo(({ machineName, machineId }: { machineName: 
         router.navigate(`/machine/${machineId}` as any);
     }, [router, machineId]);
 
+    // Live host load (from the daemon's daemonState). Colour by the busier of the
+    // two so it reads as a launch-risk cue: green calm, orange busy, red maxed.
+    const hasLoad = typeof cpu === 'number' || typeof ram === 'number';
+    const peak = Math.max(cpu ?? 0, ram ?? 0);
+    const loadColor = peak >= 90 ? '#FF3B30' : peak >= 70 ? '#FF9500' : '#34C759';
+    const loadText = [
+        typeof cpu === 'number' ? `CPU ${cpu}%` : null,
+        typeof ram === 'number' ? `RAM ${ram}%` : null,
+    ].filter(Boolean).join(' · ');
+
     return (
         <Pressable onPress={handlePress} style={styles.machineSeparator} hitSlop={{ top: 8, bottom: 8 }}>
             <View style={styles.machineSeparatorLine} />
@@ -174,6 +184,11 @@ const MachineSeparator = React.memo(({ machineName, machineId }: { machineName: 
             <Text style={styles.machineSeparatorText} numberOfLines={1}>
                 {machineName}
             </Text>
+            {hasLoad && (
+                <Text style={[styles.machineLoadText, { color: loadColor }]} numberOfLines={1}>
+                    {loadText}
+                </Text>
+            )}
             <View style={styles.machineSeparatorLine} />
         </Pressable>
     );
@@ -197,6 +212,8 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
         const byMachine = new Map<string, {
             machineId: string;
             machineName: string;
+            cpu?: number;
+            ram?: number;
             projects: Map<string, {
                 displayPath: string;
                 sessions: SessionRowData[];
@@ -209,10 +226,14 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
             const machineName = machine?.metadata?.displayName ||
                 machine?.metadata?.host ||
                 (machineId !== unknownText ? machineId : `<${unknownText}>`);
+            // Live host load from the daemon's encrypted daemonState (cpu/ram %).
+            const ds = machine?.daemonState as { cpu?: number; ram?: number } | null | undefined;
+            const cpu = typeof ds?.cpu === 'number' ? ds.cpu : undefined;
+            const ram = typeof ds?.ram === 'number' ? ds.ram : undefined;
 
             let machineGroup = byMachine.get(machineId);
             if (!machineGroup) {
-                machineGroup = { machineId, machineName, projects: new Map() };
+                machineGroup = { machineId, machineName, cpu, ram, projects: new Map() };
                 byMachine.set(machineId, machineGroup);
             }
 
@@ -255,6 +276,8 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
                         <MachineSeparator
                             machineName={machineGroup.machineName}
                             machineId={machineGroup.machineId}
+                            cpu={machineGroup.cpu}
+                            ram={machineGroup.ram}
                         />
                         {sortedProjects.map(([projectPath, projectGroup]) => {
                             const firstSession = projectGroup.sessions[0];
@@ -521,6 +544,11 @@ const stylesheet = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
         ...Typography.default('regular'),
         marginRight: 4,
+    },
+    machineLoadText: {
+        fontSize: 10,
+        ...Typography.mono(),
+        marginRight: 6,
     },
     // Project card styles
     projectCard: {

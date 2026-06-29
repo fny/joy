@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "timers/promises";
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { hostname, platform } from 'node:os';
+import { hostname, platform, cpus, freemem, totalmem, loadavg } from 'node:os';
 import { happyHomeDir, joyStateDir } from '../paths';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
@@ -260,6 +260,11 @@ export class RelayClient {
   private listeners = new Map<string, Set<() => void>>();
   private activeSessions = new Set<RelaySession>();
   private machineAliveTimer: ReturnType<typeof setInterval> | null = null;
+  // Server-side daemonState version (CAS) for machine-update-state; seeded from
+  // getOrCreateMachine, re-synced from each ack. Plus the previous cpu-tick
+  // snapshot so we can report CPU% as a busy-delta between heartbeats.
+  private daemonStateVersion = 0;
+  private prevCpuSample: { idle: number; total: number } | null = null;
 
   constructor(creds: Credentials) {
     this.creds = creds;
@@ -305,9 +310,61 @@ export class RelayClient {
    *  offline without one (this is what happy-cli's daemon did — joy now owns
    *  it). Beats immediately on every (re)connect, then every 20s. */
   private startMachineAlive(): void {
-    const beat = () => this.socket?.emit('machine-alive', { machineId: this.creds.machineId, time: Date.now() });
+    const beat = () => {
+      this.socket?.emit('machine-alive', { machineId: this.creds.machineId, time: Date.now() });
+      this.pushDaemonState();
+    };
     beat();
     if (!this.machineAliveTimer) this.machineAliveTimer = setInterval(beat, 20_000);
+  }
+
+  /** Machine encryption variant + key, matching getOrCreateMachine's metadata. */
+  private machineCrypto(): { variant: EncryptionVariant; key: Uint8Array } {
+    return this.creds.encryption.type === 'dataKey'
+      ? { variant: 'dataKey', key: this.creds.encryption.machineKey }
+      : { variant: 'legacy', key: this.creds.encryption.secret };
+  }
+
+  /** CPU busy % since the last sample (delta of idle vs total ticks across all
+   *  cores). The first call has no previous sample, so it falls back to the
+   *  1-min load average scaled by core count. */
+  private sampleCpuPercent(): number {
+    const list = cpus();
+    let idle = 0, total = 0;
+    for (const c of list) { idle += c.times.idle; for (const t of Object.values(c.times)) total += t; }
+    const prev = this.prevCpuSample;
+    this.prevCpuSample = { idle, total };
+    if (!prev) return Math.max(0, Math.min(100, Math.round((loadavg()[0] / Math.max(1, list.length)) * 100)));
+    const di = idle - prev.idle, dt = total - prev.total;
+    if (dt <= 0) return 0;
+    return Math.max(0, Math.min(100, Math.round((1 - di / dt) * 100)));
+  }
+
+  /** Push host CPU%/RAM% into the machine's encrypted daemonState (version-checked
+   *  CAS; the app decrypts it and shows it on the machine header). Rides the
+   *  machine-alive heartbeat — this op also bumps the machine's active/lastActiveAt
+   *  server-side, so it doubles as presence. Best-effort: a 'Machine not found'
+   *  (no session has registered the machine yet) or version drift just no-ops and
+   *  the next beat retries with the re-synced version. */
+  private pushDaemonState(): void {
+    if (!this.socket) return;
+    const cpu = this.sampleCpuPercent();
+    const ram = Math.max(0, Math.min(100, Math.round((1 - freemem() / totalmem()) * 100)));
+    const { variant, key } = this.machineCrypto();
+    const daemonState = b64encode(encryptWire(variant, key, { cpu, ram, time: Date.now() }));
+    this.socket.emit(
+      'machine-update-state',
+      { machineId: this.creds.machineId, daemonState, expectedVersion: this.daemonStateVersion },
+      (ack: unknown) => {
+        if (!isObj(ack)) return;
+        const a = ack as { result?: string; version?: number };
+        // success → server bumped to expectedVersion+1; version-mismatch → adopt
+        // the server's current version so the next beat lands.
+        if ((a.result === 'success' || a.result === 'version-mismatch') && typeof a.version === 'number') {
+          this.daemonStateVersion = a.version;
+        }
+      },
+    );
   }
 
   connect(): void {
@@ -498,7 +555,16 @@ export class RelayClient {
           dataEncryptionKey: dataEncryptionKeyB64,
         }),
       });
-      return r.ok;
+      if (!r.ok) return false;
+      // Seed the daemonState CAS version from the row so the first
+      // machine-update-state beat lands without a version-mismatch round-trip.
+      try {
+        const body = await r.json() as { machine?: { daemonStateVersion?: number } };
+        if (typeof body?.machine?.daemonStateVersion === 'number') {
+          this.daemonStateVersion = body.machine.daemonStateVersion;
+        }
+      } catch { /* version self-syncs from the first ack */ }
+      return true;
     } catch (e) {
       log(`getOrCreateMachine failed: ${e}`);
       return false;
