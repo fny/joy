@@ -5,6 +5,7 @@ import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { storage } from './storage';
+import { showDesktopNotification, isWindowFocused, ensureDesktopNotificationPermission } from '@/notifications/desktopNotifications';
 import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
@@ -169,6 +170,11 @@ class Sync {
         }
         this.pushTokenSync = new InvalidateSync(registerPushToken);
         this.activityAccumulator = new ActivityUpdateAccumulator(this.flushActivityUpdates.bind(this), 2000);
+
+        // Request desktop-notification permission once (web/desktop app), if enabled.
+        if (Platform.OS === 'web' && storage.getState().settings.notificationsDesktop) {
+            void ensureDesktopNotificationPermission();
+        }
 
         // Listen for app state changes to refresh purchases
         AppState.addEventListener('change', (nextAppState) => {
@@ -782,6 +788,11 @@ class Sync {
 
         // Invalidate settings sync
         this.settingsSync.invalidate();
+
+        // Toggling mobile push on/off re-runs token (de)registration immediately.
+        if ('notificationsMobile' in delta) this.pushTokenSync.invalidate();
+        // Turning desktop notifications on prompts for permission right away.
+        if (delta.notificationsDesktop && Platform.OS === 'web') void ensureDesktopNotificationPermission();
     }
 
     // Mod 13: replace the entire settings payload (used by the raw settings
@@ -2106,6 +2117,12 @@ class Sync {
     }
 
     private registerPushToken = async () => {
+        // Mobile push toggle (Notifications settings): when off, don't register a
+        // token so the server has nothing to push to.
+        if (!storage.getState().settings.notificationsMobile) {
+            log.log('registerPushToken skipped — mobile notifications disabled');
+            return;
+        }
         log.log('registerPushToken');
         try {
             const result = await syncCurrentPushToken(this.credentials);
@@ -2712,6 +2729,11 @@ class Sync {
         // unread counter on these only, ignore the noisy per-message stream.
         if (updateData.type === 'session-event') {
             notifyUnreadMessage();
+            // Desktop notification — only if enabled and the window isn't focused
+            // (same "active client" suppression idea as the mobile push).
+            if (storage.getState().settings.notificationsDesktop && !isWindowFocused()) {
+                void showDesktopNotification(updateData.title, updateData.body);
+            }
         }
 
         // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity

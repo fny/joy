@@ -183,6 +183,8 @@ describe('settings', () => {
                 diffStyle: 'unified',
                 inferenceOpenAIKey: null,
                 experiments: false,
+                notificationsDesktop: true,
+                notificationsMobile: true,
                 alwaysShowContextSize: false,
                 agentInputEnterToSend: true,
                 avatarStyle: 'brutalist',
