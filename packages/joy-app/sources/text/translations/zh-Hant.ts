@@ -19,16 +19,8 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
 export const zhHant: TranslationStructure = {
     tabs: {
         // Tab navigation labels
-        inbox: '收件匣',
         sessions: '終端',
         settings: '設定',
-    },
-
-    inbox: {
-        // Inbox screen
-        emptyTitle: '收件匣是空的',
-        emptyDescription: '與好友建立連結，開始共享工作階段',
-        updates: '更新',
     },
 
     common: {
@@ -116,7 +108,6 @@ export const zhHant: TranslationStructure = {
         showOfflineMachines: ({ count }: { count: number }) => `顯示 ${count} 台離線裝置`,
         hideOfflineMachines: '隱藏離線裝置',
         features: '功能',
-        social: '社交',
         account: '帳戶',
         accountSubtitle: '管理您的帳戶詳情',
         appearance: '外觀',
@@ -808,7 +799,6 @@ export const zhHant: TranslationStructure = {
         linkNewDevice: '連結新裝置',
         restoreWithSecretKey: '透過金鑰恢復',
         whatsNew: "更新日誌",
-        friends: '好友',
     },
 
     welcome: {
@@ -940,57 +930,6 @@ export const zhHant: TranslationStructure = {
         createError: '建立工件失敗。請重試。',
     },
 
-    friends: {
-        // Friends feature
-        title: '好友',
-        manageFriends: '管理您的好友和連結',
-        searchTitle: '尋找好友',
-        pendingRequests: '好友請求',
-        myFriends: '我的好友',
-        noFriendsYet: '您還沒有好友',
-        findFriends: '尋找好友',
-        remove: '刪除',
-        pendingRequest: '待處理',
-        sentOn: ({ date }: { date: string }) => `傳送於 ${date}`,
-        accept: '接受',
-        reject: '拒絕',
-        addFriend: '新增好友',
-        alreadyFriends: '已是好友',
-        requestPending: '請求待處理',
-        searchInstructions: '輸入使用者名稱搜尋好友',
-        searchPlaceholder: '輸入使用者名稱...',
-        searching: '搜尋中...',
-        userNotFound: '未找到使用者',
-        noUserFound: '未找到該使用者名稱的使用者',
-        checkUsername: '請檢查使用者名稱後重試',
-        howToFind: '如何尋找好友',
-        findInstructions: '透過使用者名稱搜尋好友。您和您的好友都需要連結 GitHub 才能傳送好友請求。',
-        requestSent: '好友請求已傳送！',
-        requestAccepted: '好友請求已接受！',
-        requestRejected: '好友請求已拒絕',
-        friendRemoved: '好友已刪除',
-        confirmRemove: '刪除好友',
-        confirmRemoveMessage: '確定要刪除這位好友嗎？',
-        cannotAddYourself: '您不能向自己傳送好友請求',
-        bothMustHaveGithub: '雙方都必須連結 GitHub 才能成為好友',
-        status: {
-            none: '未連結',
-            requested: '請求已傳送',
-            pending: '請求待處理',
-            friend: '好友',
-            rejected: '已拒絕',
-        },
-        acceptRequest: '接受請求',
-        removeFriend: '移除好友',
-        removeFriendConfirm: ({ name }: { name: string }) => `確定要將 ${name} 從好友清單中移除嗎？`,
-        requestSentDescription: ({ name }: { name: string }) => `您的好友請求已傳送給 ${name}`,
-        requestFriendship: '請求加為好友',
-        cancelRequest: '取消好友請求',
-        cancelRequestConfirm: ({ name }: { name: string }) => `取消傳送給 ${name} 的好友請求？`,
-        denyRequest: '拒絕請求',
-        nowFriendsWith: ({ name }: { name: string }) => `您現在與 ${name} 是好友了`,
-    },
-
     usage: {
         // Usage panel strings
         today: '今天',
@@ -1048,11 +987,4 @@ export const zhHant: TranslationStructure = {
         statusEnded: '已結束',
     },
 
-    feed: {
-        // Feed notifications for friend requests and acceptances
-        friendRequestFrom: ({ name }: { name: string }) => `${name} 向您傳送了好友請求`,
-        friendRequestGeneric: '新的好友請求',
-        friendAccepted: ({ name }: { name: string }) => `您現在與 ${name} 成為了好友`,
-        friendAcceptedGeneric: '好友請求已接受',
-    },
 } as const;

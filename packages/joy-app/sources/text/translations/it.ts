@@ -17,16 +17,8 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
 export const it: TranslationStructure = {
     tabs: {
         // Tab navigation labels
-        inbox: 'Posta',
         sessions: 'Terminali',
         settings: 'Impostazioni',
-    },
-
-    inbox: {
-        // Inbox screen
-        emptyTitle: 'Posta vuota',
-        emptyDescription: 'Connettiti con amici per iniziare a condividere sessioni',
-        updates: 'Aggiornamenti',
     },
 
     common: {
@@ -114,7 +106,6 @@ export const it: TranslationStructure = {
         showOfflineMachines: ({ count }: { count: number }) => count === 1 ? 'Mostra 1 macchina offline' : `Mostra ${count} macchine offline`,
         hideOfflineMachines: 'Nascondi macchine offline',
         features: 'Funzionalità',
-        social: 'Social',
         account: 'Account',
         accountSubtitle: 'Gestisci i dettagli del tuo account',
         appearance: 'Aspetto',
@@ -806,7 +797,6 @@ export const it: TranslationStructure = {
         linkNewDevice: 'Collega nuovo dispositivo', 
         restoreWithSecretKey: 'Ripristina con chiave segreta',
         whatsNew: 'Novità',
-        friends: 'Amici',
     },
 
     welcome: {
@@ -939,57 +929,6 @@ export const it: TranslationStructure = {
         error: 'Impossibile caricare l\'artefatto',
     },
 
-    friends: {
-        // Friends feature
-        title: 'Amici',
-        manageFriends: 'Gestisci i tuoi amici e le connessioni',
-        searchTitle: 'Trova amici',
-        pendingRequests: 'Richieste di amicizia',
-        myFriends: 'I miei amici',
-        noFriendsYet: 'Non hai ancora amici',
-        findFriends: 'Trova amici',
-        remove: 'Rimuovi',
-        pendingRequest: 'In attesa',
-        sentOn: ({ date }: { date: string }) => `Inviata il ${date}`,
-        accept: 'Accetta',
-        reject: 'Rifiuta',
-        addFriend: 'Aggiungi amico',
-        alreadyFriends: 'Già amici',
-        requestPending: 'Richiesta in sospeso',
-        searchInstructions: 'Inserisci un nome utente per cercare amici',
-        searchPlaceholder: 'Inserisci nome utente...',
-        searching: 'Ricerca...',
-        userNotFound: 'Utente non trovato',
-        noUserFound: 'Nessun utente trovato con quel nome',
-        checkUsername: 'Controlla il nome utente e riprova',
-        howToFind: 'Come trovare amici',
-        findInstructions: 'Cerca amici tramite il loro nome utente. Sia tu che il tuo amico dovete avere GitHub collegato per inviare richieste di amicizia.',
-        requestSent: 'Richiesta di amicizia inviata!',
-        requestAccepted: 'Richiesta di amicizia accettata!',
-        requestRejected: 'Richiesta di amicizia rifiutata',
-        friendRemoved: 'Amico rimosso',
-        confirmRemove: 'Rimuovi amico',
-        confirmRemoveMessage: 'Sei sicuro di voler rimuovere questo amico?',
-        cannotAddYourself: 'Non puoi inviare una richiesta di amicizia a te stesso',
-        bothMustHaveGithub: 'Entrambi gli utenti devono avere GitHub collegato per diventare amici',
-        status: {
-            none: 'Non connesso',
-            requested: 'Richiesta inviata',
-            pending: 'Richiesta in sospeso',
-            friend: 'Amici',
-            rejected: 'Rifiutata',
-        },
-        acceptRequest: 'Accetta richiesta',
-        removeFriend: 'Rimuovi amico',
-        removeFriendConfirm: ({ name }: { name: string }) => `Sei sicuro di voler rimuovere ${name} dagli amici?`,
-        requestSentDescription: ({ name }: { name: string }) => `La tua richiesta di amicizia è stata inviata a ${name}`,
-        requestFriendship: 'Richiedi amicizia',
-        cancelRequest: 'Annulla richiesta di amicizia',
-        cancelRequestConfirm: ({ name }: { name: string }) => `Annullare la tua richiesta di amicizia a ${name}?`,
-        denyRequest: 'Rifiuta richiesta',
-        nowFriendsWith: ({ name }: { name: string }) => `Ora sei amico di ${name}`,
-    },
-
     usage: {
         // Usage panel strings
         today: 'Oggi',
@@ -1046,14 +985,6 @@ export const it: TranslationStructure = {
         statusActive: 'Attiva',
         statusEnded: 'Terminata',
     },
-
-    feed: {
-        // Feed notifications for friend requests and acceptances
-        friendRequestFrom: ({ name }: { name: string }) => `${name} ti ha inviato una richiesta di amicizia`,
-        friendRequestGeneric: 'Nuova richiesta di amicizia',
-        friendAccepted: ({ name }: { name: string }) => `Ora sei amico di ${name}`,
-        friendAcceptedGeneric: 'Richiesta di amicizia accettata',
-    }
 } as const;
 
 export type TranslationsIt = typeof it;
