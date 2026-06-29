@@ -87,13 +87,25 @@ function getCommandsFromSession(sessionId: string): CommandItem[] {
     }
 
     const commands: CommandItem[] = [...DEFAULT_COMMANDS];
-    
+
+    // When plugin commands are excluded, drop the machine's plugin-only subset
+    // (plugin commands share the `name:name` shape with project-subfolder
+    // commands, so we filter by the explicit set the daemon reports, not by name).
+    let pluginSet: Set<string> | null = null;
+    if (!state.localSettings.includePluginCommands) {
+        const machineId = session.metadata.machineId;
+        const plugins = machineId ? state.machines[machineId]?.metadata?.pluginSlashCommands : undefined;
+        if (plugins && plugins.length > 0) pluginSet = new Set(plugins);
+    }
+
     // Add commands from metadata.slashCommands (filter with ignore list)
     if (session.metadata.slashCommands) {
         for (const cmd of session.metadata.slashCommands) {
             // Skip if in ignore list
             if (IGNORED_COMMANDS.includes(cmd)) continue;
-            
+            // Skip plugin commands when excluded
+            if (pluginSet?.has(cmd)) continue;
+
             // Check if it's already in default commands
             if (!commands.find(c => c.command === cmd)) {
                 commands.push({

@@ -14,6 +14,7 @@ export default function FeaturesSettingsScreen() {
     const [commandPaletteEnabled, setCommandPaletteEnabled] = useLocalSettingMutable('commandPaletteEnabled');
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
     const [limitSessionMemory, setLimitSessionMemory] = useLocalSettingMutable('limitSessionMemory');
+    const [includePluginCommands, setIncludePluginCommands] = useLocalSettingMutable('includePluginCommands');
     const [hideInactiveSessions, setHideInactiveSessions] = useSettingMutable('hideInactiveSessions');
     const [expResumeSession, setExpResumeSession] = useSettingMutable('expResumeSession');
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
@@ -196,6 +197,18 @@ export default function FeaturesSettingsScreen() {
                     icon={<Ionicons name="hardware-chip-outline" size={29} color="#34C759" />}
                     detail={limitSessionMemory != null ? String(limitSessionMemory) : 'All'}
                     onPress={handleLimitSessionMemory}
+                />
+                <Item
+                    title="Plugin slash commands"
+                    subtitle="Show plugin commands in the composer's / autocomplete"
+                    icon={<Ionicons name="extension-puzzle-outline" size={29} color="#AF52DE" />}
+                    rightElement={
+                        <Switch
+                            value={includePluginCommands}
+                            onValueChange={setIncludePluginCommands}
+                        />
+                    }
+                    showChevron={false}
                 />
             </ItemGroup>
 

@@ -11,7 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
-import { useMachine, storage } from '@/sync/storage';
+import { useMachine, useLocalSetting, storage } from '@/sync/storage';
 import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatOSPlatform } from '@/utils/sessionUtils';
 import { apiSocket } from '@/sync/apiSocket';
@@ -46,6 +46,14 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     const router = useRouter();
     const machine = useMachine(machineId ?? '');
     const online = useMachineOnline(machine);
+    // Slash-command count, honoring the "plugin slash commands" toggle.
+    const includePluginCommands = useLocalSetting('includePluginCommands');
+    const slashCommandCount = React.useMemo(() => {
+        const all = machine?.metadata?.slashCommands ?? [];
+        if (includePluginCommands) return all.length;
+        const plugins = new Set(machine?.metadata?.pluginSlashCommands ?? []);
+        return all.filter((c) => !plugins.has(c)).length;
+    }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands, includePluginCommands]);
 
     const [status, setStatus] = React.useState<JoyStatus | null>(null);
     const [failed, setFailed] = React.useState(false);
@@ -174,7 +182,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
             <ItemGroup title="Slash commands" footer="Commands & skills joy-tmux found on this machine — personal, plugins, and every project it has scanned. They appear in the composer's / menu.">
                 <Item
                     title="Available"
-                    detail={String((machine?.metadata?.slashCommands ?? []).length)}
+                    detail={String(slashCommandCount)}
                     subtitle="Shown in the composer's / autocomplete"
                     icon={<Ionicons name="terminal-outline" size={29} color="#34C759" />}
                     showChevron={false}

@@ -190,6 +190,9 @@ export const MachineMetadataSchema = z.object({
     // Slash commands joy-tmux discovered on this machine (personal + plugins +
     // every project it has scanned). Powers the machine page's command list.
     slashCommands: z.array(z.string()).optional(),
+    // The plugin-only subset of slashCommands — used to include/exclude plugin
+    // commands (they can't be told apart from project commands by name alone).
+    pluginSlashCommands: z.array(z.string()).optional(),
     // Daemon status fields
     daemonLastKnownStatus: z.enum(['running', 'shutting-down']).optional(),
     daemonLastKnownPid: z.number().optional(),
