@@ -17,16 +17,8 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
 export const en = {
     tabs: {
         // Tab navigation labels
-        inbox: 'Inbox',
         sessions: 'Terminals',
         settings: 'Settings',
-    },
-
-    inbox: {
-        // Inbox screen
-        emptyTitle: 'Empty Inbox',
-        emptyDescription: 'Connect with friends to start sharing sessions',
-        updates: 'Updates',
     },
 
     common: {
@@ -114,7 +106,6 @@ export const en = {
         showOfflineMachines: ({ count }: { count: number }) => count === 1 ? 'Show 1 offline machine' : `Show ${count} offline machines`,
         hideOfflineMachines: 'Hide offline machines',
         features: 'Features',
-        social: 'Social',
         account: 'Account',
         accountSubtitle: 'Manage your account details',
         appearance: 'Appearance',
@@ -851,7 +842,6 @@ export const en = {
         linkNewDevice: 'Link New Device', 
         restoreWithSecretKey: 'Restore with Secret Key',
         whatsNew: "What's New",
-        friends: 'Friends',
     },
 
     welcome: {
@@ -984,57 +974,6 @@ export const en = {
         error: 'Failed to load artifact',
     },
 
-    friends: {
-        // Friends feature
-        title: 'Friends',
-        manageFriends: 'Manage your friends and connections',
-        searchTitle: 'Find Friends',
-        pendingRequests: 'Friend Requests',
-        myFriends: 'My Friends',
-        noFriendsYet: "You don't have any friends yet",
-        findFriends: 'Find Friends',
-        remove: 'Remove',
-        pendingRequest: 'Pending',
-        sentOn: ({ date }: { date: string }) => `Sent on ${date}`,
-        accept: 'Accept',
-        reject: 'Reject',
-        addFriend: 'Add Friend',
-        alreadyFriends: 'Already Friends',
-        requestPending: 'Request Pending',
-        searchInstructions: 'Enter a username to search for friends',
-        searchPlaceholder: 'Enter username...',
-        searching: 'Searching...',
-        userNotFound: 'User not found',
-        noUserFound: 'No user found with that username',
-        checkUsername: 'Please check the username and try again',
-        howToFind: 'How to Find Friends',
-        findInstructions: 'Search for friends by their username. Both you and your friend need to have GitHub connected to send friend requests.',
-        requestSent: 'Friend request sent!',
-        requestAccepted: 'Friend request accepted!',
-        requestRejected: 'Friend request rejected',
-        friendRemoved: 'Friend removed',
-        confirmRemove: 'Remove Friend',
-        confirmRemoveMessage: 'Are you sure you want to remove this friend?',
-        cannotAddYourself: 'You cannot send a friend request to yourself',
-        bothMustHaveGithub: 'Both users must have GitHub connected to become friends',
-        status: {
-            none: 'Not connected',
-            requested: 'Request sent',
-            pending: 'Request pending',
-            friend: 'Friends',
-            rejected: 'Rejected',
-        },
-        acceptRequest: 'Accept Request',
-        removeFriend: 'Remove Friend',
-        removeFriendConfirm: ({ name }: { name: string }) => `Are you sure you want to remove ${name} as a friend?`,
-        requestSentDescription: ({ name }: { name: string }) => `Your friend request has been sent to ${name}`,
-        requestFriendship: 'Request friendship',
-        cancelRequest: 'Cancel friendship request',
-        cancelRequestConfirm: ({ name }: { name: string }) => `Cancel your friendship request to ${name}?`,
-        denyRequest: 'Deny friendship',
-        nowFriendsWith: ({ name }: { name: string }) => `You are now friends with ${name}`,
-    },
-
     usage: {
         // Usage panel strings
         today: 'Today',
@@ -1047,14 +986,6 @@ export const en = {
         usageOverTime: 'Usage over time',
         byModel: 'By Model',
         noData: 'No usage data available',
-    },
-
-    feed: {
-        // Feed notifications for friend requests and acceptances
-        friendRequestFrom: ({ name }: { name: string }) => `${name} sent you a friend request`,
-        friendRequestGeneric: 'New friend request',
-        friendAccepted: ({ name }: { name: string }) => `You are now friends with ${name}`,
-        friendAcceptedGeneric: 'Friend request accepted',
     },
 
 } as const;
