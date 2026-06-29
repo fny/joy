@@ -2,8 +2,6 @@
   <img src="/.github/joy-logo.png" width="260" alt="joy" />
 </div>
 
-<h1 align="center">joy</h1>
-
 <h4 align="center">
 Control your Claude Code sessions from your phone, web, or desktop — end-to-end encrypted.
 </h4>
