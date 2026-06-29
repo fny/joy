@@ -909,11 +909,12 @@ export const storage = create<StorageState>()((set, get) => {
         // when reopened (onSessionVisible invalidates its message sync).
         noteSessionVisible: (sessionId: string) => set((state) => {
             const mru = [sessionId, ...state.sessionMessageMru.filter((id) => id !== sessionId)];
-            if (!state.localSettings.limitSessionMemory) {
+            // null/empty or a non-positive number → keep all (no eviction).
+            const limit = state.localSettings.limitSessionMemory;
+            if (limit == null || limit <= 0) {
                 return { ...state, sessionMessageMru: mru };
             }
-            const KEEP = 5;
-            const keep = new Set(mru.slice(0, KEEP));
+            const keep = new Set(mru.slice(0, limit));
             const loadedIds = Object.keys(state.sessionMessages);
             const next: Record<string, SessionMessages> = {};
             for (const sid of loadedIds) {
