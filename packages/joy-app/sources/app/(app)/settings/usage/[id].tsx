@@ -9,6 +9,7 @@ import * as React from 'react';
 import { View, Text, ActivityIndicator, Pressable, ScrollView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { Stack, useLocalSearchParams } from 'expo-router';
 import { layout } from '@/components/layout';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
@@ -304,23 +305,27 @@ export default React.memo(function UsageSettingsScreen() {
     const machines = useAllMachines({ includeOffline: false });
     const onlineIds = machines.filter(isMachineOnline).map(m => m.id);
 
-    const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(cachedBurnMachineIds);
-    // 'all' aggregates every responding machine; otherwise a machine id.
-    const [scope, setScope] = React.useState<string | null>(
-        () => (cachedBurnMachineIds && cachedBurnMachineIds.size > 0
-            ? (cachedBurnMachineIds.size > 1 ? 'all' : cachedBurnMachineIds.values().next().value!)
-            : null),
+    // Scope comes from the route: a machine id, or the literal 'all' (aggregate
+    // across every joy-tmux machine — slow, which is why it's opt-in).
+    const { id: routeId } = useLocalSearchParams<{ id: string }>();
+    const scope = routeId ?? 'all';
+    const isAll = scope === 'all';
+
+    // 'all' discovers the joy-tmux machines via a probe; a single machine fetches
+    // directly (targets = [scope]) with no probe.
+    const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(
+        isAll ? cachedBurnMachineIds : new Set([scope]),
     );
     const [period, setPeriod] = React.useState<PeriodKey>('today');
     const probedRef = React.useRef(false);
 
     React.useEffect(() => {
-        if (probedRef.current || onlineIds.length === 0) return;
+        if (!isAll || probedRef.current || onlineIds.length === 0) return;
         probedRef.current = true;
         let cancelled = false;
         (async () => {
-            const probeOne = (id: string) => Promise.race([
-                apiSocket.machineRPC(id, 'joy-status', {}).then(() => id),
+            const probeOne = (mid: string) => Promise.race([
+                apiSocket.machineRPC(mid, 'joy-status', {}).then(() => mid),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
             ]);
             const results = await Promise.allSettled(onlineIds.map(probeOne));
@@ -330,10 +335,9 @@ export default React.memo(function UsageSettingsScreen() {
             );
             cachedBurnMachineIds = found;
             setJoyMachineIds(found);
-            setScope(prev => prev ?? (found.size > 1 ? 'all' : (found.values().next().value ?? null)));
         })();
         return () => { cancelled = true; };
-    }, [onlineIds.join(',')]);
+    }, [isAll, onlineIds.join(',')]);
 
     const [state, setState] = React.useState<
         | { phase: 'loading' }
@@ -400,9 +404,13 @@ export default React.memo(function UsageSettingsScreen() {
         return m?.metadata?.displayName || m?.metadata?.host || id.slice(0, 8);
     };
 
+    const headerTitle = isAll ? 'All machines · Usage' : machineName(scope);
+    const screen = <Stack.Screen options={{ headerTitle }} />;
+
     if (!joyMachineIds) {
         return (
             <View style={styles.center}>
+                {screen}
                 <ActivityIndicator />
                 <Text style={styles.centerText}>looking for machines running joy-tmux…</Text>
             </View>
@@ -412,6 +420,7 @@ export default React.memo(function UsageSettingsScreen() {
     if (joyMachineIds.size === 0) {
         return (
             <View style={styles.center}>
+                {screen}
                 <Ionicons name="cloud-offline-outline" size={48} color={styles.centerText.color} />
                 <Text style={styles.centerText}>
                     No online machine answered the joy-tmux probe. Usage reporting runs through the daemon.
@@ -438,6 +447,7 @@ export default React.memo(function UsageSettingsScreen() {
 
     return (
         <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+            {screen}
             {/* Period chips — mirrors the TUI's top strip */}
             <View style={styles.chipRow}>
                 {PERIODS.map(p => (
@@ -450,26 +460,6 @@ export default React.memo(function UsageSettingsScreen() {
                     </Pressable>
                 ))}
             </View>
-
-            {joyMachineIds.size > 1 && (
-                <View style={styles.chipRow}>
-                    <Pressable
-                        onPress={() => setScope('all')}
-                        style={[styles.chip, scope === 'all' && styles.chipActive]}
-                    >
-                        <Text style={[styles.chipText, scope === 'all' && styles.chipTextActive]}>All Machines</Text>
-                    </Pressable>
-                    {[...joyMachineIds].map(id => (
-                        <Pressable
-                            key={id}
-                            onPress={() => setScope(id)}
-                            style={[styles.chip, id === scope && styles.chipActive]}
-                        >
-                            <Text style={[styles.chipText, id === scope && styles.chipTextActive]}>{machineName(id)}</Text>
-                        </Pressable>
-                    ))}
-                </View>
-            )}
 
             {state.phase === 'loading' && (
                 <View style={{ alignItems: 'center', paddingVertical: 48, gap: 12 }}>
