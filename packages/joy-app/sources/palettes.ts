@@ -34,171 +34,16 @@ export const DEFAULT_PALETTE_ID = 'default';
 export const CUSTOM_PALETTE_ID = 'custom';
 
 export const PALETTES: NamedPalette[] = [
-    {
-        // Original: the stock light theme's colours, surfaced as a palette so you
-        // can see/copy/edit them. (The "Default" row restores the true theme.)
-        id: 'original',
-        name: 'Original',
-        background: '#F2F2F7',
-        surface: '#ffffff',
-        surfaceAlt: '#F8F8F8',
-        text: '#000000',
-        textSecondary: '#8E8E93',
-        accent: '#2BACCC',
-        border: '#eaeaea',
-        userBubble: '#f0eee6',
-        button: '#000000', // keep the original black send/primary button
-    },
-    {
-        // Lively: clean warm-white shell, vivid accents pulled from the confetti
-        // logo. Colour lives in the accents/icons, not the surfaces, so it reads
-        // playful without being busy.
-        id: 'lively',
-        name: 'Lively',
-        background: '#fffdf8',
-        surface: '#ffffff',
-        surfaceAlt: '#f4f1ea',
-        text: '#1b1a17',
-        textSecondary: '#8a8578',
-        accent: '#00b3ff',
-        border: '#ece6d8',
-        userBubble: '#eaf6ff',
-        accents: { blue: '#00b3ff', indigo: '#8a2dff', green: '#00c2a0', orange: '#ff8a00', red: '#ff4040', pink: '#ff2d95' },
-    },
-    {
-        // Muted: soft warm-gray shell, desaturated logo hues. The calmest, least
-        // distracting option — accents are present but quiet.
-        id: 'muted',
-        name: 'Muted',
-        background: '#f6f5f2',
-        surface: '#fbfaf7',
-        surfaceAlt: '#eceae4',
-        text: '#2b2a27',
-        textSecondary: '#9a958c',
-        accent: '#5f93b8',
-        border: '#e3e0d9',
-        userBubble: '#ecebe6',
-        // Desaturated versions of the joy logo hues (blue/purple/cyan/orange/
-        // red/magenta) — still recognizably joy, just quiet.
-        accents: { blue: '#5f93b8', indigo: '#8a78b8', green: '#5fae93', orange: '#cc9658', red: '#c87b73', pink: '#c57ba1' },
-    },
-    {
-        id: 'cream',
-        name: 'Cream',
-        background: '#fffdf8',
-        surface: '#fffefb',
-        surfaceAlt: '#f4efe3',
-        text: '#1b1a17',
-        textSecondary: '#8a8578',
-        accent: '#c2410c',
-        border: '#ece5d6',
-        userBubble: '#f0e9d9',
-    },
-    {
-        id: 'sepia',
-        name: 'Sepia',
-        background: '#f4ecd8',
-        surface: '#fbf5e6',
-        surfaceAlt: '#ece0c4',
-        text: '#3a2f23',
-        textSecondary: '#8a7857',
-        accent: '#9a3412',
-        border: '#ddcfb0',
-        userBubble: '#e8dcc0',
-    },
-    {
-        id: 'slate',
-        name: 'Slate',
-        background: '#eef1f4',
-        surface: '#ffffff',
-        surfaceAlt: '#e2e7ee',
-        text: '#1f2933',
-        textSecondary: '#7b8794',
-        accent: '#2563eb',
-        border: '#d6dce4',
-        userBubble: '#dde4ed',
-    },
-    {
-        id: 'mint',
-        name: 'Mint',
-        background: '#f2faf6',
-        surface: '#ffffff',
-        surfaceAlt: '#e2f1ea',
-        text: '#13241c',
-        textSecondary: '#6b8a7c',
-        accent: '#0f766e',
-        border: '#d3e8df',
-        userBubble: '#dcefe4',
-    },
-    {
-        // Paper: warm, low-contrast, easy on the eyes.
-        id: 'paper',
-        name: 'Paper',
-        background: '#f5f2ea',
-        surface: '#fbf9f3',
-        surfaceAlt: '#ece7da',
-        text: '#33302a',
-        textSecondary: '#8f897b',
-        accent: '#9c6b4f',
-        border: '#e2dcce',
-        userBubble: '#ece5d6',
-    },
-    {
-        // Graphite: cool neutral gray with crisp dark text.
-        id: 'graphite',
-        name: 'Graphite',
-        background: '#eceef0',
-        surface: '#ffffff',
-        surfaceAlt: '#e0e3e7',
-        text: '#23272b',
-        textSecondary: '#79818a',
-        accent: '#3a6ea5',
-        border: '#d8dce0',
-        userBubble: '#dde2e7',
-    },
-    {
-        // Ocean: soft blue-tinted, cool and calm; blue-leaning accents.
-        id: 'ocean',
-        name: 'Ocean',
-        background: '#eef4f7',
-        surface: '#fbfdfe',
-        surfaceAlt: '#dfeaf0',
-        text: '#15303a',
-        textSecondary: '#6f8a96',
-        accent: '#0e7490',
-        border: '#d3e2ea',
-        userBubble: '#dcebf1',
-        accents: { blue: '#0e7490', indigo: '#3b6fb0', green: '#2c9c8f', orange: '#c2843e', red: '#bf6b63', pink: '#b56d92' },
-    },
-    {
-        // Rosé: warm blush; soft warm accents.
-        id: 'rose',
-        name: 'Rosé',
-        background: '#faf1f0',
-        surface: '#fef8f7',
-        surfaceAlt: '#f1e0de',
-        text: '#3a2a2a',
-        textSecondary: '#9c8482',
-        accent: '#b05a6a',
-        border: '#ecd8d6',
-        userBubble: '#f3e2e0',
-        accents: { blue: '#7d7fb3', indigo: '#9b6fa8', green: '#7ba883', orange: '#cc8b5a', red: '#c4685f', pink: '#c76d8e' },
-    },
-    {
-        // Solarized Light (Ethan Schoonover) — base2/base3 surfaces, base00/base1
-        // text, and the canonical Solarized accent hues.
-        id: 'solarized-light',
-        name: 'Solarized Light',
-        background: '#eee8d5',
-        surface: '#fdf6e3',
-        surfaceAlt: '#e6dfc6',
-        text: '#657b83',
-        textSecondary: '#93a1a1',
-        accent: '#268bd2',
-        border: '#ddd6c1',
-        userBubble: '#e6dfc6',
-        accents: { blue: '#268bd2', indigo: '#6c71c4', green: '#859900', orange: '#cb4b16', red: '#dc322f', pink: '#d33682' },
-    },
+    { id: 'solarized-light', name: 'Solarized Light', background: '#fdf6e3', surface: '#eee8d5', surfaceAlt: '#e8e1cb', text: '#657b83', textSecondary: '#93a1a1', accent: '#268bd2', border: '#d8d2bf', userBubble: '#eee8d5', accents: { blue: '#268bd2', indigo: '#6c71c4', green: '#859900', orange: '#cb4b16', red: '#dc322f', pink: '#d33682' } },
+    { id: 'github-light', name: 'GitHub Light', background: '#ffffff', surface: '#f6f8fa', surfaceAlt: '#eaeef2', text: '#1f2328', textSecondary: '#656d76', accent: '#0969da', border: '#d0d7de', userBubble: '#f6f8fa', accents: { blue: '#0969da', indigo: '#8250df', green: '#1a7f37', orange: '#bc4c00', red: '#cf222e', pink: '#bf3989' } },
+    { id: 'ayu-light', name: 'Ayu Light', background: '#fcfcfc', surface: '#f8f9fa', surfaceAlt: '#ffffff', text: '#5c6166', textSecondary: '#787b80', accent: '#ffaa33', border: '#eaecef', userBubble: '#f0f2f4', accents: { blue: '#399ee6', indigo: '#a37acc', green: '#86b300', orange: '#fa8d3e', red: '#f07171', pink: '#ed9366' } },
+    { id: 'material-light', name: 'Material Light', background: '#fafafa', surface: '#ffffff', surfaceAlt: '#eeeeee', text: '#546e7a', textSecondary: '#90a4ae', accent: '#80cbc4', border: '#dbdbdb', userBubble: '#eceff1', accents: { blue: '#6182b8', indigo: '#9c3eda', green: '#91b859', orange: '#f76d47', red: '#e53935', pink: '#ff5370' } },
+    { id: 'one-light', name: 'One Light', background: '#fafafa', surface: '#eaeaeb', surfaceAlt: '#dbdbdc', text: '#383a42', textSecondary: '#a0a1a7', accent: '#526fff', border: '#dbdbdc', userBubble: '#e5e5e6', accents: { blue: '#0184bc', indigo: '#a626a4', green: '#50a14f', orange: '#986801', red: '#e45649', pink: '#ca1243' } },
+    { id: 'tokyo-night-day', name: 'Tokyo Night Day', background: '#e6e7ed', surface: '#d6d8df', surfaceAlt: '#c1c2c7', text: '#343b59', textSecondary: '#888b94', accent: '#2959aa', border: '#c1c2c7', userBubble: '#d6d8df', accents: { blue: '#2959aa', indigo: '#65359d', green: '#385f0d', orange: '#965027', red: '#942f2f', pink: '#8c4351' } },
+    { id: 'nord-light', name: 'Nord Light', background: '#eceff4', surface: '#e5e9f0', surfaceAlt: '#d8dee9', text: '#2e3440', textSecondary: '#4c566a', accent: '#5e81ac', border: '#d8dee9', userBubble: '#e5e9f0', accents: { blue: '#5e81ac', indigo: '#b48ead', green: '#a3be8c', orange: '#d08770', red: '#bf616a', pink: '#b48ead' } },
+    { id: 'gruvbox-light', name: 'Gruvbox Light', background: '#fbf1c7', surface: '#f2e5bc', surfaceAlt: '#ebdbb2', text: '#3c3836', textSecondary: '#7c6f64', accent: '#458588', border: '#ebdbb2', userBubble: '#f2e5bc', accents: { blue: '#458588', indigo: '#b16286', green: '#98971a', orange: '#d65d0e', red: '#cc241d', pink: '#d3869b' } },
+    { id: 'kanagawa-lotus', name: 'Kanagawa Lotus', background: '#f2ecbc', surface: '#e5ddb0', surfaceAlt: '#e7dba0', text: '#545464', textSecondary: '#8a8980', accent: '#4d699b', border: '#d5cea3', userBubble: '#dcd5ac', accents: { blue: '#4d699b', indigo: '#624c83', green: '#6f894e', orange: '#cc6d00', red: '#c84053', pink: '#b35b79' } },
+    { id: 'light-owl', name: 'Light Owl', background: '#fbfbfb', surface: '#f0f0f0', surfaceAlt: '#e8e8e8', text: '#403f53', textSecondary: '#989fb1', accent: '#4876d6', border: '#d9d9d9', userBubble: '#f0f0f0', accents: { blue: '#4876d6', indigo: '#994cc3', green: '#08916a', orange: '#aa0982', red: '#e64d49', pink: '#ff2c83' } },
 ];
 
 // The original light theme expressed as a shell palette — used when copying
@@ -370,97 +215,16 @@ export function applyAppearance(
 //
 
 export const DARK_PALETTES: NamedPalette[] = [
-    {
-        // Neutral graphite dark, iOS-system-like surfaces.
-        id: 'carbon',
-        name: 'Carbon',
-        background: '#1c1c1e',
-        surface: '#2c2c2e',
-        surfaceAlt: '#3a3a3c',
-        text: '#ffffff',
-        textSecondary: '#8e8e93',
-        accent: '#0a84ff',
-        border: '#38383a',
-        userBubble: '#2c2c2e',
-    },
-    {
-        id: 'solarized-dark',
-        name: 'Solarized Dark',
-        background: '#002b36', // base03
-        surface: '#073642',    // base02
-        surfaceAlt: '#0a3f4d',
-        text: '#93a1a1',       // base1
-        textSecondary: '#586e75', // base01
-        accent: '#268bd2',
-        border: '#0a3f4d',
-        userBubble: '#073642',
-        accents: { blue: '#268bd2', indigo: '#6c71c4', green: '#859900', orange: '#cb4b16', red: '#dc322f', pink: '#d33682' },
-    },
-    {
-        id: 'nord',
-        name: 'Nord',
-        background: '#2e3440', // nord0
-        surface: '#3b4252',    // nord1
-        surfaceAlt: '#434c5e', // nord2
-        text: '#eceff4',       // nord6
-        textSecondary: '#81a1c1', // nord9
-        accent: '#88c0d0',     // nord8
-        border: '#434c5e',
-        userBubble: '#3b4252',
-        accents: { blue: '#81a1c1', indigo: '#b48ead', green: '#a3be8c', orange: '#d08770', red: '#bf616a', pink: '#b48ead' },
-    },
-    {
-        id: 'dracula',
-        name: 'Dracula',
-        background: '#282a36',
-        surface: '#343746',
-        surfaceAlt: '#424450',
-        text: '#f8f8f2',
-        textSecondary: '#6272a4',
-        accent: '#bd93f9',
-        border: '#44475a',
-        userBubble: '#343746',
-        accents: { blue: '#8be9fd', indigo: '#bd93f9', green: '#50fa7b', orange: '#ffb86c', red: '#ff5555', pink: '#ff79c6' },
-    },
-    {
-        id: 'gruvbox-dark',
-        name: 'Gruvbox Dark',
-        background: '#282828',
-        surface: '#32302f',
-        surfaceAlt: '#3c3836',
-        text: '#ebdbb2',
-        textSecondary: '#a89984',
-        accent: '#fabd2f',
-        border: '#3c3836',
-        userBubble: '#32302f',
-        accents: { blue: '#83a598', indigo: '#d3869b', green: '#b8bb26', orange: '#fe8019', red: '#fb4934', pink: '#d3869b' },
-    },
-    {
-        id: 'one-dark',
-        name: 'One Dark',
-        background: '#21252b',
-        surface: '#282c34',
-        surfaceAlt: '#2c313a',
-        text: '#abb2bf',
-        textSecondary: '#5c6370',
-        accent: '#61afef',
-        border: '#3a3f4b',
-        userBubble: '#2c313a',
-        accents: { blue: '#61afef', indigo: '#c678dd', green: '#98c379', orange: '#d19a66', red: '#e06c75', pink: '#c678dd' },
-    },
-    {
-        id: 'tokyo-night',
-        name: 'Tokyo Night',
-        background: '#1a1b26',
-        surface: '#1f2335',
-        surfaceAlt: '#24283b',
-        text: '#c0caf5',
-        textSecondary: '#565f89',
-        accent: '#7aa2f7',
-        border: '#2a2e42',
-        userBubble: '#1f2335',
-        accents: { blue: '#7aa2f7', indigo: '#bb9af7', green: '#9ece6a', orange: '#e0af68', red: '#f7768e', pink: '#bb9af7' },
-    },
+    { id: 'solarized-dark', name: 'Solarized Dark', background: '#002b36', surface: '#073642', surfaceAlt: '#0a3f4d', text: '#839496', textSecondary: '#586e75', accent: '#268bd2', border: '#0d4250', userBubble: '#073642', accents: { blue: '#268bd2', indigo: '#6c71c4', green: '#859900', orange: '#cb4b16', red: '#dc322f', pink: '#d33682' } },
+    { id: 'github-dark', name: 'GitHub Dark', background: '#0d1117', surface: '#161b22', surfaceAlt: '#21262d', text: '#e6edf3', textSecondary: '#7d8590', accent: '#2f81f7', border: '#30363d', userBubble: '#161b22', accents: { blue: '#79c0ff', indigo: '#d2a8ff', green: '#56d364', orange: '#ffa657', red: '#ffa198', pink: '#ff9bce' } },
+    { id: 'ayu-dark', name: 'Ayu Dark', background: '#0d1017', surface: '#10141c', surfaceAlt: '#161a24', text: '#bfbdb6', textSecondary: '#565b66', accent: '#e6b450', border: '#1b1f29', userBubble: '#141821', accents: { blue: '#59c2ff', indigo: '#d2a6ff', green: '#aad94c', orange: '#ff8f40', red: '#f07178', pink: '#f29668' } },
+    { id: 'material-ocean', name: 'Material Ocean Dark', background: '#0f111a', surface: '#181a24', surfaceAlt: '#1a1c25', text: '#babed8', textSecondary: '#464b5d', accent: '#82aaff', border: '#232631', userBubble: '#1a1c25', accents: { blue: '#82aaff', indigo: '#c792ea', green: '#c3e88d', orange: '#f78c6c', red: '#f07178', pink: '#ff9cac' } },
+    { id: 'one-dark', name: 'One Dark', background: '#282c34', surface: '#21252b', surfaceAlt: '#2c313a', text: '#abb2bf', textSecondary: '#5c6370', accent: '#528bff', border: '#181a1f', userBubble: '#3e4451', accents: { blue: '#61afef', indigo: '#c678dd', green: '#98c379', orange: '#d19a66', red: '#e06c75', pink: '#e06c75' } },
+    { id: 'tokyo-night', name: 'Tokyo Night', background: '#1a1b26', surface: '#16161e', surfaceAlt: '#14141b', text: '#a9b1d6', textSecondary: '#51597d', accent: '#7aa2f7', border: '#101014', userBubble: '#2a2e42', accents: { blue: '#7aa2f7', indigo: '#bb9af7', green: '#9ece6a', orange: '#ff9e64', red: '#f7768e', pink: '#bb9af7' } },
+    { id: 'nord-dark', name: 'Nord Dark', background: '#2e3440', surface: '#3b4252', surfaceAlt: '#434c5e', text: '#eceff4', textSecondary: '#d8dee9', accent: '#88c0d0', border: '#434c5e', userBubble: '#3b4252', accents: { blue: '#81a1c1', indigo: '#b48ead', green: '#a3be8c', orange: '#d08770', red: '#bf616a', pink: '#b48ead' } },
+    { id: 'gruvbox-dark', name: 'Gruvbox Dark', background: '#282828', surface: '#3c3836', surfaceAlt: '#504945', text: '#ebdbb2', textSecondary: '#a89984', accent: '#83a598', border: '#504945', userBubble: '#3c3836', accents: { blue: '#83a598', indigo: '#d3869b', green: '#b8bb26', orange: '#fe8019', red: '#fb4934', pink: '#d3869b' } },
+    { id: 'kanagawa-dragon', name: 'Kanagawa Dragon', background: '#181616', surface: '#1d1c19', surfaceAlt: '#282727', text: '#c5c9c5', textSecondary: '#737c73', accent: '#7e9cd8', border: '#393836', userBubble: '#282727', accents: { blue: '#7e9cd8', indigo: '#957fb8', green: '#87a987', orange: '#b6927b', red: '#c4746e', pink: '#d27e99' } },
+    { id: 'night-owl', name: 'Night Owl', background: '#011627', surface: '#0b2942', surfaceAlt: '#0b253a', text: '#d6deeb', textSecondary: '#637777', accent: '#82aaff', border: '#122d42', userBubble: '#0b253a', accents: { blue: '#82aaff', indigo: '#c792ea', green: '#c5e478', orange: '#f78c6c', red: '#ef5350', pink: '#ff5874' } },
 ];
 
 // Resolve a dark selection to the palette to apply, or null for the stock dark
