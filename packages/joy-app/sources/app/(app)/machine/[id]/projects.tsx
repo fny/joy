@@ -19,6 +19,21 @@ function folderName(dir: string): string {
     return dir.split(/[/\\]/).filter(Boolean).pop() || dir;
 }
 
+// Compact "time ago" (e.g. "3h ago") appended after the absolute timestamp.
+function timeAgo(ms: number): string {
+    const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+    if (s < 60) return 'just now';
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    if (d < 30) return `${d}d ago`;
+    const mo = Math.floor(d / 30);
+    if (mo < 12) return `${mo}mo ago`;
+    return `${Math.floor(mo / 12)}y ago`;
+}
+
 // Per-machine project browser. Lists every project (cwd) the machine has run a
 // session in, each with its session logs (transcripts on disk) + an excerpt of
 // the most recent one. Tap a session to preview its last 10 messages; right-
@@ -67,42 +82,19 @@ export default React.memo(function MachineProjectsScreen() {
 });
 
 // Loads + renders one project's session logs. Each project fetches its own
-// transcript list (and the newest one's last message for an excerpt) so they
-// resolve independently.
+// transcript list so they resolve independently; each row then fetches its own
+// last-message excerpt.
 const ProjectGroup = React.memo(function ProjectGroup({ machineId, dir }: { machineId: string; dir: string }) {
     const { theme } = useUnistyles();
     const [logs, setLogs] = React.useState<JoyLogEntry[] | null>(null);
-    const [excerpt, setExcerpt] = React.useState<string | null>(null);
     const [error, setError] = React.useState<string | null>(null);
 
     React.useEffect(() => {
         let cancelled = false;
         setLogs(null);
-        setExcerpt(null);
         setError(null);
         machineListLogs(machineId, dir)
-            .then(async (entries) => {
-                if (cancelled) return;
-                // Newest first.
-                const sorted = [...entries].sort((a, b) => b.mtimeMs - a.mtimeMs);
-                setLogs(sorted);
-                // Pull the last message of the most recent session for an excerpt.
-                const newest = sorted[0];
-                if (newest) {
-                    try {
-                        const msgs = await machineReadLog(machineId, dir, newest.sessionId, 1);
-                        if (cancelled) return;
-                        const last = msgs[msgs.length - 1];
-                        if (last) {
-                            const who = last.role === 'user' ? 'You' : 'Claude';
-                            const text = last.text.replace(/\s+/g, ' ').trim().slice(0, EXCERPT_LIMIT);
-                            setExcerpt(text ? `${who}: ${text}` : null);
-                        }
-                    } catch {
-                        // Excerpt is best-effort; ignore failures.
-                    }
-                }
-            })
+            .then((entries) => { if (!cancelled) setLogs([...entries].sort((a, b) => b.mtimeMs - a.mtimeMs)); })
             .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
         return () => { cancelled = true; };
     }, [machineId, dir]);
@@ -129,7 +121,6 @@ const ProjectGroup = React.memo(function ProjectGroup({ machineId, dir }: { mach
                         machineId={machineId}
                         dir={dir}
                         log={log}
-                        excerpt={i === 0 ? excerpt : null}
                         isLast={i === logs.length - 1}
                     />
                 ))
@@ -139,15 +130,32 @@ const ProjectGroup = React.memo(function ProjectGroup({ machineId, dir }: { mach
 });
 
 const SessionRow = React.memo(function SessionRow({
-    machineId, dir, log, excerpt, isLast,
+    machineId, dir, log, isLast,
 }: {
     machineId: string;
     dir: string;
     log: JoyLogEntry;
-    excerpt: string | null;
     isLast: boolean;
 }) {
     const { theme } = useUnistyles();
+    const [excerpt, setExcerpt] = React.useState<string | null>(null);
+
+    // Each row pulls the last message of its own transcript for an excerpt.
+    React.useEffect(() => {
+        let cancelled = false;
+        machineReadLog(machineId, dir, log.sessionId, 1)
+            .then((msgs) => {
+                if (cancelled) return;
+                const last = msgs[msgs.length - 1];
+                if (last) {
+                    const who = last.role === 'user' ? 'You' : 'Claude';
+                    const text = last.text.replace(/\s+/g, ' ').trim().slice(0, EXCERPT_LIMIT);
+                    setExcerpt(text ? `${who}: ${text}` : null);
+                }
+            })
+            .catch(() => { /* excerpt is best-effort; ignore failures */ });
+        return () => { cancelled = true; };
+    }, [machineId, dir, log.sessionId]);
 
     const copyId = React.useCallback(async () => {
         await Clipboard.setStringAsync(log.sessionId);
@@ -177,7 +185,7 @@ const SessionRow = React.memo(function SessionRow({
             <View style={{ flex: 1 }}>
                 <Text style={[styles.rowTitle, { color: theme.colors.text }]}>{log.sessionId.slice(0, 8)}</Text>
                 <Text style={[styles.rowSub, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                    {new Date(log.mtimeMs).toLocaleString()}
+                    {new Date(log.mtimeMs).toLocaleString()} · {timeAgo(log.mtimeMs)}
                 </Text>
                 {excerpt ? (
                     <Text style={[styles.rowExcerpt, { color: theme.colors.textSecondary }]} numberOfLines={2}>{excerpt}</Text>
