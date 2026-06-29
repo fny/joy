@@ -813,6 +813,16 @@ export interface JoyTasksInfo {
   total: number;  // launched in this batch
 }
 
+/**
+ * The agent's active goal (Claude's `/goal`), surfaced from the transcript's
+ * `goal_status` attachments. Present while a goal is in progress (met=false);
+ * cleared to null when the goal is met/cleared. The app shows a goal bar.
+ */
+export interface JoyGoalInfo {
+  condition: string; // the goal text the user set
+  since: number;     // epoch ms when this goal became active
+}
+
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
 export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
@@ -983,6 +993,11 @@ export class RelaySession {
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__compacting == null) return;
     await this.mergeMetadata({ joy__compacting: info });
+  }
+
+  async updateGoal(info: JoyGoalInfo | null): Promise<void> {
+    if (info == null && this.metadata?.joy__goal == null) return;
+    await this.mergeMetadata({ joy__goal: info });
   }
 
   /**
