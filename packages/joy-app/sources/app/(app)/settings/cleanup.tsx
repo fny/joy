@@ -17,7 +17,7 @@ import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatLastSeen } from '@/utils/sessionUtils';
 import type { Machine } from '@/sync/storageTypes';
 import { Modal } from '@/modal';
-import { joyKillAllSessions, sessionDelete, machineDelete } from '@/sync/ops';
+import { joyKillAllSessions, sessionKill, sessionDelete, machineDelete } from '@/sync/ops';
 
 function folderName(path: string): string {
     const segs = path.split(/[\\/]/).filter(Boolean);
@@ -50,6 +50,31 @@ export default React.memo(function CleanupScreen() {
         }
         return map;
     }, [sessions]);
+
+    // machineId → detached session ids (Claude exited, the tmux pane lingers).
+    const detachedByMachine = React.useMemo(() => {
+        const map = new Map<string, string[]>();
+        for (const s of sessions) {
+            const mid = s.metadata?.machineId;
+            if (!mid || s.metadata?.joy__source !== 'joy-tmux') continue;
+            if (s.metadata?.joy__state !== 'detached') continue;
+            map.set(mid, [...(map.get(mid) ?? []), s.id]);
+        }
+        return map;
+    }, [sessions]);
+
+    const onCleanDetached = React.useCallback((machineId: string, ids: string[]) => {
+        Modal.confirm(
+            'Clean up detached sessions?',
+            `Ends ${ids.length} detached session${ids.length === 1 ? '' : 's'} (Claude already exited) and closes their lingering tmux panes. Records stay in history.`,
+            { confirmText: 'Clean up', destructive: true },
+        ).then(async (ok) => {
+            if (!ok) return;
+            let n = 0;
+            for (const id of ids) { const r = await sessionKill(id); if (r.success) n++; }
+            Modal.alert('Cleaned up', `Closed ${n} detached pane${n === 1 ? '' : 's'}.`, [{ text: 'OK' }]);
+        });
+    }, []);
 
     const onDeleteFolder = React.useCallback((folder: string, ids: string[]) => {
         Modal.confirm(
@@ -106,7 +131,9 @@ export default React.memo(function CleanupScreen() {
                     key={machine.id}
                     machine={machine}
                     folders={[...(byMachine.get(machine.id) ?? new Map<string, string[]>()).entries()].sort((a, b) => a[0].localeCompare(b[0]))}
+                    detached={detachedByMachine.get(machine.id) ?? []}
                     onDeleteFolder={onDeleteFolder}
+                    onCleanDetached={onCleanDetached}
                     onPurgeMachine={onPurgeMachine}
                     onDeleteMachine={onDeleteMachine}
                 />
@@ -121,13 +148,17 @@ export default React.memo(function CleanupScreen() {
 const MachineCleanupGroup = React.memo(function MachineCleanupGroup({
     machine,
     folders,
+    detached,
     onDeleteFolder,
+    onCleanDetached,
     onPurgeMachine,
     onDeleteMachine,
 }: {
     machine: Machine;
     folders: [string, string[]][];
+    detached: string[];
     onDeleteFolder: (folder: string, ids: string[]) => void;
+    onCleanDetached: (machineId: string, ids: string[]) => void;
     onPurgeMachine: (machineId: string, online: boolean) => void;
     onDeleteMachine: (machineId: string, name: string) => void;
 }) {
@@ -153,6 +184,16 @@ const MachineCleanupGroup = React.memo(function MachineCleanupGroup({
                     showChevron={false}
                 />
             ))}
+            {detached.length > 0 && (
+                <Item
+                    title="Clean up detached sessions"
+                    subtitle="End sessions whose Claude exited and close their lingering panes"
+                    detail={`${detached.length}`}
+                    icon={<Ionicons name="unlink-outline" size={29} color="#FF9500" />}
+                    onPress={() => onCleanDetached(machine.id, detached)}
+                    showChevron={false}
+                />
+            )}
             <Item
                 title="Purge and kill all sessions"
                 subtitle="Kill every live session, then permanently delete all records for this machine"

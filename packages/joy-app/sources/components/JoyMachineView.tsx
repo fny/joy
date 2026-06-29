@@ -230,8 +230,8 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     showChevron={false}
                 />
                 <Item
-                    title="Purge all Sessions"
-                    subtitle="Permanently delete every joy session record for this machine"
+                    title="Purge and kill all Sessions"
+                    subtitle="Kill every live session, then permanently delete all records for this machine"
                     icon={purging
                         ? <ActivityIndicator />
                         : <Ionicons name="nuclear-outline" size={29} color="#FF3B30" />}
