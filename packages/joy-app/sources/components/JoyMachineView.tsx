@@ -206,7 +206,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     title="Usage & Cost"
                     subtitle="Token usage and cost for this machine"
                     icon={<Ionicons name="flame-outline" size={29} color="#FF6B35" />}
-                    onPress={() => router.push('/settings/usage')}
+                    onPress={() => router.push(`/settings/usage/${machineId}` as any)}
                 />
             </ItemGroup>
 

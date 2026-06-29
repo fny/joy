@@ -156,6 +156,18 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/usage/index"
+                options={{
+                    headerTitle: 'Usage',
+                }}
+            />
+            <Stack.Screen
+                name="settings/usage/[id]"
+                options={{
+                    headerTitle: 'Usage',
+                }}
+            />
+            <Stack.Screen
                 name="settings/cleanup"
                 options={{
                     headerTitle: 'Cleanup',
