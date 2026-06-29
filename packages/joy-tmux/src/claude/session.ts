@@ -193,6 +193,32 @@ export function flattenForMatch(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Detect a background-task lifecycle event in a parsed transcript entry — the
+ * SINGLE source of truth for both the live tail (#onTranscriptEntry) and the
+ * derive-from-transcript reconcile (#deriveBgTasks), so the two can't drift.
+ *   launch:   a tool result with backgroundTaskId (run_in_background bash) or
+ *             { isAsync, agentId } (async Agent) — keyed by that id.
+ *   complete: a <task-notification> user entry carrying the same id in <task-id>.
+ * Mirrors the gating in #onTranscriptEntry (user role, non-meta).
+ */
+export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: string } | null {
+  const msg = entry?.message as Record<string, unknown> | undefined;
+  if (!msg || String(msg.role || "") !== "user" || entry?.isMeta) return null;
+  const content = msg.content;
+  if (typeof content !== "string") {
+    const tur = entry?.toolUseResult as Record<string, unknown> | undefined;
+    if (tur && typeof tur.backgroundTaskId === "string") return { kind: "launch", id: tur.backgroundTaskId };
+    if (tur && tur.isAsync === true && typeof tur.agentId === "string") return { kind: "launch", id: tur.agentId };
+    return null;
+  }
+  if (content.includes("<task-notification>")) {
+    const m = /<task-id>([^<]+)<\/task-id>/.exec(content);
+    if (m) return { kind: "complete", id: m[1] };
+  }
+  return null;
+}
+
 /** Slim wire shape pushed to the app (joy__queue) and returned by queue ops. */
 export interface QueuedMessage {
   id: string;
@@ -285,6 +311,11 @@ export class Session {
   // (0/3,1/3,2/3,null) as a separate metadata RPC let an intermediate value win
   // and the final `null` lose under restart contention, leaving a stuck "2/3".
   #tasksPushTimer: ReturnType<typeof setTimeout> | null = null;
+  // Low-frequency self-heal: while a background-task count is outstanding,
+  // periodically re-derive it from the transcript so an orphaned/stuck count
+  // (a missed completion, a lost push) clears itself without a daemon restart.
+  // Gated on an outstanding count, so idle sessions do zero work.
+  #taskReconcileTimer: ReturnType<typeof setInterval> | null = null;
   // The (retrying) archive POST fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -499,9 +530,20 @@ export class Session {
     // server-side. The in-memory backstop timer is also gone, so without this the
     // banner could stick until the next compaction. (Idempotent — no-op if unset.)
     if (!this.#compacting) void rs.updateCompacting(null);
-    // Clear a stale background-task count after a daemon restart (in-memory
-    // #bgTasks rebuilt empty while joy__tasks persisted server-side).
-    if (this.#bgTasks.size === 0) void rs.updateTasks(null);
+    // Reconcile the background-task count against the transcript (the truth),
+    // not a blanket clear: after a daemon restart #bgTasks is rebuilt empty
+    // while joy__tasks persisted server-side, so re-derive the real outstanding
+    // set — this both clears orphans AND preserves a genuinely still-running
+    // task's count (which a blanket clear would have wrongly dropped). Runs on
+    // every (re)attach — recovery and plain reconnect both heal.
+    this.#reconcileBgTasks();
+    // Low-frequency self-heal while a count is outstanding, so a stuck count
+    // clears without waiting for a restart/reconnect (no-op when none outstanding).
+    if (this.#taskReconcileTimer) clearInterval(this.#taskReconcileTimer);
+    this.#taskReconcileTimer = setInterval(() => {
+      if (this.status === "ended" || this.#bgTasks.size === 0) return;
+      this.#reconcileBgTasks();
+    }, 60_000);
     // Reflect the current queue on (re)attach — recovery/reconnect included.
     void rs.updateQueue(this.queueState());
 
@@ -578,6 +620,7 @@ export class Session {
     if (this.#retry?.timer) clearTimeout(this.#retry.timer);
     this.#retry = null;
     if (this.#tasksPushTimer) { clearTimeout(this.#tasksPushTimer); this.#tasksPushTimer = null; }
+    if (this.#taskReconcileTimer) { clearInterval(this.#taskReconcileTimer); this.#taskReconcileTimer = null; }
     this.#turn5xxStatus = null;
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
@@ -1585,6 +1628,47 @@ export class Session {
     }, 150);
   }
 
+  /** Replay the whole transcript through bgTaskEvent to compute the TRUE
+   *  background-task state — outstanding ids + the current batch's done/total —
+   *  using the same reset-on-empty-batch semantics as the live #taskLaunched/
+   *  #taskCompleted. The source of truth for the reconcile below. */
+  #deriveBgTasks(): { outstanding: Set<string>; total: number; done: number } {
+    const outstanding = new Set<string>();
+    let total = 0, done = 0;
+    if (!this.transcriptPath || !existsSync(this.transcriptPath)) return { outstanding, total, done };
+    let lines: string[];
+    try { lines = readFileSync(this.transcriptPath, "utf-8").split("\n"); } catch { return { outstanding, total, done }; }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let entry: unknown;
+      try { entry = JSON.parse(line); } catch { continue; }
+      const ev = bgTaskEvent(entry);
+      if (!ev) continue;
+      if (ev.kind === "launch") {
+        if (outstanding.has(ev.id)) continue;
+        if (outstanding.size === 0) { total = 0; done = 0; } // fresh batch (mirrors #taskLaunched)
+        outstanding.add(ev.id);
+        total++;
+      } else if (outstanding.delete(ev.id)) {
+        done++;
+      }
+    }
+    return { outstanding, total, done };
+  }
+
+  /** Re-derive the background-task state from the transcript and overwrite the
+   *  in-memory count + persisted joy__tasks with the truth. Fixes orphaned/stuck
+   *  counts (a completion the in-memory set missed — e.g. across a restart, a
+   *  dropped line, or a lost push) without a manual `joy restart`. Pushes the
+   *  reconciled value directly (clearing to null when nothing is outstanding). */
+  #reconcileBgTasks(): void {
+    const d = this.#deriveBgTasks();
+    this.#bgTasks = d.outstanding;
+    this.#bgTotal = d.total;
+    this.#bgDone = d.done;
+    void this.#relay?.updateTasks(d.outstanding.size > 0 ? { done: d.done, total: d.total } : null);
+  }
+
   /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
    *  status and arm a backstop timeout in case the compact_boundary record that
    *  normally clears it never arrives (compaction can run for minutes — see the
@@ -1746,9 +1830,8 @@ export class Session {
         // Both complete via <task-notification><task-id>…</task-id> where the
         // task-id is that same backgroundTaskId / agentId, so tracking the id
         // here is enough for #taskCompleted (below) to clear it.
-        const tur = entry.toolUseResult as Record<string, unknown> | undefined;
-        if (tur && typeof tur.backgroundTaskId === "string") this.#taskLaunched(tur.backgroundTaskId);
-        else if (tur && tur.isAsync === true && typeof tur.agentId === "string") this.#taskLaunched(tur.agentId);
+        const launch = bgTaskEvent(entry);
+        if (launch?.kind === "launch") this.#taskLaunched(launch.id);
         // Emit tool-call-end for tool results. NOT gated on this.#turn: the turn
         // may have been nulled (turn_duration/error) before the result lands, and
         // gating used to drop the end → a tool card stuck "running". Use the turn
@@ -1771,10 +1854,8 @@ export class Session {
       // the same id when a run_in_background bash / background agent reaches a
       // terminal state. Clear it from the live count (any terminal status, so a
       // failed/killed task can't leak a stuck "working").
-      if (content.includes("<task-notification>")) {
-        const m = /<task-id>([^<]+)<\/task-id>/.exec(content);
-        if (m) this.#taskCompleted(m[1]);
-      }
+      const completed = bgTaskEvent(entry);
+      if (completed?.kind === "complete") this.#taskCompleted(completed.id);
       // Command/bash machinery from the CLI generates a flood of synthetic
       // user entries. The user's typed command already reaches the relay as
       // their own message (so it shows as a plain outbound message — no chip),

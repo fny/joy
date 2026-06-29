@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -451,4 +451,59 @@ test("compacting: PreCompact mark sets the banner, compact_boundary clears it", 
   // Claude writes the compact_boundary marker on completion → clears the banner.
   s.onTranscriptEntry({ type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "auto" } } as any);
   expect(compactingCalls.at(-1)).toBe(null);
+});
+
+// ── bgTaskEvent: launch/complete detection (single source of truth) ──────────
+const userEntry = (extra: Record<string, unknown>) => ({ message: { role: "user", ...extra } });
+
+test("bgTaskEvent: run_in_background launch (backgroundTaskId)", () => {
+  const e = { message: { role: "user", content: [{ type: "tool_result" }] }, toolUseResult: { backgroundTaskId: "bg-1" } };
+  expect(bgTaskEvent(e)).toEqual({ kind: "launch", id: "bg-1" });
+});
+
+test("bgTaskEvent: async agent launch (isAsync + agentId)", () => {
+  const e = { message: { role: "user", content: [{ type: "tool_result" }] }, toolUseResult: { isAsync: true, agentId: "ag-9" } };
+  expect(bgTaskEvent(e)).toEqual({ kind: "launch", id: "ag-9" });
+});
+
+test("bgTaskEvent: completion via <task-notification>", () => {
+  const e = userEntry({ content: "<task-notification><task-id>bg-1</task-id> done</task-notification>" });
+  expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "bg-1" });
+});
+
+test("bgTaskEvent: ignores non-task entries, meta, and non-user roles", () => {
+  expect(bgTaskEvent(userEntry({ content: "hello" }))).toBeNull();                       // plain user text
+  expect(bgTaskEvent({ message: { role: "assistant", content: "hi" } })).toBeNull();      // assistant
+  expect(bgTaskEvent({ message: { role: "user", content: "x" }, isMeta: true })).toBeNull(); // meta
+  expect(bgTaskEvent({ message: { role: "user", content: [{ type: "tool_result" }] } })).toBeNull(); // result, no bg
+  expect(bgTaskEvent({})).toBeNull();
+});
+
+// Pure replay of the same reset-on-empty-batch semantics #deriveBgTasks uses,
+// so the count derived from a transcript matches the live tally.
+function replay(events: Array<{ kind: "launch" | "complete"; id: string }>) {
+  const outstanding = new Set<string>();
+  let total = 0, done = 0;
+  for (const ev of events) {
+    if (ev.kind === "launch") {
+      if (outstanding.has(ev.id)) continue;
+      if (outstanding.size === 0) { total = 0; done = 0; }
+      outstanding.add(ev.id); total++;
+    } else if (outstanding.delete(ev.id)) { done++; }
+  }
+  return { outstanding: [...outstanding], total, done };
+}
+
+test("derive semantics: stuck batch when a completion never arrives", () => {
+  // two launched, one completed → 1/2 outstanding (the orphan shape)
+  expect(replay([
+    { kind: "launch", id: "a" }, { kind: "launch", id: "b" }, { kind: "complete", id: "a" },
+  ])).toEqual({ outstanding: ["b"], total: 2, done: 1 });
+});
+
+test("derive semantics: a fully-drained batch clears (next launch resets the count)", () => {
+  expect(replay([
+    { kind: "launch", id: "a" }, { kind: "complete", id: "a" },
+    { kind: "launch", id: "b" },
+  ])).toEqual({ outstanding: ["b"], total: 1, done: 0 });
 });
