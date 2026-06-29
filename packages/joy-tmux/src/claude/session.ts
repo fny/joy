@@ -314,7 +314,7 @@ export class Session {
   // backfill (snapped to a turn boundary so we don't replay a partial turn).
   #transcriptStartOffset = 0;
   #delivery: DeliveryState | null = null;
-  #pendingAttachments: Promise<Uint8Array | null>[] = [];
+  #pendingAttachments: Promise<{ bytes: Uint8Array | null; name?: string }>[] = [];
   // The most recent `!cmd` command, captured from <bash-input> so it can head
   // the bash-output card.
   #pendingBashCmd?: string;
@@ -502,8 +502,12 @@ export class Session {
     rs.onFileEvent = (ev) => {
       if (!this.#deps.relayClient) return;
       const { sessionKey, variant } = rs.encryptionMaterial;
+      // Carry the original filename alongside the bytes so non-image files keep
+      // a meaningful name when written to cwd (images get a paste-* name).
       this.#pendingAttachments.push(
-        this.#deps.relayClient.downloadAndDecryptAttachment(rs.relaySessionId, ev.ref, sessionKey, variant),
+        this.#deps.relayClient
+          .downloadAndDecryptAttachment(rs.relaySessionId, ev.ref, sessionKey, variant)
+          .then((bytes) => ({ bytes, name: ev.name })),
       );
     };
 
@@ -1144,9 +1148,9 @@ export class Session {
     if (drained.length > 0) {
       const results = await Promise.all(drained);
       const paths: string[] = [];
-      for (const bytes of results) {
-        if (!bytes) continue;
-        const refPath = writeAttachmentToCwd(this.cwd, bytes);
+      for (const item of results) {
+        if (!item.bytes) continue;
+        const refPath = writeAttachmentToCwd(this.cwd, item.bytes, item.name);
         if (refPath) paths.push(refPath);
       }
       if (paths.length > 0) {

@@ -1,18 +1,18 @@
-// Image attachment helpers.
+// File attachment helpers.
 //
-// When the app sends an image alongside a chat message, joy-tmux:
+// When the app sends a file alongside a chat message, joy-tmux:
 //   1. Downloads + decrypts the blob via the relay (see relay.ts)
-//   2. Validates the bytes are a supported image format (sniffMimeAndExt)
-//   3. Writes the file to the session's cwd with a paste-* filename
-//   4. Appends the bare path to the chat text before piping into tmux
+//   2. Writes the file to the session's cwd
+//   3. Appends the bare path to the chat text before piping into tmux
 //
-// Validation mirrors happy-cli's detectClaudeImageMime: only PNG / JPEG /
-// GIF / WEBP, sniffed from magic bytes rather than trusting the wire
-// mimeType (iOS picker reports things like image/heic or empty strings,
-// and Claude's API rejects unknown media types with 400).
+// Images (PNG / JPEG / GIF / WEBP, sniffed from magic bytes rather than
+// trusting the wire mimeType — iOS reports image/heic or empty strings) get a
+// paste-* filename, mirroring happy-cli's detectClaudeImageMime. Any other
+// file type keeps its original (sanitized) name so the agent can read or
+// reference it by a meaningful path.
 
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, existsSync } from "node:fs";
+import { join, basename, extname } from "node:path";
 import { randomBytes } from "node:crypto";
 
 export type ClaudeImageMime = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
@@ -56,15 +56,41 @@ export function formatPasteFilename(ext: string, at: Date = new Date()): string 
 }
 
 /**
- * Decode + validate + write an image attachment into the session's cwd.
- * Returns the relative path (e.g. `./paste-20260608-134523-a3f9.png`)
- * suitable for appending to a chat message, or null if the bytes don't
- * look like a supported image format.
+ * Sanitize a user-supplied filename to a safe basename inside `cwd`, avoiding
+ * collisions with existing files. basename() drops any directory component;
+ * control characters (code points below 0x20) are stripped so the write stays
+ * a single safe entry in cwd. Falls back to a paste-* name when nothing usable
+ * remains.
  */
-export function writeAttachmentToCwd(cwd: string, bytes: Uint8Array): string | null {
+export function safeAttachmentFilename(cwd: string, name: string | undefined): string {
+  let base = Array.from(name ? basename(name) : "")
+    .filter((c) => c.charCodeAt(0) >= 0x20)
+    .join("")
+    .trim();
+  if (!base || base === "." || base === "..") {
+    base = formatPasteFilename("bin");
+  }
+  // Don't clobber an existing file: insert a short id before the extension.
+  if (existsSync(join(cwd, base))) {
+    const ext = extname(base);
+    const stem = ext ? base.slice(0, -ext.length) : base;
+    base = `${stem}-${randomBytes(2).toString("hex")}${ext}`;
+  }
+  return base;
+}
+
+/**
+ * Decode + write a file attachment into the session's cwd. Returns the relative
+ * path (e.g. `./paste-20260608-134523-a3f9.png` for images, or `./report.pdf`
+ * for other files) suitable for appending to a chat message. Returns null only
+ * when there are no bytes to write.
+ */
+export function writeAttachmentToCwd(cwd: string, bytes: Uint8Array, name?: string): string | null {
+  if (bytes.length === 0) return null;
   const sniffed = sniffMimeAndExt(bytes);
-  if (!sniffed) return null;
-  const filename = formatPasteFilename(sniffed.ext);
+  // Known image format → paste-* filename (keeps the established convention).
+  // Anything else → keep the original (sanitized) name.
+  const filename = sniffed ? formatPasteFilename(sniffed.ext) : safeAttachmentFilename(cwd, name);
   const absPath = join(cwd, filename);
   writeFileSync(absPath, bytes);
   // Bare relative path on its own line, as agreed: claude code interactive

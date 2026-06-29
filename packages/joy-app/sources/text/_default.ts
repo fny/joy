@@ -269,8 +269,8 @@ export const en = {
         disableAnalytics: 'Disable Analytics',
         analyticsDisabled: 'All tracking and telemetry disabled',
         analyticsEnabled: 'Anonymous usage analytics active',
-        imageUpload: 'Image Upload',
-        imageUploadSubtitle: 'Attach images to messages for Claude to analyze',
+        imageUpload: 'File Attachments',
+        imageUploadSubtitle: 'Attach files of any type to messages for Claude',
     },
 
     imageUpload: {

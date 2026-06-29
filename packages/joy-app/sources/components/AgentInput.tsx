@@ -1343,8 +1343,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         })}
                                     >
                                         <Ionicons
-                                            name="image-outline"
-                                            size={16}
+                                            name="attach-outline"
+                                            size={18}
                                             color={(props.selectedImages?.length ?? 0) > 0
                                                 ? theme.colors.radio.active
                                                 : theme.colors.button.secondary.tint}
