@@ -124,7 +124,6 @@ class Sync {
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
-    private sessionDataKeys = new Map<string, Uint8Array>(); // Store session data encryption keys internally
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
     private settingsSync: InvalidateSync;
@@ -302,6 +301,10 @@ class Sync {
         // injected client-side; never fetch/clobber it.
         if (isDemoSession(sessionId)) return;
         this.getMessagesSync(sessionId).invalidate();
+
+        // Mark this session most-recently-viewed; unloads stale background
+        // sessions' messages when limitSessionMemory is on (memory).
+        storage.getState().noteSessionVisible(sessionId);
 
         // Also invalidate git status sync for this session
         gitStatusSync.getSync(sessionId).invalidate();

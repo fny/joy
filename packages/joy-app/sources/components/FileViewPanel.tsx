@@ -15,6 +15,7 @@ import { Modal } from '@/modal';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { layout } from '@/components/layout';
+import { useActiveInterval } from '@/hooks/useActiveInterval';
 
 interface FileViewPanelProps {
     sessionId: string;
@@ -202,22 +203,21 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         return () => { cancelled = true; };
     }, [sessionId, filePath]);
 
-    // Poll for external changes every 5s
-    React.useEffect(() => {
-        if (fileState.kind !== 'loaded' || !fileState.originalHash) return;
-        const originalHash = fileState.originalHash;
-
-        const interval = setInterval(async () => {
+    // Poll for external changes every 5s — but ONLY while the screen is focused
+    // and the app is foregrounded (useActiveInterval), so a backgrounded/locked
+    // device isn't re-reading the file + hashing it every 5s (battery).
+    const originalHash = fileState.kind === 'loaded' ? fileState.originalHash : null;
+    useActiveInterval(() => {
+        if (!originalHash) return;
+        void (async () => {
             const content = await readFileContent(sessionId, filePath);
             if (!content) return;
             const currentHash = await computeSHA256(content);
             if (currentHash !== originalHash) {
                 setExternalChange(content);
             }
-        }, 5000);
-
-        return () => clearInterval(interval);
-    }, [sessionId, filePath, fileState]);
+        })();
+    }, 5000, !!originalHash);
 
     const handleReload = React.useCallback(() => {
         if (!externalChange) return;
