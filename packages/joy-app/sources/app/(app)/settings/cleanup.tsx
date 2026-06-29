@@ -154,8 +154,8 @@ const MachineCleanupGroup = React.memo(function MachineCleanupGroup({
                 />
             ))}
             <Item
-                title="Purge all sessions"
-                subtitle="Delete every joy-tmux session record for this machine"
+                title="Purge and kill all sessions"
+                subtitle="Kill every live session, then permanently delete all records for this machine"
                 icon={<Ionicons name="nuclear-outline" size={29} color="#FF3B30" />}
                 onPress={() => onPurgeMachine(machine.id, online)}
                 showChevron={false}
