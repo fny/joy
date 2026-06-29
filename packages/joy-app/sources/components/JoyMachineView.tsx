@@ -19,7 +19,11 @@ import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { Modal } from '@/modal';
+import * as Clipboard from 'expo-clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete } from '@/sync/ops';
+
+// Bytes → "X.X GB" for the system readouts.
+const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
 
 type JoyStatus = {
     ok?: boolean;
@@ -54,6 +58,11 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         const plugins = new Set(machine?.metadata?.pluginSlashCommands ?? []);
         return all.filter((c) => !plugins.has(c)).length;
     }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands, includePluginCommands]);
+
+    const copyMachineId = React.useCallback(async () => {
+        await Clipboard.setStringAsync(machineId);
+        Modal.alert('Copied', 'Machine ID copied to clipboard');
+    }, [machineId]);
 
     const [status, setStatus] = React.useState<JoyStatus | null>(null);
     const [failed, setFailed] = React.useState(false);
@@ -176,8 +185,48 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                 <ItemGroup title="Machine">
                     <Item title="Host" subtitle={machine.metadata.host} icon={<Ionicons name="server-outline" size={29} color="#5856D6" />} showChevron={false} />
                     <Item title="Home" subtitle={machine.metadata.homeDir} icon={<Ionicons name="home-outline" size={29} color="#5856D6" />} showChevron={false} />
+                    <Item
+                        title="Machine ID"
+                        subtitle={machineId}
+                        subtitleLines={1}
+                        icon={<Ionicons name="finger-print-outline" size={29} color="#5856D6" />}
+                        onPress={copyMachineId}
+                    />
                 </ItemGroup>
             )}
+
+            {(() => {
+                const ds = machine?.daemonState as {
+                        cpu?: number; ram?: number; cpuCount?: number; cpuModel?: string; load?: number;
+                        memFree?: number; memTotal?: number; diskFree?: number; diskTotal?: number;
+                    } | null;
+                    if (!ds) return null;
+                    const memUsed = ds.memTotal != null && ds.memFree != null ? ds.memTotal - ds.memFree : null;
+                    return (
+                        <ItemGroup title="System" footer="Live host stats from the daemon heartbeat (~20s).">
+                            <Item
+                                title="CPU"
+                                detail={ds.cpu != null ? `${ds.cpu}%` : '—'}
+                                subtitle={[ds.cpuModel, ds.cpuCount != null ? `${ds.cpuCount} cores` : null, ds.load != null ? `load ${ds.load.toFixed(2)}` : null].filter(Boolean).join(' · ') || undefined}
+                                icon={<Ionicons name="speedometer-outline" size={29} color="#FF9500" />}
+                                showChevron={false}
+                            />
+                            <Item
+                                title="Memory"
+                                detail={ds.memTotal != null && memUsed != null ? `${gb(memUsed)} / ${gb(ds.memTotal)}` : (ds.ram != null ? `${ds.ram}%` : '—')}
+                                subtitle={ds.ram != null ? `${ds.ram}% used` : undefined}
+                                icon={<Ionicons name="hardware-chip-outline" size={29} color="#34C759" />}
+                                showChevron={false}
+                            />
+                            <Item
+                                title="Disk"
+                                detail={ds.diskTotal ? `${gb(ds.diskFree ?? 0)} / ${gb(ds.diskTotal)} free` : '—'}
+                                icon={<Ionicons name="save-outline" size={29} color="#5856D6" />}
+                                showChevron={false}
+                            />
+                        </ItemGroup>
+                    );
+                })()}
 
             <ItemGroup title="Slash commands" footer="Commands & skills joy-tmux found on this machine — personal, plugins, and every project it has scanned. They appear in the composer's / menu.">
                 <Item
