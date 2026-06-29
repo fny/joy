@@ -91,6 +91,8 @@ interface AgentInputProps {
     onPickImages?: () => void;
     onRemoveImage?: (id: string) => void;
     onAddImages?: (images: AttachmentPreview[]) => void;
+    /** Stash the current input as an on-device draft (queued at the bottom of the chat). */
+    onSaveDraft?: () => void;
 }
 
 const MAX_CONTEXT_SIZE = 190000;
@@ -1352,6 +1354,30 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </Pressable>
                                 )}
                                 </View>}
+
+                                {/* Stash current input as an on-device draft */}
+                                {props.onSaveDraft && hasText && (
+                                    <Pressable
+                                        onPress={props.onSaveDraft}
+                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+                                        accessibilityRole="button"
+                                        accessibilityLabel="Save draft"
+                                        style={(p) => ({
+                                            width: 32,
+                                            height: 32,
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            marginRight: 6,
+                                            opacity: p.pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        <Ionicons
+                                            name="create-outline"
+                                            size={20}
+                                            color={theme.colors.button.secondary.tint}
+                                        />
+                                    </Pressable>
+                                )}
 
                                 {/* Send/Voice button - aligned with first row */}
                                 <View
