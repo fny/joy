@@ -17,10 +17,7 @@ import { DevFab } from '@/components/dev/DevFab';
 import sodium from '@/encryption/libsodium.lib';
 import { View, Platform, AppState } from 'react-native';
 import { ModalProvider } from '@/modal';
-import { PostHogProvider } from 'posthog-react-native';
-import { tracking } from '@/track/tracking';
 import { syncRestore } from '@/sync/sync';
-import { useTrackScreens } from '@/track/useTrackScreens';
 import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
 import { CommandPaletteProvider } from '@/components/CommandPalette/CommandPaletteProvider';
@@ -362,9 +359,6 @@ export default function RootLayout() {
     }, [handleNotificationResponse, initState]);
 
 
-    // Track the screens
-    useTrackScreens()
-
     // Sync console output toggle from Dev screen
     const consoleLoggingEnabled = useLocalSetting('consoleLoggingEnabled');
     const devModeEnabled = __DEV__ || useLocalSetting('devModeEnabled');
@@ -417,13 +411,6 @@ export default function RootLayout() {
             </KeyboardProvider>
         </SafeAreaProvider>
     );
-    if (tracking) {
-        providers = (
-            <PostHogProvider client={tracking}>
-                {providers}
-            </PostHogProvider>
-        );
-    }
 
     return (
         <>

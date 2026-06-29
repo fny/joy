@@ -20,7 +20,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { isUsingCustomServer } from '@/sync/serverConfig';
-import { trackFriendsSearch } from '@/track';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 
 interface MainViewProps {
@@ -203,7 +202,6 @@ const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
         return (
             <Pressable
                 onPress={() => {
-                    trackFriendsSearch();
                     router.push('/friends/search');
                 }}
                 hitSlop={15}

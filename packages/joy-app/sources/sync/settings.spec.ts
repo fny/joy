@@ -181,7 +181,6 @@ describe('settings', () => {
                 showLineNumbersInToolViews: false,
                 wrapLinesInDiffs: true,
                 diffStyle: 'unified',
-                analyticsOptOut: false,
                 inferenceOpenAIKey: null,
                 experiments: false,
                 alwaysShowContextSize: false,
@@ -349,13 +348,13 @@ describe('settings', () => {
 
             const pendingChanges: Partial<Settings> = {
                 experiments: true,
-                analyticsOptOut: true,
+                alwaysShowContextSize: true,
             };
 
             const merged = applySettings(serverSettings, pendingChanges);
 
             expect(merged.experiments).toBe(true);
-            expect(merged.analyticsOptOut).toBe(true);
+            expect(merged.alwaysShowContextSize).toBe(true);
             expect(merged.viewInline).toBe(false);
         });
 
@@ -420,18 +419,18 @@ describe('settings', () => {
             const serverSettings = settingsParse({
                 viewInline: false,
                 experiments: false,
-                analyticsOptOut: false
+                alwaysShowContextSize: false
             });
 
             const pendingChanges: Partial<Settings> = {
                 viewInline: true,
-                analyticsOptOut: true
+                alwaysShowContextSize: true
             };
 
             const merged = applySettings(serverSettings, pendingChanges);
 
             expect(merged.viewInline).toBe(true);
-            expect(merged.analyticsOptOut).toBe(true);
+            expect(merged.alwaysShowContextSize).toBe(true);
             expect(merged.experiments).toBe(false);
         });
 

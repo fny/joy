@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { sync } from '@/sync/sync';
 import { sessionAllow, sessionDeny } from '@/sync/ops';
 import { storage } from '@/sync/storage';
-import { trackVoicePermissionResponse } from '@/track';
 import { getVoiceSession, isVoiceSessionStarted } from './RealtimeSession';
 import {
     getVoiceMessageCount,
@@ -80,10 +79,8 @@ export const realtimeClientTools = {
         try {
             if (decision === 'allow') {
                 await sessionAllow(sessionId, requestId);
-                trackVoicePermissionResponse(true);
             } else {
                 await sessionDeny(sessionId, requestId);
-                trackVoicePermissionResponse(false);
             }
             return "done [DO NOT say anything else, simply say 'done']";
         } catch (error) {

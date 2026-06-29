@@ -27,7 +27,6 @@ import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
-import { tracking } from '@/track';
 import { getVoiceMessageCount, getVoiceOnboardingPromptLoadCount } from '@/sync/persistence';
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
@@ -674,35 +673,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         if (realtimeStatus === 'disconnected' || realtimeStatus === 'error') {
             try {
                 const initialPrompt = voiceHooks.onVoiceStarted(sessionId);
-                const conversationId = await startRealtimeSession(sessionId, initialPrompt);
-                if (conversationId) {
-                    const hasPro = storage.getState().purchases.entitlements['pro'] ?? false;
-                    tracking?.capture('voice_session_started', {
-                        session_id: sessionId,
-                        elevenlabs_conversation_id: conversationId,
-                        has_pro: hasPro,
-                        onboarding_prompt_load_count: getVoiceOnboardingPromptLoadCount(),
-                        voice_message_count: getVoiceMessageCount(),
-                    });
-                }
+                await startRealtimeSession(sessionId, initialPrompt);
             } catch (error) {
                 console.error('Failed to start realtime session:', error);
                 Modal.alert(t('common.error'), t('errors.voiceSessionFailed'));
-                tracking?.capture('voice_session_error', {
-                    session_id: sessionId,
-                    elevenlabs_conversation_id: getCurrentVoiceConversationId(),
-                    error: error instanceof Error ? error.message : 'Unknown error',
-                });
             }
         } else if (realtimeStatus === 'connected') {
-            const conversationId = getCurrentVoiceConversationId();
-            const durationSeconds = getCurrentVoiceSessionDurationSeconds();
             await stopRealtimeSession();
-            tracking?.capture('voice_session_stopped', {
-                session_id: sessionId,
-                elevenlabs_conversation_id: conversationId,
-                ...(durationSeconds !== undefined ? { duration_seconds: durationSeconds } : {}),
-            });
 
             // Notify voice assistant about voice session stop
             voiceHooks.onVoiceStopped();

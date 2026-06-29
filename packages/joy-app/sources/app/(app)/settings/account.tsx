@@ -105,7 +105,6 @@ export default React.memo(() => {
     const auth = useAuth();
     const [showSecret, setShowSecret] = useState(false);
     const [copiedRecently, setCopiedRecently] = useState(false);
-    const [analyticsOptOut, setAnalyticsOptOut] = useSettingMutable('analyticsOptOut');
     const { connectAccount, isLoading: isConnecting } = useConnectAccount();
     const profile = useProfile();
     const currentPushDevice = useMemo(() => getCurrentPushDeviceMetadata(), []);
@@ -479,28 +478,6 @@ export default React.memo(() => {
                     </ItemGroup>
                 )}
 
-                {/* Analytics Section */}
-                <ItemGroup
-                    title={t('settingsAccount.privacy')}
-                    footer={t('settingsAccount.privacyDescription')}
-                >
-                    <Item
-                        title={t('settingsAccount.analytics')}
-                        subtitle={analyticsOptOut ? t('settingsAccount.analyticsDisabled') : t('settingsAccount.analyticsEnabled')}
-                        rightElement={
-                            <Switch
-                                value={!analyticsOptOut}
-                                onValueChange={(value) => {
-                                    const optOut = !value;
-                                    setAnalyticsOptOut(optOut);
-                                }}
-                                trackColor={{ false: '#767577', true: '#34C759' }}
-                                thumbColor="#FFFFFF"
-                            />
-                        }
-                        showChevron={false}
-                    />
-                </ItemGroup>
 
                 <ItemGroup
                     title="Push Notifications"

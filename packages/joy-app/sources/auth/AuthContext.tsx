@@ -5,7 +5,6 @@ import * as Updates from 'expo-updates';
 import { clearPersistence, loadRegisteredPushToken } from '@/sync/persistence';
 import { unregisterPushToken } from '@/sync/apiPush';
 import { Platform } from 'react-native';
-import { trackLogout } from '@/track';
 
 interface AuthContextType {
     isAuthenticated: boolean;
@@ -38,7 +37,6 @@ export function AuthProvider({ children, initialCredentials }: { children: React
     };
 
     const logout = async () => {
-        trackLogout();
         const registeredPushToken = credentials ? loadRegisteredPushToken() : null;
         if (credentials && registeredPushToken) {
             try {

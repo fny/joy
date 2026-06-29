@@ -2,7 +2,6 @@ import Constants from 'expo-constants';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 
 export interface AppConfig {
-    postHogKey?: string;
     revenueCatAppleKey?: string;
     revenueCatGoogleKey?: string;
     revenueCatStripeKey?: string;
@@ -81,10 +80,6 @@ export function loadAppConfig(): AppConfig {
     if (process.env.EXPO_PUBLIC_REVENUE_CAT_STRIPE && config.revenueCatStripeKey !== process.env.EXPO_PUBLIC_REVENUE_CAT_STRIPE) {
         console.log('[loadAppConfig] Override revenueCatStripeKey from EXPO_PUBLIC_REVENUE_CAT_STRIPE');
         config.revenueCatStripeKey = process.env.EXPO_PUBLIC_REVENUE_CAT_STRIPE;
-    }
-    if (process.env.EXPO_PUBLIC_POSTHOG_KEY && config.postHogKey !== process.env.EXPO_PUBLIC_POSTHOG_KEY) {
-        console.log('[loadAppConfig] Override postHogKey from EXPO_PUBLIC_POSTHOG_KEY');
-        config.postHogKey = process.env.EXPO_PUBLIC_POSTHOG_KEY;
     }
     if (process.env.EXPO_PUBLIC_SERVER_URL && config.serverUrl !== process.env.EXPO_PUBLIC_SERVER_URL) {
         console.log('[loadAppConfig] Override serverUrl from EXPO_PUBLIC_SERVER_URL');

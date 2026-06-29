@@ -2,7 +2,6 @@ import * as React from 'react';
 import { View, TextInput, Text, TouchableOpacity } from 'react-native';
 import { RoundButton } from './RoundButton';
 import { useConnectTerminal } from '@/hooks/useConnectTerminal';
-import { trackConnectAttempt } from '@/track';
 import { Ionicons } from '@expo/vector-icons';
 import { t } from '@/text';
 
@@ -12,13 +11,11 @@ export const ConnectButton = React.memo(() => {
     const [showManualEntry, setShowManualEntry] = React.useState(false);
 
     const handleConnect = async () => {
-        trackConnectAttempt();
         connectTerminal();
     };
 
     const handleManualConnect = async () => {
         if (manualUrl.trim()) {
-            trackConnectAttempt();
             connectWithUrl(manualUrl.trim());
             setManualUrl('');
         }

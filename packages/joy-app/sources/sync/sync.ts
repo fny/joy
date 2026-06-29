@@ -19,18 +19,6 @@ import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
 import { applySettings, Settings, settingsDefaults, settingsParse, settingsToSyncPayload, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
-import {
-    initializeTracking,
-    trackGitHubConnected,
-    trackMessageSent,
-    tracking,
-    trackPaywallCancelled,
-    trackPaywallError,
-    trackPaywallPresented,
-    trackPaywallPurchased,
-    trackPaywallRestored,
-} from '@/track';
-import type { MessageSentSource } from '@/track';
 import { parseToken } from '@/utils/parseToken';
 import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
 import { getServerUrl } from './serverConfig';
@@ -87,7 +75,7 @@ type OutboxMessage = {
 
 type SendMessageOptions = {
     displayText?: string;
-    source?: MessageSentSource;
+    source?: 'chat' | 'new_session' | 'option' | 'question' | 'voice';
     /** Optional image attachments to send before the text message. */
     attachments?: AttachmentPreview[];
 };
@@ -290,16 +278,6 @@ class Sync {
 
         // Subscribe to updates
         this.subscribeToUpdates();
-
-        // Sync initial PostHog opt-out state with stored settings
-        if (tracking) {
-            const currentSettings = storage.getState().settings;
-            if (currentSettings.analyticsOptOut) {
-                tracking.optOut();
-            } else {
-                tracking.optIn();
-            }
-        }
 
         // Invalidate sync
         log.log('🔄 #init: Invalidating all syncs');
@@ -782,7 +760,6 @@ class Sync {
             localId,
             content: encryptedRawRecord
         });
-        trackMessageSent(source, session.metadata);
 
         this.getSendSync(sessionId).invalidate();
         this.maybeStartBackgroundSendWatchdog();
@@ -802,16 +779,6 @@ class Sync {
         // Save pending settings
         this.pendingSettings = { ...this.pendingSettings, ...delta };
         savePendingSettings(this.pendingSettings);
-
-        // Sync PostHog opt-out state if it was changed
-        if (tracking && 'analyticsOptOut' in delta) {
-            const currentSettings = storage.getState().settings;
-            if (currentSettings.analyticsOptOut) {
-                tracking.optOut();
-            } else {
-                tracking.optIn();
-            }
-        }
 
         // Invalidate settings sync
         this.settingsSync.invalidate();
@@ -899,13 +866,8 @@ class Sync {
         try {
             // Check if RevenueCat is initialized
             if (!this.revenueCatInitialized) {
-                const error = 'RevenueCat not initialized';
-                trackPaywallError(error, flow);
-                return { success: false, error };
+                return { success: false, error: 'RevenueCat not initialized' };
             }
-
-            // Track paywall presentation
-            trackPaywallPresented(flow);
 
             // Present the paywall (with flow custom variable if specified)
             const result = await RevenueCat.presentPaywall(
@@ -915,31 +877,23 @@ class Sync {
             // Handle the result
             switch (result) {
                 case PaywallResult.PURCHASED:
-                    trackPaywallPurchased(flow);
                     // Refresh customer info after purchase
                     await this.syncPurchases();
                     return { success: true, purchased: true };
                 case PaywallResult.RESTORED:
-                    trackPaywallRestored(flow);
                     // Refresh customer info after restore
                     await this.syncPurchases();
                     return { success: true, purchased: true };
                 case PaywallResult.CANCELLED:
-                    trackPaywallCancelled(flow);
                     return { success: true, purchased: false };
                 case PaywallResult.NOT_PRESENTED:
-                    trackPaywallError('Paywall not presented', flow);
                     return { success: false, error: 'Paywall not available on this platform' };
                 case PaywallResult.ERROR:
                 default:
-                    const errorMsg = 'Failed to present paywall';
-                    trackPaywallError(errorMsg, flow);
-                    return { success: false, error: errorMsg };
+                    return { success: false, error: 'Failed to present paywall' };
             }
         } catch (error: any) {
-            const errorMessage = error.message || 'Failed to present paywall';
-            trackPaywallError(errorMessage, flow);
-            return { success: false, error: errorMessage };
+            return { success: false, error: error.message || 'Failed to present paywall' };
         }
     }
 
@@ -1635,11 +1589,6 @@ class Sync {
                     // Update local storage with merged result at server's version
                     this.applyServerSettings(mergedSettings, data.currentVersion);
 
-                    // Sync tracking state with merged settings
-                    if (tracking) {
-                        mergedSettings.analyticsOptOut ? tracking.optOut() : tracking.optIn();
-                    }
-
                     // Log and retry
                     console.log('settings version-mismatch, retrying', {
                         serverVersion: data.currentVersion,
@@ -1691,15 +1640,6 @@ class Sync {
 
         // Apply settings to storage, re-layering any pending local changes on top
         this.applyServerSettings(parsedSettings, data.settingsVersion);
-
-        // Sync PostHog opt-out state with settings
-        if (tracking) {
-            if (parsedSettings.analyticsOptOut) {
-                tracking.optOut();
-            } else {
-                tracking.optIn();
-            }
-        }
     }
 
     private fetchProfile = async () => {
@@ -2387,7 +2327,6 @@ class Sync {
         } else if (updateData.body.t === 'update-account') {
             const accountUpdate = updateData.body;
             const currentProfile = storage.getState().profile;
-            const hadGitHub = !!currentProfile.github?.login;
 
             // Build updated profile with new data
             const updatedProfile: Profile = {
@@ -2402,9 +2341,6 @@ class Sync {
             // Apply the updated profile to storage
             storage.getState().applyProfile(updatedProfile);
 
-            if (!hadGitHub && updatedProfile.github?.login) {
-                trackGitHubConnected();
-            }
 
             // Handle settings updates (new for profile sync)
             if (accountUpdate.settings?.value) {
@@ -2862,9 +2798,6 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
         throw new Error(`Invalid secret key length: ${secretKey.length}, expected 32`);
     }
     const encryption = await Encryption.create(secretKey);
-
-    // Initialize tracking
-    initializeTracking(encryption.anonID);
 
     // Initialize socket connection
     const API_ENDPOINT = getServerUrl();
