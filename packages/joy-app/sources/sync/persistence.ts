@@ -125,17 +125,17 @@ export function loadThemePreference(): 'light' | 'dark' | 'adaptive' {
     return localSettingsDefaults.themePreference;
 }
 
-export function loadPaletteState(): { themePalette: string; customPalette: Record<string, string> | null; accentOverrides: Record<string, string> | null; fontOverride: string | null } {
+export function loadPaletteState(): { themePalette: string; themePaletteDark: string; customPalette: Record<string, string> | null; accentOverrides: Record<string, string> | null; fontOverride: string | null } {
     const localSettings = mmkv.getString('local-settings');
     if (localSettings) {
         try {
             const parsed = localSettingsParse(JSON.parse(localSettings));
-            return { themePalette: parsed.themePalette, customPalette: parsed.customPalette, accentOverrides: parsed.accentOverrides, fontOverride: parsed.fontOverride };
+            return { themePalette: parsed.themePalette, themePaletteDark: parsed.themePaletteDark, customPalette: parsed.customPalette, accentOverrides: parsed.accentOverrides, fontOverride: parsed.fontOverride };
         } catch (e) {
             console.error('Failed to parse local settings for palette', e);
         }
     }
-    return { themePalette: localSettingsDefaults.themePalette, customPalette: localSettingsDefaults.customPalette, accentOverrides: localSettingsDefaults.accentOverrides, fontOverride: localSettingsDefaults.fontOverride };
+    return { themePalette: localSettingsDefaults.themePalette, themePaletteDark: localSettingsDefaults.themePaletteDark, customPalette: localSettingsDefaults.customPalette, accentOverrides: localSettingsDefaults.accentOverrides, fontOverride: localSettingsDefaults.fontOverride };
 }
 
 export function loadPurchases(): Purchases {

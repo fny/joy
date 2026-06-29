@@ -9,6 +9,7 @@ import { ColorBox } from './ColorBox';
 import { useAppearanceHistory, captureAppearance } from './appearanceHistory';
 import {
     PALETTES,
+    DARK_PALETTES,
     PALETTE_FIELDS,
     type PaletteShellKey,
     DEFAULT_PALETTE_ID,
@@ -16,6 +17,7 @@ import {
     DEFAULT_SHELL,
     coerceCustomPalette,
     applyAppearance,
+    applyDarkAppearance,
     type Palette,
     type NamedPalette,
 } from '@/palettes';
@@ -37,8 +39,16 @@ function Swatches({ p }: { p: Pick<Palette, 'background' | 'surface' | 'accent' 
 // wrap it in an ItemList (settings) or a ScrollView (dev FAB panel).
 export const PaletteControls = React.memo(function PaletteControls() {
     const [selectedId, setSelectedId] = useLocalSettingMutable('themePalette');
+    const [darkId, setDarkId] = useLocalSettingMutable('themePaletteDark');
     const [storedCustom, setStoredCustom] = useLocalSettingMutable('customPalette');
     const [accentOverrides, setStoredAccents] = useLocalSettingMutable('accentOverrides');
+
+    // Dark palette selection is independent of the light one and applies to the
+    // 'dark' theme. Presets only (no custom-dark editor).
+    const selectDark = React.useCallback((id: string) => {
+        setDarkId(id);
+        applyDarkAppearance(id);
+    }, [setDarkId]);
 
     // Local editor state (raw text per field) so typing stays smooth; seeded
     // from the stored custom palette (or the custom default).
@@ -90,7 +100,7 @@ export const PaletteControls = React.memo(function PaletteControls() {
 
     return (
         <>
-            <ItemGroup title="Palette" footer="Re-skins background, surfaces, text and accent. Applies to the light theme — switch Appearance to Light to see it.">
+            <ItemGroup title="Light palettes" footer="Re-skins background, surfaces, text and accent for the light theme — switch Appearance to Light to see it.">
                 <Item
                     title="Default"
                     subtitle="Original theme"
@@ -120,6 +130,25 @@ export const PaletteControls = React.memo(function PaletteControls() {
                     icon={<Ionicons name="copy-outline" size={29} color="#8E8E93" />}
                     onPress={copyToCustom}
                 />
+            </ItemGroup>
+
+            <ItemGroup title="Dark palettes" footer="Re-skins the dark theme — switch Appearance to Dark to see it. Presets only.">
+                <Item
+                    title="Default"
+                    subtitle="Stock dark theme"
+                    icon={<Ionicons name="moon-outline" size={29} color="#8E8E93" />}
+                    selected={darkId === DEFAULT_PALETTE_ID}
+                    onPress={() => selectDark(DEFAULT_PALETTE_ID)}
+                />
+                {DARK_PALETTES.map((p: NamedPalette) => (
+                    <Item
+                        key={p.id}
+                        title={p.name}
+                        rightElement={<Swatches p={p} />}
+                        selected={darkId === p.id}
+                        onPress={() => selectDark(p.id)}
+                    />
+                ))}
             </ItemGroup>
 
             <ItemGroup title="Custom colors" footer="Enter hex like #fffdf8. Saves as the Custom palette; select Custom above to apply.">
