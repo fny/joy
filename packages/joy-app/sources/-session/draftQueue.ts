@@ -1,10 +1,11 @@
 import { create } from 'zustand';
+import { MMKV } from 'react-native-mmkv';
 
 // On-device draft queue. Drafts are messages the user has composed but not yet
 // sent — they live ONLY in the app (never propagated to joy-tmux) until the user
 // sends one, at which point it goes through the normal send path like any other
-// message. In-memory by design: a draft is a transient "queue this up to send
-// shortly" affordance, not durable state.
+// message. Persisted to MMKV (same manual hydrate/persist idiom as
+// useNewSessionDraft), so queued drafts survive a reload / app restart.
 
 export interface QueuedDraft {
     id: string;
@@ -18,29 +19,56 @@ interface DraftQueueState {
     remove: (sessionId: string, id: string) => void;
 }
 
-export const useDraftQueueStore = create<DraftQueueState>((set) => ({
-    bySession: {},
-    add: (sessionId, text) => set((s) => ({
-        bySession: {
-            ...s.bySession,
-            [sessionId]: [
-                ...(s.bySession[sessionId] ?? []),
-                { id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, text },
-            ],
-        },
-    })),
-    update: (sessionId, id, text) => set((s) => ({
-        bySession: {
-            ...s.bySession,
-            [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id ? { ...d, text } : d)),
-        },
-    })),
-    remove: (sessionId, id) => set((s) => ({
-        bySession: {
-            ...s.bySession,
-            [sessionId]: (s.bySession[sessionId] ?? []).filter((d) => d.id !== id),
-        },
-    })),
+const mmkv = new MMKV();
+const STORAGE_KEY = 'draft-queue';
+
+function load(): Record<string, QueuedDraft[]> {
+    const raw = mmkv.getString(STORAGE_KEY);
+    if (!raw) return {};
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function persist(bySession: Record<string, QueuedDraft[]>) {
+    mmkv.set(STORAGE_KEY, JSON.stringify(bySession));
+}
+
+export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
+    bySession: load(),
+    add: (sessionId, text) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: [
+                    ...(s.bySession[sessionId] ?? []),
+                    { id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, text },
+                ],
+            },
+        }));
+        persist(get().bySession);
+    },
+    update: (sessionId, id, text) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id ? { ...d, text } : d)),
+            },
+        }));
+        persist(get().bySession);
+    },
+    remove: (sessionId, id) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: (s.bySession[sessionId] ?? []).filter((d) => d.id !== id),
+            },
+        }));
+        persist(get().bySession);
+    },
 }));
 
 const EMPTY: QueuedDraft[] = [];

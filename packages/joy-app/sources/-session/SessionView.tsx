@@ -752,7 +752,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const composer = (
         <>
         {isJoyTmux && <JoyQueueStrip queue={joyQueue} />}
-        <DraftQueueStrip sessionId={sessionId} />
+        <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+            <DraftQueueStrip sessionId={sessionId} />
+        </CenteredInputWidth>
         <ChatComposer
             composerHandleRef={composerHandleRef}
             placeholder={t('session.inputPlaceholder')}
