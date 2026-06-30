@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { View, TextInput, Pressable } from 'react-native';
+import { View, TextInput, Pressable, Platform } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -12,12 +12,27 @@ import { useDrafts, useDraftQueueStore, type QueuedDraft } from './draftQueue';
 // Sending routes through the normal send path; nothing here reaches joy-tmux
 // until the user hits send.
 export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }: { sessionId: string }) {
+    const { theme } = useUnistyles();
     const drafts = useDrafts(sessionId);
+    const [collapsed, setCollapsed] = React.useState(false);
     if (drafts.length === 0) return null;
     return (
         <View style={styles.wrap}>
-            <Text style={styles.header}>{`DRAFTS · ${drafts.length}`}</Text>
-            {drafts.map((d) => (
+            <Pressable
+                onPress={() => setCollapsed((c) => !c)}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel={collapsed ? 'Expand drafts' : 'Collapse drafts'}
+                style={(p) => [styles.headerRow, { opacity: p.pressed ? 0.6 : 1 }]}
+            >
+                <Text style={styles.header}>{`DRAFTS · ${drafts.length}`}</Text>
+                <Ionicons
+                    name={collapsed ? 'chevron-up' : 'chevron-down'}
+                    size={14}
+                    color={theme.colors.textSecondary}
+                />
+            </Pressable>
+            {!collapsed && drafts.map((d) => (
                 <DraftRow key={d.id} sessionId={sessionId} draft={d} />
             ))}
         </View>
@@ -43,65 +58,81 @@ const DraftRow = React.memo(function DraftRow({ sessionId, draft }: { sessionId:
                 multiline
                 placeholder="Draft…"
                 placeholderTextColor={theme.colors.textSecondary as string}
-                style={[styles.input, { color: theme.colors.text, backgroundColor: theme.colors.input.background }]}
+                style={[
+                    styles.input,
+                    { color: theme.colors.text, backgroundColor: theme.colors.input.background },
+                    // Kill the browser focus ring on web (no border on active).
+                    Platform.OS === 'web' ? ({ outlineStyle: 'none' } as any) : null,
+                ]}
             />
-            <Pressable
-                onPress={() => remove(sessionId, draft.id)}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel="Delete draft"
-                style={(p) => [styles.iconButton, { opacity: p.pressed ? 0.6 : 1 }]}
-            >
-                <Ionicons name="trash-outline" size={18} color={theme.colors.textSecondary} />
-            </Pressable>
-            <Pressable
-                onPress={onSend}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel="Send draft"
-                style={(p) => [styles.iconButton, styles.sendButton, { backgroundColor: theme.colors.button.primary.background, opacity: p.pressed ? 0.7 : 1 }]}
-            >
-                <Ionicons name="arrow-up" size={16} color={theme.colors.button.primary.tint} />
-            </Pressable>
+            {/* Delete (×) and send (↑) sit inside the input box, bottom-right. */}
+            <View style={styles.actions}>
+                <Pressable
+                    onPress={() => remove(sessionId, draft.id)}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Delete draft"
+                    style={(p) => [styles.iconButton, { opacity: p.pressed ? 0.6 : 1 }]}
+                >
+                    <Ionicons name="close" size={20} color={theme.colors.textSecondary} />
+                </Pressable>
+                <Pressable
+                    onPress={onSend}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Send draft"
+                    style={(p) => [styles.iconButton, { opacity: p.pressed ? 0.5 : 1 }]}
+                >
+                    <Ionicons name="arrow-up" size={22} color={theme.colors.text} />
+                </Pressable>
+            </View>
         </View>
     );
 });
 
 const styles = StyleSheet.create((theme) => ({
     wrap: {
-        marginHorizontal: 8,
         marginBottom: 8,
         gap: 6,
+    },
+    headerRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        marginLeft: 8,
+        paddingVertical: 2,
     },
     header: {
         fontSize: 11,
         color: theme.colors.textSecondary,
-        marginLeft: 8,
         ...Typography.default('semiBold'),
     },
     row: {
-        flexDirection: 'row',
-        alignItems: 'flex-end',
-        gap: 8,
+        position: 'relative',
     },
     input: {
-        flex: 1,
-        minHeight: 38,
+        minHeight: 60, // ~two lines tall
         maxHeight: 120,
         borderRadius: 12,
         paddingHorizontal: 12,
         paddingVertical: 8,
+        paddingRight: 76, // clearance for the in-box action buttons
         fontSize: 15,
         ...Typography.default(),
     },
+    actions: {
+        position: 'absolute',
+        right: 6,
+        top: 0,
+        bottom: 0,
+        flexDirection: 'row',
+        alignItems: 'center', // vertically center within the box
+        gap: 4,
+    },
     iconButton: {
-        width: 32,
-        height: 32,
+        width: 30,
+        height: 30,
         alignItems: 'center',
         justifyContent: 'center',
-        marginBottom: 3,
-    },
-    sendButton: {
-        borderRadius: 16,
     },
 }));
