@@ -472,6 +472,21 @@ test("bgTaskEvent: completion via <task-notification>", () => {
   expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "bg-1" });
 });
 
+test("bgTaskEvent: completion via attachment-form notification (newer Claude)", () => {
+  // Newer Claude delivers the notification as an attachment entry, not a user
+  // message — attachment.prompt holds the payload. This is the common case that
+  // left counts stuck before the fix.
+  const e = {
+    type: "attachment",
+    attachment: {
+      type: "queued_command",
+      commandMode: "task-notification",
+      prompt: "<task-notification>\n<task-id>bg-7</task-id>\n<status>failed</status>\n</task-notification>",
+    },
+  };
+  expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "bg-7" });
+});
+
 test("bgTaskEvent: ignores non-task entries, meta, and non-user roles", () => {
   expect(bgTaskEvent(userEntry({ content: "hello" }))).toBeNull();                       // plain user text
   expect(bgTaskEvent({ message: { role: "assistant", content: "hi" } })).toBeNull();      // assistant
