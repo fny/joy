@@ -49,6 +49,33 @@ export function cwdToTranscriptDir(cwd: string): string {
   return join(homedir(), ".claude", "projects", cwd.replace(/\//g, "-"));
 }
 
+/**
+ * Resolve a possibly-short session id against a cwd's transcript dir. Claude's
+ * --resume needs the full session uuid, so callers accept a short id and expand
+ * it here: returns the full id for an exact transcript or a unique prefix of one;
+ * returns the input unchanged when nothing matches (callers then report
+ * "not found"); throws when a prefix is ambiguous, so we never resume the wrong
+ * conversation. An exact match wins even when it's also a prefix of a longer id.
+ */
+export function resolveTranscriptId(dir: string, id: string): string {
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return id; // dir missing → nothing to resolve; caller reports not-found
+  }
+  const ids = files
+    .filter((f) => f.endsWith(".jsonl"))
+    .map((f) => f.slice(0, -".jsonl".length));
+  if (ids.includes(id)) return id;
+  const matches = ids.filter((x) => x.startsWith(id));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new Error(`Session id "${id}" is ambiguous (${matches.length} matches) — provide more characters`);
+  }
+  return id;
+}
+
 /** Newest .jsonl in dir modified at/after minMtime, or null. */
 export function findLatestTranscript(dir: string, minMtime: number): string | null {
   try {

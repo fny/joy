@@ -14,7 +14,7 @@ import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
 import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
-import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset } from "../claude/transcript";
+import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureCompactHookSettings, daemonFilePath } from "../claude/compactHook";
@@ -282,6 +282,13 @@ export class SessionRegistry {
     if (opts.model && !SAFE_ID.test(opts.model)) throw new Error("invalid model");
     if (opts.fallbackModel && !SAFE_ID.test(opts.fallbackModel)) throw new Error("invalid fallbackModel");
     if (opts.resume_id && !SAFE_ID.test(opts.resume_id)) throw new Error("invalid resume_id");
+    // Accept a short id: Claude's --resume (and the existence check + live-collision
+    // guard below) all need the full session uuid, so expand a unique prefix to the
+    // full id here. An ambiguous prefix throws; nothing matched leaves it unchanged
+    // for the existence check below to report as "not found".
+    if (opts.resume_id) {
+      opts.resume_id = resolveTranscriptId(cwdToTranscriptDir(cwd), opts.resume_id);
+    }
     // Resume target must actually exist — Claude stores one transcript per
     // session id under the cwd's project dir. Validate up front so a bad id
     // surfaces as a clear "session not found" instead of Claude exiting and the
