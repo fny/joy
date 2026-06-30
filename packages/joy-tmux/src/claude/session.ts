@@ -204,6 +204,15 @@ export function flattenForMatch(text: string): string {
  * Mirrors the gating in #onTranscriptEntry (user role, non-meta).
  */
 export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: string } | null {
+  // complete: newer Claude delivers the <task-notification> as an `attachment`
+  // entry (attachment.prompt holds the payload, commandMode "task-notification"),
+  // NOT a user message — this is the common case and the one the original
+  // string-only check missed, leaving counts stuck. Check it first.
+  const att = entry?.attachment as Record<string, unknown> | undefined;
+  if (entry?.type === "attachment" && att && typeof att.prompt === "string" && att.prompt.includes("<task-notification>")) {
+    const m = /<task-id>([^<]+)<\/task-id>/.exec(att.prompt);
+    return m ? { kind: "complete", id: m[1] } : null;
+  }
   const msg = entry?.message as Record<string, unknown> | undefined;
   if (!msg || String(msg.role || "") !== "user" || entry?.isMeta) return null;
   const content = msg.content;
@@ -213,6 +222,7 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
     if (tur && tur.isAsync === true && typeof tur.agentId === "string") return { kind: "launch", id: tur.agentId };
     return null;
   }
+  // Older transcripts delivered the notification as a plain user-message string.
   if (content.includes("<task-notification>")) {
     const m = /<task-id>([^<]+)<\/task-id>/.exec(content);
     if (m) return { kind: "complete", id: m[1] };
