@@ -19,6 +19,9 @@ import { Modal } from '@/modal';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 
 const SCROLL_THRESHOLD = 300;
+// Count an item as "visible" once any sliver of it is on screen, so the prompt
+// stepper's notion of the topmost/bottommost visible item tracks the edges.
+const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 1 } as const;
 
 export const ChatList = React.memo((props: { session: Session }) => {
     const { messages, hasMoreOlder, isLoadingOlder } = useSessionMessages(props.session.id);
@@ -75,6 +78,12 @@ const ChatListInternal = React.memo((props: {
     // on every scroll frame (60Hz). Without this guard, the entire list
     // parent re-renders on every wheel tick.
     const showScrollButtonRef = React.useRef(false);
+    // The up button shows whenever we're not at the very top; mirrored to a ref
+    // so onScroll only re-renders on a threshold crossing (like the down button).
+    const [showUpButton, setShowUpButton] = React.useState(false);
+    const showUpButtonRef = React.useRef(false);
+    // Topmost visible index, tracked for the "previous prompt" jump button.
+    const visibleRangeRef = React.useRef<{ first: number; last: number }>({ first: 0, last: 0 });
     const session = useSession(props.sessionId);
 
     // Collapse agent work between a user prompt and the final answer.
@@ -94,6 +103,18 @@ const ChatListInternal = React.memo((props: {
     // maintainVisibleContentPosition.startRenderingFromBottom pin the newest at
     // the bottom — the v2 chat idiom (no `inverted`; see dev/inverted-list).
     const orderedItems = React.useMemo(() => [...displayItems].reverse(), [displayItems]);
+    // Indices of the user's own prompts within orderedItems (oldest→newest) —
+    // the jump targets for the prompt stepper. Mirrored to a ref so the stable
+    // viewability/scroll callbacks read the latest without re-subscribing.
+    const promptIndices = React.useMemo(() => {
+        const out: number[] = [];
+        orderedItems.forEach((it, i) => {
+            if (it.type === 'message' && it.message.kind === 'user-text') out.push(i);
+        });
+        return out;
+    }, [orderedItems]);
+    const promptIndicesRef = React.useRef<number[]>(promptIndices);
+    promptIndicesRef.current = promptIndices;
 
     // Tracks which groups are explicitly collapsed. Groups start collapsed;
     // pending approval groups are the only ones we auto-expand.
@@ -277,10 +298,44 @@ const ChatListInternal = React.memo((props: {
             showScrollButtonRef.current = next;
             setShowScrollButton(next);
         }
+        // Up button shows once we're scrolled down from the very top.
+        const up = contentOffset.y > SCROLL_THRESHOLD;
+        if (up !== showUpButtonRef.current) {
+            showUpButtonRef.current = up;
+            setShowUpButton(up);
+        }
     }, []);
 
     const scrollToBottom = useCallback(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
+    }, []);
+
+    // Track the visible index range for the "previous prompt" jump. Stable
+    // callback — FlashList forbids swapping onViewableItemsChanged mid-flight, so
+    // it reads everything via refs.
+    const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: Array<{ index: number | null }> }) => {
+        let first = Infinity;
+        let last = -Infinity;
+        for (const v of viewableItems) {
+            if (v.index == null) continue;
+            if (v.index < first) first = v.index;
+            if (v.index > last) last = v.index;
+        }
+        if (first === Infinity) return;
+        visibleRangeRef.current = { first, last };
+    }, []);
+
+    // Up: scroll to the nearest user prompt above the viewport (no-op if you're
+    // already above the first prompt).
+    const scrollToPrevPrompt = useCallback(() => {
+        const { first } = visibleRangeRef.current;
+        const idxs = promptIndicesRef.current;
+        let target = -1;
+        for (const i of idxs) {
+            if (i < first) target = i;
+            else break;
+        }
+        if (target >= 0) flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
     }, []);
 
     // Older history lives at the visual TOP now, so `onStartReached` fires when
@@ -334,22 +389,41 @@ const ChatListInternal = React.memo((props: {
                 renderItem={renderItem}
                 onScroll={handleScroll}
                 scrollEventThrottle={16}
+                onViewableItemsChanged={onViewableItemsChanged}
+                viewabilityConfig={VIEWABILITY_CONFIG}
                 ListHeaderComponent={<ListHeader isLoadingOlder={props.isLoadingOlder} />}
                 ListFooterComponent={<ListFooter sessionId={props.sessionId} />}
                 onStartReached={handleLoadOlder}
                 onStartReachedThreshold={0.5}
             />
-            {showScrollButton && (
-                <View style={styles.scrollButtonContainer}>
-                    <Pressable
-                        style={({ pressed }) => [
-                            styles.scrollButton,
-                            pressed ? styles.scrollButtonPressed : styles.scrollButtonDefault
-                        ]}
-                        onPress={scrollToBottom}
-                    >
-                        <Octicons name="arrow-down" size={14} color={theme.colors.text} />
-                    </Pressable>
+            {(showScrollButton || showUpButton) && (
+                <View style={styles.scrollButtonContainer} pointerEvents="box-none">
+                    {showScrollButton && (
+                        <Pressable
+                            style={({ pressed }) => [
+                                styles.scrollButton,
+                                pressed ? styles.scrollButtonPressed : styles.scrollButtonDefault
+                            ]}
+                            onPress={scrollToBottom}
+                            accessibilityRole="button"
+                            accessibilityLabel="Scroll to bottom"
+                        >
+                            <Octicons name="arrow-down" size={14} color={theme.colors.text} />
+                        </Pressable>
+                    )}
+                    {showUpButton && (
+                        <Pressable
+                            style={({ pressed }) => [
+                                styles.scrollButton,
+                                pressed ? styles.scrollButtonPressed : styles.scrollButtonDefault
+                            ]}
+                            onPress={scrollToPrevPrompt}
+                            accessibilityRole="button"
+                            accessibilityLabel="Previous prompt"
+                        >
+                            <Octicons name="arrow-up" size={14} color={theme.colors.text} />
+                        </Pressable>
+                    )}
                 </View>
             )}
         </View>
@@ -363,11 +437,11 @@ function isCollapsibleDisplayItem(item: DisplayItem): item is ToolGroupItem | Ex
 const styles = StyleSheet.create((theme) => ({
     scrollButtonContainer: {
         position: 'absolute',
-        left: 0,
-        right: 0,
+        right: 12,
         bottom: 12,
         alignItems: 'center',
-        justifyContent: 'center',
+        justifyContent: 'flex-end',
+        gap: 8,
         pointerEvents: 'box-none',
     },
     scrollButton: {
