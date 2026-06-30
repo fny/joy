@@ -59,7 +59,7 @@ export default {
     expo: {
         name,
         slug: "joy",
-        version: "1.7.0",
+        version: "1.0.0",
         runtimeVersion: "21",
         orientation: "default",
         icon: "./sources/assets/images/icon.png",
