@@ -57,6 +57,9 @@ const DEFAULT_COMMANDS: CommandItem[] = [
     { command: 'clear', description: 'Clear the conversation' },
     { command: 'mcp', description: 'Show connected MCP servers' },
     { command: 'skills', description: 'Show available skills' },
+    // joy-tmux daemon command (intercepted before Claude, so never reported in
+    // metadata.slashCommands) — surfaced here so it shows in autocomplete.
+    { command: 'steer', description: 'Send straight to the agent now, bypassing the queue' },
 ];
 
 // Command descriptions for known tools/commands
@@ -88,34 +91,34 @@ function getCommandsFromSession(sessionId: string): CommandItem[] {
 
     const commands: CommandItem[] = [...DEFAULT_COMMANDS];
 
-    // When plugin commands are excluded, drop the machine's plugin-only subset
-    // (plugin commands share the `name:name` shape with project-subfolder
-    // commands, so we filter by the explicit set the daemon reports, not by name).
-    let pluginSet: Set<string> | null = null;
-    if (!state.localSettings.includePluginCommands) {
-        const machineId = session.metadata.machineId;
-        const plugins = machineId ? state.machines[machineId]?.metadata?.pluginSlashCommands : undefined;
-        if (plugins && plugins.length > 0) pluginSet = new Set(plugins);
-    }
+    // Plugins are always excluded from the composer/autocomplete. We drop the
+    // machine's plugin-only subset (plugin commands share the `name:name` shape
+    // with project-subfolder commands, so we filter by the explicit set the
+    // daemon reports, not by name). Descriptions also ride on machine metadata.
+    const machineMeta = session.metadata.machineId ? state.machines[session.metadata.machineId]?.metadata : undefined;
+    const pluginSet = machineMeta?.pluginSlashCommands?.length ? new Set(machineMeta.pluginSlashCommands) : null;
+    const descriptions = machineMeta?.slashCommandDescriptions;
 
     // Add commands from metadata.slashCommands (filter with ignore list)
     if (session.metadata.slashCommands) {
         for (const cmd of session.metadata.slashCommands) {
             // Skip if in ignore list
             if (IGNORED_COMMANDS.includes(cmd)) continue;
-            // Skip plugin commands when excluded
+            // Skip plugin commands (always excluded)
             if (pluginSet?.has(cmd)) continue;
 
             // Check if it's already in default commands
             if (!commands.find(c => c.command === cmd)) {
                 commands.push({
                     command: cmd,
-                    description: COMMAND_DESCRIPTIONS[cmd]  // Optional description
+                    // Prefer the command's own frontmatter description, fall back
+                    // to the built-in description map.
+                    description: descriptions?.[cmd] ?? COMMAND_DESCRIPTIONS[cmd],
                 });
             }
         }
     }
-    
+
     return commands;
 }
 
