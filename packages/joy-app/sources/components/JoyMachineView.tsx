@@ -11,7 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
-import { useMachine, useLocalSetting, storage } from '@/sync/storage';
+import { useMachine, storage } from '@/sync/storage';
 import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatOSPlatform } from '@/utils/sessionUtils';
 import { apiSocket } from '@/sync/apiSocket';
@@ -50,14 +50,12 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     const router = useRouter();
     const machine = useMachine(machineId ?? '');
     const online = useMachineOnline(machine);
-    // Slash-command count, honoring the "plugin slash commands" toggle.
-    const includePluginCommands = useLocalSetting('includePluginCommands');
+    // Slash-command count — plugins are always excluded.
     const slashCommandCount = React.useMemo(() => {
         const all = machine?.metadata?.slashCommands ?? [];
-        if (includePluginCommands) return all.length;
         const plugins = new Set(machine?.metadata?.pluginSlashCommands ?? []);
         return all.filter((c) => !plugins.has(c)).length;
-    }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands, includePluginCommands]);
+    }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands]);
 
     const copyMachineId = React.useCallback(async () => {
         await Clipboard.setStringAsync(machineId);

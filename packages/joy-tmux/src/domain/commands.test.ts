@@ -28,8 +28,18 @@ describe("scanCommandsDir", () => {
     write(".claude/commands/test.md");
     write(".claude/commands/frontend/build.md");
     write(".claude/commands/notes.txt"); // ignored (not .md)
-    expect(scanCommandsDir(join(root, ".claude/commands")).sort())
+    expect(scanCommandsDir(join(root, ".claude/commands")).map((c) => c.name).sort())
       .toEqual(["deploy", "frontend:build", "test"]);
+  });
+
+  it("captures the frontmatter description when present", () => {
+    write(".claude/commands/deploy.md", "---\ndescription: Ship it\n---\nbody");
+    write(".claude/commands/plain.md", "no frontmatter");
+    const byName = Object.fromEntries(
+      scanCommandsDir(join(root, ".claude/commands")).map((c) => [c.name, c.description]),
+    );
+    expect(byName.deploy).toBe("Ship it");
+    expect(byName.plain).toBeUndefined();
   });
 
   it("returns [] for a missing dir", () => {
@@ -42,7 +52,7 @@ describe("scanSkillsDir", () => {
     write(".claude/skills/codex/SKILL.md", "---\nname: codex\ndescription: x\n---\nbody");
     write(".claude/skills/weird-dir/SKILL.md", "---\ndescription: no name here\n---\nbody");
     write(".claude/skills/notaskill/readme.md", "no manifest"); // skipped (no SKILL.md)
-    expect(scanSkillsDir(join(root, ".claude/skills")).sort())
+    expect(scanSkillsDir(join(root, ".claude/skills")).map((c) => c.name).sort())
       .toEqual(["codex", "weird-dir"]);
   });
 });
@@ -51,7 +61,7 @@ describe("scanProject", () => {
   it("merges commands + skills, deduped and sorted", () => {
     write(".claude/commands/deploy.md");
     write(".claude/skills/review/SKILL.md", "---\nname: review\n---");
-    expect(scanProject(root)).toEqual(["deploy", "review"]);
+    expect(scanProject(root).map((c) => c.name)).toEqual(["deploy", "review"]);
   });
 });
 
@@ -59,7 +69,7 @@ describe("scanPluginCommands", () => {
   it("namespaces plugin commands and skills as plugin:name", () => {
     write(".claude/plugins/marketplaces/official/plugins/hookify/commands/configure.md");
     write(".claude/plugins/marketplaces/official/plugins/hookify/skills/lint/SKILL.md", "---\nname: lint\n---");
-    expect(scanPluginCommands(join(root, ".claude/plugins")).sort())
+    expect(scanPluginCommands(join(root, ".claude/plugins")).map((c) => c.name).sort())
       .toEqual(["hookify:configure", "hookify:lint"]);
   });
 });
@@ -83,7 +93,7 @@ describe("CommandRegistry", () => {
   it("refresh() re-validates projects so removed commands drop out", () => {
     const reg = new CommandRegistry({ relayClient: null, baseMachineMetadata: {}, homeDir: root });
     reg.rescanMachine();
-    reg.setProject(root, scanProject(root)); // currently empty
+    reg.setProject(root, scanProject(root).map((c) => c.name)); // currently empty
     write(".claude/commands/new.md");        // add a command after the initial scan
     expect(reg.refresh().slashCommands).toContain("new");
   });
