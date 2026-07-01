@@ -26,7 +26,7 @@ import {
 } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { cwdToTranscriptDir } from "../claude/transcript";
-import { existsSync, statSync, readdirSync, readFileSync } from "fs";
+import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, join } from "path";
 import { hostname, platform, release, arch } from "os";
@@ -84,26 +84,54 @@ function transcriptEntryText(content: unknown): string {
  * replies) from a Claude transcript JSONL — skipping meta, tool-result, and CLI
  * wrapper lines. Newest last. Each message text is capped at LOG_MESSAGE_CHARS.
  */
+function parseLogLine(line: string): { role: "user" | "assistant"; text: string; ts: number | null } | null {
+  if (!line.trim()) return null;
+  let o: Record<string, unknown>;
+  try { o = JSON.parse(line); } catch { return null; }
+  if (o.isMeta) return null;
+  const role = o.type === "user" ? "user" : o.type === "assistant" ? "assistant" : null;
+  if (!role) return null;
+  let text = transcriptEntryText((o.message as { content?: unknown } | undefined)?.content);
+  if (!text) return null;
+  // A user line starting with "<" is a tool_result / command wrapper, not a real prompt.
+  if (role === "user" && text.startsWith("<")) return null;
+  if (text.length > LOG_MESSAGE_CHARS) text = text.slice(0, LOG_MESSAGE_CHARS) + "…";
+  const tsRaw = typeof o.timestamp === "string" ? Date.parse(o.timestamp) : NaN;
+  return { role, text, ts: Number.isNaN(tsRaw) ? null : tsRaw };
+}
+
 function readLastLogMessages(file: string, limit: number): Array<{ role: "user" | "assistant"; text: string; ts: number | null }> {
-  const out: Array<{ role: "user" | "assistant"; text: string; ts: number | null }> = [];
+  // Read the file BACKWARDS in chunks — callers want the last handful of
+  // messages (projects-page excerpts use limit=1), and transcripts run to many
+  // MB; parsing the whole file per call stalled the daemon event loop.
+  const CHUNK = 256 * 1024;
   try {
-    for (const line of readFileSync(file, "utf-8").split("\n")) {
-      if (!line.trim()) continue;
-      let o: Record<string, unknown>;
-      try { o = JSON.parse(line); } catch { continue; }
-      if (o.isMeta) continue;
-      const role = o.type === "user" ? "user" : o.type === "assistant" ? "assistant" : null;
-      if (!role) continue;
-      let text = transcriptEntryText((o.message as { content?: unknown } | undefined)?.content);
-      if (!text) continue;
-      // A user line starting with "<" is a tool_result / command wrapper, not a real prompt.
-      if (role === "user" && text.startsWith("<")) continue;
-      if (text.length > LOG_MESSAGE_CHARS) text = text.slice(0, LOG_MESSAGE_CHARS) + "…";
-      const tsRaw = typeof o.timestamp === "string" ? Date.parse(o.timestamp) : NaN;
-      out.push({ role, text, ts: Number.isNaN(tsRaw) ? null : tsRaw });
-    }
-  } catch { /* unreadable → whatever we collected */ }
-  return out.slice(-limit);
+    const size = statSync(file).size;
+    const fd = openSync(file, "r");
+    try {
+      let start = size;
+      let blockText = "";
+      for (;;) {
+        const readStart = Math.max(0, start - CHUNK);
+        if (readStart < start) {
+          const buf = Buffer.alloc(start - readStart);
+          readSync(fd, buf, 0, buf.length, readStart);
+          blockText = buf.toString("utf-8") + blockText;
+          start = readStart;
+        }
+        let lines = blockText.split("\n");
+        // Unless we're at the file start, the first line is (possibly) a partial
+        // — skip it this round; the next chunk prepend completes it.
+        if (start > 0) lines = lines.slice(1);
+        const collected: Array<{ role: "user" | "assistant"; text: string; ts: number | null }> = [];
+        for (let i = lines.length - 1; i >= 0 && collected.length < limit; i--) {
+          const m = parseLogLine(lines[i]);
+          if (m) collected.push(m);
+        }
+        if (collected.length >= limit || start === 0) return collected.reverse();
+      }
+    } finally { closeSync(fd); }
+  } catch { return []; }
 }
 
 export interface MachineOp {

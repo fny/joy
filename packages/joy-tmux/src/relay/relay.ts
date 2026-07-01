@@ -545,6 +545,10 @@ export class RelayClient {
    */
   /** GET this machine's current (decrypted) metadata, so a re-upsert can carry
    *  forward app-owned fields instead of clobbering them. Best-effort → null. */
+  // Last known app-set machine displayName (null = confirmed absent) — see
+  // getOrCreateMachine for the TTL rationale.
+  #displayNameCache: { name: string | null; at: number } | null = null;
+
   private async fetchOwnMachineMetadata(): Promise<Record<string, unknown> | null> {
     try {
       const res = await fetch(this.url('/v1/machines'), { headers: this.headers() });
@@ -565,9 +569,18 @@ export class RelayClient {
     // a rename on every command-scan push).
     const blob: Record<string, unknown> = { ...metadata, host: hostname() };
     if (blob.displayName === undefined) {
-      const current = await this.fetchOwnMachineMetadata();
-      const dn = current?.displayName;
-      if (typeof dn === 'string' && dn.length > 0) blob.displayName = dn;
+      // Short-TTL cache: boot attaches many sessions and each push landed here,
+      // re-downloading the FULL machine list per push just to carry one string
+      // forward. 60s is long enough to dedup a burst, short enough that an
+      // app-side rename (which happens on the server, invisibly to us) isn't
+      // clobbered by a stale value for more than a minute.
+      const now = Date.now();
+      if (!this.#displayNameCache || now - this.#displayNameCache.at > 60_000) {
+        const current = await this.fetchOwnMachineMetadata();
+        const dn = current?.displayName;
+        this.#displayNameCache = { name: typeof dn === 'string' && dn.length > 0 ? dn : null, at: now };
+      }
+      if (this.#displayNameCache.name) blob.displayName = this.#displayNameCache.name;
     }
     try {
       let encryptionKey: Uint8Array;
@@ -990,24 +1003,6 @@ export class RelaySession {
     // session with no active retry can reconcile its banner without churn.
     if (info == null && this.metadata?.joy__retry == null) return;
     await this.mergeMetadata({ joy__retry: info });
-  }
-
-  /**
-   * Set (or clear, with null) the "compacting" banner the app shows while Claude
-   * summarizes its context. Set by the PreCompact hook, cleared by the
-   * compact_boundary transcript marker (or a backstop timeout in the Session).
-   */
-  async updateTasks(info: JoyTasksInfo | null): Promise<void> {
-    if (info == null && this.metadata?.joy__tasks == null) return;
-    await this.mergeMetadata({ joy__tasks: info });
-  }
-
-  /** Count of live long-running processes (servers/daemons) the agent tagged
-   *  <joy-bg long-running>. Shown as plain text next to the status, never in the
-   *  N/M counter. null clears it. */
-  async updateLongRunning(count: number | null): Promise<void> {
-    if (count == null && this.metadata?.joy__longRunning == null) return;
-    await this.mergeMetadata({ joy__longRunning: count });
   }
 
   /** Push the finishing-task N/M and the long-running-process count together in a
