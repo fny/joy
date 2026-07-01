@@ -44,9 +44,17 @@ export function cappedTailOffset(path: string, capBytes: number): number {
   } catch { return 0; }
 }
 
-/** Claude Code writes transcripts under ~/.claude/projects/<cwd-with-slashes-as-dashes>/ */
+/**
+ * Claude Code writes transcripts under ~/.claude/projects/<sanitized-cwd>/, where
+ * the cwd is sanitized by replacing every character that is NOT [a-zA-Z0-9-] with
+ * a dash. So slashes, dots, underscores, and spaces all collapse to "-" (case is
+ * preserved). Slash-only replacement was wrong for any path with a dot/underscore/
+ * space in it (e.g. "…/agenttherapy.org" → …-agenttherapy-org), which left the
+ * daemon looking in a directory that never exists → transcript never binds.
+ * Verified empirically against Claude 2.1.x: "/tmp/x/a_b.c-d e" → "-tmp-x-a-b-c-d-e".
+ */
 export function cwdToTranscriptDir(cwd: string): string {
-  return join(homedir(), ".claude", "projects", cwd.replace(/\//g, "-"));
+  return join(homedir(), ".claude", "projects", cwd.replace(/[^a-zA-Z0-9-]/g, "-"));
 }
 
 /**
