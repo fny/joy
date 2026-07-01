@@ -1215,7 +1215,11 @@ export class Session {
     // starting) — that we still interrupt below; only a different, non-null timer is
     // a new send.
     if (this.#submitTimer !== null && this.#submitTimer !== submitBefore) return { ok: true };
-    if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && pane.ok &&
+    // …but do NOT treat "idle" as a no-op abort when finishing background tasks are
+    // still counted (the "N/M completed" status): the user pressing Stop on an idle
+    // turn whose async agents/processes are still tracked wants that count cleared and
+    // the status back to idle. Fall through so the bg-task cancel below runs.
+    if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && this.#bgTasks.size === 0 && pane.ok &&
         paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
       return { ok: true };
     }
@@ -2031,6 +2035,28 @@ export class Session {
 
     if (role === "user") {
       if (entry.isMeta) return;
+      // Interrupt terminator. After an Escape/abort, Claude writes
+      // "[Request interrupted by user...]" as its final entry for that turn — and the
+      // interrupted turn never emits a turn_duration. A partial-output entry Claude
+      // flushes between the interrupt and this marker can re-open a turn (abort already
+      // closed the original), and with no turn_duration to follow it would stay open
+      // forever — #canDrain needs !#turn, so the dispatch queue wedges and every later
+      // message hangs. Treat the marker as the terminator: close any open turn, stop
+      // thinking, kick the drain, and don't mirror the marker as a user bubble.
+      const interruptText = typeof content === "string" ? content
+        : Array.isArray(content)
+          ? (content as Array<Record<string, unknown>>).map((b) => (b && typeof b.text === "string" ? b.text : "")).join("")
+          : "";
+      if (/^\s*\[Request interrupted by user/.test(interruptText)) {
+        if (this.#turn) {
+          this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn.turnId, time: entryTimeMs }));
+          this.#turnUsage = null;
+          this.#turn = null;
+        }
+        this.#setThinking(false);
+        this.#maybeDrainQueue();
+        return;
+      }
       if (typeof content !== "string") {
         // (Background-task launches are handled by the coalesced re-derive
         // scheduled at the top of onTranscriptEntry.)
@@ -2161,6 +2187,13 @@ export class Session {
       this.#deps.addChatMessage({ role: "user", content, source: "cli", session_id: sid });
 
     } else if (role === "assistant") {
+      // When a turn is interrupted (abort/Escape), Claude replays the partial output
+      // as a SYNTHETIC assistant entry (model "<synthetic>") with NO turn_duration to
+      // follow. Mirroring it opens a turn that never closes — and #canDrain requires
+      // !#turn, so the dispatch queue wedges and every later message hangs undelivered.
+      // It also only duplicates the real turn's already-mirrored partial output. Skip
+      // it entirely (this also keeps currentModel off the "<synthetic>" sentinel).
+      if (msg.model === "<synthetic>") return;
       if (typeof msg.model === "string" && msg.model) {
         if (this.currentModel !== msg.model) {
           this.currentModel = msg.model;
