@@ -25,9 +25,42 @@ interface ToolGroupViewProps {
     metadata: Metadata | null;
     sessionId: string;
     expanded: boolean;
-    onToggle: () => void;
+    // Called with the group's id so parents can pass ONE stable handler to
+    // every group instead of a fresh closure per render (which defeats memo).
+    onToggle: (id: string) => void;
     nested?: boolean;
     hideSingleToolChildren?: boolean;
+}
+
+// Message refs are stable across grouping passes (useGroupedMessages rebuilds
+// the group objects/arrays every render, but the underlying Message objects
+// only change identity when their content changes). Comparing element-wise is
+// therefore both cheap and sufficient to catch any content update.
+function areMessagesEqual(a: Message[], b: Message[]): boolean {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+}
+
+// Covers every rendered input: id (identity + onToggle target), expanded,
+// derived flags (hasRunning / hasPendingPermission), the message array
+// element-wise (summary, category, suppressChildren and all child rows derive
+// from it), plus the passthrough props (metadata, sessionId, onToggle, nested,
+// hideSingleToolChildren).
+function areToolGroupPropsEqual(prev: ToolGroupViewProps, next: ToolGroupViewProps): boolean {
+    return prev.group.id === next.group.id
+        && prev.expanded === next.expanded
+        && prev.group.hasRunning === next.group.hasRunning
+        && prev.group.hasPendingPermission === next.group.hasPendingPermission
+        && prev.metadata === next.metadata
+        && prev.sessionId === next.sessionId
+        && prev.onToggle === next.onToggle
+        && prev.nested === next.nested
+        && prev.hideSingleToolChildren === next.hideSingleToolChildren
+        && areMessagesEqual(prev.group.messages, next.group.messages);
 }
 
 export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
@@ -39,9 +72,12 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
     const singleToolMessage = suppressChildren && group.messages[0]?.kind === 'tool-call'
         ? group.messages[0]
         : null;
+    const handleToggle = React.useCallback(() => {
+        onToggle(group.id);
+    }, [onToggle, group.id]);
     const handleSingleToolPress = React.useCallback(() => {
         if (!singleToolMessage) {
-            onToggle();
+            onToggle(group.id);
             return;
         }
         const filePath = isFileEditTool(singleToolMessage.tool.name) && typeof singleToolMessage.tool.input?.file_path === 'string'
@@ -52,7 +88,7 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
             return;
         }
         router.push(`/session/${sessionId}/message/${singleToolMessage.id}`);
-    }, [onToggle, router, sessionId, singleToolMessage]);
+    }, [onToggle, group.id, router, sessionId, singleToolMessage]);
     const renderGroupMessage = React.useCallback((msg: Message) => (
         <ToolGroupMessageRow
             key={msg.id}
@@ -68,7 +104,7 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
                 expanded={expanded}
                 hasRunning={group.hasRunning}
                 label={summary}
-                onPress={singleToolMessage ? handleSingleToolPress : onToggle}
+                onPress={singleToolMessage ? handleSingleToolPress : handleToggle}
                 category={summaryCategory}
                 showChevron
             />
@@ -93,14 +129,32 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
             {body}
         </View>
     );
-});
+}, areToolGroupPropsEqual);
 
 interface AgentWorkGroupViewProps {
     group: AgentWorkGroupItem;
     metadata: Metadata | null;
     sessionId: string;
     expanded: boolean;
-    onToggle: () => void;
+    // Called with the group's id — see ToolGroupViewProps.onToggle.
+    onToggle: (id: string) => void;
+}
+
+// Covers every rendered input: id, expanded, hasRunning (header spinner),
+// hasPendingPermission (derived flag, compared defensively), startedAt /
+// completedAt (duration label + elapsed timer), the message array element-wise
+// (nested grouping derives from it), plus metadata / sessionId / onToggle.
+function areAgentWorkGroupPropsEqual(prev: AgentWorkGroupViewProps, next: AgentWorkGroupViewProps): boolean {
+    return prev.group.id === next.group.id
+        && prev.expanded === next.expanded
+        && prev.group.hasRunning === next.group.hasRunning
+        && prev.group.hasPendingPermission === next.group.hasPendingPermission
+        && prev.group.startedAt === next.group.startedAt
+        && prev.group.completedAt === next.group.completedAt
+        && prev.metadata === next.metadata
+        && prev.sessionId === next.sessionId
+        && prev.onToggle === next.onToggle
+        && areMessagesEqual(prev.group.messages, next.group.messages);
 }
 
 export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) => {
@@ -166,6 +220,10 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
         });
     }, []);
 
+    const handleToggle = React.useCallback(() => {
+        onToggle(group.id);
+    }, [onToggle, group.id]);
+
     const renderNestedItem = React.useCallback((item: ToolDisplayItem) => {
         if (item.type === 'tool-group') {
             return (
@@ -175,7 +233,7 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
                     metadata={metadata}
                     sessionId={sessionId}
                     expanded={!collapsedToolGroups.has(item.id)}
-                    onToggle={() => handleToggleNestedGroup(item.id)}
+                    onToggle={handleToggleNestedGroup}
                     nested
                     hideSingleToolChildren
                 />
@@ -198,7 +256,7 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
                     expanded={expanded}
                     hasRunning={group.hasRunning}
                     label={label}
-                    onPress={onToggle}
+                    onPress={handleToggle}
                 />
                 {expanded && (
                     <View style={styles.content}>
@@ -208,7 +266,7 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
             </View>
         </View>
     );
-});
+}, areAgentWorkGroupPropsEqual);
 
 function CollapseHeader(props: {
     expanded: boolean;
