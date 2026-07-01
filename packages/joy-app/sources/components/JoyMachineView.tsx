@@ -3,7 +3,8 @@
 // for this machine. This IS the /machine/[id] page now — the joy build has no
 // separate happy-daemon machine view.
 //
-// Personal-build dev page — plain strings, no i18n (matches the /joy pages).
+// Personal-build dev page — mostly plain strings (matches the /joy pages);
+// shared bits (System group, copy toast) go through i18n.
 import * as React from 'react';
 import { View, Text, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
@@ -19,6 +20,7 @@ import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { Modal } from '@/modal';
+import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete } from '@/sync/ops';
 
@@ -59,7 +61,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
 
     const copyMachineId = React.useCallback(async () => {
         await Clipboard.setStringAsync(machineId);
-        Modal.alert('Copied', 'Machine ID copied to clipboard');
+        Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: t('machine.machineId') }));
     }, [machineId]);
 
     const [status, setStatus] = React.useState<JoyStatus | null>(null);
@@ -201,24 +203,24 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     if (!ds) return null;
                     const memUsed = ds.memTotal != null && ds.memFree != null ? ds.memTotal - ds.memFree : null;
                     return (
-                        <ItemGroup title="System" footer="Live host stats from the daemon heartbeat (~20s).">
+                        <ItemGroup title={t('machine.system')} footer={t('machine.systemFooter')}>
                             <Item
                                 title="CPU"
                                 detail={ds.cpu != null ? `${ds.cpu}%` : '—'}
-                                subtitle={[ds.cpuModel, ds.cpuCount != null ? `${ds.cpuCount} cores` : null, ds.load != null ? `load ${ds.load.toFixed(2)}` : null].filter(Boolean).join(' · ') || undefined}
+                                subtitle={[ds.cpuModel, ds.cpuCount != null ? t('machine.cpuCores', { count: ds.cpuCount }) : null, ds.load != null ? t('machine.loadAverage', { load: ds.load.toFixed(2) }) : null].filter(Boolean).join(' · ') || undefined}
                                 icon={<Ionicons name="speedometer-outline" size={29} color="#FF9500" />}
                                 showChevron={false}
                             />
                             <Item
                                 title="Memory"
                                 detail={ds.memTotal != null && memUsed != null ? `${gb(memUsed)} / ${gb(ds.memTotal)}` : (ds.ram != null ? `${ds.ram}%` : '—')}
-                                subtitle={ds.ram != null ? `${ds.ram}% used` : undefined}
+                                subtitle={ds.ram != null ? t('machine.memoryUsedPercent', { percent: ds.ram }) : undefined}
                                 icon={<Ionicons name="hardware-chip-outline" size={29} color="#34C759" />}
                                 showChevron={false}
                             />
                             <Item
                                 title="Disk"
-                                detail={ds.diskTotal ? `${gb(ds.diskFree ?? 0)} / ${gb(ds.diskTotal)} free` : '—'}
+                                detail={ds.diskTotal ? t('machine.diskFree', { free: gb(ds.diskFree ?? 0), total: gb(ds.diskTotal) }) : '—'}
                                 icon={<Ionicons name="save-outline" size={29} color="#5856D6" />}
                                 showChevron={false}
                             />

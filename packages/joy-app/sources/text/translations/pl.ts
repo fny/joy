@@ -65,6 +65,7 @@ export const pl: TranslationStructure = {
         retry: 'Ponów',
         delete: 'Usuń',
         optional: 'opcjonalnie',
+        edit: 'Edytuj',
     },
 
     profile: {
@@ -93,6 +94,7 @@ export const pl: TranslationStructure = {
         activeNow: 'Aktywny teraz',
         unknown: 'nieznane',
         unread: 'nowe wyniki',
+        backgroundProcesses: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'proces w tle', few: 'procesy w tle', many: 'procesów w tle' })}`,
     },
 
     time: {
@@ -262,6 +264,11 @@ export const pl: TranslationStructure = {
         analyticsEnabled: 'Anonimowa analityka użytkowania aktywna',
         imageUpload: 'Przesyłanie obrazów',
         imageUploadSubtitle: 'Dołącz obrazy do wiadomości, aby Claude mógł je przeanalizować',
+        limitSessionMemory: 'Ogranicz sesje w pamięci',
+        limitSessionMemorySubtitle: 'Maksymalna liczba ostatnich sesji w pamięci; starsze są wyładowywane i wczytywane ponownie przy powrocie',
+        limitSessionMemoryMessage: 'Maksymalna liczba ostatnich sesji w pamięci. Puste = zachowaj wszystkie.',
+        limitSessionMemoryPlaceholder: 'np. 5',
+        limitSessionMemoryAll: 'Wszystkie',
     },
 
     errors: {
@@ -352,6 +359,34 @@ export const pl: TranslationStructure = {
         forkErrorMissingMetadata: 'Brak metadanych sesji wymaganych do rozwidlenia.',
         forkErrorGeneric: 'Nie udało się rozwidlić sesji.',
         forkClaudeOnly: 'Rozwidlenie jest obecnie obsługiwane tylko dla sesji Claude.',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: 'CEL',
+        editTitle: 'Edytuj cel',
+        editMessage: 'Ustaw nowy cel dla agenta. Pozostaw puste, aby zachować obecny.',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: 'LOGOWANIE',
+        urlCopied: 'URL logowania skopiowany do schowka',
+        copyUrl: 'Kopiuj URL logowania',
+        openUrl: 'Otwórz URL logowania',
+        codePlaceholder: 'Wklej kod tutaj…',
+        submitCode: 'Wyślij kod logowania',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: 'W polu wprowadzania sesji pozostał tekst — dotknij, aby wyczyścić i wznowić',
+        pausedDispatchMismatch: 'Wysyłanie mogło nie przebiec poprawnie — dotknij, aby wznowić',
+        pausedDefault: 'Wiadomość z kolejki nie została wysłana — dotknij, aby wznowić',
+        queuedMessage: 'Wiadomość w kolejce',
+        editTitle: 'Edytuj wiadomość w kolejce',
+        hintWeb: 'kliknij wiadomość prawym przyciskiem, aby edytować lub usunąć',
+        hintTouch: 'przytrzymaj wiadomość, aby edytować lub usunąć',
     },
 
     commandPalette: {
@@ -874,6 +909,12 @@ export const pl: TranslationStructure = {
         deleteConfirmTitle: 'Usunąć tę maszynę?',
         deleteConfirmMessage: 'Maszyna zostanie usunięta z twojego konta. Historia sesji zostanie zachowana, ale nie będziesz mógł uruchamiać nowych sesji, dopóki ponownie nie podłączysz demona.',
         deleteFailed: 'Nie udało się usunąć maszyny.',
+        system: 'System',
+        systemFooter: 'Statystyki hosta na żywo z heartbeatu demona (~20 s).',
+        cpuCores: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'rdzeń', few: 'rdzenie', many: 'rdzeni' })}`,
+        loadAverage: ({ load }: { load: string }) => `obciążenie ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% w użyciu`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} wolne`,
     },
 
     message: {

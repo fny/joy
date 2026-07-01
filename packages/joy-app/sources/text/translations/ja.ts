@@ -56,6 +56,7 @@ export const ja: TranslationStructure = {
         retry: '再試行',
         delete: '削除',
         optional: '任意',
+        edit: '編集',
         saveAs: '名前を付けて保存',
     },
 
@@ -84,6 +85,7 @@ export const ja: TranslationStructure = {
         activeNow: 'アクティブ',
         unknown: '不明',
         unread: '新しい結果',
+        backgroundProcesses: ({ count }: { count: number }) => `バックグラウンドプロセス${count}件`,
     },
 
     time: {
@@ -246,6 +248,11 @@ export const ja: TranslationStructure = {
         analyticsEnabled: '匿名の使用状況分析がアクティブ',
         imageUpload: '画像アップロード',
         imageUploadSubtitle: 'メッセージに画像を添付してClaudeに分析させる',
+        limitSessionMemory: 'セッションのメモリ制限',
+        limitSessionMemorySubtitle: 'メモリに保持する最近のセッション数の上限。古いものはアンロードされ、再表示時に再読み込みされます',
+        limitSessionMemoryMessage: 'メモリに保持する最近のセッション数の上限。空欄ですべて保持します。',
+        limitSessionMemoryPlaceholder: '例: 5',
+        limitSessionMemoryAll: 'すべて',
     },
 
     errors: {
@@ -336,6 +343,34 @@ export const ja: TranslationStructure = {
         forkErrorMissingMetadata: 'フォークに必要なセッションのメタデータがありません。',
         forkErrorGeneric: 'セッションのフォークに失敗しました。',
         forkClaudeOnly: 'フォークは現在 Claude セッションのみ対応しています。',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: 'ゴール',
+        editTitle: 'ゴールを編集',
+        editMessage: '新しいゴールを設定します。空欄のままにすると現在のゴールを維持します。',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: 'サインイン',
+        urlCopied: 'ログインURLをクリップボードにコピーしました',
+        copyUrl: 'ログインURLをコピー',
+        openUrl: 'ログインURLを開く',
+        codePlaceholder: 'ここにコードを貼り付け…',
+        submitCode: 'ログインコードを送信',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: 'セッションの入力欄に未送信のテキストが残っています — タップしてクリアし再開',
+        pausedDispatchMismatch: '送信が正しく完了していない可能性があります — タップして再開',
+        pausedDefault: 'キュー内のメッセージが送信されませんでした — タップして再開',
+        queuedMessage: 'キュー内のメッセージ',
+        editTitle: 'キュー内のメッセージを編集',
+        hintWeb: 'メッセージを右クリックで編集・削除',
+        hintTouch: 'メッセージを長押しで編集・削除',
     },
 
     commandPalette: {
@@ -859,6 +894,12 @@ export const ja: TranslationStructure = {
         deleteConfirmTitle: 'このマシンを削除しますか？',
         deleteConfirmMessage: 'マシンがアカウントから削除されます。セッション履歴は保持されますが、デーモンを再接続するまで新しいセッションを起動できません。',
         deleteFailed: 'マシンの削除に失敗しました。',
+        system: 'システム',
+        systemFooter: 'デーモンのハートビートによるホストのライブ統計（約20秒間隔）。',
+        cpuCores: ({ count }: { count: number }) => `${count}コア`,
+        loadAverage: ({ load }: { load: string }) => `負荷 ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% 使用中`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `空き ${free} / ${total}`,
     },
 
     message: {

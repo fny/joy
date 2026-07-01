@@ -54,6 +54,7 @@ export const pt: TranslationStructure = {
         retry: 'Tentar novamente',
         delete: 'Excluir',
         optional: 'Opcional',
+        edit: 'Editar',
     },
 
     profile: {
@@ -82,6 +83,7 @@ export const pt: TranslationStructure = {
         activeNow: 'Ativo agora',
         unknown: 'desconhecido',
         unread: 'novos resultados',
+        backgroundProcesses: ({ count }: { count: number }) => `${count} processo${count !== 1 ? 's' : ''} em segundo plano`,
     },
 
     time: {
@@ -244,6 +246,11 @@ export const pt: TranslationStructure = {
         analyticsEnabled: 'Análises anônimas de uso ativas',
         imageUpload: 'Upload de imagens',
         imageUploadSubtitle: 'Anexe imagens às mensagens para Claude analisar',
+        limitSessionMemory: 'Limitar sessões na memória',
+        limitSessionMemorySubtitle: 'Máximo de sessões recentes na memória; as mais antigas são descarregadas e recarregadas ao voltar',
+        limitSessionMemoryMessage: 'Máximo de sessões recentes na memória. Vazio = manter todas.',
+        limitSessionMemoryPlaceholder: 'ex. 5',
+        limitSessionMemoryAll: 'Todas',
     },
 
     errors: {
@@ -334,6 +341,34 @@ export const pt: TranslationStructure = {
         forkErrorMissingMetadata: 'Faltam metadados da sessão necessários para bifurcar.',
         forkErrorGeneric: 'Não foi possível bifurcar a sessão.',
         forkClaudeOnly: 'A bifurcação atualmente só é suportada para sessões Claude.',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: 'OBJETIVO',
+        editTitle: 'Editar objetivo',
+        editMessage: 'Defina um novo objetivo para o agente. Deixe vazio para manter o atual.',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: 'ENTRAR',
+        urlCopied: 'URL de login copiada para a área de transferência',
+        copyUrl: 'Copiar URL de login',
+        openUrl: 'Abrir URL de login',
+        codePlaceholder: 'Cole o código aqui…',
+        submitCode: 'Enviar código de login',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: 'O campo de entrada da sessão tem texto pendente — toque para limpar e retomar',
+        pausedDispatchMismatch: 'Um envio pode não ter sido concluído corretamente — toque para retomar',
+        pausedDefault: 'Uma mensagem na fila não foi enviada — toque para retomar',
+        queuedMessage: 'Mensagem na fila',
+        editTitle: 'Editar mensagem na fila',
+        hintWeb: 'clique com o botão direito em uma mensagem para editar ou excluir',
+        hintTouch: 'segure uma mensagem para editar ou excluir',
     },
 
     commandPalette: {
@@ -857,6 +892,12 @@ export const pt: TranslationStructure = {
         deleteConfirmTitle: 'Excluir esta máquina?',
         deleteConfirmMessage: 'A máquina será removida da sua conta. O histórico de sessões será preservado, mas você não poderá iniciar novas sessões até reconectar o daemon.',
         deleteFailed: 'Falha ao excluir a máquina.',
+        system: 'Sistema',
+        systemFooter: 'Estatísticas do host em tempo real do heartbeat do daemon (~20 s).',
+        cpuCores: ({ count }: { count: number }) => `${count} núcleo${count !== 1 ? 's' : ''}`,
+        loadAverage: ({ load }: { load: string }) => `carga ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% em uso`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} livres`,
     },
 
     message: {

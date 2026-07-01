@@ -54,6 +54,7 @@ export const ca: TranslationStructure = {
         retry: 'Torna-ho a provar',
         delete: 'Elimina',
         optional: 'Opcional',
+        edit: 'Edita',
     },
 
     profile: {
@@ -82,6 +83,7 @@ export const ca: TranslationStructure = {
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
         unread: 'nous resultats',
+        backgroundProcesses: ({ count }: { count: number }) => `${count} ${count === 1 ? 'procés' : 'processos'} en segon pla`,
     },
 
     time: {
@@ -245,6 +247,11 @@ export const ca: TranslationStructure = {
         analyticsEnabled: 'Analítica anònima d\'ús activa',
         imageUpload: 'Pujada d\'imatges',
         imageUploadSubtitle: 'Adjunta imatges als missatges perquè Claude les analitzi',
+        limitSessionMemory: 'Limita les sessions en memòria',
+        limitSessionMemorySubtitle: 'Màxim de sessions recents en memòria; les més antigues es descarreguen i es tornen a carregar en tornar-hi',
+        limitSessionMemoryMessage: 'Màxim de sessions recents en memòria. Buit = conserva-les totes.',
+        limitSessionMemoryPlaceholder: 'p. ex. 5',
+        limitSessionMemoryAll: 'Totes',
     },
 
     errors: {
@@ -335,6 +342,34 @@ export const ca: TranslationStructure = {
         forkErrorMissingMetadata: 'Falten metadades de la sessió necessàries per bifurcar.',
         forkErrorGeneric: 'No s\'ha pogut bifurcar la sessió.',
         forkClaudeOnly: 'La bifurcació només està disponible per a sessions de Claude.',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: 'OBJECTIU',
+        editTitle: 'Edita l\'objectiu',
+        editMessage: 'Estableix un nou objectiu per a l\'agent. Deixa-ho buit per mantenir l\'actual.',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: 'INICIA LA SESSIÓ',
+        urlCopied: 'URL d\'inici de sessió copiada al porta-retalls',
+        copyUrl: 'Copia l\'URL d\'inici de sessió',
+        openUrl: 'Obre l\'URL d\'inici de sessió',
+        codePlaceholder: 'Enganxa el codi aquí…',
+        submitCode: 'Envia el codi d\'inici de sessió',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: 'El quadre d\'entrada de la sessió té text pendent — toca per netejar-lo i reprendre',
+        pausedDispatchMismatch: 'És possible que un enviament no s\'hagi completat correctament — toca per reprendre',
+        pausedDefault: 'Un missatge de la cua no s\'ha enviat — toca per reprendre',
+        queuedMessage: 'Missatge a la cua',
+        editTitle: 'Edita el missatge de la cua',
+        hintWeb: 'fes clic dret en un missatge per editar-lo o eliminar-lo',
+        hintTouch: 'mantén premut un missatge per editar-lo o eliminar-lo',
     },
 
     commandPalette: {
@@ -858,6 +893,12 @@ export const ca: TranslationStructure = {
         deleteConfirmTitle: 'Eliminar aquesta màquina?',
         deleteConfirmMessage: 'La màquina s\'eliminarà del teu compte. L\'historial de sessions es conservarà, però no podràs iniciar noves sessions fins que tornis a connectar el dimoni.',
         deleteFailed: 'No s\'ha pogut eliminar la màquina.',
+        system: 'Sistema',
+        systemFooter: 'Estadístiques del host en directe des del heartbeat del dimoni (~20 s).',
+        cpuCores: ({ count }: { count: number }) => `${count} nucli${count !== 1 ? 's' : ''}`,
+        loadAverage: ({ load }: { load: string }) => `càrrega ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% en ús`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} lliures`,
     },
 
     message: {

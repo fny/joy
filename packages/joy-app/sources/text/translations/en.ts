@@ -69,6 +69,7 @@ export const en: TranslationStructure = {
         retry: 'Retry',
         delete: 'Delete',
         optional: 'optional',
+        edit: 'Edit',
     },
 
     profile: {
@@ -97,6 +98,7 @@ export const en: TranslationStructure = {
         activeNow: 'Active now',
         unknown: 'unknown',
         unread: 'new results',
+        backgroundProcesses: ({ count }: { count: number }) => count === 1 ? '1 background process' : `${count} background processes`,
     },
 
     time: {
@@ -259,6 +261,11 @@ export const en: TranslationStructure = {
         analyticsEnabled: 'Anonymous usage analytics active',
         imageUpload: 'File Attachments',
         imageUploadSubtitle: 'Attach files of any type to messages for Claude',
+        limitSessionMemory: 'Limit session memory',
+        limitSessionMemorySubtitle: 'Max recent sessions kept in memory; older ones unload + reload on revisit',
+        limitSessionMemoryMessage: 'Max recent sessions to keep in memory. Empty = keep all.',
+        limitSessionMemoryPlaceholder: 'e.g. 5',
+        limitSessionMemoryAll: 'All',
     },
 
     errors: {
@@ -349,6 +356,34 @@ export const en: TranslationStructure = {
         forkErrorMissingMetadata: 'Missing session metadata required to fork.',
         forkErrorGeneric: 'Failed to fork the session.',
         forkClaudeOnly: 'Fork is currently only supported for Claude sessions.',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: 'GOAL',
+        editTitle: 'Edit goal',
+        editMessage: 'Set a new goal for the agent. Empty to keep the current one.',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: 'SIGN IN',
+        urlCopied: 'Login URL copied to clipboard',
+        copyUrl: 'Copy login URL',
+        openUrl: 'Open login URL',
+        codePlaceholder: 'Paste code here…',
+        submitCode: 'Submit login code',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: 'The session’s input box has stray text — tap to clear and resume',
+        pausedDispatchMismatch: 'A send may not have gone through cleanly — tap to resume',
+        pausedDefault: 'A queued message didn’t send — tap to resume',
+        queuedMessage: 'Queued message',
+        editTitle: 'Edit queued message',
+        hintWeb: 'right-click a message to edit or delete',
+        hintTouch: 'hold a message to edit or delete',
     },
 
     commandPalette: {
@@ -872,6 +907,12 @@ export const en: TranslationStructure = {
         deleteConfirmTitle: 'Delete this machine?',
         deleteConfirmMessage: 'This removes the machine from your account. Session history is preserved, but you can no longer launch new sessions on it until you reconnect the daemon.',
         deleteFailed: 'Failed to delete machine.',
+        system: 'System',
+        systemFooter: 'Live host stats from the daemon heartbeat (~20s).',
+        cpuCores: ({ count }: { count: number }) => count === 1 ? '1 core' : `${count} cores`,
+        loadAverage: ({ load }: { load: string }) => `load ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% used`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} free`,
     },
 
     message: {

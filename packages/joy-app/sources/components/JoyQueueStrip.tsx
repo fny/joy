@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
+import { t } from '@/text';
 import type { useJoyQueue } from '@/hooks/useJoyQueue';
 
 type Queue = ReturnType<typeof useJoyQueue>;
@@ -24,21 +25,21 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
     // text blocking dispatch" from a plain failed/timed-out send.
     const pausedMessage =
         queue.pauseReason === 'input_dirty'
-            ? 'The session’s input box has stray text — tap to clear and resume'
+            ? t('joyQueue.pausedInputDirty')
             : queue.pauseReason === 'dispatch_mismatch'
-                ? 'A send may not have gone through cleanly — tap to resume'
-                : 'A queued message didn’t send — tap to resume';
+                ? t('joyQueue.pausedDispatchMismatch')
+                : t('joyQueue.pausedDefault');
 
     const editItem = async (id: string, current: string) => {
-        const next = await Modal.prompt('Edit queued message', '', { defaultValue: current });
+        const next = await Modal.prompt(t('joyQueue.editTitle'), '', { defaultValue: current });
         if (next != null && next.trim() && next.trim() !== current) queue.edit(id, next.trim());
     };
 
     const showMenu = (id: string, text: string) => {
-        Modal.alert('Queued message', text, [
-            { text: 'Edit', onPress: () => { void editItem(id, text); } },
-            { text: 'Delete', style: 'destructive', onPress: () => { void queue.cancel(id); } },
-            { text: 'Cancel', style: 'cancel' },
+        Modal.alert(t('joyQueue.queuedMessage'), text, [
+            { text: t('common.edit'), onPress: () => { void editItem(id, text); } },
+            { text: t('common.delete'), style: 'destructive', onPress: () => { void queue.cancel(id); } },
+            { text: t('common.cancel'), style: 'cancel' },
         ]);
     };
 
@@ -72,7 +73,7 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
 
             {queue.queue.length > 0 && (
                 <Text style={styles.hint}>
-                    {Platform.OS === 'web' ? 'right-click' : 'hold'} a message to edit or delete
+                    {Platform.OS === 'web' ? t('joyQueue.hintWeb') : t('joyQueue.hintTouch')}
                 </Text>
             )}
         </View>

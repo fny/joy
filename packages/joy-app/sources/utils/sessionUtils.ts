@@ -61,93 +61,95 @@ export function useSessionStatus(session: Session): SessionStatus {
     // Long-running processes (servers/daemons the agent tagged <joy-bg
     // long-running>) never complete, so they're NOT in the N/M — they're appended
     // to whatever the real status is, in its normal color, e.g.
-    // "ready, 3 background processes".
-    // TODO(i18n): move to t('status.backgroundProcesses', { count }).
+    // "ready, 3 background processes". withBg is the single exit point that
+    // appends the suffix to every online status below.
     const longRunning = session.metadata?.joy__longRunning ?? 0;
-    const bgSuffix = longRunning > 0 ? `, ${longRunning} background process${longRunning === 1 ? '' : 'es'}` : '';
+    const withBg = (status: SessionStatus): SessionStatus => longRunning > 0
+        ? { ...status, statusText: status.statusText + ', ' + t('status.backgroundProcesses', { count: longRunning }) }
+        : status;
 
     // 500-error auto-retry in progress: the daemon is re-sending a failed turn
     // on a backoff schedule. Shown amber + pulsing, with the attempt count.
     const retry = session.metadata?.joy__retry;
     if (retry) {
-        return {
+        return withBg({
             state: 'retrying',
             isConnected: true,
-            statusText: t('status.retrying', { attempt: retry.attempt, total: retry.total }) + bgSuffix,
+            statusText: t('status.retrying', { attempt: retry.attempt, total: retry.total }),
             shouldShowStatus: true,
             statusColor: '#FF9500',
             statusDotColor: '#FF9500',
             isPulsing: true,
-        };
+        });
     }
 
     // Compacting: Claude is summarizing its context to free up tokens. Can run
     // for minutes, so it's worth surfacing. Shown purple + pulsing. Ranks above
     // thinking (the turn is effectively paused while this happens).
     if (session.metadata?.joy__compacting) {
-        return {
+        return withBg({
             state: 'compacting',
             isConnected: true,
-            statusText: t('status.compacting') + bgSuffix,
+            statusText: t('status.compacting'),
             shouldShowStatus: true,
             statusColor: '#AF52DE',
             statusDotColor: '#AF52DE',
             isPulsing: true,
-        };
+        });
     }
 
     // Check if permission is required (yellow)
     if (hasPermissions) {
-        return {
+        return withBg({
             state: 'permission_required',
             isConnected: true,
-            statusText: t('status.permissionRequired') + bgSuffix,
+            statusText: t('status.permissionRequired'),
             shouldShowStatus: true,
             statusColor: '#FFCC00',
             statusDotColor: '#FFCC00',
             isPulsing: true
-        };
+        });
     }
 
     // Finishing background tasks (builds, tests, agents — expected to complete):
     // shown in teal with an N/M progress count. Ranks above thinking so the count
     // wins when a foreground turn is also running. Long-running processes are
-    // excluded from this (they're the bgSuffix).
+    // excluded from this (they're the withBg suffix).
     const tasks = session.metadata?.joy__tasks;
     if (tasks && tasks.total > 0) {
-        return {
+        return withBg({
             state: 'tasks',
             isConnected: true,
-            statusText: `${tasks.done}/${tasks.total} completed` + bgSuffix,
+            statusText: `${tasks.done}/${tasks.total} completed`,
             shouldShowStatus: true,
             statusColor: '#30B0C7',
             statusDotColor: '#30B0C7',
             isPulsing: true
-        };
+        });
     }
 
     if (session.thinking === true) {
-        return {
+        return withBg({
             state: 'thinking',
             isConnected: true,
-            statusText: vibingMessage + bgSuffix,
+            statusText: vibingMessage,
             shouldShowStatus: true,
             statusColor: '#007AFF',
             statusDotColor: '#007AFF',
             isPulsing: true
-        };
+        });
     }
 
     // Idle. If background processes are running, surface them next to "ready" in
     // the normal (green) color, e.g. "ready, 3 background processes".
-    return {
+    return withBg({
         state: 'waiting',
         isConnected: true,
-        statusText: t('status.online') + bgSuffix,
-        shouldShowStatus: bgSuffix !== '',
+        statusText: t('status.online'),
+        shouldShowStatus: longRunning > 0,
         statusColor: '#34C759',
         statusDotColor: '#34C759'
-    };
+    });
 }
 
 /**
