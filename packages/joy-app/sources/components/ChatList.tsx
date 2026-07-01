@@ -138,6 +138,14 @@ const ChatListInternal = React.memo((props: {
         }
         return initial;
     });
+    // Mirror to a ref so renderItem can read the latest collapse state without
+    // depending on it — keeping renderItem's identity stable across the
+    // auto-collapse effect that fires on every new tool group mid-stream
+    // (a changed renderItem makes FlashList re-render every visible row).
+    // The state itself is passed as FlashList `extraData` so manual toggles
+    // still trigger a row re-render pass.
+    const collapsedGroupsRef = React.useRef(collapsedGroups);
+    collapsedGroupsRef.current = collapsedGroups;
 
     // Auto-expand groups that need user approval — but only if the user
     // hasn't manually collapsed them.
@@ -270,8 +278,8 @@ const ChatListInternal = React.memo((props: {
                     group={item}
                     metadata={props.metadata}
                     sessionId={props.sessionId}
-                    expanded={!collapsedGroups.has(item.id)}
-                    onToggle={() => handleToggleGroup(item.id)}
+                    expanded={!collapsedGroupsRef.current.has(item.id)}
+                    onToggle={handleToggleGroup}
                 />
             );
         }
@@ -281,8 +289,8 @@ const ChatListInternal = React.memo((props: {
                     group={item}
                     metadata={props.metadata}
                     sessionId={props.sessionId}
-                    expanded={!collapsedGroups.has(item.id)}
-                    onToggle={() => handleToggleGroup(item.id)}
+                    expanded={!collapsedGroupsRef.current.has(item.id)}
+                    onToggle={handleToggleGroup}
                 />
             );
         }
@@ -294,7 +302,7 @@ const ChatListInternal = React.memo((props: {
                 onForkFromUserMessage={canFork ? handleForkFromMessage : undefined}
             />
         );
-    }, [props.metadata, props.sessionId, canFork, handleForkFromMessage, collapsedGroups, handleToggleGroup]);
+    }, [props.metadata, props.sessionId, canFork, handleForkFromMessage, handleToggleGroup]);
 
     // Non-inverted list: the newest messages sit at the visual bottom. Show the
     // scroll-to-bottom button once the user has scrolled UP far enough from the
@@ -415,6 +423,7 @@ const ChatListInternal = React.memo((props: {
                 keyboardShouldPersistTaps="handled"
                 keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
                 renderItem={renderItem}
+                extraData={collapsedGroups}
                 onScroll={handleScroll}
                 scrollEventThrottle={16}
                 onViewableItemsChanged={handleViewableItemsChanged}

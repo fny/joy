@@ -25,10 +25,17 @@ export class SecretBoxEncryption implements Encryptor, Decryptor {
     }
 
     async decrypt(data: Uint8Array[]): Promise<(any | null)[]> {
-        // Process as batch, not Promise.all - more efficient
+        // decryptSecretBox is synchronous libsodium — decrypting a whole page
+        // in one tight loop blocks the JS thread for the entire batch (a
+        // 100-message page = 100 back-to-back blocking calls). Yield to the
+        // event loop every ~20 items so UI events and rendering can
+        // interleave. setTimeout(0) works on both React Native and web.
         const results: (any | null)[] = [];
-        for (const item of data) {
-            results.push(decryptSecretBox(item, this.secretKey));
+        for (let i = 0; i < data.length; i++) {
+            if (i > 0 && i % 20 === 0) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            }
+            results.push(decryptSecretBox(data[i], this.secretKey));
         }
         return results;
     }
