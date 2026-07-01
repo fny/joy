@@ -96,11 +96,24 @@ export const MetadataSchema = z.object({
         done: z.number(),
         total: z.number(),
     }).nullable().optional(),
+    // Count of live long-running background processes (servers/daemons the agent
+    // tagged <joy-bg long-running>). These never "complete", so they're kept OUT
+    // of joy__tasks (the N/M) and shown as plain text next to the status.
+    joy__longRunning: z.number().nullable().optional(),
     // The agent's active /goal (Claude goal_status), surfaced by joy-tmux. Drives
     // the goal bar. Present while a goal is in progress; cleared when met.
     joy__goal: z.object({
         condition: z.string(),
         since: z.number().optional(),
+    }).nullable().optional(),
+    // An interactive auth/login URL the agent's CLI is showing in its pane (e.g.
+    // Claude Code's /login OAuth flow), surfaced by joy-tmux. Drives the login
+    // bar; the app submits the pasted code via `/login-code <code>`. Present
+    // while the prompt is up, cleared when it's gone.
+    joy__login: z.object({
+        url: z.string(),
+        since: z.number().optional(),
+        error: z.string().optional(), // rejection message (e.g. bad/expired code)
     }).nullable().optional(),
 });
 

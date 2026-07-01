@@ -84,6 +84,14 @@ export function parseMarkdownBlock(markdown: string) {
         // Trim
         let trimmed = line.trim();
 
+        // Ignore joy control tags (e.g. <joy-bg … />) on their OWN line — they're
+        // daemon-consumed and never shown. Line-level, not global: the ``` handler
+        // below already consumed code blocks, so a fenced/inline example of the tag
+        // (like this one) survives; only a bare own-line tag is dropped.
+        if (/^<\/?joy-[\w-]+\b[^>]*>$/.test(trimmed)) {
+            continue;
+        }
+
         // Code block
         if (trimmed.startsWith('```')) {
             const language = trimmed.slice(3).trim() || null;

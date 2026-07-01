@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -408,6 +408,8 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
     updateRetry() {},
     updateQueue() {},
     updateTasks() {},
+    updateLongRunning() {},
+    async updateBgTasks() {},
     updateCompacting() {},
     updateGoal() {},
     notify() {},
@@ -437,7 +439,7 @@ test("compacting: PreCompact mark sets the banner, compact_boundary clears it", 
   const rs: any = {
     relaySessionId: "rs-c1",
     start() {}, stop() {}, send() {},
-    setThinking() {}, updateRetry() {}, updateQueue() {}, updateTasks() {}, updateGoal() {},
+    setThinking() {}, updateRetry() {}, updateQueue() {}, updateTasks() {}, updateLongRunning() {}, async updateBgTasks() {}, updateGoal() {},
     updateCompacting(info: any) { compactingCalls.push(info); },
     notify() {},
   };
@@ -487,12 +489,117 @@ test("bgTaskEvent: completion via attachment-form notification (newer Claude)", 
   expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "bg-7" });
 });
 
+test("joyBgLongRunningIds: extracts ids from assistant <joy-bg long-running> tags", () => {
+  const entry = { message: { role: "assistant", content: [
+    { type: "text", text: "Started it.\n<joy-bg id=\"bnfgnx0r\" long-running label=\"Nuxt dev\" />" },
+  ] } };
+  expect(joyBgLongRunningIds(entry)).toEqual(["bnfgnx0r"]);
+  // attribute order independence + multiple tags + string content
+  expect(joyBgLongRunningIds({ message: { role: "assistant", content:
+    "<joy-bg long-running id=\"a\" /> and <joy-bg id=\"b\" long-running />" } })).toEqual(["a", "b"]);
+});
+
+test("joyBgLongRunningIds: ignores non-long-running tags, non-assistant, and no tag", () => {
+  // A joy-bg without long-running (would be a finishing task) → not returned
+  expect(joyBgLongRunningIds({ message: { role: "assistant", content: "<joy-bg id=\"x\" />" } })).toEqual([]);
+  expect(joyBgLongRunningIds({ message: { role: "user", content: "<joy-bg id=\"x\" long-running />" } })).toEqual([]);
+  expect(joyBgLongRunningIds({ message: { role: "assistant", content: "no tags here" } })).toEqual([]);
+  expect(joyBgLongRunningIds({})).toEqual([]);
+});
+
+test("classifyBgTasks: splits finishing (N/M) from long-running, excludes servers from the count", () => {
+  const L = (id: string) => ({ kind: "launch" as const, id });
+  const C = (id: string) => ({ kind: "complete" as const, id });
+  // b1,b2 finishing; srv is long-running (tagged). srv never counts in total/done.
+  const r = classifyBgTasks([L("b1"), L("srv"), L("b2"), C("b1")], new Set(["srv"]));
+  expect({ total: r.total, done: r.done, outstanding: [...r.outstanding], longRunning: [...r.longRunning] })
+    .toEqual({ total: 2, done: 1, outstanding: ["b2"], longRunning: ["srv"] });
+});
+
+test("classifyBgTasks: long-running classified even when its launch precedes the tag (full lrIds up front)", () => {
+  // The tag lands later in the transcript, but lrIds is gathered first, so the
+  // earlier launch is still classified as long-running (never in the N/M).
+  const r = classifyBgTasks([{ kind: "launch", id: "srv" }], new Set(["srv"]));
+  expect(r.total).toBe(0);
+  expect([...r.longRunning]).toEqual(["srv"]);
+});
+
+test("classifyBgTasks: stopping a server clears it; finishing batch resets on empty (servers don't block it)", () => {
+  const L = (id: string) => ({ kind: "launch" as const, id });
+  const C = (id: string) => ({ kind: "complete" as const, id });
+  // batch1: b1 launches+completes → outstanding empties. srv (long-running) stays.
+  // batch2: b2 launches → total resets to 1 (not 2), even though srv is still live.
+  const r = classifyBgTasks([L("b1"), L("srv"), C("b1"), L("b2")], new Set(["srv"]));
+  expect({ total: r.total, done: r.done, outstanding: [...r.outstanding], longRunning: [...r.longRunning] })
+    .toEqual({ total: 1, done: 0, outstanding: ["b2"], longRunning: ["srv"] });
+  // now stop the server:
+  const r2 = classifyBgTasks([L("srv"), C("srv")], new Set(["srv"]));
+  expect([...r2.longRunning]).toEqual([]);
+});
+
 test("bgTaskEvent: ignores non-task entries, meta, and non-user roles", () => {
   expect(bgTaskEvent(userEntry({ content: "hello" }))).toBeNull();                       // plain user text
   expect(bgTaskEvent({ message: { role: "assistant", content: "hi" } })).toBeNull();      // assistant
   expect(bgTaskEvent({ message: { role: "user", content: "x" }, isMeta: true })).toBeNull(); // meta
   expect(bgTaskEvent({ message: { role: "user", content: [{ type: "tool_result" }] } })).toBeNull(); // result, no bg
   expect(bgTaskEvent({})).toBeNull();
+});
+
+// ── authUrlFromPane: detect + reassemble an interactive login URL ─────────────
+
+test("authUrlFromPane: reassembles a hard-wrapped Claude /login OAuth URL", () => {
+  // Verbatim shape of Claude Code's /login box (URL wrapped across lines).
+  const pane = [
+    "   Login",
+    "",
+    "   Browser didn't open? Use the url below to (c to",
+    "   sign in                                   copy)",
+    "",
+    "https://claude.com/cai/oauth/authorize?code=true&client_id",
+    "=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&r",
+    "edirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fco",
+    "de%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+us",
+    "er%3Ainference&code_challenge=tNFRLVJwfcDCdSYxyP",
+    "58l9xqemOf-ihKKsgqGQBHvAM&code_challenge_method=S256&state",
+    "=E9TOZySSNrscarosv72pBT0o9pjqrGzhMjglIMrAEo8",
+    "",
+    "   Paste code here if prompted >",
+    "",
+    "   Esc to cancel",
+  ].join("\n");
+  expect(authUrlFromPane(pane)).toBe(
+    "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=tNFRLVJwfcDCdSYxyP58l9xqemOf-ihKKsgqGQBHvAM&code_challenge_method=S256&state=E9TOZySSNrscarosv72pBT0o9pjqrGzhMjglIMrAEo8",
+  );
+});
+
+test("authUrlFromPane: ignores a non-auth URL in normal output, and empty panes", () => {
+  expect(authUrlFromPane("see https://example.com/docs for details")).toBeNull();
+  expect(authUrlFromPane("⏺ done\n❯ ")).toBeNull();
+  expect(authUrlFromPane("")).toBeNull();
+});
+
+test("authUrlFromPane: detects a single-line device-login URL", () => {
+  expect(authUrlFromPane("Open https://github.com/login/device and enter CODE"))
+    .toBe("https://github.com/login/device");
+});
+
+test("loginFromPane: surfaces a rejection below the URL, but NOT the 401 trigger above it", () => {
+  const pane = [
+    "⏺ Please run /login · API Error: 401 Invalid authentication credentials",
+    "",
+    "https://claude.com/cai/oauth/authorize?code_challenge=abc&state=xyz",
+    "",
+    "   Invalid code, please try again",
+    "   Paste code here if prompted >",
+  ].join("\n");
+  const r = loginFromPane(pane);
+  expect(r?.url).toBe("https://claude.com/cai/oauth/authorize?code_challenge=abc&state=xyz");
+  expect(r?.error).toBe("Invalid code, please try again"); // the box line, not the 401 above
+});
+
+test("loginFromPane: no error when the box is clean", () => {
+  const pane = "https://claude.com/cai/oauth/authorize?code_challenge=abc\n\n   Paste code here if prompted >";
+  expect(loginFromPane(pane)).toEqual({ url: "https://claude.com/cai/oauth/authorize?code_challenge=abc", error: undefined });
 });
 
 // Pure replay of the same reset-on-empty-batch semantics #deriveBgTasks uses,

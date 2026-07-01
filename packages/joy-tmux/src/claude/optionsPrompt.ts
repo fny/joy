@@ -27,7 +27,15 @@ When you are in the plan mode, you must use the options mode to give the user a 
 
 # Never use the AskUserQuestion tool
 
-Do NOT call the AskUserQuestion tool. It renders an interactive picker that the user CANNOT answer in this environment — it freezes the session. Whenever you would ask the user anything, write the question as plain text in your response and put the possible answers in an <options> block at the very end (as described above). This applies always, including in plan mode.`;
+Do NOT call the AskUserQuestion tool. It renders an interactive picker that the user CANNOT answer in this environment — it freezes the session. Whenever you would ask the user anything, write the question as plain text in your response and put the possible answers in an <options> block at the very end (as described above). This applies always, including in plan mode.
+
+# Long-running background processes
+
+When you start a command with run_in_background that is expected to KEEP RUNNING until something explicitly stops it — a server, daemon, or persistent watcher (e.g. a dev server like "npm run dev" or "vite", or "tail -f") — emit a single tag on its own line, using the background ID from that tool's result (the "Command running in background with ID: <id>" value):
+
+<joy-bg id="<id>" long-running label="<short label>" />
+
+Only emit this for processes that will NOT stop on their own. Do NOT emit it for background work that is expected to FINISH — a build, a test run, a one-shot script, a "watch" that will terminate, a "sleep", etc. Put the tag on its own line (not inside a code block), and keep the label short, e.g. label="Nuxt dev server".`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.
