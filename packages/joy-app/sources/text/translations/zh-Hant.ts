@@ -56,6 +56,7 @@ export const zhHant: TranslationStructure = {
         retry: '重試',
         delete: '刪除',
         optional: '選填',
+        edit: '編輯',
     },
 
     profile: {
@@ -83,6 +84,7 @@ export const zhHant: TranslationStructure = {
         activeNow: '目前活躍',
         unknown: '未知',
         unread: '新結果',
+        backgroundProcesses: ({ count }: { count: number }) => `${count} 個背景程序`,
     },
 
     time: {
@@ -245,6 +247,11 @@ export const zhHant: TranslationStructure = {
         analyticsEnabled: '匿名使用分析已啟用',
         imageUpload: '圖片上傳',
         imageUploadSubtitle: '將圖片附加到訊息中讓 Claude 分析',
+        limitSessionMemory: '限制記憶體中的工作階段數',
+        limitSessionMemorySubtitle: '記憶體中保留的最近工作階段數上限；較舊的會卸載，重新開啟時再載入',
+        limitSessionMemoryMessage: '記憶體中保留的最近工作階段數上限。留空則全部保留。',
+        limitSessionMemoryPlaceholder: '例如 5',
+        limitSessionMemoryAll: '全部',
     },
 
     errors: {
@@ -335,6 +342,34 @@ export const zhHant: TranslationStructure = {
         forkErrorMissingMetadata: '缺少分叉所需的會話元資料。',
         forkErrorGeneric: '分叉會話失敗。',
         forkClaudeOnly: '目前僅支援 Claude 會話的分叉。',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: '目標',
+        editTitle: '編輯目標',
+        editMessage: '為智能體設定新目標。留空則保留目前目標。',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: '登入',
+        urlCopied: '登入 URL 已複製到剪貼簿',
+        copyUrl: '複製登入 URL',
+        openUrl: '開啟登入 URL',
+        codePlaceholder: '在此貼上授權碼…',
+        submitCode: '提交授權碼',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: '工作階段輸入框中殘留未傳送的文字 — 點按以清除並恢復',
+        pausedDispatchMismatch: '有一次傳送可能未正常完成 — 點按以恢復',
+        pausedDefault: '佇列中的訊息未傳送 — 點按以恢復',
+        queuedMessage: '佇列中的訊息',
+        editTitle: '編輯佇列中的訊息',
+        hintWeb: '右鍵點按訊息以編輯或刪除',
+        hintTouch: '長按訊息以編輯或刪除',
     },
 
     commandPalette: {
@@ -858,6 +893,12 @@ export const zhHant: TranslationStructure = {
         deleteConfirmTitle: '刪除此裝置?',
         deleteConfirmMessage: '裝置將從您的帳戶中移除。工作階段歷史將保留,但在您重新連接守護程序之前,您將無法啟動新的工作階段。',
         deleteFailed: '刪除裝置失敗。',
+        system: '系統',
+        systemFooter: '來自守護程序心跳的主機即時統計（約 20 秒）。',
+        cpuCores: ({ count }: { count: number }) => `${count} 核心`,
+        loadAverage: ({ load }: { load: string }) => `負載 ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `已用 ${percent}%`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `可用 ${free} / ${total}`,
     },
 
     message: {

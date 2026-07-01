@@ -10,6 +10,7 @@ import { Item } from '@/components/Item';
 import { Modal } from '@/modal';
 import { useAllSessions, useAllMachines } from '@/sync/storage';
 import { machineListLogs, machineReadLog, type JoyLogEntry } from '@/sync/ops';
+import { formatLastSeen } from '@/utils/sessionUtils';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -17,21 +18,6 @@ const EXCERPT_LIMIT = 120;
 
 function folderName(dir: string): string {
     return dir.split(/[/\\]/).filter(Boolean).pop() || dir;
-}
-
-// Compact "time ago" (e.g. "3h ago") appended after the absolute timestamp.
-function timeAgo(ms: number): string {
-    const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-    if (s < 60) return 'just now';
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    const d = Math.floor(h / 24);
-    if (d < 30) return `${d}d ago`;
-    const mo = Math.floor(d / 30);
-    if (mo < 12) return `${mo}mo ago`;
-    return `${Math.floor(mo / 12)}y ago`;
 }
 
 // Per-machine project browser. Lists every project (cwd) the machine has run a
@@ -185,7 +171,7 @@ const SessionRow = React.memo(function SessionRow({
             <View style={{ flex: 1 }}>
                 <Text style={[styles.rowTitle, { color: theme.colors.text }]}>{log.sessionId.slice(0, 8)}</Text>
                 <Text style={[styles.rowSub, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                    {new Date(log.mtimeMs).toLocaleString()} · {timeAgo(log.mtimeMs)}
+                    {new Date(log.mtimeMs).toLocaleString()} · {formatLastSeen(log.mtimeMs)}
                 </Text>
                 {excerpt ? (
                     <Text style={[styles.rowExcerpt, { color: theme.colors.textSecondary }]} numberOfLines={2}>{excerpt}</Text>

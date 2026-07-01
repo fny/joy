@@ -54,6 +54,7 @@ export const es: TranslationStructure = {
         retry: 'Reintentar',
         delete: 'Eliminar',
         optional: 'opcional',
+        edit: 'Editar',
     },
 
     profile: {
@@ -82,6 +83,7 @@ export const es: TranslationStructure = {
         activeNow: 'Activo ahora',
         unknown: 'desconocido',
         unread: 'nuevos resultados',
+        backgroundProcesses: ({ count }: { count: number }) => `${count} proceso${count !== 1 ? 's' : ''} en segundo plano`,
     },
 
     time: {
@@ -245,6 +247,11 @@ export const es: TranslationStructure = {
         analyticsEnabled: 'Analítica anónima de uso activa',
         imageUpload: 'Subida de imágenes',
         imageUploadSubtitle: 'Adjunta imágenes a los mensajes para que Claude las analice',
+        limitSessionMemory: 'Limitar sesiones en memoria',
+        limitSessionMemorySubtitle: 'Máximo de sesiones recientes en memoria; las más antiguas se descargan y se recargan al volver',
+        limitSessionMemoryMessage: 'Máximo de sesiones recientes en memoria. Vacío = conservar todas.',
+        limitSessionMemoryPlaceholder: 'p. ej. 5',
+        limitSessionMemoryAll: 'Todas',
     },
 
     errors: {
@@ -335,6 +342,34 @@ export const es: TranslationStructure = {
         forkErrorMissingMetadata: 'Faltan metadatos de la sesión necesarios para bifurcar.',
         forkErrorGeneric: 'No se pudo bifurcar la sesión.',
         forkClaudeOnly: 'La bifurcación actualmente solo se admite para sesiones de Claude.',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: 'OBJETIVO',
+        editTitle: 'Editar objetivo',
+        editMessage: 'Establece un nuevo objetivo para el agente. Déjalo vacío para mantener el actual.',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: 'INICIAR SESIÓN',
+        urlCopied: 'URL de inicio de sesión copiada al portapapeles',
+        copyUrl: 'Copiar URL de inicio de sesión',
+        openUrl: 'Abrir URL de inicio de sesión',
+        codePlaceholder: 'Pega el código aquí…',
+        submitCode: 'Enviar código de inicio de sesión',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: 'El cuadro de entrada de la sesión tiene texto pendiente — toca para limpiarlo y reanudar',
+        pausedDispatchMismatch: 'Es posible que un envío no se haya completado correctamente — toca para reanudar',
+        pausedDefault: 'Un mensaje en cola no se envió — toca para reanudar',
+        queuedMessage: 'Mensaje en cola',
+        editTitle: 'Editar mensaje en cola',
+        hintWeb: 'haz clic derecho en un mensaje para editarlo o eliminarlo',
+        hintTouch: 'mantén pulsado un mensaje para editarlo o eliminarlo',
     },
 
     commandPalette: {
@@ -858,6 +893,12 @@ export const es: TranslationStructure = {
         deleteConfirmTitle: '¿Eliminar esta máquina?',
         deleteConfirmMessage: 'La máquina se eliminará de tu cuenta. El historial de sesiones se conservará, pero no podrás iniciar nuevas sesiones hasta que vuelvas a conectar el daemon.',
         deleteFailed: 'No se pudo eliminar la máquina.',
+        system: 'Sistema',
+        systemFooter: 'Estadísticas del host en vivo desde el heartbeat del daemon (~20 s).',
+        cpuCores: ({ count }: { count: number }) => `${count} núcleo${count !== 1 ? 's' : ''}`,
+        loadAverage: ({ load }: { load: string }) => `carga ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% en uso`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} libres`,
     },
 
     message: {

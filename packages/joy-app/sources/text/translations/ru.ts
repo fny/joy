@@ -65,6 +65,7 @@ export const ru: TranslationStructure = {
         retry: 'Повторить',
         delete: 'Удалить',
         optional: 'необязательно',
+        edit: 'Редактировать',
     },
 
     connect: {
@@ -227,6 +228,11 @@ export const ru: TranslationStructure = {
         analyticsEnabled: 'Анонимная аналитика использования активна',
         imageUpload: 'Загрузка изображений',
         imageUploadSubtitle: 'Прикрепляйте изображения к сообщениям для анализа Claude',
+        limitSessionMemory: 'Лимит сессий в памяти',
+        limitSessionMemorySubtitle: 'Максимум недавних сессий в памяти; старые выгружаются и загружаются заново при открытии',
+        limitSessionMemoryMessage: 'Максимум недавних сессий в памяти. Пусто = хранить все.',
+        limitSessionMemoryPlaceholder: 'например, 5',
+        limitSessionMemoryAll: 'Все',
     },
 
     errors: {
@@ -417,6 +423,7 @@ export const ru: TranslationStructure = {
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
         unread: 'новые результаты',
+        backgroundProcesses: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'фоновый процесс', few: 'фоновых процесса', many: 'фоновых процессов' })}`,
     },
 
     time: {
@@ -448,6 +455,34 @@ export const ru: TranslationStructure = {
         forkErrorMissingMetadata: 'Не хватает метаданных сессии для форка.',
         forkErrorGeneric: 'Не удалось форкнуть сессию.',
         forkClaudeOnly: 'Форк сейчас поддерживается только для Claude-сессий.',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: 'ЦЕЛЬ',
+        editTitle: 'Изменить цель',
+        editMessage: 'Задайте новую цель для агента. Оставьте пустым, чтобы сохранить текущую.',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: 'ВХОД',
+        urlCopied: 'URL для входа скопирован в буфер обмена',
+        copyUrl: 'Скопировать URL для входа',
+        openUrl: 'Открыть URL для входа',
+        codePlaceholder: 'Вставьте код сюда…',
+        submitCode: 'Отправить код входа',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: 'В поле ввода сессии остался текст — нажмите, чтобы очистить и продолжить',
+        pausedDispatchMismatch: 'Отправка могла пройти некорректно — нажмите, чтобы продолжить',
+        pausedDefault: 'Сообщение из очереди не отправилось — нажмите, чтобы продолжить',
+        queuedMessage: 'Сообщение в очереди',
+        editTitle: 'Изменить сообщение в очереди',
+        hintWeb: 'щёлкните правой кнопкой по сообщению, чтобы изменить или удалить',
+        hintTouch: 'удерживайте сообщение, чтобы изменить или удалить',
     },
 
     commandPalette: {
@@ -862,6 +897,12 @@ export const ru: TranslationStructure = {
         deleteConfirmTitle: 'Удалить эту машину?',
         deleteConfirmMessage: 'Машина будет удалена из вашего аккаунта. История сессий сохраняется, но вы больше не сможете запускать новые сессии, пока не подключите демон заново.',
         deleteFailed: 'Не удалось удалить машину.',
+        system: 'Система',
+        systemFooter: 'Актуальная статистика хоста из heartbeat демона (~20 с).',
+        cpuCores: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'ядро', few: 'ядра', many: 'ядер' })}`,
+        loadAverage: ({ load }: { load: string }) => `нагрузка ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% занято`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} свободно`,
     },
 
     message: {

@@ -6,6 +6,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSession } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { Modal } from '@/modal';
+import { t } from '@/text';
 import { Typography } from '@/constants/Typography';
 
 // The agent's active /goal, surfaced by joy-tmux as session.metadata.joy__goal
@@ -21,7 +22,7 @@ export const GoalBar = React.memo(function GoalBar({ sessionId }: { sessionId: s
 
     const onEdit = React.useCallback(async () => {
         if (!goal?.condition) return;
-        const next = await Modal.prompt('Edit goal', 'Set a new goal for the agent. Empty to keep the current one.', {
+        const next = await Modal.prompt(t('goal.editTitle'), t('goal.editMessage'), {
             defaultValue: goal.condition,
         });
         const trimmed = next?.trim();
@@ -38,8 +39,8 @@ export const GoalBar = React.memo(function GoalBar({ sessionId }: { sessionId: s
     return (
         <View style={[styles.bar, { backgroundColor: theme.colors.surface, borderBottomColor: theme.colors.divider }]}>
             <Ionicons name="flag" size={16} color={theme.colors.textLink} style={{ marginRight: 8 }} />
-            <Pressable style={{ flex: 1 }} onPress={onEdit} hitSlop={6} accessibilityLabel="Edit goal">
-                <Text style={[styles.label, { color: theme.colors.textSecondary }]}>GOAL</Text>
+            <Pressable style={{ flex: 1 }} onPress={onEdit} hitSlop={6} accessibilityLabel={t('goal.editTitle')}>
+                <Text style={[styles.label, { color: theme.colors.textSecondary }]}>{t('goal.label')}</Text>
                 <Text style={[styles.text, { color: theme.colors.text }]} numberOfLines={2}>{goal.condition}</Text>
             </Pressable>
             <Pressable onPress={onClear} hitSlop={8} accessibilityLabel="Clear goal" style={(p) => [styles.clear, { opacity: p.pressed ? 0.6 : 1 }]}>

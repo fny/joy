@@ -7,6 +7,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSession } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { Modal } from '@/modal';
+import { t } from '@/text';
 import { Typography } from '@/constants/Typography';
 
 // joy-tmux surfaces an interactive auth/login URL (e.g. Claude Code's /login
@@ -29,7 +30,7 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
     const onCopy = React.useCallback(async () => {
         if (!url) return;
         await Clipboard.setStringAsync(url);
-        Modal.alert('Copied', 'Login URL copied to clipboard.');
+        Modal.alert(t('common.copied'), t('joyLogin.urlCopied'));
     }, [url]);
 
     const onSubmit = React.useCallback(() => {
@@ -45,14 +46,14 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
         <View style={[styles.bar, { backgroundColor: theme.colors.surface, borderBottomColor: theme.colors.divider }]}>
             <View style={styles.row}>
                 <Ionicons name="key" size={16} color={theme.colors.textLink} style={{ marginRight: 8 }} />
-                <Text style={[styles.label, { color: theme.colors.textSecondary }]}>SIGN IN</Text>
-                <Pressable style={{ flex: 1, minWidth: 0 }} onPress={onOpen} hitSlop={6} accessibilityRole="link" accessibilityLabel="Open login URL">
+                <Text style={[styles.label, { color: theme.colors.textSecondary }]}>{t('joyLogin.label')}</Text>
+                <Pressable style={{ flex: 1, minWidth: 0 }} onPress={onOpen} hitSlop={6} accessibilityRole="link" accessibilityLabel={t('joyLogin.openUrl')}>
                     <Text style={[styles.url, { color: theme.colors.textLink }]} numberOfLines={1}>{url}</Text>
                 </Pressable>
-                <Pressable onPress={onCopy} hitSlop={8} accessibilityRole="button" accessibilityLabel="Copy login URL" style={(p) => [styles.iconBtn, { opacity: p.pressed ? 0.6 : 1 }]}>
+                <Pressable onPress={onCopy} hitSlop={8} accessibilityRole="button" accessibilityLabel={t('joyLogin.copyUrl')} style={(p) => [styles.iconBtn, { opacity: p.pressed ? 0.6 : 1 }]}>
                     <Ionicons name="copy-outline" size={18} color={theme.colors.textSecondary} />
                 </Pressable>
-                <Pressable onPress={onOpen} hitSlop={8} accessibilityRole="button" accessibilityLabel="Open login URL in browser" style={(p) => [styles.iconBtn, { opacity: p.pressed ? 0.6 : 1 }]}>
+                <Pressable onPress={onOpen} hitSlop={8} accessibilityRole="button" accessibilityLabel={t('joyLogin.openUrl')} style={(p) => [styles.iconBtn, { opacity: p.pressed ? 0.6 : 1 }]}>
                     <Ionicons name="open-outline" size={18} color={theme.colors.textSecondary} />
                 </Pressable>
             </View>
@@ -65,7 +66,7 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
                 <TextInput
                     value={code}
                     onChangeText={setCode}
-                    placeholder="Paste code here…"
+                    placeholder={t('joyLogin.codePlaceholder')}
                     placeholderTextColor={theme.colors.textSecondary as string}
                     autoCapitalize="none"
                     autoCorrect={false}
@@ -83,7 +84,7 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
                     disabled={!code.trim()}
                     hitSlop={8}
                     accessibilityRole="button"
-                    accessibilityLabel="Submit login code"
+                    accessibilityLabel={t('joyLogin.submitCode')}
                     style={(p) => [styles.sendBtn, { backgroundColor: theme.colors.button.primary.background, opacity: !code.trim() ? 0.4 : p.pressed ? 0.7 : 1 }]}
                 >
                     <Ionicons name="arrow-up" size={16} color={theme.colors.button.primary.tint} />

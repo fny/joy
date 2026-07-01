@@ -47,11 +47,11 @@ export default function FeaturesSettingsScreen() {
 
     const handleLimitSessionMemory = async () => {
         const value = await Modal.prompt(
-            'Limit session memory',
-            'Max recent sessions to keep in memory. Empty = keep all.',
+            t('settingsFeatures.limitSessionMemory'),
+            t('settingsFeatures.limitSessionMemoryMessage'),
             {
                 defaultValue: limitSessionMemory != null ? String(limitSessionMemory) : '',
-                placeholder: 'e.g. 5',
+                placeholder: t('settingsFeatures.limitSessionMemoryPlaceholder'),
             }
         );
         if (value === null) return;
@@ -191,10 +191,10 @@ export default function FeaturesSettingsScreen() {
                     showChevron={false}
                 />
                 <Item
-                    title="Limit session memory"
-                    subtitle="Max recent sessions kept in memory; older ones unload + reload on revisit"
+                    title={t('settingsFeatures.limitSessionMemory')}
+                    subtitle={t('settingsFeatures.limitSessionMemorySubtitle')}
                     icon={<Ionicons name="hardware-chip-outline" size={29} color="#34C759" />}
-                    detail={limitSessionMemory != null ? String(limitSessionMemory) : 'All'}
+                    detail={limitSessionMemory != null ? String(limitSessionMemory) : t('settingsFeatures.limitSessionMemoryAll')}
                     onPress={handleLimitSessionMemory}
                 />
             </ItemGroup>

@@ -56,6 +56,7 @@ export const zhHans: TranslationStructure = {
         retry: '重试',
         delete: '删除',
         optional: '可选的',
+        edit: '编辑',
     },
 
     profile: {
@@ -84,6 +85,7 @@ export const zhHans: TranslationStructure = {
         activeNow: '当前活跃',
         unknown: '未知',
         unread: '新结果',
+        backgroundProcesses: ({ count }: { count: number }) => `${count} 个后台进程`,
     },
 
     time: {
@@ -246,6 +248,11 @@ export const zhHans: TranslationStructure = {
         analyticsEnabled: '匿名使用分析已启用',
         imageUpload: '图片上传',
         imageUploadSubtitle: '将图片附加到消息中让 Claude 分析',
+        limitSessionMemory: '限制内存中的会话数',
+        limitSessionMemorySubtitle: '内存中保留的最近会话数上限；较旧的会话会卸载，重新打开时再加载',
+        limitSessionMemoryMessage: '内存中保留的最近会话数上限。留空则全部保留。',
+        limitSessionMemoryPlaceholder: '例如 5',
+        limitSessionMemoryAll: '全部',
     },
 
     errors: {
@@ -336,6 +343,34 @@ export const zhHans: TranslationStructure = {
         forkErrorMissingMetadata: '缺少分叉所需的会话元数据。',
         forkErrorGeneric: '分叉会话失败。',
         forkClaudeOnly: '目前仅支持 Claude 会话的分叉。',
+    },
+
+    goal: {
+        // GoalBar — the pinned /goal bar at the top of the chat
+        label: '目标',
+        editTitle: '编辑目标',
+        editMessage: '为智能体设置新目标。留空则保留当前目标。',
+    },
+
+    joyLogin: {
+        // LoginBar — pinned sign-in bar for interactive CLI logins
+        label: '登录',
+        urlCopied: '登录 URL 已复制到剪贴板',
+        copyUrl: '复制登录 URL',
+        openUrl: '打开登录 URL',
+        codePlaceholder: '在此粘贴授权码…',
+        submitCode: '提交授权码',
+    },
+
+    joyQueue: {
+        // Queued-message strip above the composer (JoyQueueStrip)
+        pausedInputDirty: '会话输入框中残留未发送的文本 — 点按以清除并恢复',
+        pausedDispatchMismatch: '有一次发送可能未正常完成 — 点按以恢复',
+        pausedDefault: '队列中的消息未发送 — 点按以恢复',
+        queuedMessage: '队列中的消息',
+        editTitle: '编辑队列中的消息',
+        hintWeb: '右键点击消息以编辑或删除',
+        hintTouch: '长按消息以编辑或删除',
     },
 
     commandPalette: {
@@ -859,6 +894,12 @@ export const zhHans: TranslationStructure = {
         deleteConfirmTitle: '删除此设备？',
         deleteConfirmMessage: '设备将从您的账户中移除。会话历史将保留，但在您重新连接守护进程之前，您将无法启动新会话。',
         deleteFailed: '删除设备失败。',
+        system: '系统',
+        systemFooter: '来自守护进程心跳的主机实时统计（约 20 秒）。',
+        cpuCores: ({ count }: { count: number }) => `${count} 核`,
+        loadAverage: ({ load }: { load: string }) => `负载 ${load}`,
+        memoryUsedPercent: ({ percent }: { percent: number }) => `已用 ${percent}%`,
+        diskFree: ({ free, total }: { free: string; total: string }) => `可用 ${free} / ${total}`,
     },
 
     message: {
