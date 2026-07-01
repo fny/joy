@@ -20,13 +20,6 @@ export type AttachmentDiagnostic = {
     reason?: string;
 };
 
-export type AttachmentDiagnosticRuntimeContext = {
-    platform?: string;
-    client?: string;
-};
-
-const ATTACHMENT_DIAGNOSTIC_ERROR_BRAND: unique symbol = Symbol('happy.attachment-diagnostic-error');
-
 const attachmentDiagnosticLegs = new Set<AttachmentDiagnosticLeg>([
     'request-upload',
     'blob-upload',
@@ -64,7 +57,6 @@ export type CreateAttachmentDiagnosticInput = {
 
 export class AttachmentDiagnosticError extends Error {
     readonly diagnostic: AttachmentDiagnostic;
-    readonly [ATTACHMENT_DIAGNOSTIC_ERROR_BRAND] = true;
 
     constructor(message: string, diagnostic: AttachmentDiagnostic) {
         super(sanitizeDiagnosticText(message) ?? '');
@@ -124,29 +116,6 @@ export function createAttachmentDiagnosticError(
     input: CreateAttachmentDiagnosticInput,
 ): AttachmentDiagnosticError {
     return new AttachmentDiagnosticError(message, createAttachmentDiagnostic(input));
-}
-
-export function getAttachmentDiagnostic(error: unknown): AttachmentDiagnostic | null {
-    if (error instanceof AttachmentDiagnosticError) {
-        return sanitizeAttachmentDiagnostic(error.diagnostic);
-    }
-
-    if (isBrandedAttachmentDiagnosticError(error) && isAttachmentDiagnostic(error.diagnostic)) {
-        return sanitizeAttachmentDiagnostic(error.diagnostic);
-    }
-    return null;
-}
-
-export function formatAttachmentDiagnosticForLog(
-    diagnostic: AttachmentDiagnostic,
-    runtime: AttachmentDiagnosticRuntimeContext = {},
-): AttachmentDiagnostic & AttachmentDiagnosticRuntimeContext {
-    const sanitized = sanitizeAttachmentDiagnostic(diagnostic);
-    return withoutUndefined({
-        ...sanitized,
-        platform: sanitizeDiagnosticText(runtime.platform),
-        client: sanitizeDiagnosticText(runtime.client),
-    });
 }
 
 function sanitizeAttachmentDiagnostic(diagnostic: AttachmentDiagnostic): AttachmentDiagnostic {
@@ -227,32 +196,6 @@ function sanitizeDiagnosticText(value: string | undefined): string | undefined {
         .replace(/\b(?:X-Amz-[A-Za-z0-9-]+|AWSAccessKeyId|policy|token|access_token|signature)=[^\s"'<>]+/gi, '[redacted-query]')
         .replace(/(^|[\s(["'=])\/(?:Users|home|var|tmp|private|Volumes|data\/user\/0|data\/data|storage\/emulated\/0|sdcard)\/[^"')\],}]+/g, '$1[local-file]')
         .replace(/(^|[\s(["'])\/?(?:happy|sessions)\/[A-Za-z0-9._~@-]+(?:\/[A-Za-z0-9._~@-]+)+(?:\?[^\s"'<>]*)?/gi, '$1[attachment-ref]');
-}
-
-function isBrandedAttachmentDiagnosticError(value: unknown): value is {
-    [ATTACHMENT_DIAGNOSTIC_ERROR_BRAND]: true;
-    diagnostic: unknown;
-} {
-    return isRecord(value)
-        && value[ATTACHMENT_DIAGNOSTIC_ERROR_BRAND] === true;
-}
-
-function isAttachmentDiagnostic(value: unknown): value is AttachmentDiagnostic {
-    if (!isRecord(value) || !attachmentDiagnosticLegs.has(value.leg as AttachmentDiagnosticLeg)) {
-        return false;
-    }
-
-    return (value.method === undefined || attachmentDiagnosticMethods.has(value.method as AttachmentDiagnosticMethod))
-        && (value.host === undefined || typeof value.host === 'string')
-        && (value.target === undefined || attachmentTransferTargets.has(value.target as AttachmentTransferTarget))
-        && (value.status === undefined || typeof value.status === 'number')
-        && (value.statusText === undefined || typeof value.statusText === 'string')
-        && (value.message === undefined || typeof value.message === 'string')
-        && (value.reason === undefined || typeof value.reason === 'string');
-}
-
-function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
-    return typeof value === 'object' && value !== null;
 }
 
 function withoutUndefined<T extends Record<string, unknown>>(value: T): T {

@@ -33,8 +33,20 @@ function load(): Record<string, QueuedDraft[]> {
     }
 }
 
+// update() is wired to onChangeText, so persisting inline would JSON.stringify
+// every session's drafts and hit MMKV once PER KEYSTROKE. Debounce on a short
+// trailing timer; add/remove flush immediately (they're rare and it keeps a
+// just-queued/just-sent draft durable even if the app dies right after).
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
 function persist(bySession: Record<string, QueuedDraft[]>) {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = null;
     mmkv.set(STORAGE_KEY, JSON.stringify(bySession));
+}
+
+function persistDebounced(get: () => DraftQueueState) {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => persist(get().bySession), 500);
 }
 
 export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
@@ -58,7 +70,7 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
                 [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id ? { ...d, text } : d)),
             },
         }));
-        persist(get().bySession);
+        persistDebounced(get);
     },
     remove: (sessionId, id) => {
         set((s) => ({
