@@ -1749,21 +1749,36 @@ class Sync {
             if (Array.isArray(data.messages) && data.messages.length > 0) {
                 const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                 let maxSeq = currentLastSeq;
+                let minSeq = Number.POSITIVE_INFINITY;
                 for (const message of data.messages) {
                     if (message.seq > maxSeq) {
                         maxSeq = message.seq;
                     }
+                    if (message.seq < minSeq) {
+                        minSeq = message.seq;
+                    }
                 }
-                this.sessionLastSeq.set(sessionId, maxSeq);
-                // The POST ack is the ONLY place a sender learns the authoritative
-                // seq of its own messages — the live socket broadcast never echoes
-                // the sender's own rows back. Feed them to the reducer so optimistic
-                // sends settle into server-log order instead of floating to "now".
-                storage.getState().reconcileSentMessages(sessionId, data.messages.map((m) => ({
-                    id: m.id,
-                    seq: m.seq,
-                    localId: m.localId
-                })));
+                if (currentLastSeq > 0 && minSeq > currentLastSeq + 1) {
+                    // Interior gap: rows we NEVER saw (an agent turn missed during a
+                    // socket drop, another client's sends) sit between our cursor and
+                    // our own acked rows. Advancing the cursor over them would make
+                    // the gap permanently unfetchable — forward sync only reads after
+                    // the cursor, and backward paging only reads older than the
+                    // initial page. That was the "invisible agent turn between two
+                    // user messages" hole. Reset and replay instead.
+                    this.healInteriorGap(sessionId);
+                } else {
+                    this.sessionLastSeq.set(sessionId, maxSeq);
+                    // The POST ack is the ONLY place a sender learns the authoritative
+                    // seq of its own messages — the live socket broadcast never echoes
+                    // the sender's own rows back. Feed them to the reducer so optimistic
+                    // sends settle into server-log order instead of floating to "now".
+                    storage.getState().reconcileSentMessages(sessionId, data.messages.map((m) => ({
+                        id: m.id,
+                        seq: m.seq,
+                        localId: m.localId
+                    })));
+                }
             }
         } catch (error) {
             this.maybeStartBackgroundSendWatchdog();
@@ -1779,6 +1794,19 @@ class Sync {
         } else if (this.appState !== 'active') {
             this.maybeStartBackgroundSendWatchdog();
         }
+    }
+
+    /** Interior-gap heal: drop the seq anchors and the session's message/reducer
+     *  state, then refetch. The reducer is order-dependent (it mutates state
+     *  in-place as batches stream through), so rows that arrive OLDER than
+     *  already-processed ones can't simply be merged — a fresh replay from the
+     *  newest page is the only ordering-safe way to make a missed turn render. */
+    private healInteriorGap(sessionId: string) {
+        log.log(`💬 interior seq gap detected for ${sessionId} — resetting and refetching`);
+        this.sessionLastSeq.delete(sessionId);
+        this.sessionOldestSeq.delete(sessionId);
+        storage.getState().resetSessionMessages(sessionId);
+        this.getMessagesSync(sessionId).invalidate();
     }
 
     private fetchMessages = async (sessionId: string) => {

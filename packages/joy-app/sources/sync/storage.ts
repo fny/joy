@@ -202,6 +202,10 @@ interface StorageState {
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     reconcileSentMessages: (sessionId: string, acks: Array<{ id: string; seq: number; localId: string | null }>) => void;
     applyMessagesLoaded: (sessionId: string) => void;
+    /** Drop a session's messages AND reducer state so the next fetch replays from
+     *  scratch — the interior-gap heal (the reducer is order-dependent, so rows
+     *  that arrive older-than-processed can't just be merged in). */
+    resetSessionMessages: (sessionId: string) => void;
     noteSessionVisible: (sessionId: string) => void;
     applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
@@ -830,6 +834,12 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
         },
+        resetSessionMessages: (sessionId: string) => set((state) => {
+            if (!state.sessionMessages[sessionId]) return state;
+            const sessionMessages = { ...state.sessionMessages };
+            delete sessionMessages[sessionId];
+            return { ...state, sessionMessages };
+        }),
         applyMessagesLoaded: (sessionId: string) => set((state) => {
             const existingSession = state.sessionMessages[sessionId];
             let result: StorageState;
