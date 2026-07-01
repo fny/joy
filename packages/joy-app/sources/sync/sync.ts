@@ -1856,9 +1856,17 @@ class Sync {
     }
 
     private prefetchOlderMessagesInBackground = async (sessionId: string) => {
-        const SLEEP_BETWEEN_PAGES_MS = 250;
+        const SLEEP_BETWEEN_PAGES_MS = 500;
+        // Cap the background prefetch: enough recent scrollback (~300
+        // messages) for casual scrolling and the prompt scrubber, without
+        // hammering the server for a session's entire history right after
+        // the chat opens (a 20k-message session would otherwise mean 200
+        // GETs + decrypts). Deeper history loads on demand via the
+        // on-scroll path (onStartReached → loadOlderMessages).
+        const MAX_PREFETCH_PAGES = 3;
         // While loadOlderMessages handles the actual work, this loop is what
         // keeps it going without user input. We keep stepping until either:
+        //   - we hit the prefetch page cap (scroll covers the rest), or
         //   - the server says there is no more older history, or
         //   - the session is no longer present in the store (user navigated
         //     away and the session was unloaded), or
@@ -1866,7 +1874,7 @@ class Sync {
         //   - the encryption key is gone (logged out).
         // The loop yields between pages to keep the UI thread responsive
         // and to spread out server load.
-        while (true) {
+        for (let page = 0; page < MAX_PREFETCH_PAGES; page++) {
             const sessionMessages = storage.getState().sessionMessages[sessionId];
             if (!sessionMessages || !sessionMessages.hasMoreOlder) {
                 return;
@@ -2140,6 +2148,7 @@ class Sync {
 
             // Decrypt message
             let lastMessage: NormalizedMessage | null = null;
+            let appliedFastPath = false;
             if (updateData.body.message) {
                 const decrypted = await encryption.decryptMessage(updateData.body.message);
                 if (decrypted) {
@@ -2176,6 +2185,7 @@ class Sync {
                     if (lastMessage && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
                         this.enqueueMessages(updateData.body.sid, [lastMessage]);
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
+                        appliedFastPath = true;
                         let hasMutableTool = false;
                         if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
                             hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
@@ -2183,14 +2193,25 @@ class Sync {
                         if (hasMutableTool) {
                             gitStatusSync.invalidate(updateData.body.sid);
                         }
-                    } else {
-                        this.getMessagesSync(updateData.body.sid).invalidate();
                     }
                 }
             }
 
-            // Ping session
-            this.onSessionVisible(updateData.body.sid);
+            // Slow-path heal: a non-consecutive seq (or a message we couldn't
+            // decrypt/normalize) means we may have missed messages — refetch
+            // from the server, and refresh git status via the DEBOUNCED
+            // invalidate since a missed message could have run a mutable tool.
+            // The fast path already applied the message, advanced the cursor,
+            // and invalidated git status for mutable tools, so it skips this.
+            // (Previously every streamed message pinged onSessionVisible here,
+            // causing a no-op HTTP GET plus undebounced git RPC churn per
+            // message. Visibility side effects — noteSessionVisible, voice
+            // focus — belong to navigation (SessionView mount / app resume),
+            // not message receipt.)
+            if (!appliedFastPath) {
+                this.getMessagesSync(updateData.body.sid).invalidate();
+                gitStatusSync.invalidate(updateData.body.sid);
+            }
 
         } else if (updateData.body.t === 'new-session') {
             log.log('🆕 New session update received');
