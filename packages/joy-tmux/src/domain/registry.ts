@@ -200,6 +200,8 @@ export class SessionRegistry {
       broadcast: (event, data) => this.broadcast(event, data),
       addChatMessage: (msg) => this.addChatMessage(msg),
       onRelayAttached: this.#onRelayAttached,
+      isTranscriptClaimed: (path, selfId) =>
+        [...this.#sessions.values()].some(s => s.id !== selfId && s.transcriptPath === path && s.status !== "ended"),
     };
   }
 
@@ -592,9 +594,18 @@ export class SessionRegistry {
       const recTranscript = rec?.claudeSessionId
         ? join(cwdToTranscriptDir(cwd), `${rec.claudeSessionId}.jsonl`)
         : null;
+      // Newest-mtime fallback must never adopt a transcript another recovered
+      // session already owns — with several sessions per cwd, both recordless
+      // windows would otherwise bind the same (newest) conversation and mirror
+      // each other's turns. Better to stay unbound and let pollForTranscript
+      // pick up a fresh transcript when it appears.
+      const claimed = new Set(
+        [...this.#sessions.values()].filter(s => s.status !== "ended").map(s => s.transcriptPath).filter(Boolean),
+      );
+      const fallback = findLatestTranscript(cwdToTranscriptDir(cwd), 0);
       const transcriptPath = (recTranscript && existsSync(recTranscript))
         ? recTranscript
-        : findLatestTranscript(cwdToTranscriptDir(cwd), 0);
+        : (fallback && !claimed.has(fallback) ? fallback : undefined);
       const claudeSessionId = transcriptPath ? basename(transcriptPath, ".jsonl") : undefined;
 
       const session = new Session({

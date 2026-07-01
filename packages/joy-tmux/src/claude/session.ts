@@ -13,7 +13,7 @@
 //      first transcript entry lands.
 
 import { setTimeout as sleep } from "timers/promises";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "fs";
 import { run } from "../tmux/shell";
 import { tmux } from "../tmux/driver";
 import {
@@ -156,6 +156,10 @@ export interface SessionDeps {
   addChatMessage(msg: ChatMessage): void;
   /** Called when a relay session is attached — the place to register session-scoped ops. */
   onRelayAttached?: (session: Session, rs: RelaySession) => void;
+  /** True if another session already tails this transcript — guards the unpinned
+   *  newest-mtime discovery from adopting a sibling session's conversation when
+   *  several sessions share a cwd. */
+  isTranscriptClaimed?: (path: string, selfId: string) => boolean;
 }
 
 export interface SendOptions {
@@ -377,6 +381,7 @@ export class Session {
   #deps: SessionDeps;
   #relay: RelaySession | null = null;
   #tailer: TranscriptTailer | null = null;
+  #transcriptPollActive = false;
   #turn: { turnId: string } | null = null;
   // Last "thinking" value pushed to the relay. The pane poll (#pollThinking)
   // reconciles this against the live pane so the app's status matches the
@@ -387,8 +392,14 @@ export class Session {
   // session "working" with an N/M count until they finish — survives turn-end,
   // unlike the pane-footer poll which flickers idle for ~3s at turn-end.
   #bgTasks = new Set<string>();
-  #bgTotal = 0;
-  #bgDone = 0;
+  // Incremental transcript scan backing #deriveBgTasks/#reconcileGoal — see
+  // #deriveBgTasks for semantics (append-only parse from a byte offset).
+  #scan: {
+    path: string; offset: number;
+    events: Array<{ kind: "launch" | "complete"; id: string }>;
+    lrIds: Set<string>;
+    lastGoal: { condition: string; met: boolean; atMs: number } | null;
+  } | null = null;
   // Long-running processes (servers/daemons the agent tagged <joy-bg long-running>).
   // Counted separately (joy__longRunning) and never in the N/M — they don't finish.
   #longRunning = new Set<string>();
@@ -1653,32 +1664,44 @@ export class Session {
 
   // ── Transcript watching ─────────────────────────────────────────────────────
 
-  // M4: 120 attempts × 500ms = 60s window, enough for slow first-runs
-  // (trust prompts etc.)
+  // 500ms cadence for the first 60s (trust prompts, slow first runs), then a
+  // 5s heartbeat FOREVER. A session that recovers before its transcript exists
+  // must still bind whenever Claude finally writes one — giving up leaves the
+  // session permanently blind: dispatch confirmation, bg tasks, goal and
+  // mirrored turns all silently stop working.
   pollForTranscript(attempts = 0): void {
-    if (this.#tailer || this.status === "ended") return;
+    if (attempts === 0) {
+      if (this.#transcriptPollActive) return; // a poll chain is already running
+      this.#transcriptPollActive = true;
+    }
+    if (this.#tailer || this.status === "ended") {
+      this.#transcriptPollActive = false;
+      return;
+    }
     if (this.transcriptPath) {
       // A pinned transcript — the --resume target, or a fresh session's own
       // --session-id file. Tail it once it appears (a fresh one is created by
       // Claude on first turn). Do NOT fall back to mtime discovery: that's the
       // race that let two sessions in one cwd tail each other's transcript.
       if (existsSync(this.transcriptPath)) {
+        this.#transcriptPollActive = false;
         this.startTailer(this.transcriptPath);
         return;
       }
     } else {
-      // Unpinned legacy path: discover the newest transcript in the cwd.
+      // Unpinned legacy path: discover the newest transcript in the cwd —
+      // skipping one already tailed by a sibling session in the same cwd.
       const path = findLatestTranscript(cwdToTranscriptDir(this.cwd), this.startedAt);
-      if (path) {
+      if (path && !this.#deps.isTranscriptClaimed?.(path, this.id)) {
+        this.#transcriptPollActive = false;
         this.startTailer(path);
         return;
       }
     }
-    if (attempts < 120) {
-      setTimeout(() => this.pollForTranscript(attempts + 1), 500);
-    } else {
-      process.stderr.write(`[transcript] WARN: no transcript found for ${this.id} after 60s — assistant output will not reach the relay\n`);
+    if (attempts === 120) {
+      process.stderr.write(`[transcript] WARN: no transcript found for ${this.id} after 60s — dropping to slow poll (5s) until one appears\n`);
     }
+    setTimeout(() => this.pollForTranscript(attempts + 1), attempts < 120 ? 500 : 5000);
   }
 
   /**
@@ -1708,10 +1731,36 @@ export class Session {
   #pollEnd(): void {
     if (this.status === "ended") return;
     if (this.pid !== undefined && !run("kill", "-0", String(this.pid)).ok) {
-      this.end("process_exited");
-      return;
+      // The cached pid can be stale or plain wrong: launch grabs the shell's
+      // first child 800ms in (which may not be claude), and claude can re-exec
+      // itself (self-update). A dead cached pid while Claude runs on caused
+      // false "detached" sessions. Before declaring death, re-resolve from the
+      // pane itself; only end when the pane also shows no live Claude.
+      const fresh = this.#resolvePidFromPane();
+      if (fresh !== undefined) {
+        this.pid = fresh;
+      } else {
+        const pane = tmux.captureCached(this.tmuxWindow);
+        if (!(pane.ok && paneShowsClaudeRunning(pane.out))) {
+          this.end("process_exited");
+          return;
+        }
+        // The pane still shows Claude (pid unresolvable right now — e.g. mid
+        // re-exec). Keep watching; the next tick re-resolves.
+      }
     }
     setTimeout(() => this.#pollEnd(), 5000);
+  }
+
+  /** Re-derive Claude's pid from the pane's shell: its live first child. */
+  #resolvePidFromPane(): number | undefined {
+    const shell = tmux.runSync("display-message", "-t", this.tmuxWindow, "-p", "#{pane_pid}");
+    if (!shell.ok) return undefined; // window gone → let the caller end the session
+    const shellPid = parseInt(shell.out.trim());
+    if (isNaN(shellPid)) return undefined;
+    const child = parseInt(run("pgrep", "-P", String(shellPid)).out.split("\n")[0]);
+    if (!isNaN(child) && child !== this.pid && run("kill", "-0", String(child)).ok) return child;
+    return undefined;
   }
 
   /** Synthesize tool-call-end for every tool whose start we forwarded but whose
@@ -1757,27 +1806,55 @@ export class Session {
   #deriveBgTasks(): { outstanding: Set<string>; total: number; done: number; longRunning: Set<string> } {
     const empty = { outstanding: new Set<string>(), total: 0, done: 0, longRunning: new Set<string>() };
     if (!this.transcriptPath || !existsSync(this.transcriptPath)) return empty;
-    let lines: string[];
-    try { lines = readFileSync(this.transcriptPath, "utf-8").split("\n"); } catch { return empty; }
-    // Pass 1: collect ordered task events + the full set of long-running ids (the
-    // tag can sit a few entries after its launch, so we need it before replay).
-    const events: Array<{ kind: "launch" | "complete"; id: string }> = [];
-    const lrIds = new Set<string>();
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let entry: unknown;
-      try { entry = JSON.parse(line); } catch { continue; }
-      const ev = bgTaskEvent(entry);
-      if (ev) events.push(ev);
-      for (const id of joyBgLongRunningIds(entry)) lrIds.add(id);
-    }
-    // Pass 2: replay, classifying each task by lrIds. Drop any task an abort
-    // cancelled — its launch is in the transcript but its completion never will be,
-    // so leaving it would keep the N/M count stuck.
+    // Incremental scan: transcripts are append-only, so parse only the bytes
+    // added since the last derive (a whole-file re-parse ran every 150ms-coalesced
+    // event AND every 60s for the life of any long-running process — ~100ms of
+    // blocking JSON.parse per tick on multi-MB transcripts). The cache holds the
+    // ordered task events, long-running ids, and the latest goal_status; it
+    // resets when the transcript rotates (path change) or shrinks (rewrite).
+    if (this.#scan?.path !== this.transcriptPath) this.#scan = null;
+    const scan = this.#scan ?? (this.#scan = {
+      path: this.transcriptPath, offset: 0,
+      events: [], lrIds: new Set<string>(), lastGoal: null,
+    });
+    try {
+      const size = statSync(scan.path).size;
+      if (size < scan.offset) { scan.offset = 0; scan.events = []; scan.lrIds = new Set(); scan.lastGoal = null; }
+      if (size > scan.offset) {
+        const fd = openSync(scan.path, "r");
+        try {
+          const buf = Buffer.alloc(size - scan.offset);
+          readSync(fd, buf, 0, buf.length, scan.offset);
+          // Consume only complete lines; a trailing partial line (mid-write or a
+          // split multi-byte char) is left for the next pass.
+          const end = buf.lastIndexOf(0x0a);
+          if (end >= 0) {
+            scan.offset += end + 1;
+            for (const line of buf.subarray(0, end).toString("utf-8").split("\n")) {
+              if (!line.trim()) continue;
+              let entry: unknown;
+              try { entry = JSON.parse(line); } catch { continue; }
+              const ev = bgTaskEvent(entry);
+              if (ev) scan.events.push(ev);
+              for (const id of joyBgLongRunningIds(entry)) scan.lrIds.add(id);
+              const g = goalStatusFromEntry(entry);
+              if (g) {
+                const atMs = Date.parse(String((entry as { timestamp?: string }).timestamp || "")) || Date.now();
+                scan.lastGoal = { ...g, atMs };
+              }
+            }
+          }
+        } finally { closeSync(fd); }
+      }
+    } catch { return empty; }
+    // Replay, classifying each task by lrIds (the long-running tag can trail its
+    // launch by a few entries, which is why classification happens at the end).
+    // Drop any task an abort cancelled — its launch is in the transcript but its
+    // completion never will be, so leaving it would keep the N/M count stuck.
     const live = this.#cancelledBgTasks.size > 0
-      ? events.filter((e) => !this.#cancelledBgTasks.has(e.id))
-      : events;
-    return classifyBgTasks(live, lrIds);
+      ? scan.events.filter((e) => !this.#cancelledBgTasks.has(e.id))
+      : scan.events;
+    return classifyBgTasks(live, scan.lrIds);
   }
 
   /** Re-derive from the transcript and push BOTH the finishing N/M (joy__tasks)
@@ -1786,8 +1863,6 @@ export class Session {
   #reconcileBgTasks(): void {
     const d = this.#deriveBgTasks();
     this.#bgTasks = d.outstanding;
-    this.#bgTotal = d.total;
-    this.#bgDone = d.done;
     this.#longRunning = d.longRunning;
     const tasks = d.outstanding.size > 0 ? { done: d.done, total: d.total } : null;
     const longRunning = d.longRunning.size > 0 ? d.longRunning.size : null;
@@ -1814,23 +1889,13 @@ export class Session {
   }
 
   /** Re-derive the active goal from the transcript (the LAST goal_status wins)
-   *  and push it — used on (re)attach so a restart doesn't drop/stick the bar. */
+   *  and push it — used on (re)attach so a restart doesn't drop/stick the bar.
+   *  Rides the shared incremental scan instead of re-reading the whole file. */
   #reconcileGoal(): void {
-    let latest: { condition: string; met: boolean } | null = null;
-    let latestAt = Date.now();
-    if (this.transcriptPath && existsSync(this.transcriptPath)) {
-      try {
-        for (const line of readFileSync(this.transcriptPath, "utf-8").split("\n")) {
-          if (!line.trim() || !line.includes("goal_status")) continue;
-          let entry: unknown;
-          try { entry = JSON.parse(line); } catch { continue; }
-          const g = goalStatusFromEntry(entry);
-          if (g) { latest = g; latestAt = Date.parse(String((entry as { timestamp?: string }).timestamp || "")) || Date.now(); }
-        }
-      } catch { /* best-effort */ }
-    }
+    this.#deriveBgTasks(); // advance the shared scan to the end of the transcript
+    const latest = this.#scan?.lastGoal ?? null;
     this.#goal = null; // force #applyGoalStatus to treat the derived value as fresh
-    if (latest) this.#applyGoalStatus(latest, latestAt);
+    if (latest) this.#applyGoalStatus(latest, latest.atMs);
     else void this.#relay?.updateGoal(null);
   }
 
@@ -2169,6 +2234,19 @@ export class Session {
           if (this.#dispatchInFlight &&
               flattenForMatch(this.#dispatchInFlight.text) === matchContent) {
             this.#confirmDispatchIfAwaiting();
+          }
+          // Late-echo self-heal: a dispatch that timed out (e.g. the tailer
+          // bound after the 20s window) re-queued its item and paused. This
+          // echo proves that message DID land — drop the re-queued twin and
+          // resume, otherwise tapping "resume" would deliver it twice. Guarded
+          // to the wedged state so a genuine duplicate send (same text queued
+          // while another is in flight) is never swallowed.
+          if (!this.#dispatchInFlight && this.#queuePaused && this.#pauseReason === "dispatch_timeout") {
+            const head = this.#queue[0];
+            if (head && flattenForMatch(head.text) === matchContent) {
+              this.#queue.shift();
+              this.resumeQueue();
+            }
           }
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
         }
