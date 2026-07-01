@@ -20,6 +20,7 @@ import { AnsiText } from '@/components/AnsiText';
 import { TerminalKeyBar } from '@/components/TerminalKeyBar';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useActiveInterval } from '@/hooks/useActiveInterval';
+import { useIsTablet } from '@/utils/responsive';
 
 const POLL_MS = 1500;
 // Pane font metrics — char width ≈ 0.6em for the mono fonts below; used to
@@ -34,6 +35,7 @@ export default React.memo(function JoyPaneScreen() {
     const machineId = String(params.machine ?? '');
     const sessionId = String(params.id ?? '');
 
+    const isTablet = useIsTablet();
     const [pane, setPane] = React.useState<string>('');
     const [paneError, setPaneError] = React.useState<string | null>(null);
     const [input, setInput] = React.useState('');
@@ -145,9 +147,10 @@ export default React.memo(function JoyPaneScreen() {
     return (
         <KeyboardWrapper {...keyboardProps}>
         <View style={styles.container}>
-            {/* Header is hidden for a full-height terminal — keep a back affordance
-                on mobile (web navigates via the sidebar). */}
-            {Platform.OS !== 'web' && (
+            {/* Header is hidden for a full-height terminal — show a back affordance
+                whenever the sidebar is collapsed (narrow width / phone), matching the
+                chat view's `!isTablet` rule so web-narrow gets a way back too. */}
+            {!isTablet && (
                 <Pressable
                     onPress={() => router.back()}
                     style={(p) => [styles.backButton, p.pressed && styles.quickKeyPressed]}
