@@ -18,6 +18,7 @@ import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
 import { AnsiText } from '@/components/AnsiText';
 import { TerminalKeyBar } from '@/components/TerminalKeyBar';
+import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useActiveInterval } from '@/hooks/useActiveInterval';
 
 const POLL_MS = 1500;
@@ -133,7 +134,16 @@ export default React.memo(function JoyPaneScreen() {
         }
     }, [input, sendScript, rawMode]);
 
+    // The header is hidden (full-height terminal), so on iOS the keyboard would
+    // overlay the quick-keys + input row. Lift the whole column above it with the
+    // keyboard-controller's KeyboardAvoidingView (no-op wrapper on other platforms).
+    const KeyboardWrapper = Platform.OS === 'ios' ? KeyboardAvoidingView : React.Fragment;
+    const keyboardProps = Platform.OS === 'ios'
+        ? { behavior: 'padding' as const, keyboardVerticalOffset: 0, style: styles.flex }
+        : {};
+
     return (
+        <KeyboardWrapper {...keyboardProps}>
         <View style={styles.container}>
             {/* Header is hidden for a full-height terminal — keep a back affordance
                 on mobile (web navigates via the sidebar). */}
@@ -202,10 +212,14 @@ export default React.memo(function JoyPaneScreen() {
                 </Pressable>
             </View>
         </View>
+        </KeyboardWrapper>
     );
 });
 
 const styles = StyleSheet.create((theme, runtime) => ({
+    flex: {
+        flex: 1,
+    },
     container: {
         flex: 1,
         backgroundColor: '#0c0c0c',
