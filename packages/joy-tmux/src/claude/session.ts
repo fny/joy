@@ -225,6 +225,13 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
     const tur = entry?.toolUseResult as Record<string, unknown> | undefined;
     if (tur && typeof tur.backgroundTaskId === "string") return { kind: "launch", id: tur.backgroundTaskId };
     if (tur && tur.isAsync === true && typeof tur.agentId === "string") return { kind: "launch", id: tur.agentId };
+    // TaskStop: an explicitly stopped task never gets a <task-notification>,
+    // so treat the stop tool_result as its completion — otherwise a stopped
+    // long-running process leaves joy__longRunning stuck forever (and a
+    // stopped finishing task would wedge the N/M count the same way).
+    if (tur && typeof tur.task_id === "string" && /stopped/i.test(String(tur.message ?? ""))) {
+      return { kind: "complete", id: tur.task_id };
+    }
     return null;
   }
   // Older transcripts delivered the notification as a plain user-message string.

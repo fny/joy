@@ -473,6 +473,17 @@ test("bgTaskEvent: completion via <task-notification>", () => {
   expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "bg-1" });
 });
 
+test("bgTaskEvent: completion via TaskStop tool_result (explicitly stopped task)", () => {
+  // A stopped task never gets a <task-notification> — the TaskStop result is
+  // its completion. Without this, a stopped <joy-bg long-running> server
+  // leaves joy__longRunning stuck forever (found live by the e2e suite).
+  const e = {
+    message: { role: "user", content: [{ type: "tool_result" }] },
+    toolUseResult: { message: "Successfully stopped task: b30k2oxtm (python3 -m http.server 8931)", task_id: "b30k2oxtm", task_type: "local_bash", command: "python3 -m http.server 8931" },
+  };
+  expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "b30k2oxtm" });
+});
+
 test("bgTaskEvent: completion via attachment-form notification (newer Claude)", () => {
   // Newer Claude delivers the notification as an attachment entry, not a user
   // message — attachment.prompt holds the payload. This is the common case that
