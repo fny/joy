@@ -172,6 +172,17 @@ function NewJoyTmuxSessionScreen() {
     const selectedHomeDir = selectedMachine?.metadata?.homeDir;
     const isOffline = selectedMachine ? !isMachineOnline(selectedMachine) : false;
 
+    // Once the selected machine's home dir is known, collapse an absolute
+    // under-home path (e.g. a deep-link `params.path` or a legacy absolute recent)
+    // to the portable tilde form so the field shows "~/…", not "/home/xyz/…".
+    React.useEffect(() => {
+        if (!selectedHomeDir) return;
+        setPathInput(prev => {
+            const p = trimPathInput(prev);
+            return p.startsWith(selectedHomeDir) ? formatPathRelativeToHome(p, selectedHomeDir) : prev;
+        });
+    }, [selectedHomeDir]);
+
     // Sort: online first, then offline
     const machineList = React.useMemo(() => {
         return [...allMachines].sort((a, b) => (isMachineOnline(a) ? 0 : 1) - (isMachineOnline(b) ? 0 : 1));
@@ -331,7 +342,8 @@ function NewJoyTmuxSessionScreen() {
             await sync.refreshSessions();
 
             // Remember this machine+folder so the next new-session pre-selects it.
-            const usedPath = trimPathInput(pathInput) || '~/';
+            // Store the tilde-relative form (~/…) so it stays portable across machines.
+            const usedPath = formatPathRelativeToHome(trimPathInput(pathInput) || '~/', selectedHomeDir);
             setRecentMachinePaths([
                 { machineId: selectedMachineId, path: usedPath },
                 ...recentMachinePaths.filter(r => !(r.machineId === selectedMachineId && r.path === usedPath)),
@@ -708,7 +720,10 @@ function NewJoyTmuxSessionScreen() {
                                     key={p}
                                     style={(pr) => [styles.modalOption, pr.pressed && styles.configRowPressed]}
                                     onPress={() => {
-                                        setPathInput(p);
+                                        // Keep the portable tilde form (~/…), not the
+                                        // machine-specific absolute path, so it stays
+                                        // valid when switching machines.
+                                        setPathInput(formatPathRelativeToHome(p, selectedHomeDir));
                                         setPathPickerOpen(false);
                                     }}
                                 >
