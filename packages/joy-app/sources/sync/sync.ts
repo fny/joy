@@ -68,6 +68,11 @@ type V3PostSessionMessagesResponse = {
 type OutboxMessage = {
     localId: string;
     content: string;
+    // Wall-clock time this message entered the outbox. The background-send
+    // watchdog fails a message only once ITS OWN age crosses the timeout — never
+    // a shared/global clock, so a freshly-submitted message can't be declared
+    // "failed" the instant an unrelated stale timer is consulted.
+    enqueuedAt: number;
 };
 
 type SendMessageOptions = {
@@ -114,6 +119,11 @@ class Sync {
     private messagesSync = new Map<string, InvalidateSync>();
     private sendSync = new Map<string, InvalidateSync>();
     private sendAbortControllers = new Map<string, AbortController>();
+    // localIds currently being POSTed for a session (the in-flight batch). These
+    // are still in pendingOutbox but must NOT be treated as failed — the POST
+    // decides their fate. Excluding them from the overdue check is what keeps a
+    // delivered-but-slow-to-ack send from being falsely failed.
+    private inFlightOutbox = new Map<string, Set<string>>();
     private sessionLastSeq = new Map<string, number>();
     // Lowest seq value we have already fetched and applied for a session.
     // Used as the cursor for backward pagination when the user scrolls up to
@@ -138,7 +148,6 @@ class Sync {
     private appState: AppStateStatus = AppState.currentState;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
-    private backgroundSendStartedAt: number | null = null;
     revenueCatInitialized = false;
 
     // Generic locking mechanism
@@ -177,14 +186,15 @@ class Sync {
             apiSocket.sendAppState(getCurrentAppState());
 
             if (nextAppState === 'active') {
-                const shouldFailAfterResume = this.backgroundSendStartedAt !== null
-                    && this.hasPendingOutboxMessages()
-                    && (Date.now() - this.backgroundSendStartedAt) >= Sync.BACKGROUND_SEND_TIMEOUT_MS;
+                // Fail only messages whose OWN age has crossed the timeout — not
+                // "any pending + an old shared clock", which used to fire the
+                // instant a fresh submit coincided with a stale watchdog timestamp.
+                const shouldFailAfterResume = this.hasOverdueOutboxMessages();
                 void this.cancelBackgroundSendTimeoutNotification();
                 this.clearBackgroundSendWatchdog();
                 if (shouldFailAfterResume) {
                     void this.notifyMessageSendFailed();
-                    this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
+                    this.failOverdueOutboxMessages('Message failed to send after 30s. Please retry.');
                 }
                 log.log('📱 App became active');
                 this.purchasesSync.invalidate();
@@ -417,6 +427,27 @@ class Sync {
         return false;
     }
 
+    // A message is "overdue" only once IT SPECIFICALLY has sat in the outbox past
+    // the timeout WITHOUT being in flight. Two guarantees fall out of this:
+    //  - per-message age (not a shared clock) → a just-submitted message (age ~0)
+    //    is never failed, even if a stale watchdog timestamp is still around.
+    //  - in-flight messages are skipped → a delivered-but-slow-to-ack POST isn't
+    //    failed out from under itself; the POST's success/failure decides its fate.
+    private hasOverdueOutboxMessages(now = Date.now()) {
+        for (const [sessionId, messages] of this.pendingOutbox) {
+            const inFlight = this.inFlightOutbox.get(sessionId);
+            for (const m of messages) {
+                if (inFlight?.has(m.localId)) {
+                    continue;
+                }
+                if (now - m.enqueuedAt >= Sync.BACKGROUND_SEND_TIMEOUT_MS) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private maybeStartBackgroundSendWatchdog() {
         if (Platform.OS === 'web' || this.appState === 'active') {
             return;
@@ -426,7 +457,6 @@ class Sync {
         }
 
         log.log('📨 Pending messages detected in background. Starting 30s send watchdog.');
-        this.backgroundSendStartedAt = Date.now();
         this.backgroundSendTimeout = setTimeout(() => {
             this.backgroundSendTimeout = null;
             void this.handleBackgroundSendTimeout();
@@ -439,7 +469,6 @@ class Sync {
             clearTimeout(this.backgroundSendTimeout);
             this.backgroundSendTimeout = null;
         }
-        this.backgroundSendStartedAt = null;
     }
 
     private async scheduleBackgroundSendTimeoutNotification() {
@@ -494,20 +523,29 @@ class Sync {
         }
     }
 
-    private failPendingOutboxMessages(reasonText: string) {
-        for (const controller of this.sendAbortControllers.values()) {
-            controller.abort();
-        }
-        this.sendAbortControllers.clear();
-
+    // Fail ONLY messages that have aged past the timeout AND are not currently in
+    // flight. Kept out of scope on purpose: fresh messages (age ~0) and in-flight
+    // messages (the POST owns them). We never abort the in-flight send here — that
+    // was the source of a race where a POST resolving despite the abort would
+    // splice/delete the concurrently-rewritten outbox and lose survivors. Because
+    // an in-flight batch is skipped, and flushOutbox removes sent messages by
+    // localId from whatever the current array is, the two can't corrupt each other.
+    private failOverdueOutboxMessages(reasonText: string) {
         const now = Date.now();
         const sessionIds: string[] = [];
-        for (const [sessionId, pending] of this.pendingOutbox) {
-            if (pending.length === 0) {
+        for (const [sessionId, pending] of [...this.pendingOutbox]) {
+            const inFlight = this.inFlightOutbox.get(sessionId);
+            const isOverdue = (m: OutboxMessage) =>
+                !inFlight?.has(m.localId) && now - m.enqueuedAt >= Sync.BACKGROUND_SEND_TIMEOUT_MS;
+            if (!pending.some(isOverdue)) {
                 continue;
             }
-            pending.length = 0;
-            this.pendingOutbox.delete(sessionId);
+            const remaining = pending.filter((m) => !isOverdue(m));
+            if (remaining.length > 0) {
+                this.pendingOutbox.set(sessionId, remaining);
+            } else {
+                this.pendingOutbox.delete(sessionId);
+            }
             sessionIds.push(sessionId);
         }
 
@@ -523,20 +561,20 @@ class Sync {
                     message: reasonText
                 }
             }]);
+            // Retry any survivors that weren't overdue (and weren't in flight).
+            this.getSendSync(sessionId).invalidate();
         }
     }
 
     private async handleBackgroundSendTimeout() {
-        if (!this.hasPendingOutboxMessages()) {
-            await this.cancelBackgroundSendTimeoutNotification();
-            this.backgroundSendStartedAt = null;
-            return;
-        }
-
         await this.cancelBackgroundSendTimeoutNotification();
-        await this.notifyMessageSendFailed();
-        this.failPendingOutboxMessages('Message failed to send in background after 30s. Please retry.');
-        this.backgroundSendStartedAt = null;
+        if (this.hasOverdueOutboxMessages()) {
+            await this.notifyMessageSendFailed();
+            this.failOverdueOutboxMessages('Message failed to send after 30s. Please retry.');
+        }
+        // Messages still pending but not yet overdue keep their own deadline —
+        // re-arm so the watchdog fires again when the next one comes due.
+        this.maybeStartBackgroundSendWatchdog();
     }
 
     /**
@@ -694,7 +732,7 @@ class Sync {
                     if (fileNormalized) {
                         this.enqueueMessages(sessionId, [fileNormalized]);
                     }
-                    pending.push({ localId: fileLocalId, content: encryptedFileRecord });
+                    pending.push({ localId: fileLocalId, content: encryptedFileRecord, enqueuedAt: Date.now() });
                 }
             }
         }
@@ -751,7 +789,8 @@ class Sync {
         }
         pending.push({
             localId,
-            content: encryptedRawRecord
+            content: encryptedRawRecord,
+            enqueuedAt: createdAt
         });
 
         this.getSendSync(sessionId).invalidate();
@@ -1644,20 +1683,47 @@ class Sync {
         }
     }
 
+    // Remove specific messages (by localId) from a session's outbox. Operates on
+    // the CURRENT map entry, never a captured array reference, and only clears the
+    // key when nothing is left — so it stays correct even if the array was replaced
+    // concurrently (e.g. by failOverdueOutboxMessages or a newly enqueued send).
+    private removeFromOutbox(sessionId: string, localIds: Set<string>) {
+        const current = this.pendingOutbox.get(sessionId);
+        if (!current) {
+            return;
+        }
+        const left = current.filter((m) => !localIds.has(m.localId));
+        if (left.length > 0) {
+            this.pendingOutbox.set(sessionId, left);
+        } else {
+            this.pendingOutbox.delete(sessionId);
+        }
+    }
+
     private flushOutbox = async (sessionId: string) => {
         const pending = this.pendingOutbox.get(sessionId);
         if (!pending || pending.length === 0) {
             if (!this.hasPendingOutboxMessages()) {
                 this.clearBackgroundSendWatchdog();
                 await this.cancelBackgroundSendTimeoutNotification();
-                this.backgroundSendStartedAt = null;
             }
             return;
         }
 
         const batch = pending.slice();
+        const batchIds = new Set(batch.map((m) => m.localId));
         const controller = new AbortController();
         this.sendAbortControllers.set(sessionId, controller);
+        // Mark the batch in flight so the watchdog won't fail it mid-POST. We
+        // deliberately do NOT arm a client-side request timeout here: aborting an
+        // in-flight POST clears this flag, which on a delayed/suspended-timer
+        // resume opens a window for the overdue check to fail a message that
+        // actually delivered. Since the POST ack is the ONLY delivery signal the
+        // sender ever gets (the live stream never echoes the sender's own rows),
+        // it's safer to let the request settle on its own — a still-in-flight
+        // message is never failed — and accept that a (rare) truly-hung POST just
+        // keeps showing "sending" until it resolves rather than risk a false fail.
+        this.inFlightOutbox.set(sessionId, batchIds);
         try {
             const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages`, {
                 method: 'POST',
@@ -1677,7 +1743,9 @@ class Sync {
             }
 
             const data = await response.json() as V3PostSessionMessagesResponse;
-            pending.splice(0, batch.length);
+            // Remove exactly what we sent, by localId, from the current outbox
+            // (which may have been replaced/extended while the POST was in flight).
+            this.removeFromOutbox(sessionId, batchIds);
             if (Array.isArray(data.messages) && data.messages.length > 0) {
                 const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                 let maxSeq = currentLastSeq;
@@ -1702,15 +1770,12 @@ class Sync {
             throw error;
         } finally {
             this.sendAbortControllers.delete(sessionId);
+            this.inFlightOutbox.delete(sessionId);
         }
 
-        if (pending.length === 0) {
-            this.pendingOutbox.delete(sessionId);
-        }
         if (!this.hasPendingOutboxMessages()) {
             this.clearBackgroundSendWatchdog();
             await this.cancelBackgroundSendTimeoutNotification();
-            this.backgroundSendStartedAt = null;
         } else if (this.appState !== 'active') {
             this.maybeStartBackgroundSendWatchdog();
         }
@@ -2117,6 +2182,7 @@ class Sync {
             this.messagesSync.delete(sessionId);
             this.sendSync.delete(sessionId);
             this.pendingOutbox.delete(sessionId);
+            this.inFlightOutbox.delete(sessionId);
             this.sessionLastSeq.delete(sessionId);
             this.sessionOldestSeq.delete(sessionId);
             this.sessionMessageLocks.delete(sessionId);
