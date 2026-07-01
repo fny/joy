@@ -22,7 +22,11 @@ export interface TmuxResult { ok: boolean; out: string; error?: string }
 // pure-function tests don't exercise. (Not a feature flag: the daemon never runs
 // under vitest, so production is always control mode.)
 const ENABLE_CONTROL = process.env.VITEST !== "true";
-const SNAPSHOT_REFRESH_MS = 1000; // periodic backstop refresh of tracked windows
+// Slow FULL-sweep backstop. %output-driven refreshes are pane-scoped (below), so
+// this only exists to catch content changes with no %output (resize/redraw, a
+// pane whose id mapping we missed). 1s full sweeps were the daemon's dominant
+// idle cost: N capture commands/sec through the FIFO control channel.
+const SNAPSHOT_REFRESH_MS = 5000;
 const OUTPUT_DEBOUNCE_MS = 75;    // coalesce %output bursts before re-snapshotting
 
 export class TmuxDriver {
@@ -32,6 +36,11 @@ export class TmuxDriver {
   #client: TmuxControlClient | null = null;
   #snapshots = new Map<string, { text: string; ts: number }>();
   #targets = new Set<string>();
+  // pane-id ↔ target mapping so a %output only re-captures the window that
+  // actually changed, instead of sweeping the whole fleet on every burst.
+  #paneToTarget = new Map<string, string>();
+  #targetToPane = new Map<string, string>();
+  #dirty = new Set<string>();
   #outputTimer: ReturnType<typeof setTimeout> | null = null;
   #refreshInFlight = false;   // a sweep is currently running
   #refreshRequested = false;  // another %output/tick landed mid-sweep → run once more
@@ -39,9 +48,47 @@ export class TmuxDriver {
   constructor() {
     if (ENABLE_CONTROL) {
       const session = process.env.TMUX_SESSION ?? "joy";
-      this.#client = new TmuxControlClient(session, { onOutput: () => this.#onOutput() });
-      const t = setInterval(() => { void this.#refreshTracked(); }, SNAPSHOT_REFRESH_MS);
+      this.#client = new TmuxControlClient(session, { onOutput: (paneId) => this.#onOutput(paneId) });
+      const t = setInterval(() => {
+        for (const target of this.#targets) {
+          this.#dirty.add(target);
+          if (!this.#targetToPane.has(target)) void this.#resolvePane(target);
+        }
+        void this.#refreshTracked();
+      }, SNAPSHOT_REFRESH_MS);
       t.unref?.();
+    }
+  }
+
+  /** Stop snapshot-tracking a window (session ended/killed): removes it from the
+   *  periodic sweep so dead sessions stop costing captures. A later captureCached/
+   *  captureFresh on the same target re-tracks it. */
+  untrack(target: string): void {
+    this.#targets.delete(target);
+    this.#snapshots.delete(target);
+    this.#dirty.delete(target);
+    const pane = this.#targetToPane.get(target);
+    if (pane) this.#paneToTarget.delete(pane);
+    this.#targetToPane.delete(target);
+  }
+
+  #track(target: string): void {
+    if (this.#targets.has(target)) return;
+    this.#targets.add(target);
+    void this.#resolvePane(target);
+  }
+
+  /** Resolve the target's pane id so %output events can be scoped to it. */
+  async #resolvePane(target: string): Promise<void> {
+    if (!this.#client?.connected) return;
+    const r = await this.#client.command(tmuxCommand(["display-message", "-p", "-t", target, "#{pane_id}"]));
+    const paneId = r.ok ? r.out.trim() : "";
+    if (paneId.startsWith("%") && this.#targets.has(target)) {
+      // Drop a stale reverse mapping if the window was recreated with a new pane.
+      const old = this.#targetToPane.get(target);
+      if (old && old !== paneId) this.#paneToTarget.delete(old);
+      this.#targetToPane.set(target, paneId);
+      this.#paneToTarget.set(paneId, target);
     }
   }
 
@@ -120,7 +167,7 @@ export class TmuxDriver {
    */
   captureCached(target: string, opts?: { color?: boolean }): TmuxResult {
     if (this.#client?.connected && !opts?.color) {
-      this.#targets.add(target);
+      this.#track(target);
       const s = this.#snapshots.get(target);
       if (s) return { ok: true, out: s.text };
       const r = this.capture(target); // no snapshot yet → spawn once, then refresh takes over
@@ -138,7 +185,7 @@ export class TmuxDriver {
    */
   async captureFresh(target: string, opts?: { color?: boolean }): Promise<TmuxResult> {
     if (this.#client?.connected) {
-      this.#targets.add(target);
+      this.#track(target);
       // -e keeps ANSI for the app's colour pane view; that text must NOT pollute the
       // plain-text snapshot cache (the watchers read plain), so colour reads go over
       // control but stay UNcached. Plain reads update the cache as before.
@@ -152,18 +199,24 @@ export class TmuxDriver {
     return this.capture(target, opts);
   }
 
-  #onOutput(): void {
+  #onOutput(paneId: string): void {
+    // Scope the refresh to the window that actually produced output. An unknown
+    // pane (mapping not resolved yet, or a non-joy window in the session) is
+    // ignored — the slow backstop sweep covers stragglers.
+    const target = this.#paneToTarget.get(paneId);
+    if (!target) return;
+    this.#dirty.add(target);
     if (this.#outputTimer) return; // debounce a burst into one refresh
     const t = setTimeout(() => { this.#outputTimer = null; void this.#refreshTracked(); }, OUTPUT_DEBOUNCE_MS);
     t.unref?.();
     this.#outputTimer = t;
   }
 
-  // Re-snapshot every tracked window over the connection (no spawn). Refreshes ALL
-  // tracked windows on any %output (simple, correct; a future refinement could map
-  // pane→window to refresh only the one that changed). A gone window stops tracking.
+  // Re-snapshot the DIRTY windows over the connection (no spawn). %output marks
+  // just the emitting window dirty; the slow ticker marks everything (backstop
+  // for resize/redraw and missed mappings). A gone window stops tracking.
   //
-  // Coalesced: the %output debounce and the 1s ticker both call this, and each sweep
+  // Coalesced: the %output debounce and the ticker both call this, and each sweep
   // awaits N capture commands — so without a guard they'd interleave into 2N+ queued
   // commands. At most ONE sweep runs; anything that fires mid-sweep sets a flag that
   // triggers exactly one more sweep when the current finishes (so the final state is
@@ -173,10 +226,13 @@ export class TmuxDriver {
     this.#refreshInFlight = true;
     try {
       if (!this.#client?.connected) return;
-      for (const target of [...this.#targets]) {
+      const dirty = [...this.#dirty];
+      this.#dirty.clear();
+      for (const target of dirty) {
+        if (!this.#targets.has(target)) continue; // untracked mid-sweep
         const r = await this.#client.command(tmuxCommand(["capture-pane", "-p", "-t", target]));
         if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
-        else if (r.error && /can't find/i.test(r.error)) { this.#targets.delete(target); this.#snapshots.delete(target); }
+        else if (r.error && /can't find/i.test(r.error)) this.untrack(target);
       }
     } finally {
       this.#refreshInFlight = false;

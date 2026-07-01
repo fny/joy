@@ -74,7 +74,20 @@ export function loadReceipts(relaySessionId: string, baseDir = defaultStateDir()
   return { inbound: [], outbound: [], received: [] };
 }
 
-export function saveReceipts(relaySessionId: string, log: ReceiptLog, baseDir = defaultStateDir()): void {
+// Coalesce writes: saveReceipts is called for EVERY forwarded transcript entry,
+// and a synchronous whole-file rewrite per entry is O(n²) cumulative IO as the
+// log grows (the log can't be pruned — forwardedUuids must cover the full
+// replay window for restart dedup). Writes are debounced per session and
+// flushed on process exit; only the last ≤300ms can be lost to a hard crash
+// (worst case: a handful of entries re-forwarded once after restart).
+// Under vitest writes stay synchronous — tests read the file right back
+// (same precedent as ENABLE_CONTROL in tmux/driver.ts).
+const SAVE_DEBOUNCE_MS = 300;
+const IMMEDIATE_SAVES = process.env.VITEST === "true";
+const pendingSaves = new Map<string, { log: ReceiptLog; baseDir: string; timer: ReturnType<typeof setTimeout> }>();
+let exitFlushInstalled = false;
+
+function writeReceiptsNow(relaySessionId: string, log: ReceiptLog, baseDir: string): void {
   try {
     const p = receiptPath(relaySessionId, baseDir);
     const tmp = p + ".tmp";
@@ -83,6 +96,36 @@ export function saveReceipts(relaySessionId: string, log: ReceiptLog, baseDir = 
   } catch (e) {
     process.stderr.write(`[receipts] save failed for ${relaySessionId}: ${e}\n`);
   }
+}
+
+/** Synchronously flush every pending debounced save (exit hook / tests). */
+export function flushReceipts(): void {
+  for (const [id, p] of pendingSaves) {
+    clearTimeout(p.timer);
+    writeReceiptsNow(id, p.log, p.baseDir);
+  }
+  pendingSaves.clear();
+}
+
+export function saveReceipts(relaySessionId: string, log: ReceiptLog, baseDir = defaultStateDir()): void {
+  if (IMMEDIATE_SAVES) {
+    writeReceiptsNow(relaySessionId, log, baseDir);
+    return;
+  }
+  if (!exitFlushInstalled) {
+    exitFlushInstalled = true;
+    process.on("exit", flushReceipts);
+  }
+  const existing = pendingSaves.get(relaySessionId);
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    pendingSaves.delete(relaySessionId);
+    writeReceiptsNow(relaySessionId, log, baseDir);
+  }, SAVE_DEBOUNCE_MS);
+  timer.unref?.();
+  // `log` is the live mutable ReceiptLog — the flush serializes its state as of
+  // write time, so coalesced entries are all captured.
+  pendingSaves.set(relaySessionId, { log, baseDir, timer });
 }
 
 export function initDeliveryState(relaySessionId: string, baseDir = defaultStateDir()): DeliveryState {
