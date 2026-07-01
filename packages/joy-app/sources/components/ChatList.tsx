@@ -20,6 +20,11 @@ import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 
 const SCROLL_THRESHOLD = 300;
 
+// Count a row as "visible" as soon as any sliver of it is in view, so the
+// topmost partially-clipped row is tracked as the viewport top. Must be a stable
+// reference — FlashList/RN forbid changing it between renders.
+const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 0 } as const;
+
 export const ChatList = React.memo((props: { session: Session }) => {
     const { messages, hasMoreOlder, isLoadingOlder } = useSessionMessages(props.session.id);
     const joy__chatHistoryLimit = useSetting('joy__chatHistoryLimit');
@@ -79,9 +84,11 @@ const ChatListInternal = React.memo((props: {
     // so onScroll only re-renders on a threshold crossing (like the down button).
     const [showUpButton, setShowUpButton] = React.useState(false);
     const showUpButtonRef = React.useRef(false);
-    // Scrubber position: index into promptIndices of the prompt we're parked on
-    // (null = at the bottom / not scrubbing). Up/Down step this pointer.
-    const scrubRef = React.useRef<number | null>(null);
+    // Topmost item index currently in the viewport. Kept in sync with manual
+    // scrolls via onViewableItemsChanged and set optimistically on each scrub,
+    // so scrubbing always steps relative to where the user actually is (a stored
+    // pointer would go stale the moment the user scrolled by hand).
+    const topVisibleIndexRef = React.useRef<number>(0);
     const session = useSession(props.sessionId);
 
     // Collapse agent work between a user prompt and the final answer.
@@ -100,17 +107,23 @@ const ChatListInternal = React.memo((props: {
     // renders top→bottom, so feed it oldest→newest and let
     // maintainVisibleContentPosition.startRenderingFromBottom pin the newest at
     // the bottom — the v2 chat idiom (no `inverted`; see dev/inverted-list).
-    const orderedItems = React.useMemo(() => [...displayItems].reverse(), [displayItems]);
-    // Indices of the user's own prompts within orderedItems (oldest→newest) —
-    // the jump targets for the prompt stepper. Mirrored to a ref so the stable
-    // viewability/scroll callbacks read the latest without re-subscribing.
-    const promptIndices = React.useMemo(() => {
-        const out: number[] = [];
-        orderedItems.forEach((it, i) => {
-            if (it.type === 'message' && it.message.kind === 'user-text') out.push(i);
-        });
-        return out;
-    }, [orderedItems]);
+    // Built in ONE pass with the prompt indices — displayItems recomputes on
+    // every streamed token batch, so a separate reverse + rescan doubled the
+    // per-update O(n) work on the app's hottest render path. promptIndices are
+    // the user's own prompts (oldest→newest), the jump targets for the prompt
+    // stepper; mirrored to a ref so the stable viewability/scroll callbacks
+    // read the latest without re-subscribing.
+    const { orderedItems, promptIndices } = React.useMemo(() => {
+        const n = displayItems.length;
+        const ordered = new Array<DisplayItem>(n);
+        const prompts: number[] = [];
+        for (let i = 0; i < n; i++) {
+            const it = displayItems[n - 1 - i];
+            ordered[i] = it;
+            if (it.type === 'message' && it.message.kind === 'user-text') prompts.push(i);
+        }
+        return { orderedItems: ordered, promptIndices: prompts };
+    }, [displayItems]);
     const promptIndicesRef = React.useRef<number[]>(promptIndices);
     promptIndicesRef.current = promptIndices;
 
@@ -296,8 +309,6 @@ const ChatListInternal = React.memo((props: {
             showScrollButtonRef.current = next;
             setShowScrollButton(next);
         }
-        // Back at the bottom → restart scrubbing from the newest prompt next time.
-        if (!next) scrubRef.current = null;
         // Up button shows once we're scrolled down from the very top.
         const up = contentOffset.y > SCROLL_THRESHOLD;
         if (up !== showUpButtonRef.current) {
@@ -307,35 +318,52 @@ const ChatListInternal = React.memo((props: {
     }, []);
 
     const scrollToBottom = useCallback(() => {
-        scrubRef.current = null;
+        // A subsequent Up should start from the newest prompt again.
+        topVisibleIndexRef.current = Number.MAX_SAFE_INTEGER;
         flatListRef.current?.scrollToEnd({ animated: true });
     }, []);
 
-    // Up: step to the previous (older) user prompt. When not already scrubbing
-    // (parked at the bottom), the first press jumps to the newest prompt.
+    // Track the topmost visible row so scrubbing steps relative to the current
+    // viewport, not a stored pointer that manual scrolling would invalidate.
+    const handleViewableItemsChanged = useCallback((info: { viewableItems: Array<{ index: number | null }> }) => {
+        let min = Infinity;
+        for (const v of info.viewableItems) {
+            if (v.index != null && v.index < min) min = v.index;
+        }
+        if (min !== Infinity) topVisibleIndexRef.current = min;
+    }, []);
+
+    // Up: jump to the nearest user prompt ABOVE the current viewport. When parked
+    // at the bottom the first press goes to the newest prompt (which may sit just
+    // below the fold), so we treat "at bottom" as an unbounded top.
     const scrubToPrevPrompt = useCallback(() => {
         const idxs = promptIndicesRef.current;
         if (idxs.length === 0) return;
-        const pos = scrubRef.current === null ? idxs.length - 1 : Math.max(0, scrubRef.current - 1);
-        scrubRef.current = pos;
-        flatListRef.current?.scrollToIndex({ index: idxs[pos], animated: true, viewPosition: 0 });
+        const top = showScrollButtonRef.current ? topVisibleIndexRef.current : Number.MAX_SAFE_INTEGER;
+        let target = -1;
+        for (let i = idxs.length - 1; i >= 0; i--) {
+            if (idxs[i] < top) { target = idxs[i]; break; }
+        }
+        if (target < 0) return; // already above every prompt
+        topVisibleIndexRef.current = target; // optimistic — survives rapid presses
+        flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
     }, []);
 
-    // Down: step to the next (newer) user prompt, or jump to the bottom once
-    // we've stepped past the last one.
+    // Down: jump to the nearest user prompt BELOW the current viewport, or to the
+    // very bottom once we've stepped past the last one.
     const scrubToNextPrompt = useCallback(() => {
         const idxs = promptIndicesRef.current;
-        if (idxs.length === 0 || scrubRef.current === null) {
+        const top = topVisibleIndexRef.current;
+        let target = -1;
+        for (let i = 0; i < idxs.length; i++) {
+            if (idxs[i] > top) { target = idxs[i]; break; }
+        }
+        if (target < 0) {
             scrollToBottom();
             return;
         }
-        const pos = scrubRef.current + 1;
-        if (pos >= idxs.length) {
-            scrollToBottom();
-            return;
-        }
-        scrubRef.current = pos;
-        flatListRef.current?.scrollToIndex({ index: idxs[pos], animated: true, viewPosition: 0 });
+        topVisibleIndexRef.current = target; // optimistic — survives rapid presses
+        flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
     }, [scrollToBottom]);
 
     // Older history lives at the visual TOP now, so `onStartReached` fires when
@@ -389,6 +417,8 @@ const ChatListInternal = React.memo((props: {
                 renderItem={renderItem}
                 onScroll={handleScroll}
                 scrollEventThrottle={16}
+                onViewableItemsChanged={handleViewableItemsChanged}
+                viewabilityConfig={VIEWABILITY_CONFIG}
                 ListHeaderComponent={<ListHeader isLoadingOlder={props.isLoadingOlder} />}
                 ListFooterComponent={<ListFooter sessionId={props.sessionId} />}
                 onStartReached={handleLoadOlder}
