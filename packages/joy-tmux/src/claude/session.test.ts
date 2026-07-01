@@ -524,6 +524,20 @@ test("classifyBgTasks: long-running classified even when its launch precedes the
   expect([...r.longRunning]).toEqual(["srv"]);
 });
 
+test("classifyBgTasks: an aborted task (launch dropped, per #deriveBgTasks cancel-filter) clears the count", () => {
+  const L = (id: string) => ({ kind: "launch" as const, id });
+  const C = (id: string) => ({ kind: "complete" as const, id });
+  // b1 launched but interrupted before completing (its complete never lands). On
+  // abort, #deriveBgTasks drops b1's events (it's in #cancelledBgTasks); b2, sent
+  // after the abort, still counts. This mirrors that filter+classify composition.
+  const cancelled = new Set(["b1"]);
+  const events = [L("b1"), L("b2"), C("b2")];
+  const live = events.filter((e) => !cancelled.has(e.id));
+  const r = classifyBgTasks(live, new Set());
+  expect({ total: r.total, done: r.done, outstanding: [...r.outstanding] })
+    .toEqual({ total: 1, done: 1, outstanding: [] });
+});
+
 test("classifyBgTasks: stopping a server clears it; finishing batch resets on empty (servers don't block it)", () => {
   const L = (id: string) => ({ kind: "launch" as const, id });
   const C = (id: string) => ({ kind: "complete" as const, id });

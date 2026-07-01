@@ -392,6 +392,12 @@ export class Session {
   // Long-running processes (servers/daemons the agent tagged <joy-bg long-running>).
   // Counted separately (joy__longRunning) and never in the N/M — they don't finish.
   #longRunning = new Set<string>();
+  // Finishing-task ids cancelled by an abort. An interrupted turn never writes the
+  // task's completion, so #deriveBgTasks would keep it "outstanding" forever and
+  // the N/M counter would stick; these ids are filtered out of the derivation so
+  // Stop clears the count. Task ids are unique per launch, so this never suppresses
+  // a later real task.
+  #cancelledBgTasks = new Set<string>();
   // Last pushed {tasks, longRunning} as a string key — dedups reconcile pushes by
   // DESIRED state (not this.metadata, which can lag a pending write and drop a clear).
   #lastBgKey: string | null = null;
@@ -1245,6 +1251,10 @@ export class Session {
     // Interrupting mid-tool means Claude won't write that tool's result — close any
     // open tools so their cards don't spin forever.
     this.#closeOpenTools();
+    // Show the user that the Stop landed. Emitted while #turn is still open so the
+    // note lands inside the interrupted turn (a bare pending-submit abort has no
+    // open turn, so #emitAgentNote opens+closes a standalone one).
+    this.#emitAgentNote("⏹ Interrupted", Date.now(), this.claudeSessionId);
     // Escape ends the current turn, but an INTERRUPTED turn never produces a
     // turn-end in the transcript — so #turn would stay set forever. The drain gate
     // (#canDrain requires !#turn) would then block every following message, and
@@ -1258,6 +1268,16 @@ export class Session {
       this.#turnUsage = null;
       this.#turn = null;
       this.#maybeDrainQueue();
+    }
+    // Abort cancels the finishing background tasks/agents that were in flight — an
+    // interrupted turn never emits their completion, so without this the "N/M
+    // completed" counter sticks forever. Mark the outstanding finishing-task ids
+    // cancelled (the derivation drops them) and push the cleared count. Long-running
+    // processes are intentionally left — Escape ends Claude's turn, not a detached
+    // server the user meant to keep running.
+    if (this.#bgTasks.size > 0) {
+      for (const id of this.#bgTasks) this.#cancelledBgTasks.add(id);
+      this.#reconcileBgTasks();
     }
     // Clear after abort: Escape interrupts but does NOT clear the box (verified), so
     // anything typed while Claude was generating lingers. Once the interrupt settles +
@@ -1737,8 +1757,13 @@ export class Session {
       if (ev) events.push(ev);
       for (const id of joyBgLongRunningIds(entry)) lrIds.add(id);
     }
-    // Pass 2: replay, classifying each task by lrIds.
-    return classifyBgTasks(events, lrIds);
+    // Pass 2: replay, classifying each task by lrIds. Drop any task an abort
+    // cancelled — its launch is in the transcript but its completion never will be,
+    // so leaving it would keep the N/M count stuck.
+    const live = this.#cancelledBgTasks.size > 0
+      ? events.filter((e) => !this.#cancelledBgTasks.has(e.id))
+      : events;
+    return classifyBgTasks(live, lrIds);
   }
 
   /** Re-derive from the transcript and push BOTH the finishing N/M (joy__tasks)
