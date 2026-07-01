@@ -58,6 +58,14 @@ export function useSessionStatus(session: Session): SessionStatus {
         };
     }
 
+    // Long-running processes (servers/daemons the agent tagged <joy-bg
+    // long-running>) never complete, so they're NOT in the N/M — they're appended
+    // to whatever the real status is, in its normal color, e.g.
+    // "ready, 3 background processes".
+    // TODO(i18n): move to t('status.backgroundProcesses', { count }).
+    const longRunning = session.metadata?.joy__longRunning ?? 0;
+    const bgSuffix = longRunning > 0 ? `, ${longRunning} background process${longRunning === 1 ? '' : 'es'}` : '';
+
     // 500-error auto-retry in progress: the daemon is re-sending a failed turn
     // on a backoff schedule. Shown amber + pulsing, with the attempt count.
     const retry = session.metadata?.joy__retry;
@@ -65,7 +73,7 @@ export function useSessionStatus(session: Session): SessionStatus {
         return {
             state: 'retrying',
             isConnected: true,
-            statusText: t('status.retrying', { attempt: retry.attempt, total: retry.total }),
+            statusText: t('status.retrying', { attempt: retry.attempt, total: retry.total }) + bgSuffix,
             shouldShowStatus: true,
             statusColor: '#FF9500',
             statusDotColor: '#FF9500',
@@ -80,7 +88,7 @@ export function useSessionStatus(session: Session): SessionStatus {
         return {
             state: 'compacting',
             isConnected: true,
-            statusText: t('status.compacting'),
+            statusText: t('status.compacting') + bgSuffix,
             shouldShowStatus: true,
             statusColor: '#AF52DE',
             statusDotColor: '#AF52DE',
@@ -88,32 +96,32 @@ export function useSessionStatus(session: Session): SessionStatus {
         };
     }
 
-    // Check if permission is required
+    // Check if permission is required (yellow)
     if (hasPermissions) {
         return {
             state: 'permission_required',
             isConnected: true,
-            statusText: t('status.permissionRequired'),
+            statusText: t('status.permissionRequired') + bgSuffix,
             shouldShowStatus: true,
-            statusColor: '#FF9500',
-            statusDotColor: '#FF9500',
+            statusColor: '#FFCC00',
+            statusDotColor: '#FFCC00',
             isPulsing: true
         };
     }
 
-    // Background tasks (run_in_background bash / agents) in flight: the daemon
-    // tracks them from the transcript and pushes a live count that outlives the
-    // foreground turn. Shown ORANGE with "N/M completed" — ranks above plain
-    // thinking so the count wins when a turn is also running.
+    // Finishing background tasks (builds, tests, agents — expected to complete):
+    // shown in teal with an N/M progress count. Ranks above thinking so the count
+    // wins when a foreground turn is also running. Long-running processes are
+    // excluded from this (they're the bgSuffix).
     const tasks = session.metadata?.joy__tasks;
     if (tasks && tasks.total > 0) {
         return {
             state: 'tasks',
             isConnected: true,
-            statusText: `${tasks.done}/${tasks.total} completed`,
+            statusText: `${tasks.done}/${tasks.total} completed` + bgSuffix,
             shouldShowStatus: true,
-            statusColor: '#FF9500',
-            statusDotColor: '#FF9500',
+            statusColor: '#30B0C7',
+            statusDotColor: '#30B0C7',
             isPulsing: true
         };
     }
@@ -122,7 +130,7 @@ export function useSessionStatus(session: Session): SessionStatus {
         return {
             state: 'thinking',
             isConnected: true,
-            statusText: vibingMessage,
+            statusText: vibingMessage + bgSuffix,
             shouldShowStatus: true,
             statusColor: '#007AFF',
             statusDotColor: '#007AFF',
@@ -130,11 +138,13 @@ export function useSessionStatus(session: Session): SessionStatus {
         };
     }
 
+    // Idle. If background processes are running, surface them next to "ready" in
+    // the normal (green) color, e.g. "ready, 3 background processes".
     return {
         state: 'waiting',
         isConnected: true,
-        statusText: t('status.online'),
-        shouldShowStatus: false,
+        statusText: t('status.online') + bgSuffix,
+        shouldShowStatus: bgSuffix !== '',
         statusColor: '#34C759',
         statusDotColor: '#34C759'
     };

@@ -823,6 +823,18 @@ export interface JoyGoalInfo {
   since: number;     // epoch ms when this goal became active
 }
 
+/**
+ * An interactive auth/login URL the agent's CLI is showing in its pane (e.g.
+ * Claude Code's `/login` OAuth flow). Detected by scanning the pane for an
+ * auth-shaped URL; present while the prompt is up, cleared when it's gone. The
+ * app shows a login bar with the URL + a field to submit the pasted code.
+ */
+export interface JoyLoginInfo {
+  url: string;     // the reassembled auth URL
+  since: number;   // epoch ms when it was first detected
+  error?: string;  // a rejection/error message shown in the box (e.g. bad code)
+}
+
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
 export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
@@ -990,6 +1002,23 @@ export class RelaySession {
     await this.mergeMetadata({ joy__tasks: info });
   }
 
+  /** Count of live long-running processes (servers/daemons) the agent tagged
+   *  <joy-bg long-running>. Shown as plain text next to the status, never in the
+   *  N/M counter. null clears it. */
+  async updateLongRunning(count: number | null): Promise<void> {
+    if (count == null && this.metadata?.joy__longRunning == null) return;
+    await this.mergeMetadata({ joy__longRunning: count });
+  }
+
+  /** Push the finishing-task N/M and the long-running-process count together in a
+   *  SINGLE metadata patch, so the split can't be observed half-applied and a
+   *  clear of one field can't be dropped by a still-pending set of the other.
+   *  The caller (Session#reconcileBgTasks) dedups by DESIRED state, so we always
+   *  write when called (no this.metadata skip that could race a pending write). */
+  async updateBgTasks(tasks: JoyTasksInfo | null, longRunning: number | null): Promise<void> {
+    await this.mergeMetadata({ joy__tasks: tasks, joy__longRunning: longRunning });
+  }
+
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__compacting == null) return;
     await this.mergeMetadata({ joy__compacting: info });
@@ -998,6 +1027,11 @@ export class RelaySession {
   async updateGoal(info: JoyGoalInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__goal == null) return;
     await this.mergeMetadata({ joy__goal: info });
+  }
+
+  async updateLogin(info: JoyLoginInfo | null): Promise<void> {
+    if (info == null && this.metadata?.joy__login == null) return;
+    await this.mergeMetadata({ joy__login: info });
   }
 
   /**

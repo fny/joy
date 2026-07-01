@@ -26,6 +26,7 @@ import {
   type RelayClient,
   type RelaySession,
   type JoyGoalInfo,
+  type JoyLoginInfo,
 } from "../relay/relay.ts";
 import {
   initDeliveryState,
@@ -165,7 +166,7 @@ export interface SendOptions {
 }
 
 /** Slash commands joy handles itself, before the text reaches Claude (today: `/title`). */
-const JOY_COMMANDS = new Set(["steer", "title"]);
+const JOY_COMMANDS = new Set(["steer", "title", "login-code"]);
 
 /**
  * Parse a joy-owned slash command the daemon intercepts BEFORE the text reaches Claude:
@@ -228,6 +229,64 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
     if (m) return { kind: "complete", id: m[1] };
   }
   return null;
+}
+
+/**
+ * The agent tags a long-running background process (server/daemon/persistent
+ * watcher) in its own text: <joy-bg id="<backgroundTaskId>" long-running … />.
+ * Returns the ids of every such tag in this entry (assistant text only), so the
+ * task tracker can count them as long-running processes instead of finishing
+ * tasks — they never "complete", so they must never sit in the N/M counter.
+ */
+export function joyBgLongRunningIds(entry: any): string[] {
+  const msg = entry?.message as Record<string, unknown> | undefined;
+  if (!msg || String(msg.role || "") !== "assistant") return [];
+  const c = msg.content;
+  let text = "";
+  if (typeof c === "string") text = c;
+  else if (Array.isArray(c)) {
+    for (const p of c) if (p?.type === "text" && typeof p.text === "string") text += "\n" + p.text;
+  }
+  if (!text.includes("<joy-bg")) return [];
+  const ids: string[] = [];
+  const tagRe = /<joy-bg\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(text))) {
+    if (!/\blong-running\b/i.test(m[0])) continue;
+    const idm = /\bid="([^"]+)"/.exec(m[0]);
+    if (idm) ids.push(idm[1]);
+  }
+  return ids;
+}
+
+/**
+ * Replay ordered background-task events, splitting into FINISHING tasks (the N/M
+ * counter, reset-on-empty-batch semantics) and LONG-RUNNING processes (ids in
+ * `lrIds` — the agent's <joy-bg long-running> tags). A long-running launch is
+ * counted only in `longRunning` (never the N/M, so it can't stick at 0/1); its
+ * completion (server stopped) clears it. `lrIds` is the FULL set gathered up
+ * front, so a launch is classified correctly even when its tag lands later.
+ */
+export function classifyBgTasks(
+  events: Array<{ kind: "launch" | "complete"; id: string }>,
+  lrIds: Set<string>,
+): { outstanding: Set<string>; total: number; done: number; longRunning: Set<string> } {
+  const outstanding = new Set<string>();
+  const longRunning = new Set<string>();
+  let total = 0, done = 0;
+  for (const ev of events) {
+    if (ev.kind === "launch") {
+      if (lrIds.has(ev.id)) { longRunning.add(ev.id); continue; }
+      if (outstanding.has(ev.id)) continue;
+      if (outstanding.size === 0) { total = 0; done = 0; } // fresh batch
+      outstanding.add(ev.id);
+      total++;
+    } else {
+      if (longRunning.delete(ev.id)) continue; // a tagged server was stopped
+      if (outstanding.delete(ev.id)) done++;
+    }
+  }
+  return { outstanding, total, done, longRunning };
 }
 
 /**
@@ -330,7 +389,13 @@ export class Session {
   #bgTasks = new Set<string>();
   #bgTotal = 0;
   #bgDone = 0;
-  // Coalesces task-count pushes (see #pushTasks). Transcript backfill on recovery
+  // Long-running processes (servers/daemons the agent tagged <joy-bg long-running>).
+  // Counted separately (joy__longRunning) and never in the N/M — they don't finish.
+  #longRunning = new Set<string>();
+  // Last pushed {tasks, longRunning} as a string key — dedups reconcile pushes by
+  // DESIRED state (not this.metadata, which can lag a pending write and drop a clear).
+  #lastBgKey: string | null = null;
+  // Coalesces task-count pushes (see #scheduleTaskReconcile). Transcript backfill on recovery
   // replays a whole batch's launches+completions in milliseconds — pushing each
   // (0/3,1/3,2/3,null) as a separate metadata RPC let an intermediate value win
   // and the final `null` lose under restart contention, leaving a stuck "2/3".
@@ -343,6 +408,11 @@ export class Session {
   // The agent's active /goal (null when none / met / cleared). Surfaced as
   // joy__goal so the app can show a goal bar.
   #goal: JoyGoalInfo | null = null;
+  // Interactive auth/login URL the CLI is showing in its pane (null when none).
+  // Surfaced as joy__login so the app can show a login bar. #loginUrlPending
+  // debounces detection: a URL must persist across two polls before we push it.
+  #login: JoyLoginInfo | null = null;
+  #loginUrlPending: string | null = null;
   // The (retrying) archive POST fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -563,6 +633,9 @@ export class Session {
     // set — this both clears orphans AND preserves a genuinely still-running
     // task's count (which a blanket clear would have wrongly dropped). Runs on
     // every (re)attach — recovery and plain reconnect both heal.
+    // Clear the dedup key first so this (re)attach always re-pushes, even if the
+    // desired state is unchanged but the server-side metadata drifted while detached.
+    this.#lastBgKey = null;
     this.#reconcileBgTasks();
     // Re-derive the active /goal from the transcript (restart/reconnect safe).
     this.#reconcileGoal();
@@ -570,7 +643,7 @@ export class Session {
     // clears without waiting for a restart/reconnect (no-op when none outstanding).
     if (this.#taskReconcileTimer) clearInterval(this.#taskReconcileTimer);
     this.#taskReconcileTimer = setInterval(() => {
-      if (this.status === "ended" || this.#bgTasks.size === 0) return;
+      if (this.status === "ended" || (this.#bgTasks.size === 0 && this.#longRunning.size === 0)) return;
       this.#reconcileBgTasks();
     }, 60_000);
     // Reflect the current queue on (re)attach — recovery/reconnect included.
@@ -789,6 +862,8 @@ export class Session {
         });
       } else if (cmd.name === "title") {
         this.#setTitle(cmd.args);
+      } else if (cmd.name === "login-code" && cmd.args.trim()) {
+        void this.#submitLoginCode(cmd.args);
       }
       return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
     }
@@ -1626,76 +1701,66 @@ export class Session {
     this.#relay?.setThinking(thinking);
   }
 
-  /** A background task (run_in_background bash / agent) launched — start or
-   *  extend the current batch and push the live N/M count. */
-  #taskLaunched(id: string): void {
-    if (this.#bgTasks.has(id)) return;
-    if (this.#bgTasks.size === 0) { this.#bgTotal = 0; this.#bgDone = 0; } // fresh batch
-    this.#bgTasks.add(id);
-    this.#bgTotal++;
-    this.#pushTasks();
-  }
-
-  /** A background task reached a terminal state (its task-notification arrived). */
-  #taskCompleted(id: string): void {
-    if (!this.#bgTasks.delete(id)) return;
-    this.#bgDone++;
-    this.#pushTasks();
-  }
-
-  /** Push batch progress to the app (cleared to null when none outstanding).
-   *  Coalesced on a short trailing timer: a burst of changes (notably the
-   *  transcript backfill replay on recovery, which fires a whole batch in
-   *  milliseconds) collapses to ONE push of the final value, so the terminal
-   *  state can't be overtaken by a stale intermediate. Live changes are seconds
-   *  apart, so each still pushes its own step. */
-  #pushTasks(): void {
-    if (this.#tasksPushTimer) clearTimeout(this.#tasksPushTimer);
+  /** A task launch/completion or a <joy-bg> tag changes the split, so schedule a
+   *  single coalesced re-derive on a short trailing timer — a burst (the recovery
+   *  backfill, or several launches in a turn) collapses to ONE derive+push of the
+   *  final state. Derive-based (not incremental) because a task's long-running
+   *  classification arrives in a SEPARATE, later entry than its launch, so only a
+   *  full re-scan sees both together. */
+  #scheduleTaskReconcile(): void {
+    if (this.#tasksPushTimer) return; // already scheduled
     this.#tasksPushTimer = setTimeout(() => {
       this.#tasksPushTimer = null;
-      void this.#relay?.updateTasks(this.#bgTasks.size > 0 ? { done: this.#bgDone, total: this.#bgTotal } : null);
+      this.#reconcileBgTasks();
     }, 150);
   }
 
-  /** Replay the whole transcript through bgTaskEvent to compute the TRUE
-   *  background-task state — outstanding ids + the current batch's done/total —
-   *  using the same reset-on-empty-batch semantics as the live #taskLaunched/
-   *  #taskCompleted. The source of truth for the reconcile below. */
-  #deriveBgTasks(): { outstanding: Set<string>; total: number; done: number } {
-    const outstanding = new Set<string>();
-    let total = 0, done = 0;
-    if (!this.transcriptPath || !existsSync(this.transcriptPath)) return { outstanding, total, done };
+  /** Replay the whole transcript to compute the TRUE background state, split in
+   *  two: FINISHING tasks (the N/M counter, reset-on-empty-batch semantics) and
+   *  LONG-RUNNING processes (ids the agent tagged <joy-bg long-running> — servers/
+   *  daemons that never "complete", so they're counted separately and never sit
+   *  in the N/M where they'd stick at 0/1). */
+  #deriveBgTasks(): { outstanding: Set<string>; total: number; done: number; longRunning: Set<string> } {
+    const empty = { outstanding: new Set<string>(), total: 0, done: 0, longRunning: new Set<string>() };
+    if (!this.transcriptPath || !existsSync(this.transcriptPath)) return empty;
     let lines: string[];
-    try { lines = readFileSync(this.transcriptPath, "utf-8").split("\n"); } catch { return { outstanding, total, done }; }
+    try { lines = readFileSync(this.transcriptPath, "utf-8").split("\n"); } catch { return empty; }
+    // Pass 1: collect ordered task events + the full set of long-running ids (the
+    // tag can sit a few entries after its launch, so we need it before replay).
+    const events: Array<{ kind: "launch" | "complete"; id: string }> = [];
+    const lrIds = new Set<string>();
     for (const line of lines) {
       if (!line.trim()) continue;
       let entry: unknown;
       try { entry = JSON.parse(line); } catch { continue; }
       const ev = bgTaskEvent(entry);
-      if (!ev) continue;
-      if (ev.kind === "launch") {
-        if (outstanding.has(ev.id)) continue;
-        if (outstanding.size === 0) { total = 0; done = 0; } // fresh batch (mirrors #taskLaunched)
-        outstanding.add(ev.id);
-        total++;
-      } else if (outstanding.delete(ev.id)) {
-        done++;
-      }
+      if (ev) events.push(ev);
+      for (const id of joyBgLongRunningIds(entry)) lrIds.add(id);
     }
-    return { outstanding, total, done };
+    // Pass 2: replay, classifying each task by lrIds.
+    return classifyBgTasks(events, lrIds);
   }
 
-  /** Re-derive the background-task state from the transcript and overwrite the
-   *  in-memory count + persisted joy__tasks with the truth. Fixes orphaned/stuck
-   *  counts (a completion the in-memory set missed — e.g. across a restart, a
-   *  dropped line, or a lost push) without a manual `joy restart`. Pushes the
-   *  reconciled value directly (clearing to null when nothing is outstanding). */
+  /** Re-derive from the transcript and push BOTH the finishing N/M (joy__tasks)
+   *  and the live long-running-process count (joy__longRunning), each cleared to
+   *  null when empty. Also the self-heal for a stuck/orphaned count. */
   #reconcileBgTasks(): void {
     const d = this.#deriveBgTasks();
     this.#bgTasks = d.outstanding;
     this.#bgTotal = d.total;
     this.#bgDone = d.done;
-    void this.#relay?.updateTasks(d.outstanding.size > 0 ? { done: d.done, total: d.total } : null);
+    this.#longRunning = d.longRunning;
+    const tasks = d.outstanding.size > 0 ? { done: d.done, total: d.total } : null;
+    const longRunning = d.longRunning.size > 0 ? d.longRunning.size : null;
+    // Dedup by desired state, then push BOTH in one patch (see updateBgTasks) so a
+    // clear can't be dropped by a pending set and the split never shows half-applied.
+    const key = JSON.stringify({ tasks, longRunning });
+    if (key === this.#lastBgKey) return;
+    const relay = this.#relay;
+    if (!relay) return;
+    // Record the key only AFTER the write resolves, so a FAILED write isn't
+    // dedup-suppressed forever — the next reconcile / 60s timer retries it.
+    void relay.updateBgTasks(tasks, longRunning).then(() => { this.#lastBgKey = key; }, () => { });
   }
 
   /** Apply a parsed /goal status: a met=false goal is ACTIVE (push it, keeping
@@ -1762,15 +1827,69 @@ export class Session {
       if (pane.ok) {
         const working = paneShowsWorking(pane.out);
         if (working !== this.#thinking) this.#setThinking(working); // only on change
+        this.#reconcileLogin(pane.out);
       }
     }
     setTimeout(() => this.#pollThinking(), 3000);
+  }
+
+  /** Surface an interactive auth/login URL the CLI is showing (e.g. Claude
+   *  Code's /login OAuth box) as joy__login, so the app can show a login bar.
+   *  Debounced: a URL must be seen on two consecutive polls before we push it
+   *  (guards against a transient link in normal output), and it's cleared as
+   *  soon as the prompt is gone. */
+  #reconcileLogin(paneText: string): void {
+    const login = loginFromPane(paneText);
+    if (!login) {
+      this.#loginUrlPending = null;
+      if (this.#login) {
+        this.#login = null;
+        void this.#relay?.updateLogin(null);
+      }
+      return;
+    }
+    // Debounce only the FIRST appearance of a URL (guards a transient link);
+    // once we're showing the bar, error changes on the same URL push immediately.
+    if (!this.#login && this.#loginUrlPending !== login.url) {
+      this.#loginUrlPending = login.url; // first sighting — confirm next poll
+      return;
+    }
+    const sameUrl = this.#login?.url === login.url;
+    if (sameUrl && (this.#login?.error ?? undefined) === login.error) return; // no change
+    this.#loginUrlPending = null;
+    this.#login = {
+      url: login.url,
+      since: sameUrl ? this.#login!.since : Date.now(),
+      ...(login.error ? { error: login.error } : {}),
+    };
+    void this.#relay?.updateLogin(this.#login);
+  }
+
+  /** /login-code: type a pasted auth code straight into the CLI's "paste code"
+   *  field and submit. No queue/clear dance — the field is a focused, empty
+   *  input, not a normal turn. Guarded: only type when the login box is still up
+   *  (a fresh pane capture), else the code would land in the normal input and be
+   *  sent as a chat message. */
+  async #submitLoginCode(code: string): Promise<void> {
+    if (this.status === "ended") return;
+    const c = code.trim();
+    if (!c) return;
+    const pane = await tmux.captureFresh(this.tmuxWindow);
+    if (!pane.ok || !authUrlFromPane(pane.out)) return; // box gone — drop it
+    if (!(await this.#typeLines(c))) return;
+    await sleep(ENTER_SUBMIT_DELAY_MS); // paste-detection swallows an immediate Enter
+    await tmux.key(this.tmuxWindow, "Enter");
   }
 
   // ── Transcript entry semantics ──────────────────────────────────────────────
 
   onTranscriptEntry(entry: Record<string, unknown>): void {
     const entryType = String(entry.type || "");
+
+    // A background-task launch/completion or a <joy-bg> tag changes the task
+    // split — schedule a coalesced re-derive (derive-based so it sees a launch
+    // and its later long-running tag together).
+    if (bgTaskEvent(entry) || joyBgLongRunningIds(entry).length > 0) this.#scheduleTaskReconcile();
 
     // First entry activates the session — Claude is now reading the pane.
     if (this.status === "starting") {
@@ -1888,16 +2007,8 @@ export class Session {
     if (role === "user") {
       if (entry.isMeta) return;
       if (typeof content !== "string") {
-        // A background task just launched — track it so the session stays
-        // "working (N/M)" until the matching <task-notification> arrives, even
-        // though this foreground turn is about to end. Two launch shapes:
-        //  - run_in_background bash → toolUseResult.backgroundTaskId
-        //  - async agent (Agent tool) → toolUseResult { isAsync, agentId }
-        // Both complete via <task-notification><task-id>…</task-id> where the
-        // task-id is that same backgroundTaskId / agentId, so tracking the id
-        // here is enough for #taskCompleted (below) to clear it.
-        const launch = bgTaskEvent(entry);
-        if (launch?.kind === "launch") this.#taskLaunched(launch.id);
+        // (Background-task launches are handled by the coalesced re-derive
+        // scheduled at the top of onTranscriptEntry.)
         // Emit tool-call-end for tool results. NOT gated on this.#turn: the turn
         // may have been nulled (turn_duration/error) before the result lands, and
         // gating used to drop the end → a tool card stuck "running". Use the turn
@@ -1916,12 +2027,8 @@ export class Session {
         }
         return;
       }
-      // Background task finished: Claude Code injects a <task-notification> with
-      // the same id when a run_in_background bash / background agent reaches a
-      // terminal state. Clear it from the live count (any terminal status, so a
-      // failed/killed task can't leak a stuck "working").
-      const completed = bgTaskEvent(entry);
-      if (completed?.kind === "complete") this.#taskCompleted(completed.id);
+      // (Background-task completions — the <task-notification> — are handled by
+      // the coalesced re-derive scheduled at the top of onTranscriptEntry.)
       // Command/bash machinery from the CLI generates a flood of synthetic
       // user entries. The user's typed command already reaches the relay as
       // their own message (so it shows as a plain outbound message — no chip),
@@ -2151,6 +2258,56 @@ export class Session {
  * "❯ 1. Yes, …". Ghost-text suggestions like `❯ Try "refactor <filepath>"` count
  * as ready (the live box with placeholder text).
  */
+/**
+ * Scan a captured pane for an interactive auth URL (e.g. Claude Code's `/login`
+ * OAuth box, or a device-login URL from another CLI). The TUI hard-wraps the URL
+ * across several lines, so we rejoin the contiguous run of URL-character lines
+ * starting at the first `https://`. Only auth-SHAPED URLs qualify
+ * (oauth / authorize / code_challenge / device / login) so a stray link in
+ * normal agent output won't trigger a false login prompt. Returns the
+ * reassembled URL, or null.
+ */
+const URL_CHARS = /^[A-Za-z0-9%:/?=&+._~#@!$',;()*-]+$/;
+export interface PaneLogin { url: string; error?: string }
+export function loginFromPane(text: string): PaneLogin | null {
+  const AUTH = /(oauth|authorize|code_challenge|\/device|\/login)/i;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = /(https?:\/\/[^\s]+)/.exec(lines[i].trim());
+    if (!m) continue;
+    let url = m[1];
+    let last = i;
+    // Rejoin hard-wrapped continuation lines (pure URL-char lines beneath it).
+    for (let j = i + 1; j < lines.length; j++) {
+      const s = lines[j].trim();
+      if (s.length > 0 && URL_CHARS.test(s)) { url += s; last = j; }
+      else break;
+    }
+    // Trim any trailing box-border/punctuation the first line may have grabbed.
+    url = url.replace(/[^A-Za-z0-9%/=&+_~#-]+$/, "");
+    if (!AUTH.test(url)) continue;
+    // A code-rejection message lives in the box BELOW the URL (the "Paste code"
+    // region) — scanning only there excludes the 401 "Invalid authentication
+    // credentials" trigger line, which sits ABOVE the box.
+    let error: string | undefined;
+    for (let j = last + 1; j < lines.length; j++) {
+      const s = lines[j].replace(/[│|]/g, "").trim();
+      if (!s) continue;
+      if (/\b(invalid|incorrect|expired|failed|denied|rejected|unable|wrong|try again|not valid|could ?not|couldn)\b/i.test(s)) {
+        error = s.slice(0, 160);
+        break;
+      }
+    }
+    return { url, error };
+  }
+  return null;
+}
+
+/** Convenience: just the auth URL (or null). */
+export function authUrlFromPane(text: string): string | null {
+  return loginFromPane(text)?.url ?? null;
+}
+
 export function paneShowsReadyPrompt(text: string): boolean {
   const lines = text.split("\n");
   const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
