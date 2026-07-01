@@ -1258,7 +1258,15 @@ export class Session {
     // still counted (the "N/M completed" status): the user pressing Stop on an idle
     // turn whose async agents/processes are still tracked wants that count cleared and
     // the status back to idle. Fall through so the bg-task cancel below runs.
-    if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && this.#bgTasks.size === 0 && pane.ok &&
+    // Also require !#thinking: during the PRE-OUTPUT phase of a turn (long
+    // initial cogitation) the transcript has no entries yet (#turn null), the
+    // dispatch is already echo-confirmed (#dispatchInFlight null), and the
+    // pane can momentarily lack the "esc to interrupt" marker mid-repaint —
+    // all idle signals read false-idle and the abort was silently swallowed
+    // (caught live by the e2e suite). The daemon's own thinking flag knows a
+    // turn is in flight; trust it.
+    if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && !this.#thinking &&
+        this.#bgTasks.size === 0 && pane.ok &&
         paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
       return { ok: true };
     }
