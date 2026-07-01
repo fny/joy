@@ -435,6 +435,16 @@ export class Session {
   // Throttle: surface at most one api_error note per turn (Claude retries up to
   // 10×, so a turn can emit several). Reset at turn end.
   #errorNotedThisTurn = false;
+  // Report the context tokens used (cumulative usage: input + cache-read +
+  // cache-create) from the turn's final usage. The app owns the window/threshold;
+  // we only send the raw count.
+  #pushContextUsage(): void {
+    const u = this.#turnUsage;
+    if (!u || !this.#relay) return;
+    const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
+    const used = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+    if (used > 0) void this.#relay.updateContext(used);
+  }
   // 500-error auto-retry. #turn5xxStatus holds the last 5xx status seen in the
   // current turn; it's cleared the moment Claude produces real output (recovery)
   // and consumed on turn-end — if a turn ENDS with it still set, Claude gave up
@@ -1972,6 +1982,7 @@ export class Session {
       this.#deps.broadcast("stop", { session_id: sid });
       if (this.#relay && this.#turn) {
         this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs, usage: this.#turnUsage ?? undefined }));
+        this.#pushContextUsage();
       }
       this.#turnUsage = null;
       this.#closeOpenTools(entryTimeMs); // a tool abandoned by an errored turn shouldn't spin forever
@@ -2257,6 +2268,7 @@ export class Session {
           this.#errorNotedThisTurn = false;
           this.#closeOpenTools(entryTimeMs); // safety: any tool without a result
           this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs, usage: this.#turnUsage ?? undefined }));
+          this.#pushContextUsage();
           this.#turnUsage = null;
           this.#turn = null;
           this.#setThinking(false);
