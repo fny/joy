@@ -1228,6 +1228,33 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {props.zenMode && <View style={{ flex: 1 }} />}
                                 {!props.zenMode && <View style={styles.actionButtonsLeft}>
 
+                                {/* Image picker / attach button (expImageUpload) — kept leftmost so
+                                    it isn't clipped by the group's overflow:hidden on narrow screens */}
+                                {props.onPickImages && (
+                                    <Pressable
+                                        onPress={props.onPickImages}
+                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+                                        style={(p) => ({
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            borderRadius: Platform.select({ default: 16, android: 20 }),
+                                            paddingHorizontal: 8,
+                                            paddingVertical: 6,
+                                            justifyContent: 'center',
+                                            height: 32,
+                                            opacity: p.pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        <Ionicons
+                                            name="attach-outline"
+                                            size={18}
+                                            color={(props.selectedImages?.length ?? 0) > 0
+                                                ? theme.colors.radio.active
+                                                : theme.colors.button.secondary.tint}
+                                        />
+                                    </Pressable>
+                                )}
+
                                 {/* Settings button */}
                                 {props.onPermissionModeChange && (
                                     <Pressable
@@ -1327,32 +1354,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
                                 {/* Git Status Badge */}
                                 <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
-
-                                {/* Image picker button (expImageUpload) */}
-                                {props.onPickImages && (
-                                    <Pressable
-                                        onPress={props.onPickImages}
-                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
-                                        style={(p) => ({
-                                            flexDirection: 'row',
-                                            alignItems: 'center',
-                                            borderRadius: Platform.select({ default: 16, android: 20 }),
-                                            paddingHorizontal: 8,
-                                            paddingVertical: 6,
-                                            justifyContent: 'center',
-                                            height: 32,
-                                            opacity: p.pressed ? 0.7 : 1,
-                                        })}
-                                    >
-                                        <Ionicons
-                                            name="attach-outline"
-                                            size={18}
-                                            color={(props.selectedImages?.length ?? 0) > 0
-                                                ? theme.colors.radio.active
-                                                : theme.colors.button.secondary.tint}
-                                        />
-                                    </Pressable>
-                                )}
                                 </View>}
 
                                 {/* Stash current input as an on-device draft */}
