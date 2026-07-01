@@ -1010,12 +1010,21 @@ export class Session {
     return true;
   }
 
-  /** Re-enable auto-drain after a paused (failed/dirty) dispatch. */
+  /** Re-enable auto-drain after a paused (failed/dirty) dispatch. The app's
+   *  banner for input_dirty says "tap to CLEAR and resume" — so honor it:
+   *  wipe the stray box text first, otherwise the next drain re-detects the
+   *  dirt and instantly re-pauses (an unresumable banner loop, found live by
+   *  the e2e suite). Async best-effort: the drain kicks after the clear. */
   resumeQueue(): void {
+    const wasDirty = this.#pauseReason === "input_dirty";
     this.#queuePaused = false;
     this.#pauseReason = undefined;
     this.#clearAttempts = 0;
     this.#broadcastQueue();
+    if (wasDirty) {
+      void this.#clearInputIfDirty(true).then(() => this.#maybeDrainQueue());
+      return;
+    }
     this.#maybeDrainQueue();
   }
 
