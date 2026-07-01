@@ -29,7 +29,7 @@ import { sync } from "./sync";
 import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/RealtimeSession';
 import { isMutableTool } from "@/components/tools/knownTools";
 import { DecryptedArtifact } from "./artifactTypes";
-import { compareMessagesNewestFirst } from "./messageOrdering";
+import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
 
 // Debounce timer for realtimeMode changes
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -251,7 +251,56 @@ interface StorageState {
 }
 
 // Helper function to build unified list view data from sessions and machines
+// Row + list identity reuse. buildSessionListViewData runs on EVERY
+// applySessions (once per streamed message via the updatedAt bump) and used to
+// mint fresh SessionRowData objects for all sessions — so one changed row made
+// every sidebar row's React.memo fail, and the downstream useDeepEqual had to
+// deep-compare the whole list on every store set(). Reusing the previous row
+// object when its content is unchanged (and the previous ARRAY when every
+// element was reused) makes both checks reference-equal short-circuits.
+const sessionRowCache = new Map<string, SessionRowData>();
+let prevSessionListViewData: SessionListViewItem[] | null = null;
+
+function buildSessionRowDataCached(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
+    const next = buildSessionRowData(session, unreadSessionIds);
+    const prev = sessionRowCache.get(session.id);
+    if (prev && equal(prev, next)) return prev;
+    sessionRowCache.set(session.id, next);
+    return next;
+}
+
 function buildSessionListViewData(
+    sessions: Record<string, Session>,
+    unreadSessionIds?: Set<string>,
+): SessionListViewItem[] {
+    // Prune cache entries for sessions that no longer exist.
+    if (sessionRowCache.size > Object.keys(sessions).length) {
+        for (const id of sessionRowCache.keys()) {
+            if (!sessions[id]) sessionRowCache.delete(id);
+        }
+    }
+    const next = buildSessionListViewDataInner(sessions, unreadSessionIds);
+    const prev = prevSessionListViewData;
+    if (prev && prev.length === next.length) {
+        let same = true;
+        for (let i = 0; i < next.length; i++) {
+            const a = prev[i], b = next[i];
+            if (a === b) continue;
+            if (a.type === 'session' && b.type === 'session' && a.session === b.session) continue;
+            if (a.type === 'header' && b.type === 'header' && a.title === b.title) continue;
+            if (a.type === 'active-sessions' && b.type === 'active-sessions'
+                && a.sessions.length === b.sessions.length
+                && a.sessions.every((s, j) => s === b.sessions[j])) continue;
+            same = false;
+            break;
+        }
+        if (same) return prev;
+    }
+    prevSessionListViewData = next;
+    return next;
+}
+
+function buildSessionListViewDataInner(
     sessions: Record<string, Session>,
     unreadSessionIds?: Set<string>,
 ): SessionListViewItem[] {
@@ -284,7 +333,7 @@ function buildSessionListViewData(
 
     // Add active sessions as a single item at the top (if any)
     if (activeSessions.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeSessions.map(s => buildSessionRowData(s, unreadSessionIds)) });
+        listData.push({ type: 'active-sessions', sessions: activeSessions.map(s => buildSessionRowDataCached(s, unreadSessionIds)) });
     }
 
     // Group inactive sessions by date
@@ -318,7 +367,7 @@ function buildSessionListViewData(
 
                 listData.push({ type: 'header', title: headerTitle });
                 currentDateGroup.forEach(sess => {
-                    listData.push({ type: 'session', session: buildSessionRowData(sess, unreadSessionIds) });
+                    listData.push({ type: 'session', session: buildSessionRowDataCached(sess, unreadSessionIds) });
                 });
             }
 
@@ -348,7 +397,7 @@ function buildSessionListViewData(
 
         listData.push({ type: 'header', title: headerTitle });
         currentDateGroup.forEach(sess => {
-            listData.push({ type: 'session', session: buildSessionRowData(sess, unreadSessionIds) });
+            listData.push({ type: 'session', session: buildSessionRowDataCached(sess, unreadSessionIds) });
         });
     }
 
@@ -739,21 +788,49 @@ export const storage = create<StorageState>()((set, get) => {
                     hasReadyEvent = true;
                 }
 
-                // Merge messages
+                // Merge messages. A streamed batch touches a handful of messages in a
+                // potentially multi-thousand-message history, so a full
+                // Object.values().sort() per batch was the dominant JS cost while
+                // streaming. Updated messages keep their slot when their sort key
+                // (seq, createdAt, id) is unchanged; new messages binary-insert.
+                // A key change or a bulk batch falls back to the full sort.
                 const mergedMessagesMap = { ...existingSession.messagesMap };
+                const newItems: Message[] = [];
+                let sortKeyChanged = false;
                 processedMessages.forEach(message => {
+                    const old = existingSession.messagesMap[message.id];
+                    if (!old) newItems.push(message);
+                    else if (compareMessagesNewestFirst(old, message) !== 0) sortKeyChanged = true;
                     mergedMessagesMap[message.id] = message;
                 });
 
-                // Convert to array and sort by createdAt
-                const messagesArray = Object.values(mergedMessagesMap)
-                    .sort(compareMessagesNewestFirst);
+                let messagesArray: Message[];
+                if (sortKeyChanged || newItems.length > 20) {
+                    messagesArray = Object.values(mergedMessagesMap)
+                        .sort(compareMessagesNewestFirst);
+                } else {
+                    // Carry updated instances into the existing order, then
+                    // binary-insert the (few) genuinely new messages.
+                    messagesArray = existingSession.messages.map(m => mergedMessagesMap[m.id]);
+                    if (newItems.length > 0) {
+                        newItems.sort(compareMessagesNewestFirst);
+                        for (const item of newItems) {
+                            messagesArray.splice(insertionIndexNewestFirst(messagesArray, item), 0, item);
+                        }
+                    }
+                }
 
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
-                // This ensures latestUsage is available immediately on load, even before messages are fully loaded
+                // This ensures latestUsage is available immediately on load, even before messages are fully loaded.
+                // Only mint a NEW latestUsage object when its values actually changed —
+                // a fresh identity per batch defeated useSession's shallow-equal and
+                // re-rendered every session subscriber on every streamed batch.
                 let updatedSessions = state.sessions;
-                const needsUpdate = (reducerResult.todos !== undefined || existingSession.reducerState.latestUsage || shouldEnterPlanMode) && session;
+                const reducedUsage = existingSession.reducerState.latestUsage;
+                const usageChanged = !!reducedUsage &&
+                    JSON.stringify(reducedUsage) !== JSON.stringify(session?.latestUsage);
+                const needsUpdate = (reducerResult.todos !== undefined || usageChanged || shouldEnterPlanMode) && session;
 
                 if (needsUpdate) {
                     updatedSessions = {
@@ -762,9 +839,7 @@ export const storage = create<StorageState>()((set, get) => {
                             ...session,
                             ...(reducerResult.todos !== undefined && { todos: reducerResult.todos }),
                             // Copy latestUsage from reducerState to make it immediately available
-                            latestUsage: existingSession.reducerState.latestUsage ? {
-                                ...existingSession.reducerState.latestUsage
-                            } : session.latestUsage,
+                            latestUsage: usageChanged ? { ...reducedUsage } : session.latestUsage,
                             // Auto-switch to plan mode when EnterPlanMode tool call is detected
                             ...(shouldEnterPlanMode && { permissionMode: 'plan' })
                         }
