@@ -1019,6 +1019,14 @@ export class RelaySession {
     await this.mergeMetadata({ joy__tasks: tasks, joy__longRunning: longRunning });
   }
 
+  /** Context tokens used as of the latest turn (input + cache-read + cache-create
+   *  from the transcript's cumulative usage). The app owns the window/threshold —
+   *  we only report the raw count. null clears it. */
+  async updateContext(tokens: number | null): Promise<void> {
+    if (tokens == null && this.metadata?.joy__context == null) return;
+    await this.mergeMetadata({ joy__context: tokens });
+  }
+
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__compacting == null) return;
     await this.mergeMetadata({ joy__compacting: info });

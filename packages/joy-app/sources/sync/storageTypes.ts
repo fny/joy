@@ -100,6 +100,10 @@ export const MetadataSchema = z.object({
     // tagged <joy-bg long-running>). These never "complete", so they're kept OUT
     // of joy__tasks (the N/M) and shown as plain text next to the status.
     joy__longRunning: z.number().nullable().optional(),
+    // Context tokens used as of the latest turn (input + cache-read + cache-create
+    // from the transcript's cumulative usage), reported by joy-tmux. The app owns
+    // the window/threshold; this is just the raw count. Not yet surfaced in the UI.
+    joy__context: z.number().nullable().optional(),
     // The agent's active /goal (Claude goal_status), surfaced by joy-tmux. Drives
     // the goal bar. Present while a goal is in progress; cleared when met.
     joy__goal: z.object({
