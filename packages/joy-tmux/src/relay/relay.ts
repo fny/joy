@@ -1068,6 +1068,22 @@ export class RelaySession {
     }, 3_000);
   }
 
+  /**
+   * Downgrade a DETACHED session's heartbeat: drop the 3s message pull (a dead
+   * pane ignores messages anyway — the poll is the daemon's only message path
+   * because the machine-scoped socket never receives new-message pokes, but
+   * that only matters for LIVE sessions) while keeping the 30s presence
+   * keepalive, so the app still shows red "detached" instead of offline.
+   * Without this, every detached session that ever accumulates polls the
+   * server over HTTPS every 3s forever.
+   */
+  pausePull(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = setInterval(() => {
+      this.client.emitAlive(this.relaySessionId, this.lastThinking);
+    }, 30_000);
+  }
+
   stop(): void {
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
     this.unsubscribe?.();

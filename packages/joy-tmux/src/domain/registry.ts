@@ -131,12 +131,18 @@ export class SessionRegistry {
    */
   claudeInfo(): { available: boolean; version: string | null } {
     if (this.#claudeInfo?.available) return this.#claudeInfo;
+    // Negative-cache for 30s: a machine without claude would otherwise pay the
+    // ~100ms blocking probe on EVERY status poll, forever.
+    const now = Date.now();
+    if (this.#claudeInfo && now - this.#claudeProbeAt < 30_000) return this.#claudeInfo;
+    this.#claudeProbeAt = now;
     const r = run("claude", "--version");
     this.#claudeInfo = r.ok
       ? { available: true, version: r.out.split("\n")[0].trim() || null }
       : { available: false, version: null };
     return this.#claudeInfo;
   }
+  #claudeProbeAt = 0;
 
   // ── Lookup ──────────────────────────────────────────────────────────────────
 
@@ -164,6 +170,10 @@ export class SessionRegistry {
   // ── Event fan-out (debug page SSE + bounded chat log) ───────────────────────
 
   broadcast(event: string, data: unknown): void {
+    // Called for every transcript entry of every session — don't pay the
+    // stringify (tool results can be tens of KB) when nobody's watching the
+    // debug page, which is nearly always.
+    if (this.#sseListeners.size === 0) return;
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const emit of this.#sseListeners) emit(payload);
   }

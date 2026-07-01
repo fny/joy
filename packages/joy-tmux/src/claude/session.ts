@@ -639,6 +639,9 @@ export class Session {
     // presence — that per-session liveness is how the app distinguishes "daemon
     // alive, Claude dead" (red detached) from "daemon gone" (falls back to
     // offline). The app renders joy__state='detached' as red, not green online.
+    // It does NOT keep the 3s message pull: a dead pane ignores messages, so
+    // recovery-attached ended sessions drop to the 30s keepalive immediately.
+    if (this.status === "ended") rs.pausePull();
     this.#relay = rs;
     this.relaySessionId = rs.relaySessionId;
 
@@ -764,18 +767,26 @@ export class Session {
     this.endReason = reason;
     this.lastActiveAt = Date.now();
 
+    // Stop paying the periodic pane-snapshot sweep for this window. A later
+    // user-driven pane view (captureFresh) transparently re-tracks it.
+    tmux.untrack(this.tmuxWindow);
+
     if (reason === "process_exited") {
       // Detached: keep the relay attached AND keep heartbeating presence (the
       // session-alive loop keeps running), so the app sees a live presence +
       // joy__state='detached' → red "detached". When the daemon dies the
       // heartbeat stops and it lapses to offline. Messages are still ignored
-      // (dead pane) via #onRelayMessage.
+      // (dead pane) via #onRelayMessage — so the 3s message pull is dropped
+      // too (pausePull), leaving only the 30s presence keepalive.
       // Clear thinking first: #pollThinking stops the instant status==='ended',
       // so without this the keepalive would re-assert a stale thinking:true
       // (Claude usually died mid-turn) forever on the dead session.
       this.#setThinking(false);
       this.#clearCompacting();
-      if (this.#relay) void this.#relay.updateJoyState("detached");
+      if (this.#relay) {
+        void this.#relay.updateJoyState("detached");
+        this.#relay.pausePull();
+      }
     } else {
       // Killed → archived: flag, archive, detach, kill the window.
       if (this.#relay) void this.#relay.updateJoyState("archived");
@@ -1386,12 +1397,24 @@ export class Session {
     return { ok: res.ok };
   }
 
+  // Cache keyed by (path, size, mtime): the transcript view refetches on focus,
+  // and a whole-file parse of a multi-MB transcript blocks the event loop for
+  // every session's timers. Unchanged file → same parsed array.
+  #transcriptCache: { path: string; size: number; mtimeMs: number; lines: unknown[] } | null = null;
+
   transcript(): { lines: unknown[] } {
     if (!this.transcriptPath || !existsSync(this.transcriptPath)) return { lines: [] };
+    let st: { size: number; mtimeMs: number };
+    try { st = statSync(this.transcriptPath); } catch { return { lines: [] }; }
+    const c = this.#transcriptCache;
+    if (c && c.path === this.transcriptPath && c.size === st.size && c.mtimeMs === st.mtimeMs) {
+      return { lines: c.lines };
+    }
     const lines = readFileSync(this.transcriptPath, "utf-8").split("\n")
       .filter((l) => l.trim())
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean);
+    this.#transcriptCache = { path: this.transcriptPath, size: st.size, mtimeMs: st.mtimeMs, lines };
     return { lines };
   }
 
@@ -1727,10 +1750,16 @@ export class Session {
     );
   }
 
+  /** True if the pid is alive — a plain syscall, NOT a spawned `kill` binary
+   *  (this runs every 5s per session; fork+exec for it was pure waste). */
+  static #pidAlive(pid: number): boolean {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  }
+
   /** PID-death detection: poll every 5s; on exit, run the full teardown. */
   #pollEnd(): void {
     if (this.status === "ended") return;
-    if (this.pid !== undefined && !run("kill", "-0", String(this.pid)).ok) {
+    if (this.pid !== undefined && !Session.#pidAlive(this.pid)) {
       // The cached pid can be stale or plain wrong: launch grabs the shell's
       // first child 800ms in (which may not be claude), and claude can re-exec
       // itself (self-update). A dead cached pid while Claude runs on caused
@@ -1759,7 +1788,7 @@ export class Session {
     const shellPid = parseInt(shell.out.trim());
     if (isNaN(shellPid)) return undefined;
     const child = parseInt(run("pgrep", "-P", String(shellPid)).out.split("\n")[0]);
-    if (!isNaN(child) && child !== this.pid && run("kill", "-0", String(child)).ok) return child;
+    if (!isNaN(child) && child !== this.pid && Session.#pidAlive(child)) return child;
     return undefined;
   }
 

@@ -247,6 +247,12 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
   const root = q.root ?? join(homedir(), ".claude", "projects");
 
   const files = listTranscripts(root);
+  // Evict cache entries whose files vanished (deleted/rotated transcripts) so
+  // the per-file agg cache tracks the on-disk set instead of growing forever.
+  const live = new Set(files.map((f) => f.path));
+  for (const path of fileCache.keys()) {
+    if (!live.has(path)) fileCache.delete(path);
+  }
   const aggs: FileAgg[] = [];
   for (const { path, sessionId } of files) {
     let st;
