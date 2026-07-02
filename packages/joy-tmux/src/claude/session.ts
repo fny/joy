@@ -954,13 +954,13 @@ export class Session {
       this.#broadcastQueue();
     }
     // No dispatch gate here (steering types alongside an in-flight turn), so clear any
-    // leftover ourselves — but with a GUARDED C-c, never a blind one: C-c on an empty
-    // box arms Claude's "press again to exit", so we only send it when the box actually
-    // holds text. C-c (unlike C-u) clears a wrapped multi-line box. Let it settle before
-    // the type so it can't be folded into a multi-line paste (the \x15-class bug).
+    // leftover ourselves — guarded on the box actually holding text (a blind clear on
+    // an empty box wastes a keystroke and C-c would arm "press again to exit"). See
+    // #clearBoxWithCtrlU for the Claude 2.1.x keymap change. Let it settle before the
+    // type so it can't be folded into a multi-line paste (the \x15-class bug).
     const pane = await tmux.captureFresh(this.tmuxWindow);
     if (pane.ok && paneInputText(pane.out)) {
-      await tmux.key(this.tmuxWindow, "C-c");
+      await this.#clearBoxWithCtrlU();
       await sleep(CLEAR_SETTLE_MS);
     }
     if (!(await this.#typeLines(text))) return;
@@ -1069,9 +1069,25 @@ export class Session {
     if (!pane.ok) return false;
     if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return false;
     const box = paneInputText(pane.out);
-    if (box === "" || box === null) return false; // empty / no box → nothing to clear (never C-c empty)
-    const cc = await tmux.key(this.tmuxWindow, "C-c");
-    return cc.ok;
+    if (box === "" || box === null) return false; // empty / no box → nothing to clear
+    return this.#clearBoxWithCtrlU();
+  }
+
+  /** Clear a NON-EMPTY input box. Claude 2.1.x changed the keymap: C-c no
+   *  longer clears a filled box (verified live — it's a no-op with text, and
+   *  on an empty box it arms "press again to exit", so never send it). C-u
+   *  kills one line per press; loop with fresh captures until the box reads
+   *  empty (bounded — a wrapped/multi-line paste spans several lines). */
+  async #clearBoxWithCtrlU(): Promise<boolean> {
+    for (let i = 0; i < 6; i++) {
+      const cu = await tmux.key(this.tmuxWindow, "C-u");
+      if (!cu.ok) return i > 0;
+      const re = await tmux.captureFresh(this.tmuxWindow);
+      if (!re.ok) return true;
+      const remaining = paneInputText(re.out);
+      if (remaining === "" || remaining === null) return true;
+    }
+    return true;
   }
 
   /** True when a drain could proceed by the transcript/queue state alone (pane
