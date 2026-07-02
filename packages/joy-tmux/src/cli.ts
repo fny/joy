@@ -411,6 +411,25 @@ async function cmdJump(rest: string[]): Promise<number> {
 //     dialog mid-turn, and a blocked `ask` would hang until timeout.
 // Exit codes: 0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 bad mode.
 
+const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Delete a session's transcript log ROBUSTLY. Killing the session tears down
+ * claude, and a dying claude flushes a final transcript write — which can
+ * re-create the file AFTER a single rmSync, leaving a leak. So delete on a
+ * loop and only return once the file has stayed absent across consecutive
+ * checks (claude has finished exiting and can't flush again). Bounded so it
+ * never hangs if something else keeps re-creating the path.
+ */
+async function purgeTranscript(tp: string): Promise<void> {
+  let goneStreak = 0;
+  for (let i = 0; i < 24; i++) { // ~6s ceiling
+    if (existsSync(tp)) { try { rmSync(tp); } catch { /* best-effort */ } goneStreak = 0; }
+    else if (++goneStreak >= 3) return; // absent 3 checks running → claude done flushing
+    await wait(250);
+  }
+}
+
 /** Resolve a session by exact id, exact claude id, or a unique prefix of either. */
 async function resolveSession(idOrPrefix: string): Promise<any | null> {
   const r = await api("GET", "/sessions").catch(() => null);
@@ -587,6 +606,84 @@ async function cmdAsk(rest: string[]): Promise<number> {
   return 0;
 }
 
+// joy run <prompt...> [--dir d] [--model m] [--effort e] [--read-only]
+//                      [--timeout secs] [--json]
+// One-shot / EPHEMERAL, the `claude -p` analogue: create a throwaway session,
+// run the prompt, print the response, then ALWAYS tear down — kill the session
+// (closes its tmux window) AND delete the Claude transcript log, leaving no
+// trace. Cleanup runs even on timeout/error so a failed run never strands a
+// zombie session or its log. Default cwd is `.`; default mode is yolo
+// (bypassPermissions) so tools run without prompting — `--read-only` uses plan.
+async function cmdRun(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  const readOnly = takeBool(rest, "--read-only");
+  const timeoutS = Number(takeFlag(rest, "--timeout") ?? 600);
+  const dir = takeFlag(rest, "--dir") ?? ".";
+  const model = takeFlag(rest, "--model");
+  const effort = takeFlag(rest, "--effort");
+  const prompt = rest.join(" ").trim();
+  if (!prompt) { console.error("usage: joy run <prompt...> [--dir d] [--model m] [--read-only] [--timeout secs] [--json]"); return 2; }
+  const cwd = resolve(expandTilde(dir));
+
+  const cr = await api("POST", "/sessions", {
+    cwd, createDir: true, model, effort,
+    permissionMode: readOnly ? "plan" : "bypassPermissions",
+  }).catch(() => null);
+  if (!cr) { console.error(`${bad} daemon not running (joy start)`); return 1; }
+  const rec = await cr.json().catch(() => ({})) as any;
+  if (cr.status !== 201) { console.error(`${bad} create failed: ${JSON.stringify(rec)}`); return 1; }
+  // The `stop` SSE event is keyed by the CLAUDE session id, but the create
+  // response returns BEFORE the transcript binds, so rec.claude_session_id is
+  // still unset here. Derive it from the transcript path (…/<claudeId>.jsonl)
+  // so the stop matcher can pair the turn — otherwise the wait hangs forever.
+  if (!rec.claude_session_id && typeof rec.transcript_path === "string") {
+    rec.claude_session_id = basename(rec.transcript_path, ".jsonl");
+  }
+
+  let response = "";
+  let code = 0;
+  try {
+    // Fresh session → baseline 0; a session with no prompt emits no assistant
+    // text, so the FIRST stop belongs to our prompt's turn. Connect the
+    // stop-listener before sending (the cold-start delay makes this trivially
+    // in time). Plain (non-exclusive) send: this session is ours alone and is
+    // still "starting", so the dispatch queue owns waiting for a ready pane —
+    // exclusive's mode probe would race the startup.
+    const controller = new AbortController();
+    const { ready, done } = sseWaitForStop(rec, timeoutS * 1000, controller);
+    await ready;
+    const sr = await api("POST", "/send", { session_id: rec.id, text: prompt }).catch(() => null);
+    if (!sr || !sr.ok) { controller.abort(); console.error(`${bad} send failed`); code = 1; }
+    else if (!(await done)) { console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`); code = 4; }
+    else response = assistantTextFromLines(await transcriptLines(rec.id), 0);
+  } finally {
+    // ALWAYS tear down. Grab the FRESHEST pid + transcript path first (the
+    // create-time pid can be stale before the session bound), then kill.
+    let pid = rec.pid as number | undefined;
+    let tp = rec.transcript_path as string | undefined;
+    try {
+      const g = await api("GET", `/sessions/${rec.id}`);
+      if (g.ok) { const s = await g.json() as any; pid = s.pid ?? pid; tp = s.transcript_path ?? tp; }
+    } catch { /* use create-time values */ }
+    await api("DELETE", `/sessions/${rec.id}`).catch(() => {});
+    // Wait for claude to ACTUALLY exit before deleting its log — a kill mid-turn
+    // flushes a final transcript write on the way out, which would re-create the
+    // file after a delete. Poll the pid locally (same user → signal 0 works)
+    // until it's gone, bounded, THEN purge (which still guards a trailing flush).
+    if (typeof pid === "number") {
+      for (let i = 0; i < 40; i++) { // ~10s ceiling
+        try { process.kill(pid, 0); } catch { break; } // ESRCH → dead
+        await wait(250);
+      }
+    }
+    if (tp) await purgeTranscript(tp);
+  }
+  if (code !== 0) return code;
+  if (json) console.log(JSON.stringify({ ok: true, cwd, response }));
+  else console.log(response);
+  return 0;
+}
+
 // joy send <session> <text...> — exclusive fire-and-forget (no wait).
 async function cmdSend(rest: string[]): Promise<number> {
   const [target, ...words] = rest;
@@ -678,6 +775,9 @@ ${c.b("Usage:")} joy <command>
   ${c.b("list")}         List sessions the daemon is tracking
   ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
 
+  ${c.b("run")}          One-shot (ephemeral, like ${c.dim("claude -p")}): create → run prompt → print
+                 response → kill session + delete its log. joy run <prompt...>
+                 [--dir d] [--model m] [--read-only] [--timeout s] [--json]
   ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--model m] [--effort e]
                  [--read-only] [--continue|--resume <id>] [--json]  → prints session id
   ${c.b("ask")}          Send + wait + print the response:  joy ask <session> <text...> [--timeout s] [--json]
@@ -704,6 +804,7 @@ async function main(): Promise<void> {
     case "status": code = await cmdStatus(); break;
     case "list": case "ls": code = await cmdList(); break;
     case "jump": case "j": code = await cmdJump(rest); break;
+    case "run": code = await cmdRun(rest); break;
     case "new": code = await cmdNew(rest); break;
     case "ask": code = await cmdAsk(rest); break;
     case "send": code = await cmdSend(rest); break;
