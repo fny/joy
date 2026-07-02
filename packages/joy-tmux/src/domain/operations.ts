@@ -301,6 +301,18 @@ export const machineOps: MachineOp[] = [
       if (!text.trim()) return { error: "empty" };
       const session = params.session_id ? registry.get(String(params.session_id)) : undefined;
       if (!session) return { error: "session_not_found" };
+      // exclusive: the scripting contract (joy CLI / other programs). Refuse
+      // instead of queueing when ANY work is in flight — a script must never
+      // silently line up behind a turn it doesn't know about — and only drive
+      // sessions in a mode that can't park on a permission dialog mid-turn
+      // (bypassPermissions or read-only plan), so a wait can't hang forever.
+      if (params.exclusive === true) {
+        if (session.busy()) return { error: "busy" };
+        const mode = session.detectPermissionMode();
+        if (mode !== "bypassPermissions" && mode !== "plan") {
+          return { error: "mode_not_scriptable", mode: mode ?? "unknown" };
+        }
+      }
       const trimmed = text.trim();
       const source = meta.via === "http" ? "web" as const : "rpc" as const;
       const chat_id = registry.nextChatId();
@@ -318,6 +330,8 @@ export const machineOps: MachineOp[] = [
       const r = result as { error?: string };
       if (r.error === "empty") return { status: 400, body: result };
       if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error === "busy") return { status: 409, body: result };
+      if (r.error === "mode_not_scriptable") return { status: 409, body: result };
       return { status: 200, body: result };
     },
   },

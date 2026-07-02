@@ -131,6 +131,8 @@ export interface SessionRecord {
   relay_session_id?: string;
   /** Conversation title (Claude's ai-title or a manual /title), aka the relay summary. */
   summary?: string;
+  /** Turn/dispatch/queue activity — the scripting "can I ask now?" signal (see busy()). */
+  busy?: boolean;
 }
 
 export interface ChatMessage {
@@ -562,6 +564,7 @@ export class Session {
       relay_session_id: this.relaySessionId,
       current_model: this.currentModel,
       summary: this.summary,
+      busy: this.busy(),
     };
   }
 
@@ -857,6 +860,18 @@ export class Session {
   }
 
   // ── Message queue API ───────────────────────────────────────────────────────
+
+  /**
+   * True when the session is doing or holding ANY work: an open turn, a
+   * dispatch awaiting its echo, a pending submit Enter, the thinking flag, or
+   * queued messages. This is the scripting-facing "can I ask now?" signal —
+   * the CLI's exclusive send refuses (busy error) instead of queueing, so a
+   * program never silently lines up behind an in-flight turn.
+   */
+  busy(): boolean {
+    return !!(this.#turn || this.#dispatchInFlight || this.#submitTimer || this.#thinking)
+      || this.#queue.length > 0;
+  }
 
   queueState(): QueueState {
     // Only VISIBLE items are user-facing chips. Hidden (relay/send/retry) items

@@ -343,6 +343,17 @@ function qSession() {
   );
 }
 
+test("busy(): idle with an empty queue is not busy; a queued message is", () => {
+  // The scripting-facing signal the CLI's exclusive send gates on. An 'ended'
+  // qSession never drains (no tmux), so the queued item stays — perfect to
+  // assert the queue-length arm of busy() in isolation from dispatch state.
+  const s = qSession();
+  expect(s.busy()).toBe(false);
+  s.enqueue("queued work");
+  expect(s.busy()).toBe(true);
+  expect(s.toJSON().busy).toBe(true);
+});
+
 test("queue: enqueue / list / edit / cancel", () => {
   const s = qSession();
   const a = s.enqueue("first");
