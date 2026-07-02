@@ -1229,9 +1229,18 @@ export class Session {
   /** Called from onTranscriptEntry when a new turn starts — confirms the dispatch landed. */
   #confirmDispatchIfAwaiting(): void {
     if (!this.#dispatchInFlight) return;
+    // A dispatch whose submit Enter is still PENDING cannot be what started this
+    // turn — the message hasn't been submitted yet. Confirming here is how a
+    // message gets silently LOST (caught live by e2e Test 5): the previous
+    // answer's late transcript entries open a fresh turn id right after the
+    // drain typed the next queued message; the unconditional confirm dropped
+    // that message as "delivered" AND cancelled its pending Enter, stranding
+    // its text in the box. Leave it in flight: #armSubmit reschedules around
+    // the open turn and the transcript user-echo (text-matched) confirms it —
+    // or the 20s dispatch timeout requeues it. Never confirm on turn-start alone.
+    if (this.#submitTimer) return;
     this.#dispatchInFlight = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-    this.#clearSubmitTimer(); // the turn already started → the submit Enter is done/moot
     this.#broadcastQueue();
   }
 
