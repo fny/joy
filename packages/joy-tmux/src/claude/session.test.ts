@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
+import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -120,6 +120,20 @@ test("input text: MULTI-line box reads the whole box, not just the ❯ line", ()
   const pane = ["────────", "❯ line one", "  line two", "  line three", "────────", "  ⏵⏵ bypass permissions on"].join("\n");
   expect(paneInputText(pane)).toBe("line one line two line three");
   expect(paneShowsEmptyReadyPrompt(pane)).toBe(false);
+});
+
+test("input line span: sizes the C-u press budget (1 per rendered line)", () => {
+  // C-u kills ONE line per press (~2 presses/line with the break) — verified live
+  // 2026-07-02, a 3-line box took exactly 6 presses. The budget must scale with the
+  // box height or a tall box exhausts the loop and leaves residue (concat risk).
+  const three = ["────────", "❯ line one", "  line two", "  line three", "────────", "  ⏵⏵ bypass permissions on"].join("\n");
+  expect(paneInputLineSpan(three)).toBe(3);
+  const one = ["✻ Brewed for 43s", "────────", "❯ ABORTTEST: essay", "────────", "  ⏵⏵ bypass permissions on"].join("\n");
+  expect(paneInputLineSpan(one)).toBe(1);
+  expect(paneInputLineSpan("no box here at all")).toBe(0);
+  // Footer without a bottom rule must bound the span, mirroring paneInputText.
+  const noRule = ["────────", "❯ text", "  more", "  ⏵⏵ bypass permissions on"].join("\n");
+  expect(paneInputLineSpan(noRule)).toBe(2);
 });
 
 test("input text: multi-line box with a BLANK first line is still NON-empty (blind-spot fix)", () => {
