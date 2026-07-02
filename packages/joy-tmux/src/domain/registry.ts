@@ -457,6 +457,16 @@ export class SessionRegistry {
       resumeStartOffset = cappedTailOffset(resumeTranscriptPath, capBytes);
     }
 
+    // --continue has the SAME flooding problem as --resume (it replays a
+    // full-history transcript), but its file isn't known here — Claude picks
+    // it at launch. So pass the cap down and let the Session apply it when the
+    // transcript binds (startTailer). Same default (2MB) and flag as --resume;
+    // 0 = full. Not for fresh sessions (empty transcript) or --resume (capped
+    // above at create).
+    const backfillCapBytes = opts.continue
+      ? Math.max(0, opts.resumeLimitMb ?? 2) * 1024 * 1024
+      : 0;
+
     const session = new Session({
       id, pid, tmuxWindow, cwd,
       model: opts.model,
@@ -466,6 +476,7 @@ export class SessionRegistry {
       startedAt: Date.now(),
       transcriptPath: resumeTranscriptPath ?? freshTranscriptPath,
       transcriptStartOffset: resumeStartOffset,
+      backfillCapBytes,
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);

@@ -39,7 +39,7 @@ import {
 } from "../domain/receipts";
 import { writeAttachmentToCwd } from "../domain/attachments";
 import { saveWindowRecord } from "../domain/windowRecord";
-import { cwdToTranscriptDir, findLatestTranscript, tailJsonl, type TranscriptTailer } from "./transcript";
+import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
 export type SessionStatus = "starting" | "active" | "ended";
@@ -358,6 +358,9 @@ export interface SessionInit {
   transcriptPath?: string;
   /** Byte offset to start tailing at (resume backfill cap, snapped to a turn). */
   transcriptStartOffset?: number;
+  /** Cap the --continue backfill to ~this many bytes, applied when the transcript
+   *  BINDS (continue's file isn't known at create, unlike --resume). 0 = uncapped. */
+  backfillCapBytes?: number;
 }
 
 export class Session {
@@ -476,6 +479,9 @@ export class Session {
   // Byte offset the tailer starts at — non-zero only for a capped --resume
   // backfill (snapped to a turn boundary so we don't replay a partial turn).
   #transcriptStartOffset = 0;
+  // --continue backfill cap (bytes). Unlike --resume the file isn't known at
+  // create, so the cap is applied ONCE when the transcript binds (startTailer).
+  #backfillCapBytes = 0;
   #delivery: DeliveryState | null = null;
   #pendingAttachments: Promise<{ bytes: Uint8Array | null; name?: string }>[] = [];
   // The most recent `!cmd` command, captured from <bash-input> so it can head
@@ -534,6 +540,7 @@ export class Session {
     this.claudeSessionId = init.claudeSessionId;
     this.transcriptPath = init.transcriptPath;
     this.#transcriptStartOffset = init.transcriptStartOffset ?? 0;
+    this.#backfillCapBytes = init.backfillCapBytes ?? 0;
     this.#deps = deps;
   }
 
@@ -1841,6 +1848,16 @@ export class Session {
       this.#tailer = null;
     }
     this.transcriptPath = transcriptPath;
+    // --continue backfill cap: --continue replays a full-history transcript from
+    // offset 0, flooding the relay for a huge session. --resume caps this at
+    // create (its file is known), but --continue's file isn't known until it
+    // binds — so compute the turn-snapped tail offset HERE, once. Guard on a
+    // zero start offset (resume-by-id already set its own) so this can't fight
+    // that path, and clear the cap after so a forced re-tail won't re-skip.
+    if (this.#backfillCapBytes > 0 && this.#transcriptStartOffset === 0) {
+      this.#transcriptStartOffset = cappedTailOffset(transcriptPath, this.#backfillCapBytes);
+    }
+    this.#backfillCapBytes = 0;
     this.#tailer = tailJsonl(
       transcriptPath,
       (entry) => {
