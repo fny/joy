@@ -326,8 +326,9 @@ const ChatListInternal = React.memo((props: {
     }, []);
 
     const scrollToBottom = useCallback(() => {
-        // A subsequent Up should start from the newest prompt again.
-        topVisibleIndexRef.current = Number.MAX_SAFE_INTEGER;
+        // Don't pin topVisibleIndex to MAX here: onViewableItemsChanged corrects
+        // it to the real viewport top after the scroll, and a stale MAX would make
+        // the next Up press target the (already-visible) newest prompt → a no-op.
         flatListRef.current?.scrollToEnd({ animated: true });
     }, []);
 
@@ -341,13 +342,16 @@ const ChatListInternal = React.memo((props: {
         if (min !== Infinity) topVisibleIndexRef.current = min;
     }, []);
 
-    // Up: jump to the nearest user prompt ABOVE the current viewport. When parked
-    // at the bottom the first press goes to the newest prompt (which may sit just
-    // below the fold), so we treat "at bottom" as an unbounded top.
+    // Up: jump to the nearest user prompt strictly ABOVE the current viewport top.
+    // Always relative to the topmost visible row (symmetric with scrubToNextPrompt).
+    // Do NOT special-case "at bottom" to target the newest prompt: at the bottom
+    // that prompt is usually already on screen in the last screenful, so
+    // scrollToIndex(viewPosition:0) can't lift it to the top and the press is a
+    // no-op. Using the real viewport top always steps to a prompt above the fold.
     const scrubToPrevPrompt = useCallback(() => {
         const idxs = promptIndicesRef.current;
         if (idxs.length === 0) return;
-        const top = showScrollButtonRef.current ? topVisibleIndexRef.current : Number.MAX_SAFE_INTEGER;
+        const top = topVisibleIndexRef.current;
         let target = -1;
         for (let i = idxs.length - 1; i >= 0; i--) {
             if (idxs[i] < top) { target = idxs[i]; break; }
