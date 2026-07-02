@@ -271,7 +271,14 @@ Type=simple
 ExecStart=${NODE} --import tsx ${SERVER_TS}
 WorkingDirectory=${PKG_DIR}
 Environment=PATH=${process.env.PATH ?? ""}
-Restart=on-failure
+# Restart=always, NOT on-failure: the daemon self-restarts (joy-restart-daemon
+# RPC + the update flow) by exiting 0 after spawning a detached replacement.
+# Under systemd the default KillMode=control-group reaps that replacement when
+# the main process exits, so on-failure would leave the service permanently
+# DEAD after any clean self-restart. always makes systemd the supervisor: it
+# revives the status-0 exit, the singleton port-lock arbitrates any overlap.
+# (macOS launchd already covers this via KeepAlive=true.)
+Restart=always
 RestartSec=3
 
 [Install]
@@ -299,6 +306,11 @@ WantedBy=default.target
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>${process.env.PATH ?? ""}</string></dict>
   <key>RunAtLoad</key><true/>
+  <!-- KeepAlive=true (restart on ANY exit, incl. clean exit 0) is load-bearing:
+       the daemon self-restarts by exiting 0 (see scheduleDaemonRestart). Do not
+       narrow to a SuccessfulExit condition or the self-restart would leave it
+       dead. launchd relaunches immediately and wins the port over the 1s-delayed
+       detached replacement, which then exits via the singleton lock. -->
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${LOG_FILE}</string>
   <key>StandardErrorPath</key><string>${LOG_FILE}</string>
