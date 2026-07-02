@@ -203,6 +203,12 @@ export default function DevScreen() {
                     icon={<Ionicons name="document-text-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/logs')}
                 />
+                <Item
+                    title="Session State"
+                    subtitle="Per-session metadata + computed status (spot stale/wrong status)"
+                    icon={<Ionicons name="pulse-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/session-state' as any)}
+                />
             </ItemGroup>
 
             {/* Component Demos */}

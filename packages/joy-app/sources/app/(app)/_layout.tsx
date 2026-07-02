@@ -259,6 +259,13 @@ export default function RootLayout() {
             />
 
             <Stack.Screen
+                name="dev/session-state"
+                options={{
+                    headerTitle: 'Session State',
+                }}
+            />
+
+            <Stack.Screen
                 name="dev/list-demo"
                 options={{
                     headerTitle: 'List Components Demo',
