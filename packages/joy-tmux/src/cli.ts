@@ -401,6 +401,271 @@ async function cmdJump(rest: string[]): Promise<number> {
   return sub.status === 0 ? 0 : 1;
 }
 
+// ── session scripting (new/ask/send/wait/log/kill) ──────────────────────────
+// The programmatic surface: lets other programs and agents drive joy-tmux
+// sessions. Contract (deliberate, do not soften):
+//   - sends are EXCLUSIVE: a mid-turn session is a BUSY error (exit 3), never
+//     an implicit queue — a script must not line up behind work it can't see.
+//   - only bypassPermissions (yolo) or plan (read-only) sessions are
+//     scriptable (exit 5 otherwise): any other mode can park on a permission
+//     dialog mid-turn, and a blocked `ask` would hang until timeout.
+// Exit codes: 0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 bad mode.
+
+/** Resolve a session by exact id, exact claude id, or a unique prefix of either. */
+async function resolveSession(idOrPrefix: string): Promise<any | null> {
+  const r = await api("GET", "/sessions").catch(() => null);
+  if (!r || !r.ok) { console.error(`${bad} daemon not running (joy start)`); return null; }
+  const sessions = (await r.json()) as any[];
+  let m = sessions.filter((s) => s.id === idOrPrefix || s.claude_session_id === idOrPrefix);
+  if (!m.length) m = sessions.filter((s) => String(s.id).startsWith(idOrPrefix) || String(s.claude_session_id ?? "").startsWith(idOrPrefix));
+  if (m.length === 1) return m[0];
+  if (m.length === 0) console.error(`${bad} no session matching "${idOrPrefix}"`);
+  else { console.error(`${bad} ${m.length} sessions match "${idOrPrefix}":`); for (const s of m) console.error(`    ${s.id}  ${s.cwd}`); }
+  return null;
+}
+
+/**
+ * Wait on the daemon's SSE stream (/events) for a `stop` event belonging to
+ * the session — fired at every turn end. Returns two promises: `ready` resolves
+ * once the stream is actually CONNECTED (its first frame decoded — the daemon
+ * always opens with a `history` event), and `done` resolves true on the stop /
+ * false on timeout. The caller must `await ready` BEFORE sending, or a fast
+ * turn's stop can fire in the gap before the stream is listening and be missed.
+ */
+function sseWaitForStop(rec: any, timeoutMs: number, controller: AbortController): { ready: Promise<void>; done: Promise<boolean> } {
+  let markReady: () => void;
+  const ready = new Promise<void>((r) => { markReady = r; });
+  const done = new Promise<boolean>((resolveWait) => {
+    const timer = setTimeout(() => { controller.abort(); resolveWait(false); }, timeoutMs);
+    (async () => {
+      try {
+        const res = await fetch(BASE + "/events", { headers: authHeaders(), signal: controller.signal });
+        if (!res.ok || !res.body) { clearTimeout(timer); markReady(); resolveWait(false); return; }
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        let event = "";
+        let readyFired = false;
+        for (;;) {
+          const { done: streamDone, value } = await reader.read();
+          if (streamDone) break;
+          if (!readyFired) { readyFired = true; markReady(); } // first bytes → connected
+          buf += dec.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl).trimEnd();
+            buf = buf.slice(nl + 1);
+            if (line.startsWith("event: ")) { event = line.slice(7); continue; }
+            if (line.startsWith("data: ") && event === "stop") {
+              try {
+                const d = JSON.parse(line.slice(6));
+                if (d.session_id === rec.claude_session_id || d.session_id === rec.id) {
+                  clearTimeout(timer); controller.abort(); resolveWait(true); return;
+                }
+              } catch { /* ignore malformed frame */ }
+            }
+            if (line === "") event = "";
+          }
+        }
+      } catch { /* aborted or connection lost */ }
+      clearTimeout(timer);
+      markReady();
+      resolveWait(false);
+    })();
+  });
+  return { ready, done };
+}
+
+/** Assistant text blocks from transcript lines[from..] joined as the response. */
+function assistantTextFromLines(lines: any[], from: number): string {
+  const parts: string[] = [];
+  for (const e of lines.slice(from)) {
+    if (e?.message?.role !== "assistant") continue;
+    const content = e.message.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) parts.push(b.text.trim());
+    }
+  }
+  return parts.join("\n\n");
+}
+
+async function transcriptLines(id: string): Promise<any[]> {
+  const r = await api("GET", `/sessions/${id}/transcript`).catch(() => null);
+  if (!r || !r.ok) return [];
+  const j = await r.json().catch(() => null) as { lines?: any[] } | null;
+  return Array.isArray(j?.lines) ? j!.lines! : [];
+}
+
+/** Shared flag parsing: pulls `--flag value` / boolean flags out of argv. */
+function takeFlag(rest: string[], name: string): string | undefined {
+  const i = rest.indexOf(name);
+  if (i < 0) return undefined;
+  const v = rest[i + 1];
+  rest.splice(i, v !== undefined && !v.startsWith("--") ? 2 : 1);
+  return v !== undefined && !v.startsWith("--") ? v : "";
+}
+function takeBool(rest: string[], name: string): boolean {
+  const i = rest.indexOf(name);
+  if (i < 0) return false;
+  rest.splice(i, 1);
+  return true;
+}
+
+// joy new <dir> [-m "first message"] [--model m] [--effort e] [--read-only]
+//               [--continue | --resume <id>] [--json]
+// Creates the directory if missing (scripts are non-interactive). Prints the
+// session id (or the full record with --json). A -m message is queued and
+// drains once claude is ready — follow with `joy wait` to block on it.
+async function cmdNew(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  const readOnly = takeBool(rest, "--read-only");
+  const cont = takeBool(rest, "--continue");
+  const model = takeFlag(rest, "--model");
+  const effort = takeFlag(rest, "--effort");
+  const resumeId = takeFlag(rest, "--resume");
+  const msg = takeFlag(rest, "-m") ?? takeFlag(rest, "--message");
+  const dir = rest[0];
+  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--model m] [--read-only] [--continue|--resume id] [--json]"); return 2; }
+  const cwd = resolve(expandTilde(dir));
+  const r = await api("POST", "/sessions", {
+    cwd, createDir: true, model, effort,
+    permissionMode: readOnly ? "plan" : "bypassPermissions",
+    continue: cont || undefined,
+    resume_id: resumeId || undefined,
+  }).catch(() => null);
+  if (!r) { console.error(`${bad} daemon not running (joy start)`); return 1; }
+  const body = await r.json().catch(() => ({}));
+  if (r.status !== 201) { console.error(`${bad} create failed: ${JSON.stringify(body)}`); return 1; }
+  const rec = body as any;
+  if (msg && msg.trim()) {
+    // Bootstrap message: NOT exclusive — the session is still starting and the
+    // dispatch queue owns delivering it once the pane is ready.
+    await api("POST", "/send", { session_id: rec.id, text: msg }).catch(() => null);
+  }
+  if (json) console.log(JSON.stringify(rec));
+  else console.log(rec.id);
+  return 0;
+}
+
+// joy ask <session> <text...> [--timeout secs] [--json]
+// Exclusive send + wait for the turn to finish + print the response text.
+async function cmdAsk(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  const timeoutS = Number(takeFlag(rest, "--timeout") ?? 600);
+  const [target, ...words] = rest;
+  const text = words.join(" ").trim();
+  if (!target || !text) { console.error("usage: joy ask <session> <text...> [--timeout secs] [--json]"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+
+  const baseline = (await transcriptLines(rec.id)).length;
+  // Open the stop-listener and WAIT for it to connect BEFORE sending, so a fast
+  // turn's stop event can't fire in the gap before the stream is listening.
+  const controller = new AbortController();
+  const { ready, done: stopped } = sseWaitForStop(rec, timeoutS * 1000, controller);
+  await ready;
+
+  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: true }).catch(() => null);
+  if (!r) { controller.abort(); console.error(`${bad} daemon not running`); return 1; }
+  const body = await r.json().catch(() => ({})) as any;
+  if (body.error === "busy") { controller.abort(); console.error(`${bad} session ${rec.id} is busy (mid-turn or queued work)`); return 3; }
+  if (body.error === "mode_not_scriptable") {
+    controller.abort();
+    console.error(`${bad} session ${rec.id} is in "${body.mode}" mode — scripting needs yolo (bypassPermissions) or read-only (plan)`);
+    return 5;
+  }
+  if (!r.ok) { controller.abort(); console.error(`${bad} send failed: ${JSON.stringify(body)}`); return 1; }
+
+  if (!(await stopped)) {
+    console.error(`${bad} timed out after ${timeoutS}s waiting for the turn to finish (session ${rec.id})`);
+    return 4;
+  }
+  const response = assistantTextFromLines(await transcriptLines(rec.id), baseline);
+  if (json) console.log(JSON.stringify({ ok: true, session: rec.id, response }));
+  else console.log(response);
+  return 0;
+}
+
+// joy send <session> <text...> — exclusive fire-and-forget (no wait).
+async function cmdSend(rest: string[]): Promise<number> {
+  const [target, ...words] = rest;
+  const text = words.join(" ").trim();
+  if (!target || !text) { console.error("usage: joy send <session> <text...>"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: true }).catch(() => null);
+  if (!r) { console.error(`${bad} daemon not running`); return 1; }
+  const body = await r.json().catch(() => ({})) as any;
+  if (body.error === "busy") { console.error(`${bad} session ${rec.id} is busy`); return 3; }
+  if (body.error === "mode_not_scriptable") { console.error(`${bad} mode "${body.mode}" not scriptable (need yolo or read-only)`); return 5; }
+  if (!r.ok) { console.error(`${bad} send failed: ${JSON.stringify(body)}`); return 1; }
+  console.log("sent");
+  return 0;
+}
+
+// joy wait <session> [--timeout secs] — block until the session is idle.
+async function cmdWaitIdle(rest: string[]): Promise<number> {
+  const timeoutS = Number(takeFlag(rest, "--timeout") ?? 600);
+  const target = rest[0];
+  if (!target) { console.error("usage: joy wait <session> [--timeout secs]"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  const deadline = Date.now() + timeoutS * 1000;
+  for (;;) {
+    const r = await api("GET", `/sessions/${rec.id}`).catch(() => null);
+    if (!r || !r.ok) { console.error(`${bad} session ${rec.id} gone`); return 1; }
+    const s = await r.json() as any;
+    if (s.busy === false) return 0;
+    const left = deadline - Date.now();
+    if (left <= 0) { console.error(`${bad} timed out after ${timeoutS}s (session still busy)`); return 4; }
+    // Ride the SSE stop for the next turn end (cheap), bounded by the deadline;
+    // then loop to RE-CHECK busy — a stop is per-turn, not "fully idle". Cap the
+    // window at 5s so a stop that fired just before we connected (idle already)
+    // doesn't stall the loop — the re-check catches it promptly either way.
+    const controller = new AbortController();
+    await sseWaitForStop(rec, Math.min(left, 5_000), controller).done;
+  }
+}
+
+// joy log <session> [-n count] — recent user/assistant text from the transcript.
+async function cmdLogTail(rest: string[]): Promise<number> {
+  const n = Number(takeFlag(rest, "-n") ?? 12);
+  const target = rest[0];
+  if (!target) { console.error("usage: joy log <session> [-n count]"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  const lines = await transcriptLines(rec.id);
+  const out: string[] = [];
+  for (const e of lines) {
+    const role = e?.message?.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const content = e.message.content;
+    let txt = "";
+    if (typeof content === "string") txt = content;
+    else if (Array.isArray(content)) txt = content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join(" ");
+    txt = txt.trim();
+    if (!txt || txt.startsWith("<task-notification>")) continue;
+    out.push(`${role === "user" ? c.b("user     ") : c.g("assistant")} ${txt.replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+  for (const l of out.slice(-n)) console.log(l);
+  return 0;
+}
+
+// joy kill <session> — end the session (kills its tmux window).
+async function cmdKill(rest: string[]): Promise<number> {
+  const target = rest[0];
+  if (!target) { console.error("usage: joy kill <session>"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  const r = await api("DELETE", `/sessions/${rec.id}`).catch(() => null);
+  if (!r) { console.error(`${bad} daemon not running`); return 1; }
+  const body = await r.json().catch(() => ({})) as any;
+  if (!body.ok) { console.error(`${bad} kill failed`); return 1; }
+  console.log(`killed ${rec.id}`);
+  return 0;
+}
+
 function help(): void {
   console.log(`${c.b("joy")} — joy-tmux daemon control
 
@@ -412,6 +677,17 @@ ${c.b("Usage:")} joy <command>
   ${c.b("status")}       Show daemon status
   ${c.b("list")}         List sessions the daemon is tracking
   ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
+
+  ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--model m] [--effort e]
+                 [--read-only] [--continue|--resume <id>] [--json]  → prints session id
+  ${c.b("ask")}          Send + wait + print the response:  joy ask <session> <text...> [--timeout s] [--json]
+  ${c.b("send")}         Send without waiting:  joy send <session> <text...>
+  ${c.b("wait")}         Block until the session is idle:  joy wait <session> [--timeout s]
+  ${c.b("log")}          Recent conversation:  joy log <session> [-n 12]
+  ${c.b("kill")}         End a session:  joy kill <session>
+               Scripting contract: sends error when the session is BUSY (exit 3) —
+               they never queue — and only yolo / read-only sessions are scriptable
+               (exit 5). Exit codes: 0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 mode.
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
   ${c.b("auth")}         Show authentication status (shared with the Joy app)
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
@@ -428,6 +704,12 @@ async function main(): Promise<void> {
     case "status": code = await cmdStatus(); break;
     case "list": case "ls": code = await cmdList(); break;
     case "jump": case "j": code = await cmdJump(rest); break;
+    case "new": code = await cmdNew(rest); break;
+    case "ask": code = await cmdAsk(rest); break;
+    case "send": code = await cmdSend(rest); break;
+    case "wait": code = await cmdWaitIdle(rest); break;
+    case "log": code = await cmdLogTail(rest); break;
+    case "kill": code = await cmdKill(rest); break;
     case "start": code = await cmdStart(); break;
     case "stop": code = await cmdStop(); break;
     case "restart": code = await cmdRestart(); break;
