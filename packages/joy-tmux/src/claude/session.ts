@@ -60,13 +60,7 @@ const STARTUP_DEADLINE_ATTEMPTS = 30; // ~21s — long enough for cold start / -
 // timeout (requeue + pause), not a blind re-Enter.
 const ENTER_SUBMIT_DELAY_MS = 350;
 
-// After an abort (Escape interrupts the turn), wait this long before clearing any
-// text left in the input box. Escape does NOT clear the box (verified live) — e.g.
-// text the user typed while Claude was generating stays put — so we follow up with
-// a guarded C-c once the interrupt has settled and the ready prompt has repainted
-// (paneInputText needs the box drawn to read it). Cancelled if a new send starts.
-const ABORT_CLEAR_DELAY_MS = 400;
-// After the C-u/C-c clear, wait this long before typing a MULTI-LINE message. The
+// After the C-u clear, wait this long before typing a MULTI-LINE message. The
 // C-j burst trips Claude's paste-detection, which otherwise captures the just-sent
 // clear control char into the pasted content — corrupting the message + breaking
 // dedup. The delay lets the kill-line be processed first. (Used by /steer.)
@@ -506,15 +500,12 @@ export class Session {
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
   // into the pane (re-submitting an aborted message, or submitting into a turn).
   #submitTimer: ReturnType<typeof setTimeout> | null = null;
-  // Pending delayed clear of leftover input-box text after an abort (see
-  // ABORT_CLEAR_DELAY_MS). Cancelled when a new send starts (so it can't C-c the
-  // freshly-typed message) or on teardown.
-  #abortClearTimer: ReturnType<typeof setTimeout> | null = null;
   // Pending delayed-Enter for a /steer send — separate from #submitTimer so steering
   // (which submits mid-turn) and the dispatch submit don't cancel each other.
   #steerSubmitTimer: ReturnType<typeof setTimeout> | null = null;
-  // Count of clear-the-input attempts for the current drain: one guarded C-c, then
-  // pause. Reset once the box is empty / on dispatch / when the pane isn't ready.
+  // Count of FAILED clear episodes (C-u loop ran, box still dirty) for the current
+  // drain: two failed episodes spaced 750ms → pause with the input_dirty banner.
+  // Reset once the box is empty / on dispatch / when the pane isn't ready.
   #clearAttempts = 0;
   // Async drain pump (control-mode captures are awaited). #draining serializes one
   // drain at a time; #drainRequested re-runs once if a trigger (turn-end / enqueue)
@@ -765,7 +756,6 @@ export class Session {
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#clearSubmitTimer();
-    if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
     if (this.#steerSubmitTimer) { clearTimeout(this.#steerSubmitTimer); this.#steerSubmitTimer = null; }
     this.#queue = [];
     this.#dispatchInFlight = null;
@@ -939,7 +929,7 @@ export class Session {
     if (this.status === "ended") return;
     const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeLines)
     // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
-    // pending), steer's C-c below would wipe that text AND its stale submit Enter would
+    // pending), steer's clear below would wipe that text AND its stale submit Enter would
     // then fire under our steer — corrupting both. Put that dispatch back on the queue
     // head (neutralizing its receipt) and cancel its submit, so it re-dispatches cleanly
     // after steer settles, instead of being clobbered.
@@ -954,13 +944,28 @@ export class Session {
       this.#broadcastQueue();
     }
     // No dispatch gate here (steering types alongside an in-flight turn), so clear any
-    // leftover ourselves — guarded on the box actually holding text (a blind clear on
-    // an empty box wastes a keystroke and C-c would arm "press again to exit"). See
-    // #clearBoxWithCtrlU for the Claude 2.1.x keymap change. Let it settle before the
-    // type so it can't be folded into a multi-line paste (the \x15-class bug).
+    // leftover ourselves — guarded on the box actually holding text (never clear a box
+    // that reads empty). See docs/pane-input-clearing.md for why C-u, not C-c. Let it
+    // settle before the type so it can't be folded into a multi-line paste (the
+    // \x15-class bug). If the clear can't empty the box (a stalled/damaged pane —
+    // keys aren't being processed), do NOT type over the residue: the two would
+    // concatenate into one garbled submit. Fall back to the queue head + the
+    // input_dirty banner, the same recovery path the dispatch gate uses.
     const pane = await tmux.captureFresh(this.tmuxWindow);
     if (pane.ok && paneInputText(pane.out)) {
-      await this.#clearBoxWithCtrlU();
+      if (!(await this.#clearBoxWithCtrlU())) {
+        this.#queue.unshift({
+          id: crypto.randomUUID().slice(0, 8),
+          text,
+          createdAt: Date.now(),
+          source: opts.source,
+          mirrorToRelay: opts.mirrorToRelay ?? true,
+          seq: opts.seq,
+          visible: false,
+        });
+        this.#pauseDispatch("input_dirty");
+        return;
+      }
       await sleep(CLEAR_SETTLE_MS);
     }
     if (!(await this.#typeLines(text))) return;
@@ -1049,45 +1054,67 @@ export class Session {
   }
 
   /**
-   * Clear the live input box IF it currently holds real text — ONE guarded `C-c`.
-   * `C-c` reliably clears even a wrapped multi-line box (which `C-u` can't), but on
-   * an EMPTY box it arms claude's "press again to exit" — so this re-captures and
-   * fires ONLY when the box is confirmed non-empty (real text, not the empty/ghost
-   * state). Single-shot by design: callers must never blind-retry a 2nd `C-c` (it
-   * could land on a now-empty box). `idleOnly` adds the dispatch-gate guards (no
-   * open turn / in-flight dispatch / generating) — the abort path passes false
-   * because it intentionally clears right after interrupting a turn. Returns true
-   * iff a `C-c` was sent.
+   * Clear the live input box IF it currently holds real text (see
+   * docs/pane-input-clearing.md for the full design + forensics). `idleOnly`
+   * adds the dispatch-gate guards (no open turn / in-flight dispatch /
+   * generating). Honest three-way result:
+   *   "cleared" — a clear episode ran and the box verifiably reads empty
+   *   "dirty"   — an episode ran but text remains (stalled/damaged pane, or
+   *               more lines than the press budget); caller must NOT type
+   *   "skipped" — nothing attempted (guards failed, capture failed, or the
+   *               box was already empty/absent); not a failed attempt
    */
-  async #clearInputIfDirty(idleOnly: boolean): Promise<boolean> {
-    if (idleOnly && (this.#turn || this.#dispatchInFlight)) return false;
+  async #clearInputIfDirty(idleOnly: boolean): Promise<"cleared" | "dirty" | "skipped"> {
+    if (idleOnly && (this.#turn || this.#dispatchInFlight)) return "skipped";
     const pane = await tmux.captureFresh(this.tmuxWindow); // FRESH — stale here = concatenation
     // captureFresh can take a control-mode round-trip; re-check the idle guards after
     // it: a turn / dispatch may have begun while it was in flight, in which case the
     // text in the box is no longer stale leftover and must not be cleared.
-    if (idleOnly && (this.#turn || this.#dispatchInFlight)) return false;
-    if (!pane.ok) return false;
-    if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return false;
+    if (idleOnly && (this.#turn || this.#dispatchInFlight)) return "skipped";
+    if (!pane.ok) return "skipped";
+    if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return "skipped";
     const box = paneInputText(pane.out);
-    if (box === "" || box === null) return false; // empty / no box → nothing to clear
-    return this.#clearBoxWithCtrlU();
+    if (box === "" || box === null) return "skipped"; // empty / no box → nothing to clear
+    return (await this.#clearBoxWithCtrlU()) ? "cleared" : "dirty";
   }
 
-  /** Clear a NON-EMPTY input box. Claude 2.1.x changed the keymap: C-c no
-   *  longer clears a filled box (verified live — it's a no-op with text, and
-   *  on an empty box it arms "press again to exit", so never send it). C-u
-   *  kills one line per press; loop with fresh captures until the box reads
-   *  empty (bounded — a wrapped/multi-line paste spans several lines). */
+  /**
+   * Clear a NON-EMPTY input box with a verified C-u loop. WHY C-u AND NOT C-c
+   * (do not "fix" this back — docs/pane-input-clearing.md has the 2026-07-02
+   * forensics): a healthy claude clears a filled box with one C-c, but when
+   * claude stalls/stops, the pane's interactive-bash parent takes the tty back
+   * in COOKED mode while claude's TUI stays painted — and in that state ^C is
+   * not a keypress, it's SIGINT: it goes to bash (silent no-op) or, once claude
+   * is foreground again, KILLS the claude session (reproduced live, twice).
+   * ^U can never become a signal; extra C-u's on an empty box are harmless
+   * no-ops, so late-processed buffered presses are safe too.
+   *
+   * C-u kills ONE line per press (~2 presses per line with the line break), so
+   * the press budget scales with the box's rendered height. Returns true only
+   * when a fresh capture confirms the box reads empty. Three consecutive
+   * presses with NO change to the box text is the stalled-pane fingerprint
+   * (keys aren't being processed) — bail early and report dirty rather than
+   * blind-blasting the budget.
+   */
   async #clearBoxWithCtrlU(): Promise<boolean> {
-    for (let i = 0; i < 6; i++) {
+    const first = await tmux.captureFresh(this.tmuxWindow);
+    if (!first.ok) return false;
+    let prev = paneInputText(first.out);
+    if (prev === "" || prev === null) return true; // already empty
+    const budget = Math.min(40, paneInputLineSpan(first.out) * 2 + 4);
+    let stalled = 0;
+    for (let i = 0; i < budget; i++) {
       const cu = await tmux.key(this.tmuxWindow, "C-u");
-      if (!cu.ok) return i > 0;
+      if (!cu.ok) return false;
       const re = await tmux.captureFresh(this.tmuxWindow);
-      if (!re.ok) return true;
+      if (!re.ok) return false; // can't verify → report dirty, never claim success
       const remaining = paneInputText(re.out);
       if (remaining === "" || remaining === null) return true;
+      stalled = remaining === prev ? stalled + 1 : 0;
+      if (stalled >= 3) return false; // pane not processing keys — stop, report dirty
+      prev = remaining;
     }
-    return true;
+    return false; // budget exhausted with text left
   }
 
   /** True when a drain could proceed by the transcript/queue state alone (pane
@@ -1133,9 +1160,12 @@ export class Session {
    *   2. AT the ready prompt (not a dialog/spinner) — repaint lag → recheck shortly.
    * Then REQUIRE an EMPTY box: dispatch ONLY when paneInputText === "" — a null box
    * (no live input box detected) is "not ready", NOT "empty", so it retries; stuck
-   * TEXT is cleared with one guarded C-c (a 2nd dirty read pauses, never a blind 2nd
-   * C-c). (Background shells alone don't block — that's why it's "esc to interrupt",
-   * not paneShowsWorking.)
+   * TEXT is cleared with a verified C-u episode (#clearInputIfDirty). PATIENCE
+   * MATTERS here: a busy claude processes buffered keys LATE, so a single quick
+   * re-capture misreads "busy" as "unclearable" (see docs/pane-input-clearing.md).
+   * Two full failed episodes, spaced 750ms, are required before pausing with the
+   * input_dirty banner. (Background shells alone don't block — that's why it's
+   * "esc to interrupt", not paneShowsWorking.)
    */
   async #drainOnce(): Promise<void> {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
@@ -1152,15 +1182,22 @@ export class Session {
     const box = paneInputText(pane.out);
     if (box !== "") {
       if (box === null) { this.#clearAttempts = 0; this.#armDrainRetry(500); return; } // not-ready, not empty
-      // Stuck text → one guarded C-c, re-check next tick; a 2nd dirty read pauses
-      // (never a blind 2nd C-c). Count the attempt ONLY when a C-c actually went out.
-      if (this.#clearAttempts >= 1) {
+      // Stuck text → run a verified clear episode. Only a FAILED episode ("dirty":
+      // keys went out but the box still holds text) counts toward the pause;
+      // "skipped" means state changed under us (turn started / not ready), which
+      // ends the episode without blame. Two failed episodes spaced 750ms → pause:
+      // the spacing gives a busy claude time to process buffered keys before we
+      // declare the pane unclearable (docs/pane-input-clearing.md).
+      const res = await this.#clearInputIfDirty(true);
+      if (res === "cleared") { this.#clearAttempts = 0; this.#armDrainRetry(200); return; }
+      if (res === "skipped") { this.#clearAttempts = 0; this.#armDrainRetry(500); return; }
+      this.#clearAttempts += 1;
+      if (this.#clearAttempts >= 2) {
         process.stderr.write(`[queue] input box dirty + unclearable for ${this.id} — paused\n`);
         this.#pauseDispatch("input_dirty");
         return;
       }
-      if (await this.#clearInputIfDirty(true)) this.#clearAttempts += 1;
-      this.#armDrainRetry(200);
+      this.#armDrainRetry(750);
       return;
     }
 
@@ -1313,7 +1350,8 @@ export class Session {
       // gone, not re-queued. Clear the 20s echo-timeout (else it would fire, re-queue the
       // aborted message, and pause the queue) and neutralize its receipt (it never
       // submitted, so it'll never echo — leaving the receipt would wrongly suppress a
-      // later identical real message). The abort-clear below wipes the leftover text.
+      // later identical real message). The leftover text stays in the box — see the
+      // no-clear note at the end of abort() for why that's deliberate.
       this.#clearSubmitTimer();
       if (this.#dispatchInFlight) {
         if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
@@ -1355,18 +1393,21 @@ export class Session {
       for (const id of this.#bgTasks) this.#cancelledBgTasks.add(id);
       this.#reconcileBgTasks();
     }
-    // Clear after abort: Escape interrupts but does NOT clear the box (verified), so
-    // anything typed while Claude was generating lingers. Once the interrupt settles +
-    // the prompt repaints, drop it with one guarded C-c. Cancelled if a new queued send
-    // starts first (#typeIntoTmux clears the timer). The clear only ever C-c's a box it
-    // re-confirms non-empty, so an idle/already-clear box is a no-op.
-    if (sameSubmit) {
-      if (this.#abortClearTimer) clearTimeout(this.#abortClearTimer);
-      this.#abortClearTimer = setTimeout(() => {
-        this.#abortClearTimer = null;
-        if (this.status !== "ended") void this.#clearInputIfDirty(false);
-      }, ABORT_CLEAR_DELAY_MS);
-    }
+    // DELIBERATELY NO BOX CLEAR HERE — abort sends Escape and nothing else.
+    // Abort used to arm a delayed clear (#abortClearTimer) to wipe leftover box
+    // text; removed 2026-07-02 (docs/pane-input-clearing.md). Two reasons:
+    //  1. It's redundant for correctness: every daemon type-site (#drainOnce,
+    //     #steer) independently verifies an empty box and clears before typing,
+    //     and the discard semantics above are enforced by receipt
+    //     neutralization, not by the box being visually empty.
+    //  2. It's the single riskiest moment to fire control keys: right after an
+    //     interrupt is exactly when the pane may be stalled or job-control-
+    //     cooked (keys are then swallowed, buffered for late delivery into
+    //     whatever state comes next, or — as C-c/SIGINT — able to kill claude).
+    // Accepted trade-off: an aborted-but-unsubmitted message stays visible in
+    // the tmux pane until the next send's gate clears it (or indefinitely on an
+    // abandoned session), where a human attached to the pane could submit it
+    // with a stray Enter. Do not "fix" that by re-adding an abort-time clear.
     return { ok: true };
   }
 
@@ -1613,9 +1654,6 @@ export class Session {
 
   /** Type a message into the pane + record receipt + bump thinking. */
   async #typeIntoTmux(text: string, opts: SendOptions): Promise<void> {
-    // A new send supersedes any pending abort-clear: cancel it so its C-c can't
-    // fire mid-type and wipe the message we're about to send.
-    if (this.#abortClearTimer) { clearTimeout(this.#abortClearTimer); this.#abortClearTimer = null; }
     const delivery = this.#ensureDelivery();
     // Commands (`!bash`, `/slash`) never produce a user-text transcript entry —
     // their synthetic wrappers are suppressed — so they must NOT go on the
@@ -1642,7 +1680,7 @@ export class Session {
       recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
     }
     // No pre-clear: the drain gate only dispatches into a box it has confirmed EMPTY
-    // (clearing any leftover with a guarded C-c first), so a C-u here is redundant — and
+    // (clearing any leftover with the verified C-u loop first), so a C-u here is redundant — and
     // a control char right before the C-j burst is exactly what paste-detection folded
     // into the message as a stray \x15. Type goes over control mode (or spawn while
     // disconnected) IN ORDER via the FIFO; on failure roll back + throw so the drain
@@ -2579,6 +2617,32 @@ export function paneInputText(text: string): string | null {
     return joined;
   }
   return null;
+}
+
+/**
+ * Number of rendered lines the live input box spans (the ❯ line plus its
+ * continuation lines down to the bottom rule/footer) — 0 when no box. Sizes the
+ * C-u press budget in #clearBoxWithCtrlU: C-u kills one line per press and the
+ * line break costs another, so a box of N rendered lines needs ~2N presses.
+ * Rendered (wrapped) lines over-count logical lines, which only pads the
+ * budget — the loop exits early once the box reads empty.
+ */
+export function paneInputLineSpan(text: string): number {
+  const lines = text.split("\n");
+  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  for (let i = 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t.startsWith("❯")) continue;
+    if (/^❯\s*\d+\./.test(t)) continue;     // selector option row, not the input
+    if (!isRule(lines[i - 1])) continue;    // not the live box (scrollback echo)
+    let span = 1;
+    for (let j = i + 1; j < lines.length && !isRule(lines[j]); j++) {
+      if (/⏵|⏸|shift\+tab|bypass permissions|accept edits|plan mode|for shortcuts|for agents|to manage/i.test(lines[j])) break;
+      span++;
+    }
+    return span;
+  }
+  return 0;
 }
 
 /** True when the live input box is present AND empty — safe to type into. */
