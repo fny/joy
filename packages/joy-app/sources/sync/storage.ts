@@ -129,7 +129,7 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
     } else if (hasPermissions) {
         state = 'permission_required';
     } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
-        state = 'tasks'; // background work in flight — orange, outlives the turn
+        state = 'tasks'; // background work in flight — teal N/M, outlives the turn
     } else if (session.thinking) {
         state = 'thinking';
     } else {
