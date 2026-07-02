@@ -16,6 +16,7 @@
 // See CONTROL-MODE-MIGRATION.md.
 import { spawn, type ChildProcess } from "child_process";
 import { run } from "./shell";
+import { tmuxCommand } from "./serialize";
 import type { TmuxResult } from "./driver";
 
 /**
@@ -162,6 +163,7 @@ export class TmuxControlClient {
       this.#ready = true;
       this.#attempt = 0;
       this.#pump(); // attach done → start draining anything queued meanwhile
+      void this.#detachOrphanControlClients(); // sweep stale control clients from dead daemons
     }
     // else: an unsolicited block with nothing active — ignore.
   }
@@ -204,6 +206,32 @@ export class TmuxControlClient {
       this.#writeQueue.push({ cmd, p: { resolve } });
       this.#pump();
     });
+  }
+
+  /**
+   * Detach any OTHER control-mode clients on this session — orphans left by a
+   * crashed or manually-restarted daemon whose `tmux -C` process outlived it (a
+   * dead daemon's control client isn't always reaped: the pre-`Restart=always`
+   * self-restart spawned a detached replacement whose control client could
+   * survive its parent). We are the SOLE control client by design; a lingering
+   * one holds a client slot and, under `window-size latest`, can shrink windows
+   * — a 2-day-old orphan pinned a live pane to 20x10, truncating "esc to
+   * interrupt" so paneShowsGenerating read false and the app showed idle mid-turn.
+   * Matches control-mode clients whose pid isn't our own attach process; a human's
+   * `joy jump` terminal (NON-control) is never touched. Best-effort, runs once per
+   * (re)connect, and can never detach us (our client's pid == this.#proc.pid).
+   */
+  async #detachOrphanControlClients(): Promise<void> {
+    const ourPid = this.#proc?.pid;
+    if (!ourPid) return;
+    const res = await this.command(tmuxCommand(["list-clients", "-F", "#{client_pid}|#{client_control_mode}|#{client_name}"]));
+    if (!res.ok) return;
+    for (const line of res.out.split("\n")) {
+      const [pid, ctrl, name] = line.split("|");
+      if (ctrl === "1" && name && Number(pid) !== ourPid) {
+        void this.command(tmuxCommand(["detach-client", "-t", name]));
+      }
+    }
   }
 
   #onExit(): void {
