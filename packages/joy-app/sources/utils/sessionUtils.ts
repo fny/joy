@@ -16,6 +16,32 @@ export interface SessionStatus {
 }
 
 /**
+ * SINGLE SOURCE OF TRUTH for status colors + pulsing/connected per state. BOTH
+ * the session-screen footer (useSessionStatus, below) and the sidebar
+ * (SessionsList) render from this map — they previously kept separate copies
+ * that drifted, so a session finishing background tasks showed teal in the
+ * footer but orange in the sidebar (and permission_required yellow vs orange).
+ * Only color/pulsing/connected live here; statusText + shouldShowStatus stay
+ * contextual and are computed per-branch in useSessionStatus.
+ */
+export const STATUS_PALETTE: Record<SessionState, { color: string; dotColor: string; isPulsing: boolean; isConnected: boolean }> = {
+    disconnected:        { color: '#999',    dotColor: '#999',    isPulsing: false, isConnected: false },
+    detached:            { color: '#FF3B30', dotColor: '#FF3B30', isPulsing: false, isConnected: false },
+    retrying:            { color: '#FF9500', dotColor: '#FF9500', isPulsing: true,  isConnected: true },
+    compacting:          { color: '#AF52DE', dotColor: '#AF52DE', isPulsing: true,  isConnected: true },
+    permission_required: { color: '#FFCC00', dotColor: '#FFCC00', isPulsing: true,  isConnected: true },
+    tasks:               { color: '#30B0C7', dotColor: '#30B0C7', isPulsing: true,  isConnected: true },
+    thinking:            { color: '#007AFF', dotColor: '#007AFF', isPulsing: true,  isConnected: true },
+    waiting:             { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
+};
+
+/** Base SessionStatus fields (state + colors + pulsing/connected) from the shared palette. */
+function paletteBase(state: SessionState): Pick<SessionStatus, 'state' | 'isConnected' | 'statusColor' | 'statusDotColor' | 'isPulsing'> {
+    const p = STATUS_PALETTE[state];
+    return { state, isConnected: p.isConnected, statusColor: p.color, statusDotColor: p.dotColor, isPulsing: p.isPulsing };
+}
+
+/**
  * Get the current state of a session based on presence and thinking status.
  * Uses centralized session state from storage.ts
  */
@@ -38,23 +64,17 @@ export function useSessionStatus(session: Session): SessionStatus {
     // and it falls back to plain offline (we no longer know it's detached).
     if (isOnline && session.metadata?.joy__state === 'detached') {
         return {
-            state: 'detached',
-            isConnected: false,
+            ...paletteBase('detached'),
             statusText: t('status.detached'),
             shouldShowStatus: true,
-            statusColor: '#FF3B30',
-            statusDotColor: '#FF3B30'
         };
     }
 
     if (!isOnline) {
         return {
-            state: 'disconnected',
-            isConnected: false,
+            ...paletteBase('disconnected'),
             statusText: t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }),
             shouldShowStatus: true,
-            statusColor: '#999',
-            statusDotColor: '#999'
         };
     }
 
@@ -73,13 +93,9 @@ export function useSessionStatus(session: Session): SessionStatus {
     const retry = session.metadata?.joy__retry;
     if (retry) {
         return withBg({
-            state: 'retrying',
-            isConnected: true,
+            ...paletteBase('retrying'),
             statusText: t('status.retrying', { attempt: retry.attempt, total: retry.total }),
             shouldShowStatus: true,
-            statusColor: '#FF9500',
-            statusDotColor: '#FF9500',
-            isPulsing: true,
         });
     }
 
@@ -88,26 +104,18 @@ export function useSessionStatus(session: Session): SessionStatus {
     // thinking (the turn is effectively paused while this happens).
     if (session.metadata?.joy__compacting) {
         return withBg({
-            state: 'compacting',
-            isConnected: true,
+            ...paletteBase('compacting'),
             statusText: t('status.compacting'),
             shouldShowStatus: true,
-            statusColor: '#AF52DE',
-            statusDotColor: '#AF52DE',
-            isPulsing: true,
         });
     }
 
     // Check if permission is required (yellow)
     if (hasPermissions) {
         return withBg({
-            state: 'permission_required',
-            isConnected: true,
+            ...paletteBase('permission_required'),
             statusText: t('status.permissionRequired'),
             shouldShowStatus: true,
-            statusColor: '#FFCC00',
-            statusDotColor: '#FFCC00',
-            isPulsing: true
         });
     }
 
@@ -118,37 +126,26 @@ export function useSessionStatus(session: Session): SessionStatus {
     const tasks = session.metadata?.joy__tasks;
     if (tasks && tasks.total > 0) {
         return withBg({
-            state: 'tasks',
-            isConnected: true,
+            ...paletteBase('tasks'),
             statusText: `${tasks.done}/${tasks.total} completed`,
             shouldShowStatus: true,
-            statusColor: '#30B0C7',
-            statusDotColor: '#30B0C7',
-            isPulsing: true
         });
     }
 
     if (session.thinking === true) {
         return withBg({
-            state: 'thinking',
-            isConnected: true,
+            ...paletteBase('thinking'),
             statusText: vibingMessage,
             shouldShowStatus: true,
-            statusColor: '#007AFF',
-            statusDotColor: '#007AFF',
-            isPulsing: true
         });
     }
 
     // Idle. If background processes are running, surface them next to "ready" in
     // the normal (green) color, e.g. "ready, 3 background processes".
     return withBg({
-        state: 'waiting',
-        isConnected: true,
+        ...paletteBase('waiting'),
         statusText: t('status.online'),
         shouldShowStatus: longRunning > 0,
-        statusColor: '#34C759',
-        statusDotColor: '#34C759'
     });
 }
 

@@ -4,7 +4,7 @@ import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
 import { SessionListViewItem, SessionRowData } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
-import { type SessionState, formatLastSeen, vibingMessages } from '@/utils/sessionUtils';
+import { STATUS_PALETTE, formatLastSeen, vibingMessages } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -345,17 +345,6 @@ export function SessionsList() {
     );
 }
 
-const STATUS_CONFIG: Record<SessionState, { color: string; dotColor: string; isPulsing: boolean; isConnected: boolean }> = {
-    disconnected: { color: '#999', dotColor: '#999', isPulsing: false, isConnected: false },
-    detached: { color: '#FF3B30', dotColor: '#FF3B30', isPulsing: false, isConnected: false },
-    retrying: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
-    compacting: { color: '#AF52DE', dotColor: '#AF52DE', isPulsing: true, isConnected: true },
-    thinking: { color: '#007AFF', dotColor: '#007AFF', isPulsing: true, isConnected: true },
-    tasks: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
-    waiting: { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
-    permission_required: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
-};
-
 const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }: {
     session: SessionRowData;
     selected?: boolean;
@@ -366,7 +355,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     const styles = stylesheet;
     const navigateToSession = useNavigateToSession();
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
-    const baseStatus = STATUS_CONFIG[session.state];
+    const baseStatus = STATUS_PALETTE[session.state];
     // Mod 11: use the same green (#34C759) as the rest of the app for unread results,
     // not the iOS blue that overlaps with the `thinking` state.
     const status = session.hasUnread
