@@ -286,8 +286,10 @@ function NewJoyTmuxSessionScreen() {
                 // resume a specific conversation by id; it takes precedence over
                 // `continue` (most-recent), so don't send both.
                 resume_id: resumeId.trim() || undefined,
-                // history (MB) to backfill on resume; default 2, 0 = full.
-                resume_limit_mb: resumeId.trim() ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 2) : undefined,
+                // history (MB) to backfill; default 2, 0 = full. Applies to BOTH
+                // resume-by-id and --continue (the daemon caps continue's replay
+                // at bind time), so send it whenever either path is active.
+                resume_limit_mb: (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 2) : undefined,
                 continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: currentMode.key,
@@ -365,7 +367,7 @@ function NewJoyTmuxSessionScreen() {
         } finally {
             setIsSpawning(false);
         }
-    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, chrome, detached, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
+    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, resumeId, resumeMb, chrome, detached, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
 
     const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
 
@@ -556,9 +558,9 @@ function NewJoyTmuxSessionScreen() {
                                 />
                             </View>
 
-                            {/* History to backfill on resume (MB). Only relevant
-                                when a resume id is set. 0 = full history. */}
-                            {resumeId.trim() ? (
+                            {/* History to backfill (MB). Relevant when resuming by
+                                id OR continuing the last conversation. 0 = full. */}
+                            {(resumeId.trim() || continueLast) ? (
                                 <View style={styles.configRow}>
                                     <Ionicons name="time-outline" size={15} color={theme.colors.textSecondary} />
                                     <TextInput
