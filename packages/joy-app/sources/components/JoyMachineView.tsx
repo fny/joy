@@ -64,6 +64,22 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: t('machine.machineId') }));
     }, [machineId]);
 
+    // Tap the command count to see the full list the daemon reported — plugins
+    // marked "(plugin — hidden)". Diagnoses the two failure modes directly: if a
+    // plugin command still shows in the composer but ISN'T marked here, the
+    // daemon didn't report it in pluginSlashCommands (so the app can't filter it);
+    // an empty list means the machine metadata hasn't reached the app at all.
+    const showCommandList = React.useCallback(() => {
+        const all = [...(machine?.metadata?.slashCommands ?? [])].sort();
+        const plugins = new Set(machine?.metadata?.pluginSlashCommands ?? []);
+        if (all.length === 0) {
+            Modal.alert('Slash commands', 'None in this machine\'s metadata yet — the daemon hasn\'t reported any (or the update hasn\'t reached the app).');
+            return;
+        }
+        const body = all.map((c) => (plugins.has(c) ? `${c}  (plugin — hidden)` : c)).join('\n');
+        Modal.alert(`${all.length} commands · ${plugins.size} plugins`, body);
+    }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands]);
+
     const [status, setStatus] = React.useState<JoyStatus | null>(null);
     const [failed, setFailed] = React.useState(false);
     React.useEffect(() => {
@@ -232,9 +248,9 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                 <Item
                     title="Available"
                     detail={String(slashCommandCount)}
-                    subtitle="Shown in the composer's / autocomplete"
+                    subtitle="Tap to list every command the daemon reported"
                     icon={<Ionicons name="terminal-outline" size={29} color="#34C759" />}
-                    showChevron={false}
+                    onPress={showCommandList}
                 />
                 <Item
                     title="Refresh"

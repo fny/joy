@@ -57,9 +57,10 @@ const DEFAULT_COMMANDS: CommandItem[] = [
     { command: 'clear', description: 'Clear the conversation' },
     { command: 'mcp', description: 'Show connected MCP servers' },
     { command: 'skills', description: 'Show available skills' },
-    // joy-tmux daemon command (intercepted before Claude, so never reported in
-    // metadata.slashCommands) — surfaced here so it shows in autocomplete.
+    // joy-tmux daemon commands (intercepted before Claude, so never reported in
+    // metadata.slashCommands) — surfaced here so they show in autocomplete.
     { command: 'steer', description: 'Send straight to the agent now, bypassing the queue' },
+    { command: 'title', description: 'Set the conversation title' },
 ];
 
 // Command descriptions for known tools/commands
