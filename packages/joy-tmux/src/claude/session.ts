@@ -66,6 +66,15 @@ const ENTER_SUBMIT_DELAY_MS = 350;
 // dedup. The delay lets the kill-line be processed first. (Used by /steer.)
 const CLEAR_SETTLE_MS = 120;
 
+// Echo-confirmation window for a dispatched message: if no turn starts within
+// this, the send is treated as failed (requeue + pause). Bumped from 20s — a
+// large context makes turn-start slower, and 20s false-failed genuine sends.
+const DISPATCH_ECHO_TIMEOUT_MS = 30000;
+// …but if Claude is visibly WORKING at the deadline (churning on a huge context
+// before writing turn-start), extend rather than fail — up to this many times
+// (~2min total). Beyond that a genuinely-lost dispatch finally surfaces.
+const MAX_DISPATCH_EXTENDS = 3;
+
 // 500-error auto-retry backoff (seconds): paired ramp, then STOP. 14 attempts,
 // ~63 min total. When a turn ENDS with an unresolved 5xx (Claude gave up after
 // its own internal retries), joy-tmux re-sends the failed turn on this schedule
@@ -503,6 +512,10 @@ export class Session {
   // the whole item so a timeout re-queues it with its original seq/source/opts.
   #dispatchInFlight: QueuedItem | null = null;
   #dispatchTimer: ReturnType<typeof setTimeout> | null = null;
+  // How many times the current dispatch's echo timeout has been EXTENDED because
+  // Claude is visibly working (slow turn-start on a huge context) — bounded so a
+  // genuinely-lost dispatch still surfaces. Reset on confirm / requeue.
+  #dispatchExtends = 0;
   #drainRetry: ReturnType<typeof setTimeout> | null = null;
   // The pending delayed-Enter (submit) for a just-typed message. Cancellable so an
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
@@ -957,7 +970,7 @@ export class Session {
     // after steer settles, instead of being clobbered.
     if (this.#submitTimer && this.#dispatchInFlight) {
       this.#clearSubmitTimer();
-      // Also kill that dispatch's 20s echo-timeout — otherwise it stays live and could
+      // Also kill that dispatch's echo-timeout — otherwise it stays live and could
       // prematurely time out the message once it RE-dispatches after the steer.
       if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
       this.#queue.unshift(this.#dispatchInFlight);
@@ -1245,7 +1258,8 @@ export class Session {
     }
     // Arm the echo-confirmation timeout: a successful dispatch produces a new turn.
     // If none appears, the message didn't land.
-    this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), 20000);
+    this.#dispatchExtends = 0;
+    this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
   }
 
   /** Called from onTranscriptEntry when a new turn starts — confirms the dispatch landed. */
@@ -1259,9 +1273,10 @@ export class Session {
     // that message as "delivered" AND cancelled its pending Enter, stranding
     // its text in the box. Leave it in flight: #armSubmit reschedules around
     // the open turn and the transcript user-echo (text-matched) confirms it —
-    // or the 20s dispatch timeout requeues it. Never confirm on turn-start alone.
+    // or the dispatch echo timeout requeues it. Never confirm on turn-start alone.
     if (this.#submitTimer) return;
     this.#dispatchInFlight = null;
+    this.#dispatchExtends = 0;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     this.#broadcastQueue();
   }
@@ -1270,11 +1285,27 @@ export class Session {
     this.#dispatchTimer = null;
     const inflight = this.#dispatchInFlight;
     if (!inflight) return;
-    // No turn started in time → the message didn't land (a dialog ate it, or
-    // Claude wasn't actually ready). Re-queue the WHOLE item at the head (so its
-    // seq/source/mirror/visible survive) and pause so we don't pile more into a
-    // bad state; resume re-clears the box and re-types it. Drop the stale pending
-    // entry first so the re-type doesn't double it / suppress it as a self-echo.
+    // Before declaring failure, check whether Claude is actually WORKING on the
+    // message. A large context (600k+ tokens) can make turn-start take longer
+    // than the echo window — the message DID land, Claude is just churning on it
+    // before writing the first transcript entry. Pausing here false-fails EVERY
+    // send on such a session ("queued message failed to send" that keeps
+    // recurring). If the pane shows generation/work, EXTEND the window instead of
+    // pausing — bounded, so a genuinely-lost dispatch (a dialog ate it, Claude
+    // wasn't ready) still surfaces after the extensions are spent.
+    const pane = tmux.captureCached(this.tmuxWindow);
+    const working = pane.ok && (paneShowsGenerating(pane.out) || paneShowsWorking(pane.out));
+    if (working && this.#dispatchExtends < MAX_DISPATCH_EXTENDS) {
+      this.#dispatchExtends += 1;
+      this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
+      return;
+    }
+    // No turn started in time and Claude isn't visibly working → the message
+    // didn't land. Re-queue the WHOLE item at the head (so its seq/source/mirror/
+    // visible survive) and pause so we don't pile more into a bad state; resume
+    // re-clears the box and re-types it. Drop the stale pending entry first so the
+    // re-type doesn't double it / suppress it as a self-echo.
+    this.#dispatchExtends = 0;
     this.#dispatchInFlight = null;
     this.#clearSubmitTimer();
     this.#neutralizePending(inflight.text);
@@ -1378,7 +1409,7 @@ export class Session {
     if (sameSubmit) {
       // Aborting a message that was typed but NOT yet submitted (its Enter was still
       // pending): cancel that Enter AND discard the dispatch — Stop means the message is
-      // gone, not re-queued. Clear the 20s echo-timeout (else it would fire, re-queue the
+      // gone, not re-queued. Clear the echo-timeout (else it would fire, re-queue the
       // aborted message, and pause the queue) and neutralize its receipt (it never
       // submitted, so it'll never echo — leaving the receipt would wrongly suppress a
       // later identical real message). The leftover text stays in the box — see the
@@ -1779,7 +1810,7 @@ export class Session {
       if (this.#turn) { this.#armSubmit(opts); return; }
       // Mirror + flip thinking ONLY after the Enter has actually gone out over the
       // wire — so the app never shows "sent" before the pane submitted. A failed
-      // Enter (disconnect) leaves it unsent; the 20s dispatch timeout surfaces it.
+      // Enter (disconnect) leaves it unsent; the dispatch echo timeout surfaces it.
       const e = await tmux.key(this.tmuxWindow, "Enter");
       if (!e.ok) return;
       // Re-validate AFTER the awaited Enter (it may have queued behind other control
@@ -2377,7 +2408,7 @@ export class Session {
           // codex-3: the echo proves the dispatched prompt landed. Confirm it now
           // instead of waiting for assistant output — a turn that errors before any
           // output (api_error → turn_duration with no assistant blocks) would
-          // otherwise leave #dispatchInFlight set until the 20s timeout requeues +
+          // otherwise leave #dispatchInFlight set until the dispatch echo timeout requeues +
           // pauses an already-delivered message.
           if (this.#dispatchInFlight &&
               flattenForMatch(this.#dispatchInFlight.text) === matchContent) {
@@ -2414,7 +2445,7 @@ export class Session {
             // collision that could garble a dispatch into a mismatched echo, so an unmatched
             // entry is never a corrupted app send (that's why there's no longer a
             // dispatch_mismatch suppress+pause here). Any in-flight dispatch is left
-            // untouched: its own clean echo matches later, or the 20s timeout re-queues it.
+            // untouched: its own clean echo matches later, or the dispatch echo timeout re-queues it.
             this.#relay!.send(encodeUserMessage(content, entryTimeMs));
             recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "", at: Date.now() });
           }
