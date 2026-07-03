@@ -1,3 +1,12 @@
+# Jul 3 — Consistent status, working scrubber, /title
+
+Small polish across the chat and machine views, plus fewer false "failed to send" alarms.
+
+- Session status color is now consistent everywhere — the sidebar dot and the chat header no longer disagree (teal while finishing background tasks, yellow for permission prompts).
+- The "jump to previous prompt" arrow works when you're scrolled to the very bottom of a chat, instead of doing nothing.
+- `/title` shows up in the slash-command menu, so you can rename a conversation without remembering the command.
+- Tap a machine's command count to see the full list of slash commands it found (plugins marked), so it's clear what's available.
+
 # May 15 — Cleaner, steadier chat
 
 Less clutter in the conversation, fewer stuck states, smoother scrolling.
