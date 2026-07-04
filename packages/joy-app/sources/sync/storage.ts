@@ -206,6 +206,12 @@ interface StorageState {
      *  scratch — the interior-gap heal (the reducer is order-dependent, so rows
      *  that arrive older-than-processed can't just be merged in). */
     resetSessionMessages: (sessionId: string) => void;
+    /** Remove one message row from a session's display list — used to dismiss
+     *  LOCAL-ONLY event rows (e.g. the "Message failed to send" notice), which
+     *  have no seq and no server presence, so removal can't desync anything.
+     *  Safe against resurrection: applyMessages merges reducer output rather
+     *  than rebuilding, and a local event row is never re-emitted. */
+    dismissMessage: (sessionId: string, messageId: string) => void;
     noteSessionVisible: (sessionId: string) => void;
     applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
@@ -914,6 +920,23 @@ export const storage = create<StorageState>()((set, get) => {
             const sessionMessages = { ...state.sessionMessages };
             delete sessionMessages[sessionId];
             return { ...state, sessionMessages };
+        }),
+        dismissMessage: (sessionId: string, messageId: string) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing || !existing.messagesMap[messageId]) return state;
+            const messagesMap = { ...existing.messagesMap };
+            delete messagesMap[messageId];
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: {
+                        ...existing,
+                        messages: existing.messages.filter((m) => m.id !== messageId),
+                        messagesMap
+                    } satisfies SessionMessages
+                }
+            };
         }),
         applyMessagesLoaded: (sessionId: string) => set((state) => {
             const existingSession = state.sessionMessages[sessionId];

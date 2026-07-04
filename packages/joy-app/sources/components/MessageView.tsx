@@ -5,6 +5,7 @@ import { MarkdownView } from "./markdown/MarkdownView";
 import { t } from '@/text';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
+import { storage } from "@/sync/storage";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
@@ -77,7 +78,7 @@ function RenderBlock(props: {
       />;
 
     case 'agent-event':
-      return <AgentEventBlock event={props.message.event} metadata={props.metadata} />;
+      return <AgentEventBlock event={props.message.event} metadata={props.metadata} sessionId={props.sessionId} messageId={props.message.id} />;
 
 
     default:
@@ -278,7 +279,15 @@ function AgentTextBlock(props: {
 function AgentEventBlock(props: {
   event: AgentEvent;
   metadata: Metadata | null;
+  sessionId: string;
+  messageId: string;
 }) {
+  const { sessionId, messageId } = props;
+  // Local-only notice rows (e.g. "Message failed to send after 30s") have no
+  // server presence and nothing else ever clears them — tap to dismiss.
+  const handleDismiss = React.useCallback(() => {
+    storage.getState().dismissMessage(sessionId, messageId);
+  }, [sessionId, messageId]);
   if (props.event.type === 'switch') {
     return (
       <View style={styles.agentEventContainer}>
@@ -288,9 +297,9 @@ function AgentEventBlock(props: {
   }
   if (props.event.type === 'message') {
     return (
-      <View style={styles.agentEventContainer}>
+      <Pressable onPress={handleDismiss} style={styles.agentEventContainer}>
         <Text style={styles.agentEventText}>{props.event.message}</Text>
-      </View>
+      </Pressable>
     );
   }
   if (props.event.type === 'limit-reached') {
