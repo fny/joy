@@ -1132,9 +1132,16 @@ export class RelaySession {
           }
 
           if (role !== 'user') continue;
-          // H1: skip messages sent by joy itself to avoid double-injecting into tmux
+          // H1: skip messages sent by joy itself to avoid double-injecting into tmux.
+          // Log the skip: this is the ONLY silent drop on the pull path, and an
+          // app message swallowed here (mis-tagged meta) is otherwise undiagnosable
+          // (the 2026-07-04 lost-message hunt had no way to see 6004's meta).
           const meta = dec['meta'] as { sentFrom?: string } | undefined;
-          if (meta?.sentFrom === 'joy') continue;
+          if (meta?.sentFrom === 'joy') {
+            log(`pull: skip own-send seq=${msg.seq} sentFrom=joy`);
+            continue;
+          }
+          if (meta?.sentFrom) log(`pull: user msg seq=${msg.seq} sentFrom=${meta.sentFrom}`);
           const c = dec['content'] as { type?: string; text?: string } | undefined;
           if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
             // onMessage now hands the text to the session's in-memory verified
