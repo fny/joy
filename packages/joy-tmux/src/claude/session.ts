@@ -81,13 +81,6 @@ const MAX_DISPATCH_EXTENDS = 3;
 // until it succeeds, abort is pressed, or the schedule runs out.
 const RETRY_SCHEDULE_SEC = [15, 15, 30, 30, 60, 60, 120, 120, 240, 240, 480, 480, 960, 960];
 
-/**
- * Turn a CLI-wrapped command transcript entry into a clean one-line echo so it
- * can show in chat instead of being dropped (which left no confirmation a
- * command was received). Returns null for unparseable noise.
- *   <command-name>/model</command-name><command-args>opus</command-args> → "/model opus"
- *   <bash-input>ls -la</bash-input>…                                       → "$ ls -la"
- */
 // Strip ANSI/terminal escape sequences (SGR colors, cursor moves, OSC) so
 // mirrored command output doesn't render as garbage in the chat.
 // eslint-disable-next-line no-control-regex
@@ -96,30 +89,6 @@ export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");
 }
 
-export function summarizeCommandEcho(content: string): string | null {
-  const pick = (tag: string) => {
-    const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(content);
-    return m ? stripAnsi(m[1]).trim() : "";
-  };
-  // Slash command: command-message is the human-readable form; fall back to name+args.
-  const message = pick("command-message");
-  const name = pick("command-name");
-  if (message || name) {
-    if (message) return message.startsWith("/") ? message : `/${message}`;
-    const args = pick("command-args");
-    const slash = name.startsWith("/") ? name : `/${name}`;
-    return args ? `${slash} ${args}` : slash;
-  }
-  // Local ! bash: prefer the input command, else the first line of output.
-  const bashIn = pick("bash-input");
-  if (bashIn) return `$ ${bashIn.split("\n")[0]}`.slice(0, 200);
-  const out = pick("local-command-stdout") || pick("local-command-stderr");
-  if (out) {
-    const first = out.split("\n").find(l => l.trim());
-    return first ? `$ ${first}`.slice(0, 200) : null;
-  }
-  return null;
-}
 
 /** Wire shape — frozen. The app and the debug page consume this JSON. */
 export interface SessionRecord {
@@ -2194,6 +2163,91 @@ export class Session {
    *  status and arm a backstop timeout in case the compact_boundary record that
    *  normally clears it never arrives (compaction can run for minutes — see the
    *  174s observed — so the window is generous). */
+  /**
+   * Claude Code hook event (POST /sessions/:id/hook from the generated
+   * joy-hook.mjs — see hooks.ts). Hooks are LIVE STATE EDGES: instant,
+   * machine-generated signals for exactly the states the pane/transcript
+   * heuristics infer with lag or guesswork. They TIGHTEN state, they never
+   * carry it alone — a session without hooks (adopted orphan, old settings
+   * snapshot, daemon downtime while firing) behaves exactly as before.
+   */
+  onHookEvent(ev: Record<string, unknown>): { ok: boolean } {
+    if (this.status === "ended") return { ok: false };
+    const name = String(ev.event ?? "");
+    const str = (k: string) => (typeof ev[k] === "string" && ev[k] ? String(ev[k]) : null);
+    switch (name) {
+      case "PreCompact": {
+        this.markCompacting(str("trigger") ?? "auto");
+        return { ok: true };
+      }
+      case "SessionStart": {
+        // Authoritative transcript binding: claude tells us its session id and
+        // transcript path at startup — no mtime discovery, no cwd-collision
+        // races, and a pending --continue backfill cap computes against the
+        // TRUE file at bind (startTailer). Fires on startup/resume/clear.
+        const sid = str("session_id");
+        const tp = str("transcript_path");
+        process.stderr.write(`[hook] ${this.id} SessionStart sid=${sid ?? "?"} source=${str("source") ?? "?"}\n`);
+        if (sid) this.claudeSessionId = sid;
+        if (tp && tp !== this.transcriptPath) {
+          if (this.#tailer) {
+            // Bound to a DIFFERENT file (mtime discovery guessed wrong, or a
+            // /clear rotated the conversation) — rebind. Receipts dedup the
+            // replay so the app doesn't get re-pushed history.
+            process.stderr.write(`[hook] ${this.id} rebinding transcript ${this.transcriptPath} → ${tp}\n`);
+            this.#transcriptStartOffset = 0; // stale offset belongs to the old file
+          }
+          this.startTailer(tp, true);
+        } else if (!this.#tailer && tp) {
+          this.transcriptPath = tp; // file may not exist yet — the pinned-poll picks it up
+          this.pollForTranscript();
+        }
+        return { ok: true };
+      }
+      case "UserPromptSubmit": {
+        // A prompt was REALLY submitted — the authoritative version of the
+        // signals the dispatch pipeline infers from echo timers and turn
+        // starts. Thinking flips on at the submit instant (the "thinking never
+        // shows at turn start" gap), and a text match against the in-flight
+        // dispatch confirms delivery outright — no echo-timeout heuristics,
+        // no confirm-on-foreign-turn races.
+        this.#setThinking(true);
+        this.#idlePolls = 0;
+        const prompt = str("prompt");
+        if (prompt && this.#dispatchInFlight
+          && flattenForMatch(prompt) === flattenForMatch(this.#dispatchInFlight.text)) {
+          process.stderr.write(`[hook] ${this.id} UserPromptSubmit confirmed dispatch\n`);
+          this.#clearSubmitTimer(); // our delayed Enter would fire into an empty box — harmless, but don't
+          this.#dispatchInFlight = null;
+          this.#dispatchExtends = 0;
+          if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+          this.#broadcastQueue();
+          void this.#restoreDraftIfAny();
+        }
+        return { ok: true };
+      }
+      case "Stop": {
+        // Turn finished. The transcript's end_turn/turn_duration entries also
+        // land, but this fires first — thinking clears instantly and the next
+        // queued message dispatches without waiting for tailer lag.
+        this.#setThinking(false);
+        this.#idlePolls = 0;
+        this.#maybeDrainQueue();
+        return { ok: true };
+      }
+      case "Notification": {
+        // Claude is WAITING (permission request / idle input prompt) — not
+        // generating. The pane poll can only guess at this state.
+        process.stderr.write(`[hook] ${this.id} Notification: ${(str("message") ?? "").slice(0, 80)}\n`);
+        this.#setThinking(false);
+        this.#idlePolls = 0;
+        return { ok: true };
+      }
+      default:
+        return { ok: false };
+    }
+  }
+
   markCompacting(trigger: string): void {
     if (this.status === "ended") return;
     this.#compacting = { trigger: trigger === "manual" ? "manual" : "auto", since: Date.now() };
@@ -2671,9 +2725,11 @@ export class Session {
             uuid: entryUuid, turn: this.#turn.turnId, at: Date.now(),
           });
         }
-        // M3: send turn-end when the assistant finishes — don't require a
-        // Stop hook. end_turn = normal completion; tool_use = more tool
-        // calls pending (no turn-end yet).
+        // Send turn-end when the assistant finishes. The Stop HOOK (onHookEvent)
+        // clears thinking/drains faster when present, but the transcript stays
+        // the authority for the turn lifecycle — hook-less sessions (adopted
+        // orphans, old settings snapshots) rely on this path alone. end_turn =
+        // normal completion; tool_use = more tool calls pending (no turn-end yet).
         const stopReason = String(msg.stop_reason || "");
         if (stopReason === "end_turn" || stopReason === "max_tokens") {
           this.#errorNotedThisTurn = false;

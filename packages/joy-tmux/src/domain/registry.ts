@@ -17,7 +17,7 @@ import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
-import { ensureCompactHookSettings, daemonFilePath } from "../claude/compactHook";
+import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 
 export interface CreateSessionOpts {
   cwd: string;
@@ -338,7 +338,7 @@ export class SessionRegistry {
     // joy-managed Claude settings, merged on top of the user's own: adds the
     // PreCompact hook that drives the app's "compacting" status. "" = generation
     // failed → skip the flag rather than pass claude a broken --settings path.
-    const claudeSettings = ensureCompactHookSettings();
+    const claudeSettings = ensureHookSettings();
 
     // YOLO mode is the default for joy-tmux sessions — the app drives the
     // session and approving permission prompts via tmux send-keys is fragile.

@@ -660,9 +660,21 @@ export const sessionOps: SessionOp[] = [
     handler: (session) => session.abort(),
   },
   {
-    // Hit by the Claude PreCompact hook when compaction starts, so the app can
-    // show a "compacting" status. Cleared by the compact_boundary transcript
-    // record (no clear route needed). trigger = "manual" | "auto".
+    // Generic Claude Code hook ingest (SessionStart/UserPromptSubmit/Stop/
+    // Notification/PreCompact) — hit by the generated joy-hook.mjs forwarder
+    // (hooks.ts). Best-effort on the sender side; unknown events return
+    // ok:false.
+    name: "hookEvent",
+    scope: "session",
+    rpcName: "joy-hook",
+    http: { method: "POST", path: "/sessions/:id/hook" },
+    handler: (session, params) => session.onHookEvent(params as Record<string, unknown>),
+  },
+  {
+    // Hit by the LEGACY PreCompact hook script (precompact-hook.mjs): sessions
+    // launched before the generic /hook forwarder snapshot their hook config
+    // at claude startup and keep posting here until they restart. Keep until
+    // the fleet has cycled. trigger = "manual" | "auto".
     name: "compacting",
     scope: "session",
     rpcName: "compacting",
