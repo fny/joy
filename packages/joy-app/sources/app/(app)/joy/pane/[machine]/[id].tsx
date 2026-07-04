@@ -81,7 +81,12 @@ export default React.memo(function JoyPaneScreen() {
         // never exceeds the content box — otherwise it wraps or (previously)
         // scrolled sideways.
         const cols = Math.max(20, Math.floor((widthPx - PANE_H_PADDING) / CHAR_WIDTH));
-        const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT));
+        // 2× the viewport height: claude runs on tmux's alternate screen, so its
+        // pane has NO tmux scrollback (history_size=0) — the only way to scroll
+        // back further in this view is a taller window, which makes claude's TUI
+        // render twice the conversation; the ScrollView scrolls within it (the
+        // input box stays at the pane's bottom, i.e. at the scroll end).
+        const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT) * 2);
         if (cols === lastColsRef.current || !cols) return;
         lastColsRef.current = cols;
         void apiSocket.machineRPC(machineId, 'joy-resize', { id: sessionId, cols, rows })
