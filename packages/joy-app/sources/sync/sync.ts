@@ -148,6 +148,10 @@ class Sync {
     private appState: AppStateStatus = AppState.currentState;
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
+    // True once the "message still sending" notification fired for the current
+    // background episode — gates the watchdog so retries don't re-notify every
+    // 30s. Reset on app resume and when the outbox fully drains.
+    private backgroundSendEpisodeNotified = false;
     revenueCatInitialized = false;
 
     // Generic locking mechanism
@@ -186,15 +190,20 @@ class Sync {
             apiSocket.sendAppState(getCurrentAppState());
 
             if (nextAppState === 'active') {
-                // Fail only messages whose OWN age has crossed the timeout — not
-                // "any pending + an old shared clock", which used to fire the
-                // instant a fresh submit coincided with a stale watchdog timestamp.
-                const shouldFailAfterResume = this.hasOverdueOutboxMessages();
+                // Resume = the moment we REGAIN the ability to deliver — retry,
+                // never fail. The v3 POST dedupes by localId, so re-sending a
+                // message whose ack was lost to app suspension (the common
+                // "failure") resolves into a plain ack, not a duplicate. The old
+                // behavior failed + discarded overdue messages right here, which
+                // both lost the user's text and usually lied (the send had
+                // landed; only the ack was lost).
                 void this.cancelBackgroundSendTimeoutNotification();
                 this.clearBackgroundSendWatchdog();
-                if (shouldFailAfterResume) {
-                    void this.notifyMessageSendFailed();
-                    this.failOverdueOutboxMessages('Message failed to send after 30s. Please retry.');
+                this.backgroundSendEpisodeNotified = false;
+                for (const [sessionId, pending] of this.pendingOutbox) {
+                    if (pending.length > 0) {
+                        this.getSendSync(sessionId).invalidate();
+                    }
                 }
                 log.log('📱 App became active');
                 this.purchasesSync.invalidate();
@@ -452,6 +461,13 @@ class Sync {
         if (Platform.OS === 'web' || this.appState === 'active') {
             return;
         }
+        // One notification per background episode: flushOutbox failure re-calls
+        // this after every retry, and without the gate a background-alive JS
+        // runtime would re-schedule a fresh notification every 30s for as long
+        // as the send stays pending. Reset on resume and on outbox drain.
+        if (this.backgroundSendEpisodeNotified) {
+            return;
+        }
         if (!this.hasPendingOutboxMessages() || this.backgroundSendTimeout) {
             return;
         }
@@ -478,8 +494,8 @@ class Sync {
         try {
             this.backgroundSendNotificationId = await Notifications.scheduleNotificationAsync({
                 content: {
-                    title: 'Message not sent',
-                    body: 'A message is still sending in the background. It will fail in 30 seconds if not delivered.',
+                    title: 'Message still sending',
+                    body: "A message hasn't been delivered yet. Open Joy to let it retry.",
                     sound: true
                 },
                 trigger: {
@@ -505,76 +521,43 @@ class Sync {
         }
     }
 
-    private async notifyMessageSendFailed() {
+    private async notifyMessageStillSending() {
         if (Platform.OS === 'web') {
             return;
         }
         try {
             await Notifications.scheduleNotificationAsync({
                 content: {
-                    title: 'Message failed',
-                    body: 'A message failed to send while the app was in background. Open Joy and retry.',
+                    title: 'Message still sending',
+                    body: "A message hasn't been delivered yet. Open Joy to let it retry.",
                     sound: true
                 },
                 trigger: null
             });
         } catch (error) {
-            log.log(`Failed to schedule message failure notification: ${error}`);
+            log.log(`Failed to schedule message still-sending notification: ${error}`);
         }
     }
 
-    // Fail ONLY messages that have aged past the timeout AND are not currently in
-    // flight. Kept out of scope on purpose: fresh messages (age ~0) and in-flight
-    // messages (the POST owns them). We never abort the in-flight send here — that
-    // was the source of a race where a POST resolving despite the abort would
-    // splice/delete the concurrently-rewritten outbox and lose survivors. Because
-    // an in-flight batch is skipped, and flushOutbox removes sent messages by
-    // localId from whatever the current array is, the two can't corrupt each other.
-    private failOverdueOutboxMessages(reasonText: string) {
-        const now = Date.now();
-        const sessionIds: string[] = [];
-        for (const [sessionId, pending] of [...this.pendingOutbox]) {
-            const inFlight = this.inFlightOutbox.get(sessionId);
-            const isOverdue = (m: OutboxMessage) =>
-                !inFlight?.has(m.localId) && now - m.enqueuedAt >= Sync.BACKGROUND_SEND_TIMEOUT_MS;
-            if (!pending.some(isOverdue)) {
-                continue;
-            }
-            const remaining = pending.filter((m) => !isOverdue(m));
-            if (remaining.length > 0) {
-                this.pendingOutbox.set(sessionId, remaining);
-            } else {
-                this.pendingOutbox.delete(sessionId);
-            }
-            sessionIds.push(sessionId);
-        }
-
-        for (const sessionId of sessionIds) {
-            this.enqueueMessages(sessionId, [{
-                id: randomUUID(),
-                localId: null,
-                createdAt: now,
-                role: 'event',
-                isSidechain: false,
-                content: {
-                    type: 'message',
-                    message: reasonText
-                }
-            }]);
-            // Retry any survivors that weren't overdue (and weren't in flight).
-            this.getSendSync(sessionId).invalidate();
-        }
-    }
-
+    // Overdue messages are NEVER failed or discarded anymore. The v3 POST
+    // dedupes by localId, so keeping a message in the outbox and retrying on
+    // resume/reconnect is always safe: a genuinely-undelivered send goes
+    // through late, and a delivered-but-unacked send (ack lost to iOS
+    // suspension — the common "failure") resolves into a plain ack. The old
+    // fail-after-30s path deleted the outbox copy (user's text gone, "Please
+    // retry" with nothing to retry) and injected a permanent local "failed"
+    // row into the chat — usually a false accusation. The 30s deadline's only
+    // remaining job is the once-per-episode notification below.
     private async handleBackgroundSendTimeout() {
         await this.cancelBackgroundSendTimeoutNotification();
         if (this.hasOverdueOutboxMessages()) {
-            await this.notifyMessageSendFailed();
-            this.failOverdueOutboxMessages('Message failed to send after 30s. Please retry.');
+            await this.notifyMessageStillSending();
+            this.backgroundSendEpisodeNotified = true;
+        } else {
+            // Messages still pending but not yet overdue keep their own
+            // deadline — re-arm so the watchdog fires when the next one comes due.
+            this.maybeStartBackgroundSendWatchdog();
         }
-        // Messages still pending but not yet overdue keep their own deadline —
-        // re-arm so the watchdog fires again when the next one comes due.
-        this.maybeStartBackgroundSendWatchdog();
     }
 
     /**
@@ -1686,7 +1669,7 @@ class Sync {
     // Remove specific messages (by localId) from a session's outbox. Operates on
     // the CURRENT map entry, never a captured array reference, and only clears the
     // key when nothing is left — so it stays correct even if the array was replaced
-    // concurrently (e.g. by failOverdueOutboxMessages or a newly enqueued send).
+    // concurrently (e.g. by a newly enqueued send).
     private removeFromOutbox(sessionId: string, localIds: Set<string>) {
         const current = this.pendingOutbox.get(sessionId);
         if (!current) {
@@ -1705,6 +1688,7 @@ class Sync {
         if (!pending || pending.length === 0) {
             if (!this.hasPendingOutboxMessages()) {
                 this.clearBackgroundSendWatchdog();
+                this.backgroundSendEpisodeNotified = false; // episode over — outbox drained
                 await this.cancelBackgroundSendTimeoutNotification();
             }
             return;
@@ -1790,6 +1774,7 @@ class Sync {
 
         if (!this.hasPendingOutboxMessages()) {
             this.clearBackgroundSendWatchdog();
+            this.backgroundSendEpisodeNotified = false; // episode over — outbox drained
             await this.cancelBackgroundSendTimeoutNotification();
         } else if (this.appState !== 'active') {
             this.maybeStartBackgroundSendWatchdog();
