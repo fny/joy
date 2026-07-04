@@ -1834,10 +1834,20 @@ class Sync {
                 // messages. The user's reported pain point was "opening a long
                 // session feels frozen" — this is the fix.
                 await this.fetchInitialLatestPage(sessionId, encryption);
+            } else if (!storage.getState().sessionMessages[sessionId]) {
+                // Cursor survived but the message store was evicted
+                // (limitSessionMemory unload). Forward-replaying the gap would
+                // rebuild history we no longer even hold — re-anchor: refetch
+                // exactly like a cold open (newest page; older fills on scroll).
+                log.log(`💬 fetchMessages: store evicted for ${sessionId} — re-anchoring at latest page`);
+                this.sessionLastSeq.delete(sessionId);
+                this.sessionOldestSeq.delete(sessionId);
+                await this.fetchInitialLatestPage(sessionId, encryption);
             } else {
                 // Forward incremental sync. Used after reconnect, invalidate,
-                // or any subsequent visit. Only pulls messages newer than what
-                // we already have, so it's bounded and fast in normal use.
+                // or any subsequent visit. Pulls messages newer than what we
+                // already have — bounded by the re-anchor inside (a huge gap
+                // stops replaying and jumps to the newest page instead).
                 await this.fetchForwardSince(sessionId, encryption, knownLastSeq);
             }
 
@@ -1930,12 +1940,21 @@ class Sync {
         });
     }
 
+    // Forward catch-up tolerates this many 100-message pages before giving up
+    // on replaying the gap and re-anchoring at the newest page. Small gaps
+    // (reconnects, brief backgrounding) replay exactly as before; a session
+    // that ran hot while unwatched (or a daemon backfill wave) no longer costs
+    // an unbounded serial replay — decrypt + reducer + re-render per page —
+    // just to reach "now". 5 pages ≈ 500 messages.
+    private static readonly MAX_FORWARD_CATCHUP_PAGES = 5;
+
     private fetchForwardSince = async (
         sessionId: string,
         encryption: ReturnType<Encryption['getSessionEncryption']> & {},
         fromSeq: number
     ) => {
         let afterSeq = fromSeq;
+        let pages = 0;
         while (true) {
             const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
             if (!response.ok) {
@@ -1956,6 +1975,32 @@ class Sync {
             if (maxSeq === afterSeq) {
                 log.log(`💬 fetchForwardSince: pagination stalled for ${sessionId}, stopping to avoid infinite loop`);
                 break;
+            }
+
+            pages += 1;
+            if (pages >= Sync.MAX_FORWARD_CATCHUP_PAGES) {
+                // Re-anchor — but never while this session has un-acked local
+                // sends: their optimistic rows live only in the store until the
+                // POST ack reconciles a seq, and the reset below would eat them
+                // (the lost-send bug family). A pending outbox means the user
+                // just sent something, so the gap is about to matter anyway —
+                // keep replaying in that (rare) case.
+                const hasPendingSends = (this.pendingOutbox.get(sessionId) ?? []).length > 0
+                    || this.inFlightOutbox.has(sessionId);
+                if (hasPendingSends) {
+                    log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} but sends are pending — continuing replay`);
+                    continue;
+                }
+                // Same reset the interior-gap heal uses (healInteriorGap), then
+                // refetch like a cold open, inline — we already hold the session
+                // message lock and the encryption handle. Skipped interior
+                // history stays on the server; scroll-up re-pages it on demand.
+                log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} — re-anchoring at latest page`);
+                this.sessionLastSeq.delete(sessionId);
+                this.sessionOldestSeq.delete(sessionId);
+                storage.getState().resetSessionMessages(sessionId);
+                await this.fetchInitialLatestPage(sessionId, encryption);
+                return;
             }
             afterSeq = maxSeq;
         }
