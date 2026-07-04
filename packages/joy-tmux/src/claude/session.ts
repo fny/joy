@@ -455,6 +455,9 @@ export class Session {
   // joy__goal so the app can show a goal bar.
   #goal: JoyGoalInfo | null = null;
   // Interactive auth/login URL the CLI is showing in its pane (null when none).
+  // When the 401 login-needed note last fired (0 = never) — one per
+  // 5-minute episode (see the api_error handler).
+  #autoLoginAt = 0;
   // Surfaced as joy__login so the app can show a login bar. #loginUrlPending
   // debounces detection: a URL must persist across two polls before we push it.
   #login: JoyLoginInfo | null = null;
@@ -1465,7 +1468,7 @@ export class Session {
     // Abort also cancels an in-progress 500 auto-retry (pressing abort = "stop
     // trying") and disarms a pending retry so the next turn-end won't start one.
     if (this.#retry) {
-      this.#emitAgentNote(`⏹ Auto-retry cancelled`, Date.now(), this.claudeSessionId);
+      this.#emitAgentNote(`Auto-retry cancelled`, Date.now(), this.claudeSessionId);
       this.#clearRetry();
     }
     this.#turn5xxStatus = null;
@@ -1498,7 +1501,7 @@ export class Session {
     // Show the user that the Stop landed. Emitted while #turn is still open so the
     // note lands inside the interrupted turn (a bare pending-submit abort has no
     // open turn, so #emitAgentNote opens+closes a standalone one).
-    this.#emitAgentNote("⏹ Interrupted", Date.now(), this.claudeSessionId);
+    this.#emitAgentNote("Interrupted", Date.now(), this.claudeSessionId);
     // Escape ends the current turn, but an INTERRUPTED turn never produces a
     // turn-end in the transcript — so #turn would stay set forever. The drain gate
     // (#canDrain requires !#turn) would then block every following message, and
@@ -1739,7 +1742,7 @@ export class Session {
   #scheduleRetry(status: number, sid?: string): void {
     const made = this.#retry?.attempts ?? 0;
     if (made >= RETRY_SCHEDULE_SEC.length) {
-      this.#emitAgentNote(`⚠️ API ${status}: auto-retry exhausted after ${RETRY_SCHEDULE_SEC.length} attempts — giving up`, Date.now(), sid);
+      this.#emitAgentNote(`API ${status}: auto-retry exhausted after ${RETRY_SCHEDULE_SEC.length} attempts — giving up`, Date.now(), sid);
       this.#clearRetry();
       return;
     }
@@ -1749,7 +1752,7 @@ export class Session {
     if (this.#retry?.timer) clearTimeout(this.#retry.timer);
     this.#retry = { attempts: attempt, timer: setTimeout(() => this.#fireRetry(sid), delaySec * 1000) };
     void this.#relay?.updateRetry({ attempt, total: RETRY_SCHEDULE_SEC.length, nextAt, status });
-    this.#emitAgentNote(`⏳ API ${status} — retrying in ${formatRetryDelay(delaySec)} (attempt ${attempt}/${RETRY_SCHEDULE_SEC.length})`, Date.now(), sid);
+    this.#emitAgentNote(`API ${status} — retrying in ${formatRetryDelay(delaySec)} (attempt ${attempt}/${RETRY_SCHEDULE_SEC.length})`, Date.now(), sid);
   }
 
   /** Fire a scheduled retry: re-send the failed prompt through the queue. */
@@ -1758,7 +1761,7 @@ export class Session {
     this.#retry.timer = null;
     const text = this.#lastUserText;
     if (!text) {
-      this.#emitAgentNote(`⚠️ Auto-retry: no prompt to re-send — giving up`, Date.now(), sid);
+      this.#emitAgentNote(`Auto-retry: no prompt to re-send — giving up`, Date.now(), sid);
       this.#clearRetry();
       return;
     }
@@ -2377,7 +2380,23 @@ export class Session {
       process.stderr.write(`[api_error] ${this.id} status=${err.status ?? "?"} retry=${entry.retryAttempt ?? "?"}/${entry.maxRetries ?? "?"}: ${formatted}\n`);
       if (!this.#errorNotedThisTurn) {
         this.#errorNotedThisTurn = true;
-        this.#emitAgentNote(`⚠️ API error: ${formatted}`, entryTimeMs, sid);
+        this.#emitAgentNote(`API error: ${formatted}`, entryTimeMs, sid);
+      }
+      // 401 = credentials expired/invalid. Claude just prints "Please run
+      // /login" at the prompt and waits — the app's login bar only appears once
+      // the interactive login SCREEN is open (joy__login via #reconcileLogin),
+      // so an expired session looked "stuck at login" with no prompt anywhere
+      // (boite, 2026-07-04). Surface a clear instruction (deliberately NOT
+      // auto-running /login — the user drives it): sending /login from the app
+      // types it into the pane, the screen opens, and #reconcileLogin surfaces
+      // the auth URL bar. Once per 5-minute episode, and only for fresh entries
+      // (entryTimeMs gate) so a transcript replay after a restart can't
+      // re-announce a historical 401.
+      if (Number(err.status) === 401
+        && entryTimeMs >= this.#tailBoundAt - 60_000
+        && Date.now() - this.#autoLoginAt > 5 * 60_000) {
+        this.#autoLoginAt = Date.now();
+        this.#emitAgentNote("Claude auth expired — send /login to reauthenticate (a login prompt will appear here)", entryTimeMs, sid);
       }
       // Mark the turn as carrying an unresolved server error. Claude retries 5xx
       // internally; if it recovers, the assistant-output path clears this. If the
