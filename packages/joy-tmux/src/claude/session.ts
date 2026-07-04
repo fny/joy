@@ -2635,9 +2635,22 @@ export function authUrlFromPane(text: string): string | null {
   return loginFromPane(text)?.url ?? null;
 }
 
+/**
+ * True when a line is the input box's horizontal rule. Claude renders the box
+ * borders as a run of ─/━ — but with an agent name set (the app's rename flow,
+ * /agents, or a harness), the TOP border carries an embedded label, e.g.
+ * `──────────────── Joy ──`. A pure-rule regex made every parser below blind to
+ * such a box (paneInputText → null forever → dispatch silently retried for the
+ * session's whole life — the "app messages never arrive" bug of 2026-07-04), so
+ * accept an optional non-rule label segment that ends with at least 2 rule chars.
+ */
+function isBoxRule(s: string | undefined): boolean {
+  return /^[─━]{3,}(?:[^─━]{1,80}[─━]{2,})?$/.test((s ?? "").trim());
+}
+
 export function paneShowsReadyPrompt(text: string): boolean {
   const lines = text.split("\n");
-  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  const isRule = isBoxRule;
   for (let i = 1; i < lines.length; i++) {
     const t = lines[i].trim();
     if (!t.startsWith("❯")) continue;
@@ -2662,7 +2675,7 @@ export function paneShowsReadyPrompt(text: string): boolean {
  */
 export function paneInputText(text: string): string | null {
   const lines = text.split("\n");
-  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  const isRule = isBoxRule;
   for (let i = 1; i < lines.length; i++) {
     const t = lines[i].trim();
     if (!t.startsWith("❯")) continue;
@@ -2701,7 +2714,7 @@ export function paneInputText(text: string): string | null {
  */
 export function paneInputLineSpan(text: string): number {
   const lines = text.split("\n");
-  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  const isRule = isBoxRule;
   for (let i = 1; i < lines.length; i++) {
     const t = lines[i].trim();
     if (!t.startsWith("❯")) continue;
@@ -2762,7 +2775,7 @@ export function paneShowsWorking(text: string): boolean {
   // scope the scan to the lines after it (fall back to the last few lines if no
   // box is on screen, e.g. a dialog).
   const lines = text.split("\n");
-  const isRule = (s: string | undefined) => /^[─━]{3,}$/.test((s ?? "").trim());
+  const isRule = isBoxRule;
   let boxLine = -1;
   for (let i = 1; i < lines.length; i++) {
     const t = lines[i].trim();
@@ -2783,7 +2796,16 @@ export function paneShowsWorking(text: string): boolean {
  * must NOT count here — Claude is idle at the prompt and can take the next message.
  */
 export function paneShowsGenerating(text: string): boolean {
-  return /esc to interrupt/i.test(text);
+  if (/esc to interrupt/i.test(text)) return true;
+  // Narrow-pane fallback: on a small attached client (e.g. 58 cols) claude
+  // truncates the status line before "esc to interrupt" ("… · esc to…"), which
+  // made the daemon read a generating pane as idle (and, with the box parser
+  // also blind, kept dispatch gated forever — 2026-07-04). The spinner line
+  // itself survives truncation: `✽ Zesting… (4m 17s · ↓ 13.9k tokens …`. Match
+  // its shape — spinner glyph, word, ellipsis, then an elapsed-time paren —
+  // only in the live bottom region (scrollback can echo old spinner text).
+  const tail = text.split("\n").slice(-12);
+  return tail.some(l => /^\s*[✽✻✶✳✢·∗]\s+\w[\w '’-]*…\s*\(\d+[ms]?\s?\d*s?\b/u.test(l));
 }
 
 /** Human-readable backoff delay for retry notes: "15s", "2m". Exported for tests. */

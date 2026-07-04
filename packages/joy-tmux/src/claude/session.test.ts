@@ -174,6 +174,56 @@ test("input text: selector option row is not the input box", () => {
   expect(paneInputText(pane)).toBe(null);
 });
 
+// ── Agent-name labeled box border + narrow-pane truncation ──────────────────
+// Captured live 2026-07-04 (window at 58 cols, session agent-named "Joy"):
+// the box's TOP border embeds the name (`──… Joy ──`) and the footer truncates
+// before "esc to interrupt". The pure-rule border regex made every parser
+// return null/false → dispatch silently retried forever → app messages never
+// reached Claude for the session's entire life.
+const LABELED_RULE = "─".repeat(51) + " Joy ──";
+const PLAIN_RULE = "─".repeat(58);
+
+test("ready + empty box: agent-name label in the top border (58-col live capture)", () => {
+  const pane = [LABELED_RULE, "❯ ", PLAIN_RULE, "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to…"].join("\n");
+  expect(paneShowsReadyPrompt(pane)).toBe(true);
+  expect(paneInputText(pane)).toBe("");
+  expect(paneShowsEmptyReadyPrompt(pane)).toBe(true);
+});
+
+test("input text: typed content under a labeled border", () => {
+  const pane = [LABELED_RULE, "❯ hello from the app", PLAIN_RULE].join("\n");
+  expect(paneInputText(pane)).toBe("hello from the app");
+});
+
+test("input text: labeled border is NOT mistaken for content or scrollback", () => {
+  // Scrollback echo (no rule above ❯) still yields null — label change must not
+  // loosen the live-box requirement.
+  const pane = ["● earlier reply", "", "❯ old echoed prompt"].join("\n");
+  expect(paneInputText(pane)).toBe(null);
+});
+
+test("generating: spinner shape survives narrow-pane truncation of 'esc to interrupt'", () => {
+  const pane = [
+    "● Reading 2 files, running 1 shell command…",
+    "",
+    "✽ Zesting… (4m 17s · ↓ 13.9k tokens · thought for 19s)",
+    "",
+    LABELED_RULE, "❯ ", PLAIN_RULE,
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to…",
+  ].join("\n");
+  expect(paneShowsGenerating(pane)).toBe(true);
+});
+
+test("generating: old spinner text in scrollback does NOT read as generating", () => {
+  const pane = [
+    "✻ Booping… (4s · ↓ 142 tokens)", // scrollback echo, far above the box
+    ...Array(14).fill(""),
+    PLAIN_RULE, "❯ ", PLAIN_RULE,
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+  ].join("\n");
+  expect(paneShowsGenerating(pane)).toBe(false);
+});
+
 test("claude running: ready input prompt", () => {
   expect(paneShowsClaudeRunning("────\n❯\n────\n  ⏵⏵ bypass permissions on")).toBe(true);
 });
