@@ -1589,9 +1589,15 @@ export class Session {
     // -e includes ANSI SGR escape sequences (colors, bold, …) so the app can
     // render the TUI in color; without it the capture is plain text. A FRESH read
     // over control mode (colour stays uncached) — falls back to spawn while
-    // disconnected.
-    return { ok: true, text: (await tmux.captureFresh(this.tmuxWindow, { color })).out };
+    // disconnected. scrollbackLines = one extra screenful of history above the
+    // visible region, so the app's pane view scrolls back twice as far as the
+    // screen shows (#viewRows tracks the viewer's height via resize()).
+    return { ok: true, text: (await tmux.captureFresh(this.tmuxWindow, { color, scrollbackLines: this.#viewRows })).out };
   }
+
+  // Viewer height (rows) from the last resize() — sizes the pane view's
+  // scrollback capture. Default matches the resize clamp's typical phone view.
+  #viewRows = 50;
 
   /**
    * Resize the tmux window. tmux's resize-window auto-switches the window to
@@ -1604,6 +1610,7 @@ export class Session {
     const c = Math.max(20, Math.min(500, Math.floor(cols)));
     const r = Math.max(10, Math.min(200, Math.floor(rows)));
     if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false };
+    this.#viewRows = r; // pane view scrollback tracks the viewer's height
     const res = await tmux.command(["resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)]);
     return { ok: res.ok };
   }

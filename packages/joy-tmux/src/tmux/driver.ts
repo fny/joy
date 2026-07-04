@@ -94,11 +94,16 @@ export class TmuxDriver {
 
   // ── Spawn path (reconnect/while-disconnected fallback + bootstrap/teardown) ──
 
-  /** Capture a pane's visible text. color=true keeps ANSI SGR (the app's colour view). */
-  capture(target: string, opts?: { color?: boolean }): TmuxResult {
-    return opts?.color
-      ? run("tmux", "capture-pane", "-p", "-e", "-t", target)
-      : run("tmux", "capture-pane", "-p", "-t", target);
+  /** Capture a pane's visible text. color=true keeps ANSI SGR (the app's colour
+   *  view); scrollbackLines pulls that many history lines above the visible
+   *  region (-S -N) — view-only reads, never the parser/gate paths, which
+   *  assume a visible-region capture. */
+  capture(target: string, opts?: { color?: boolean; scrollbackLines?: number }): TmuxResult {
+    const args = ["capture-pane", "-p"];
+    if (opts?.color) args.push("-e");
+    if (opts?.scrollbackLines && opts.scrollbackLines > 0) args.push("-S", `-${Math.floor(opts.scrollbackLines)}`);
+    args.push("-t", target);
+    return run("tmux", ...args);
   }
 
   /**
@@ -183,17 +188,20 @@ export class TmuxDriver {
    * command over the connection; updates the cache. Falls back to a spawn capture on
    * disconnect/error (or under the test runner, where there's no client).
    */
-  async captureFresh(target: string, opts?: { color?: boolean }): Promise<TmuxResult> {
+  async captureFresh(target: string, opts?: { color?: boolean; scrollbackLines?: number }): Promise<TmuxResult> {
     if (this.#client?.connected) {
       this.#track(target);
       // -e keeps ANSI for the app's colour pane view; that text must NOT pollute the
       // plain-text snapshot cache (the watchers read plain), so colour reads go over
       // control but stay UNcached. Plain reads update the cache as before.
-      const args = opts?.color
-        ? ["capture-pane", "-p", "-e", "-t", target]
-        : ["capture-pane", "-p", "-t", target];
+      const args = ["capture-pane", "-p"];
+      if (opts?.color) args.push("-e");
+      if (opts?.scrollbackLines && opts.scrollbackLines > 0) args.push("-S", `-${Math.floor(opts.scrollbackLines)}`);
+      args.push("-t", target);
       const r = await this.#client.command(tmuxCommand(args));
-      if (r.ok) { if (!opts?.color) this.#snapshots.set(target, { text: r.out, ts: nowMs() }); return r; }
+      // Colour/scrollback reads must NOT pollute the plain visible-region
+      // snapshot cache the watchers and parsers read.
+      if (r.ok) { if (!opts?.color && !opts?.scrollbackLines) this.#snapshots.set(target, { text: r.out, ts: nowMs() }); return r; }
       // disconnect / %error → fall through to spawn
     }
     return this.capture(target, opts);
