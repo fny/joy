@@ -102,13 +102,26 @@ export interface SessionRowData {
     homeDir: string | null;
     completedTodosCount: number;
     totalTodosCount: number;
+    // joy__tasks / joy__retry mirrors so the sidebar can render the same status
+    // TEXT as the in-session view ("3/5 completed", "retrying 2/6") — the row
+    // previously fell back to "online" for these states while the dot showed
+    // the state color (the "status messages are broken" mismatch, 2026-07-04).
+    tasksDone: number | null;
+    tasksTotal: number | null;
+    retryAttempt: number | null;
+    retryTotal: number | null;
     hasUnread: boolean;
     isJoyTmux: boolean;
     joySessionId: string | null;
 }
 
 function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
-    const isOnline = session.presence === "online";
+    // presence is computed when the session row is APPLIED and then goes stale —
+    // a dead daemon stops sending updates, so presence freezes at "online" until
+    // the server reaper (~10 min). Re-check freshness here, same as
+    // useSessionStatus does at render, so the sidebar can't show a live color
+    // for a session the in-session view already calls disconnected.
+    const isOnline = session.presence === "online" && isFresh(session);
     const hasPermissions = !!(session.agentState?.requests && Object.keys(session.agentState.requests).length > 0);
 
     let state: SessionState;
@@ -151,6 +164,10 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         homeDir: session.metadata?.homeDir ?? null,
         completedTodosCount: session.todos?.filter(todo => todo.status === 'completed').length ?? 0,
         totalTodosCount: session.todos?.length ?? 0,
+        tasksDone: session.metadata?.joy__tasks?.done ?? null,
+        tasksTotal: session.metadata?.joy__tasks?.total ?? null,
+        retryAttempt: session.metadata?.joy__retry?.attempt ?? null,
+        retryTotal: session.metadata?.joy__retry?.total ?? null,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
         isJoyTmux: session.metadata?.joy__source === 'joy-tmux',
         joySessionId: session.metadata?.joy__sessionId ?? null,
