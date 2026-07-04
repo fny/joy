@@ -1678,6 +1678,34 @@ export class Session {
    * response. Wraps it in a transient turn when none is open so the app
    * renders it left-aligned like Claude's replies, not as an outbound message.
    */
+  /**
+   * Replay-dedup + freshness gate for synthetic agent notes derived from
+   * USER-type transcript entries (slash-command stdout — /model, /compact
+   * notices — and !cmd output cards). The assistant path skips
+   * already-forwarded entries via forwardedUuids, but these notes recorded NO
+   * receipt at all, so every daemon restart's transcript replay re-pushed
+   * every historical /model output, compaction notice, and bash card into the
+   * chat ("a bunch of messages about switching to fable opus", 2026-07-04).
+   * Two gates:
+   *  - receipt: emit once per entry uuid, persisted across restarts;
+   *  - freshness: an entry older than the tailer bind (60s grace) is history
+   *    being replayed, not new output — record its receipt but never emit.
+   *    This also stops a resume/--continue backfill from re-announcing old
+   *    /model outputs onto a fresh card, and covers uuid-less entries.
+   */
+  #shouldEmitNote(entry: Record<string, unknown>, entryTimeMs: number): boolean {
+    const uuid = typeof entry.uuid === "string" ? entry.uuid : "";
+    const fresh = entryTimeMs >= this.#tailBoundAt - 60_000;
+    if (uuid && this.#relay && this.relaySessionId) {
+      const delivery = this.#ensureDelivery();
+      if (delivery) {
+        if (delivery.forwardedUuids.has(uuid)) return false;
+        recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "note", at: Date.now() });
+      }
+    }
+    return fresh;
+  }
+
   #emitAgentNote(text: string, timeMs: number, sid?: string): void {
     if (this.#relay) {
       const opened = !this.#turn;
@@ -1940,6 +1968,11 @@ export class Session {
    * seam for the future /branch//fork/--resume handling, where Claude rotates
    * its session id and starts writing a new transcript file.
    */
+  /** When the current tailer bound — the freshness horizon for synthetic agent
+   *  notes (#shouldEmitNote): entries older than this are history being
+   *  replayed, not new output. */
+  #tailBoundAt = 0;
+
   startTailer(transcriptPath: string, force = false): void {
     if (this.#tailer) {
       if (!force) return;
@@ -1957,6 +1990,7 @@ export class Session {
       this.#transcriptStartOffset = cappedTailOffset(transcriptPath, this.#backfillCapBytes);
     }
     this.#backfillCapBytes = 0;
+    this.#tailBoundAt = Date.now();
     this.#tailer = tailJsonl(
       transcriptPath,
       (entry) => {
@@ -2414,7 +2448,7 @@ export class Session {
       if (content.startsWith("<local-command-stdout>")) {
         const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(content);
         const out = m ? stripAnsi(m[1]).trim() : "";
-        if (out) this.#emitAgentNote(out, entryTimeMs, sid);
+        if (out && this.#shouldEmitNote(entry, entryTimeMs)) this.#emitAgentNote(out, entryTimeMs, sid);
         return;
       }
       // `!cmd`: capture the command from <bash-input> (to head the output card)
@@ -2434,8 +2468,10 @@ export class Session {
         const stderr = se ? stripAnsi(se[1]).replace(/\s+$/, "") : "";
         const cmd = this.#pendingBashCmd ?? "";
         this.#pendingBashCmd = undefined;
-        const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
-        this.#emitAgentNote(`<bash-run><cmd>${b64(cmd)}</cmd><stdout>${b64(stdout)}</stdout><stderr>${b64(stderr)}</stderr></bash-run>`, entryTimeMs, sid);
+        if (this.#shouldEmitNote(entry, entryTimeMs)) {
+          const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+          this.#emitAgentNote(`<bash-run><cmd>${b64(cmd)}</cmd><stdout>${b64(stdout)}</stdout><stderr>${b64(stderr)}</stderr></bash-run>`, entryTimeMs, sid);
+        }
         return;
       }
       if (content.startsWith("<command-name>") ||
