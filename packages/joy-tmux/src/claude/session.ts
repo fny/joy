@@ -531,6 +531,12 @@ export class Session {
   // genuinely-lost dispatch still surfaces. Reset on confirm / requeue.
   #dispatchExtends = 0;
   #drainRetry: ReturnType<typeof setTimeout> | null = null;
+  // A human-typed draft captured from the input box right before a dispatch-
+  // driven clear wiped it (drain gate / steer). Restored — typed back, never
+  // submitted — once the queue is idle again, so text someone typed directly
+  // into the pane survives an app send instead of being destroyed by it.
+  // Flattened to one line (paneInputText collapses newlines). In-memory only.
+  #preservedDraft: string | null = null;
   // The pending delayed-Enter (submit) for a just-typed message. Cancellable so an
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
   // into the pane (re-submitting an aborted message, or submitting into a turn).
@@ -1002,6 +1008,7 @@ export class Session {
     // input_dirty banner, the same recovery path the dispatch gate uses.
     const pane = await tmux.captureFresh(this.tmuxWindow);
     if (pane.ok && paneInputText(pane.out)) {
+      this.#preserveDraft(paneInputText(pane.out)!);
       if (!(await this.#clearBoxWithCtrlU())) {
         this.#queue.unshift({
           id: crypto.randomUUID().slice(0, 8),
@@ -1124,7 +1131,44 @@ export class Session {
     if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return "skipped";
     const box = paneInputText(pane.out);
     if (box === "" || box === null) return "skipped"; // empty / no box → nothing to clear
+    this.#preserveDraft(box);
     return (await this.#clearBoxWithCtrlU()) ? "cleared" : "dirty";
+  }
+
+  /**
+   * Remember box text about to be cleared so it can be restored after the queue
+   * drains — UNLESS it's a pending send's own leftover (a timed-out dispatch is
+   * re-queued with its text still in the box; preserving that would deliver the
+   * message TWICE: once re-dispatched from the queue, once as a restored
+   * "draft"). Anything else in the box is treated as human-typed. That includes
+   * an aborted-but-unsubmitted message (abort leaves its text in the box by
+   * design — docs/pane-input-clearing.md): it comes back as an editable draft
+   * rather than silently vanishing, same visibility hazard as today.
+   */
+  #preserveDraft(box: string): void {
+    const flat = flattenForMatch(box);
+    const isPendingSend = this.#queue.some(q => flattenForMatch(q.text) === flat)
+      || (this.#dispatchInFlight !== null && flattenForMatch(this.#dispatchInFlight.text) === flat);
+    if (!isPendingSend) this.#preservedDraft = box;
+  }
+
+  /**
+   * Type a preserved human draft back into the box — literal keys only, NEVER
+   * Enter — once the dispatch queue is fully idle. Only restores into a
+   * verified-EMPTY box: if the user has started typing again (or no live box is
+   * on screen), hold the draft and try again at the next idle trigger rather
+   * than merging two texts. Typing while Claude is generating is safe — keys
+   * buffer into the box (docs/pane-input-clearing.md).
+   */
+  async #restoreDraftIfAny(): Promise<void> {
+    const draft = this.#preservedDraft;
+    if (!draft || this.status === "ended") return;
+    if (this.#queue.length > 0 || this.#dispatchInFlight) return; // box is needed again — keep holding
+    const pane = await tmux.captureFresh(this.tmuxWindow);
+    if (!pane.ok) return;
+    if (paneInputText(pane.out) !== "") return; // user typed anew / no box — never merge
+    this.#preservedDraft = null;
+    if (!(await this.#typeLines(draft))) this.#preservedDraft = draft; // typing failed — keep for retry
   }
 
   /**
@@ -1188,6 +1232,12 @@ export class Session {
    */
   #maybeDrainQueue(): void {
     if (this.#draining) { this.#drainRequested = true; return; }
+    // Queue fully idle → this trigger (turn-end/resume/…) is also the retry
+    // point for restoring a preserved human draft (rare: gated on the field).
+    if (this.#preservedDraft && this.#queue.length === 0 && !this.#dispatchInFlight) {
+      void this.#restoreDraftIfAny();
+      return;
+    }
     void this.#kickDrain();
   }
 
@@ -1293,6 +1343,10 @@ export class Session {
     this.#dispatchExtends = 0;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     this.#broadcastQueue();
+    // Delivery done — if the queue is idle, give back any human draft the
+    // dispatch's box-clear captured (types into the now-empty box; the new
+    // turn's generation just buffers the keys).
+    void this.#restoreDraftIfAny();
   }
 
   #onDispatchTimeout(): void {

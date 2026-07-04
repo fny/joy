@@ -372,6 +372,22 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    // NOTE: registered BEFORE queueEdit on purpose — the HTTP router matches
+    // routes in registration order, and queueEdit's POST /sessions/:id/queue/:qid
+    // would otherwise capture the static /queue/resume path as qid="resume"
+    // (resume-over-HTTP returned queueEdit's {error:"empty"}; RPC was unaffected).
+    name: "queueResume",
+    scope: "machine",
+    rpcName: "joy-queue-resume",
+    http: { method: "POST", path: "/sessions/:id/queue/resume" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      session.resumeQueue();
+      return { ok: true, ...session.queueState() };
+    },
+  },
+  {
     name: "queueEdit",
     scope: "machine",
     rpcName: "joy-queue-edit",
@@ -407,18 +423,6 @@ export const machineOps: MachineOp[] = [
       if (!session) return { error: "session_not_found" };
       const ok = session.reorderQueued(String(params.qid ?? params.queue_id ?? ""), Number(params.toIndex ?? params.to ?? 0));
       return { ok, ...session.queueState() };
-    },
-  },
-  {
-    name: "queueResume",
-    scope: "machine",
-    rpcName: "joy-queue-resume",
-    http: { method: "POST", path: "/sessions/:id/queue/resume" },
-    handler: (registry, params) => {
-      const session = registry.get(String(params.id ?? params.session_id ?? ""));
-      if (!session) return { error: "session_not_found" };
-      session.resumeQueue();
-      return { ok: true, ...session.queueState() };
     },
   },
   {
