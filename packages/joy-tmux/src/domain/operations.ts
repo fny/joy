@@ -26,6 +26,7 @@ import {
 } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { cwdToTranscriptDir } from "../claude/transcript";
+import { joySessionDir } from "../paths";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, join } from "path";
@@ -716,7 +717,9 @@ export const sessionOps: SessionOp[] = [
     scope: "session",
     rpcName: "readFile",
     http: { method: "POST", path: "/sessions/:id/readFile" },
-    handler: (session, params) => handleReadFile(session.cwd, params as unknown as Parameters<typeof handleReadFile>[1]),
+    // Second allowed root: the session's own ~/.joy/sessions/<id>/ so the app
+    // can fetch joy-img media the agent saved there — scoped per session.
+    handler: (session, params) => handleReadFile(session.cwd, params as unknown as Parameters<typeof handleReadFile>[1], [joySessionDir(session.id)]),
   },
   {
     name: "writeFile",
