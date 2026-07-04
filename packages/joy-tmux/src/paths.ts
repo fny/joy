@@ -15,3 +15,11 @@ export function happyHomeDir(): string {
 export function joyStateDir(): string {
   return join(happyHomeDir(), "joy-tmux-state");
 }
+
+/** Per-session home for everything session-related the daemon/agent persists
+ *  outside the project cwd — display images (joy-img media/), future drafts,
+ *  exports. The readFile RPC allows this directory as a second root scoped to
+ *  exactly the session being asked (each session reaches only its own folder). */
+export function joySessionDir(sessionId: string): string {
+  return join(homedir(), ".joy", "sessions", sessionId);
+}

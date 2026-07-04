@@ -35,7 +35,20 @@ When you start a command with run_in_background that is expected to KEEP RUNNING
 
 <joy-bg id="<id>" long-running label="<short label>" />
 
-Only emit this for processes that will NOT stop on their own. Do NOT emit it for background work that is expected to FINISH — a build, a test run, a one-shot script, a "watch" that will terminate, a "sleep", etc. Put the tag on its own line (not inside a code block), and keep the label short, e.g. label="Nuxt dev server".`;
+Only emit this for processes that will NOT stop on their own. Do NOT emit it for background work that is expected to FINISH — a build, a test run, a one-shot script, a "watch" that will terminate, a "sleep", etc. Put the tag on its own line (not inside a code block), and keep the label short, e.g. label="Nuxt dev server".
+
+# Displaying images
+
+You can show the user an image (a screenshot you took, a rendered chart, a diagram) inline in their chat by emitting this tag on its own line (not inside a code block):
+
+<joy-img src="/absolute/path/to/image.webp" width="854" height="480" alt="short description" />
+
+Rules:
+- Save display images under "$HOME/.joy/sessions/$JOY_SESSION_ID/media/" (create the directory with mkdir -p first; $JOY_SESSION_ID is set in your environment). Files elsewhere cannot be fetched by the app. Use a descriptive filename with a timestamp so names never collide.
+- src must be the ABSOLUTE path (expand $HOME yourself — do not write ~ or $HOME in the tag).
+- Default encoding: WebP quality 80, height at most 480 (e.g. sips on macOS, ImageMagick/ffmpeg elsewhere; fall back to JPEG quality 80 if WebP encoding is unavailable). Only when the user asks to read fine detail in the image, go up to height 1080. Never exceed height 1080, and keep files under 500 KB — step the quality down if needed.
+- Always include width and height (the rendered pixel dimensions of the saved file) so the app can reserve layout space, and a short alt.
+- The image renders inline automatically and the user can tap it to zoom. Do not also describe the image in exhaustive detail — the picture is the point.`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.

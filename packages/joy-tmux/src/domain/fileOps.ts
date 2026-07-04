@@ -15,7 +15,7 @@ import { promisify } from "util";
 import { existsSync } from "fs";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import { join, resolve, sep } from "path";
-import { platform } from "os";
+import { homedir, platform } from "os";
 
 const execAsync = promisify(exec);
 
@@ -51,13 +51,21 @@ export interface DifftasticResponse { success: boolean; exitCode?: number; stdou
 
 // Mirrors happy-cli/src/modules/common/pathSecurity.validatePath. Restricts
 // access to paths within the session's working directory; rejects traversal.
-export function validatePath(targetPath: string, workingDirectory: string): { valid: boolean; resolvedPath?: string; error?: string } {
-  const resolvedTarget = resolve(workingDirectory, targetPath);
-  const resolvedWorkingDir = resolve(workingDirectory);
-  if (
-    !resolvedTarget.startsWith(resolvedWorkingDir + sep) &&
-    resolvedTarget !== resolvedWorkingDir
-  ) {
+export function validatePath(targetPath: string, workingDirectory: string, extraRoots: string[] = []): { valid: boolean; resolvedPath?: string; error?: string } {
+  // Expand a leading ~/ — resolve() doesn't, and the joy-img contract points at
+  // files under the caller's home (the per-session media dir).
+  const expanded = targetPath === "~" || targetPath.startsWith("~/")
+    ? join(homedir(), targetPath.slice(1))
+    : targetPath;
+  const resolvedTarget = resolve(workingDirectory, expanded);
+  const within = (root: string) => {
+    const r = resolve(root);
+    return resolvedTarget === r || resolvedTarget.startsWith(r + sep);
+  };
+  // Jailed to the session cwd, plus any explicitly allowed extra roots (the
+  // readFile op passes the session's own ~/.joy/sessions/<id> dir so the app
+  // can fetch joy-img media — each session reaches ONLY its own folder).
+  if (!within(workingDirectory) && !extraRoots.some(within)) {
     return {
       valid: false,
       resolvedPath: resolvedTarget,
@@ -115,8 +123,8 @@ export async function handleBash(workingDirectory: string, data: BashRequest): P
   }
 }
 
-export async function handleReadFile(workingDirectory: string, data: ReadFileRequest): Promise<ReadFileResponse> {
-  const validation = validatePath(data.path, workingDirectory);
+export async function handleReadFile(workingDirectory: string, data: ReadFileRequest, extraRoots: string[] = []): Promise<ReadFileResponse> {
+  const validation = validatePath(data.path, workingDirectory, extraRoots);
   if (!validation.valid) return { success: false, error: validation.error };
   try {
     const buffer = await readFile(validation.resolvedPath!);
