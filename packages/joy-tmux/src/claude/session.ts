@@ -223,6 +223,20 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
     const m = /<task-id>([^<]+)<\/task-id>/.exec(att.prompt);
     return m ? { kind: "complete", id: m[1] } : null;
   }
+  // complete (THIRD delivery form): when Claude is busy at notification time,
+  // the payload gets ENQUEUED into Claude's own message queue and the
+  // transcript records a `queue-operation` entry with the notification in
+  // `content` — no user message, no attachment. Sometimes that queue-operation
+  // is the ONLY record of the completion (measured 15/494 on a real 22MB
+  // session), and missing it left those tasks outstanding forever — which also
+  // blocked the outstanding==0 batch reset, fusing every later batch into one
+  // ever-growing stuck count (the "61/76 completed" ghost). Duplicate
+  // completion events are harmless: classifyBgTasks only counts a completion
+  // that removes a live outstanding id.
+  if (entry?.type === "queue-operation" && typeof entry.content === "string" && entry.content.includes("<task-notification>")) {
+    const m = /<task-id>([^<]+)<\/task-id>/.exec(entry.content);
+    return m ? { kind: "complete", id: m[1] } : null;
+  }
   const msg = entry?.message as Record<string, unknown> | undefined;
   if (!msg || String(msg.role || "") !== "user" || entry?.isMeta) return null;
   const content = msg.content;

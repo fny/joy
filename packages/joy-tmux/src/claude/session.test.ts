@@ -574,6 +574,56 @@ test("bgTaskEvent: completion via attachment-form notification (newer Claude)", 
   expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "bg-7" });
 });
 
+test("bgTaskEvent: completion via queue-operation entry (busy-Claude enqueue)", () => {
+  // When Claude is busy at notification time, the payload is enqueued into
+  // Claude's own message queue; the transcript records a queue-operation entry
+  // with the notification in `content` — sometimes the ONLY record of the
+  // completion (15/494 measured on a real session). Missing it wedged the N/M
+  // counter forever (the "61/76 completed" ghost).
+  const e = {
+    type: "queue-operation",
+    operation: "enqueue",
+    timestamp: "2026-07-01T10:00:00.000Z",
+    sessionId: "df4f5b50",
+    content: "<task-notification>\n<task-id>a876f9f4c8d976e55</task-id>\n<output-summary>done</output-summary>\n</task-notification>",
+  };
+  expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "a876f9f4c8d976e55" });
+});
+
+test("bgTaskEvent: queue-operation without a task-notification is not an event", () => {
+  const e = { type: "queue-operation", operation: "enqueue", content: "just a queued user message" };
+  expect(bgTaskEvent(e)).toBeNull();
+});
+
+test("classifyBgTasks: queue-operation completion unwedges the batch reset", () => {
+  // The wedge: one completion arriving ONLY in queue-operation form used to be
+  // invisible → its task stayed outstanding → outstanding never hit 0 → the
+  // fresh-batch reset never fired and every later batch fused into one
+  // ever-growing count. With the completion seen, the next batch resets clean.
+  const events: Array<{ kind: "launch" | "complete"; id: string }> = [
+    { kind: "launch", id: "t1" },
+    { kind: "launch", id: "t2" },
+    { kind: "complete", id: "t1" },
+    { kind: "complete", id: "t2" }, // the queue-operation-only completion
+    { kind: "launch", id: "t3" },   // next batch — must start fresh at 1, not 3
+  ];
+  const r = classifyBgTasks(events, new Set());
+  expect(r.total).toBe(1);
+  expect(r.done).toBe(0);
+  expect(r.outstanding).toEqual(new Set(["t3"]));
+});
+
+test("classifyBgTasks: duplicate completion (queue-op echo + user message) counts once", () => {
+  const events: Array<{ kind: "launch" | "complete"; id: string }> = [
+    { kind: "launch", id: "t1" },
+    { kind: "complete", id: "t1" },
+    { kind: "complete", id: "t1" }, // same notification seen in a second form
+  ];
+  const r = classifyBgTasks(events, new Set());
+  expect(r.done).toBe(1);
+  expect(r.outstanding.size).toBe(0);
+});
+
 test("joyBgLongRunningIds: extracts ids from assistant <joy-bg long-running> tags", () => {
   const entry = { message: { role: "assistant", content: [
     { type: "text", text: "Started it.\n<joy-bg id=\"bnfgnx0r\" long-running label=\"Nuxt dev\" />" },
