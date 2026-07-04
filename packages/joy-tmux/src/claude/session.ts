@@ -2211,22 +2211,46 @@ export class Session {
   }
 
   /** Reconcile "thinking" from the live pane every 3s — the pane is the ground
-   *  truth: the "esc to interrupt" line shows iff Claude is actively generating.
-   *  This corrects the event-driven setters for the cases they miss: typing
-   *  directly in the pane, stops at an interactive prompt (no end_turn), and
-   *  interrupts. Runs only while a relay is attached and the session is live. */
+   *  truth: the "esc to interrupt" line (or the spinner) shows iff Claude is
+   *  actively generating. This corrects the event-driven setters for the cases
+   *  they miss: typing directly in the pane, stops at an interactive prompt
+   *  (no end_turn), and interrupts. Runs only while a relay is attached and
+   *  the session is live.
+   *
+   *  GENERATING, not paneShowsWorking: Working also counts a live-footer
+   *  background shell ("· 1 shell ·"), so any session with a persistent dev
+   *  server read as thinking FOREVER while idle at the prompt — busy:true,
+   *  blue sidebar on an idle session — the "sidebar color doesn't match the
+   *  session" bug (2026-07-04). A lingering shell is not a turn. */
   #pollThinking(): void {
     if (this.status === "ended") return;
     if (this.#relay) {
       const pane = tmux.captureCached(this.tmuxWindow);
       if (pane.ok) {
-        const working = paneShowsWorking(pane.out);
-        if (working !== this.#thinking) this.#setThinking(working); // only on change
+        const generating = paneShowsGenerating(pane.out);
+        // Hysteresis: SET on one generating read (thinking should appear fast),
+        // CLEAR only after two consecutive idle reads. A single stale/mid-repaint
+        // capture at a turn boundary used to flip thinking off and back on —
+        // the app status flapping between the busy state and "online"
+        // (2026-07-04). Real turn ends still clear instantly via the transcript
+        // event setters; this is only the poll's own clear path.
+        if (generating) {
+          this.#idlePolls = 0;
+          if (!this.#thinking) this.#setThinking(true);
+        } else if (this.#thinking) {
+          this.#idlePolls += 1;
+          if (this.#idlePolls >= 2) { this.#idlePolls = 0; this.#setThinking(false); }
+        } else {
+          this.#idlePolls = 0;
+        }
         this.#reconcileLogin(pane.out);
       }
     }
     setTimeout(() => this.#pollThinking(), 3000);
   }
+
+  // Consecutive not-generating poll reads while thinking (see #pollThinking).
+  #idlePolls = 0;
 
   /** Surface an interactive auth/login URL the CLI is showing (e.g. Claude
    *  Code's /login OAuth box) as joy__login, so the app can show a login bar.

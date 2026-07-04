@@ -5,7 +5,7 @@ import { Text } from '@/components/StyledText';
 import { Machine } from '@/sync/storageTypes';
 import { SessionRowData } from '@/sync/storage';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { type SessionState, formatPathRelativeToHome, vibingMessages, formatLastSeen } from '@/utils/sessionUtils';
+import { type SessionState, formatPathRelativeToHome, vibingMessages, formatLastSeen, STATUS_PALETTE } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
@@ -24,16 +24,6 @@ import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 import { isTouchWeb } from '@/utils/isTouchWeb';
 import { useRouter } from 'expo-router';
 
-const STATUS_CONFIG: Record<SessionState, { color: string; dotColor: string; isPulsing: boolean; isConnected: boolean }> = {
-    disconnected: { color: '#999', dotColor: '#999', isPulsing: false, isConnected: false },
-    detached: { color: '#FF3B30', dotColor: '#FF3B30', isPulsing: false, isConnected: false },
-    retrying: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
-    compacting: { color: '#AF52DE', dotColor: '#AF52DE', isPulsing: true, isConnected: true },
-    thinking: { color: '#007AFF', dotColor: '#007AFF', isPulsing: true, isConnected: true },
-    tasks: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
-    waiting: { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
-    permission_required: { color: '#FF9500', dotColor: '#FF9500', isPulsing: true, isConnected: true },
-};
 
 interface ActiveSessionsGroupProps {
     sessions: SessionRowData[];
@@ -316,7 +306,7 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
 const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: SessionRowData; selected?: boolean; showBorder?: boolean }) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
-    const baseStatus = STATUS_CONFIG[session.state];
+    const baseStatus = STATUS_PALETTE[session.state];
     // Mod 11: use the same green (#34C759) as the rest of the app for unread results,
     // not the iOS blue that overlaps with the `thinking` state.
     const status = session.hasUnread
@@ -383,7 +373,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         } else {
             // Every other state (thinking=blue, tasks=orange, compacting=purple,
             // retrying/permission=orange, detached=red, …) shows its configured
-            // STATUS_CONFIG color. Previously only thinking/permission got a dot,
+            // STATUS_PALETTE color. Previously only thinking/permission got a dot,
             // so background-task and compaction sessions showed NO indicator.
             indicator = <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />;
         }

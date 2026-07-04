@@ -366,6 +366,9 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [session.state]);
 
+    // Full state→text map, matching the in-session view (useSessionStatus):
+    // tasks/compacting/retrying previously fell through to "online" here while
+    // the dot showed the state color — sidebar text contradicted the session.
     const statusText = session.hasUnread
         ? t('status.unread')
         : session.state === 'thinking'
@@ -376,7 +379,13 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     ? t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) })
                     : session.state === 'permission_required'
                         ? t('status.permissionRequired')
-                        : t('status.online');
+                        : session.state === 'tasks' && session.tasksTotal != null
+                            ? `${session.tasksDone ?? 0}/${session.tasksTotal} completed`
+                            : session.state === 'compacting'
+                                ? t('status.compacting')
+                                : session.state === 'retrying' && session.retryAttempt != null
+                                    ? t('status.retrying', { attempt: session.retryAttempt, total: session.retryTotal ?? 0 })
+                                    : t('status.online');
 
     const handlePress = React.useCallback(() => {
         navigateToSession(session.id);
