@@ -6,6 +6,8 @@ import { t } from '@/text';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
 import { storage } from "@/sync/storage";
+import { hasJoyImg, splitJoyImgSegments } from "@/utils/joyImg";
+import { JoyImage } from "./JoyImage";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
@@ -269,9 +271,24 @@ function AgentTextBlock(props: {
     return <BashRunCard cmd={bashRun.cmd} stdout={bashRun.stdout} stderr={bashRun.stderr} />;
   }
 
+  const text = stripAnsi(props.message.text);
+
+  // <joy-img/> tags → inline images interleaved with the surrounding markdown
+  // (bytes fetched on demand over the readFile RPC; see JoyImage).
+  if (hasJoyImg(text)) {
+    const segments = splitJoyImgSegments(text);
+    return (
+      <View style={styles.agentMessageContainer}>
+        {segments.map((seg, i) => seg.kind === 'md'
+          ? <MarkdownView key={i} markdown={seg.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+          : <JoyImage key={i} sessionId={props.sessionId} src={seg.src} width={seg.width} height={seg.height} alt={seg.alt} />)}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.agentMessageContainer}>
-      <MarkdownView markdown={stripAnsi(props.message.text)} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+      <MarkdownView markdown={text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
     </View>
   );
 }
