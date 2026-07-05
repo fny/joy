@@ -1288,10 +1288,14 @@ export class RelaySession {
    *  back to the session's host/folder so a push always identifies its source;
    *  when the agent titles it, the location rides in the body suffix instead. */
   notifyCustom(title: string | null, message: string): void {
-    const loc = this.#notifyLocation();
-    const finalTitle = title || loc;
-    const body = title ? `${message} · ${loc}` : message;
-    void this.client.sendSessionPushEvent(this.relaySessionId, 'done', finalTitle, body);
+    // Project-prefixed title ("joy: Deploy finished") so every push reads as
+    // <where>: <what> at a glance; untitled tags fall back to host/folder.
+    const path = (this.metadata?.path as string | undefined)?.trim();
+    const folder = path ? path.split(/[\\/]/).filter(Boolean).pop() : undefined;
+    const finalTitle = title
+      ? (folder ? `${folder}: ${title}` : title)
+      : this.#notifyLocation();
+    void this.client.sendSessionPushEvent(this.relaySessionId, 'done', finalTitle, message);
   }
 
   notify(kind: 'done' | 'permission' | 'question'): void {
