@@ -384,6 +384,7 @@ export const en: TranslationStructure = {
         pausedDispatchMismatch: 'A send may not have gone through cleanly — tap to resume',
         pausedDefault: 'A queued message didn’t send — tap to resume',
         queuedMessage: 'Queued message',
+        pendingCount: ({ count }: { count: number }) => count === 1 ? '1 message queued…' : `${count} messages queued…`,
         editTitle: 'Edit queued message',
         hintWeb: 'right-click a message to edit or delete',
         hintTouch: 'hold a message to edit or delete',

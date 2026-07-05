@@ -371,6 +371,7 @@ export const ja: TranslationStructure = {
         pausedDispatchMismatch: '送信が正しく完了していない可能性があります — タップして再開',
         pausedDefault: 'キュー内のメッセージが送信されませんでした — タップして再開',
         queuedMessage: 'キュー内のメッセージ',
+        pendingCount: ({ count }: { count: number }) => `キュー内: ${count}件…`,
         editTitle: 'キュー内のメッセージを編集',
         hintWeb: 'メッセージを右クリックで編集・削除',
         hintTouch: 'メッセージを長押しで編集・削除',

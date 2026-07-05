@@ -371,6 +371,7 @@ export const zhHans: TranslationStructure = {
         pausedDispatchMismatch: '有一次发送可能未正常完成 — 点按以恢复',
         pausedDefault: '队列中的消息未发送 — 点按以恢复',
         queuedMessage: '队列中的消息',
+        pendingCount: ({ count }: { count: number }) => `队列中：${count} 条…`,
         editTitle: '编辑队列中的消息',
         hintWeb: '右键点击消息以编辑或删除',
         hintTouch: '长按消息以编辑或删除',
