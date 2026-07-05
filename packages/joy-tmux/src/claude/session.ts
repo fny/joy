@@ -2811,7 +2811,15 @@ export class Session {
           // about to send) WITHOUT yet setting #dispatchInFlight — checking only
           // #dispatchInFlight would fire a premature "done" for an intermediate
           // turn while more queued messages are still about to run.
-          if (!this.#dispatchInFlight && this.#queue.length === 0 && !this.#drainRetry) {
+          // ALSO gate on no outstanding finishing background tasks: a turn that
+          // ends while async agents/builds still run is an INTERMEDIATE end —
+          // each task completion then spawns another turn whose end would push
+          // again (an agent-fleet run buzzed the phone per wave). #longRunning
+          // deliberately doesn't block: servers never "finish". The final
+          // turn-end — after the last completion empties #bgTasks (reconcile is
+          // coalesced at 150ms, well inside LLM reply latency) — pushes once.
+          if (!this.#dispatchInFlight && this.#queue.length === 0 && !this.#drainRetry
+            && this.#bgTasks.size === 0) {
             this.#relay?.notify("done");
           }
         }
