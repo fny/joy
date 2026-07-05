@@ -214,6 +214,8 @@ export const ja: TranslationStructure = {
         chatHistoryLimitDescription: '会話ごとに最新のメッセージのみを表示',
         chatHistoryLimitPlaceholder: '例: 50',
         chatHistoryLimitOff: 'オフ',
+        jsUpdate: 'JSアップデート',
+        jsUpdateDescription: '実行中のJavaScriptバンドル（OTA更新で変わります）',
         chatHistoryLimitValue: ({ count }: { count: number }) => `直近${count}件のメッセージ`,
         mod06Title: '06 · ダブルタップ',
         mod06Description: 'アシスタントからの選択式回答を確定するには、2秒以内に2回目のタップが必要です。誤選択を防ぐのに役立ちます。',

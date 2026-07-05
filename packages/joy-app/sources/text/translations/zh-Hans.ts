@@ -214,6 +214,8 @@ export const zhHans: TranslationStructure = {
         chatHistoryLimitDescription: '每个会话只显示最近的消息',
         chatHistoryLimitPlaceholder: '例如 50',
         chatHistoryLimitOff: '关闭',
+        jsUpdate: 'JS 更新',
+        jsUpdateDescription: '当前运行的 JavaScript 包（OTA 更新时会变化）',
         chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 条消息`,
         mod06Title: '06 · 双击确认',
         mod06Description: '需要在 2 秒内再次点击以提交助手的多选答案。有助于防止误选。',
