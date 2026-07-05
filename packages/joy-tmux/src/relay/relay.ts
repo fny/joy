@@ -4,6 +4,7 @@
  * External deps: socket.io-client, tweetnacl.
  */
 import { setTimeout as sleep } from "timers/promises";
+import { execSync } from 'node:child_process';
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -346,11 +347,45 @@ export class RelayClient {
    *  server-side, so it doubles as presence. Best-effort: a 'Machine not found'
    *  (no session has registered the machine yet) or version drift just no-ops and
    *  the next beat retries with the re-synced version. */
+  /**
+   * Reclaimable-aware available memory. os.freemem() reports only TRULY free
+   * pages — on macOS that excludes inactive/purgeable/file-cache the OS holds
+   * but frees on demand, so `1 - free/total` read ~99% "used" while Activity
+   * Monitor showed ~46% (2026-07-05); Linux freemem() ignores cache/buffers
+   * the same way. Use MemAvailable (Linux) / vm_stat reclaimable pages (macOS),
+   * falling back to freemem() on anything unexpected. Best-effort + cached 5s
+   * so the heartbeat never blocks on vm_stat.
+   */
+  #availMemCache: { bytes: number; at: number } | null = null;
+  private availableMemBytes(): number {
+    const now = Date.now();
+    if (this.#availMemCache && now - this.#availMemCache.at < 5000) return this.#availMemCache.bytes;
+    let bytes = freemem();
+    try {
+      if (platform() === 'linux') {
+        const m = /MemAvailable:\s+(\d+)\s+kB/.exec(readFileSync('/proc/meminfo', 'utf8'));
+        if (m) bytes = Number(m[1]) * 1024;
+      } else if (platform() === 'darwin') {
+        const out = execSync('vm_stat', { encoding: 'utf8', timeout: 2000 });
+        const pageSize = Number(/page size of (\d+) bytes/.exec(out)?.[1] ?? 4096);
+        const pages = (label: string) => Number(new RegExp(label + ':\\s+(\\d+)\\.').exec(out)?.[1] ?? 0);
+        // Match Activity Monitor's "Memory Used" = active + wired + compressed;
+        // available = total - that. freemem()'s "free pages only" ignored the
+        // large inactive/purgeable/cached pools macOS reclaims on demand, so it
+        // read ~99% used. Verified against boite's live vm_stat (2026-07-05).
+        const used = (pages('Pages active') + pages('Pages wired down') + pages('Pages occupied by compressor')) * pageSize;
+        if (used > 0) bytes = Math.max(0, totalmem() - used);
+      }
+    } catch { /* keep freemem() fallback */ }
+    this.#availMemCache = { bytes, at: now };
+    return bytes;
+  }
+
   private pushDaemonState(): void {
     if (!this.socket) return;
     const cpu = this.sampleCpuPercent();
     const memTotal = totalmem();
-    const memFree = freemem();
+    const memFree = this.availableMemBytes(); // reclaimable-aware (see helper)
     const ram = Math.max(0, Math.min(100, Math.round((1 - memFree / memTotal) * 100)));
     const list = cpus();
     // Disk for the home filesystem (best-effort — statfs can fail on odd mounts).
