@@ -127,7 +127,7 @@ export function useSessionStatus(session: Session): SessionStatus {
     if (tasks && tasks.total > 0) {
         return withBg({
             ...paletteBase('tasks'),
-            statusText: `${tasks.done}/${tasks.total} completed`,
+            statusText: t('status.tasksCompleted', { done: tasks.done, total: tasks.total }),
             shouldShowStatus: true,
         });
     }

@@ -28,13 +28,23 @@ const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 0 } as const;
 export const ChatList = React.memo((props: { session: Session }) => {
     const { messages, hasMoreOlder, isLoadingOlder } = useSessionMessages(props.session.id);
     const joy__chatHistoryLimit = useSetting('joy__chatHistoryLimit');
-    const visibleMessages = joy__chatHistoryLimit != null ? messages.slice(0, joy__chatHistoryLimit) : messages;
+    // Memoized: an un-memoized slice() minted a fresh array identity on EVERY
+    // render (session object churns constantly mid-stream), defeating
+    // ChatListInternal's memo + regrouping the whole window on the hottest path.
+    const visibleMessages = React.useMemo(
+        () => joy__chatHistoryLimit != null ? messages.slice(0, joy__chatHistoryLimit) : messages,
+        [messages, joy__chatHistoryLimit],
+    );
+    // With the display cap active, older pages could never render — but
+    // onStartReached still fired at the top of the capped window, downloading
+    // the entire history page-by-page for nothing. Treat history as exhausted.
+    const capActive = joy__chatHistoryLimit != null && messages.length >= joy__chatHistoryLimit;
     return (
         <ChatListInternal
             metadata={props.session.metadata}
             sessionId={props.session.id}
             messages={visibleMessages}
-            hasMoreOlder={hasMoreOlder}
+            hasMoreOlder={capActive ? false : hasMoreOlder}
             isLoadingOlder={isLoadingOlder}
         />
     )

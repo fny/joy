@@ -234,13 +234,6 @@ export function SessionsList() {
         }
     }, [data && data.length > 0]);
 
-    // Early return if no data yet
-    if (!data) {
-        return (
-            <View style={styles.container} />
-        );
-    }
-
     const keyExtractor = React.useCallback((item: SessionListViewItem, index: number) => {
         switch (item.type) {
             case 'header': return `header-${item.title}-${index}`;
@@ -295,8 +288,8 @@ export function SessionsList() {
 
             case 'session':
                 // Determine card styling based on position within date group
-                const prevItem = index > 0 ? data[index - 1] : null;
-                const nextItem = index < data.length - 1 ? data[index + 1] : null;
+                const prevItem = index > 0 ? data?.[index - 1] ?? null : null;
+                const nextItem = data && index < data.length - 1 ? data[index + 1] : null;
 
                 const isFirst = prevItem?.type === 'header';
                 const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions';
@@ -325,6 +318,16 @@ export function SessionsList() {
         );
     }, []);
 
+
+
+    // Early return if no data yet — AFTER every hook: this used to sit above the
+    // useCallbacks, and a null↔non-null data transition while mounted would
+    // throw "Rendered more hooks than during the previous render".
+    if (!data) {
+        return (
+            <View style={styles.container} />
+        );
+    }
 
     return (
         <View style={styles.container}>
@@ -380,7 +383,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     : session.state === 'permission_required'
                         ? t('status.permissionRequired')
                         : session.state === 'tasks' && session.tasksTotal != null
-                            ? `${session.tasksDone ?? 0}/${session.tasksTotal} completed`
+                            ? t('status.tasksCompleted', { done: session.tasksDone ?? 0, total: session.tasksTotal })
                             : session.state === 'compacting'
                                 ? t('status.compacting')
                                 : session.state === 'retrying' && session.retryAttempt != null

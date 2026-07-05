@@ -78,6 +78,7 @@ export const en = {
         permissionRequired: 'permission required',
         detached: 'detached',
         compacting: 'compacting',
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} completed`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Active now',
         unknown: 'unknown',

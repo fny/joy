@@ -412,6 +412,18 @@ class Sync {
                 if (!pending || pending.length === 0) {
                     break;
                 }
+                // Evicted store + surviving cursor: applying here would AUTO-CREATE
+                // a skeleton entry (hasMoreOlder:false, fresh reducer) holding only
+                // post-eviction rows — the evicted-store re-anchor in fetchMessages
+                // then never fires (it keys on the entry being absent) and all
+                // prior history becomes unreachable for the rest of the app run.
+                // Drop the batch and refetch instead (re-anchor pulls the newest
+                // page; these rows are on the server and come back with it).
+                if (!storage.getState().sessionMessages[sessionId] && this.sessionLastSeq.has(sessionId)) {
+                    this.sessionMessageQueue.delete(sessionId);
+                    this.getMessagesSync(sessionId).invalidate();
+                    break;
+                }
                 const batch = pending.splice(0, pending.length);
                 this.applyMessages(sessionId, batch);
             }
@@ -670,12 +682,6 @@ class Sync {
             }
 
             if (uploaded.length > 0) {
-                let pending = this.pendingOutbox.get(sessionId);
-                if (!pending) {
-                    pending = [];
-                    this.pendingOutbox.set(sessionId, pending);
-                }
-
                 for (const att of uploaded) {
                     const fileRecord: RawRecord = {
                         role: 'session',
@@ -715,7 +721,17 @@ class Sync {
                     if (fileNormalized) {
                         this.enqueueMessages(sessionId, [fileNormalized]);
                     }
-                    pending.push({ localId: fileLocalId, content: encryptedFileRecord, enqueuedAt: Date.now() });
+                    // Re-read the CURRENT map entry after the encrypt await: a
+                    // concurrent flushOutbox ack REPLACES the array in the map
+                    // (removeFromOutbox), so a reference captured before the loop
+                    // went stale — records pushed into it were never POSTed
+                    // (silent ghost attachments).
+                    const cur = this.pendingOutbox.get(sessionId);
+                    if (cur) {
+                        cur.push({ localId: fileLocalId, content: encryptedFileRecord, enqueuedAt: Date.now() });
+                    } else {
+                        this.pendingOutbox.set(sessionId, [{ localId: fileLocalId, content: encryptedFileRecord, enqueuedAt: Date.now() }]);
+                    }
                 }
             }
         }
@@ -1742,7 +1758,13 @@ class Sync {
                         minSeq = message.seq;
                     }
                 }
-                if (currentLastSeq > 0 && minSeq > currentLastSeq + 1) {
+                // No currentLastSeq > 0 guard: an EMPTY session's cursor is 0
+                // (fetchInitialLatestPage stores 0 for a no-message page), and rows
+                // written between that fetch and our send (daemon init turns) are a
+                // gap above cursor 0 like any other — advancing over them made
+                // seqs 1..N permanently unfetchable (oldestSeq unset blocks
+                // backward paging too).
+                if (minSeq > currentLastSeq + 1) {
                     // Interior gap: rows we haven't seen yet (in-flight socket lag
                     // during a hot turn — routine — or a genuinely missed agent turn)
                     // sit between our cursor and our own acked rows. Advancing the
@@ -1974,6 +1996,7 @@ class Sync {
                     || this.inFlightOutbox.has(sessionId);
                 if (hasPendingSends) {
                     log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} but sends are pending — continuing replay`);
+                    afterSeq = maxSeq; // MUST advance — continue skips the loop-tail assignment (was a tight same-page refetch loop)
                     continue;
                 }
                 // Full reset (cursors + store), then refetch like a cold open, inline — we already hold the session

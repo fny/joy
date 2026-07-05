@@ -40,18 +40,21 @@ export default React.memo(function FilesScreen() {
 
     // Handle search and file loading
     React.useEffect(() => {
+        // latest-wins: a slow round-trip for an OLD query must not overwrite the
+        // results of a newer one that already rendered.
+        let cancelled = false;
         const loadFiles = async () => {
             if (!sessionId) return;
 
             try {
                 setIsSearching(true);
                 const results = await searchFiles(sessionId, searchQuery, { limit: 100 });
-                setSearchResults(results);
+                if (!cancelled) setSearchResults(results);
             } catch (error) {
                 console.error('Failed to search files:', error);
-                setSearchResults([]);
+                if (!cancelled) setSearchResults([]);
             } finally {
-                setIsSearching(false);
+                if (!cancelled) setIsSearching(false);
             }
         };
 
@@ -65,6 +68,7 @@ export default React.memo(function FilesScreen() {
             setSearchResults([]);
             setIsSearching(false);
         }
+        return () => { cancelled = true; };
     }, [searchQuery, gitStatusFiles, sessionId, isLoading]);
 
     const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {

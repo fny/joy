@@ -101,8 +101,12 @@ export default React.memo(function JoyPaneScreen() {
     // mirroring the pane every 1.5s (battery — see useActiveInterval).
     useActiveInterval(() => void refresh(), POLL_MS);
 
-    const sendScript = React.useCallback(async (script: string, literal = false) => {
-        if (!script) return;
+    // Returns true only when the keys actually landed — callers that chain a
+    // follow-up (text mode's submit Enter) must gate on it: an unconditional
+    // Enter after a FAILED text send would submit whatever already sits in
+    // Claude's input box, or answer a TUI prompt.
+    const sendScript = React.useCallback(async (script: string, literal = false): Promise<boolean> => {
+        if (!script) return false;
         setSending(true);
         try {
             const result = await Promise.race([
@@ -113,12 +117,14 @@ export default React.memo(function JoyPaneScreen() {
             ]);
             if (result.error) {
                 Modal.alert('Error', result.error);
-                return;
+                return false;
             }
             // Tight feedback loop: re-poll right after the keys land.
             setTimeout(() => void refresh(), 250);
+            return true;
         } catch (e) {
             Modal.alert('Error', e instanceof Error ? e.message : String(e));
+            return false;
         } finally {
             if (mountedRef.current) setSending(false);
         }
@@ -135,8 +141,9 @@ export default React.memo(function JoyPaneScreen() {
             // text mode (default): type the message verbatim, then submit with a
             // real Enter key (in literal mode "<Enter>" would type as characters).
             void (async () => {
-                await sendScript(script, true);
-                await sendScript('<Enter>', false);
+                if (await sendScript(script, true)) {
+                    await sendScript('<Enter>', false);
+                }
             })();
         }
     }, [input, sendScript, rawMode]);

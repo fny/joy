@@ -81,6 +81,7 @@ export const zhHans: TranslationStructure = {
         permissionRequired: '需要权限',
         detached: '已分离',
         compacting: '压缩中',
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 已完成`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: '当前活跃',
         unknown: '未知',
