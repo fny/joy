@@ -2231,15 +2231,29 @@ class Sync {
                         this.fetchSessions();
                     }
 
-                    // Fast-path only on consecutive seq values, otherwise fetch from server.
+                    // Fast-path on consecutive seq — advance the cursor whether or
+                    // not this message RENDERS. joy interleaves lifecycle envelopes
+                    // (turn-start, start/stop, usage) that normalizeRawMessage
+                    // returns null for; the old `lastMessage && …` guard skipped
+                    // advancing over those, so the very next real message read as
+                    // non-consecutive and every subsequent one fell to the coalesced
+                    // slow-path heal — the "responses only appear after I navigate
+                    // away and back" bug (the per-message onSessionVisible heal that
+                    // used to mask it was removed in 70555f16). Decouple "seq
+                    // consumed" from "message displayed": we're inside the
+                    // decrypt-SUCCESS branch, so a decrypt failure still correctly
+                    // falls to the slow-path fetch; enqueue only when there's
+                    // something to render.
                     const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
                     const incomingSeq = updateData.body.message.seq;
-                    if (lastMessage && currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
-                        this.enqueueMessages(updateData.body.sid, [lastMessage]);
+                    if (currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
+                        if (lastMessage) {
+                            this.enqueueMessages(updateData.body.sid, [lastMessage]);
+                        }
                         this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
                         appliedFastPath = true;
                         let hasMutableTool = false;
-                        if (lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
+                        if (lastMessage && lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
                             hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
                         }
                         if (hasMutableTool) {
