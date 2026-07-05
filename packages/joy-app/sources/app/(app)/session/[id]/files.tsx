@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { View, ActivityIndicator, Platform, TextInput } from 'react-native';
+import { View, ActivityIndicator, Platform, TextInput, Pressable } from 'react-native';
 import { t } from '@/text';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Octicons } from '@expo/vector-icons';
@@ -16,6 +16,7 @@ import { layout } from '@/components/layout';
 import { FileIcon } from '@/components/FileIcon';
 import { Shaker, ShakeInstance } from '@/components/Shaker';
 import { usePrefetchFileContents } from '@/hooks/usePrefetchFileContents';
+import { AllFilesTab } from '@/components/FilesSidebar';
 
 export default React.memo(function FilesScreen() {
     const router = useRouter();
@@ -25,6 +26,9 @@ export default React.memo(function FilesScreen() {
 
     // Prefetch file contents for instant navigation into file view
     usePrefetchFileContents(sessionId!, gitStatusFiles);
+    // Changes (git status, the default) vs All files (the same browsable tree
+    // the desktop sidebar shows — AllFilesTab brings its own search + cache).
+    const [mode, setMode] = React.useState<'changes' | 'allFiles'>('changes');
     const [searchQuery, setSearchQuery] = React.useState('');
     const [searchResults, setSearchResults] = React.useState<FileItem[]>([]);
     const [isSearching, setIsSearching] = React.useState(false);
@@ -176,8 +180,57 @@ export default React.memo(function FilesScreen() {
         return item;
     };
 
+    const modeToggle = (
+        <View style={{
+            flexDirection: 'row',
+            marginHorizontal: 16,
+            marginTop: 12,
+            backgroundColor: theme.colors.surfaceHighest,
+            borderRadius: 9,
+            padding: 2,
+        }}>
+            {(['changes', 'allFiles'] as const).map((m) => (
+                <Pressable
+                    key={m}
+                    onPress={() => setMode(m)}
+                    style={{
+                        flex: 1,
+                        paddingVertical: 6,
+                        borderRadius: 7,
+                        alignItems: 'center',
+                        backgroundColor: mode === m ? theme.colors.surface : 'transparent',
+                    }}
+                >
+                    <Text style={{
+                        fontSize: 13,
+                        color: mode === m ? theme.colors.text : theme.colors.textSecondary,
+                        ...Typography.default('semiBold'),
+                    }}>
+                        {m === 'changes' ? t('files.changes') : t('files.allFiles')}
+                    </Text>
+                </Pressable>
+            ))}
+        </View>
+    );
+
+    if (mode === 'allFiles') {
+        return (
+            <View style={[styles.container, { backgroundColor: theme.colors.surface }]}>
+                {modeToggle}
+                <AllFilesTab
+                    sessionId={sessionId!}
+                    selectedPath={null}
+                    onFilePress={(filePath) => {
+                        router.push(`/session/${sessionId}/file?path=${btoa(filePath)}`);
+                    }}
+                />
+            </View>
+        );
+    }
+
     return (
         <View style={[styles.container, { backgroundColor: theme.colors.surface }]}>
+            {modeToggle}
 
             {/* Search Input - Always Visible */}
             <View style={{
