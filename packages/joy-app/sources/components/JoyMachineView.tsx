@@ -22,7 +22,7 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
-import { joyKillAllSessions, joyRestartDaemon, sessionDelete } from '@/sync/ops';
+import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 
 // Bytes → "X.X GB" for the system readouts.
 const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
@@ -97,6 +97,23 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     }, [machineId, online]);
 
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || 'machine';
+
+    const renameMachine = React.useCallback(async () => {
+        if (!machine?.metadata) return;
+        const current = machine.metadata.displayName || '';
+        const next = await Modal.prompt(t('machine.renameTitle'), t('machine.renameMessage', { host: machine.metadata.host }), { defaultValue: current });
+        if (next == null) return; // cancelled
+        const trimmed = next.trim();
+        try {
+            await machineUpdateMetadata(machine.id, {
+                ...machine.metadata,
+                // Empty input clears the custom name → UI falls back to the host.
+                displayName: trimmed.length > 0 ? trimmed : undefined,
+            }, machine.metadataVersion);
+        } catch (e) {
+            Modal.alert(t('common.error'), e instanceof Error ? e.message : String(e));
+        }
+    }, [machine]);
 
     const [restarting, doRestartDaemon] = useHappyAction(React.useCallback(async () => {
         await joyRestartDaemon(machineId);
@@ -199,6 +216,17 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
 
             {machine?.metadata?.homeDir && (
                 <ItemGroup title="Machine">
+                    {/* Rename: sets metadata.displayName (CAS-merged; the daemon
+                        deliberately carries an app-set name forward on every
+                        upsert). Clearing the field falls back to the live host —
+                        this is how a stale label (a Mac renamed at the OS level
+                        after registration, e.g. beast-mini → boite) gets fixed. */}
+                    <Item
+                        title={t('machine.name')}
+                        subtitle={machine.metadata.displayName || machine.metadata.host}
+                        icon={<Ionicons name="pencil-outline" size={29} color="#5856D6" />}
+                        onPress={renameMachine}
+                    />
                     <Item title="Host" subtitle={machine.metadata.host} icon={<Ionicons name="server-outline" size={29} color="#5856D6" />} showChevron={false} />
                     <Item title="Home" subtitle={machine.metadata.homeDir} icon={<Ionicons name="home-outline" size={29} color="#5856D6" />} showChevron={false} />
                     <Item
