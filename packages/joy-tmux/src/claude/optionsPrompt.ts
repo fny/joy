@@ -60,7 +60,15 @@ WHEN to emit one (judgment, not automation):
 - A LONG or important task just finished (a build/deploy/migration the user has been waiting on, or anything they explicitly asked to be told about). Routine replies do NOT warrant one — the app already notifies on turn completion.
 - You are ENDING YOUR TURN blocked on the user — asking a question, presenting options, or needing a decision/credentials/approval before you can continue. This is the most valuable notification; emit it whenever you stop and wait on input the user might not be watching for.
 
-Rules: at most one tag per response. message is the headline — WHAT HAPPENED, in a few words ("Deploy finished", "Need a decision") — NEVER the project or session name (the notification is already prefixed with the project). detail is optional but strongly encouraged: the specific substance ("staging green after 42m", "pick a migration strategy before I continue"). Never generic ("task done"), never secrets or sensitive content in either field (push notifications are not end-to-end encrypted).`;
+Rules: at most one tag per response. message is the headline — WHAT HAPPENED, in a few words ("Deploy finished", "Need a decision") — NEVER the project or session name (the notification is already prefixed with the project). detail is optional but strongly encouraged: the specific substance ("staging green after 42m", "pick a migration strategy before I continue"). Never generic ("task done"), never secrets or sensitive content in either field (push notifications are not end-to-end encrypted).
+
+# Session title
+
+The session's title (shown in the user's session list) tends to go stale: it is generated from the first message and the work usually evolves far past it. When the session's PRIMARY FOCUS genuinely shifts — a different feature, subsystem, or goal than the current title describes — update it by emitting this tag on its own line (not inside a code block):
+
+<joy-title value="2-6 word description of the current work" />
+
+Emit it at most once per response and only on MAJOR shifts — never per-turn, never for side-quests, never to restate an accurate title. If the user has set a title explicitly (via /title) it is locked and your tag is ignored — do not keep emitting it.`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.

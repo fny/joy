@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -639,6 +639,16 @@ test("joyNotifyEvents: detail capped at 180, headline at 60 chars", () => {
   const e = { message: { role: "assistant", content: `<joy-notify message="${long}" detail="${long}" />` } };
   expect(joyNotifyEvents(e)[0].detail!.length).toBe(180);
   expect(joyNotifyEvents(e)[0].headline.length).toBe(60);
+});
+
+test("joyTitleValue: parses value from assistant text; caps at 60; ignores non-assistant", () => {
+  const e = { message: { role: "assistant", content: 'Pivoting.\n<joy-title value="push notification overhaul" />' } };
+  expect(joyTitleValue(e)).toBe("push notification overhaul");
+  const long = { message: { role: "assistant", content: `<joy-title value="${"x".repeat(200)}" />` } };
+  expect(joyTitleValue(long)!.length).toBe(60);
+  expect(joyTitleValue({ message: { role: "user", content: '<joy-title value="spoof" />' } })).toBeNull();
+  expect(joyTitleValue({ message: { role: "assistant", content: "no tag here" } })).toBeNull();
+  expect(joyTitleValue({ message: { role: "assistant", content: '<joy-title value="" />' } })).toBeNull();
 });
 
 test("joyBgLongRunningIds: extracts ids from assistant <joy-bg long-running> tags", () => {
