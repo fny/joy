@@ -668,17 +668,25 @@ export class RelayClient {
     const data = await res.json() as { tokens?: { token: string }[] };
     const tokens = (data.tokens ?? []).map(t => t.token).filter(Boolean);
     if (tokens.length === 0) return { sent: 0 };
-    const messages = tokens.map(to => ({
-      to, title, body: body || undefined, sound: 'default',
-      data: { source: 'joy-cli', timestamp: Date.now() },
-    }));
-    const r = await fetch('https://exp.host/--/api/v2/push/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(messages),
-    });
-    if (!r.ok) throw new Error(`expo push: HTTP ${r.status}`);
-    return { sent: tokens.length };
+    // One request PER TOKEN: Expo rejects a batch that mixes projects
+    // (PUSH_TOO_MANY_EXPERIENCE_IDS), and an account that ever installed
+    // another Expo app (the upstream happy app) holds mixed tokens — one
+    // zombie token used to 400 the WHOLE batch and silently kill every
+    // notification (found 2026-07-05: three stale @bulkacorp/happy tokens
+    // blacked out all pushes).
+    let sent = 0;
+    for (const to of tokens) {
+      try {
+        const r = await fetch('https://exp.host/--/api/v2/push/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify([{ to, title, body: body || undefined, sound: 'default', data: { source: 'joy-cli', timestamp: Date.now() } }]),
+        });
+        if (r.ok) sent++;
+        else log(`push to ${to.slice(0, 28)}…: HTTP ${r.status}`);
+      } catch (e) { log(`push to ${to.slice(0, 28)}…: ${e}`); }
+    }
+    return { sent };
   }
 
   /**
@@ -1275,6 +1283,12 @@ export class RelaySession {
    *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
    *  WHICH session at a glance; body is the AI summary (or the per-kind reason).
    *  The server suppresses it when the app is focused on this session. */
+  /** Agent-authored notification (<joy-notify/> tag): custom body, same
+   *  server-side focus suppression as the automatic pushes. */
+  notifyCustom(kind: 'done' | 'permission' | 'question', message: string): void {
+    void this.client.sendSessionPushEvent(this.relaySessionId, kind, this.#notifyLocation(), message);
+  }
+
   notify(kind: 'done' | 'permission' | 'question'): void {
     const summary = (this.metadata?.summary as { text?: string } | undefined)?.text?.trim();
     const body = kind === 'done' ? (summary || 'Finished')

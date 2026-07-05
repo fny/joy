@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
+import { joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -614,6 +614,28 @@ test("classifyBgTasks: duplicate completion (queue-op echo + user message) count
   const r = classifyBgTasks(events, new Set());
   expect(r.done).toBe(1);
   expect(r.outstanding.size).toBe(0);
+});
+
+test("joyNotifyEvents: parses kind + message from assistant text", () => {
+  const e = { message: { role: "assistant", content: [
+    { type: "text", text: 'Done!\n<joy-notify message="staging deploy green after 42m" kind="done" />' },
+  ] } };
+  expect(joyNotifyEvents(e)).toEqual([{ kind: "done", message: "staging deploy green after 42m" }]);
+});
+
+test("joyNotifyEvents: kind defaults to done; empty message ignored; user entries ignored", () => {
+  const noKind = { message: { role: "assistant", content: '<joy-notify message="need a decision" />' } };
+  expect(joyNotifyEvents(noKind)).toEqual([{ kind: "done", message: "need a decision" }]);
+  const empty = { message: { role: "assistant", content: '<joy-notify message="" kind="question" />' } };
+  expect(joyNotifyEvents(empty)).toEqual([]);
+  const user = { message: { role: "user", content: '<joy-notify message="spoofed" />' } };
+  expect(joyNotifyEvents(user)).toEqual([]);
+});
+
+test("joyNotifyEvents: message capped at 180 chars", () => {
+  const long = "x".repeat(400);
+  const e = { message: { role: "assistant", content: `<joy-notify message="${long}" kind="question" />` } };
+  expect(joyNotifyEvents(e)[0].message.length).toBe(180);
 });
 
 test("joyBgLongRunningIds: extracts ids from assistant <joy-bg long-running> tags", () => {
