@@ -14,21 +14,15 @@ const KEYS: TerminalKey[] = [
     { label: 'Enter', script: '<Enter>' },
     { label: 'Esc', script: '<Esc>' },
     { label: '^C', script: '<C-c>' },
-    // ⌫ = Backspace (erase left) — what a terminal user means by "delete".
-    // The old 'Del' button sent <Del> (tmux DC, FORWARD-delete), which no-ops
-    // at end-of-line, i.e. almost always — "why doesn't del send backspace?".
     { label: '⌫', script: '<BS>' },
-    { label: 'Tab', script: '<Tab>' },
+    { label: '←', script: '<Left>' },
+    { label: '→', script: '<Right>' },
     { label: '↑', script: '<Up>' },
     { label: '↓', script: '<Down>' },
-    // Word-wise editing/motion (readline/emacs bindings, which claude's box
-    // and most TUIs honor): ⌫W kills the word left, ⌦W the word right;
-    // ←W/→W move by word. Home/End jump line edges; ^U kills to line start,
-    // ^D forward-deletes (or EOFs an empty shell line — the classic).
-    { label: '⌫W', script: '<C-w>' },
-    { label: '⌦W', script: '<M-d>' },
+    // Word-wise motion (readline M-b/M-f, honored by claude's box + most TUIs).
     { label: '←W', script: '<M-b>' },
     { label: '→W', script: '<M-f>' },
+    { label: 'Tab', script: '<Tab>' },
     { label: 'Home', script: '<Home>' },
     { label: 'End', script: '<End>' },
     { label: '^U', script: '<C-u>' },
@@ -36,7 +30,6 @@ const KEYS: TerminalKey[] = [
     { label: 'PgUp', script: '<PgUp>' },
     { label: 'PgDn', script: '<PgDn>' },
     { label: '⇧Tab', script: '<S-Tab>' },
-    { label: 'Del', script: '<Del>' },
 ];
 
 export const TerminalKeyBar = React.memo(({ onKey, disabled }: {
