@@ -238,12 +238,13 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
  * tasks — they never "complete", so they must never sit in the N/M counter.
  */
 /**
- * <joy-notify message="…" kind="done|question|permission" /> — the agent's
- * explicit "this is worth a push": a long task finished, input is needed, a
- * blocker hit. Agent-judged (system prompt has the contract), so routine turn
- * ends don't spam. Returns every tag in the entry's assistant text.
+ * <joy-notify title="…" message="…" /> — the agent's explicit "this is worth
+ * a push": a long task finished, input is needed, a blocker hit. Free-form
+ * title + message (title optional — falls back to the session's host/folder);
+ * WHEN to emit is prompt-contract judgment, not an enum. Agent-judged, so
+ * routine turn ends don't spam.
  */
-export function joyNotifyEvents(entry: any): Array<{ kind: "done" | "permission" | "question"; message: string }> {
+export function joyNotifyEvents(entry: any): Array<{ title: string | null; message: string }> {
   const msg = entry?.message as Record<string, unknown> | undefined;
   if (!msg || String(msg.role || "") !== "assistant") return [];
   const c = msg.content;
@@ -253,14 +254,17 @@ export function joyNotifyEvents(entry: any): Array<{ kind: "done" | "permission"
     for (const p of c) if (p?.type === "text" && typeof p.text === "string") text += "\n" + p.text;
   }
   if (!text.includes("<joy-notify")) return [];
-  const out: Array<{ kind: "done" | "permission" | "question"; message: string }> = [];
+  const out: Array<{ title: string | null; message: string }> = [];
   const tagRe = /<joy-notify\b[^>]*>/gi;
   let m: RegExpExecArray | null;
   while ((m = tagRe.exec(text))) {
     const msgAttr = /\bmessage="([^"]*)"/.exec(m[0]);
     if (!msgAttr || !msgAttr[1].trim()) continue;
-    const kindAttr = /\bkind="(done|question|permission)"/.exec(m[0]);
-    out.push({ kind: (kindAttr?.[1] as "done" | "permission" | "question") ?? "done", message: msgAttr[1].trim().slice(0, 180) });
+    const titleAttr = /\btitle="([^"]*)"/.exec(m[0]);
+    out.push({
+      title: titleAttr?.[1].trim() ? titleAttr[1].trim().slice(0, 60) : null,
+      message: msgAttr[1].trim().slice(0, 180),
+    });
   }
   return out;
 }
@@ -2745,7 +2749,7 @@ export class Session {
       // history can never re-fire old notifications (the forwardedUuids skip
       // above covers replayed entries, this covers never-forwarded old ones).
       if (this.#relay && entryTimeMs >= this.#tailBoundAt - 60_000) {
-        for (const ev of joyNotifyEvents(entry)) this.#relay.notifyCustom(ev.kind, ev.message);
+        for (const ev of joyNotifyEvents(entry)) this.#relay.notifyCustom(ev.title, ev.message);
       }
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
