@@ -364,6 +364,9 @@ export const es: TranslationStructure = {
         submitCode: 'Enviar código de inicio de sesión',
     },
 
+    joyLogs: {
+        resumeThisSession: 'Reanudar esta sesión…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'El cuadro de entrada de la sesión tiene texto pendiente — toca para limpiarlo y reanudar',

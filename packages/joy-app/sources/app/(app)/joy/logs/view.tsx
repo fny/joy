@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { ActivityIndicator, View, Pressable } from 'react-native';
 import { Text } from '@/components/StyledText';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { t } from '@/text';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { ItemList } from '@/components/ItemList';
@@ -14,6 +15,7 @@ const PREVIEW_LIMIT = 10;
 
 // Preview the last few back-and-forth messages of a single transcript log.
 export default React.memo(function JoyLogViewScreen() {
+    const router = useRouter();
     const { machine, dir, sessionId } = useLocalSearchParams<{ machine: string; dir: string; sessionId: string }>();
     const { theme } = useUnistyles();
     const styles = stylesheet;
@@ -45,6 +47,22 @@ export default React.memo(function JoyLogViewScreen() {
                     <Text style={styles.idValue} numberOfLines={1}>{sessionId}</Text>
                 </View>
                 <Ionicons name="copy-outline" size={20} color={theme.colors.textSecondary} />
+            </Pressable>
+
+            {/* One-tap resume: opens the new-session page with this transcript's
+                id prefilled in the resume field (and machine/path preselected). */}
+            <Pressable
+                style={styles.idCard}
+                onPress={() => router.push({
+                    pathname: '/joy/new',
+                    params: { machineId: machine!, path: dir!, resumeId: sessionId! },
+                })}
+                accessibilityRole="button"
+            >
+                <View style={{ flex: 1 }}>
+                    <Text style={styles.idValue}>{t('joyLogs.resumeThisSession')}</Text>
+                </View>
+                <Ionicons name="play-outline" size={20} color={theme.colors.textSecondary} />
             </Pressable>
 
             <Text style={styles.sectionTitle}>{`LAST ${PREVIEW_LIMIT} MESSAGES`}</Text>

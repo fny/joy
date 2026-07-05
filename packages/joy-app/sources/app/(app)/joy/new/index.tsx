@@ -112,7 +112,7 @@ function NewJoyTmuxSessionScreen() {
     const [resumeId, setResumeId] = React.useState(params.resumeId ?? '');
     // How much history (MB) to backfill on --resume. Big transcripts are mostly
     // tool calls; 2 MB ≈ the recent conversation. 0 = full history.
-    const [resumeMb, setResumeMb] = React.useState('2');
+    const [resumeMb, setResumeMb] = React.useState('1');
     // Free-form extra CLI arguments appended verbatim to the claude command.
     const [extraArgs, setExtraArgs] = React.useState('');
     const [prompt, setPrompt] = React.useState('');
@@ -289,7 +289,7 @@ function NewJoyTmuxSessionScreen() {
                 // history (MB) to backfill; default 2, 0 = full. Applies to BOTH
                 // resume-by-id and --continue (the daemon caps continue's replay
                 // at bind time), so send it whenever either path is active.
-                resume_limit_mb: (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 2) : undefined,
+                resume_limit_mb: (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
                 continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: currentMode.key,

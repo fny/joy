@@ -477,6 +477,9 @@ export const ru: TranslationStructure = {
         submitCode: 'Отправить код входа',
     },
 
+    joyLogs: {
+        resumeThisSession: 'Возобновить эту сессию…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'В поле ввода сессии остался текст — нажмите, чтобы очистить и продолжить',

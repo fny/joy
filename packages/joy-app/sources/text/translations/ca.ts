@@ -364,6 +364,9 @@ export const ca: TranslationStructure = {
         submitCode: 'Envia el codi d\'inici de sessió',
     },
 
+    joyLogs: {
+        resumeThisSession: 'Reprèn aquesta sessió…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'El quadre d\'entrada de la sessió té text pendent — toca per netejar-lo i reprendre',
