@@ -682,7 +682,15 @@ export class RelayClient {
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify([{ to, title, body: body || undefined, sound: 'default', data: { source: 'joy-cli', timestamp: Date.now() } }]),
         });
-        if (r.ok) sent++;
+        if (r.ok) {
+          // HTTP 200 only means Expo ACCEPTED the request — per-ticket errors
+          // (DeviceNotRegistered for a deleted app's token, etc.) ride in the
+          // body and used to be counted as "sent".
+          const j = await r.json().catch(() => null) as { data?: Array<{ status?: string; message?: string }> } | null;
+          const ticket = j?.data?.[0];
+          if (ticket?.status === "ok") sent++;
+          else log(`push to ${to.slice(0, 28)}…: ticket ${ticket?.status ?? "?"} ${ticket?.message ?? ""}`);
+        }
         else log(`push to ${to.slice(0, 28)}…: HTTP ${r.status}`);
       } catch (e) { log(`push to ${to.slice(0, 28)}…: ${e}`); }
     }
