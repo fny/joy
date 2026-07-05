@@ -7,8 +7,6 @@ import { Pressable, ScrollView, Text, Platform } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 
 // SGR mouse-wheel: Cb 64 = wheel up, 65 = wheel down; coords are 1-based col;row.
-const WHEEL_UP = '\x1b[<64;1;1M';
-const WHEEL_DOWN = '\x1b[<65;1;1M';
 
 type TerminalKey = { label: string; script: string; literal?: boolean };
 
@@ -23,16 +21,22 @@ const KEYS: TerminalKey[] = [
     { label: 'Tab', script: '<Tab>' },
     { label: '↑', script: '<Up>' },
     { label: '↓', script: '<Down>' },
+    // Word-wise editing/motion (readline/emacs bindings, which claude's box
+    // and most TUIs honor): ⌫W kills the word left, ⌦W the word right;
+    // ←W/→W move by word. Home/End jump line edges; ^U kills to line start,
+    // ^D forward-deletes (or EOFs an empty shell line — the classic).
+    { label: '⌫W', script: '<C-w>' },
+    { label: '⌦W', script: '<M-d>' },
+    { label: '←W', script: '<M-b>' },
+    { label: '→W', script: '<M-f>' },
+    { label: 'Home', script: '<Home>' },
+    { label: 'End', script: '<End>' },
+    { label: '^U', script: '<C-u>' },
+    { label: '^D', script: '<C-d>' },
     { label: 'PgUp', script: '<PgUp>' },
     { label: 'PgDn', script: '<PgDn>' },
-    { label: 'WUp', script: WHEEL_UP, literal: true },
-    { label: 'WDn', script: WHEEL_DOWN, literal: true },
     { label: '⇧Tab', script: '<S-Tab>' },
     { label: 'Del', script: '<Del>' },
-    { label: '1', script: '1' },
-    { label: '2', script: '2' },
-    { label: '3', script: '3' },
-    { label: '4', script: '4' },
 ];
 
 export const TerminalKeyBar = React.memo(({ onKey, disabled }: {
