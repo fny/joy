@@ -16,7 +16,10 @@ const KEYS: TerminalKey[] = [
     { label: 'Enter', script: '<Enter>' },
     { label: 'Esc', script: '<Esc>' },
     { label: '^C', script: '<C-c>' },
-    { label: 'Del', script: '<Del>' },
+    // ⌫ = Backspace (erase left) — what a terminal user means by "delete".
+    // The old 'Del' button sent <Del> (tmux DC, FORWARD-delete), which no-ops
+    // at end-of-line, i.e. almost always — "why doesn't del send backspace?".
+    { label: '⌫', script: '<BS>' },
     { label: 'Tab', script: '<Tab>' },
     { label: '↑', script: '<Up>' },
     { label: '↓', script: '<Down>' },
@@ -25,6 +28,7 @@ const KEYS: TerminalKey[] = [
     { label: 'WUp', script: WHEEL_UP, literal: true },
     { label: 'WDn', script: WHEEL_DOWN, literal: true },
     { label: '⇧Tab', script: '<S-Tab>' },
+    { label: 'Del', script: '<Del>' },
     { label: '1', script: '1' },
     { label: '2', script: '2' },
     { label: '3', script: '3' },
