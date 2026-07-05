@@ -146,6 +146,9 @@ function UserTextBlock(props: {
   // Command lines (`!`bash / `&`background) render monospace, matching the
   // composer. The bash OUTPUT renders as a structured card on the agent side.
   const isMonoCommand = /^\s*[!&]/.test(bodyText);
+  // Slash commands render as normal text with the COMMAND TOKEN bold — not
+  // monospace (the whole-bubble mono read as code for what is chat-adjacent).
+  const slashMatch = !isMonoCommand ? /^(\/[a-zA-Z][\w:-]*)([\s\S]*)$/.exec(bodyText) : null;
 
   return (
     <View style={styles.userMessageContainer}>
@@ -156,7 +159,12 @@ function UserTextBlock(props: {
       >
         {isMonoCommand
           ? <Text style={styles.monoMessageText} selectable>{bodyText}</Text>
-          : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} />}
+          : slashMatch
+            ? <Text style={styles.slashMessageText} selectable>
+                <Text style={styles.slashCommandToken}>{slashMatch[1]}</Text>
+                {slashMatch[2]}
+              </Text>
+            : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} />}
       </Pressable>
     </View>
   );
@@ -406,6 +414,17 @@ const styles = StyleSheet.create((theme) => ({
     marginBottom: 8,
     color: theme.colors.text,
     fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
+  // Slash-command bubbles: normal chat typography, command token bold.
+  slashMessageText: {
+    fontSize: 16,
+    lineHeight: 24,
+    marginTop: 8,
+    marginBottom: 8,
+    color: theme.colors.text,
+  },
+  slashCommandToken: {
+    fontWeight: '700',
   },
   commandCellText: {
     flex: 1,
