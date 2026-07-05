@@ -39,6 +39,7 @@ import {
 } from "../domain/receipts";
 import { writeAttachmentToCwd } from "../domain/attachments";
 import { saveWindowRecord } from "../domain/windowRecord";
+import { saveQueue, loadQueue, clearQueue } from "../domain/queueStore";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
@@ -524,6 +525,8 @@ export class Session {
   // (relay/send/retry) items just serialize. The queue never contains the
   // in-flight message — edit/cancel/reorder are plain array ops.
   #queue: QueuedItem[] = [];
+  // Restored from disk in the constructor (see queueStore) — items queued
+  // before a daemon restart deliver on the next idle instead of vanishing.
   // The message typed-but-not-yet-confirmed. Treated as busy: nothing else
   // dispatches until Claude starts a turn in response (echo confirmation) or we
   // time out. Confirmed when the next turn-start fires; failed on timeout. Holds
@@ -578,6 +581,18 @@ export class Session {
     this.transcriptPath = init.transcriptPath;
     this.#transcriptStartOffset = init.transcriptStartOffset ?? 0;
     this.#backfillCapBytes = init.backfillCapBytes ?? 0;
+    // Reload any queue items a previous daemon left undelivered (B1). They
+    // drain on the first idle exactly like freshly queued messages.
+    const persisted = loadQueue(this.id);
+    if (persisted.length > 0 && this.status !== "ended") {
+      this.#queue = persisted.map(r => ({
+        id: r.id, text: r.text, createdAt: r.createdAt,
+        source: (r.source as QueuedItem["source"]) ?? "rpc",
+        mirrorToRelay: r.mirrorToRelay !== false,
+        seq: r.seq, visible: r.visible !== false,
+      }));
+      process.stderr.write(`[queue-store] ${this.id}: restored ${persisted.length} undelivered item(s) from disk\n`);
+    }
     this.#deps = deps;
   }
 
@@ -815,6 +830,7 @@ export class Session {
     if (this.#steerSubmitTimer) { clearTimeout(this.#steerSubmitTimer); this.#steerSubmitTimer = null; }
     this.#queue = [];
     this.#dispatchInFlight = null;
+    clearQueue(this.id); // an ended session will never deliver — drop the spool
 
     this.status = "ended";
     this.endReason = reason;
@@ -1120,6 +1136,13 @@ export class Session {
     this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...state });
     // Push to the app via session metadata so it doesn't have to poll.
     void this.#relay?.updateQueue(state);
+    // Persist undelivered items (in-flight first — it's undelivered until its
+    // confirm rebroadcasts without it), so a daemon restart can't eat queued
+    // messages (B1: the pull cursor persists ahead of delivery).
+    saveQueue(this.id, [
+      ...(this.#dispatchInFlight ? [this.#dispatchInFlight] : []),
+      ...this.#queue,
+    ].map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible })));
   }
 
   /**
