@@ -89,6 +89,12 @@ export const MetadataSchema = z.object({
         trigger: z.enum(['auto', 'manual']),
         since: z.number(),
     }).nullable().optional(),
+    // Persisted mirror of the ephemeral thinking flag (the ephemeral only
+    // reaches connected clients, so a cold app start lost the state until the
+    // next 30s keepalive). Only trusted while the session's presence is live.
+    joy__thinking: z.object({
+        since: z.number(),
+    }).nullable().optional(),
     // joy: background tasks (run_in_background bash / agents) in flight, tracked
     // by the daemon from the transcript. Drives a continuous "N/M completed"
     // working status that outlives the foreground turn. null/absent = none.

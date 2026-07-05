@@ -472,6 +472,7 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
     start() {}, stop() {}, send() {},
     setThinking(v: boolean) { thinkingCalls.push(v); },
     updateRetry() {},
+    async clearThinkingMeta() {},
     updateQueue() {},
     async updateBgTasks() {},
     async updateContext() {},
@@ -504,7 +505,7 @@ test("compacting: PreCompact mark sets the banner, compact_boundary clears it", 
   const rs: any = {
     relaySessionId: "rs-c1",
     start() {}, stop() {}, send() {},
-    setThinking() {}, updateRetry() {}, updateQueue() {}, async updateBgTasks() {}, async updateContext() {}, updateGoal() {},
+    setThinking() {}, updateRetry() {}, async clearThinkingMeta() {}, updateQueue() {}, async updateBgTasks() {}, async updateContext() {}, updateGoal() {},
     updateCompacting(info: any) { compactingCalls.push(info); },
     notify() {},
   };
