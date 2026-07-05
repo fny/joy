@@ -22,6 +22,8 @@ export const LocalSettingsSchema = z.object({
     verboseLogging: z.boolean().describe('Log all network requests and responses'),
     zenMode: z.boolean().describe('Hide all sidebars and non-essential UI for focused work'),
     limitSessionMemory: z.number().nullable().describe('Max sessions to keep in memory (most-recently-viewed; unload the rest, reloaded on revisit). null/empty = keep all'),
+    fileViewerFontSize: z.number().describe('Code/file viewer font size in px'),
+    fileViewerWrap: z.boolean().describe('Code/file viewer word wrap (off = horizontal scroll)'),
     // CLI version acknowledgments - keyed by machineId
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
 });
@@ -51,6 +53,8 @@ export const localSettingsDefaults: LocalSettings = {
     accentOverrides: null,
     fontOverride: null,
     limitSessionMemory: 5,
+    fileViewerFontSize: 14,
+    fileViewerWrap: true,
     terminalTheme: 'default',
     markdownCopyV2: false,
     consoleLoggingEnabled: false,

@@ -6,7 +6,8 @@ import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
 import { sessionReadFile, sessionBash } from '@/sync/ops';
-import { storage, useSessionFileCache } from '@/sync/storage';
+import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
+import { Ionicons } from '@expo/vector-icons';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -34,14 +35,14 @@ function decodeUtf8Bytes(bytes: Uint8Array): string {
 }
 
 // Diff display component
-const DiffDisplay: React.FC<{ diffContent: string }> = ({ diffContent }) => {
+const DiffDisplay: React.FC<{ diffContent: string; fontSize?: number }> = ({ diffContent, fontSize = 14 }) => {
     const { theme } = useUnistyles();
     const lines = diffContent.split('\n');
 
     return (
         <View>
             {lines.map((line, index) => {
-                const baseStyle = { ...Typography.mono(), fontSize: 14, lineHeight: 20 };
+                const baseStyle = { ...Typography.mono(), fontSize, lineHeight: Math.round(fontSize * 1.43) };
                 let lineStyle: any = baseStyle;
                 let backgroundColor = 'transparent';
 
@@ -115,6 +116,9 @@ export default React.memo(function FileScreen() {
     });
     const [diffContent, setDiffContent] = React.useState<string | null>(() => cached?.diff ?? null);
     const [displayMode, setDisplayMode] = React.useState<'file' | 'diff'>('diff');
+    const [fontSize, setFontSize] = useLocalSettingMutable('fileViewerFontSize');
+    const [wrap, setWrap] = useLocalSettingMutable('fileViewerWrap');
+    const bumpFont = (delta: number) => setFontSize(Math.max(9, Math.min(28, (fontSize ?? 14) + delta)));
     const [isLoading, setIsLoading] = React.useState(!cached);
     const [error, setError] = React.useState<string | null>(null);
     const scrollViewRef = React.useRef<ScrollView | null>(null);
@@ -437,6 +441,16 @@ export default React.memo(function FileScreen() {
                         ? `${filePath}:${requestedLine}${requestedColumn !== null && requestedColumn > 0 ? `:${requestedColumn}` : ''}`
                         : filePath}
                 </Text>
+                {/* Viewer controls: font zoom + word-wrap toggle (persisted). */}
+                <Pressable onPress={() => bumpFont(-1)} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="button" accessibilityLabel="Decrease font size">
+                    <Text style={[styles.ctrlText, { color: theme.colors.textSecondary }]}>A−</Text>
+                </Pressable>
+                <Pressable onPress={() => bumpFont(1)} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="button" accessibilityLabel="Increase font size">
+                    <Text style={[styles.ctrlText, { color: theme.colors.textSecondary, fontSize: 18 }]}>A+</Text>
+                </Pressable>
+                <Pressable onPress={() => setWrap(!wrap)} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="switch" accessibilityState={{ checked: wrap }} accessibilityLabel="Toggle word wrap">
+                    <Ionicons name={wrap ? 'return-down-forward' : 'arrow-forward'} size={18} color={wrap ? theme.colors.textLink : theme.colors.textSecondary} />
+                </Pressable>
             </View>
 
             {/* Toggle buttons for File/Diff view */}
@@ -498,13 +512,21 @@ export default React.memo(function FileScreen() {
                 showsVerticalScrollIndicator={true}
             >
                 {displayMode === 'diff' && diffContent ? (
-                    <DiffDisplay diffContent={diffContent} />
+                    wrap ? (
+                        <DiffDisplay diffContent={diffContent} fontSize={fontSize ?? 14} />
+                    ) : (
+                        <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+                            <DiffDisplay diffContent={diffContent} fontSize={fontSize ?? 14} />
+                        </ScrollView>
+                    )
                 ) : displayMode === 'file' && fileContent?.content ? (
-                    <SimpleSyntaxHighlighter
-                        code={fileContent.content}
-                        language={language}
-                        selectable={true}
-                    />
+                    wrap ? (
+                        <SimpleSyntaxHighlighter code={fileContent.content} language={language} selectable={true} fontSize={fontSize ?? 14} wrap={true} />
+                    ) : (
+                        <ScrollView horizontal showsHorizontalScrollIndicator={true}>
+                            <SimpleSyntaxHighlighter code={fileContent.content} language={language} selectable={true} fontSize={fontSize ?? 14} wrap={false} />
+                        </ScrollView>
+                    )
                 ) : displayMode === 'file' && fileContent && !fileContent.content ? (
                     <Text style={{
                         fontSize: 16,
@@ -530,6 +552,17 @@ export default React.memo(function FileScreen() {
 });
 
 const styles = StyleSheet.create((theme) => ({
+    ctrlBtn: {
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+        marginLeft: 4,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    ctrlText: {
+        fontSize: 15,
+        fontWeight: '600',
+    },
     container: {
         // Header (file path + toggle) spans the full screen width;
         // the code/diff body is bounded by layout.maxWidth on the ScrollView's
