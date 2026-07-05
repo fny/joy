@@ -7,7 +7,7 @@ import { apiSocket } from '@/sync/apiSocket';
 // confirmed; `paused` means a dispatch failed and auto-drain is halted.
 export interface QueuedMessage { id: string; text: string; createdAt: number; }
 export type QueuePauseReason = 'input_dirty' | 'dispatch_timeout' | 'dispatch_mismatch' | 'dispatch_failed';
-export interface JoyQueueState { queue: QueuedMessage[]; pendingCount?: number; inFlight: string | null; paused: boolean; pauseReason?: QueuePauseReason; }
+export interface JoyQueueState { queue: QueuedMessage[]; hidden?: QueuedMessage[]; pendingCount?: number; inFlight: string | null; paused: boolean; pauseReason?: QueuePauseReason; }
 
 const EMPTY: JoyQueueState = { queue: [], inFlight: null, paused: false };
 

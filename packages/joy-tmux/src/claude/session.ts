@@ -366,6 +366,12 @@ export interface QueueState {
    *  bubbles instead of chips, but without this count the user had zero
    *  feedback that rapid sends were being held ("I don't see queuing"). */
   pendingCount: number;
+  /** Hidden (app-sent) queued items, exposed so the app can offer
+   *  cancel/edit-as-draft on them — "I want to edit them if I change my
+   *  mind". Their delivery text can't be edited in place (the message is
+   *  already an immutable server row), so the app's edit flow is
+   *  cancel-here + move the text into its on-device drafts. */
+  hidden: QueuedMessage[];
   /** Text of the (visible) message dispatched but not yet confirmed, or null. */
   inFlight: string | null;
   /** True when auto-drain is halted after a failed dispatch / dirty input. */
@@ -955,6 +961,7 @@ export class Session {
     const inFlight = this.#dispatchInFlight?.visible ? this.#dispatchInFlight.text : null;
     return {
       queue: visible.map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt })),
+      hidden: this.#queue.filter(q => !q.visible).map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt })),
       pendingCount: this.#queue.length + (this.#dispatchInFlight ? 1 : 0),
       inFlight,
       paused: this.#queuePaused,

@@ -370,6 +370,7 @@ export const es: TranslationStructure = {
         pausedDispatchMismatch: 'Es posible que un envío no se haya completado correctamente — toca para reanudar',
         pausedDefault: 'Un mensaje en cola no se envió — toca para reanudar',
         queuedMessage: 'Mensaje en cola',
+        pendingItem: ({ text }: { text: string }) => `en cola: ${text}`,
         pendingCount: ({ count }: { count: number }) => count === 1 ? '1 mensaje en cola…' : `${count} mensajes en cola…`,
         editTitle: 'Editar mensaje en cola',
         hintWeb: 'haz clic derecho en un mensaje para editarlo o eliminarlo',

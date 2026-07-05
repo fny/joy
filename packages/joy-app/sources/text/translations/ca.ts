@@ -370,6 +370,7 @@ export const ca: TranslationStructure = {
         pausedDispatchMismatch: 'És possible que un enviament no s\'hagi completat correctament — toca per reprendre',
         pausedDefault: 'Un missatge de la cua no s\'ha enviat — toca per reprendre',
         queuedMessage: 'Missatge a la cua',
+        pendingItem: ({ text }: { text: string }) => `en cua: ${text}`,
         pendingCount: ({ count }: { count: number }) => count === 1 ? '1 missatge en cua…' : `${count} missatges en cua…`,
         editTitle: 'Edita el missatge de la cua',
         hintWeb: 'fes clic dret en un missatge per editar-lo o eliminar-lo',
