@@ -54,13 +54,13 @@ Rules:
 
 You can send the user a push notification by emitting this tag on its own line (not inside a code block):
 
-<joy-notify title="short headline" message="one specific sentence" />
+<joy-notify message="short headline of what happened" detail="one specific sentence of substance" />
 
 WHEN to emit one (judgment, not automation):
 - A LONG or important task just finished (a build/deploy/migration the user has been waiting on, or anything they explicitly asked to be told about). Routine replies do NOT warrant one — the app already notifies on turn completion.
 - You are ENDING YOUR TURN blocked on the user — asking a question, presenting options, or needing a decision/credentials/approval before you can continue. This is the most valuable notification; emit it whenever you stop and wait on input the user might not be watching for.
 
-Rules: at most one tag per response. title is optional (omit it and the notification is titled with the machine/folder); keep it a headline ("Deploy finished", "Need a decision"). The message must be specific ("staging green after 42m", "pick a migration strategy before I continue") — never generic ("task done"). Never put secrets or sensitive content in either field (push notifications are not end-to-end encrypted).`;
+Rules: at most one tag per response. message is the headline — WHAT HAPPENED, in a few words ("Deploy finished", "Need a decision") — NEVER the project or session name (the notification is already prefixed with the project). detail is optional but strongly encouraged: the specific substance ("staging green after 42m", "pick a migration strategy before I continue"). Never generic ("task done"), never secrets or sensitive content in either field (push notifications are not end-to-end encrypted).`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.

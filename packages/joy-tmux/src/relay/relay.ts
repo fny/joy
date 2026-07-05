@@ -1297,20 +1297,21 @@ export class RelaySession {
    *  same server-side focus suppression as the automatic pushes. Title falls
    *  back to the session's host/folder so a push always identifies its source;
    *  when the agent titles it, the location rides in the body suffix instead. */
-  notifyCustom(title: string | null, message: string): void {
-    // Project-prefixed title ("joy: Deploy finished") so every push reads as
-    // <where>: <what> at a glance; untitled tags fall back to host/folder.
+  notifyCustom(headline: string, detail: string | null): void {
+    // Project-prefixed headline ("joy: Deploy finished") so every push reads
+    // as <where>: <what> at a glance; detail (when given) is the body.
     const path = (this.metadata?.path as string | undefined)?.trim();
     const folder = path ? path.split(/[\\/]/).filter(Boolean).pop() : undefined;
-    const finalTitle = title
-      ? (folder ? `${folder}: ${title}` : title)
-      : this.#notifyLocation();
-    void this.client.sendSessionPushEvent(this.relaySessionId, 'done', finalTitle, message);
+    const finalTitle = folder ? `${folder}: ${headline}` : headline;
+    void this.client.sendSessionPushEvent(this.relaySessionId, 'done', finalTitle, detail ?? headline);
   }
 
-  notify(kind: 'done' | 'permission' | 'question'): void {
+  notify(kind: 'done' | 'permission' | 'question', snippet?: string): void {
     const summary = (this.metadata?.summary as { text?: string } | undefined)?.text?.trim();
-    const body = kind === 'done' ? (summary || 'Finished')
+    // Prefer the caller's snippet (the reply's first line) — the session
+    // summary alone read as project-name noise, telling the user nothing
+    // about what actually happened.
+    const body = kind === 'done' ? (snippet || summary || 'Finished')
       : kind === 'permission' ? (summary ? `Permission needed · ${summary}` : 'Permission needed')
       : (summary ? `Clarification needed · ${summary}` : 'Clarification needed');
     void this.client.sendSessionPushEvent(this.relaySessionId, kind, this.#notifyLocation(), body);
