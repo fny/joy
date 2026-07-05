@@ -22,6 +22,9 @@ import { joyImgMime } from '@/utils/joyImg';
 // hammer the RPC channel. Keyed per session+path; modest cap, oldest evicted.
 const cache = new Map<string, string>();
 const CACHE_MAX = 40;
+// In-flight fetches, deduped per key: two mounts of the same src (or a fast
+// unmount/remount during scroll) share one RPC instead of issuing duplicates.
+const inFlight = new Map<string, Promise<string | null>>();
 
 function cacheGet(key: string): string | undefined {
     return cache.get(key);
@@ -55,17 +58,27 @@ export const JoyImage = React.memo((props: {
         if (cached) { setUri(cached); return; }
         setUri(null);
         setFailed(false);
-        void (async () => {
-            const res = await sessionReadFile(sessionId, src);
+        // The fetch (and cachePut) completes even if this row unmounts mid-RPC —
+        // discarding a few-hundred-KB payload because FlashList recycled the row
+        // meant scrolling back refetched the whole image. Only the setState is
+        // gated on being mounted.
+        let p = inFlight.get(key);
+        if (!p) {
+            p = (async () => {
+                const res = await sessionReadFile(sessionId, src);
+                if (res.success && res.content) {
+                    const dataUri = `data:${joyImgMime(src)};base64,${res.content}`;
+                    cachePut(key, dataUri);
+                    return dataUri;
+                }
+                return null;
+            })().finally(() => { inFlight.delete(key); });
+            inFlight.set(key, p);
+        }
+        void p.then((dataUri) => {
             if (!alive) return;
-            if (res.success && res.content) {
-                const dataUri = `data:${joyImgMime(src)};base64,${res.content}`;
-                cachePut(key, dataUri);
-                setUri(dataUri);
-            } else {
-                setFailed(true);
-            }
-        })();
+            if (dataUri) setUri(dataUri); else setFailed(true);
+        });
         return () => { alive = false; };
     }, [key, sessionId, src]);
 

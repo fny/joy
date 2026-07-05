@@ -81,6 +81,7 @@ export const ja: TranslationStructure = {
         permissionRequired: '権限が必要です',
         detached: 'デタッチ',
         compacting: '圧縮中',
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 完了`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'アクティブ',
         unknown: '不明',

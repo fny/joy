@@ -44,9 +44,16 @@ function positiveInt(v: string | undefined): number | null {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
+const PREFIX_RE = /<joy-img/i;
+// An unterminated tag at the END of the text — the streaming case: the tag's
+// prefix has arrived but its closing '>' hasn't. Rendered as-is it shows raw
+// XML to the user until the next token batch (or forever, if output was
+// truncated mid-tag).
+const PARTIAL_TAIL_RE = /<joy-img\b[^>]*$/i;
+
 /** True when the text contains at least one joy-img tag (cheap pre-check). */
 export function hasJoyImg(text: string): boolean {
-    return text.includes('<joy-img');
+    return PREFIX_RE.test(text);
 }
 
 export function splitJoyImgSegments(text: string): JoySegment[] {
@@ -70,7 +77,8 @@ export function splitJoyImgSegments(text: string): JoySegment[] {
         // No src → tag is stripped (never render raw XML to the user).
         last = m.index + m[0].length;
     }
-    const rest = text.slice(last);
+    // Strip a trailing unterminated tag (mid-stream) so raw XML never renders.
+    const rest = text.slice(last).replace(PARTIAL_TAIL_RE, '');
     if (rest.trim()) segments.push({ kind: 'md', text: rest });
     return segments;
 }

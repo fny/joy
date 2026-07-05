@@ -78,6 +78,7 @@ export const it: TranslationStructure = {
         permissionRequired: 'permesso richiesto',
         detached: 'scollegato',
         compacting: 'compattazione',
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} completate`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Attivo ora',
         unknown: 'sconosciuto',
