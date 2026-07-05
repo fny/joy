@@ -95,6 +95,7 @@ export const en: TranslationStructure = {
         detached: 'detached',
         compacting: 'compacting',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} completed`,
+        agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agents`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Active now',
         unknown: 'unknown',

@@ -3,7 +3,7 @@ import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 
-export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'tasks' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
@@ -31,6 +31,7 @@ export const STATUS_PALETTE: Record<SessionState, { color: string; dotColor: str
     compacting:          { color: '#AF52DE', dotColor: '#AF52DE', isPulsing: true,  isConnected: true },
     permission_required: { color: '#FFCC00', dotColor: '#FFCC00', isPulsing: true,  isConnected: true },
     tasks:               { color: '#30B0C7', dotColor: '#30B0C7', isPulsing: true,  isConnected: true },
+    agents:              { color: '#FF2D95', dotColor: '#FF2D95', isPulsing: true,  isConnected: true },
     thinking:            { color: '#007AFF', dotColor: '#007AFF', isPulsing: true,  isConnected: true },
     waiting:             { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
 };
@@ -123,6 +124,16 @@ export function useSessionStatus(session: Session): SessionStatus {
     // shown in teal with an N/M progress count. Ranks above thinking so the count
     // wins when a foreground turn is also running. Long-running processes are
     // excluded from this (they're the withBg suffix).
+    // Background AGENTS (magenta) rank above finishing shell tasks (teal).
+    const agents = session.metadata?.joy__agents;
+    if (agents && agents.total > 0) {
+        return withBg({
+            ...paletteBase('agents'),
+            statusText: t('status.agentsRunning', { done: agents.done, total: agents.total }),
+            shouldShowStatus: true,
+        });
+    }
+
     const tasks = session.metadata?.joy__tasks;
     if (tasks && tasks.total > 0) {
         return withBg({

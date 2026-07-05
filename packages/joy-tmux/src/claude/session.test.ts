@@ -527,12 +527,12 @@ const userEntry = (extra: Record<string, unknown>) => ({ message: { role: "user"
 
 test("bgTaskEvent: run_in_background launch (backgroundTaskId)", () => {
   const e = { message: { role: "user", content: [{ type: "tool_result" }] }, toolUseResult: { backgroundTaskId: "bg-1" } };
-  expect(bgTaskEvent(e)).toEqual({ kind: "launch", id: "bg-1" });
+  expect(bgTaskEvent(e)).toEqual({ kind: "launch", id: "bg-1", source: "shell" });
 });
 
 test("bgTaskEvent: async agent launch (isAsync + agentId)", () => {
   const e = { message: { role: "user", content: [{ type: "tool_result" }] }, toolUseResult: { isAsync: true, agentId: "ag-9" } };
-  expect(bgTaskEvent(e)).toEqual({ kind: "launch", id: "ag-9" });
+  expect(bgTaskEvent(e)).toEqual({ kind: "launch", id: "ag-9", source: "agent" });
 });
 
 test("bgTaskEvent: completion via <task-notification>", () => {
@@ -592,12 +592,12 @@ test("classifyBgTasks: queue-operation completion unwedges the batch reset", () 
   // invisible → its task stayed outstanding → outstanding never hit 0 → the
   // fresh-batch reset never fired and every later batch fused into one
   // ever-growing count. With the completion seen, the next batch resets clean.
-  const events: Array<{ kind: "launch" | "complete"; id: string }> = [
-    { kind: "launch", id: "t1" },
-    { kind: "launch", id: "t2" },
+  const events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }> = [
+    { kind: "launch", id: "t1", source: "shell" },
+    { kind: "launch", id: "t2", source: "shell" },
     { kind: "complete", id: "t1" },
     { kind: "complete", id: "t2" }, // the queue-operation-only completion
-    { kind: "launch", id: "t3" },   // next batch — must start fresh at 1, not 3
+    { kind: "launch", id: "t3", source: "shell" },   // next batch — must start fresh at 1, not 3
   ];
   const r = classifyBgTasks(events, new Set());
   expect(r.total).toBe(1);
@@ -605,9 +605,25 @@ test("classifyBgTasks: queue-operation completion unwedges the batch reset", () 
   expect(r.outstanding).toEqual(new Set(["t3"]));
 });
 
+test("classifyBgTasks: agents and shells tracked in separate groups", () => {
+  const events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }> = [
+    { kind: "launch", id: "a1", source: "agent" },
+    { kind: "launch", id: "s1", source: "shell" },
+    { kind: "launch", id: "a2", source: "agent" },
+    { kind: "complete", id: "s1" },
+  ];
+  const r = classifyBgTasks(events, new Set());
+  expect({ t: r.agent.total, d: r.agent.done }).toEqual({ t: 2, d: 0 });
+  expect({ t: r.shell.total, d: r.shell.done }).toEqual({ t: 1, d: 1 });
+  expect(r.agent.outstanding).toEqual(new Set(["a1", "a2"]));
+  expect(r.shell.outstanding.size).toBe(0);
+  // combined view still works for busy()/self-heal
+  expect(r.outstanding).toEqual(new Set(["a1", "a2"]));
+});
+
 test("classifyBgTasks: duplicate completion (queue-op echo + user message) counts once", () => {
-  const events: Array<{ kind: "launch" | "complete"; id: string }> = [
-    { kind: "launch", id: "t1" },
+  const events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }> = [
+    { kind: "launch", id: "t1", source: "shell" },
     { kind: "complete", id: "t1" },
     { kind: "complete", id: "t1" }, // same notification seen in a second form
   ];
@@ -670,7 +686,7 @@ test("joyBgLongRunningIds: ignores non-long-running tags, non-assistant, and no 
 });
 
 test("classifyBgTasks: splits finishing (N/M) from long-running, excludes servers from the count", () => {
-  const L = (id: string) => ({ kind: "launch" as const, id });
+  const L = (id: string) => ({ kind: "launch" as const, id, source: "shell" as const });
   const C = (id: string) => ({ kind: "complete" as const, id });
   // b1,b2 finishing; srv is long-running (tagged). srv never counts in total/done.
   const r = classifyBgTasks([L("b1"), L("srv"), L("b2"), C("b1")], new Set(["srv"]));
@@ -681,13 +697,13 @@ test("classifyBgTasks: splits finishing (N/M) from long-running, excludes server
 test("classifyBgTasks: long-running classified even when its launch precedes the tag (full lrIds up front)", () => {
   // The tag lands later in the transcript, but lrIds is gathered first, so the
   // earlier launch is still classified as long-running (never in the N/M).
-  const r = classifyBgTasks([{ kind: "launch", id: "srv" }], new Set(["srv"]));
+  const r = classifyBgTasks([{ kind: "launch", id: "srv", source: "shell" }], new Set(["srv"]));
   expect(r.total).toBe(0);
   expect([...r.longRunning]).toEqual(["srv"]);
 });
 
 test("classifyBgTasks: an aborted task (launch dropped, per #deriveBgTasks cancel-filter) clears the count", () => {
-  const L = (id: string) => ({ kind: "launch" as const, id });
+  const L = (id: string) => ({ kind: "launch" as const, id, source: "shell" as const });
   const C = (id: string) => ({ kind: "complete" as const, id });
   // b1 launched but interrupted before completing (its complete never lands). On
   // abort, #deriveBgTasks drops b1's events (it's in #cancelledBgTasks); b2, sent
@@ -701,7 +717,7 @@ test("classifyBgTasks: an aborted task (launch dropped, per #deriveBgTasks cance
 });
 
 test("classifyBgTasks: stopping a server clears it; finishing batch resets on empty (servers don't block it)", () => {
-  const L = (id: string) => ({ kind: "launch" as const, id });
+  const L = (id: string) => ({ kind: "launch" as const, id, source: "shell" as const });
   const C = (id: string) => ({ kind: "complete" as const, id });
   // batch1: b1 launches+completes → outstanding empties. srv (long-running) stays.
   // batch2: b2 launches → total resets to 1 (not 2), even though srv is still live.
@@ -780,7 +796,7 @@ test("loginFromPane: no error when the box is clean", () => {
 
 // Pure replay of the same reset-on-empty-batch semantics #deriveBgTasks uses,
 // so the count derived from a transcript matches the live tally.
-function replay(events: Array<{ kind: "launch" | "complete"; id: string }>) {
+function replay(events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }>) {
   const outstanding = new Set<string>();
   let total = 0, done = 0;
   for (const ev of events) {
@@ -796,14 +812,14 @@ function replay(events: Array<{ kind: "launch" | "complete"; id: string }>) {
 test("derive semantics: stuck batch when a completion never arrives", () => {
   // two launched, one completed → 1/2 outstanding (the orphan shape)
   expect(replay([
-    { kind: "launch", id: "a" }, { kind: "launch", id: "b" }, { kind: "complete", id: "a" },
+    { kind: "launch", id: "a", source: "shell" }, { kind: "launch", id: "b", source: "shell" }, { kind: "complete", id: "a" },
   ])).toEqual({ outstanding: ["b"], total: 2, done: 1 });
 });
 
 test("derive semantics: a fully-drained batch clears (next launch resets the count)", () => {
   expect(replay([
-    { kind: "launch", id: "a" }, { kind: "complete", id: "a" },
-    { kind: "launch", id: "b" },
+    { kind: "launch", id: "a", source: "shell" }, { kind: "complete", id: "a" },
+    { kind: "launch", id: "b", source: "shell" },
   ])).toEqual({ outstanding: ["b"], total: 1, done: 0 });
 });
 

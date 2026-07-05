@@ -382,6 +382,8 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     ? t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) })
                     : session.state === 'permission_required'
                         ? t('status.permissionRequired')
+                        : session.state === 'agents' && session.agentsTotal != null
+                            ? t('status.agentsRunning', { done: session.agentsDone ?? 0, total: session.agentsTotal })
                         : session.state === 'tasks' && session.tasksTotal != null
                             ? t('status.tasksCompleted', { done: session.tasksDone ?? 0, total: session.tasksTotal })
                             : session.state === 'compacting'
