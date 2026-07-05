@@ -685,10 +685,16 @@ export class Session {
     // Low-frequency self-heal while a count is outstanding, so a stuck count
     // clears without waiting for a restart/reconnect (no-op when none outstanding).
     if (this.#taskReconcileTimer) clearInterval(this.#taskReconcileTimer);
-    this.#taskReconcileTimer = setInterval(() => {
-      if (this.status === "ended" || (this.#bgTasks.size === 0 && this.#longRunning.size === 0)) return;
-      this.#reconcileBgTasks();
-    }, 60_000);
+    // Not for ended sessions (recovery attaches relays to those for file/git
+    // RPCs): end() already ran and can never run again, so an interval armed
+    // here would leak — ticking for the daemon's lifetime and pinning the
+    // Session + RelaySession.
+    if (this.status !== "ended") {
+      this.#taskReconcileTimer = setInterval(() => {
+        if (this.status === "ended" || (this.#bgTasks.size === 0 && this.#longRunning.size === 0)) return;
+        this.#reconcileBgTasks();
+      }, 60_000);
+    }
     // Reflect the current queue on (re)attach — recovery/reconnect included.
     void rs.updateQueue(this.queueState());
 
@@ -770,6 +776,7 @@ export class Session {
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
+    this.#clearCompacting(); // every end path — a kill mid-compaction leaked the 10-min backstop timer
     this.#clearSubmitTimer();
     if (this.#steerSubmitTimer) { clearTimeout(this.#steerSubmitTimer); this.#steerSubmitTimer = null; }
     this.#queue = [];
@@ -1442,10 +1449,13 @@ export class Session {
     }
     this.#turn5xxStatus = null;
     // Cancel the pending submit Enter — but ONLY the one that was pending when abort
-    // BEGAN. The new-dispatch case already returned above, so here sameSubmit is false
-    // ONLY when that pre-abort submit FIRED mid-capture (#submitTimer went null): then
-    // there's nothing to cancel and the box is empty, so skip the cancel + abort-clear.
-    const sameSubmit = this.#submitTimer === submitBefore;
+    // BEGAN, and only if one existed at all: submitBefore === null means the Enter
+    // already FIRED before abort was called (dispatch delivered, awaiting its echo /
+    // turn-start) — with a bare === both sides are null and the old check wrongly
+    // classified that as "typed but not submitted", discarding + neutralizing a
+    // message Claude already received (its later echo then mirrored as a duplicate
+    // user bubble). A fired-or-never-armed submit has nothing to cancel.
+    const sameSubmit = submitBefore !== null && this.#submitTimer === submitBefore;
     if (sameSubmit) {
       // Aborting a message that was typed but NOT yet submitted (its Enter was still
       // pending): cancel that Enter AND discard the dispatch — Stop means the message is
@@ -1826,6 +1836,12 @@ export class Session {
       if (pendingEntry) {
         const i = delivery!.pending.indexOf(pendingEntry); // splice THIS entry, not the last one
         if (i >= 0) delivery!.pending.splice(i, 1);
+        // Also neutralize the persisted `received` backstop recorded above — the
+        // text never reached the pane, so no echo will consume it. Leaving it
+        // stacked meant the re-dispatch recorded a SECOND one, the echo consumed
+        // only one, and the dangling 15-min entry silently swallowed a later
+        // identical message typed directly in the pane.
+        consumeReceived(delivery!, this.relaySessionId!, typed, Date.now());
       }
       throw new Error("tmux send-keys failed");
     }
@@ -2106,7 +2122,13 @@ export class Session {
           }
         } finally { closeSync(fd); }
       }
-    } catch { return empty; }
+    } catch {
+      // Transient fs error (stat/open EBUSY, rotation race): fall back to the
+      // cached scan instead of returning empty — an empty result wrongly
+      // CLEARED a live N/M count, and the 60s self-heal then gated itself off
+      // (it no-ops when nothing is outstanding).
+      if (!this.#scan) return empty;
+    }
     // Replay, classifying each task by lrIds (the long-running tag can trail its
     // launch by a few entries, which is why classification happens at the end).
     // Drop any task an abort cancelled — its launch is in the transcript but its

@@ -1094,6 +1094,10 @@ export class RelaySession {
 
   private pulling = false;
 
+  // Consecutive decrypt-failure counts per seq (quarantine after 3 rounds).
+
+  private decryptFailures = new Map<number, number>();
+
   private async pull(): Promise<void> {
     // Re-entrancy guard (like drain()): pull() fires from both the 3s heartbeat
     // and the poke subscription. Without this, a second pull could read the next
@@ -1107,13 +1111,29 @@ export class RelaySession {
       if (messages.length > 0) log(`pull ${this.relaySessionId}: got ${messages.length} msgs, lastSeq=${this.lastSeq}`);
       let advanced = false;
       while (messages.length > 0) {
+        const roundStart = this.lastSeq;
         for (const msg of messages) {
-          // M2: decrypt before advancing seq so a failed decrypt doesn't silently consume the seq
+          // M2: decrypt before advancing seq so a failed decrypt doesn't silently consume the seq.
+          // Quarantine backstop: a message that fails decrypt on several separate
+          // pull rounds (key rotation, foreign-key history on a tag-dedup'd
+          // session) is advanced past — with the old skip-forever behavior, a
+          // whole page of undecryptable rows made readSince return the identical
+          // page every round: a zero-delay hot loop that hammered the server and
+          // blocked the session's inbound messages until a daemon restart.
           const dec = this.client.decryptMessage(msg, this.sessionKey, this.variant);
           if (dec === null) {
-            log(`pull msg seq=${msg.seq} DECRYPT_FAILED — skipping without advancing seq`);
+            const attempts = (this.decryptFailures.get(msg.seq) ?? 0) + 1;
+            if (attempts >= 3) {
+              this.decryptFailures.delete(msg.seq);
+              log(`pull msg seq=${msg.seq} DECRYPT_FAILED x${attempts} — quarantining (advancing past it)`);
+              if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; }
+            } else {
+              this.decryptFailures.set(msg.seq, attempts);
+              log(`pull msg seq=${msg.seq} DECRYPT_FAILED (attempt ${attempts}) — skipping without advancing seq`);
+            }
             continue;
           }
+          this.decryptFailures.delete(msg.seq);
           if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; }
           log(`pull msg seq=${msg.seq} dec=${JSON.stringify(dec)?.slice(0, 120)}`);
           if (!isObj(dec)) continue;
@@ -1165,6 +1185,12 @@ export class RelaySession {
           }
         }
         if (!hasMore) break;
+        // Spin guard: if this whole page advanced the cursor by nothing (every
+        // row undecryptable and not yet quarantined), refetching from the same
+        // cursor returns the identical page — break and let the next 3s pull
+        // tick retry (which also steps the quarantine counters) instead of
+        // hot-looping inside one round.
+        if (this.lastSeq === roundStart) break;
         ({ messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq));
       }
       // Low: only write to disk when seq actually changed

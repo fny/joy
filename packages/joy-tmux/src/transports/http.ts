@@ -37,10 +37,18 @@ function compilePath(path: string): { regex: RegExp; paramNames: string[] } {
 // Collect a request body and parse it as JSON. Empty / non-JSON bodies resolve
 // to undefined (matches the Bun version's swallow-on-parse-error behavior).
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  // 10MB cap: unbounded accumulation into a string let any local process OOM
+  // the daemon (which holds live sessions) with one giant POST body.
+  const MAX_BODY = 10 * 1024 * 1024;
   return new Promise(resolve => {
     let data = "";
-    req.on("data", chunk => { data += chunk; });
-    req.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(undefined); } });
+    let overflow = false;
+    req.on("data", chunk => {
+      if (overflow) return;
+      data += chunk;
+      if (data.length > MAX_BODY) { overflow = true; data = ""; req.destroy(); resolve(undefined); }
+    });
+    req.on("end", () => { if (!overflow) { try { resolve(JSON.parse(data)); } catch { resolve(undefined); } } });
     req.on("error", () => resolve(undefined));
   });
 }
@@ -102,6 +110,17 @@ export function startHttpServer(opts: {
 
     try {
     if (method === "OPTIONS") return send(204, corsHeaders);
+
+    // DNS-rebinding defense: a hostile page whose DNS flips to 127.0.0.1 makes
+    // SAME-ORIGIN requests (no CORS involved) — but it necessarily carries its
+    // own Host header. Reject anything not addressed to localhost, closing
+    // unauthenticated GET exfiltration (/sessions/:id/log serves the full
+    // transcript; /events streams chat history) while keeping the debug pages
+    // browser-loadable via localhost.
+    const host = String(req.headers.host ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+    if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
+      return json({ error: "forbidden host" }, 403);
+    }
 
     // Token check on all mutating routes
     if (method === "POST" || method === "DELETE") {

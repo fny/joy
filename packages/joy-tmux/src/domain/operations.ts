@@ -236,8 +236,14 @@ export const machineOps: MachineOp[] = [
     // id was never learned). Returns the NEW session — the app should
     // navigate to the returned relaySessionId.
     handler: async (registry, params) => {
+      const id = String(params.id ?? "");
+      // The id flows into file paths (window-<id>.json), the tmux window name
+      // (j-<id>), and the readFile extra root (~/.joy/sessions/<id>) — enforce
+      // the same 8-hex shape recover() requires so `../`-style ids can't
+      // relocate any of those (defense-in-depth; the surface is token-authed).
+      if (!/^[0-9a-f]{8}$/.test(id)) return { error: "invalid session id" };
       const session = await registry.restart({
-        id: String(params.id ?? ""),
+        id,
         cwd: typeof params.cwd === "string" ? params.cwd : undefined,
       });
       return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };

@@ -78,6 +78,14 @@ process.exit(0);
 // are rewritten on the next daemon start.
 const HOOK_VERSION = "2";
 
+// The stamp covers the script version AND the embedded node path: the hook
+// command pins the daemon's absolute execPath, so a node upgrade that removes
+// the old binary would otherwise leave every hook ENOENTing silently (hooks
+// are best-effort — nothing surfaces) until someone bumped the version.
+function hookStamp(): string {
+  return `${HOOK_VERSION}:${execPath}`;
+}
+
 let cachedSettingsPath: string | null = null;
 
 /**
@@ -97,7 +105,7 @@ export function ensureHookSettings(): string {
     mkdirSync(dir, { recursive: true });
     const stamp = existsSync(stampPath) ? readFileSync(stampPath, "utf8") : "";
     try { rmSync(join(dir, "precompact-hook.version"), { force: true }); } catch {}
-    if (stamp !== HOOK_VERSION || !existsSync(hookPath) || !existsSync(settingsPath)) {
+    if (stamp !== hookStamp() || !existsSync(hookPath) || !existsSync(settingsPath)) {
       writeFileSync(hookPath, HOOK_SCRIPT);
       // Run via the daemon's own node (absolute path) so the hook works
       // regardless of the login shell's PATH. Quote both paths for spaces.
@@ -113,7 +121,7 @@ export function ensureHookSettings(): string {
         },
       };
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-      writeFileSync(stampPath, HOOK_VERSION);
+      writeFileSync(stampPath, hookStamp());
     }
   } catch {
     return "";
