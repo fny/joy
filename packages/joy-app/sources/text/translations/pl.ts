@@ -381,6 +381,9 @@ export const pl: TranslationStructure = {
         submitCode: 'Wyślij kod logowania',
     },
 
+    joyLogs: {
+        resumeThisSession: 'Wznów tę sesję…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'W polu wprowadzania sesji pozostał tekst — dotknij, aby wyczyścić i wznowić',

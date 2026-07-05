@@ -364,6 +364,9 @@ export const zhHant: TranslationStructure = {
         submitCode: '提交授權碼',
     },
 
+    joyLogs: {
+        resumeThisSession: '恢復此工作階段…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: '工作階段輸入框中殘留未傳送的文字 — 點按以清除並恢復',

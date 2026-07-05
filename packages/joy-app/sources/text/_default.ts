@@ -406,6 +406,9 @@ export const en = {
         submitCode: 'Submit login code',
     },
 
+    joyLogs: {
+        resumeThisSession: 'Resume this session…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'The session’s input box has stray text — tap to clear and resume',

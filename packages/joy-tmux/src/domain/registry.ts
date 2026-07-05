@@ -29,7 +29,7 @@ export interface CreateSessionOpts {
   effort?: string;
   continue?: boolean;
   resume_id?: string;
-  /** Cap the --resume history backfill to ~this many MB (snapped to a turn). Default 2; 0 = full. */
+  /** Cap the --resume history backfill to ~this many MB (snapped to a turn). Default 1; 0 = full. */
   resumeLimitMb?: number;
   createDir?: boolean;
   yolo?: boolean;
@@ -447,24 +447,24 @@ export class SessionRegistry {
     // its history into the new relay session, instead of relying on the
     // mtime>=startedAt finder — which misses a resumed file (Claude touches it
     // before startedAt while loading context, then sits idle at the prompt).
-    // Cap the backfill to the last ~resumeLimitMb (default 2), snapped back to a
+    // Cap the backfill to the last ~resumeLimitMb (default 1), snapped back to a
     // turn boundary so a huge transcript doesn't flood the UI on resume.
     let resumeTranscriptPath: string | undefined;
     let resumeStartOffset = 0;
     if (opts.resume_id) {
       resumeTranscriptPath = join(cwdToTranscriptDir(cwd), `${opts.resume_id}.jsonl`);
-      const capBytes = Math.max(0, opts.resumeLimitMb ?? 2) * 1024 * 1024;
+      const capBytes = Math.max(0, opts.resumeLimitMb ?? 1) * 1024 * 1024;
       resumeStartOffset = cappedTailOffset(resumeTranscriptPath, capBytes);
     }
 
     // --continue has the SAME flooding problem as --resume (it replays a
     // full-history transcript), but its file isn't known here — Claude picks
     // it at launch. So pass the cap down and let the Session apply it when the
-    // transcript binds (startTailer). Same default (2MB) and flag as --resume;
+    // transcript binds (startTailer). Same default (1MB) and flag as --resume;
     // 0 = full. Not for fresh sessions (empty transcript) or --resume (capped
     // above at create).
     const backfillCapBytes = opts.continue
-      ? Math.max(0, opts.resumeLimitMb ?? 2) * 1024 * 1024
+      ? Math.max(0, opts.resumeLimitMb ?? 1) * 1024 * 1024
       : 0;
 
     const session = new Session({

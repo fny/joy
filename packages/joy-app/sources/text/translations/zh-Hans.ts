@@ -365,6 +365,9 @@ export const zhHans: TranslationStructure = {
         submitCode: '提交授权码',
     },
 
+    joyLogs: {
+        resumeThisSession: '恢复此会话…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: '会话输入框中残留未发送的文本 — 点按以清除并恢复',

@@ -362,6 +362,9 @@ export const it: TranslationStructure = {
         submitCode: 'Invia codice di accesso',
     },
 
+    joyLogs: {
+        resumeThisSession: 'Riprendi questa sessione…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'Il campo di input della sessione contiene testo residuo — tocca per pulirlo e riprendere',

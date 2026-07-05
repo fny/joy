@@ -365,6 +365,9 @@ export const ja: TranslationStructure = {
         submitCode: 'ログインコードを送信',
     },
 
+    joyLogs: {
+        resumeThisSession: 'このセッションを再開…',
+    },
     joyQueue: {
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'セッションの入力欄に未送信のテキストが残っています — タップしてクリアし再開',
