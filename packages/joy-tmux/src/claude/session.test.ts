@@ -616,26 +616,27 @@ test("classifyBgTasks: duplicate completion (queue-op echo + user message) count
   expect(r.outstanding.size).toBe(0);
 });
 
-test("joyNotifyEvents: parses kind + message from assistant text", () => {
+test("joyNotifyEvents: parses title + message from assistant text", () => {
   const e = { message: { role: "assistant", content: [
-    { type: "text", text: 'Done!\n<joy-notify message="staging deploy green after 42m" kind="done" />' },
+    { type: "text", text: 'Done!\n<joy-notify title="Deploy finished" message="staging green after 42m" />' },
   ] } };
-  expect(joyNotifyEvents(e)).toEqual([{ kind: "done", message: "staging deploy green after 42m" }]);
+  expect(joyNotifyEvents(e)).toEqual([{ title: "Deploy finished", message: "staging green after 42m" }]);
 });
 
-test("joyNotifyEvents: kind defaults to done; empty message ignored; user entries ignored", () => {
-  const noKind = { message: { role: "assistant", content: '<joy-notify message="need a decision" />' } };
-  expect(joyNotifyEvents(noKind)).toEqual([{ kind: "done", message: "need a decision" }]);
-  const empty = { message: { role: "assistant", content: '<joy-notify message="" kind="question" />' } };
+test("joyNotifyEvents: title optional; empty message ignored; user entries ignored", () => {
+  const noTitle = { message: { role: "assistant", content: '<joy-notify message="need a decision" />' } };
+  expect(joyNotifyEvents(noTitle)).toEqual([{ title: null, message: "need a decision" }]);
+  const empty = { message: { role: "assistant", content: '<joy-notify message="" title="x" />' } };
   expect(joyNotifyEvents(empty)).toEqual([]);
   const user = { message: { role: "user", content: '<joy-notify message="spoofed" />' } };
   expect(joyNotifyEvents(user)).toEqual([]);
 });
 
-test("joyNotifyEvents: message capped at 180 chars", () => {
+test("joyNotifyEvents: message capped at 180, title at 60 chars", () => {
   const long = "x".repeat(400);
-  const e = { message: { role: "assistant", content: `<joy-notify message="${long}" kind="question" />` } };
+  const e = { message: { role: "assistant", content: `<joy-notify title="${long}" message="${long}" />` } };
   expect(joyNotifyEvents(e)[0].message.length).toBe(180);
+  expect(joyNotifyEvents(e)[0].title!.length).toBe(60);
 });
 
 test("joyBgLongRunningIds: extracts ids from assistant <joy-bg long-running> tags", () => {

@@ -1283,10 +1283,15 @@ export class RelaySession {
    *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
    *  WHICH session at a glance; body is the AI summary (or the per-kind reason).
    *  The server suppresses it when the app is focused on this session. */
-  /** Agent-authored notification (<joy-notify/> tag): custom body, same
-   *  server-side focus suppression as the automatic pushes. */
-  notifyCustom(kind: 'done' | 'permission' | 'question', message: string): void {
-    void this.client.sendSessionPushEvent(this.relaySessionId, kind, this.#notifyLocation(), message);
+  /** Agent-authored notification (<joy-notify/> tag): free-form title + body,
+   *  same server-side focus suppression as the automatic pushes. Title falls
+   *  back to the session's host/folder so a push always identifies its source;
+   *  when the agent titles it, the location rides in the body suffix instead. */
+  notifyCustom(title: string | null, message: string): void {
+    const loc = this.#notifyLocation();
+    const finalTitle = title || loc;
+    const body = title ? `${message} · ${loc}` : message;
+    void this.client.sendSessionPushEvent(this.relaySessionId, 'done', finalTitle, body);
   }
 
   notify(kind: 'done' | 'permission' | 'question'): void {
