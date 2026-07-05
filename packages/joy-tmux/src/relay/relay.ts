@@ -1028,8 +1028,8 @@ export class RelaySession {
    *  clear of one field can't be dropped by a still-pending set of the other.
    *  The caller (Session#reconcileBgTasks) dedups by DESIRED state, so we always
    *  write when called (no this.metadata skip that could race a pending write). */
-  async updateBgTasks(tasks: JoyTasksInfo | null, longRunning: number | null): Promise<void> {
-    await this.mergeMetadata({ joy__tasks: tasks, joy__longRunning: longRunning });
+  async updateBgTasks(tasks: JoyTasksInfo | null, agents: JoyTasksInfo | null, longRunning: number | null): Promise<void> {
+    await this.mergeMetadata({ joy__tasks: tasks, joy__agents: agents, joy__longRunning: longRunning });
   }
 
   /** Context tokens used as of the latest turn (input + cache-read + cache-create

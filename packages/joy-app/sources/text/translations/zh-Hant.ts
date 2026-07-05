@@ -81,6 +81,7 @@ export const zhHant: TranslationStructure = {
         detached: '已分離',
         compacting: '壓縮中',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 已完成`,
+        agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} 代理`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: '目前活躍',
         unknown: '未知',

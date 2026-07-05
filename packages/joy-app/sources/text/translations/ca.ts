@@ -80,6 +80,7 @@ export const ca: TranslationStructure = {
         detached: 'separat',
         compacting: 'compactant',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} completades`,
+        agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agents`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Actiu ara',
         unknown: 'desconegut',

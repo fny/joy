@@ -108,6 +108,8 @@ export interface SessionRowData {
     // the state color (the "status messages are broken" mismatch, 2026-07-04).
     tasksDone: number | null;
     tasksTotal: number | null;
+    agentsDone: number | null;
+    agentsTotal: number | null;
     retryAttempt: number | null;
     retryTotal: number | null;
     hasUnread: boolean;
@@ -141,8 +143,10 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         state = 'compacting'; // Claude summarizing context — purple, ranks above a paused turn
     } else if (hasPermissions) {
         state = 'permission_required';
+    } else if (session.metadata?.joy__agents && session.metadata.joy__agents.total > 0) {
+        state = 'agents'; // background AGENTS — magenta N/M, ranks above shell tasks
     } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
-        state = 'tasks'; // background work in flight — teal N/M, outlives the turn
+        state = 'tasks'; // background shell work in flight — teal N/M, outlives the turn
     } else if (session.thinking || (isOnline && session.metadata?.joy__thinking != null)) {
         // Persisted mirror (joy__thinking) restores the state on cold start —
         // the ephemeral only reaches connected clients. Presence-gated.
@@ -168,6 +172,8 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         totalTodosCount: session.todos?.length ?? 0,
         tasksDone: session.metadata?.joy__tasks?.done ?? null,
         tasksTotal: session.metadata?.joy__tasks?.total ?? null,
+        agentsDone: session.metadata?.joy__agents?.done ?? null,
+        agentsTotal: session.metadata?.joy__agents?.total ?? null,
         retryAttempt: session.metadata?.joy__retry?.attempt ?? null,
         retryTotal: session.metadata?.joy__retry?.total ?? null,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,

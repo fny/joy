@@ -104,6 +104,10 @@ export const MetadataSchema = z.object({
         done: z.number(),
         total: z.number(),
     }).nullable().optional(),
+    // Background AGENTS (async Task-tool agents) — magenta N/M, ranks above
+    // joy__tasks (shell/bash finishing tasks, teal).
+    joy__agents: z.object({ done: z.number(), total: z.number() }).nullable().optional(),
+
     // Count of live long-running background processes (servers/daemons the agent
     // tagged <joy-bg long-running>). These never "complete", so they're kept OUT
     // of joy__tasks (the N/M) and shown as plain text next to the status.

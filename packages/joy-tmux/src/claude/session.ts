@@ -183,7 +183,7 @@ export function flattenForMatch(text: string): string {
  *   complete: a <task-notification> user entry carrying the same id in <task-id>.
  * Mirrors the gating in #onTranscriptEntry (user role, non-meta).
  */
-export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: string } | null {
+export function bgTaskEvent(entry: any): { kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string } | null {
   // complete: newer Claude delivers the <task-notification> as an `attachment`
   // entry (attachment.prompt holds the payload, commandMode "task-notification"),
   // NOT a user message — this is the common case and the one the original
@@ -212,8 +212,8 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
   const content = msg.content;
   if (typeof content !== "string") {
     const tur = entry?.toolUseResult as Record<string, unknown> | undefined;
-    if (tur && typeof tur.backgroundTaskId === "string") return { kind: "launch", id: tur.backgroundTaskId };
-    if (tur && tur.isAsync === true && typeof tur.agentId === "string") return { kind: "launch", id: tur.agentId };
+    if (tur && typeof tur.backgroundTaskId === "string") return { kind: "launch", id: tur.backgroundTaskId, source: "shell" };
+    if (tur && tur.isAsync === true && typeof tur.agentId === "string") return { kind: "launch", id: tur.agentId, source: "agent" };
     // TaskStop: an explicitly stopped task never gets a <task-notification>,
     // so treat the stop tool_result as its completion — otherwise a stopped
     // long-running process leaves joy__longRunning stuck forever (and a
@@ -327,26 +327,32 @@ export function joyBgLongRunningIds(entry: any): string[] {
  * completion (server stopped) clears it. `lrIds` is the FULL set gathered up
  * front, so a launch is classified correctly even when its tag lands later.
  */
+export interface BgGroup { outstanding: Set<string>; total: number; done: number; }
 export function classifyBgTasks(
-  events: Array<{ kind: "launch" | "complete"; id: string }>,
+  events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }>,
   lrIds: Set<string>,
-): { outstanding: Set<string>; total: number; done: number; longRunning: Set<string> } {
-  const outstanding = new Set<string>();
+): { shell: BgGroup; agent: BgGroup; longRunning: Set<string>; outstanding: Set<string>; total: number; done: number } {
+  const shell: BgGroup = { outstanding: new Set(), total: 0, done: 0 };
+  const agent: BgGroup = { outstanding: new Set(), total: 0, done: 0 };
   const longRunning = new Set<string>();
-  let total = 0, done = 0;
+  const step = (g: BgGroup, id: string) => {
+    if (g.outstanding.has(id)) return;
+    if (g.outstanding.size === 0) { g.total = 0; g.done = 0; } // fresh batch, per group
+    g.outstanding.add(id); g.total++;
+  };
   for (const ev of events) {
     if (ev.kind === "launch") {
       if (lrIds.has(ev.id)) { longRunning.add(ev.id); continue; }
-      if (outstanding.has(ev.id)) continue;
-      if (outstanding.size === 0) { total = 0; done = 0; } // fresh batch
-      outstanding.add(ev.id);
-      total++;
+      step(ev.source === "agent" ? agent : shell, ev.id);
     } else {
-      if (longRunning.delete(ev.id)) continue; // a tagged server was stopped
-      if (outstanding.delete(ev.id)) done++;
+      if (longRunning.delete(ev.id)) continue;   // a tagged server was stopped
+      if (agent.outstanding.delete(ev.id)) { agent.done++; continue; }
+      if (shell.outstanding.delete(ev.id)) { shell.done++; }
     }
   }
-  return { outstanding, total, done, longRunning };
+  // Combined view for the union-based busy()/self-heal checks.
+  const outstanding = new Set([...shell.outstanding, ...agent.outstanding]);
+  return { shell, agent, longRunning, outstanding, total: shell.total + agent.total, done: shell.done + agent.done };
 }
 
 /**
@@ -466,7 +472,7 @@ export class Session {
   // #deriveBgTasks for semantics (append-only parse from a byte offset).
   #scan: {
     path: string; offset: number;
-    events: Array<{ kind: "launch" | "complete"; id: string }>;
+    events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }>;
     lrIds: Set<string>;
     lastGoal: { condition: string; met: boolean; atMs: number } | null;
   } | null = null;
@@ -2194,8 +2200,9 @@ export class Session {
    *  LONG-RUNNING processes (ids the agent tagged <joy-bg long-running> — servers/
    *  daemons that never "complete", so they're counted separately and never sit
    *  in the N/M where they'd stick at 0/1). */
-  #deriveBgTasks(): { outstanding: Set<string>; total: number; done: number; longRunning: Set<string> } {
-    const empty = { outstanding: new Set<string>(), total: 0, done: 0, longRunning: new Set<string>() };
+  #deriveBgTasks(): ReturnType<typeof classifyBgTasks> {
+    const emptyG = { outstanding: new Set<string>(), total: 0, done: 0 };
+    const empty = { shell: { ...emptyG }, agent: { ...emptyG }, longRunning: new Set<string>(), outstanding: new Set<string>(), total: 0, done: 0 };
     if (!this.transcriptPath || !existsSync(this.transcriptPath)) return empty;
     // Incremental scan: transcripts are append-only, so parse only the bytes
     // added since the last derive (a whole-file re-parse ran every 150ms-coalesced
@@ -2259,19 +2266,18 @@ export class Session {
    *  null when empty. Also the self-heal for a stuck/orphaned count. */
   #reconcileBgTasks(): void {
     const d = this.#deriveBgTasks();
-    this.#bgTasks = d.outstanding;
+    this.#bgTasks = d.outstanding; // union — busy()/self-heal want "any finishing task"
     this.#longRunning = d.longRunning;
-    const tasks = d.outstanding.size > 0 ? { done: d.done, total: d.total } : null;
+    // Split: shell/bash tasks → joy__tasks (teal); background AGENTS → joy__agents
+    // (magenta). Each pushed as its own N/M so the app can colour them apart.
+    const tasks = d.shell.outstanding.size > 0 ? { done: d.shell.done, total: d.shell.total } : null;
+    const agents = d.agent.outstanding.size > 0 ? { done: d.agent.done, total: d.agent.total } : null;
     const longRunning = d.longRunning.size > 0 ? d.longRunning.size : null;
-    // Dedup by desired state, then push BOTH in one patch (see updateBgTasks) so a
-    // clear can't be dropped by a pending set and the split never shows half-applied.
-    const key = JSON.stringify({ tasks, longRunning });
+    const key = JSON.stringify({ tasks, agents, longRunning });
     if (key === this.#lastBgKey) return;
     const relay = this.#relay;
     if (!relay) return;
-    // Record the key only AFTER the write resolves, so a FAILED write isn't
-    // dedup-suppressed forever — the next reconcile / 60s timer retries it.
-    void relay.updateBgTasks(tasks, longRunning).then(() => { this.#lastBgKey = key; }, () => { });
+    void relay.updateBgTasks(tasks, agents, longRunning).then(() => { this.#lastBgKey = key; }, () => { });
   }
 
   /** Apply a parsed /goal status: a met=false goal is ACTIVE (push it, keeping

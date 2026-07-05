@@ -82,6 +82,7 @@ export const ja: TranslationStructure = {
         detached: 'デタッチ',
         compacting: '圧縮中',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 完了`,
+        agentsRunning: ({ done, total }: { done: number; total: number }) => `エージェント ${done}/${total}`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'アクティブ',
         unknown: '不明',
