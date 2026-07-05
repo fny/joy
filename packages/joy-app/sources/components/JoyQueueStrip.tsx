@@ -16,9 +16,12 @@ type Queue = ReturnType<typeof useJoyQueue>;
 
 export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
     const { theme } = useUnistyles();
-    // Only waiting items (and the paused banner). The in-flight message has
-    // left the queue — no "sending" block.
-    const hasItems = queue.queue.length > 0 || queue.paused;
+    // Visible chips, the paused banner, and — new — a count-only line for
+    // HIDDEN pending items (rapid app sends queue with visible:false since
+    // their chat bubbles already exist; without the count the user had zero
+    // feedback that messages were being held: "I don't see queuing").
+    const hiddenPending = Math.max(0, (queue.pendingCount ?? 0) - queue.queue.length);
+    const hasItems = queue.queue.length > 0 || queue.paused || hiddenPending > 0;
     if (!hasItems) return null;
 
     // Reason-specific paused banner — distinguishes "the pane input has stray
@@ -45,6 +48,11 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
 
     return (
         <View style={styles.wrap}>
+            {hiddenPending > 0 && (
+                <View style={styles.pendingLine}>
+                    <Text style={styles.pendingText}>{t('joyQueue.pendingCount', { count: hiddenPending })}</Text>
+                </View>
+            )}
             {queue.paused && (
                 <Pressable style={styles.pausedRow} onPress={() => queue.resume()}>
                     <Ionicons name="warning-outline" size={15} color="#FF9500" />
@@ -81,6 +89,15 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
 });
 
 const styles = StyleSheet.create((theme) => ({
+    pendingLine: {
+        paddingHorizontal: 14,
+        paddingVertical: 4,
+    },
+    pendingText: {
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        fontStyle: 'italic',
+    },
     wrap: {
         marginHorizontal: 8,
         marginBottom: 6,

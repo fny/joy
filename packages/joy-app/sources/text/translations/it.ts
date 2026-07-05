@@ -368,6 +368,7 @@ export const it: TranslationStructure = {
         pausedDispatchMismatch: 'Un invio potrebbe non essere andato a buon fine — tocca per riprendere',
         pausedDefault: 'Un messaggio in coda non è stato inviato — tocca per riprendere',
         queuedMessage: 'Messaggio in coda',
+        pendingCount: ({ count }: { count: number }) => count === 1 ? '1 messaggio in coda…' : `${count} messaggi in coda…`,
         editTitle: 'Modifica messaggio in coda',
         hintWeb: 'clic destro su un messaggio per modificarlo o eliminarlo',
         hintTouch: 'tieni premuto un messaggio per modificarlo o eliminarlo',

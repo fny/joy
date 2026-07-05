@@ -361,6 +361,11 @@ export interface QueuedItem extends QueuedMessage {
 
 export interface QueueState {
   queue: QueuedMessage[];
+  /** ALL undelivered items (visible chips + hidden app-sends + the in-flight
+   *  dispatch) — the app's "N queued" indicator. Hidden items have chat
+   *  bubbles instead of chips, but without this count the user had zero
+   *  feedback that rapid sends were being held ("I don't see queuing"). */
+  pendingCount: number;
   /** Text of the (visible) message dispatched but not yet confirmed, or null. */
   inFlight: string | null;
   /** True when auto-drain is halted after a failed dispatch / dirty input. */
@@ -950,6 +955,7 @@ export class Session {
     const inFlight = this.#dispatchInFlight?.visible ? this.#dispatchInFlight.text : null;
     return {
       queue: visible.map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt })),
+      pendingCount: this.#queue.length + (this.#dispatchInFlight ? 1 : 0),
       inFlight,
       paused: this.#queuePaused,
       pauseReason: this.#queuePaused ? this.#pauseReason : undefined,

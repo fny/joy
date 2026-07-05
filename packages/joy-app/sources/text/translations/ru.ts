@@ -483,6 +483,7 @@ export const ru: TranslationStructure = {
         pausedDispatchMismatch: 'Отправка могла пройти некорректно — нажмите, чтобы продолжить',
         pausedDefault: 'Сообщение из очереди не отправилось — нажмите, чтобы продолжить',
         queuedMessage: 'Сообщение в очереди',
+        pendingCount: ({ count }: { count: number }) => `в очереди: ${count}…`,
         editTitle: 'Изменить сообщение в очереди',
         hintWeb: 'щёлкните правой кнопкой по сообщению, чтобы изменить или удалить',
         hintTouch: 'удерживайте сообщение, чтобы изменить или удалить',

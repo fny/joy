@@ -369,6 +369,7 @@ export const pt: TranslationStructure = {
         pausedDispatchMismatch: 'Um envio pode não ter sido concluído corretamente — toque para retomar',
         pausedDefault: 'Uma mensagem na fila não foi enviada — toque para retomar',
         queuedMessage: 'Mensagem na fila',
+        pendingCount: ({ count }: { count: number }) => count === 1 ? '1 mensagem na fila…' : `${count} mensagens na fila…`,
         editTitle: 'Editar mensagem na fila',
         hintWeb: 'clique com o botão direito em uma mensagem para editar ou excluir',
         hintTouch: 'segure uma mensagem para editar ou excluir',

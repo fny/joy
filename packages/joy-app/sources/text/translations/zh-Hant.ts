@@ -370,6 +370,7 @@ export const zhHant: TranslationStructure = {
         pausedDispatchMismatch: '有一次傳送可能未正常完成 — 點按以恢復',
         pausedDefault: '佇列中的訊息未傳送 — 點按以恢復',
         queuedMessage: '佇列中的訊息',
+        pendingCount: ({ count }: { count: number }) => `佇列中：${count} 則…`,
         editTitle: '編輯佇列中的訊息',
         hintWeb: '右鍵點按訊息以編輯或刪除',
         hintTouch: '長按訊息以編輯或刪除',

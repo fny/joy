@@ -387,6 +387,7 @@ export const pl: TranslationStructure = {
         pausedDispatchMismatch: 'Wysyłanie mogło nie przebiec poprawnie — dotknij, aby wznowić',
         pausedDefault: 'Wiadomość z kolejki nie została wysłana — dotknij, aby wznowić',
         queuedMessage: 'Wiadomość w kolejce',
+        pendingCount: ({ count }: { count: number }) => `w kolejce: ${count}…`,
         editTitle: 'Edytuj wiadomość w kolejce',
         hintWeb: 'kliknij wiadomość prawym przyciskiem, aby edytować lub usunąć',
         hintTouch: 'przytrzymaj wiadomość, aby edytować lub usunąć',
