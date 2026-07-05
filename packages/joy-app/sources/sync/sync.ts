@@ -1743,14 +1743,26 @@ class Sync {
                     }
                 }
                 if (currentLastSeq > 0 && minSeq > currentLastSeq + 1) {
-                    // Interior gap: rows we NEVER saw (an agent turn missed during a
-                    // socket drop, another client's sends) sit between our cursor and
-                    // our own acked rows. Advancing the cursor over them would make
-                    // the gap permanently unfetchable — forward sync only reads after
-                    // the cursor, and backward paging only reads older than the
-                    // initial page. That was the "invisible agent turn between two
-                    // user messages" hole. Reset and replay instead.
-                    this.healInteriorGap(sessionId);
+                    // Interior gap: rows we haven't seen yet (in-flight socket lag
+                    // during a hot turn — routine — or a genuinely missed agent turn)
+                    // sit between our cursor and our own acked rows. Advancing the
+                    // cursor over them would make the gap permanently unfetchable.
+                    //
+                    // Do NOT reset the store (healInteriorGap): this fires on any
+                    // send that races live activity, and nuking + replaying rebuilt
+                    // the entire chat — THE "list jumps when I send a message" bug.
+                    // Instead leave the cursor where it is and kick the messages
+                    // sync: forward sync pulls the gap rows AND our own acked rows
+                    // in seq order (the HTTP fetch includes the sender's rows, unlike
+                    // the socket broadcast), the reducer upgrades our optimistic rows
+                    // by localId when their fetched copies arrive (see
+                    // messageOrdering.spec "upgrades an optimistic send"), and a
+                    // pathologically huge gap is bounded by the forward-catchup
+                    // re-anchor. No reset, no rebuild, no jump. Skipping
+                    // reconcileSentMessages here is deliberate: assigning our rows
+                    // their (higher) seqs before the gap rows arrive would hand the
+                    // order-dependent reducer older-than-processed rows.
+                    this.getMessagesSync(sessionId).invalidate();
                 } else {
                     this.sessionLastSeq.set(sessionId, maxSeq);
                     // The POST ack is the ONLY place a sender learns the authoritative
@@ -1781,18 +1793,6 @@ class Sync {
         }
     }
 
-    /** Interior-gap heal: drop the seq anchors and the session's message/reducer
-     *  state, then refetch. The reducer is order-dependent (it mutates state
-     *  in-place as batches stream through), so rows that arrive OLDER than
-     *  already-processed ones can't simply be merged — a fresh replay from the
-     *  newest page is the only ordering-safe way to make a missed turn render. */
-    private healInteriorGap(sessionId: string) {
-        log.log(`💬 interior seq gap detected for ${sessionId} — resetting and refetching`);
-        this.sessionLastSeq.delete(sessionId);
-        this.sessionOldestSeq.delete(sessionId);
-        storage.getState().resetSessionMessages(sessionId);
-        this.getMessagesSync(sessionId).invalidate();
-    }
 
     private fetchMessages = async (sessionId: string) => {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
@@ -1976,8 +1976,7 @@ class Sync {
                     log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} but sends are pending — continuing replay`);
                     continue;
                 }
-                // Same reset the interior-gap heal uses (healInteriorGap), then
-                // refetch like a cold open, inline — we already hold the session
+                // Full reset (cursors + store), then refetch like a cold open, inline — we already hold the session
                 // message lock and the encryption handle. Skipped interior
                 // history stays on the server; scroll-up re-pages it on demand.
                 log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} — re-anchoring at latest page`);
