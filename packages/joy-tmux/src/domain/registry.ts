@@ -657,6 +657,12 @@ export class SessionRegistry {
   /** Re-attach relay sessions orphaned by a socket reconnect. */
   onRelayReconnect(): void {
     for (const session of this.#sessions.values()) {
+      // NEVER re-attach a killed session: end("killed") stopped its relay and
+      // wrote joy__state:'archived', but the Session object stays in #sessions
+      // — re-attaching here recreated a relay session under the same tag and
+      // overwrote 'archived' with 'detached', resurrecting the card in the app
+      // (red, heartbeating) on every socket blip. Same filter list() applies.
+      if (this.#isKilled(session)) continue;
       // Re-attach any session missing a relay — including ended ones, so their
       // file/git RPCs survive a socket reconnect too.
       if (session.relayAttached) {
