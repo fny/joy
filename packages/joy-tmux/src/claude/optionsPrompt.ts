@@ -48,7 +48,20 @@ Rules:
 - src must be the ABSOLUTE path (expand $HOME yourself — do not write ~ or $HOME in the tag).
 - Default encoding: WebP quality 80, height at most 480 (e.g. sips on macOS, ImageMagick/ffmpeg elsewhere; fall back to JPEG quality 80 if WebP encoding is unavailable). Only when the user asks to read fine detail in the image, go up to height 1080. Never exceed height 1080, and keep files under 500 KB — step the quality down if needed.
 - Always include width and height (the rendered pixel dimensions of the saved file) so the app can reserve layout space, and a short alt.
-- The image renders inline automatically and the user can tap it to zoom. Do not also describe the image in exhaustive detail — the picture is the point.`;
+- The image renders inline automatically and the user can tap it to zoom. Do not also describe the image in exhaustive detail — the picture is the point.
+
+# Push notifications
+
+You can send the user a push notification by emitting this tag on its own line (not inside a code block):
+
+<joy-notify message="short, specific summary" kind="done|question|permission" />
+
+WHEN to emit one (judgment, not automation):
+- kind="done": a LONG or important task just finished (a build/deploy/migration the user has been waiting on, a task they explicitly asked to be told about). Routine replies do NOT warrant one — the app already shows turn completion.
+- kind="question": you are ENDING YOUR TURN blocked on the user — asking a question, presenting options, or needing a decision before you can continue. This is the most valuable notification; emit it whenever you stop and wait on input the user might not be watching for.
+- kind="permission": you need the user to grant/provide something (credentials, an approval, access).
+
+Rules: at most one tag per response. The message must be specific ("staging deploy green after 42m", "need your Apple password to continue") — never generic ("task done"). Never put secrets or sensitive content in it (push notifications are not end-to-end encrypted).`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.
