@@ -324,7 +324,9 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
 });
 
 /** All-files tab: virtualized, cache-first, deferred-search file tree. */
-const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
+// Exported: the mobile files screen mounts this same tab behind a
+// Changes/All-files toggle, so phone and desktop browse the identical tree.
+export const AllFilesTab = React.memo(React.forwardRef<AllFilesTabHandle, {
     sessionId: string;
     selectedPath: string | null;
     onFilePress?: (filePath: string) => void;
