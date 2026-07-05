@@ -207,8 +207,15 @@ export default {
         ],
         updates: {
             url: "https://u.expo.dev/4d6417af-448e-4a7b-a36e-b05ce12251a2",
+            // NO hardcoded expo-channel-name: this header is what the BUILT app
+            // sends when polling for OTAs, and it OVERRIDES the eas.json build
+            // profile's channel — a preview build shipped polling "production"
+            // while updates were published to "preview", so OTAs never arrived
+            // (2026-07-05; unblocked server-side by pointing channel production
+            // at branch preview). Leaving it unset lets EAS inject the build
+            // profile's channel, so each build polls its own channel.
             requestHeaders: {
-                "expo-channel-name": "production"
+                "expo-channel-name": process.env.APP_ENV === "production" ? "production" : "preview"
             }
         },
         experiments: {
