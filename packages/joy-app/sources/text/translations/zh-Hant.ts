@@ -213,6 +213,8 @@ export const zhHant: TranslationStructure = {
         chatHistoryLimitDescription: '每個對話只顯示最近的訊息',
         chatHistoryLimitPlaceholder: '例如 50',
         chatHistoryLimitOff: '關閉',
+        jsUpdate: 'JS 更新',
+        jsUpdateDescription: '目前執行的 JavaScript 套件（OTA 更新時會變更）',
         chatHistoryLimitValue: ({ count }: { count: number }) => `最近 ${count} 則訊息`,
         mod06Title: '06 · 雙擊確認',
         mod06Description: '需要在 2 秒內再次點擊以提交助手的多選答案。有助於防止誤選。',

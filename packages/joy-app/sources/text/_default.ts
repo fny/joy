@@ -239,6 +239,8 @@ export const en = {
         chatHistoryLimitDescription: 'Show only the most recent messages per conversation',
         chatHistoryLimitPlaceholder: 'e.g. 50',
         chatHistoryLimitOff: 'Off',
+        jsUpdate: 'JS Update',
+        jsUpdateDescription: 'Which JavaScript bundle is running (changes on OTA updates)',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Last ${count} messages`,
         mod06Title: '06 · Double Tap',
         mod06Description: 'Require a second tap within 2 seconds to commit a multiple-choice answer from the assistant. Helps prevent accidental selections.',

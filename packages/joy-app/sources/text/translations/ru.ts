@@ -193,6 +193,8 @@ export const ru: TranslationStructure = {
         chatHistoryLimitDescription: 'Показывать только последние сообщения в каждом разговоре',
         chatHistoryLimitPlaceholder: 'например, 50',
         chatHistoryLimitOff: 'Выкл',
+        jsUpdate: 'JS-обновление',
+        jsUpdateDescription: 'Какой JavaScript-бандл запущен (меняется при OTA-обновлениях)',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Последние ${count} сообщений`,
         mod06Title: '06 · Двойное нажатие',
         mod06Description: 'Требует повторного нажатия в течение 2 секунд для подтверждения выбора варианта ответа от ассистента. Помогает избежать случайных выборов.',

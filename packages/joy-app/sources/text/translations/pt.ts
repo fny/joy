@@ -212,6 +212,8 @@ export const pt: TranslationStructure = {
         chatHistoryLimitDescription: 'Mostrar apenas as mensagens mais recentes por conversa',
         chatHistoryLimitPlaceholder: 'ex. 50',
         chatHistoryLimitOff: 'Desativado',
+        jsUpdate: 'Atualização JS',
+        jsUpdateDescription: 'Qual pacote JavaScript está em execução (muda com atualizações OTA)',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Últimas ${count} mensagens`,
         mod06Title: '06 · Toque duplo',
         mod06Description: 'Exige um segundo toque em 2 segundos para confirmar uma resposta de múltipla escolha do assistente. Ajuda a evitar seleções acidentais.',

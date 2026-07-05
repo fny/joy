@@ -230,6 +230,8 @@ export const pl: TranslationStructure = {
         chatHistoryLimitDescription: 'Pokazuj tylko najnowsze wiadomości w każdej rozmowie',
         chatHistoryLimitPlaceholder: 'np. 50',
         chatHistoryLimitOff: 'Wył.',
+        jsUpdate: 'Aktualizacja JS',
+        jsUpdateDescription: 'Który pakiet JavaScript jest uruchomiony (zmienia się przy aktualizacjach OTA)',
         chatHistoryLimitValue: ({ count }: { count: number }) => `Ostatnie ${count} wiadomości`,
         mod06Title: '06 · Podwójne dotknięcie',
         mod06Description: 'Wymaga drugiego dotknięcia w ciągu 2 sekund, aby zatwierdzić wybór odpowiedzi z listy od asystenta. Pomaga zapobiegać przypadkowym wyborom.',

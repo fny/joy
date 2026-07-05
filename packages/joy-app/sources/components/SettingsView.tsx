@@ -5,6 +5,7 @@ import { Text } from '@/components/StyledText';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
+import * as Updates from 'expo-updates';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
@@ -60,6 +61,22 @@ function formatBuildSubtitle(buildConfig: BuildConfig): string | undefined {
         commitTimestamp ? `Commit ${commitTimestamp}` : 'Commit',
         commitSha,
     ].filter(Boolean).join(' / ');
+}
+
+// The JS bundle's identity — the ONLY reliable way to see whether an OTA
+// landed: the native version string never changes on OTA, so "still says
+// 1.2.0" tells you nothing. Embedded = the bundle shipped inside the binary;
+// an id+timestamp = an OTA, stamped with when it was PUBLISHED.
+function otaDetail(): string {
+    try {
+        if (Updates.isEmbeddedLaunch || !Updates.updateId) return 'embedded bundle';
+        const when = Updates.createdAt
+            ? new Date(Updates.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            : '';
+        return `${Updates.updateId.slice(0, 8)}${when ? ` · ${when}` : ''}`;
+    } catch {
+        return 'unavailable';
+    }
 }
 
 export const SettingsView = React.memo(function SettingsView() {
@@ -283,6 +300,13 @@ export const SettingsView = React.memo(function SettingsView() {
                         onPress={() => openExternalUrl('https://www.apple.com/legal/internet-services/itunes/dev/stdeula/')}
                     />
                 )}
+                <Item
+                    title={t('settingsMods.jsUpdate')}
+                    subtitle={t('settingsMods.jsUpdateDescription')}
+                    detail={otaDetail()}
+                    icon={<Ionicons name="cloud-download-outline" size={29} color={theme.colors.textSecondary} />}
+                    showChevron={false}
+                />
                 <Item
                     title={t('common.version')}
                     subtitle={versionSubtitle}
