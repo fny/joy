@@ -1,7 +1,7 @@
 {
   "name": "@fny/joy-tmux",
-  "version": "1.4.0",
-  "description": "joy-tmux daemon + CLI — run Claude Code sessions in tmux, bridged to the joy/Happy relay.",
+  "version": "1.5.0",
+  "description": "joy-tmux daemon + CLI \u2014 run Claude Code sessions in tmux, bridged to the joy/Happy relay.",
   "type": "module",
   "bin": {
     "joy": "./bin/joy.mjs"
