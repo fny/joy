@@ -29,8 +29,14 @@ export async function getProjectFiles(sessionId: string): Promise<ProjectFilesLi
 
     const cwd = session.metadata.path;
 
+    // git ls-files for repos (tracked + untracked, .gitignore respected);
+    // outside a repo, fall back to a pruned find so the All-files tab works on
+    // plain directories too (the header comment always promised this fallback
+    // — it was never actually implemented, so non-git projects showed nothing).
+    // The prune list covers the usual heavyweight dirs; 20k-file cap protects
+    // against pathological trees. BSD/GNU-find compatible (boite is a Mac).
     const res = await sessionBash(sessionId, {
-        command: 'git -c core.quotepath=false ls-files --cached --others --exclude-standard',
+        command: "git -c core.quotepath=false ls-files --cached --others --exclude-standard 2>/dev/null || { find . \\( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name __pycache__ -o -name .next -o -name dist -o -name build -o -name Pods -o -name DerivedData \\) -prune -o -type f -print 2>/dev/null | head -20000; }",
         cwd,
         timeout: 15000,
     });
