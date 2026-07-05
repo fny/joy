@@ -168,15 +168,24 @@ export default React.memo(function JoyPaneScreen() {
             )}
             {/* Pane view — vertical scroll only; the window is sized to fit this
                 width (adaptive resize), so there's no horizontal scroll to drift. */}
+            {/* A failed poll (timeout, daemon blip) must NOT blank the terminal —
+                keep the last capture visible + scrollable and show a small banner
+                instead. The 1.5s poll keeps retrying, and a success clears the
+                banner + refreshes the text. */}
+            {paneError != null && (
+                <View style={styles.errorBanner}>
+                    <Text style={styles.errorBannerText} numberOfLines={2}>
+                        {`⚠ ${paneError} — retrying…`}
+                    </Text>
+                </View>
+            )}
             <ScrollView
                 ref={scrollRef}
                 style={styles.paneScroll}
                 onLayout={(e) => drivePaneSize(e.nativeEvent.layout.width, e.nativeEvent.layout.height)}
                 onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
             >
-                {paneError
-                    ? <Text style={styles.paneText} selectable>{`⚠ ${paneError}`}</Text>
-                    : <AnsiText text={pane || '…'} style={styles.paneText} />}
+                <AnsiText text={pane || '…'} style={styles.paneText} />
             </ScrollView>
 
             {/* Quick keys — horizontally scrollable */}
@@ -232,6 +241,17 @@ const styles = StyleSheet.create((theme, runtime) => ({
         flex: 1,
         backgroundColor: '#0c0c0c',
         paddingBottom: runtime.insets.bottom,
+    },
+    errorBanner: {
+        backgroundColor: 'rgba(255, 149, 0, 0.18)',
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(255, 149, 0, 0.35)',
+        paddingVertical: 5,
+        paddingHorizontal: 12,
+    },
+    errorBannerText: {
+        color: '#FFB340',
+        fontSize: 12,
     },
     paneScroll: {
         flex: 1,
