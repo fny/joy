@@ -7,6 +7,8 @@ interface SimpleSyntaxHighlighterProps {
   code: string;
   language: string | null;
   selectable: boolean;
+  fontSize?: number;
+  wrap?: boolean;
 }
 
 // Get theme-aware colors
@@ -250,7 +252,9 @@ const tokenizeCode = (code: string, language: string | null) => {
 export const SimpleSyntaxHighlighter: React.FC<SimpleSyntaxHighlighterProps> = ({
   code,
   language,
-  selectable
+  selectable,
+  fontSize = 14,
+  wrap = true,
 }) => {
   const { theme } = useUnistyles();
   const colors = getColors(theme);
@@ -293,14 +297,16 @@ export const SimpleSyntaxHighlighter: React.FC<SimpleSyntaxHighlighterProps> = (
     }
   };
 
+  const lineHeight = Math.round(fontSize * 1.43);
   return (
     <View>
       <Text 
         selectable={selectable}
+        {...(wrap ? {} : { numberOfLines: undefined })}
         style={{ 
           fontFamily: Typography.mono().fontFamily,
-          fontSize: 14,
-          lineHeight: 20,
+          fontSize,
+          lineHeight,
         }}
       >
         {tokens.map((token, index) => (
