@@ -143,7 +143,9 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         state = 'permission_required';
     } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
         state = 'tasks'; // background work in flight — teal N/M, outlives the turn
-    } else if (session.thinking) {
+    } else if (session.thinking || (isOnline && session.metadata?.joy__thinking != null)) {
+        // Persisted mirror (joy__thinking) restores the state on cold start —
+        // the ephemeral only reaches connected clients. Presence-gated.
         state = 'thinking';
     } else {
         state = 'waiting';

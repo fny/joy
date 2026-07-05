@@ -665,6 +665,8 @@ export class Session {
     // plain socket reconnect keeps #retry (the backoff timer survives in-process),
     // so a genuinely-live banner is preserved. (Idempotent — no-op if unset.)
     if (!this.#retry) void rs.updateRetry(null);
+    // Same reconcile for a stale persisted thinking flag (see clearThinkingMeta).
+    if (!this.#thinking) void rs.clearThinkingMeta();
     // Same reconcile for the compacting banner: a daemon restart mid-compaction
     // rebuilds the Session with #compacting=null while joy__compacting persisted
     // server-side. The in-memory backstop timer is also gone, so without this the

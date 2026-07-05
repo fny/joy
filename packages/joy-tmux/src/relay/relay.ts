@@ -1242,8 +1242,27 @@ export class RelaySession {
   private lastThinking = false;
 
   setThinking(thinking: boolean): void {
+    const changed = this.lastThinking !== thinking;
     this.lastThinking = thinking;
     this.client.emitAlive(this.relaySessionId, thinking);
+    // ALSO persist on change: the ephemeral only reaches currently-connected
+    // clients and the server never stores it, so a cold app start showed every
+    // session idle until the next 30s keepalive happened to land ("close the
+    // app and the status is lost"). The app treats joy__thinking + live
+    // presence as thinking, so state survives restarts; presence gating keeps
+    // a daemon death from freezing a stale blue.
+    if (changed) {
+      void this.mergeMetadata({ joy__thinking: thinking ? { since: Date.now() } : null }).catch(() => {});
+    }
+  }
+
+  /** Clear a stale persisted joy__thinking (daemon restarted while the flag
+   *  was set; the fresh Session starts not-thinking so the change-gate in
+   *  setThinking would never write the false). Attach-time reconcile, same
+   *  pattern as the retry/compacting banners. */
+  async clearThinkingMeta(): Promise<void> {
+    if (this.metadata?.joy__thinking == null) return;
+    await this.mergeMetadata({ joy__thinking: null });
   }
 
   /** Re-emit presence with the CURRENT thinking value — used on socket

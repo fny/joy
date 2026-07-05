@@ -132,7 +132,10 @@ export function useSessionStatus(session: Session): SessionStatus {
         });
     }
 
-    if (session.thinking === true) {
+    // Ephemeral flag (live socket) OR the persisted mirror — the mirror is what
+    // survives an app cold start; it's only trusted while presence is live
+    // (isOnline gates this whole branch), so a dead daemon can't freeze it.
+    if (session.thinking === true || session.metadata?.joy__thinking != null) {
         return withBg({
             ...paletteBase('thinking'),
             statusText: vibingMessage,
