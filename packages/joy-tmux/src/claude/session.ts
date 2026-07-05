@@ -239,13 +239,14 @@ export function bgTaskEvent(entry: any): { kind: "launch" | "complete"; id: stri
  * tasks — they never "complete", so they must never sit in the N/M counter.
  */
 /**
- * <joy-notify title="…" message="…" /> — the agent's explicit "this is worth
- * a push": a long task finished, input is needed, a blocker hit. Free-form
- * title + message (title optional — falls back to the session's host/folder);
- * WHEN to emit is prompt-contract judgment, not an enum. Agent-judged, so
- * routine turn ends don't spam.
+ * <joy-notify message="…" detail="…" /> — the agent's explicit "this is worth
+ * a push". `message` is the headline (what happened: "Deploy finished"),
+ * `detail` the substance ("staging green after 42m"). Renamed from title/
+ * message — "title" invited project-title-shaped junk instead of content
+ * (2026-07-05). Legacy title/message tags still parse (title→headline).
+ * WHEN to emit is prompt-contract judgment, not an enum.
  */
-export function joyNotifyEvents(entry: any): Array<{ title: string | null; message: string }> {
+export function joyNotifyEvents(entry: any): Array<{ headline: string; detail: string | null }> {
   const msg = entry?.message as Record<string, unknown> | undefined;
   if (!msg || String(msg.role || "") !== "assistant") return [];
   const c = msg.content;
@@ -255,17 +256,22 @@ export function joyNotifyEvents(entry: any): Array<{ title: string | null; messa
     for (const p of c) if (p?.type === "text" && typeof p.text === "string") text += "\n" + p.text;
   }
   if (!text.includes("<joy-notify")) return [];
-  const out: Array<{ title: string | null; message: string }> = [];
+  const out: Array<{ headline: string; detail: string | null }> = [];
   const tagRe = /<joy-notify\b[^>]*>/gi;
   let m: RegExpExecArray | null;
   while ((m = tagRe.exec(text))) {
-    const msgAttr = /\bmessage="([^"]*)"/.exec(m[0]);
-    if (!msgAttr || !msgAttr[1].trim()) continue;
-    const titleAttr = /\btitle="([^"]*)"/.exec(m[0]);
-    out.push({
-      title: titleAttr?.[1].trim() ? titleAttr[1].trim().slice(0, 60) : null,
-      message: msgAttr[1].trim().slice(0, 180),
-    });
+    const attr = (name: string) => {
+      const a = new RegExp(`\\b${name}="([^"]*)"`).exec(m![0]);
+      return a?.[1].trim() || null;
+    };
+    const legacyTitle = attr("title");
+    const message = attr("message");
+    const detail = attr("detail");
+    // New form: message=headline, detail=body. Legacy form: title=headline, message=body.
+    const headline = legacyTitle ? legacyTitle : message;
+    const body = legacyTitle ? message : detail;
+    if (!headline) continue;
+    out.push({ headline: headline.slice(0, 60), detail: body ? body.slice(0, 180) : null });
   }
   return out;
 }
@@ -2785,7 +2791,7 @@ export class Session {
       // history can never re-fire old notifications (the forwardedUuids skip
       // above covers replayed entries, this covers never-forwarded old ones).
       if (this.#relay && entryTimeMs >= this.#tailBoundAt - 60_000) {
-        for (const ev of joyNotifyEvents(entry)) this.#relay.notifyCustom(ev.title, ev.message);
+        for (const ev of joyNotifyEvents(entry)) this.#relay.notifyCustom(ev.headline, ev.detail);
       }
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
@@ -2865,7 +2871,18 @@ export class Session {
             this.#bgTasks.size > 0 ? `bgTasks=${this.#bgTasks.size}` : null,
           ].filter(Boolean);
           if (notifyBlockers.length === 0) {
-            this.#relay?.notify("done");
+            // Body = the reply's first line — a glanceable "what happened",
+            // not the session title (which reads as project-name noise).
+            // NOTE push payloads are not E2E-encrypted; same trade as
+            // joy-notify (whose contract bans secrets in the fields).
+            let snippet: string | undefined;
+            for (const block of blocks) {
+              if (block.type === "text" && typeof block.text === "string") {
+                const line = stripAnsi(block.text).split("\n").find(l => l.trim());
+                if (line) { snippet = line.trim().slice(0, 140); break; }
+              }
+            }
+            this.#relay?.notify("done", snippet);
           } else {
             // Diagnosable, not silent: "why didn't I get a push" was previously
             // unanswerable from logs.
