@@ -38,7 +38,7 @@ import {
   type DeliverySource,
 } from "../domain/receipts";
 import { writeAttachmentToCwd } from "../domain/attachments";
-import { saveWindowRecord } from "../domain/windowRecord";
+import { saveWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import { saveQueue, loadQueue, clearQueue } from "../domain/queueStore";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
@@ -274,6 +274,28 @@ export function joyNotifyEvents(entry: any): Array<{ headline: string; detail: s
     out.push({ headline: headline.slice(0, 60), detail: body ? body.slice(0, 180) : null });
   }
   return out;
+}
+
+/**
+ * <joy-title value="…" /> — the agent re-titles the session when its primary
+ * focus genuinely shifts (prompt contract: major work changes only, 2-6
+ * words). Fixes the stuck-title problem: Claude writes its ai-title off the
+ * first message and never revisits, while sessions here live for days and
+ * pivot constantly. A user-set title (/title) LOCKS the title against both
+ * this tag and ai-title re-titles until a bare /title unlocks.
+ */
+export function joyTitleValue(entry: any): string | null {
+  const msg = entry?.message as Record<string, unknown> | undefined;
+  if (!msg || String(msg.role || "") !== "assistant") return null;
+  const c = msg.content;
+  let text = "";
+  if (typeof c === "string") text = c;
+  else if (Array.isArray(c)) {
+    for (const p of c) if (p?.type === "text" && typeof p.text === "string") text += "\n" + p.text;
+  }
+  if (!text.includes("<joy-title")) return null;
+  const m = /<joy-title\b[^>]*\bvalue="([^"]+)"[^>]*>/i.exec(text);
+  return m?.[1].trim() ? m[1].trim().slice(0, 60) : null;
 }
 
 export function joyBgLongRunningIds(entry: any): string[] {
@@ -561,6 +583,8 @@ export class Session {
   // into the pane survives an app send instead of being destroyed by it.
   // Flattened to one line (paneInputText collapses newlines). In-memory only.
   #preservedDraft: string | null = null;
+  // User-set title lock (see joyTitleValue / windowRecord.titleLockedByUser).
+  #titleLocked = false;
   // The pending delayed-Enter (submit) for a just-typed message. Cancellable so an
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
   // into the pane (re-submitting an aborted message, or submitting into a turn).
@@ -598,6 +622,8 @@ export class Session {
     this.transcriptPath = init.transcriptPath;
     this.#transcriptStartOffset = init.transcriptStartOffset ?? 0;
     this.#backfillCapBytes = init.backfillCapBytes ?? 0;
+    // Title lock survives restarts via the window record.
+    this.#titleLocked = loadWindowRecord(this.id)?.titleLockedByUser === true;
     // Reload any queue items a previous daemon left undelivered (B1). They
     // drain on the first idle exactly like freshly queued messages.
     const persisted = loadQueue(this.id);
@@ -999,7 +1025,7 @@ export class Session {
           mirrorToRelay: opts?.mirrorToRelay ?? true,
         });
       } else if (cmd.name === "title") {
-        this.#setTitle(cmd.args);
+        this.#setTitle(cmd.args, { byUser: true });
       } else if (cmd.name === "login-code" && cmd.args.trim()) {
         void this.#submitLoginCode(cmd.args);
       }
@@ -1937,9 +1963,22 @@ export class Session {
    * so the app shows it instead of "New Chat". A later ai-title entry can still overwrite
    * it (same as renaming in Claude). Bare `/title` (no text) is a no-op.
    */
-  #setTitle(title: string): void {
+  #setTitle(title: string, opts?: { byUser?: boolean }): void {
     const t = title.trim();
-    if (!t) return;
+    if (!t) {
+      // Bare /title from the user = UNLOCK + revert to Claude's latest ai-title.
+      if (opts?.byUser && this.#titleLocked) {
+        this.#titleLocked = false;
+        saveWindowRecord(this.id, { titleLockedByUser: false });
+        const ai = this.#readLatestAiTitle();
+        if (ai) { this.summary = ai; void this.#relay?.updateSummary(ai); this.#deps.broadcast("session_update", this.toJSON()); }
+      }
+      return;
+    }
+    if (opts?.byUser) {
+      this.#titleLocked = true;
+      saveWindowRecord(this.id, { titleLockedByUser: true });
+    }
     this.summary = t;
     void this.#relay?.updateSummary(t);
     this.#deps.broadcast("session_update", this.toJSON());
@@ -2483,6 +2522,7 @@ export class Session {
     // title instead of "New Chat".
     if (entryType === "ai-title") {
       const title = typeof entry.aiTitle === "string" ? entry.aiTitle.trim() : "";
+      if (this.#titleLocked) return; // user-set title wins until a bare /title unlocks
       if (title) {
         this.summary = title;
         void this.#relay?.updateSummary(title);
@@ -2792,6 +2832,10 @@ export class Session {
       // above covers replayed entries, this covers never-forwarded old ones).
       if (this.#relay && entryTimeMs >= this.#tailBoundAt - 60_000) {
         for (const ev of joyNotifyEvents(entry)) this.#relay.notifyCustom(ev.headline, ev.detail);
+        const newTitle = joyTitleValue(entry);
+        if (newTitle && !this.#titleLocked && newTitle !== this.summary) {
+          this.#setTitle(newTitle); // agent re-title — never locks
+        }
       }
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn

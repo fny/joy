@@ -20,6 +20,10 @@ export interface WindowRecord {
   launchCwd: string;
   /** Claude's transcript/session uuid, once learned from a transcript entry. */
   claudeSessionId?: string;
+  /** True once the user set a title explicitly (/title): agent joy-title tags
+   *  and Claude's own ai-title re-titles are ignored until a bare /title
+   *  unlocks. Persisted so the lock survives daemon restarts. */
+  titleLockedByUser?: boolean;
   updatedAt: number;
 }
 
@@ -44,7 +48,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -53,6 +57,7 @@ export function saveWindowRecord(
       id,
       launchCwd: patch.launchCwd ?? prev?.launchCwd ?? "",
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
+      titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet
