@@ -2268,16 +2268,19 @@ export class Session {
     const d = this.#deriveBgTasks();
     this.#bgTasks = d.outstanding; // union — busy()/self-heal want "any finishing task"
     this.#longRunning = d.longRunning;
-    // Split: shell/bash tasks → joy__tasks (teal); background AGENTS → joy__agents
-    // (magenta). Each pushed as its own N/M so the app can colour them apart.
-    const tasks = d.shell.outstanding.size > 0 ? { done: d.shell.done, total: d.shell.total } : null;
+    // joy__tasks stays the COMBINED count (shell + agents) — backward compat:
+    // an app that doesn't yet render joy__agents still shows teal N/M for
+    // agents instead of nothing (the split regressed that until the magenta
+    // OTA ships). joy__agents is the agent OVERLAY: a new app prefers it and
+    // colours those magenta, ranking above the teal combined.
+    const combined = d.outstanding.size > 0 ? { done: d.done, total: d.total } : null;
     const agents = d.agent.outstanding.size > 0 ? { done: d.agent.done, total: d.agent.total } : null;
     const longRunning = d.longRunning.size > 0 ? d.longRunning.size : null;
-    const key = JSON.stringify({ tasks, agents, longRunning });
+    const key = JSON.stringify({ combined, agents, longRunning });
     if (key === this.#lastBgKey) return;
     const relay = this.#relay;
     if (!relay) return;
-    void relay.updateBgTasks(tasks, agents, longRunning).then(() => { this.#lastBgKey = key; }, () => { });
+    void relay.updateBgTasks(combined, agents, longRunning).then(() => { this.#lastBgKey = key; }, () => { });
   }
 
   /** Apply a parsed /goal status: a met=false goal is ACTIVE (push it, keeping
