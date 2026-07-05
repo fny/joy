@@ -2845,9 +2845,18 @@ export class Session {
           // deliberately doesn't block: servers never "finish". The final
           // turn-end — after the last completion empties #bgTasks (reconcile is
           // coalesced at 150ms, well inside LLM reply latency) — pushes once.
-          if (!this.#dispatchInFlight && this.#queue.length === 0 && !this.#drainRetry
-            && this.#bgTasks.size === 0) {
+          const notifyBlockers = [
+            this.#dispatchInFlight ? "dispatch" : null,
+            this.#queue.length > 0 ? `queue=${this.#queue.length}` : null,
+            this.#drainRetry ? "drainRetry" : null,
+            this.#bgTasks.size > 0 ? `bgTasks=${this.#bgTasks.size}` : null,
+          ].filter(Boolean);
+          if (notifyBlockers.length === 0) {
             this.#relay?.notify("done");
+          } else {
+            // Diagnosable, not silent: "why didn't I get a push" was previously
+            // unanswerable from logs.
+            process.stderr.write(`[notify] ${this.id}: done push skipped (${notifyBlockers.join(",")})\n`);
           }
         }
       }

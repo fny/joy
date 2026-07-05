@@ -705,7 +705,9 @@ export class RelayClient {
         const res = await fetch(this.url(`/v1/sessions/${encodeURIComponent(sessionId)}/push-event`), {
           method: 'POST', headers: this.headers(), body: body_,
         });
-        if (res.ok) return;
+        // Success IS logged: "no push arrived" must be distinguishable between
+        // never-sent, server-suppressed (app focused), and delivery failure.
+        if (res.ok) { log(`push-event ${kind} sent for ${sessionId} (server decides suppression)`); return; }
         if (res.status >= 400 && res.status < 500) { log(`push-event ${kind} for ${sessionId}: HTTP ${res.status}`); return; }
         log(`push-event ${kind} for ${sessionId}: HTTP ${res.status} (attempt ${attempt + 1})`);
       } catch (e) {
