@@ -128,13 +128,15 @@ export function scanProject(cwd: string): ScannedCommand[] {
   return dedupeSorted([...scanCommandsDir(join(base, "commands")), ...scanSkillsDir(join(base, "skills"))]);
 }
 
-/** Machine-wide commands: personal `~/.claude` + installed plugins. */
+/** Machine-wide commands: personal `~/.claude` only. Plugin commands
+ *  (marketplaces/<m>/plugins/<p>) are deliberately EXCLUDED — they flooded
+ *  the app's "/" autocomplete with noise (claude-code-setup, example-plugin,
+ *  …) the user never invokes from chat ("I don't want any plugins"). */
 export function scanMachine(home: string): ScannedCommand[] {
   const base = join(home, ".claude");
   return dedupeSorted([
     ...scanCommandsDir(join(base, "commands")),
     ...scanSkillsDir(join(base, "skills")),
-    ...scanPluginCommands(join(base, "plugins")),
   ]);
 }
 
@@ -184,7 +186,7 @@ export class CommandRegistry {
   rescanMachine(): void {
     const machine = scanMachine(this.#home);
     this.#machine = new Set(machine.map((c) => c.name));
-    this.#plugins = new Set(scanPluginCommands(join(this.#home, ".claude", "plugins")).map((c) => c.name));
+    this.#plugins = new Set(); // plugin commands excluded from autocomplete entirely (see scanMachine)
     this.#mergeDescriptions(machine);
   }
 

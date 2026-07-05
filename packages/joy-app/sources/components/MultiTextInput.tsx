@@ -95,10 +95,14 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
             inputRef.current.setSelection(sel.start, sel.end);
         }
     });
-    // Command lines (start with ! bash, & , or / slash command) read better in
-    // monospace with autocorrect/autocapitalize off — typing a command into a
-    // proportional, sentence-cased, autocorrecting field mangles it.
+    // Command lines (start with ! bash, &, or / slash command) need
+    // autocorrect/autocapitalize/spellcheck OFF — an autocorrecting field
+    // mangles them. Only SHELL lines (!/&) also flip to monospace: slash
+    // commands are chat-adjacent and the whole-field mono flip on typing "/"
+    // was jarring (the detected command renders bold in the sent bubble
+    // instead).
     const isCommandLine = /^\s*[!&/]/.test(text);
+    const isShellLine = /^\s*[!&]/.test(text);
     const textStyle = {
         width: '100%' as const,
         fontSize: MULTI_TEXT_INPUT_FONT_SIZE,
@@ -112,7 +116,7 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
         paddingLeft: props.paddingLeft,
         paddingRight: props.paddingRight,
         opacity: editable ? 1 : 0.58,
-        ...(isCommandLine ? Typography.mono() : Typography.default()),
+        ...(isShellLine ? Typography.mono() : Typography.default()),
     };
 
     React.useEffect(() => {
