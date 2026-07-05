@@ -753,7 +753,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const composer = (
         <>
-        {isJoyTmux && <JoyQueueStrip queue={joyQueue} />}
+        {isJoyTmux && <JoyQueueStrip queue={joyQueue} sessionId={sessionId} />}
         <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
             <DraftQueueStrip sessionId={sessionId} />
         </CenteredInputWidth>

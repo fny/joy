@@ -9,19 +9,25 @@ import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
+import { useDraftQueueStore } from '@/-session/draftQueue';
 import { t } from '@/text';
 import type { useJoyQueue } from '@/hooks/useJoyQueue';
 
 type Queue = ReturnType<typeof useJoyQueue>;
 
-export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
+export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; sessionId: string }) => {
     const { theme } = useUnistyles();
-    // Visible chips, the paused banner, and — new — a count-only line for
-    // HIDDEN pending items (rapid app sends queue with visible:false since
-    // their chat bubbles already exist; without the count the user had zero
-    // feedback that messages were being held: "I don't see queuing").
-    const hiddenPending = Math.max(0, (queue.pendingCount ?? 0) - queue.queue.length);
-    const hasItems = queue.queue.length > 0 || queue.paused || hiddenPending > 0;
+    // Visible chips, the paused banner, and HIDDEN pending items (rapid app
+    // sends queue with visible:false — their chat bubbles already exist).
+    // Hidden items get actionable chips too: Edit cancels the queued delivery
+    // and moves the text into the on-device drafts strip (it can't be edited
+    // in place — the message is already an immutable server row); Delete just
+    // cancels. Older daemons don't send `hidden` — fall back to a count line.
+    const hidden = queue.hidden ?? [];
+    const hiddenCountOnly = queue.hidden === undefined
+        ? Math.max(0, (queue.pendingCount ?? 0) - queue.queue.length)
+        : 0;
+    const hasItems = queue.queue.length > 0 || queue.paused || hidden.length > 0 || hiddenCountOnly > 0;
     if (!hasItems) return null;
 
     // Reason-specific paused banner — distinguishes "the pane input has stray
@@ -38,6 +44,22 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
         if (next != null && next.trim() && next.trim() !== current) queue.edit(id, next.trim());
     };
 
+    // Hidden (app-sent) queued item: Edit = cancel delivery + move text into
+    // the drafts strip for reworking; Delete = cancel delivery. The original
+    // chat bubble stays (immutable history) — it just won't be answered.
+    const showHiddenMenu = (id: string, text: string) => {
+        Modal.alert(t('joyQueue.queuedMessage'), text, [
+            {
+                text: t('common.edit'), onPress: () => {
+                    void queue.cancel(id);
+                    useDraftQueueStore.getState().add(sessionId, text);
+                }
+            },
+            { text: t('common.delete'), style: 'destructive', onPress: () => { void queue.cancel(id); } },
+            { text: t('common.cancel'), style: 'cancel' },
+        ]);
+    };
+
     const showMenu = (id: string, text: string) => {
         Modal.alert(t('joyQueue.queuedMessage'), text, [
             { text: t('common.edit'), onPress: () => { void editItem(id, text); } },
@@ -48,11 +70,21 @@ export const JoyQueueStrip = React.memo(({ queue }: { queue: Queue }) => {
 
     return (
         <View style={styles.wrap}>
-            {hiddenPending > 0 && (
+            {hiddenCountOnly > 0 && (
                 <View style={styles.pendingLine}>
-                    <Text style={styles.pendingText}>{t('joyQueue.pendingCount', { count: hiddenPending })}</Text>
+                    <Text style={styles.pendingText}>{t('joyQueue.pendingCount', { count: hiddenCountOnly })}</Text>
                 </View>
             )}
+            {hidden.map((item) => (
+                <Pressable
+                    key={item.id}
+                    onPress={() => showHiddenMenu(item.id, item.text)}
+                    style={styles.pendingLine}
+                    accessibilityRole="button"
+                >
+                    <Text style={styles.pendingText} numberOfLines={1}>{t('joyQueue.pendingItem', { text: item.text })}</Text>
+                </Pressable>
+            ))}
             {queue.paused && (
                 <Pressable style={styles.pausedRow} onPress={() => queue.resume()}>
                     <Ionicons name="warning-outline" size={15} color="#FF9500" />

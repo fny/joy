@@ -79,6 +79,7 @@ export const MetadataSchema = z.object({
     joy__queue: z.object({
         queue: z.array(z.object({ id: z.string(), text: z.string(), createdAt: z.number() })),
         pendingCount: z.number().optional(),
+        hidden: z.array(z.object({ id: z.string(), text: z.string(), createdAt: z.number() })).optional(),
         inFlight: z.string().nullable(),
         paused: z.boolean(),
         pauseReason: z.enum(['input_dirty', 'dispatch_timeout', 'dispatch_mismatch', 'dispatch_failed']).optional(),
