@@ -21,6 +21,7 @@ import { TerminalKeyBar } from '@/components/TerminalKeyBar';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useActiveInterval } from '@/hooks/useActiveInterval';
 import { useIsTablet } from '@/utils/responsive';
+import { useRootGutter } from '@/hooks/useRootGutter';
 
 const POLL_MS = 1500;
 // Pane font metrics — char width ≈ 0.6em for the mono fonts below; used to
@@ -36,6 +37,12 @@ export default React.memo(function JoyPaneScreen() {
     const sessionId = String(params.id ?? '');
 
     const isTablet = useIsTablet();
+    // Landscape gutters (root safe-area strips) melt into the terminal's dark
+    // background while this screen is focused, instead of theme-colored bars.
+    useFocusEffect(React.useCallback(() => {
+        useRootGutter.getState().setColor('#0c0c0c');
+        return () => useRootGutter.getState().setColor(null);
+    }, []));
     const [pane, setPane] = React.useState<string>('');
     const [paneError, setPaneError] = React.useState<string | null>(null);
     const [input, setInput] = React.useState('');

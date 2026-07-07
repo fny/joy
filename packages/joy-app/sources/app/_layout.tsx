@@ -21,7 +21,8 @@ import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
 import { CommandPaletteProvider } from '@/components/CommandPalette/CommandPaletteProvider';
 import { StatusBarProvider } from '@/components/StatusBarProvider';
-// import * as SystemUI from 'expo-system-ui';
+import * as SystemUI from 'expo-system-ui';
+import { useRootGutter } from '@/hooks/useRootGutter';
 import { initConsoleLogging, setConsoleOutputEnabled } from '@/utils/consoleLogging';
 import { useLocalSetting } from '@/sync/storage';
 import { useUnistyles } from 'react-native-unistyles';
@@ -86,14 +87,28 @@ SplashScreen.preventAutoHideAsync();
 // Remote logging to local log server (configured via Dev > Log Server setting)
 initConsoleLogging()
 
-// Component to apply horizontal safe area padding
+// Applies horizontal safe-area padding AND paints the gutters. In landscape the
+// left/right insets are non-zero (notch / rounded corners); padding alone left
+// the bare native window (white) showing in those strips. Background follows
+// the theme, or a screen's override (e.g. the terminal pane's dark) via
+// useRootGutter. The native window color is kept in sync so rotation
+// transitions don't flash white either.
 function HorizontalSafeAreaWrapper({ children }: { children: React.ReactNode }) {
     const insets = useSafeAreaInsets();
+    const { theme } = useUnistyles();
+    const override = useRootGutter((s) => s.color);
+    const background = override ?? theme.colors.groupped.background;
+    React.useEffect(() => {
+        if (Platform.OS !== 'web') {
+            void SystemUI.setBackgroundColorAsync(background).catch(() => { });
+        }
+    }, [background]);
     return (
         <View style={{
             flex: 1,
             paddingLeft: insets.left,
-            paddingRight: insets.right
+            paddingRight: insets.right,
+            backgroundColor: background,
         }}>
             {children}
         </View>
