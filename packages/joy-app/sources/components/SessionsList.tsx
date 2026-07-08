@@ -392,6 +392,20 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                                     ? t('status.retrying', { attempt: session.retryAttempt, total: session.retryTotal ?? 0 })
                                     : t('status.online');
 
+    // Background counts as a suffix on live non-count states (mirrors
+    // useSessionStatus.withBg): "brewing…, 1/3 agents". Offline/detached rows
+    // skip it — their metadata is a snapshot of a dead session, not live work.
+    const bgSuffixParts: string[] = [];
+    if (session.state !== 'disconnected' && session.state !== 'detached' && !session.hasUnread) {
+        if (session.state !== 'agents' && session.agentsTotal != null && session.agentsTotal > 0) {
+            bgSuffixParts.push(t('status.agentsRunning', { done: session.agentsDone ?? 0, total: session.agentsTotal }));
+        }
+        if (session.state !== 'tasks' && session.tasksTotal != null && session.tasksTotal > 0) {
+            bgSuffixParts.push(t('status.tasksCompleted', { done: session.tasksDone ?? 0, total: session.tasksTotal }));
+        }
+    }
+    const statusTextWithBg = bgSuffixParts.length > 0 ? statusText + ', ' + bgSuffixParts.join(', ') : statusText;
+
     const handlePress = React.useCallback(() => {
         navigateToSession(session.id);
     }, [navigateToSession, session.id]);
@@ -478,7 +492,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                         styles.statusText,
                         { color: status.color }
                     ]}>
-                        {statusText}
+                        {statusTextWithBg}
                     </Text>
                 </View>
             </View>

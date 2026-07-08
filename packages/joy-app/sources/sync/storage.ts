@@ -143,14 +143,17 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         state = 'compacting'; // Claude summarizing context — purple, ranks above a paused turn
     } else if (hasPermissions) {
         state = 'permission_required';
-    } else if (session.metadata?.joy__agents && session.metadata.joy__agents.total > 0) {
-        state = 'agents'; // background AGENTS — magenta N/M, ranks above shell tasks
-    } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
-        state = 'tasks'; // background shell work in flight — teal N/M, outlives the turn
     } else if (session.thinking || (isOnline && session.metadata?.joy__thinking != null)) {
         // Persisted mirror (joy__thinking) restores the state on cold start —
         // the ephemeral only reaches connected clients. Presence-gated.
+        // Ranks ABOVE the background counts (mirrors useSessionStatus): a
+        // streaming reply is the "you can converse" signal; the counts show as
+        // a text suffix in the row instead.
         state = 'thinking';
+    } else if (session.metadata?.joy__agents && session.metadata.joy__agents.total > 0) {
+        state = 'agents'; // idle + background AGENTS — magenta N/M, ranks above shell tasks
+    } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
+        state = 'tasks'; // idle + background shell work — teal N/M, outlives the turn
     } else {
         state = 'waiting';
     }
