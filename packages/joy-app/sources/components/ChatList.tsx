@@ -20,6 +20,22 @@ import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 
 const SCROLL_THRESHOLD = 300;
 
+// Last scroll position per session, surviving unmounts. Navigating away
+// (sessions list, tmux pane on some layouts) remounts ChatList, and
+// startRenderingFromBottom repainted at the newest message — reading position
+// lost. Restored on the list's first onLoad; a position near the bottom is NOT
+// restored (bottom is already the default and where streaming keeps you).
+// Module-level and capped: a handful of entries, ~16 bytes each.
+const savedScroll = new Map<string, { offset: number; nearBottom: boolean }>();
+const SAVED_SCROLL_MAX = 30;
+function rememberScroll(sessionId: string, offset: number, nearBottom: boolean) {
+    if (!savedScroll.has(sessionId) && savedScroll.size >= SAVED_SCROLL_MAX) {
+        const oldest = savedScroll.keys().next().value;
+        if (oldest !== undefined) savedScroll.delete(oldest);
+    }
+    savedScroll.set(sessionId, { offset, nearBottom });
+}
+
 // Count a row as "visible" as soon as any sliver of it is in view, so the
 // topmost partially-clipped row is tracked as the viewport top. Must be a stable
 // reference — FlashList/RN forbid changing it between renders.
@@ -99,6 +115,7 @@ const ChatListInternal = React.memo((props: {
     // so scrubbing always steps relative to where the user actually is (a stored
     // pointer would go stale the moment the user scrolled by hand).
     const topVisibleIndexRef = React.useRef<number>(0);
+    const sessionId = props.sessionId;
     const session = useSession(props.sessionId);
 
     // Collapse agent work between a user prompt and the final answer.
@@ -323,6 +340,7 @@ const ChatListInternal = React.memo((props: {
         const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
         const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
         const next = distanceFromBottom > SCROLL_THRESHOLD;
+        rememberScroll(sessionId, contentOffset.y, !next);
         if (next !== showScrollButtonRef.current) {
             showScrollButtonRef.current = next;
             setShowScrollButton(next);
@@ -333,7 +351,20 @@ const ChatListInternal = React.memo((props: {
             showUpButtonRef.current = up;
             setShowUpButton(up);
         }
-    }, []);
+    }, [sessionId]);
+
+    // Restore the pre-navigation position on the list's first paint. onLoad
+    // fires once, after FlashList has laid out the initial window — early enough
+    // that the bottom-pinned first frame barely shows.
+    const restoredRef = React.useRef(false);
+    const handleLoad = useCallback(() => {
+        if (restoredRef.current) return;
+        restoredRef.current = true;
+        const saved = savedScroll.get(sessionId);
+        if (saved && !saved.nearBottom) {
+            flatListRef.current?.scrollToOffset({ offset: saved.offset, animated: false });
+        }
+    }, [sessionId]);
 
     const scrollToBottom = useCallback(() => {
         // Don't pin topVisibleIndex to MAX here: onViewableItemsChanged corrects
@@ -393,7 +424,6 @@ const ChatListInternal = React.memo((props: {
     // messages (see sync.fetchInitialLatestPage), so we lazy-load earlier pages
     // here; maintainVisibleContentPosition.autoscrollToTopThreshold keeps the
     // viewport anchored as older pages prepend (no jump).
-    const sessionId = props.sessionId;
     const hasMoreOlder = props.hasMoreOlder;
     const isLoadingOlder = props.isLoadingOlder;
     const handleLoadOlder = useCallback(() => {
@@ -439,6 +469,7 @@ const ChatListInternal = React.memo((props: {
                 renderItem={renderItem}
                 extraData={collapsedGroups}
                 onScroll={handleScroll}
+                onLoad={handleLoad}
                 scrollEventThrottle={16}
                 onViewableItemsChanged={handleViewableItemsChanged}
                 viewabilityConfig={VIEWABILITY_CONFIG}
