@@ -813,6 +813,12 @@ export class Session {
     }
     // Reflect the current queue on (re)attach — recovery/reconnect included.
     void rs.updateQueue(this.queueState());
+    // Reconcile the model mirror. A model change seen while no relay was
+    // attached (daemon-restart replay) sets currentModel WITHOUT mirroring it,
+    // and the change-gate means it never re-fires for the same model — the app
+    // then shows the stale model forever ("opus yolo" while the pane ran
+    // fable, 2026-07-08). updateModelCode no-ops when already in sync.
+    if (this.currentModel) void rs.updateModelCode(this.currentModel);
 
     // File events arrive ahead of the user-text message. Kick off the
     // download/decrypt immediately; the next message drains the bucket.
