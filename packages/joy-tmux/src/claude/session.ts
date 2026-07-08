@@ -781,6 +781,11 @@ export class Session {
     if (!this.#retry) void rs.updateRetry(null);
     // Same reconcile for a stale persisted thinking flag (see clearThinkingMeta).
     if (!this.#thinking) void rs.clearThinkingMeta();
+    // Same reconcile for a stale login bar: #reconcileLogin only clears
+    // joy__login when the in-memory #login flag is set, so a daemon restart
+    // while the bar was up (fresh #login=null, URL gone from the pane) left it
+    // stuck server-side forever. updateLogin(null) no-ops when already clear.
+    if (!this.#login) void rs.updateLogin(null);
     // Same reconcile for the compacting banner: a daemon restart mid-compaction
     // rebuilds the Session with #compacting=null while joy__compacting persisted
     // server-side. The in-memory backstop timer is also gone, so without this the
