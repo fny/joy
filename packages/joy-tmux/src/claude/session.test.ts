@@ -770,9 +770,16 @@ test("authUrlFromPane: ignores a non-auth URL in normal output, and empty panes"
   expect(authUrlFromPane("")).toBeNull();
 });
 
-test("authUrlFromPane: detects a single-line device-login URL", () => {
+test("authUrlFromPane: ignores NON-Claude auth URLs — agents print third-party login links in replies", () => {
+  // Real false positive (fny eventhorizon, 2026-07-08): an AWS SSO device URL
+  // in conversation output put the login bar up for a healthy session.
+  expect(authUrlFromPane("Open this link: https://d-9267d2a99a.awsapps.com/start/#/device?user_code=KRFG-CZRN"))
+    .toBeNull();
   expect(authUrlFromPane("Open https://github.com/login/device and enter CODE"))
-    .toBe("https://github.com/login/device");
+    .toBeNull();
+  // Claude hosts still match, including subdomains.
+  expect(authUrlFromPane("https://console.anthropic.com/oauth/authorize?x=1"))
+    .toBe("https://console.anthropic.com/oauth/authorize?x=1");
 });
 
 test("loginFromPane: surfaces a rejection below the URL, but NOT the 401 trigger above it", () => {

@@ -3004,6 +3004,11 @@ const URL_CHARS = /^[A-Za-z0-9%:/?=&+._~#@!$',;()*-]+$/;
 export interface PaneLogin { url: string; error?: string }
 export function loginFromPane(text: string): PaneLogin | null {
   const AUTH = /(oauth|authorize|code_challenge|\/device|\/login)/i;
+  // Only CLAUDE login URLs qualify. The pane shows conversation output too, and
+  // agents print third-party auth links all the time (AWS SSO device URLs,
+  // GitHub device flows…) — an awsapps.com/#/device link in a reply put the
+  // login bar up for a session that was fine (fny eventhorizon, 2026-07-08).
+  const CLAUDE_HOST = /^https?:\/\/([a-z0-9-]+\.)*(claude\.(ai|com)|anthropic\.com)\//i;
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const m = /(https?:\/\/[^\s]+)/.exec(lines[i].trim());
@@ -3018,7 +3023,7 @@ export function loginFromPane(text: string): PaneLogin | null {
     }
     // Trim any trailing box-border/punctuation the first line may have grabbed.
     url = url.replace(/[^A-Za-z0-9%/=&+_~#-]+$/, "");
-    if (!AUTH.test(url)) continue;
+    if (!AUTH.test(url) || !CLAUDE_HOST.test(url)) continue;
     // A code-rejection message lives in the box BELOW the URL (the "Paste code"
     // region) — scanning only there excludes the 401 "Invalid authentication
     // credentials" trigger line, which sits ABOVE the box.
