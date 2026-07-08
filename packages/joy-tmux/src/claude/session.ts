@@ -2814,7 +2814,19 @@ export class Session {
       // !#turn, so the dispatch queue wedges and every later message hangs undelivered.
       // It also only duplicates the real turn's already-mirrored partial output. Skip
       // it entirely (this also keeps currentModel off the "<synthetic>" sentinel).
-      if (msg.model === "<synthetic>") return;
+      // EXCEPT: API-error notices ride the same synthetic vehicle ("API Error:
+      // Server error mid-response…") and are the app's ONLY signal that a turn
+      // died mid-response — surface those as a note (receipt-deduped, freshness
+      // gated). 401/login ones are excluded: the pane login flow already
+      // surfaces those with the auth URL.
+      if (msg.model === "<synthetic>") {
+        const parts = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
+        const text = parts.map((b) => typeof b?.text === "string" ? b.text : "").join(" ").trim();
+        if (/API Error/i.test(text) && !/401|\/login/i.test(text) && this.#shouldEmitNote(entry, entryTimeMs)) {
+          this.#emitAgentNote(text.slice(0, 300), entryTimeMs, sid);
+        }
+        return;
+      }
       if (typeof msg.model === "string" && msg.model) {
         if (this.currentModel !== msg.model) {
           this.currentModel = msg.model;
