@@ -85,9 +85,21 @@ export function useSessionStatus(session: Session): SessionStatus {
     // "ready, 3 background processes". withBg is the single exit point that
     // appends the suffix to every online status below.
     const longRunning = session.metadata?.joy__longRunning ?? 0;
-    const withBg = (status: SessionStatus): SessionStatus => longRunning > 0
-        ? { ...status, statusText: status.statusText + ', ' + t('status.backgroundProcesses', { count: longRunning }) }
-        : status;
+    const agents = session.metadata?.joy__agents;
+    const tasks = session.metadata?.joy__tasks;
+    // Background-work suffix appended to every online status EXCEPT the one
+    // already headlining that count: "permission needed, 1/3 agents". Blocking
+    // states and thinking outrank the counts — the primary state answers "can a
+    // reply happen right now?", the suffix says what's still running behind it.
+    const withBg = (status: SessionStatus): SessionStatus => {
+        const parts: string[] = [];
+        if (agents && agents.total > 0 && status.state !== 'agents') parts.push(t('status.agentsRunning', { done: agents.done, total: agents.total }));
+        if (tasks && tasks.total > 0 && status.state !== 'tasks') parts.push(t('status.tasksCompleted', { done: tasks.done, total: tasks.total }));
+        if (longRunning > 0) parts.push(t('status.backgroundProcesses', { count: longRunning }));
+        return parts.length > 0
+            ? { ...status, statusText: status.statusText + ', ' + parts.join(', ') }
+            : status;
+    };
 
     // 500-error auto-retry in progress: the daemon is re-sending a failed turn
     // on a backoff schedule. Shown amber + pulsing, with the attempt count.
@@ -120,12 +132,23 @@ export function useSessionStatus(session: Session): SessionStatus {
         });
     }
 
-    // Finishing background tasks (builds, tests, agents — expected to complete):
-    // shown in teal with an N/M progress count. Ranks above thinking so the count
-    // wins when a foreground turn is also running. Long-running processes are
-    // excluded from this (they're the withBg suffix).
-    // Background AGENTS (magenta) rank above finishing shell tasks (teal).
-    const agents = session.metadata?.joy__agents;
+    // Thinking ranks ABOVE the background counts: a streaming reply is the
+    // strongest "you can converse right now" signal, and the counts stay
+    // visible as the withBg suffix. (They used to mask thinking entirely.)
+    // Ephemeral flag (live socket) OR the persisted mirror — the mirror is what
+    // survives an app cold start; it's only trusted while presence is live
+    // (isOnline gates this whole branch), so a dead daemon can't freeze it.
+    if (session.thinking === true || session.metadata?.joy__thinking != null) {
+        return withBg({
+            ...paletteBase('thinking'),
+            statusText: vibingMessage,
+            shouldShowStatus: true,
+        });
+    }
+
+    // Foreground idle with background work in flight: the counts ARE the
+    // headline (magenta agents above teal shell tasks). Long-running processes
+    // are excluded from the N/M (they're the withBg suffix).
     if (agents && agents.total > 0) {
         return withBg({
             ...paletteBase('agents'),
@@ -134,22 +157,10 @@ export function useSessionStatus(session: Session): SessionStatus {
         });
     }
 
-    const tasks = session.metadata?.joy__tasks;
     if (tasks && tasks.total > 0) {
         return withBg({
             ...paletteBase('tasks'),
             statusText: t('status.tasksCompleted', { done: tasks.done, total: tasks.total }),
-            shouldShowStatus: true,
-        });
-    }
-
-    // Ephemeral flag (live socket) OR the persisted mirror — the mirror is what
-    // survives an app cold start; it's only trusted while presence is live
-    // (isOnline gates this whole branch), so a dead daemon can't freeze it.
-    if (session.thinking === true || session.metadata?.joy__thinking != null) {
-        return withBg({
-            ...paletteBase('thinking'),
-            statusText: vibingMessage,
             shouldShowStatus: true,
         });
     }
