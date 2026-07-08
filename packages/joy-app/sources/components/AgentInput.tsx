@@ -329,6 +329,7 @@ type StatusRowProps = {
     permissionModeKey: string;
     isSandboxedYoloMode: boolean;
     permissionLabel: string | null;
+    modelLabel: string | null;
     zenMode?: boolean;
 };
 
@@ -448,6 +449,15 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                         ? 'pause' : 'play-forward';
                 return (
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        {!!p.modelLabel && (
+                            <Text style={{
+                                fontSize: 11,
+                                color: theme.colors.textSecondary,
+                                ...Typography.default()
+                            }}>
+                                {p.modelLabel}
+                            </Text>
+                        )}
                         <Ionicons name={permIcon} size={11} color={permColor} />
                         <Text style={{
                             fontSize: 11,
@@ -568,6 +578,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const displayPermissionMode = React.useMemo(() => (
         props.permissionMode ? hackMode(props.permissionMode) : null
     ), [props.permissionMode]);
+    // Short model name for the status row ("fable yolo"). currentModelCode is
+    // the daemon's mirror of the model actually producing output (it tracks
+    // /model switches made in the terminal), so it wins over the composer
+    // selection; full ids reduce to the family alias (claude-fable-5 → fable).
+    const modelLabel = React.useMemo(() => {
+        const code = props.metadata?.currentModelCode;
+        const m = typeof code === 'string' ? /^claude-([a-z]+)/.exec(code) : null;
+        return m?.[1] ?? props.modelMode?.name ?? null;
+    }, [props.metadata?.currentModelCode, props.modelMode]);
     const permissionModeKey = displayPermissionMode?.key ?? 'default';
     const availableModes = React.useMemo(() => (
         hackModes(props.availableModes ?? [])
@@ -1185,6 +1204,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     permissionModeKey={permissionModeKey}
                     isSandboxedYoloMode={isSandboxedYoloMode}
                     permissionLabel={displayPermissionMode ? withSandboxSuffix(displayPermissionMode.name, permissionModeKey) : null}
+                    modelLabel={modelLabel}
                     zenMode={props.zenMode}
                 />
 
