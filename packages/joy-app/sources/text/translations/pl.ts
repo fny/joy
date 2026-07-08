@@ -54,6 +54,7 @@ export const pl: TranslationStructure = {
         discard: 'Odrzuć',
         version: 'Wersja',
         copied: 'Skopiowano',
+        share: 'Udostępnij',
         copy: 'Kopiuj',
         scanning: 'Skanowanie...',
         urlPlaceholder: 'https://example.com',

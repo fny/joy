@@ -45,6 +45,7 @@ export const zhHans: TranslationStructure = {
         discard: '放弃',
         version: '版本',
         copied: '已复制',
+        share: '分享',
         copy: '复制',
         scanning: '扫描中...',
         urlPlaceholder: 'https://example.com',

@@ -43,6 +43,7 @@ export const ca: TranslationStructure = {
         discard: 'Descarta',
         version: 'Versió',
         copied: 'Copiat',
+        share: 'Comparteix',
         copy: 'Copiar',
         scanning: 'Escanejant...',
         urlPlaceholder: 'https://exemple.com',

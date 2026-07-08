@@ -59,6 +59,7 @@ export const en: TranslationStructure = {
         version: 'Version',
         copy: 'Copy',
         copied: 'Copied',
+        share: 'Share',
         scanning: 'Scanning...',
         urlPlaceholder: 'https://example.com',
         home: 'Home',

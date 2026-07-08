@@ -42,6 +42,7 @@ export const it: TranslationStructure = {
         discard: 'Scarta',
         version: 'Versione',
         copied: 'Copiato',
+        share: 'Condividi',
         copy: 'Copia',
         scanning: 'Scansione...',
         urlPlaceholder: 'https://esempio.com',
