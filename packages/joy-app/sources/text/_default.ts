@@ -43,6 +43,7 @@ export const en = {
         discard: 'Discard',
         version: 'Version',
         copied: 'Copied',
+        share: 'Share',
         copy: 'Copy',
         scanning: 'Scanning...',
         urlPlaceholder: 'https://example.com',

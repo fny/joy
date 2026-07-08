@@ -54,6 +54,7 @@ export const ru: TranslationStructure = {
         discard: 'Отменить',
         version: 'Версия',
         copied: 'Скопировано',
+        share: 'Поделиться',
         copy: 'Копировать',
         scanning: 'Сканирование...',
         urlPlaceholder: 'https://example.com',

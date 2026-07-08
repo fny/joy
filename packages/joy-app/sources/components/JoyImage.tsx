@@ -4,6 +4,12 @@ import { Image } from 'expo-image';
 import { StyleSheet } from 'react-native-unistyles';
 import { sessionReadFile } from '@/sync/ops';
 import { joyImgMime } from '@/utils/joyImg';
+import { writeAsStringAsync, deleteAsync, cacheDirectory, EncodingType } from 'expo-file-system/legacy';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import * as Sharing from 'expo-sharing';
+import * as Clipboard from 'expo-clipboard';
+import { Modal as AppModal } from '@/modal';
+import { t } from '@/text';
 
 /**
  * Inline chat image for <joy-img/> tags. Bytes come over the session's
@@ -82,6 +88,50 @@ export const JoyImage = React.memo((props: {
         return () => { alive = false; };
     }, [key, sessionId, src]);
 
+    // Copy / share (share sheet includes "Save Image" on iOS — no photo-library
+    // permission needed). Bytes are already local as a data URI; both actions
+    // stage them through a cache file. Pasteboards don't accept webp (the tag's
+    // default encoding), so copy converts to PNG first.
+    const copyImage = React.useCallback(async () => {
+        if (!uri) return;
+        try {
+            let base64 = uri.split(',')[1];
+            if (!/\.(png|jpe?g)$/i.test(src)) {
+                const tmp = `${cacheDirectory}joy-img-${Date.now()}.webp`;
+                await writeAsStringAsync(tmp, base64, { encoding: EncodingType.Base64 });
+                const png = await manipulateAsync(tmp, [], { base64: true, format: SaveFormat.PNG });
+                void deleteAsync(tmp, { idempotent: true });
+                if (!png.base64) throw new Error('convert failed');
+                base64 = png.base64;
+            }
+            await Clipboard.setImageAsync(base64);
+        } catch {
+            AppModal.alert(t('common.error'), t('errors.operationFailed'));
+        }
+    }, [uri, src]);
+
+    const shareImage = React.useCallback(async () => {
+        if (!uri) return;
+        try {
+            const ext = (src.split('.').pop() ?? 'webp').toLowerCase();
+            const file = `${cacheDirectory}joy-img-${Date.now()}.${ext}`;
+            await writeAsStringAsync(file, uri.split(',')[1], { encoding: EncodingType.Base64 });
+            await Sharing.shareAsync(file, { mimeType: joyImgMime(src) });
+            void deleteAsync(file, { idempotent: true });
+        } catch {
+            AppModal.alert(t('common.error'), t('errors.operationFailed'));
+        }
+    }, [uri, src]);
+
+    const showImageMenu = React.useCallback(() => {
+        if (!uri || Platform.OS === 'web') return;
+        AppModal.alert(props.alt ?? src.split('/').pop() ?? '', undefined, [
+            { text: t('common.copy'), onPress: () => { void copyImage(); } },
+            { text: t('common.share'), onPress: () => { void shareImage(); } },
+            { text: t('common.cancel'), style: 'cancel' },
+        ]);
+    }, [uri, props.alt, src, copyImage, shareImage]);
+
     // Reserve the exact aspect box from the tag's dimensions; fall back to a
     // pleasant 16:9 when the agent omitted them.
     const aspectRatio = props.width && props.height ? props.width / props.height : 16 / 9;
@@ -99,6 +149,7 @@ export const JoyImage = React.memo((props: {
         <>
             <Pressable
                 onPress={uri ? () => setViewer(true) : undefined}
+                onLongPress={uri ? showImageMenu : undefined}
                 accessibilityRole="imagebutton"
                 accessibilityLabel={props.alt ?? undefined}
                 style={[styles.frame, { aspectRatio, maxWidth }]}
@@ -136,6 +187,11 @@ export const JoyImage = React.memo((props: {
                     <Pressable style={styles.viewerClose} onPress={() => setViewer(false)} accessibilityRole="button">
                         <Text style={styles.viewerCloseText}>✕</Text>
                     </Pressable>
+                    {Platform.OS !== 'web' && (
+                        <Pressable style={styles.viewerShare} onPress={showImageMenu} accessibilityRole="button" accessibilityLabel={t('common.share')}>
+                            <Text style={styles.viewerCloseText}>⇪</Text>
+                        </Pressable>
+                    )}
                 </View>
             </Modal>
         </>
@@ -179,6 +235,17 @@ const styles = StyleSheet.create((theme) => ({
         position: 'absolute',
         top: 54,
         right: 20,
+        width: 36,
+        height: 36,
+        borderRadius: 18,
+        backgroundColor: 'rgba(255,255,255,0.15)',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    viewerShare: {
+        position: 'absolute',
+        top: 54,
+        left: 20,
         width: 36,
         height: 36,
         borderRadius: 18,
