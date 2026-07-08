@@ -28,7 +28,7 @@ import { useLocalSetting } from '@/sync/storage';
 import { useUnistyles } from 'react-native-unistyles';
 import { AsyncLock } from '@/utils/lock';
 import { getSessionRouteFromNotificationResponse } from '@/utils/notificationRouting';
-import { navigateToSession } from '@/hooks/useNavigateToSession';
+import { navigateToSession, PathnameTracker } from '@/hooks/useNavigateToSession';
 import { applyVoiceUpsellOverride } from '@/realtime/voiceExperiment';
 import { useTauriZoom } from '@/hooks/useTauriZoom';
 import { BrowserNavigationShortcuts } from '@/hooks/useBrowserNavigationShortcuts';
@@ -407,6 +407,7 @@ export default function RootLayout() {
                     <AuthProvider initialCredentials={initState.credentials}>
                         <ThemeProvider value={navigationTheme}>
                             <StatusBarProvider />
+                            <PathnameTracker />
                             <ModalProvider>
                                 <BrowserNavigationShortcuts />
                                 <CommandPaletteProvider>
