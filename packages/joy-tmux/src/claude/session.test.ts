@@ -535,6 +535,23 @@ test("bgTaskEvent: async agent launch (isAsync + agentId)", () => {
   expect(bgTaskEvent(e)).toEqual({ kind: "launch", id: "ag-9", source: "agent" });
 });
 
+test("bgTaskEvent: Monitor lifecycle — launch, interim events don't complete, terminal does", () => {
+  // Launch: Monitor tool_result is {taskId, timeoutMs, persistent} (real shape
+  // from fny agent2, 2026-07-08). Counted as a shell task → teal N/M status.
+  const launch = { message: { role: "user", content: [{ type: "tool_result" }] }, toolUseResult: { taskId: "b6im95b83", timeoutMs: 3600000, persistent: false } };
+  expect(bgTaskEvent(launch)).toEqual({ kind: "launch", id: "b6im95b83", source: "shell" });
+  // Interim monitor event: same <task-id>, NO <status> — must NOT complete the
+  // task (the first event used to flip the monitor to done instantly).
+  const interim = { type: "queue-operation", operation: "enqueue", content: '<task-notification>\n<task-id>b6im95b83</task-id>\n<summary>Monitor event: "image build 33328c5dc"</summary>\n<event>BUILD OK</event>\n</task-notification>' };
+  expect(bgTaskEvent(interim)).toBeNull();
+  // Terminal: stream ended, <status>completed</status> present.
+  const done = { type: "queue-operation", operation: "enqueue", content: '<task-notification>\n<task-id>b6im95b83</task-id>\n<status>completed</status>\n<summary>Monitor "image build 33328c5dc" stream ended</summary>\n</task-notification>' };
+  expect(bgTaskEvent(done)).toEqual({ kind: "complete", id: "b6im95b83" });
+  // A bare TaskCreate-ish result (taskId but no timeoutMs) must NOT launch.
+  const taskCreate = { message: { role: "user", content: [{ type: "tool_result" }] }, toolUseResult: { taskId: "todo-1" } };
+  expect(bgTaskEvent(taskCreate)).toBeNull();
+});
+
 test("bgTaskEvent: completion via <task-notification>", () => {
   const e = userEntry({ content: "<task-notification><task-id>bg-1</task-id> done</task-notification>" });
   expect(bgTaskEvent(e)).toEqual({ kind: "complete", id: "bg-1" });

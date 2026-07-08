@@ -183,6 +183,19 @@ export function flattenForMatch(text: string): string {
  *   complete: a <task-notification> user entry carrying the same id in <task-id>.
  * Mirrors the gating in #onTranscriptEntry (user role, non-meta).
  */
+/** Completion from a <task-notification> payload — or null when it's a Monitor
+ *  INTERIM event. Monitors notify on every matched event with the same
+ *  <task-id> as their terminal notification; only terminal ones carry a
+ *  <status> tag (completed/failed/killed). Payloads with no <status> at all
+ *  are legacy shell-task notifications (always terminal) — except interim
+ *  monitor events, recognizable by their "Monitor event:" summary. */
+function completionFromNotification(payload: string): { kind: "complete"; id: string } | null {
+  const m = /<task-id>([^<]+)<\/task-id>/.exec(payload);
+  if (!m) return null;
+  if (!/<status>/.test(payload) && /<summary>\s*Monitor event:/i.test(payload)) return null;
+  return { kind: "complete", id: m[1] };
+}
+
 export function bgTaskEvent(entry: any): { kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string } | null {
   // complete: newer Claude delivers the <task-notification> as an `attachment`
   // entry (attachment.prompt holds the payload, commandMode "task-notification"),
@@ -190,8 +203,7 @@ export function bgTaskEvent(entry: any): { kind: "launch"; id: string; source: "
   // string-only check missed, leaving counts stuck. Check it first.
   const att = entry?.attachment as Record<string, unknown> | undefined;
   if (entry?.type === "attachment" && att && typeof att.prompt === "string" && att.prompt.includes("<task-notification>")) {
-    const m = /<task-id>([^<]+)<\/task-id>/.exec(att.prompt);
-    return m ? { kind: "complete", id: m[1] } : null;
+    return completionFromNotification(att.prompt);
   }
   // complete (THIRD delivery form): when Claude is busy at notification time,
   // the payload gets ENQUEUED into Claude's own message queue and the
@@ -204,8 +216,7 @@ export function bgTaskEvent(entry: any): { kind: "launch"; id: string; source: "
   // completion events are harmless: classifyBgTasks only counts a completion
   // that removes a live outstanding id.
   if (entry?.type === "queue-operation" && typeof entry.content === "string" && entry.content.includes("<task-notification>")) {
-    const m = /<task-id>([^<]+)<\/task-id>/.exec(entry.content);
-    return m ? { kind: "complete", id: m[1] } : null;
+    return completionFromNotification(entry.content);
   }
   const msg = entry?.message as Record<string, unknown> | undefined;
   if (!msg || String(msg.role || "") !== "user" || entry?.isMeta) return null;
@@ -214,6 +225,14 @@ export function bgTaskEvent(entry: any): { kind: "launch"; id: string; source: "
     const tur = entry?.toolUseResult as Record<string, unknown> | undefined;
     if (tur && typeof tur.backgroundTaskId === "string") return { kind: "launch", id: tur.backgroundTaskId, source: "shell" };
     if (tur && tur.isAsync === true && typeof tur.agentId === "string") return { kind: "launch", id: tur.agentId, source: "agent" };
+    // Monitor tool: result is {taskId, timeoutMs, persistent}. Counted like a
+    // shell background task (teal N/M) — it runs in the background and DOES
+    // terminate: stream-end/timeout emit a <status> notification, and an
+    // explicit TaskStop hits the stop branch below. timeoutMs required so a
+    // plain TaskCreate result (also taskId-shaped) can't masquerade as one.
+    if (tur && typeof tur.taskId === "string" && typeof tur.timeoutMs === "number") {
+      return { kind: "launch", id: tur.taskId, source: "shell" };
+    }
     // TaskStop: an explicitly stopped task never gets a <task-notification>,
     // so treat the stop tool_result as its completion — otherwise a stopped
     // long-running process leaves joy__longRunning stuck forever (and a
@@ -225,8 +244,7 @@ export function bgTaskEvent(entry: any): { kind: "launch"; id: string; source: "
   }
   // Older transcripts delivered the notification as a plain user-message string.
   if (content.includes("<task-notification>")) {
-    const m = /<task-id>([^<]+)<\/task-id>/.exec(content);
-    if (m) return { kind: "complete", id: m[1] };
+    return completionFromNotification(content);
   }
   return null;
 }
