@@ -13,6 +13,7 @@ import { ItemList } from '@/components/ItemList';
 import { useConnectTerminal } from '@/hooks/useConnectTerminal';
 import { useLocalSettingMutable } from '@/sync/storage';
 import { Modal } from '@/modal';
+import { useHappyAction } from '@/hooks/useHappyAction';
 import { useMultiClick } from '@/hooks/useMultiClick';
 import { JoyLogoType } from '@/components/JoyLogotype';
 import { useJoyMachines } from '@/hooks/useJoyMachines';
@@ -83,6 +84,19 @@ function otaDetail(): string {
 export const SettingsView = React.memo(function SettingsView() {
     const { theme } = useUnistyles();
     const router = useRouter();
+    // Manual OTA pull: check → download → apply NOW (reloadAsync), replacing
+    // the "force-quit twice and hope" dance — and unlike the silent automatic
+    // check, every outcome is surfaced (up to date / restarting / real error).
+    const [checkingUpdate, checkForUpdate] = useHappyAction(React.useCallback(async () => {
+        const res = await Updates.checkForUpdateAsync();
+        if (!res.isAvailable) {
+            Modal.alert(t('settingsMods.jsUpdate'), t('settingsMods.upToDate'));
+            return;
+        }
+        await Updates.fetchUpdateAsync();
+        Modal.alert(t('settingsMods.jsUpdate'), t('settingsMods.updating'));
+        await Updates.reloadAsync();
+    }, []));
     const appVersion = Constants.expoConfig?.version || '1.0.0';
     const runtimeVersion = typeof Constants.expoConfig?.runtimeVersion === 'string'
         ? Constants.expoConfig.runtimeVersion
@@ -315,6 +329,12 @@ export const SettingsView = React.memo(function SettingsView() {
                         void Clipboard.setStringAsync(full);
                         Modal.alert(t('common.copied'), full);
                     }}
+                />
+                <Item
+                    title={t('settingsMods.checkForUpdate')}
+                    icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.textSecondary} />}
+                    loading={checkingUpdate}
+                    onPress={checkingUpdate ? undefined : checkForUpdate}
                 />
                 <Item
                     title={t('common.version')}
