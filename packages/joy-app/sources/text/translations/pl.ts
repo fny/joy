@@ -91,7 +91,7 @@ export const pl: TranslationStructure = {
         permissionRequired: 'wymagane uprawnienie',
         detached: 'odłączony',
         compacting: 'kompaktowanie',
-        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} ukończono`,
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} zadań`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agentów`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Aktywny teraz',

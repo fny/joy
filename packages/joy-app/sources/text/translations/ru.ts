@@ -422,7 +422,7 @@ export const ru: TranslationStructure = {
         permissionRequired: 'требуется разрешение',
         detached: 'отключён',
         compacting: 'сжатие',
-        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} завершено`,
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} задач`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `агентов: ${done}/${total}`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `повтор ${attempt}/${total}`,
         activeNow: 'Активен сейчас',

@@ -81,7 +81,7 @@ export const zhHant: TranslationStructure = {
         permissionRequired: '需要權限',
         detached: '已分離',
         compacting: '壓縮中',
-        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 已完成`,
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 個任務`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} 代理`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: '目前活躍',

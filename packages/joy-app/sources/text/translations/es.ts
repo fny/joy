@@ -80,7 +80,7 @@ export const es: TranslationStructure = {
         permissionRequired: 'permiso requerido',
         detached: 'desacoplado',
         compacting: 'compactando',
-        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} completadas`,
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} tareas`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agentes`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Activo ahora',
