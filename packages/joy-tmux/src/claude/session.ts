@@ -509,7 +509,6 @@ export class Session {
   // the N/M counter would stick; these ids are filtered out of the derivation so
   // Stop clears the count. Task ids are unique per launch, so this never suppresses
   // a later real task.
-  #cancelledBgTasks = new Set<string>();
   // Last pushed {tasks, longRunning} as a string key — dedups reconcile pushes by
   // DESIRED state (not this.metadata, which can lag a pending write and drop a clear).
   #lastBgKey: string | null = null;
@@ -1582,19 +1581,16 @@ export class Session {
     // starting) — that we still interrupt below; only a different, non-null timer is
     // a new send.
     if (this.#submitTimer !== null && this.#submitTimer !== submitBefore) return { ok: true };
-    // …but do NOT treat "idle" as a no-op abort when finishing background tasks are
-    // still counted (the "N/M completed" status): the user pressing Stop on an idle
-    // turn whose async agents/processes are still tracked wants that count cleared and
-    // the status back to idle. Fall through so the bg-task cancel below runs.
-    // Also require !#thinking: during the PRE-OUTPUT phase of a turn (long
+    // Require !#thinking: during the PRE-OUTPUT phase of a turn (long
     // initial cogitation) the transcript has no entries yet (#turn null), the
     // dispatch is already echo-confirmed (#dispatchInFlight null), and the
     // pane can momentarily lack the "esc to interrupt" marker mid-repaint —
     // all idle signals read false-idle and the abort was silently swallowed
     // (caught live by the e2e suite). The daemon's own thinking flag knows a
-    // turn is in flight; trust it.
+    // turn is in flight; trust it. (Outstanding background tasks do NOT make
+    // an idle session abortable — Escape can't reach them; see below.)
     if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && !this.#thinking &&
-        this.#bgTasks.size === 0 && pane.ok &&
+        pane.ok &&
         paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
       return { ok: true };
     }
@@ -1652,16 +1648,13 @@ export class Session {
       this.#turn = null;
       this.#maybeDrainQueue();
     }
-    // Abort cancels the finishing background tasks/agents that were in flight — an
-    // interrupted turn never emits their completion, so without this the "N/M
-    // completed" counter sticks forever. Mark the outstanding finishing-task ids
-    // cancelled (the derivation drops them) and push the cleared count. Long-running
-    // processes are intentionally left — Escape ends Claude's turn, not a detached
-    // server the user meant to keep running.
-    if (this.#bgTasks.size > 0) {
-      for (const id of this.#bgTasks) this.#cancelledBgTasks.add(id);
-      this.#reconcileBgTasks();
-    }
+    // Background tasks are DELIBERATELY untouched by abort: Escape interrupts
+    // Claude's turn, not the background processes — the monitor keeps watching,
+    // the build keeps building, and their <task-notification> completions still
+    // arrive and parse (stream-end, TaskStop, and timeout forms all covered).
+    // An earlier version cancelled the whole count here on the "completions
+    // never land after an interrupt" premise; that stopped being true and it
+    // wiped live status the moment the user pressed Stop (2026-07-09).
     // DELIBERATELY NO BOX CLEAR HERE — abort sends Escape and nothing else.
     // Abort used to arm a delayed clear (#abortClearTimer) to wipe leftover box
     // text; removed 2026-07-02 (docs/pane-input-clearing.md). Two reasons:
@@ -2302,12 +2295,7 @@ export class Session {
     }
     // Replay, classifying each task by lrIds (the long-running tag can trail its
     // launch by a few entries, which is why classification happens at the end).
-    // Drop any task an abort cancelled — its launch is in the transcript but its
-    // completion never will be, so leaving it would keep the N/M count stuck.
-    const live = this.#cancelledBgTasks.size > 0
-      ? scan.events.filter((e) => !this.#cancelledBgTasks.has(e.id))
-      : scan.events;
-    return classifyBgTasks(live, scan.lrIds);
+    return classifyBgTasks(scan.events, scan.lrIds);
   }
 
   /** Re-derive from the transcript and push BOTH the finishing N/M (joy__tasks)
