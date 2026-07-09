@@ -8,6 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { sessionReadFile, sessionBash } from '@/sync/ops';
 import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -73,7 +74,7 @@ const DiffDisplay: React.FC<{ diffContent: string; fontSize?: number }> = ({ dif
                             borderLeftColor: line.startsWith('+') && !line.startsWith('+++') ? theme.colors.diff.addedBorder : theme.colors.diff.removedBorder
                         }}
                     >
-                        <Text style={lineStyle}>
+                        <Text style={lineStyle} selectable>
                             {line || ' '}
                         </Text>
                     </View>
@@ -119,6 +120,19 @@ export default React.memo(function FileScreen() {
     const [fontSize, setFontSize] = useLocalSettingMutable('fileViewerFontSize');
     const [wrap, setWrap] = useLocalSettingMutable('fileViewerWrap');
     const bumpFont = (delta: number) => setFontSize(Math.max(9, Math.min(28, (fontSize ?? 14) + delta)));
+    // Copy the whole visible content (file text or raw diff). Per-line
+    // selection exists too, but iOS long-press selection inside nested
+    // scroll views is unreliable — the button is the dependable path.
+    const [copied, setCopied] = React.useState(false);
+    const copiedTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    React.useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
+    const copyContent = React.useCallback((text: string | null | undefined) => {
+        if (!text) return;
+        void Clipboard.setStringAsync(text);
+        setCopied(true);
+        if (copiedTimer.current) clearTimeout(copiedTimer.current);
+        copiedTimer.current = setTimeout(() => setCopied(false), 1500);
+    }, []);
     const [isLoading, setIsLoading] = React.useState(!cached);
     const [error, setError] = React.useState<string | null>(null);
     const scrollViewRef = React.useRef<ScrollView | null>(null);
@@ -450,6 +464,15 @@ export default React.memo(function FileScreen() {
                 </Pressable>
                 <Pressable onPress={() => setWrap(!wrap)} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="switch" accessibilityState={{ checked: wrap }} accessibilityLabel="Toggle word wrap">
                     <Ionicons name={wrap ? 'return-down-forward' : 'arrow-forward'} size={18} color={wrap ? theme.colors.textLink : theme.colors.textSecondary} />
+                </Pressable>
+                <Pressable
+                    onPress={() => copyContent(displayMode === 'diff' && diffContent ? diffContent : fileContent?.content)}
+                    hitSlop={8}
+                    style={styles.ctrlBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel="Copy contents"
+                >
+                    <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={17} color={copied ? theme.colors.textLink : theme.colors.textSecondary} />
                 </Pressable>
             </View>
 
