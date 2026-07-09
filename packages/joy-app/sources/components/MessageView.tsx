@@ -6,7 +6,8 @@ import { t } from '@/text';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
 import { storage } from "@/sync/storage";
-import { hasJoyImg, splitJoyImgSegments } from "@/utils/joyImg";
+import { hasJoyTags, splitJoySegments } from "@/utils/joyImg";
+import { JoyFileChip } from "@/components/JoyFileChip";
 import { JoyImage } from "./JoyImage";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
@@ -283,13 +284,15 @@ function AgentTextBlock(props: {
 
   // <joy-img/> tags → inline images interleaved with the surrounding markdown
   // (bytes fetched on demand over the readFile RPC; see JoyImage).
-  if (hasJoyImg(text)) {
-    const segments = splitJoyImgSegments(text);
+  if (hasJoyTags(text)) {
+    const segments = splitJoySegments(text);
     return (
       <View style={styles.agentMessageContainer}>
         {segments.map((seg, i) => seg.kind === 'md'
           ? <MarkdownView key={i} markdown={seg.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
-          : <JoyImage key={i} sessionId={props.sessionId} src={seg.src} width={seg.width} height={seg.height} alt={seg.alt} />)}
+          : seg.kind === 'img'
+            ? <JoyImage key={i} sessionId={props.sessionId} src={seg.src} width={seg.width} height={seg.height} alt={seg.alt} />
+            : <JoyFileChip key={i} sessionId={props.sessionId} path={seg.path} line={seg.line} name={seg.name} />)}
       </View>
     );
   }

@@ -1,14 +1,15 @@
 /**
- * <joy-img/> tag parsing. The agent displays an image inline in chat by
- * emitting a standard-img-like tag in its reply text (see joy-tmux's injected
+ * <joy-img/> and <joy-file/> tag parsing. The agent displays an image inline
+ * or links a file by emitting a tag in its reply text (see joy-tmux's injected
  * system prompt for the authoring contract):
  *
  *   <joy-img src="/abs/path/img.webp" width="854" height="480" alt="…" />
+ *   <joy-file path="/abs/or/relative/path.ts" line="42" name="optional label" />
  *
- * splitJoyImgSegments splits a message's text into markdown and image
- * segments so the renderer can interleave MarkdownView blocks with image
- * components. Unknown/malformed tags (no src) are stripped rather than shown
- * as raw XML.
+ * splitJoySegments splits a message's text into markdown, image, and file
+ * segments so the renderer can interleave MarkdownView blocks with the tag
+ * components. Unknown/malformed tags (no src/path) are stripped rather than
+ * shown as raw XML.
  */
 
 export interface JoyImgSegment {
@@ -19,14 +20,21 @@ export interface JoyImgSegment {
     alt: string | null;
 }
 
+export interface JoyFileSegment {
+    kind: 'file';
+    path: string;
+    line: number | null;
+    name: string | null;
+}
+
 export interface JoyMdSegment {
     kind: 'md';
     text: string;
 }
 
-export type JoySegment = JoyImgSegment | JoyMdSegment;
+export type JoySegment = JoyImgSegment | JoyFileSegment | JoyMdSegment;
 
-const TAG_RE = /<joy-img\b[^>]*?\/?>/gi;
+const TAG_RE = /<joy-(img|file)\b[^>]*?\/?>/gi;
 const ATTR_RE = /([a-zA-Z-]+)\s*=\s*"([^"]*)"/g;
 
 function parseAttrs(tag: string): Record<string, string> {
@@ -44,19 +52,19 @@ function positiveInt(v: string | undefined): number | null {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
-const PREFIX_RE = /<joy-img/i;
+const PREFIX_RE = /<joy-(img|file)/i;
 // An unterminated tag at the END of the text — the streaming case: the tag's
 // prefix has arrived but its closing '>' hasn't. Rendered as-is it shows raw
 // XML to the user until the next token batch (or forever, if output was
 // truncated mid-tag).
-const PARTIAL_TAIL_RE = /<joy-img\b[^>]*$/i;
+const PARTIAL_TAIL_RE = /<joy-(img|file)\b[^>]*$/i;
 
-/** True when the text contains at least one joy-img tag (cheap pre-check). */
-export function hasJoyImg(text: string): boolean {
+/** True when the text contains at least one joy tag (cheap pre-check). */
+export function hasJoyTags(text: string): boolean {
     return PREFIX_RE.test(text);
 }
 
-export function splitJoyImgSegments(text: string): JoySegment[] {
+export function splitJoySegments(text: string): JoySegment[] {
     const segments: JoySegment[] = [];
     let last = 0;
     TAG_RE.lastIndex = 0;
@@ -65,7 +73,7 @@ export function splitJoyImgSegments(text: string): JoySegment[] {
         const before = text.slice(last, m.index);
         if (before.trim()) segments.push({ kind: 'md', text: before });
         const attrs = parseAttrs(m[0]);
-        if (attrs.src) {
+        if (m[1].toLowerCase() === 'img' && attrs.src) {
             segments.push({
                 kind: 'img',
                 src: attrs.src,
@@ -73,8 +81,15 @@ export function splitJoyImgSegments(text: string): JoySegment[] {
                 height: positiveInt(attrs.height),
                 alt: attrs.alt?.trim() || null,
             });
+        } else if (m[1].toLowerCase() === 'file' && attrs.path) {
+            segments.push({
+                kind: 'file',
+                path: attrs.path,
+                line: positiveInt(attrs.line),
+                name: attrs.name?.trim() || null,
+            });
         }
-        // No src → tag is stripped (never render raw XML to the user).
+        // No src/path → tag is stripped (never render raw XML to the user).
         last = m.index + m[0].length;
     }
     // Strip a trailing unterminated tag (mid-stream) so raw XML never renders.
