@@ -192,7 +192,14 @@ export function flattenForMatch(text: string): string {
 function completionFromNotification(payload: string): { kind: "complete"; id: string } | null {
   const m = /<task-id>([^<]+)<\/task-id>/.exec(payload);
   if (!m) return null;
-  if (!/<status>/.test(payload) && /<summary>\s*Monitor event:/i.test(payload)) return null;
+  if (!/<status>/.test(payload) && /<summary>\s*Monitor event:/i.test(payload)) {
+    // A TIMEOUT rides the interim-event shape (no <status>, "Monitor event:"
+    // summary) but is terminal — the monitor is dead ("re-arm if needed").
+    // Without this, a timed-out monitor stays outstanding forever (fny agent2
+    // stuck at "1/2 completed", 2026-07-09).
+    if (/Monitor timed out/i.test(payload)) return { kind: "complete", id: m[1] };
+    return null;
+  }
   return { kind: "complete", id: m[1] };
 }
 
