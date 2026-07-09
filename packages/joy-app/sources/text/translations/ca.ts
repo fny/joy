@@ -80,7 +80,7 @@ export const ca: TranslationStructure = {
         permissionRequired: 'permís requerit',
         detached: 'separat',
         compacting: 'compactant',
-        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} completades`,
+        tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} tasques`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agents`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
         activeNow: 'Actiu ara',
