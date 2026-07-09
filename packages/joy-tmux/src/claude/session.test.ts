@@ -725,18 +725,20 @@ test("classifyBgTasks: long-running classified even when its launch precedes the
   expect([...r.longRunning]).toEqual(["srv"]);
 });
 
-test("classifyBgTasks: an aborted task (launch dropped, per #deriveBgTasks cancel-filter) clears the count", () => {
+test("classifyBgTasks: an interrupt does NOT drop running tasks — they complete later", () => {
   const L = (id: string) => ({ kind: "launch" as const, id, source: "shell" as const });
   const C = (id: string) => ({ kind: "complete" as const, id });
-  // b1 launched but interrupted before completing (its complete never lands). On
-  // abort, #deriveBgTasks drops b1's events (it's in #cancelledBgTasks); b2, sent
-  // after the abort, still counts. This mirrors that filter+classify composition.
-  const cancelled = new Set(["b1"]);
-  const events = [L("b1"), L("b2"), C("b2")];
-  const live = events.filter((e) => !cancelled.has(e.id));
-  const r = classifyBgTasks(live, new Set());
-  expect({ total: r.total, done: r.done, outstanding: [...r.outstanding] })
-    .toEqual({ total: 1, done: 1, outstanding: [] });
+  // b1 was in flight when the user pressed Stop. Escape interrupts Claude's
+  // turn, not the background process — b1 keeps running and its completion
+  // notification still lands, so the count must keep tracking it. (An earlier
+  // abort-time cancel-filter wiped live status the moment Stop was pressed.)
+  const during = classifyBgTasks([L("b1"), L("b2"), C("b2")], new Set());
+  expect({ total: during.total, done: during.done, outstanding: [...during.outstanding] })
+    .toEqual({ total: 2, done: 1, outstanding: ["b1"] });
+  // …and when b1's notification arrives post-interrupt, it drains normally.
+  const after = classifyBgTasks([L("b1"), L("b2"), C("b2"), C("b1")], new Set());
+  expect({ total: after.total, done: after.done, outstanding: [...after.outstanding] })
+    .toEqual({ total: 2, done: 2, outstanding: [] });
 });
 
 test("classifyBgTasks: stopping a server clears it; finishing batch resets on empty (servers don't block it)", () => {
