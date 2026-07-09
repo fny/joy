@@ -1067,21 +1067,18 @@ export class Session {
           mirrorToRelay: opts?.mirrorToRelay ?? true,
         });
       } else if (cmd.name === "btw" && cmd.args.trim()) {
-        // /btw <msg> — an ASIDE, steered straight into the pane (same bypass as
-        // /steer). The pane gets the message wrapped so Claude answers it briefly
-        // and returns to the task instead of pivoting; the chat bubble mirrors
-        // only the user's own words. The reply needs no collection channel:
-        // steered text is Claude's next input, so the answer arrives in the
-        // transcript and mirrors to the app like any other output.
-        void this.#steer(
-          `By the way: ${cmd.args.trim()}\n(Aside — answer briefly, then continue what you were doing.)`,
-          {
-            seq: opts?.seq,
-            source: opts?.source ?? "rpc",
-            mirrorToRelay: opts?.mirrorToRelay ?? true,
-            mirrorText: `btw: ${cmd.args.trim()}`,
-          },
-        );
+        // /btw is Claude Code's BUILT-IN side-question command (immediate,
+        // control-request dispatch — answers without interrupting the main
+        // conversation). Joy's only job is transport: steer the literal
+        // "/btw <q>" into the pane NOW, bypassing the queue — parked behind
+        // the idle gate it would answer long after the moment passed. The
+        // CLI runs the command and its reply lands in the transcript like
+        // any other output; no collection channel needed.
+        void this.#steer(text, {
+          seq: opts?.seq,
+          source: opts?.source ?? "rpc",
+          mirrorToRelay: opts?.mirrorToRelay ?? true,
+        });
       } else if (cmd.name === "title") {
         this.#setTitle(cmd.args, { byUser: true });
       } else if (cmd.name === "login-code" && cmd.args.trim()) {
@@ -1112,7 +1109,7 @@ export class Session {
    * whole point. Records a receipt so the transcript echo is deduped (not re-mirrored),
    * and mirrors to the relay once the Enter actually lands.
    */
-  async #steer(text: string, opts: SendOptions & { mirrorText?: string }): Promise<void> {
+  async #steer(text: string, opts: SendOptions): Promise<void> {
     if (this.status === "ended") return;
     const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeLines)
     // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
@@ -1172,7 +1169,7 @@ export class Session {
         delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
         recordReceived(delivery, this.relaySessionId, typed, Date.now());
       }
-      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.mirrorText ?? text));
+      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
