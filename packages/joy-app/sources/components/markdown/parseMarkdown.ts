@@ -23,6 +23,9 @@ export type MarkdownBlock = {
 } | {
     type: 'horizontal-rule'
 } | {
+    type: 'quote',
+    lines: MarkdownSpan[][]
+} | {
     type: 'options',
     items: string[]
 } | {
