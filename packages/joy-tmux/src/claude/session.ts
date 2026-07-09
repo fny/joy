@@ -2778,8 +2778,33 @@ export class Session {
         }
         return;
       }
-      if (content.startsWith("<command-name>") ||
-          content.startsWith("<command-message>") ||
+      if (content.startsWith("<command-name>")) {
+        // A LOCAL slash command echoes as <command-name> entries — never as
+        // plain text, and the CLI fires no UserPromptSubmit for it. A daemon
+        // dispatch of "/goal clear" therefore executed fine but was never
+        // CONFIRMED: the echo timeout re-queued the already-run command and
+        // paused the queue (it then ran AGAIN on resume — seen live 2026-07-09,
+        // /goal clear executed twice, two messages stuck behind the pause).
+        // Confirm here: command token of the echo vs the in-flight dispatch.
+        const m = /<command-name>([^<]+)<\/command-name>/.exec(content);
+        const echoedCmd = m?.[1]?.trim();
+        const inflight = this.#dispatchInFlight;
+        if (echoedCmd && inflight && inflight.text.trim().split(/\s+/)[0] === echoedCmd) {
+          process.stderr.write(`[queue] ${this.id} command echo confirmed dispatch (${echoedCmd})\n`);
+          this.#clearSubmitTimer();
+          // No plain-text echo will EVER come for this dispatch — drop its
+          // pending entry now or it would suppress a later identical send.
+          this.#neutralizePending(inflight.text);
+          this.#dispatchInFlight = null;
+          this.#dispatchExtends = 0;
+          if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+          this.#broadcastQueue();
+          void this.#restoreDraftIfAny();
+          this.#maybeDrainQueue();
+        }
+        return;
+      }
+      if (content.startsWith("<command-message>") ||
           content.startsWith("<local-command") ||
           content.startsWith("<bash-")) {
         return;
