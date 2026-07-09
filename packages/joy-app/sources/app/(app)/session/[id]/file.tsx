@@ -9,6 +9,8 @@ import { sessionReadFile, sessionBash } from '@/sync/ops';
 import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import { storeTempText } from '@/sync/persistence';
+import { useRouter } from 'expo-router';
 import { Modal } from '@/modal';
 import { useUnistyles, StyleSheet } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
@@ -133,6 +135,21 @@ export default React.memo(function FileScreen() {
         if (copiedTimer.current) clearTimeout(copiedTimer.current);
         copiedTimer.current = setTimeout(() => setCopied(false), 1500);
     }, []);
+    // Long-press → the dedicated text-selection screen (native text view with
+    // real drag-handle PARTIAL selection). RN's inline `selectable` can't do
+    // this reliably on iOS: per-line Texts cap selection at one line and
+    // nested highlight spans break partial drags — same reason markdown
+    // messages long-press into this screen.
+    const router = useRouter();
+    const openTextSelection = React.useCallback((text: string | null | undefined) => {
+        if (!text) return;
+        try {
+            const textId = storeTempText(text);
+            router.push(`/text-selection?textId=${textId}`);
+        } catch {
+            Modal.alert(t('common.error'), t('errors.operationFailed'));
+        }
+    }, [router]);
     const [isLoading, setIsLoading] = React.useState(!cached);
     const [error, setError] = React.useState<string | null>(null);
     const scrollViewRef = React.useRef<ScrollView | null>(null);
@@ -467,10 +484,11 @@ export default React.memo(function FileScreen() {
                 </Pressable>
                 <Pressable
                     onPress={() => copyContent(displayMode === 'diff' && diffContent ? diffContent : fileContent?.content)}
+                    onLongPress={() => openTextSelection(displayMode === 'diff' && diffContent ? diffContent : fileContent?.content)}
                     hitSlop={8}
                     style={styles.ctrlBtn}
                     accessibilityRole="button"
-                    accessibilityLabel="Copy contents"
+                    accessibilityLabel="Copy contents (long-press to select text)"
                 >
                     <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={17} color={copied ? theme.colors.textLink : theme.colors.textSecondary} />
                 </Pressable>
