@@ -33,12 +33,22 @@ const MAX_IMAGE_WIDTH = 280;
 const MAX_IMAGE_HEIGHT = 360;
 const DEFAULT_ASPECT = 4 / 3; // when wire-format omits image{} dimensions
 
+// Attachments that should render as a picture. The wire's image{} block is
+// authoritative; for older messages without it, fall back to the extension.
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|heic|heif|bmp|tiff?|avif)$/i;
+
+function formatSize(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
+}
+
 export const FileView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
     const { theme } = useUnistyles();
     const parsed = fileInputSchema.safeParse(tool.input);
     if (!parsed.success) return null;
 
-    const { name, image, ref } = parsed.data;
+    const { name, image, ref, size } = parsed.data;
 
     const placeholder = React.useMemo(() => {
         if (!image?.thumbhash) return undefined;
@@ -46,7 +56,29 @@ export const FileView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
         return uri ? { uri } : undefined;
     }, [image?.thumbhash]);
 
-    const { uri, error } = useAttachmentImage(sessionId ?? '', sessionId ? ref : undefined);
+    // Non-image files, and images whose bytes are gone (expired/deleted
+    // attachment), collapse to a compact filename row — a large empty frame
+    // communicates nothing. Loading images keep the sized placeholder box so
+    // the chat doesn't jump when the bytes land. Non-images skip the byte
+    // fetch entirely (nothing to render with them).
+    const isImage = !!image || IMAGE_EXT_RE.test(name);
+    const { uri, error } = useAttachmentImage(sessionId ?? '', sessionId && isImage ? ref : undefined);
+    if (!isImage || (error && !uri)) {
+        return (
+            <View style={styles.inlineContainer}>
+                <View style={[styles.fileRow, { borderColor: theme.colors.divider, backgroundColor: theme.colors.surfaceHigh }]}>
+                    <Ionicons name={isImage ? 'image-outline' : 'document-outline'} size={18} color={theme.colors.textSecondary} />
+                    <Text style={[styles.fileRowName, { color: theme.colors.text }]} numberOfLines={1}>{name}</Text>
+                    {typeof size === 'number' && size > 0 && (
+                        <Text style={[styles.fileRowSize, { color: theme.colors.textSecondary }]}>{formatSize(size)}</Text>
+                    )}
+                    {isImage && (
+                        <Ionicons name="alert-circle-outline" size={16} color={theme.colors.textSecondary} />
+                    )}
+                </View>
+            </View>
+        );
+    }
 
     // Pick display dimensions. Real w/h drives the aspect ratio when present,
     // but a missing image{} block (older messages, iOS picker that didn't
@@ -114,5 +146,24 @@ const styles = StyleSheet.create(() => ({
     filename: {
         fontSize: 13,
         fontWeight: '500',
+    },
+    fileRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        borderRadius: BORDER_RADIUS,
+        borderWidth: 1,
+        paddingHorizontal: 10,
+        paddingVertical: 8,
+        alignSelf: 'flex-start',
+        maxWidth: MAX_IMAGE_WIDTH,
+    },
+    fileRowName: {
+        fontSize: 13,
+        fontWeight: '500',
+        flexShrink: 1,
+    },
+    fileRowSize: {
+        fontSize: 12,
     },
 }));
