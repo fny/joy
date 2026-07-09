@@ -2736,11 +2736,16 @@ export class Session {
           for (const item of content as Array<Record<string, unknown>>) {
             if (item.type === "tool_result" && typeof item.tool_use_id === "string") {
               const id = item.tool_use_id;
-              const turn = this.#openTools.get(id) ?? this.#turn?.turnId;
-              if (turn) {
-                this.#relay.send(encodeToolCallEnd(id, { turn, time: entryTimeMs }));
-                this.#openTools.delete(id);
-              }
+              // No known turn? Emit anyway (turn is optional app-side). A result
+              // landing while the daemon is DOWN (e.g. the command being mirrored
+              // is the one restarting the daemon) replays with #openTools empty
+              // and no live #turn — the old `if (turn)` gate dropped the end and
+              // the app's tool card spun forever (stuck-spinner screenshots,
+              // 2026-07-09). Ends for never-forwarded starts are harmless: the
+              // app ignores results with no matching call.
+              const turn = this.#openTools.get(id) ?? this.#turn?.turnId ?? "";
+              this.#relay.send(encodeToolCallEnd(id, { turn, time: entryTimeMs }));
+              this.#openTools.delete(id);
             }
           }
         }
