@@ -285,7 +285,7 @@ function updateLatestTodos(state: ReducerState, value: unknown, timestamp: numbe
  * start arriving out of createdAt order.
  */
 function reconcileSeq(state: ReducerState, changed: Set<string>, msg: NormalizedMessage): void {
-    const internalId = (msg.role === 'user' && msg.localId ? state.localIds.get(msg.localId) : undefined)
+    const internalId = (msg.localId ? state.localIds.get(msg.localId) : undefined)
         ?? state.messageIds.get(msg.id);
     if (!internalId) return;
     const existing = state.messages.get(internalId);
@@ -892,6 +892,14 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         });
 
                         state.toolIdToMessageId.set(c.id, mid);
+                        // Optimistic sends that normalize as agent TOOL-CALLS
+                        // (file attachments) live under this allocated mid — map
+                        // their localId here or the POST ack can't find them and
+                        // their seq stays null forever (the seq-sort then floats
+                        // the file bubble to "newest": stuck at the chat bottom).
+                        if (msg.localId) {
+                            state.localIds.set(msg.localId, mid);
+                        }
                         changed.add(mid);
 
                     }
