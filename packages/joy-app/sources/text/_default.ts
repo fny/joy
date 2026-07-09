@@ -85,7 +85,7 @@ export const en = {
         activeNow: 'Active now',
         unknown: 'unknown',
         unread: 'new results',
-        backgroundProcesses: ({ count }: { count: number }) => count === 1 ? '1 background process' : `${count} background processes`,
+        backgroundProcesses: ({ count }: { count: number }) => count === 1 ? '1 process' : `${count} processes`,
     },
 
     time: {

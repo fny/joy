@@ -88,7 +88,7 @@ export const ja: TranslationStructure = {
         activeNow: 'アクティブ',
         unknown: '不明',
         unread: '新しい結果',
-        backgroundProcesses: ({ count }: { count: number }) => `バックグラウンドプロセス${count}件`,
+        backgroundProcesses: ({ count }: { count: number }) => `プロセス${count}件`,
     },
 
     time: {

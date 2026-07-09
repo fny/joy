@@ -428,7 +428,7 @@ export const ru: TranslationStructure = {
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
         unread: 'новые результаты',
-        backgroundProcesses: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'фоновый процесс', few: 'фоновых процесса', many: 'фоновых процессов' })}`,
+        backgroundProcesses: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'процесс', few: 'процесса', many: 'процессов' })}`,
     },
 
     time: {

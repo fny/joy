@@ -88,7 +88,7 @@ export const zhHans: TranslationStructure = {
         activeNow: '当前活跃',
         unknown: '未知',
         unread: '新结果',
-        backgroundProcesses: ({ count }: { count: number }) => `${count} 个后台进程`,
+        backgroundProcesses: ({ count }: { count: number }) => `${count} 个进程`,
     },
 
     time: {
