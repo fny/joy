@@ -404,7 +404,10 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
             bgSuffixParts.push(t('status.tasksCompleted', { done: session.tasksDone ?? 0, total: session.tasksTotal }));
         }
     }
-    const statusTextWithBg = bgSuffixParts.length > 0 ? statusText + ', ' + bgSuffixParts.join(', ') : statusText;
+    // Space (not comma) after a trailing ellipsis — "brewing… 1/3 agents".
+    const statusTextWithBg = bgSuffixParts.length > 0
+        ? statusText + (statusText.endsWith('…') ? ' ' : ', ') + bgSuffixParts.join(', ')
+        : statusText;
 
     const handlePress = React.useCallback(() => {
         navigateToSession(session.id);

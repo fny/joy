@@ -96,9 +96,11 @@ export function useSessionStatus(session: Session): SessionStatus {
         if (agents && agents.total > 0 && status.state !== 'agents') parts.push(t('status.agentsRunning', { done: agents.done, total: agents.total }));
         if (tasks && tasks.total > 0 && status.state !== 'tasks') parts.push(t('status.tasksCompleted', { done: tasks.done, total: tasks.total }));
         if (longRunning > 0) parts.push(t('status.backgroundProcesses', { count: longRunning }));
-        return parts.length > 0
-            ? { ...status, statusText: status.statusText + ', ' + parts.join(', ') }
-            : status;
+        if (parts.length === 0) return status;
+        // After a trailing ellipsis ("brewing…") a comma reads badly — join
+        // the suffix with a plain space there; comma elsewhere ("ready, …").
+        const sep = status.statusText.endsWith('…') ? ' ' : ', ';
+        return { ...status, statusText: status.statusText + sep + parts.join(', ') };
     };
 
     // 500-error auto-retry in progress: the daemon is re-sending a failed turn
