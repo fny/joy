@@ -47,6 +47,32 @@ describe('parseMarkdown', () => {
         }]);
     });
 
+    it('parses blockquotes into quote blocks (with inline formatting intact)', () => {
+        const blocks = parseMarkdown([
+            'Before.',
+            '> quoted **bold** line',
+            '>',
+            '> second para with [a link](https://example.com)',
+            'After.',
+        ].join('\n'));
+        expect(blocks).toHaveLength(3);
+        expect(blocks[1]).toEqual({
+            type: 'quote',
+            lines: [
+                [
+                    { styles: [], text: 'quoted ', url: null },
+                    { styles: ['bold'], text: 'bold', url: null },
+                    { styles: [], text: ' line', url: null },
+                ],
+                [],
+                [
+                    { styles: [], text: 'second para with ', url: null },
+                    { styles: [], text: 'a link', url: 'https://example.com' },
+                ],
+            ],
+        });
+    });
+
     it('parses standalone markdown image blocks', () => {
         const blocks = parseMarkdown('![Markdown renderable image](data:image/png;base64,abc123)');
 

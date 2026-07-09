@@ -66,6 +66,8 @@ export const MarkdownView = React.memo((props: {
                         return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'horizontal-rule') {
                         return <View style={style.horizontalRule} key={index} />;
+                    } else if (block.type === 'quote') {
+                        return <RenderQuoteBlock lines={block.lines} key={index} selectable={selectable} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'list') {
                         return <RenderListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'numbered-list') {
@@ -123,6 +125,20 @@ type RenderSpanProps = {
 
 function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
     return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last]}><RenderSpans spans={props.spans} baseStyle={style.text} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
+}
+
+function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean, onLinkPress: (url: string) => void }) {
+    return (
+        <View style={style.quote}>
+            {props.lines.map((spans, i) => (
+                spans.length === 0
+                    ? <View key={i} style={{ height: 8 }} />
+                    : <Text key={i} selectable={props.selectable} style={[style.text, style.quoteText]}>
+                        <RenderSpans spans={spans} baseStyle={[style.text, style.quoteText]} selectable={props.selectable} onLinkPress={props.onLinkPress} />
+                    </Text>
+            ))}
+        </View>
+    );
 }
 
 function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
@@ -534,6 +550,17 @@ const style = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.divider,
         marginTop: 8,
         marginBottom: 8,
+    },
+    quote: {
+        borderLeftWidth: 3,
+        borderLeftColor: theme.colors.divider,
+        paddingLeft: 12,
+        marginVertical: 8,
+        gap: 2,
+    },
+    quoteText: {
+        color: theme.colors.textSecondary,
+        marginBottom: 0,
     },
     imageBlock: {
         width: '100%',

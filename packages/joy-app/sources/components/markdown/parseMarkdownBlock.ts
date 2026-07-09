@@ -122,6 +122,23 @@ export function parseMarkdownBlock(markdown: string) {
             continue;
         }
 
+        // Blockquote: consecutive '>'-prefixed lines fold into one quote block.
+        // A bare '>' inside the run is a blank quoted line (paragraph break).
+        if (trimmed.startsWith('>')) {
+            const quoteLines: ReturnType<typeof parseMarkdownSpans>[] = [];
+            let cur = trimmed;
+            while (true) {
+                quoteLines.push(parseMarkdownSpans(cur.replace(/^>\s?/, ''), false));
+                if (index >= lines.length) break;
+                const next = lines[index].trim();
+                if (!next.startsWith('>')) break;
+                cur = next;
+                index++;
+            }
+            blocks.push({ type: 'quote', lines: quoteLines });
+            continue;
+        }
+
         // Options block
         if (trimmed.startsWith('<options>')) {
             let items: string[] = [];
