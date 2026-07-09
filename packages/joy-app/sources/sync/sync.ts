@@ -1945,31 +1945,52 @@ class Sync {
         sessionId: string,
         encryption: ReturnType<Encryption['getSessionEncryption']> & {}
     ) => {
-        const response = await apiSocket.request(
-            `/v3/sessions/${sessionId}/messages?before_seq=${SEQ_BACKWARD_INITIAL_SENTINEL}&limit=100`
-        );
-        if (!response.ok) {
-            throw new Error(`Failed to fetch initial page for ${sessionId}: ${response.status}`);
-        }
-        const data = await response.json() as V3GetSessionMessagesResponse;
-        const messages = Array.isArray(data.messages) ? data.messages : [];
+        // Page backward until the chat has something to SHOW. A raw 100-row
+        // page can be almost entirely invisible lifecycle events (turn-start/
+        // end, usage — a busy joy session produced 98/100), which opened a
+        // long-running session onto a near-EMPTY chat ("prior sessions aren't
+        // loading", 2026-07-09). Keep pulling older pages until the store has
+        // a screenful of renderable messages or we hit the page budget —
+        // scroll-up paging takes over from there.
+        const MIN_RENDERABLE = 20;
+        const MAX_INITIAL_PAGES = 5;
+        let beforeSeq = SEQ_BACKWARD_INITIAL_SENTINEL;
+        let maxSeq = 0;
+        let minSeq = Number.POSITIVE_INFINITY;
+        let hasMore = false;
+        let anyMessages = false;
+        for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
+            const response = await apiSocket.request(
+                `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
+            );
+            if (!response.ok) {
+                if (page === 0) throw new Error(`Failed to fetch initial page for ${sessionId}: ${response.status}`);
+                break; // keep what we have — older pages are a bonus
+            }
+            const data = await response.json() as V3GetSessionMessagesResponse;
+            const messages = Array.isArray(data.messages) ? data.messages : [];
+            hasMore = !!data.hasMore && messages.length > 0;
+            if (messages.length > 0) anyMessages = true;
 
-        await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
+            await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
+
+            for (const message of messages) {
+                if (message.seq > maxSeq) maxSeq = message.seq;
+                if (message.seq < minSeq) minSeq = message.seq;
+            }
+            const renderable = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
+            if (!hasMore || renderable >= MIN_RENDERABLE) break;
+            beforeSeq = minSeq;
+        }
 
         // Anchor both ends so future incremental forward sync resumes from
         // maxSeq, and loadOlderMessages can page backward from minSeq.
-        let maxSeq = 0;
-        let minSeq = Number.POSITIVE_INFINITY;
-        for (const message of messages) {
-            if (message.seq > maxSeq) maxSeq = message.seq;
-            if (message.seq < minSeq) minSeq = message.seq;
-        }
         this.sessionLastSeq.set(sessionId, maxSeq);
-        if (messages.length > 0) {
+        if (anyMessages) {
             this.sessionOldestSeq.set(sessionId, minSeq);
         }
         storage.getState().applyOlderMessagesPagination(sessionId, {
-            hasMore: !!data.hasMore && messages.length > 0
+            hasMore
         });
     }
 
