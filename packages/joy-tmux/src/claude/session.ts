@@ -2396,6 +2396,19 @@ export class Session {
           if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
           this.#broadcastQueue();
           void this.#restoreDraftIfAny();
+        } else if (prompt && this.#queue.length > 0) {
+          // The same text reached Claude by ANOTHER route (steer, typed in the
+          // pane) while a copy sat queued. Drop the queued copy: it would
+          // re-deliver later as a duplicate turn, and until then the app shows
+          // "queued" for a message that already ran (seen live with a steered
+          // "/goal clear" stuck in the spool). Exact-match, first match only.
+          const flat = flattenForMatch(prompt);
+          const i = this.#queue.findIndex((q) => flattenForMatch(q.text) === flat);
+          if (i >= 0) {
+            process.stderr.write(`[hook] ${this.id} UserPromptSubmit dropped queued duplicate ${this.#queue[i].id}\n`);
+            this.#queue.splice(i, 1);
+            this.#broadcastQueue();
+          }
         }
         return { ok: true };
       }
