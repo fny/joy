@@ -1922,6 +1922,32 @@ export class Session {
    * (newline-collapsed) form, and leaving that behind would (a) double up on
    * re-dispatch and (b) wrongly suppress a later identical prompt as a self-echo.
    */
+  /** A LOCAL slash command echoes as <command-name> markup — never as plain
+   *  text, and the CLI fires no UserPromptSubmit for it. A daemon dispatch of
+   *  "/goal clear" therefore executed fine but was never CONFIRMED: the echo
+   *  timeout re-queued the already-run command and paused the queue (it then
+   *  ran AGAIN on resume — seen live 2026-07-09). Confirm by command token.
+   *  Reached from BOTH transcript shapes: legacy user-role string entries and
+   *  the current CLI's system/local_command entries (2.1.198 moved the whole
+   *  local-command family there — the user-branch fix was dead on arrival). */
+  #confirmCommandEcho(content: string): void {
+    const m = /<command-name>([^<]+)<\/command-name>/.exec(content);
+    const echoedCmd = m?.[1]?.trim();
+    const inflight = this.#dispatchInFlight;
+    if (!echoedCmd || !inflight || inflight.text.trim().split(/\s+/)[0] !== echoedCmd) return;
+    process.stderr.write(`[queue] ${this.id} command echo confirmed dispatch (${echoedCmd})\n`);
+    this.#clearSubmitTimer();
+    // No plain-text echo will EVER come for this dispatch — drop its
+    // pending entry now or it would suppress a later identical send.
+    this.#neutralizePending(inflight.text);
+    this.#dispatchInFlight = null;
+    this.#dispatchExtends = 0;
+    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    this.#broadcastQueue();
+    void this.#restoreDraftIfAny();
+    this.#maybeDrainQueue();
+  }
+
   #neutralizePending(text: string): void {
     const delivery = this.#delivery;
     if (!delivery || !this.relaySessionId) return;
@@ -2335,9 +2361,10 @@ export class Session {
   #reconcileGoal(): void {
     this.#deriveBgTasks(); // advance the shared scan to the end of the transcript
     const latest = this.#scan?.lastGoal ?? null;
+    process.stderr.write(`[goal] ${this.id} reconcile: lastGoal=${latest ? `met=${latest.met}` : "none"}\n`);
     this.#goal = null; // force #applyGoalStatus to treat the derived value as fresh
     if (latest) this.#applyGoalStatus(latest, latest.atMs);
-    else void this.#relay?.updateGoal(null);
+    else void Promise.resolve(this.#relay?.updateGoal(null)).catch((e) => process.stderr.write(`[goal] updateGoal(null) failed: ${e}\n`));
   }
 
   /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
@@ -2606,6 +2633,22 @@ export class Session {
     // ones that ended in an API error — whose assistant entry carries no
     // end_turn stop_reason, so the assistant-path turn-end below never fires.
     // Handling it here is what unsticks `thinking` when a turn errors out.
+    // CLI ≥2.1.198 records the local-command family as system/local_command
+    // entries with a TOP-LEVEL content string (previously user-role message
+    // content). Route them to the same handlers: <command-name> confirms a
+    // dispatched slash command (queue wedge otherwise), <local-command-stdout>
+    // surfaces the command's output as an agent note ("No goal set" etc.).
+    if (entryType === "system" && entry.subtype === "local_command" && typeof entry.content === "string") {
+      const sysContent = entry.content as string;
+      if (sysContent.startsWith("<command-name>")) {
+        this.#confirmCommandEcho(sysContent);
+      } else if (sysContent.startsWith("<local-command-stdout>")) {
+        const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(sysContent);
+        const out = m ? stripAnsi(m[1]).trim() : "";
+        if (out && this.#shouldEmitNote(entry, entryTimeMs)) this.#emitAgentNote(out, entryTimeMs, sid);
+      }
+      return;
+    }
     if (entryType === "system" && (entry.subtype === "stop_hook_summary" || entry.subtype === "turn_duration")) {
       this.#errorNotedThisTurn = false;
       this.#deps.broadcast("stop", { session_id: sid });
@@ -2779,29 +2822,7 @@ export class Session {
         return;
       }
       if (content.startsWith("<command-name>")) {
-        // A LOCAL slash command echoes as <command-name> entries — never as
-        // plain text, and the CLI fires no UserPromptSubmit for it. A daemon
-        // dispatch of "/goal clear" therefore executed fine but was never
-        // CONFIRMED: the echo timeout re-queued the already-run command and
-        // paused the queue (it then ran AGAIN on resume — seen live 2026-07-09,
-        // /goal clear executed twice, two messages stuck behind the pause).
-        // Confirm here: command token of the echo vs the in-flight dispatch.
-        const m = /<command-name>([^<]+)<\/command-name>/.exec(content);
-        const echoedCmd = m?.[1]?.trim();
-        const inflight = this.#dispatchInFlight;
-        if (echoedCmd && inflight && inflight.text.trim().split(/\s+/)[0] === echoedCmd) {
-          process.stderr.write(`[queue] ${this.id} command echo confirmed dispatch (${echoedCmd})\n`);
-          this.#clearSubmitTimer();
-          // No plain-text echo will EVER come for this dispatch — drop its
-          // pending entry now or it would suppress a later identical send.
-          this.#neutralizePending(inflight.text);
-          this.#dispatchInFlight = null;
-          this.#dispatchExtends = 0;
-          if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-          this.#broadcastQueue();
-          void this.#restoreDraftIfAny();
-          this.#maybeDrainQueue();
-        }
+        this.#confirmCommandEcho(content);
         return;
       }
       if (content.startsWith("<command-message>") ||
