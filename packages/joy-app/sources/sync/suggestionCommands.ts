@@ -60,6 +60,7 @@ const DEFAULT_COMMANDS: CommandItem[] = [
     // joy-tmux daemon commands (intercepted before Claude, so never reported in
     // metadata.slashCommands) — surfaced here so they show in autocomplete.
     { command: 'steer', description: 'Send straight to the agent now, bypassing the queue' },
+    { command: 'btw', description: 'Ask an aside now — agent answers briefly and continues its task' },
     { command: 'title', description: 'Set the conversation title' },
 ];
 

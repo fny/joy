@@ -145,7 +145,7 @@ export interface SendOptions {
 }
 
 /** Slash commands joy handles itself, before the text reaches Claude (today: `/title`). */
-const JOY_COMMANDS = new Set(["steer", "title", "login-code"]);
+const JOY_COMMANDS = new Set(["steer", "btw", "title", "login-code"]);
 
 /**
  * Parse a joy-owned slash command the daemon intercepts BEFORE the text reaches Claude:
@@ -1066,6 +1066,22 @@ export class Session {
           source: opts?.source ?? "rpc",
           mirrorToRelay: opts?.mirrorToRelay ?? true,
         });
+      } else if (cmd.name === "btw" && cmd.args.trim()) {
+        // /btw <msg> — an ASIDE, steered straight into the pane (same bypass as
+        // /steer). The pane gets the message wrapped so Claude answers it briefly
+        // and returns to the task instead of pivoting; the chat bubble mirrors
+        // only the user's own words. The reply needs no collection channel:
+        // steered text is Claude's next input, so the answer arrives in the
+        // transcript and mirrors to the app like any other output.
+        void this.#steer(
+          `By the way: ${cmd.args.trim()}\n(Aside — answer briefly, then continue what you were doing.)`,
+          {
+            seq: opts?.seq,
+            source: opts?.source ?? "rpc",
+            mirrorToRelay: opts?.mirrorToRelay ?? true,
+            mirrorText: `btw: ${cmd.args.trim()}`,
+          },
+        );
       } else if (cmd.name === "title") {
         this.#setTitle(cmd.args, { byUser: true });
       } else if (cmd.name === "login-code" && cmd.args.trim()) {
@@ -1096,7 +1112,7 @@ export class Session {
    * whole point. Records a receipt so the transcript echo is deduped (not re-mirrored),
    * and mirrors to the relay once the Enter actually lands.
    */
-  async #steer(text: string, opts: SendOptions): Promise<void> {
+  async #steer(text: string, opts: SendOptions & { mirrorText?: string }): Promise<void> {
     if (this.status === "ended") return;
     const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeLines)
     // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
@@ -1156,7 +1172,7 @@ export class Session {
         delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
         recordReceived(delivery, this.relaySessionId, typed, Date.now());
       }
-      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
+      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.mirrorText ?? text));
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
