@@ -33,6 +33,20 @@ describe('parseMarkdown', () => {
         ]));
     });
 
+    it('renders a markdown link nested inside bold as a clickable link', () => {
+        // Live regression: "**[ENG-5297 — …](https://linear.app/…)**" showed raw
+        // markdown — the bold branch only auto-linked bare URLs.
+        const blocks = parseMarkdown('Cleaned up. **[ENG-5297 — VPC Flow Logs](https://linear.app/voltai/issue/ENG-5297)** stands.');
+        expect(blocks).toEqual([{
+            type: 'text',
+            content: [
+                { styles: [], text: 'Cleaned up. ', url: null },
+                { styles: ['bold'], text: 'ENG-5297 — VPC Flow Logs', url: 'https://linear.app/voltai/issue/ENG-5297' },
+                { styles: [], text: ' stands.', url: null },
+            ],
+        }]);
+    });
+
     it('parses standalone markdown image blocks', () => {
         const blocks = parseMarkdown('![Markdown renderable image](data:image/png;base64,abc123)');
 
