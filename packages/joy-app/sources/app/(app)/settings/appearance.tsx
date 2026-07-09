@@ -8,7 +8,7 @@ import { useRouter } from 'expo-router';
 import * as Localization from 'expo-localization';
 import { useUnistyles, UnistylesRuntime } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
-import { Appearance } from 'react-native';
+import { Appearance, Platform } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
 import { t, getLanguageNativeName, SUPPORTED_LANGUAGES } from '@/text';
@@ -190,13 +190,18 @@ export default function AppearanceSettingsScreen() {
                         />
                     }
                 />
-                <Item
-                    title={t('settingsAppearance.diffStyle')}
-                    subtitle={t('settingsAppearance.diffStyleDescription')}
-                    icon={<Ionicons name="git-compare-outline" size={29} color={theme.colors.accents.indigo} />}
-                    detail={diffStyle === 'split' ? t('settingsAppearance.diffStyleOptions.split') : t('settingsAppearance.diffStyleOptions.unified')}
-                    onPress={() => setDiffStyle(diffStyle === 'unified' ? 'split' : 'unified')}
-                />
+                {/* Split rendering exists only in the web diff renderer —
+                    native always draws unified (side-by-side doesn't fit phone
+                    widths), so offering the toggle there was a dead switch. */}
+                {Platform.OS === 'web' && (
+                    <Item
+                        title={t('settingsAppearance.diffStyle')}
+                        subtitle={t('settingsAppearance.diffStyleDescription')}
+                        icon={<Ionicons name="git-compare-outline" size={29} color={theme.colors.accents.indigo} />}
+                        detail={diffStyle === 'split' ? t('settingsAppearance.diffStyleOptions.split') : t('settingsAppearance.diffStyleOptions.unified')}
+                        onPress={() => setDiffStyle(diffStyle === 'unified' ? 'split' : 'unified')}
+                    />
+                )}
                 <Item
                     title={t('settingsAppearance.alwaysShowContextSize')}
                     subtitle={t('settingsAppearance.alwaysShowContextSizeDescription')}
