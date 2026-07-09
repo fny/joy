@@ -36,6 +36,28 @@ function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: Mark
     }
 }
 
+// [text](url) links NESTED inside an already-styled run (bold/italic). The
+// top-level pattern consumes the whole **…** first and the inner content was
+// only auto-linked — a markdown link inside bold rendered as raw "[text](url)"
+// (seen live with "**[ENG-5297 — …](linear.app/…)**"). Re-parse links here;
+// everything between them still gets the bare-URL auto-linking.
+const nestedLinkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+function pushStyledContent(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles']) {
+    let last = 0;
+    let m: RegExpExecArray | null;
+    nestedLinkPattern.lastIndex = 0;
+    while ((m = nestedLinkPattern.exec(text)) !== null) {
+        if (m.index > last) {
+            pushTextWithAutoLinks(spans, text.slice(last, m.index), styles);
+        }
+        spans.push({ styles, text: m[1], url: m[2] });
+        last = m.index + m[0].length;
+    }
+    if (last < text.length) {
+        pushTextWithAutoLinks(spans, text.slice(last), styles);
+    }
+}
+
 export function parseMarkdownSpans(markdown: string, header: boolean) {
     const spans: MarkdownSpan[] = [];
     let lastIndex = 0;
@@ -51,18 +73,10 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
 
         if (match[1]) {
             // Bold
-            if (header) {
-                pushTextWithAutoLinks(spans, match[2], []);
-            } else {
-                pushTextWithAutoLinks(spans, match[2], ['bold']);
-            }
+            pushStyledContent(spans, match[2], header ? [] : ['bold']);
         } else if (match[3]) {
             // Italic
-            if (header) {
-                pushTextWithAutoLinks(spans, match[4], []);
-            } else {
-                pushTextWithAutoLinks(spans, match[4], ['italic']);
-            }
+            pushStyledContent(spans, match[4], header ? [] : ['italic']);
         } else if (match[5]) {
             // Link - handle incomplete links (no URL part)
             if (match[7]) {
