@@ -97,7 +97,7 @@ export const pl: TranslationStructure = {
         activeNow: 'Aktywny teraz',
         unknown: 'nieznane',
         unread: 'nowe wyniki',
-        backgroundProcesses: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'proces w tle', few: 'procesy w tle', many: 'procesów w tle' })}`,
+        backgroundProcesses: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'proces', few: 'procesy', many: 'procesów' })}`,
     },
 
     time: {

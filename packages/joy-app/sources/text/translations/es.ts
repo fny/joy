@@ -86,7 +86,7 @@ export const es: TranslationStructure = {
         activeNow: 'Activo ahora',
         unknown: 'desconocido',
         unread: 'nuevos resultados',
-        backgroundProcesses: ({ count }: { count: number }) => `${count} proceso${count !== 1 ? 's' : ''} en segundo plano`,
+        backgroundProcesses: ({ count }: { count: number }) => `${count} proceso${count !== 1 ? 's' : ''}`,
     },
 
     time: {

@@ -86,7 +86,7 @@ export const ca: TranslationStructure = {
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
         unread: 'nous resultats',
-        backgroundProcesses: ({ count }: { count: number }) => `${count} ${count === 1 ? 'procés' : 'processos'} en segon pla`,
+        backgroundProcesses: ({ count }: { count: number }) => `${count} ${count === 1 ? 'procés' : 'processos'}`,
     },
 
     time: {
