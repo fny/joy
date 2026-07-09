@@ -1,5 +1,7 @@
 import * as React from 'react';
-import { Text, View, StyleSheet, Platform } from 'react-native';
+import { Text, View, StyleSheet, Platform, Pressable } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import { useUnistyles } from 'react-native-unistyles';
 
 interface CommandViewProps {
@@ -89,33 +91,56 @@ export const CommandView = React.memo<CommandViewProps>(({
         },
     });
 
+    const [copied, setCopied] = React.useState(false);
+    const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    React.useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
+    const copyCommand = React.useCallback(() => {
+        void Clipboard.setStringAsync(command);
+        setCopied(true);
+        if (copyTimer.current) clearTimeout(copyTimer.current);
+        copyTimer.current = setTimeout(() => setCopied(false), 1500);
+    }, [command]);
+
     return (
         <View style={[
             styles.container, 
             maxHeight ? { maxHeight } : undefined,
             fullWidth ? { width: '100%' } : undefined
         ]}>
+            {/* Copy-command affordance — full detail view only, inline chat
+                rows stay uncluttered (texts are selectable everywhere). */}
+            {fullWidth && (
+                <Pressable
+                    onPress={copyCommand}
+                    hitSlop={10}
+                    accessibilityRole="button"
+                    accessibilityLabel="Copy command"
+                    style={{ position: 'absolute', top: 10, right: 10, zIndex: 1, opacity: 0.85 }}
+                >
+                    <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={16} color={copied ? theme.colors.terminal.prompt : theme.colors.terminal.stdout} />
+                </Pressable>
+            )}
             {/* Command Line */}
             <View style={styles.line}>
                 <Text style={styles.promptText}>{prompt} </Text>
-                <Text style={styles.commandText}>{command}</Text>
+                <Text style={styles.commandText} selectable>{command}</Text>
             </View>
 
             {hasNewProps ? (
                 <>
                     {/* Standard Output */}
                     {stdout && stdout.trim() && (
-                        <Text style={styles.stdout}>{stdout}</Text>
+                        <Text style={styles.stdout} selectable>{stdout}</Text>
                     )}
 
                     {/* Standard Error */}
                     {stderr && stderr.trim() && (
-                        <Text style={styles.stderr}>{stderr}</Text>
+                        <Text style={styles.stderr} selectable>{stderr}</Text>
                     )}
 
                     {/* Error Message */}
                     {error && (
-                        <Text style={styles.error}>{error}</Text>
+                        <Text style={styles.error} selectable>{error}</Text>
                     )}
 
                     {/* Empty output indicator */}
