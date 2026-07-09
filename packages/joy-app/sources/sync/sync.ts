@@ -258,6 +258,32 @@ class Sync {
         }
     }
 
+    /** Staleness probe for the OPEN chat: one-row fetch after the local cursor.
+     *  Anything there means we missed a live update (zombie socket, dropped
+     *  frame — cause immaterial) → invalidate and let the normal fetch heal.
+     *  Runs on a short interval from SessionView; a single tiny query per tick
+     *  for one session, and a no-op result costs one empty page. This is the
+     *  backstop for the "response doesn't show until I switch away and back"
+     *  family — reconnect/foreground heals exist, but silent in-foreground
+     *  loss had nothing watching for it. */
+    probeViewedSessionStaleness = async () => {
+        const sessionId = storage.getState().currentViewingSessionId;
+        if (!sessionId) return;
+        const cursor = this.sessionLastSeq.get(sessionId);
+        if (cursor === undefined) return; // initial load not done — it fetches anyway
+        try {
+            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${cursor}&limit=1`);
+            if (!response.ok) return;
+            const data = await response.json() as { messages?: unknown[] };
+            if ((data.messages?.length ?? 0) > 0) {
+                log.log(`🩹 Staleness probe: rows beyond cursor ${cursor} for ${sessionId} — healing`);
+                this.getMessagesSync(sessionId).invalidate();
+            }
+        } catch {
+            // transient — next tick retries
+        }
+    }
+
     async create(credentials: AuthCredentials, encryption: Encryption) {
         this.credentials = credentials;
         this.encryption = encryption;

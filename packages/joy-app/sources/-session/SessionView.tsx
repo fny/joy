@@ -47,6 +47,7 @@ import { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming, Easing } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useActiveInterval } from '@/hooks/useActiveInterval';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
@@ -729,6 +730,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             }
         };
     }, [sessionId, realtimeStatus]);
+
+    // Staleness backstop for the open chat: a missed live update (zombie
+    // socket, silently dropped frame) froze the conversation until the user
+    // navigated away and back — reconnect/foreground heals never fired because
+    // nothing LOOKED broken. Probe the server for rows beyond our cursor on a
+    // short cadence while this screen is active; the probe no-ops when in sync.
+    useActiveInterval(() => {
+        void sync.probeViewedSessionStaleness();
+    }, 7000);
 
     let content = (
         <>
