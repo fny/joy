@@ -40,6 +40,53 @@ describe('reconcileSentSeqs', () => {
         expect(state.messageIds.get('server-1')).toBe(after?.id);
     });
 
+    it('upgrades an optimistic FILE ATTACHMENT seq from the ack (agent-role tool-call)', () => {
+        // File attachments normalize as AGENT tool-calls ('file') but are the
+        // client's own optimistic sends (sync.sendMessage enqueues them with a
+        // localId before the POST). Their seq must reconcile like user text —
+        // unreconciled they float to "newest" and the file bubble sticks to the
+        // bottom of the chat forever (live bug, 2026-07-09).
+        const state = createReducer();
+        const fileMsg: NormalizedMessage = {
+            role: 'agent',
+            content: [{
+                type: 'tool-call',
+                id: 'local-file-1',
+                name: 'file',
+                input: { ref: 'r1', name: 'photo.jpg', size: 1234 },
+                description: 'Attached image',
+                uuid: 'u-1',
+                parentUUID: null,
+            }, {
+                type: 'tool-result',
+                tool_use_id: 'local-file-1',
+                content: null,
+                is_error: false,
+                uuid: 'u-2',
+                parentUUID: 'u-1',
+            }],
+            id: 'local-file-1',
+            localId: 'local-file-1',
+            createdAt: 2000,
+            seq: null,
+            isSidechain: false,
+        } as unknown as NormalizedMessage;
+        reducer(state, [fileMsg]);
+
+        const before = [...state.messages.values()].find((m) => m.tool?.name === 'file');
+        expect(before).toBeTruthy();
+        expect(before?.seq).toBeNull();
+
+        const changed = reconcileSentSeqs(state, [{ id: 'server-f1', seq: 77, localId: 'local-file-1' }]);
+
+        expect(changed).toHaveLength(1);
+        expect(changed[0].seq).toBe(77);
+        const after = [...state.messages.values()].find((m) => m.tool?.name === 'file');
+        expect(after?.seq).toBe(77);
+        // Server id indexed → the fetched server copy dedupes instead of doubling.
+        expect(state.messageIds.get('server-f1')).toBe(after?.id);
+    });
+
     it('no-ops on an ack whose localId/id the reducer has never seen (no phantom message)', () => {
         const state = createReducer();
         reducer(state, [optimisticUser('local-1', 'hello', 1000)]);
