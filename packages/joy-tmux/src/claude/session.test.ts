@@ -551,6 +551,11 @@ test("bgTaskEvent: Monitor lifecycle — launch, interim events don't complete, 
   // A bare TaskCreate-ish result (taskId but no timeoutMs) must NOT launch.
   const taskCreate = { message: { role: "user", content: [{ type: "tool_result" }] }, toolUseResult: { taskId: "todo-1" } };
   expect(bgTaskEvent(taskCreate)).toBeNull();
+  // TIMEOUT: terminal despite riding the interim-event shape (no <status>,
+  // "Monitor event:" summary). Real payload from fny agent2 (2026-07-09) —
+  // this stuck the count at "1/2 completed" until treated as a completion.
+  const timedOut = { type: "queue-operation", operation: "enqueue", content: '<task-notification>\n<task-id>bdjmqwhi5</task-id>\n<summary>Monitor event: "doritos stack update (neo4j GDS image)"</summary>\n<event>[Monitor timed out — re-arm if needed.]</event>\n</task-notification>' };
+  expect(bgTaskEvent(timedOut)).toEqual({ kind: "complete", id: "bdjmqwhi5" });
 });
 
 test("bgTaskEvent: completion via <task-notification>", () => {
