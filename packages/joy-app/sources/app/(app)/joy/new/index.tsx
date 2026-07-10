@@ -67,6 +67,18 @@ function trimPathInput(path: string | null | undefined): string {
     return path?.trim() ?? '';
 }
 
+// Git/GitHub URL in the path field → clone-and-spawn. Full URLs only
+// (https/git@/ssh) so plain relative paths can't be misread.
+const GIT_URL_RE = /^(https?:\/\/\S+|git@\S+:\S+|ssh:\/\/\S+)$/;
+function parseGitUrl(input: string): { url: string; repoName: string } | null {
+    const v = input.trim();
+    if (!GIT_URL_RE.test(v)) return null;
+    const tail = v.replace(/\/+$/, '').split(/[/:]/).pop() ?? '';
+    const repoName = tail.replace(/\.git$/i, '');
+    if (!repoName) return null;
+    return { url: v, repoName };
+}
+
 type JoyCreateResult =
     | { ok: true; relaySessionId?: string; session: { id: string } }
     | { error: string }
@@ -258,7 +270,12 @@ function NewJoyTmuxSessionScreen() {
             Modal.alert(t('common.error'), 'Machine is offline');
             return;
         }
-        const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedHomeDir);
+        const gitClone = parseGitUrl(pathInput);
+        // A git URL clones into ~/Workspace/<repo> (or reuses an existing
+        // clone there) and the session launches inside it.
+        const cwd = gitClone
+            ? resolveAbsolutePath(`~/Workspace/${gitClone.repoName}`, selectedHomeDir)
+            : resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedHomeDir);
         // Race the RPC against a 30s timeout. machineRPC has no built-in
         // timeout — a machine without joy-tmux would hang the spinner
         // forever. 30s is enough for the slowest legitimate spawn (claude
@@ -267,6 +284,7 @@ function NewJoyTmuxSessionScreen() {
         const sendCreateRpc = (createDir: boolean) => Promise.race<JoyCreateResult>([
             apiSocket.machineRPC<JoyCreateResult, {
                 cwd: string;
+                gitUrl?: string;
                 model?: string;
                 effort?: string;
                 continue?: boolean;
@@ -281,6 +299,7 @@ function NewJoyTmuxSessionScreen() {
                 extraArgs?: string;
             }>(selectedMachineId, 'joy-create-session', {
                 cwd,
+                gitUrl: gitClone?.url,
                 model: currentModel?.key,
                 effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
                 // resume a specific conversation by id; it takes precedence over
@@ -299,7 +318,12 @@ function NewJoyTmuxSessionScreen() {
                 detached: detached || undefined,
                 extraArgs: extraArgs.trim() || undefined,
             }),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s — is the daemon running on the selected machine?')), 30000)),
+            new Promise<never>((_, reject) => setTimeout(
+                () => reject(new Error(gitClone
+                    ? 'clone + spawn did not finish within 4 minutes — large repo or slow network?'
+                    : 'joy-tmux did not respond within 30s — is the daemon running on the selected machine?')),
+                gitClone ? 240_000 : 30_000,
+            )),
         ]);
 
         setIsSpawning(true);
@@ -712,6 +736,11 @@ function NewJoyTmuxSessionScreen() {
                             returnKeyType="done"
                             onSubmitEditing={() => setPathPickerOpen(false)}
                         />
+                        {parseGitUrl(pathInput) && (
+                            <Text style={[styles.modalSubLabel, { color: theme.colors.textLink }]}>
+                                {`Clones into ~/Workspace/${parseGitUrl(pathInput)!.repoName} and starts the session there`}
+                            </Text>
+                        )}
                         <Text style={styles.modalSubLabel}>Recent</Text>
                         <ScrollView style={{ maxHeight: 280 }}>
                             {pathSuggestions.length === 0 && (
