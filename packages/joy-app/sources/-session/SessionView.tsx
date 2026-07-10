@@ -61,6 +61,16 @@ import { GoalBar } from './GoalBar';
 import { LoginBar } from './LoginBar';
 import { useDraftQueueStore } from './draftQueue';
 
+// Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
+// app-side queue hold. CLI 2.1.198's own `immediate` set (extracted from the
+// binary) + joy's daemon-intercepted commands (steer/btw/title/login-code),
+// whose whole point is mid-turn delivery.
+const IMMEDIATE_COMMANDS = new Set([
+    'btw', 'goal', 'stop', 'mcp', 'skills', 'hooks', 'loops', 'color',
+    'doctor', 'version', 'focus', 'brief', 'daemon',
+    'steer', 'title', 'login-code',
+]);
+
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
     const router = useRouter();
@@ -636,8 +646,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // nature, and drafts don't carry attachments.
         const latest = storage.getState().sessions[sessionId];
         const busy = latest?.thinking === true || latest?.metadata?.joy__thinking != null;
-        const isCommand = liveMessage.trim().startsWith('/');
-        if (isJoyTmux && busy && !isCommand && !hasImages) {
+        // Only commands that actually EXECUTE mid-turn bypass the hold: the
+        // CLI's immediate set (verified against the 2.1.198 binary — /model,
+        // /compact, /clear are NOT in it; typed mid-turn they'd just sit in
+        // Claude's TUI buffer, outside our editable queue and its ordering)
+        // plus joy's daemon-intercepted commands, which exist for mid-turn use.
+        const cmdMatch = /^\/([a-z-]+)/i.exec(liveMessage.trim());
+        const isImmediateCommand = cmdMatch != null && IMMEDIATE_COMMANDS.has(cmdMatch[1].toLowerCase());
+        if (isJoyTmux && busy && !isImmediateCommand && !hasImages) {
             composerHandleRef.current?.clearMessage();
             useDraftQueueStore.getState().add(sessionId, liveMessage);
             return;
