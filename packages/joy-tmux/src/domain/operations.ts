@@ -27,11 +27,36 @@ import {
 import { computeUsage, periodToRange } from "../claude/usage";
 import { cwdToTranscriptDir } from "../claude/transcript";
 import { joySessionDir } from "../paths";
-import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync } from "fs";
+import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, join } from "path";
 import { hostname, platform, release, arch } from "os";
-import { spawn } from "child_process";
+import { spawn, execFile } from "child_process";
+
+/** Clone `gitUrl` into `target` for a git-URL session spawn. Reuses an
+ *  existing clone (target/.git present) so re-spawning the same URL lands in
+ *  the same working copy; refuses a non-empty non-repo target; cleans up a
+ *  partial clone on failure. Full clone (agents want history), generous
+ *  timeout — the app extends its RPC race accordingly. */
+function cloneForSpawn(gitUrl: string, target: string): Promise<{ ok: true } | { error: string }> {
+  return new Promise((resolve) => {
+    try {
+      if (existsSync(target)) {
+        if (existsSync(join(target, ".git"))) return resolve({ ok: true }); // existing clone — reuse
+        if (readdirSync(target).length > 0) return resolve({ error: `directory ${target} exists and is not a git repo` });
+      }
+      execFile("git", ["clone", gitUrl, target], { timeout: 220_000 }, (err, _stdout, stderr) => {
+        if (!err) return resolve({ ok: true });
+        // Don't leave a partial clone behind — it would block the retry.
+        try { if (existsSync(target)) rmSync(target, { recursive: true, force: true }); } catch { /* best effort */ }
+        const detail = (stderr || String(err)).trim().split("\n").slice(-3).join(" ");
+        resolve({ error: `git clone failed: ${detail.slice(0, 300)}` });
+      });
+    } catch (e) {
+      resolve({ error: `git clone failed: ${e}` });
+    }
+  });
+}
 
 export type HttpMethod = "GET" | "POST" | "DELETE";
 
@@ -200,6 +225,13 @@ export const machineOps: MachineOp[] = [
     handler: async (registry, params) => {
       const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
       if (!cwd) return { error: "cwd required" };
+      // git-URL spawn: clone (or reuse) into cwd first, then launch inside it.
+      const gitUrl = typeof params.gitUrl === "string" ? params.gitUrl.trim() : "";
+      if (gitUrl) {
+        if (!/^(https?:\/\/|git@|ssh:\/\/)\S+$/.test(gitUrl)) return { error: "invalid git url" };
+        const cloned = await cloneForSpawn(gitUrl, cwd);
+        if ("error" in cloned) return cloned;
+      }
       const session = await registry.create({
         cwd,
         createDir: params.createDir === true,
