@@ -624,18 +624,28 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         if (!liveMessage.trim() && !hasImages) return;
         const attachments = expImageUpload ? selectedImages : undefined;
 
-        // joy text sends ALWAYS take the durable relay path (sync.sendMessage).
-        // The daemon now serializes every app→Claude message through its verified
-        // dispatch queue — typing only into an empty, ready box, behind any
-        // in-flight turn — so the app must NOT decide queue-vs-direct from the
-        // stale/volatile session.thinking flag (the old joyQueue.add RPC branch
-        // raced that flag and swallowed failures → lost/merged sends). A message
-        // sent while Claude is busy shows as an optimistic bubble immediately and
-        // the daemon dispatches it in order after the current turn finishes.
+        // THE queue is APP-SIDE (draft queue): a plain-text message sent while
+        // the agent is busy is HELD here — editable/deletable until its turn —
+        // and auto-released by draftQueueRelease when the turn completes. This
+        // is deliberate (2026-07-10): daemon-side queueing meant fighting the
+        // TUI for edit/cancel and inferring delivery from fragile signals. An
+        // earlier app-side gate failed because thinking was stale and sends
+        // were fire-and-forget; both are fixed (hook-driven thinking, and the
+        // release is an automatic loop, not a one-shot). Slash commands and
+        // attachment sends bypass the hold: commands are steer/immediate by
+        // nature, and drafts don't carry attachments.
+        const latest = storage.getState().sessions[sessionId];
+        const busy = latest?.thinking === true || latest?.metadata?.joy__thinking != null;
+        const isCommand = liveMessage.trim().startsWith('/');
+        if (isJoyTmux && busy && !isCommand && !hasImages) {
+            composerHandleRef.current?.clearMessage();
+            useDraftQueueStore.getState().add(sessionId, liveMessage);
+            return;
+        }
         composerHandleRef.current?.clearMessage();
         if (expImageUpload) clearImages();
         sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
-    }, [sessionId, expImageUpload, selectedImages, clearImages]);
+    }, [sessionId, isJoyTmux, expImageUpload, selectedImages, clearImages]);
 
     // Stash the current input as an on-device draft (queued at the bottom of the
     // chat) and clear the box so the user can compose the next one. Drafts are
