@@ -62,10 +62,14 @@ import { LoginBar } from './LoginBar';
 import { useDraftQueueStore } from './draftQueue';
 
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
-// app-side queue hold. CLI 2.1.198's own `immediate` set (extracted from the
-// binary) + joy's daemon-intercepted commands (steer/btw/title/login-code),
+// app-side queue hold. Sources: official docs confirm /model and /effort
+// "switch immediately" mid-turn (model-config.md) and /btw runs while Claude
+// works (interactive-mode.md); the CLI binary's `immediate` set covers the
+// local-UI commands; /compact and /clear are boundary-only per docs — they
+// HOLD. Plus joy's daemon-intercepted commands (steer/title/login-code),
 // whose whole point is mid-turn delivery.
 const IMMEDIATE_COMMANDS = new Set([
+    'model', 'effort',
     'btw', 'goal', 'stop', 'mcp', 'skills', 'hooks', 'loops', 'color',
     'doctor', 'version', 'focus', 'brief', 'daemon',
     'steer', 'title', 'login-code',
