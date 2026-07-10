@@ -285,6 +285,14 @@ class Sync {
     }
 
     async create(credentials: AuthCredentials, encryption: Encryption) {
+        // App-side queue release valve: sends the head queued draft when a
+        // session's turn completes. Lazy import — the module reads storage +
+        // sync only at runtime, avoiding a static cycle.
+        void import('@/-session/draftQueueRelease').then(({ initDraftQueueRelease }) => {
+            initDraftQueueRelease((sessionId, text) => {
+                this.sendMessage(sessionId, text, { source: 'chat' });
+            });
+        });
         this.credentials = credentials;
         this.encryption = encryption;
         this.anonID = encryption.anonID;
