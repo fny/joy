@@ -26,14 +26,14 @@ const SCROLL_THRESHOLD = 300;
 // lost. Restored on the list's first onLoad; a position near the bottom is NOT
 // restored (bottom is already the default and where streaming keeps you).
 // Module-level and capped: a handful of entries, ~16 bytes each.
-const savedScroll = new Map<string, { offset: number; nearBottom: boolean }>();
+const savedScroll = new Map<string, { offset: number; nearBottom: boolean; newestId: string | null }>();
 const SAVED_SCROLL_MAX = 30;
-function rememberScroll(sessionId: string, offset: number, nearBottom: boolean) {
+function rememberScroll(sessionId: string, offset: number, nearBottom: boolean, newestId: string | null) {
     if (!savedScroll.has(sessionId) && savedScroll.size >= SAVED_SCROLL_MAX) {
         const oldest = savedScroll.keys().next().value;
         if (oldest !== undefined) savedScroll.delete(oldest);
     }
-    savedScroll.set(sessionId, { offset, nearBottom });
+    savedScroll.set(sessionId, { offset, nearBottom, newestId });
 }
 
 // Count a row as "visible" as soon as any sliver of it is in view, so the
@@ -116,6 +116,10 @@ const ChatListInternal = React.memo((props: {
     // pointer would go stale the moment the user scrolled by hand).
     const topVisibleIndexRef = React.useRef<number>(0);
     const sessionId = props.sessionId;
+    // Newest message id, readable from the stable scroll callback — stamped
+    // into the saved position so a stale restore can be detected.
+    const newestIdRef = React.useRef<string | null>(null);
+    newestIdRef.current = props.messages[0]?.id ?? null;
     const session = useSession(props.sessionId);
 
     // Collapse agent work between a user prompt and the final answer.
@@ -340,7 +344,7 @@ const ChatListInternal = React.memo((props: {
         const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
         const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
         const next = distanceFromBottom > SCROLL_THRESHOLD;
-        rememberScroll(sessionId, contentOffset.y, !next);
+        rememberScroll(sessionId, contentOffset.y, !next, newestIdRef.current);
         if (next !== showScrollButtonRef.current) {
             showScrollButtonRef.current = next;
             setShowScrollButton(next);
@@ -361,7 +365,10 @@ const ChatListInternal = React.memo((props: {
         if (restoredRef.current) return;
         restoredRef.current = true;
         const saved = savedScroll.get(sessionId);
-        if (saved && !saved.nearBottom) {
+        // Restore only when NOTHING new arrived since the position was saved —
+        // otherwise stay at the bottom where the new messages are (restoring
+        // the old position would bury them above the fold).
+        if (saved && !saved.nearBottom && saved.newestId === newestIdRef.current) {
             flatListRef.current?.scrollToOffset({ offset: saved.offset, animated: false });
         }
     }, [sessionId]);
