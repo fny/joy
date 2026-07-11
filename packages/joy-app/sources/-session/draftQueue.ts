@@ -10,6 +10,9 @@ import { MMKV } from 'react-native-mmkv';
 export interface QueuedDraft {
     id: string;
     text: string;
+    /** When the draft was queued — drives the max-hold TTL (older persisted
+     *  drafts without it fall back to the id's timestamp prefix). */
+    queuedAt?: number;
 }
 
 interface DraftQueueState {
@@ -57,7 +60,7 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
                 ...s.bySession,
                 [sessionId]: [
                     ...(s.bySession[sessionId] ?? []),
-                    { id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, text },
+                    { id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, text, queuedAt: Date.now() },
                 ],
             },
         }));
