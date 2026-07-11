@@ -42,7 +42,7 @@ const REALTIME_MODE_DEBOUNCE_MS = 150;
 // flapping an idle-but-alive session.
 const SESSION_STALE_AFTER_MS = 90_000;
 
-function isFresh(session: { activeAt: number }): boolean {
+export function isFresh(session: { activeAt: number }): boolean {
     return Date.now() - session.activeAt < SESSION_STALE_AFTER_MS;
 }
 

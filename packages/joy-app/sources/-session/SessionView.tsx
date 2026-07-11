@@ -60,6 +60,7 @@ import { DraftQueueStrip } from './DraftQueueStrip';
 import { GoalBar } from './GoalBar';
 import { LoginBar } from './LoginBar';
 import { useDraftQueueStore } from './draftQueue';
+import { isFresh } from '@/sync/storage';
 
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
@@ -649,7 +650,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // attachment sends bypass the hold: commands are steer/immediate by
         // nature, and drafts don't carry attachments.
         const latest = storage.getState().sessions[sessionId];
-        const busy = latest?.thinking === true || latest?.metadata?.joy__thinking != null;
+        // Hold ONLY on fresh, provable busy: live presence + the ephemeral
+        // thinking flag. A stale thinking (missed turn-end — the freeze bug
+        // family) or a stale joy__thinking mirror must NOT gate sends: a
+        // wrongly-held message is worse than a wrongly-immediate one (the
+        // daemon/TUI queue absorbs the latter; the former ate sends, boite
+        // Workspace/18, 2026-07-11).
+        const busy = latest?.thinking === true
+            && latest?.presence === 'online'
+            && isFresh(latest);
         // Only commands that actually EXECUTE mid-turn bypass the hold: the
         // CLI's immediate set (verified against the 2.1.198 binary — /model,
         // /compact, /clear are NOT in it; typed mid-turn they'd just sit in

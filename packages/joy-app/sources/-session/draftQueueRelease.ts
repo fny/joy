@@ -1,4 +1,4 @@
-import { storage } from '@/sync/storage';
+import { storage, isFresh } from '@/sync/storage';
 import { useDraftQueueStore } from './draftQueue';
 
 /**
@@ -30,7 +30,7 @@ export function initDraftQueueRelease(send: SendFn): void {
     if (initialized) return;
     initialized = true;
 
-    const maybeRelease = () => {
+    const releasePass = () => {
         const state = storage.getState();
         const drafts = useDraftQueueStore.getState().bySession;
         const now = Date.now();
@@ -38,9 +38,15 @@ export function initDraftQueueRelease(send: SendFn): void {
             if (!queue || queue.length === 0) continue;
             const session = state.sessions[sessionId];
             if (!session || session.metadata?.joy__source !== 'joy-tmux') continue;
-            const busy = session.thinking === true || session.metadata?.joy__thinking != null;
+            // Busy must be FRESH and provable (mirrors the capture gate): a
+            // stale thinking flag held sends hostage. Stale presence = treat
+            // as idle and release — the daemon/TUI queue absorbs a mid-turn
+            // arrival harmlessly; a silently-held message does not.
+            const busy = session.thinking === true
+                && session.presence === 'online'
+                && isFresh(session);
             if (busy) {
-                // Turn started — the previous release (if any) landed.
+                // Turn running — the previous release (if any) landed.
                 inFlightUntil.delete(sessionId);
                 continue;
             }
@@ -54,9 +60,25 @@ export function initDraftQueueRelease(send: SendFn): void {
         }
     };
 
+    // Deferred + guarded: this runs inside store notification chains, where a
+    // synchronous nested set (send → applyMessages) or a thrown error would
+    // break the remaining listeners — the whole UI stops reacting. Escape the
+    // stack, swallow failures (the sweep below retries).
+    let scheduled = false;
+    const maybeRelease = () => {
+        if (scheduled) return;
+        scheduled = true;
+        setTimeout(() => {
+            scheduled = false;
+            try { releasePass(); } catch { /* next pass retries */ }
+        }, 0);
+    };
+
     // Sessions state drives the thinking transitions; drafts changing while
-    // idle (user queues onto an idle session — rare, but possible from the
-    // strip) also needs a look.
+    // idle also needs a look; and a periodic sweep backstops BOTH — a session
+    // whose state stopped updating entirely (dead daemon) still releases once
+    // its freshness lapses.
     storage.subscribe(maybeRelease);
     useDraftQueueStore.subscribe(maybeRelease);
+    setInterval(maybeRelease, 10_000);
 }
