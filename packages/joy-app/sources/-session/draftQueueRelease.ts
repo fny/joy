@@ -23,6 +23,18 @@ type SendFn = (sessionId: string, text: string) => void;
 
 const inFlightUntil = new Map<string, number>();
 const RELEASE_BACKSTOP_MS = 15_000;
+// Hard invariant (codex design review, 2026-07-11): NO app-side state may
+// indefinitely prevent user input from reaching the CLI. The fresh-busy gate
+// has a residual hostage case — activeAt refreshes from the daemon's generic
+// 30s keepalive, so a stuck thinking=true on a HEALTHY daemon still reads
+// "fresh busy" forever. A draft held longer than this releases regardless;
+// the CLI's native mid-turn queue absorbs it.
+const MAX_HOLD_MS = 3 * 60_000;
+
+function draftAge(d: { id: string; queuedAt?: number }, now: number): number {
+    const t = d.queuedAt ?? Number.parseInt(d.id, 10);
+    return Number.isFinite(t) && t > 0 ? now - t : Number.POSITIVE_INFINITY;
+}
 
 let initialized = false;
 
@@ -42,18 +54,18 @@ export function initDraftQueueRelease(send: SendFn): void {
             // stale thinking flag held sends hostage. Stale presence = treat
             // as idle and release — the daemon/TUI queue absorbs a mid-turn
             // arrival harmlessly; a silently-held message does not.
+            const head = queue[0];
             const busy = session.thinking === true
                 && session.presence === 'online'
                 && isFresh(session);
-            if (busy) {
+            if (busy && draftAge(head, now) < MAX_HOLD_MS) {
                 // Turn running — the previous release (if any) landed.
                 inFlightUntil.delete(sessionId);
                 continue;
             }
             const until = inFlightUntil.get(sessionId);
             if (until !== undefined && now < until) continue;
-            // Idle + queued + not mid-release → send the head.
-            const head = queue[0];
+            // Idle (or held past the TTL) + not mid-release → send the head.
             inFlightUntil.set(sessionId, now + RELEASE_BACKSTOP_MS);
             useDraftQueueStore.getState().remove(sessionId, head.id);
             send(sessionId, head.text);
