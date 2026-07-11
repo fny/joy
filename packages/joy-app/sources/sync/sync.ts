@@ -1980,7 +1980,11 @@ class Sync {
             hasMore = !!data.hasMore && messages.length > 0;
             if (messages.length > 0) anyMessages = true;
 
-            await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
+            // deriveThinking ONLY from the newest page — older pages carry
+            // STALE lifecycle rows, and a trailing turn-start there wrongly
+            // flipped the session to thinking (which the app-side queue then
+            // trusted, holding every send: "the transcript never syncs").
+            await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: page === 0 });
 
             for (const message of messages) {
                 if (message.seq > maxSeq) maxSeq = message.seq;
