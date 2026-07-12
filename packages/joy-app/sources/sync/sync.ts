@@ -293,6 +293,17 @@ class Sync {
         }
     }
 
+    /** Nuclear per-session heal: drop the chat's client state (messages,
+     *  reducer, cursors) and refetch from scratch — the user-facing escape
+     *  hatch for any "chat is frozen/behind and nothing else fixes it" bug.
+     *  Server state is untouched; nothing can be lost except local corruption. */
+    resetSessionChatState(sessionId: string): void {
+        this.sessionLastSeq.delete(sessionId);
+        this.sessionOldestSeq.delete(sessionId);
+        storage.getState().resetSessionMessages(sessionId);
+        this.getMessagesSync(sessionId).invalidate();
+    }
+
     async create(credentials: AuthCredentials, encryption: Encryption) {
         // App-side queue release valve: sends the head queued draft when a
         // session's turn completes. Lazy import — the module reads storage +
