@@ -1,6 +1,7 @@
 import { storage, isFresh } from '@/sync/storage';
 import { useDraftQueueStore } from './draftQueue';
 import type { SendMessageResult } from '@/sync/sync';
+import { randomUUID } from 'expo-crypto';
 
 /**
  * Auto-release for the app-side message queue (draft queue).
@@ -78,7 +79,12 @@ export function initDraftQueueRelease(send: SendFn): void {
             // remove only on {ok}; revert with the error otherwise.
             if (head.state === 'releasing' && (head.leaseUntil ?? 0) > now) continue; // another pass owns it
             if ((head.attempt ?? 0) >= MAX_AUTO_ATTEMPTS) continue; // parked for manual action
-            const releaseLocalId = head.releaseLocalId ?? `${sessionId}-${head.id}`;
+            // FRESH random id when the draft has none (5.6-sol verify #7):
+            // the deterministic `${sessionId}-${id}` fallback meant an EDITED
+            // draft regenerated the same localId as its pre-edit send — the
+            // server's dedupe then acked old text A for new text B. Retries
+            // stay stable because markReleasing persists the minted id.
+            const releaseLocalId = head.releaseLocalId ?? randomUUID();
             inFlightUntil.set(sessionId, now + RELEASE_BACKSTOP_MS);
             useDraftQueueStore.getState().markReleasing(sessionId, head.id, releaseLocalId, now + RELEASE_LEASE_MS);
             void send(sessionId, head.text, releaseLocalId)
