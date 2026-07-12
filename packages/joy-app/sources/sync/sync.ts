@@ -1972,11 +1972,19 @@ class Sync {
         // scroll-up paging takes over from there.
         const MIN_RENDERABLE = 20;
         const MAX_INITIAL_PAGES = 5;
+        // COLLECT pages first, apply ONCE in ascending seq order. The first
+        // version of this loop applied each page as it arrived — newest page
+        // first — feeding the ORDER-DEPENDENT reducer newer rows before older
+        // ones. On any session that needed page 2+ (lifecycle-heavy joy
+        // sessions, i.e. the busiest ones), the reducer state corrupted and
+        // the chat froze behind reality with no error ("new messages never
+        // appeared", fny agent2, 2026-07-12). The renderable-count probe uses
+        // a cheap normalize pass instead of the store.
         let beforeSeq = SEQ_BACKWARD_INITIAL_SENTINEL;
         let maxSeq = 0;
         let minSeq = Number.POSITIVE_INFINITY;
         let hasMore = false;
-        let anyMessages = false;
+        const collected: ApiMessage[] = [];
         for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
             const response = await apiSocket.request(
                 `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
@@ -1988,22 +1996,29 @@ class Sync {
             const data = await response.json() as V3GetSessionMessagesResponse;
             const messages = Array.isArray(data.messages) ? data.messages : [];
             hasMore = !!data.hasMore && messages.length > 0;
-            if (messages.length > 0) anyMessages = true;
+            collected.push(...messages);
 
-            // deriveThinking ONLY from the newest page — older pages carry
-            // STALE lifecycle rows, and a trailing turn-start there wrongly
-            // flipped the session to thinking (which the app-side queue then
-            // trusted, holding every send: "the transcript never syncs").
-            await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: page === 0 });
-
+            let pageMin = Number.POSITIVE_INFINITY;
             for (const message of messages) {
                 if (message.seq > maxSeq) maxSeq = message.seq;
                 if (message.seq < minSeq) minSeq = message.seq;
+                if (message.seq < pageMin) pageMin = message.seq;
             }
-            const renderable = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
+            // Enough renderable content? Estimate by decrypt+normalize (cheap
+            // relative to the fetch; the real apply happens once, below).
+            const decrypted = await encryption.decryptMessages(collected);
+            let renderable = 0;
+            for (const d of decrypted) {
+                if (d && normalizeRawMessage(d.id, d.localId, d.createdAt, d.content)) renderable++;
+            }
             if (!hasMore || renderable >= MIN_RENDERABLE) break;
-            beforeSeq = minSeq;
+            if (!Number.isFinite(pageMin)) break; // empty page — nothing older
+            beforeSeq = pageMin;
         }
+        const anyMessages = collected.length > 0;
+        // Single ordered apply: ascending seq, exactly what the reducer expects.
+        collected.sort((a, b) => a.seq - b.seq);
+        await this.applyFetchedMessages(sessionId, encryption, collected, { deriveThinking: true });
 
         // Anchor both ends so future incremental forward sync resumes from
         // maxSeq, and loadOlderMessages can page backward from minSeq.
