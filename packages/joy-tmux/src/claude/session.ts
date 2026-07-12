@@ -824,6 +824,17 @@ export class Session {
     }
     // Reflect the current queue on (re)attach — recovery/reconnect included.
     void rs.updateQueue(this.queueState());
+    // Receipts are written ON SERVER ACK now (codex review finding 1): the
+    // relay stamps each transcript entry's receipt on its group's last row
+    // and calls back here once that row is durably appended. Registered
+    // before anything below can queue rows, and it flushes acks buffered
+    // from a restart drain that outran this attach.
+    rs.setReceiptSink((r) => {
+      const delivery = this.#ensureDelivery();
+      if (delivery && this.relaySessionId) {
+        recordOutboundReceipt(delivery, this.relaySessionId, { uuid: r.uuid, turn: r.turn, at: Date.now() });
+      }
+    });
     // Reconcile the model mirror. A model change seen while no relay was
     // attached (daemon-restart replay) sets currentModel WITHOUT mirroring it,
     // and the change-gate means it never re-fires for the same model — the app
@@ -1839,25 +1850,42 @@ export class Session {
       const delivery = this.#ensureDelivery();
       if (delivery) {
         if (delivery.forwardedUuids.has(uuid)) return false;
-        recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "note", at: Date.now() });
+        // In-memory dedupe NOW (this process won't re-emit); the PERSISTED
+        // receipt is stamped by #emitAgentNote and written on server ack —
+        // handoff-time persistence turned dropped notes into "forwarded"
+        // (codex review finding 1). Crash between emit and ack re-emits on
+        // replay: at-least-once, matching the assistant path.
+        delivery.forwardedUuids.add(uuid);
+        this.#nextNoteReceipt = uuid;
       }
     }
     return fresh;
   }
 
+  /** Receipt uuid staged by #shouldEmitNote for the #emitAgentNote that
+   *  immediately follows it (same synchronous block) — stamped onto the
+   *  note's last queued relay row. */
+  #nextNoteReceipt: string | null = null;
+
   #emitAgentNote(text: string, timeMs: number, sid?: string): void {
     if (this.#relay) {
       const opened = !this.#turn;
+      const turnId = this.#turn?.turnId ?? crypto.randomUUID();
       if (opened) {
-        this.#turn = { turnId: crypto.randomUUID() };
-        this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: timeMs }));
+        this.#turn = { turnId };
+        this.#relay.send(encodeTurnStart({ turn: turnId, time: timeMs }));
       }
-      this.#relay.send(encodeTextEvent(text, { turn: this.#turn!.turnId, time: timeMs }));
+      this.#relay.send(encodeTextEvent(text, { turn: turnId, time: timeMs }));
       if (opened) {
-        this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn!.turnId, time: timeMs }));
+        this.#relay.send(encodeTurnEnd("completed", { turn: turnId, time: timeMs }));
         this.#turn = null;
       }
+      // Note receipt (staged by #shouldEmitNote) rides the note's LAST row.
+      if (this.#nextNoteReceipt && this.relaySessionId) {
+        this.#relay.stampReceiptOnLastQueued({ uuid: this.#nextNoteReceipt, turn: "note" });
+      }
     }
+    this.#nextNoteReceipt = null;
     this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: sid });
   }
 
@@ -2901,7 +2929,7 @@ export class Session {
             // dispatch_mismatch suppress+pause here). Any in-flight dispatch is left
             // untouched: its own clean echo matches later, or the dispatch echo timeout re-queues it.
             this.#relay!.send(encodeUserMessage(content, entryTimeMs));
-            recordOutboundReceipt(delivery, this.relaySessionId, { uuid, turn: "", at: Date.now() });
+            this.#relay!.stampReceiptOnLastQueued({ uuid, turn: "" });
           }
         }
       }
@@ -2987,12 +3015,12 @@ export class Session {
             }));
           }
         }
-        // Record outbound receipt — we forwarded this transcript entry to the relay.
-        const delivery = this.#ensureDelivery();
-        if (entryUuid && delivery && this.relaySessionId) {
-          recordOutboundReceipt(delivery, this.relaySessionId, {
-            uuid: entryUuid, turn: this.#turn.turnId, at: Date.now(),
-          });
+        // Outbound receipt: stamped on the LAST queued row of this entry's
+        // group and written only when that row ACKS — a dropped/parked send
+        // no longer reads as "forwarded" (codex review finding 1). If the
+        // entry queued no rows, the stamp degenerates to an immediate receipt.
+        if (entryUuid && this.relaySessionId) {
+          this.#relay.stampReceiptOnLastQueued({ uuid: entryUuid, turn: this.#turn.turnId });
         }
         // Send turn-end when the assistant finishes. The Stop HOOK (onHookEvent)
         // clears thinking/drains faster when present, but the transcript stays

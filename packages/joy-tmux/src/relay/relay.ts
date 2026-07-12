@@ -10,6 +10,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsS
 import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
 import { happyHomeDir, joyStateDir } from '../paths';
+import { loadOutbound, saveOutbound, clearOutbound, type PersistedOutboundItem } from '../domain/outboundStore';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
 
@@ -917,7 +918,11 @@ export class RelaySession {
   private readonly sessionKey: Uint8Array;
   private readonly variant: EncryptionVariant;
   private lastSeq: number;
-  private queue: Array<{ localId: string; wire: WireRecord; attempts: number }> = [];
+  private queue: Array<{ localId: string; wire: WireRecord; attempts: number; receipt?: { uuid: string; turn: string } }> = [];
+  /** Receipt payloads acked before a Session registered the sink (restart
+   *  drain can outrun attachRelay) — flushed on setReceiptSink. Persisted. */
+  private ackedReceipts: { uuid: string; turn: string }[] = [];
+  private receiptSink: ((r: { uuid: string; turn: string }) => void) | null = null;
   private draining = false;
   // Last-known session metadata blob + its server version, so we can merge in
   // a summary update (Claude's ai-title) without clobbering the other fields.
@@ -953,6 +958,20 @@ export class RelaySession {
     this.lastSeq = opts.initialSeq ?? 0;
     this.metadata = opts.metadata ?? null;
     this.metadataVersion = opts.metadataVersion ?? 0;
+    // Restore rows a previous daemon accepted but never delivered (persisted
+    // from enqueue until server ack — codex review finding 1). VITEST guard
+    // mirrors the dispatch-queue spool: unit tests construct sessions freely.
+    if (!process.env.VITEST) {
+      const persisted = loadOutbound(this.relaySessionId);
+      if (persisted.items.length > 0 || persisted.ackedReceipts.length > 0) {
+        this.queue = persisted.items.map((i: PersistedOutboundItem) => ({
+          localId: i.localId, wire: i.wire as WireRecord, attempts: 0, receipt: i.receipt,
+        }));
+        this.ackedReceipts = persisted.ackedReceipts;
+        log(`restored ${this.queue.length} undelivered outbound row(s) for ${this.relaySessionId}`);
+        void this.drain();
+      }
+    }
   }
 
   // Serializes metadata writes for this session (see mergeMetadata).
@@ -1262,10 +1281,57 @@ export class RelaySession {
 
   send(wire: WireRecord): void {
     this.queue.push({ localId: crypto.randomUUID(), wire, attempts: 0 });
+    this.persistOutbound();
     void this.drain();
   }
 
-  private static readonly MAX_SEND_ATTEMPTS = 10;
+  /** Attach a receipt payload to the most recently queued row — the LAST row
+   *  of a transcript entry's group. Drain is FIFO, so this row's ack implies
+   *  the whole group landed; only then is the receipt written (via the sink),
+   *  replacing the old record-at-handoff that turned dropped sends into
+   *  "forwarded". If the queue already drained (all rows acked), deliver now. */
+  stampReceiptOnLastQueued(receipt: { uuid: string; turn: string }): void {
+    const tail = this.queue[this.queue.length - 1];
+    if (tail) {
+      tail.receipt = receipt;
+      this.persistOutbound();
+    } else {
+      this.deliverReceipt(receipt);
+    }
+  }
+
+  /** Session registers the receipts writer here (attachRelay). Flushes any
+   *  receipts whose rows acked before registration. */
+  setReceiptSink(sink: (r: { uuid: string; turn: string }) => void): void {
+    this.receiptSink = sink;
+    if (this.ackedReceipts.length > 0) {
+      const pending = this.ackedReceipts.splice(0);
+      this.persistOutbound();
+      for (const r of pending) sink(r);
+    }
+  }
+
+  private deliverReceipt(receipt: { uuid: string; turn: string }): void {
+    if (this.receiptSink) {
+      this.receiptSink(receipt);
+    } else {
+      this.ackedReceipts.push(receipt);
+      this.persistOutbound();
+    }
+  }
+
+  private persistOutbound(): void {
+    // Self-GC: an empty state (all delivered, receipts flushed) deletes the
+    // file instead of leaving an empty husk per session forever.
+    if (this.queue.length === 0 && this.ackedReceipts.length === 0) {
+      clearOutbound(this.relaySessionId);
+      return;
+    }
+    saveOutbound(this.relaySessionId, {
+      items: this.queue.map((q) => ({ localId: q.localId, wire: q.wire as unknown, receipt: q.receipt })),
+      ackedReceipts: this.ackedReceipts,
+    });
+  }
 
   private async drain(): Promise<void> {
     if (this.draining) return;
@@ -1276,22 +1342,31 @@ export class RelaySession {
         const enc = encryptWire(this.variant, this.sessionKey, item.wire);
         await this.client.append(this.relaySessionId, enc, item.localId);
         this.queue.shift();
+        // Group receipt rides the entry's LAST row — its ack means every row
+        // of that transcript entry is durably on the server.
+        if (item.receipt) this.deliverReceipt(item.receipt);
+        this.persistOutbound();
       } catch (e) {
         item.attempts++;
-        // A permanent (4xx) failure — e.g. the session was archived (404/410) or
-        // auth rejected (401/403) — will never succeed, so drop it IMMEDIATELY
-        // instead of backing off ~2.5min × 10 on it AND head-of-line-blocking every
-        // queued message behind it. 408/429 are retryable. (H2: cap retries too so
-        // a transient failure can't wedge the queue forever.)
+        // Permanent 4xx (archived session 404/410, auth 401/403) will never
+        // succeed: drop the ROW, but NEVER its receipt — "not delivered" must
+        // not become "forwarded" (codex review finding 1). The transcript
+        // entry stays unreceipted, so a later rebind/replay can retry it.
+        // 408/429 are retryable. Retryables are NEVER dropped — parked with
+        // capped backoff until the relay comes back (the queue is persisted,
+        // so a restart resumes it too).
         const status = (e as { status?: number }).status;
         const permanent = typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
-        if (permanent || item.attempts >= RelaySession.MAX_SEND_ATTEMPTS) {
-          log(`send ${permanent ? `permanently failed (HTTP ${status})` : `failed after ${item.attempts} attempts`}, dropping: ${e}`);
+        if (permanent) {
+          log(`send permanently failed (HTTP ${status}), dropping row (receipt withheld): ${e}`);
           this.queue.shift();
+          this.persistOutbound();
           continue;
         }
-        const delay = Math.min(500 * 2 ** item.attempts, 30_000);
-        log(`send failed (attempt ${item.attempts}), retrying in ${delay}ms: ${e}`);
+        const delay = Math.min(500 * 2 ** Math.min(item.attempts, 7), 30_000);
+        if (item.attempts === 1 || item.attempts % 10 === 0) {
+          log(`send failed (attempt ${item.attempts}), retrying in ${delay}ms (queue parked, ${this.queue.length} waiting): ${e}`);
+        }
         await sleep(delay);
       }
     }
