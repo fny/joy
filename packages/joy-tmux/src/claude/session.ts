@@ -580,7 +580,12 @@ export class Session {
   // create, so the cap is applied ONCE when the transcript binds (startTailer).
   #backfillCapBytes = 0;
   #delivery: DeliveryState | null = null;
-  #pendingAttachments: Promise<{ bytes: Uint8Array | null; name?: string }>[] = [];
+  // Attachment REFS, not download promises (5.6-sol audit #4): bytes are
+  // fetched at CONSUMPTION (the text message that carries them), so a failed
+  // download throws inside #onRelayMessage → the pull halts un-confirmed and
+  // the retry re-downloads. Eager promises made the file row "delivered" the
+  // moment it was seen, with settled-failed promises unrecoverable on retry.
+  #pendingAttachments: { ref: string; name?: string }[] = [];
   // The most recent `!cmd` command, captured from <bash-input> so it can head
   // the bash-output card.
   #pendingBashCmd?: string;
@@ -621,7 +626,18 @@ export class Session {
   #submitTimer: ReturnType<typeof setTimeout> | null = null;
   // Pending delayed-Enter for a /steer send — separate from #submitTimer so steering
   // (which submits mid-turn) and the dispatch submit don't cancel each other.
-  #steerSubmitTimer: ReturnType<typeof setTimeout> | null = null;
+  #steerSubmitTimer: (ReturnType<typeof setTimeout> & { onSuperseded?: () => void }) | null = null;
+
+  /** Clear a pending steer submit AND settle its awaiting promise — a
+   *  superseded steer's caller must not hang (its text was deliberately
+   *  replaced; the newer steer owns delivery). */
+  #cancelSteerSubmit(): void {
+    if (this.#steerSubmitTimer) {
+      clearTimeout(this.#steerSubmitTimer);
+      this.#steerSubmitTimer.onSuperseded?.();
+      this.#steerSubmitTimer = null;
+    }
+  }
   // Count of FAILED clear episodes (C-u loop ran, box still dirty) for the current
   // drain: two failed episodes spaced 750ms → pause with the input_dirty banner.
   // Reset once the box is empty / on dispatch / when the pane isn't ready.
@@ -845,15 +861,12 @@ export class Session {
     // File events arrive ahead of the user-text message. Kick off the
     // download/decrypt immediately; the next message drains the bucket.
     rs.onFileEvent = (ev) => {
-      if (!this.#deps.relayClient) return;
-      const { sessionKey, variant } = rs.encryptionMaterial;
-      // Carry the original filename alongside the bytes so non-image files keep
-      // a meaningful name when written to cwd (images get a paste-* name).
-      this.#pendingAttachments.push(
-        this.#deps.relayClient
-          .downloadAndDecryptAttachment(rs.relaySessionId, ev.ref, sessionKey, variant)
-          .then((bytes) => ({ bytes, name: ev.name })),
-      );
+      // Stage the REF only; download happens when the accompanying text
+      // message consumes it (see #pendingAttachments doc). Duplicate refs
+      // from a re-pulled file row are collapsed.
+      if (!this.#pendingAttachments.some((a) => a.ref === ev.ref)) {
+        this.#pendingAttachments.push({ ref: ev.ref, name: ev.name });
+      }
     };
 
     rs.onMessage = async (text, seq) => {
@@ -922,7 +935,7 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#clearCompacting(); // every end path — a kill mid-compaction leaked the 10-min backstop timer
     this.#clearSubmitTimer();
-    if (this.#steerSubmitTimer) { clearTimeout(this.#steerSubmitTimer); this.#steerSubmitTimer = null; }
+    this.#cancelSteerSubmit();
     this.#queue = [];
     this.#dispatchInFlight = null;
     clearQueue(this.id); // an ended session will never deliver — drop the spool
@@ -1184,24 +1197,38 @@ export class Session {
       }
       await sleep(CLEAR_SETTLE_MS);
     }
-    if (!(await this.#typeLines(text))) return;
+    if (!(await this.#typeLines(text))) {
+      // Typing failed → the caller (relay pull) must NOT confirm this seq.
+      throw new Error("steer: typing into the pane failed");
+    }
     // Submit after the settle delay (paste-detection swallows an immediate Enter).
     // Coalesce rapid steers; record the receipt + mirror only once the Enter actually
-    // lands — so a steer that got superseded (its C-j burst cleared by a later steer)
-    // never leaves a stale receipt that would suppress a later identical real message.
-    if (this.#steerSubmitTimer) clearTimeout(this.#steerSubmitTimer);
-    this.#steerSubmitTimer = setTimeout(async () => {
-      this.#steerSubmitTimer = null;
-      if (this.status === "ended") return;
-      const e = await tmux.key(this.tmuxWindow, "Enter");
-      if (!e.ok) return;
-      const delivery = this.#ensureDelivery();
-      if (delivery && this.relaySessionId) {
-        delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
-        recordReceived(delivery, this.relaySessionId, typed, Date.now());
-      }
-      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
-    }, ENTER_SUBMIT_DELAY_MS);
+    // lands. The returned promise resolves when the Enter LANDS (or the steer is
+    // deliberately superseded by a newer one) and rejects when it fails — the
+    // relay pull awaits this, so the cursor covers the whole delivery, not just
+    // the typing (5.6-sol audit #5: a crash inside the submit delay lost the
+    // steer while the cursor had already moved on).
+    this.#cancelSteerSubmit();
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(async () => {
+        this.#steerSubmitTimer = null;
+        try {
+          if (this.status === "ended") { resolve(); return; } // dead session — nothing to deliver to
+          const e = await tmux.key(this.tmuxWindow, "Enter");
+          if (!e.ok) { reject(new Error("steer: submit Enter failed")); return; }
+          const delivery = this.#ensureDelivery();
+          if (delivery && this.relaySessionId) {
+            delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
+            recordReceived(delivery, this.relaySessionId, typed, Date.now());
+          }
+          if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
+          resolve();
+        } catch (e) { reject(e as Error); }
+      }, ENTER_SUBMIT_DELAY_MS);
+      // A NEWER steer superseding this one clears the timer: the text was
+      // deliberately replaced — resolve (the newer steer owns delivery now).
+      this.#steerSubmitTimer = Object.assign(timer, { onSuperseded: resolve }) as typeof timer;
+    });
   }
 
   editQueued(id: string, text: string): boolean {
@@ -1820,12 +1847,27 @@ export class Session {
     this.#pendingAttachments = [];
     let augmented = text;
     if (drained.length > 0) {
-      const results = await Promise.all(drained);
-      const paths: string[] = [];
-      for (const item of results) {
-        if (!item.bytes) continue;
-        const refPath = writeAttachmentToCwd(this.cwd, item.bytes, item.name);
-        if (refPath) paths.push(refPath);
+      let paths: string[] = [];
+      try {
+        const rs = this.#relay;
+        if (!rs || !this.#deps.relayClient) throw new Error("no relay for attachment download");
+        const { sessionKey, variant } = rs.encryptionMaterial;
+        const results = await Promise.all(drained.map(async (a) => ({
+          bytes: await this.#deps.relayClient!.downloadAndDecryptAttachment(rs.relaySessionId, a.ref, sessionKey, variant),
+          name: a.name,
+        })));
+        for (const item of results) {
+          if (!item.bytes) continue;
+          const refPath = writeAttachmentToCwd(this.cwd, item.bytes, item.name);
+          if (refPath === null) throw new Error("attachment write failed");
+          paths.push(refPath);
+        }
+      } catch (e) {
+        // Restore the refs and propagate: the pull halts at this seq and the
+        // retry re-downloads — the message is NOT delivered without its
+        // attachments (5.6-sol audit #4).
+        this.#pendingAttachments = drained.concat(this.#pendingAttachments);
+        throw e;
       }
       if (paths.length > 0) {
         // Bare relative paths appended after the text, space-separated.
@@ -1917,6 +1959,9 @@ export class Session {
     "agent-name", "ai-title", "custom-title", "mode", "permission-mode",
   ]);
   #unknownEntryStreak = 0;
+  /** Hook-proposed transcript binding awaiting confirmation by activity on
+   *  that exact path (review finding 4 / audit #6). Never load-bearing alone. */
+  #pendingHookBinding: { sid: string; path: string; at: number } | null = null;
 
   /** Receipt uuid staged by #shouldEmitNote for the #emitAgentNote that
    *  immediately follows it (same synchronous block) — stamped onto the
@@ -2292,6 +2337,15 @@ export class Session {
     if (this.#checkpointTimer) return;
     this.#checkpointTimer = setTimeout(() => {
       this.#checkpointTimer = null;
+      // HOLD the checkpoint while the outbound spool can't persist (5.6-sol
+      // audit #2): advancing past entries whose mirror rows exist only in
+      // memory makes a crash lose the rows AND the replay window that would
+      // have re-mirrored them. Held checkpoints just mean a bigger (receipt-
+      // deduped) replay after restart — safe, merely slower.
+      if (this.#relay?.outboundPersistDegraded) {
+        process.stderr.write(`[checkpoint] ${this.id}: outbound spool degraded — holding checkpoint\n`);
+        return;
+      }
       const off = this.#tailer?.offset() ?? 0;
       if (off > 0 && this.status !== "ended") {
         saveWindowRecord(this.id, { transcriptCheckpoint: { path: transcriptPath, offset: off } });
@@ -2519,14 +2573,29 @@ export class Session {
         const sid = str("session_id");
         const tp = str("transcript_path");
         process.stderr.write(`[hook] ${this.id} SessionStart sid=${sid ?? "?"} source=${str("source") ?? "?"}\n`);
-        if (sid) this.claudeSessionId = sid;
+        // STAGED binding (review finding 4, built per 5.6-sol audit #6): the
+        // hook proposes {sid, path}; transcript ACTIVITY on that exact path
+        // confirms it (see the starting-activation block) — persisting a sid
+        // even when entries stop carrying entry.sessionId, without hooks ever
+        // carrying the binding alone. Conflicts with an already-learned sid
+        // are logged loudly, not silently overwritten.
+        if (sid && this.claudeSessionId && sid !== this.claudeSessionId) {
+          process.stderr.write(`[hook] ${this.id} SessionStart sid MISMATCH: hook=${sid} learned=${this.claudeSessionId}\n`);
+        }
+        if (sid) {
+          this.claudeSessionId = sid;
+          if (tp) this.#pendingHookBinding = { sid, path: tp, at: Date.now() };
+        }
         if (tp && tp !== this.transcriptPath) {
           if (this.#tailer) {
             // Bound to a DIFFERENT file (mtime discovery guessed wrong, or a
             // /clear rotated the conversation) — rebind. Receipts dedup the
-            // replay so the app doesn't get re-pushed history.
-            process.stderr.write(`[hook] ${this.id} rebinding transcript ${this.transcriptPath} → ${tp}\n`);
-            this.#transcriptStartOffset = 0; // stale offset belongs to the old file
+            // replay — and when the target file has a persisted checkpoint,
+            // resume THERE: a full from-zero replay of a long transcript is
+            // no longer receipt-covered once the logs prune (audit #6).
+            const cp = loadWindowRecord(this.id)?.transcriptCheckpoint;
+            this.#transcriptStartOffset = (cp && cp.path === tp) ? cp.offset : 0;
+            process.stderr.write(`[hook] ${this.id} rebinding transcript ${this.transcriptPath} → ${tp} (offset ${this.#transcriptStartOffset})\n`);
           }
           this.startTailer(tp, true);
         } else if (!this.#tailer && tp) {
@@ -2718,8 +2787,14 @@ export class Session {
 
     // First entry activates the session — Claude is now reading the pane.
     if (this.status === "starting") {
-      const sid = String(entry.sessionId || "");
+      // entry.sessionId is authoritative; absent (an upstream shape change),
+      // transcript ACTIVITY on the hook-staged path confirms the hook's sid —
+      // the session no longer sticks in "starting" forever (audit #6).
+      const entrySid = String(entry.sessionId || "");
+      const staged = this.#pendingHookBinding;
+      const sid = entrySid || (staged && this.transcriptPath === staged.path ? staged.sid : "");
       if (sid) {
+        if (!entrySid) process.stderr.write(`[hook] ${this.id} confirmed staged sid ${sid} by transcript activity (entries carry no sessionId)\n`);
         this.claudeSessionId = sid;
         this.status = "active";
         this.lastActiveAt = Date.now();
@@ -2728,6 +2803,9 @@ export class Session {
         saveWindowRecord(this.id, { claudeSessionId: sid });
         this.#deps.broadcast("session_update", this.toJSON());
       }
+    } else if (this.#pendingHookBinding && String(entry.sessionId || "") && String(entry.sessionId) !== this.#pendingHookBinding.sid) {
+      process.stderr.write(`[hook] ${this.id} HARD MISMATCH: transcript sid ${entry.sessionId} vs staged ${this.#pendingHookBinding.sid}\n`);
+      this.#pendingHookBinding = null;
     }
 
     const sid = this.claudeSessionId;

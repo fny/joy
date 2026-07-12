@@ -85,7 +85,14 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
         set((s) => ({
             bySession: {
                 ...s.bySession,
-                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id ? { ...d, text } : d)),
+                // Editing RECLAIMS the draft (5.6-sol audit #7): clearing the
+                // release identity means an in-flight ack for the OLD text can
+                // no longer remove the edited draft (ack removal matches on
+                // releaseLocalId), and the next release mints a fresh localId
+                // instead of colliding with the server's dedupe of the old one.
+                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
+                    ? { ...d, text, state: 'queued' as const, releaseLocalId: undefined, leaseUntil: undefined }
+                    : d)),
             },
         }));
         persistDebounced(get);

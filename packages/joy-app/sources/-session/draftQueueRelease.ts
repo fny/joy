@@ -83,9 +83,14 @@ export function initDraftQueueRelease(send: SendFn): void {
             useDraftQueueStore.getState().markReleasing(sessionId, head.id, releaseLocalId, now + RELEASE_LEASE_MS);
             void send(sessionId, head.text, releaseLocalId)
                 .then((res) => {
-                    if (res.ok) {
-                        useDraftQueueStore.getState().remove(sessionId, head.id);
-                    } else {
+                    // {ok} means the send reached the in-memory outbox — NOT
+                    // durable (5.6-sol audit #3: the app dying before the POST
+                    // completed vaporized both copies). The draft is removed
+                    // only on OUTBOX ACK (notifyOutboxAcked below); here we
+                    // just keep the lease alive while the POST flies. Lease
+                    // expiry retries with the SAME localId — the server's
+                    // dedupe makes that a plain re-ack if the first landed.
+                    if (!res.ok) {
                         useDraftQueueStore.getState().revertRelease(sessionId, head.id, res.reason);
                     }
                 })
@@ -116,4 +121,18 @@ export function initDraftQueueRelease(send: SendFn): void {
     storage.subscribe(maybeRelease);
     useDraftQueueStore.subscribe(maybeRelease);
     setInterval(maybeRelease, 10_000);
+}
+
+/** POST-ack notification from sync's outbox: the server durably owns these
+ *  localIds now, so their releasing drafts can finally be removed. Matches on
+ *  releaseLocalId (NOT draft id) — an edited draft cleared its release
+ *  identity and must survive the stale ack (5.6-sol audit #7). */
+export function notifyOutboxAcked(sessionId: string, localIds: Iterable<string>): void {
+    const acked = new Set(localIds);
+    const drafts = useDraftQueueStore.getState().bySession[sessionId] ?? [];
+    for (const d of drafts) {
+        if (d.state === 'releasing' && d.releaseLocalId && acked.has(d.releaseLocalId)) {
+            useDraftQueueStore.getState().remove(sessionId, d.id);
+        }
+    }
 }

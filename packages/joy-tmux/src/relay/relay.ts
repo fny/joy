@@ -1332,14 +1332,21 @@ export class RelaySession {
     }
   }
 
+  /** True while the last outbound spool write failed — the transcript
+   *  checkpoint must NOT advance past entries whose rows aren't durably
+   *  spooled (5.6-sol audit #2: correlated loss of both the rows and the
+   *  replay that would have recovered them). */
+  outboundPersistDegraded = false;
+
   private persistOutbound(): void {
     // Self-GC: an empty state (all delivered, receipts flushed) deletes the
     // file instead of leaving an empty husk per session forever.
     if (this.queue.length === 0 && this.ackedReceipts.length === 0) {
       clearOutbound(this.relaySessionId);
+      this.outboundPersistDegraded = false;
       return;
     }
-    saveOutbound(this.relaySessionId, {
+    this.outboundPersistDegraded = !saveOutbound(this.relaySessionId, {
       items: this.queue.map((q) => ({ localId: q.localId, wire: q.wire as unknown, receipt: q.receipt })),
       ackedReceipts: this.ackedReceipts,
     });
@@ -1370,7 +1377,21 @@ export class RelaySession {
         const status = (e as { status?: number }).status;
         const permanent = typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
         if (permanent) {
-          log(`send permanently failed (HTTP ${status}), dropping row (receipt withheld): ${e}`);
+          // Dropping ANY row of a transcript-entry group poisons the whole
+          // group's receipt (5.6-sol audit #1): without this, a mid-group 400
+          // dropped one row and the LAST row's ack still wrote the receipt —
+          // partial delivery read as "forwarded". Walk forward to the group
+          // terminator (the receipt-bearing row) and strip its receipt, so the
+          // entry stays unreceipted and a later rebind/replay can retry it
+          // whole. Rows already sent stay sent (server localId dedupe absorbs
+          // the replay's duplicates).
+          let groupEnd = this.queue.findIndex((q) => q.receipt !== undefined);
+          if (groupEnd >= 0) {
+            log(`send permanently failed (HTTP ${status}) mid-group — withholding group receipt ${this.queue[groupEnd].receipt!.uuid}`);
+            this.queue[groupEnd].receipt = undefined;
+          } else {
+            log(`send permanently failed (HTTP ${status}), dropping row (receipt withheld): ${e}`);
+          }
           this.queue.shift();
           this.persistOutbound();
           continue;

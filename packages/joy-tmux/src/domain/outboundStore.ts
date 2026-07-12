@@ -42,15 +42,21 @@ export function loadOutbound(relaySessionId: string, baseDir = joyStateDir()): P
 /** Atomic write (tmp+rename), same idiom as the dispatch-queue spool. Throws
  *  are swallowed — outbound rows also live in memory, and the next mutation
  *  retries the write; a read-only disk degrades to pre-persistence behavior. */
-export function saveOutbound(relaySessionId: string, state: PersistedOutboundState, baseDir = joyStateDir()): void {
+export function saveOutbound(relaySessionId: string, state: PersistedOutboundState, baseDir = joyStateDir()): boolean {
   try {
     mkdirSync(baseDir, { recursive: true });
     const p = fileFor(relaySessionId, baseDir);
     const tmp = `${p}.tmp`;
     writeFileSync(tmp, JSON.stringify(state));
     renameSync(tmp, p);
-  } catch {
-    // best effort — see doc comment
+    return true;
+  } catch (e) {
+    // Reported, not thrown: rows also live in memory and the next mutation
+    // retries — but the CALLER must know (5.6-sol audit #2: a swallowed
+    // outbound-persist failure while the transcript checkpoint advanced left
+    // a crash with neither persisted rows NOR replay coverage).
+    process.stderr.write(`[outbound] save failed for ${relaySessionId}: ${e}\n`);
+    return false;
   }
 }
 
