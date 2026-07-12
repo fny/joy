@@ -1790,6 +1790,11 @@ class Sync {
             // Remove exactly what we sent, by localId, from the current outbox
             // (which may have been replaced/extended while the POST was in flight).
             this.removeFromOutbox(sessionId, batchIds);
+            // Server ack: releasing drafts for these localIds may now be
+            // removed (they persist until THIS moment — 5.6-sol audit #3).
+            void import('@/-session/draftQueueRelease').then(({ notifyOutboxAcked }) => {
+                notifyOutboxAcked(sessionId, batchIds);
+            });
             if (Array.isArray(data.messages) && data.messages.length > 0) {
                 const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
                 let maxSeq = currentLastSeq;
@@ -2004,12 +2009,23 @@ class Sync {
                 if (message.seq < minSeq) minSeq = message.seq;
                 if (message.seq < pageMin) pageMin = message.seq;
             }
-            // Enough renderable content? Estimate by decrypt+normalize (cheap
-            // relative to the fetch; the real apply happens once, below).
+            // Enough renderable content? Estimate by decrypt+normalize, but
+            // count only rows that produce a VISIBLE chat element (5.6-sol
+            // audit #8): tool-results/usage/etc normalize non-null yet render
+            // nothing, so a raw normalize count declared lifecycle-heavy pages
+            // "full" while the chat stayed near-empty.
             const decrypted = await encryption.decryptMessages(collected);
             let renderable = 0;
             for (const d of decrypted) {
-                if (d && normalizeRawMessage(d.id, d.localId, d.createdAt, d.content)) renderable++;
+                if (!d) continue;
+                const n = normalizeRawMessage(d.id, d.localId, d.createdAt, d.content);
+                if (!n) continue;
+                if (n.role === 'user') { renderable++; continue; }
+                if (n.role === 'agent' && Array.isArray(n.content)) {
+                    if (n.content.some((c: { type?: string; text?: string }) =>
+                        (c.type === 'text' && typeof c.text === 'string' && c.text.trim().length > 0)
+                        || c.type === 'tool-call')) renderable++;
+                }
             }
             if (!hasMore || renderable >= MIN_RENDERABLE) break;
             if (!Number.isFinite(pageMin)) break; // empty page — nothing older
