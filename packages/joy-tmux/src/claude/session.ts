@@ -2186,6 +2186,7 @@ export class Session {
       if (st === "ended" || this.#turn || !target || this.#dispatchInFlight !== target) return;
       if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
       this.#setThinking(true);
+      this.#thinkingLeaseUntil = Date.now() + Session.#THINKING_LEASE_MS; // trusted edge — pane can't clear
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
@@ -2338,7 +2339,17 @@ export class Session {
   /** Single funnel for the app's "thinking" status — tracks the last value and
    *  pushes it to the relay. Lifecycle transitions (send/end_turn/abort) call
    *  this directly; the pane poll change-gates itself before calling. */
+  /** Trusted-positive thinking lease (codex review finding 7): after a
+   *  hook/echo-confirmed submit, the PANE POLL may not clear thinking — a
+   *  broken spinner matcher cleared it ~6s into a long pre-output think,
+   *  releasing held drafts early. Only trusted negative edges (Stop hook,
+   *  turn-end/error, abort, Notification) or lease expiry clear it; every
+   *  accepted clear voids the lease. Sized just under the app's 3-min TTL. */
+  #thinkingLeaseUntil = 0;
+  static readonly #THINKING_LEASE_MS = 170_000;
+
   #setThinking(thinking: boolean): void {
+    if (!thinking) this.#thinkingLeaseUntil = 0; // any accepted clear ends the lease
     this.#thinking = thinking;
     this.#relay?.setThinking(thinking);
   }
@@ -2514,6 +2525,7 @@ export class Session {
         // dispatch confirms delivery outright — no echo-timeout heuristics,
         // no confirm-on-foreign-turn races.
         this.#setThinking(true);
+        this.#thinkingLeaseUntil = Date.now() + Session.#THINKING_LEASE_MS; // trusted edge — pane can't clear
         this.#idlePolls = 0;
         const prompt = str("prompt");
         if (prompt && this.#dispatchInFlight
@@ -2608,7 +2620,14 @@ export class Session {
           if (!this.#thinking) this.#setThinking(true);
         } else if (this.#thinking) {
           this.#idlePolls += 1;
-          if (this.#idlePolls >= 2) { this.#idlePolls = 0; this.#setThinking(false); }
+          if (this.#idlePolls >= 2) {
+            this.#idlePolls = 0;
+            // Lease check: the pane's "not generating" read cannot override a
+            // trusted submit — a matcher broken by a TUI change looked idle
+            // ~6s into a minutes-long pre-output think. Trusted negative
+            // edges bypass this (they clear via #setThinking directly).
+            if (Date.now() >= this.#thinkingLeaseUntil) this.#setThinking(false);
+          }
         } else {
           this.#idlePolls = 0;
         }
