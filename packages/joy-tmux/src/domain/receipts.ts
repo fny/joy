@@ -76,8 +76,8 @@ export function loadReceipts(relaySessionId: string, baseDir = defaultStateDir()
 
 // Coalesce writes: saveReceipts is called for EVERY forwarded transcript entry,
 // and a synchronous whole-file rewrite per entry is O(n²) cumulative IO as the
-// log grows (the log can't be pruned — forwardedUuids must cover the full
-// replay window for restart dedup). Writes are debounced per session and
+// log grows (the log IS pruned now — see pruneReceiptLog — since the
+// transcript offset checkpoint bounds the replay window). Writes are debounced per session and
 // flushed on process exit; only the last ≤300ms can be lost to a hard crash
 // (worst case: a handful of entries re-forwarded once after restart).
 // Under vitest writes stay synchronous — tests read the file right back
@@ -159,6 +159,20 @@ export function matchPendingForUserEntry(state: DeliveryState, text: string): Pe
 }
 
 /** Append an inbound receipt to state and persist. Idempotent on uuid. */
+// Receipt logs are bounded now that transcript replay is bounded (codex
+// review finding 8 — pruning BEFORE the offset checkpoint existed would have
+// caused duplicate pushes: recovery replayed whole files relying on
+// forwardedUuids). With checkpoints, a replay covers at most the ~5s window
+// since the last checkpoint save; 2000 entries is orders of magnitude more
+// than that overlap. The in-memory forwardedUuids set keeps everything seen
+// this process (broader dedupe is harmless); the pruned log only shapes what
+// a RESTART rebuilds — which only needs the checkpoint overlap.
+const RECEIPT_LOG_MAX = 2000;
+const RECEIPT_LOG_TRIM = 500;
+function pruneReceiptLog<T>(log: T[]): void {
+  if (log.length > RECEIPT_LOG_MAX) log.splice(0, RECEIPT_LOG_TRIM);
+}
+
 export function recordInboundReceipt(
   state: DeliveryState,
   relaySessionId: string,
@@ -169,6 +183,7 @@ export function recordInboundReceipt(
   // Mark as handled so a re-tail (in-run or after restart) won't re-mirror it.
   state.forwardedUuids.add(receipt.uuid);
   state.receipts.inbound.push(receipt);
+  pruneReceiptLog(state.receipts.inbound);
   saveReceipts(relaySessionId, state.receipts, baseDir);
 }
 
@@ -182,6 +197,7 @@ export function recordOutboundReceipt(
   if (state.forwardedUuids.has(receipt.uuid)) return;
   state.forwardedUuids.add(receipt.uuid);
   state.receipts.outbound.push(receipt);
+  pruneReceiptLog(state.receipts.outbound);
   saveReceipts(relaySessionId, state.receipts, baseDir);
 }
 

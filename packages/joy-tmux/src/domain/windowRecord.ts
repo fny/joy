@@ -24,6 +24,13 @@ export interface WindowRecord {
    *  and Claude's own ai-title re-titles are ignored until a bare /title
    *  unlocks. Persisted so the lock survives daemon restarts. */
   titleLockedByUser?: boolean;
+  /** Transcript replay checkpoint (codex review finding 8): byte offset of
+   *  the tail AFTER the last processed entry, per transcript path. Recovery
+   *  resumes here instead of replaying the whole file from 0 — which both
+   *  bounds restart cost and makes receipt pruning a correctness bound
+   *  (receipts only need to cover post-checkpoint overlap). Path-scoped: a
+   *  /clear rotation binds a NEW file, where offset 0 is correct. */
+  transcriptCheckpoint?: { path: string; offset: number };
   updatedAt: number;
 }
 
@@ -48,7 +55,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -58,6 +65,7 @@ export function saveWindowRecord(
       launchCwd: patch.launchCwd ?? prev?.launchCwd ?? "",
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
+      transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet

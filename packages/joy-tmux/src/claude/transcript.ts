@@ -102,6 +102,9 @@ export function findLatestTranscript(dir: string, minMtime: number): string | nu
 
 export interface TranscriptTailer {
   close(): void;
+  /** Current byte offset AFTER the last fully-consumed line — the replay
+   *  checkpoint persisted by the session (codex review finding 8). */
+  offset(): number;
 }
 
 /** Tailer health counters (codex review finding 6): an upstream format change
@@ -204,6 +207,7 @@ export function tailJsonl(
 
   attach();
   return {
+    offset() { return byteOffset - Buffer.byteLength(leftover, "utf-8"); },
     close() {
       closed = true;
       fsWatcher?.close();

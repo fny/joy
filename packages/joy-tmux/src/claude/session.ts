@@ -2265,6 +2265,7 @@ export class Session {
       (entry) => {
         this.onTranscriptEntry(entry);
         this.#deps.broadcast("transcript_entry", { session_id: this.claudeSessionId, entry });
+        this.#scheduleCheckpoint(transcriptPath);
       },
       () => this.status !== "ended",
       this.#transcriptStartOffset,
@@ -2279,6 +2280,23 @@ export class Session {
         this.#emitAgentNote(`${what} (${h.consecutive} consecutive failures)`, Date.now(), this.claudeSessionId);
       },
     );
+  }
+
+  /** Debounced transcript-checkpoint persist (codex review finding 8): the
+   *  tail offset after the last processed entry, written at most every 5s.
+   *  Safe to advance immediately after processing — an entry's outbound rows
+   *  are already in the persisted relay queue by then, so a restart resuming
+   *  AT the checkpoint re-mirrors nothing and misses nothing. */
+  #checkpointTimer: ReturnType<typeof setTimeout> | null = null;
+  #scheduleCheckpoint(transcriptPath: string): void {
+    if (this.#checkpointTimer) return;
+    this.#checkpointTimer = setTimeout(() => {
+      this.#checkpointTimer = null;
+      const off = this.#tailer?.offset() ?? 0;
+      if (off > 0 && this.status !== "ended") {
+        saveWindowRecord(this.id, { transcriptCheckpoint: { path: transcriptPath, offset: off } });
+      }
+    }, 5_000);
   }
 
   /** True if the pid is alive — a plain syscall, NOT a spawned `kill` binary
