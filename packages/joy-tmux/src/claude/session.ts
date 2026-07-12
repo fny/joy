@@ -1162,6 +1162,11 @@ export class Session {
    */
   async #steer(text: string, opts: SendOptions): Promise<void> {
     if (this.status === "ended") return;
+    // Settle any PENDING steer submit before touching the pane (5.6-sol
+    // verify round 2): cancelling it only after our capture/clear/type awaits
+    // let the old timer fire MID-STAGING — submitting our half-typed text
+    // while acknowledging the old steer.
+    this.#cancelSteerSubmit();
     const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeLines)
     // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
     // pending), steer's clear below would wipe that text AND its stale submit Enter would
@@ -1215,7 +1220,6 @@ export class Session {
     // relay pull awaits this, so the cursor covers the whole delivery, not just
     // the typing (5.6-sol audit #5: a crash inside the submit delay lost the
     // steer while the cursor had already moved on).
-    this.#cancelSteerSubmit();
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(async () => {
         this.#steerSubmitTimer = null;
@@ -1883,7 +1887,6 @@ export class Session {
         this.#pendingAttachments = drained.concat(this.#pendingAttachments);
         throw e;
       }
-      saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
       if (paths.length > 0) {
         // Bare relative paths appended after the text, space-separated.
         // tmux send-keys -l + Enter sends a single line, so line breaks
@@ -1910,6 +1913,7 @@ export class Session {
       } else if (cmd.name === "login-code" && cmd.args.trim()) {
         await this.#submitLoginCode(cmd.args);
       }
+      if (drained.length > 0) saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
       return;
     }
     // Route through the verified dispatch queue (NOT sendText directly): the app
@@ -1922,6 +1926,12 @@ export class Session {
     // ack — if it fails, this throws and the pull loop halts at the confirmed
     // cursor (codex review finding 2).
     this.enqueue(augmented, { seq, source: "relay", mirrorToRelay: false, visible: false, requireDurable: true });
+    // Persist the cleared refs ONLY here — after durable handoff (spool write
+    // or awaited command delivery above). Clearing earlier meant a crash or
+    // spool failure between download and enqueue retried the text WITHOUT its
+    // attachments (5.6-sol verify round 2). A throw anywhere above skips this,
+    // leaving the restored refs persisted for the retry.
+    if (drained.length > 0) saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
   }
 
   /**
@@ -2606,9 +2616,12 @@ export class Session {
           // loudly, stage for activity-confirmation, but do NOT overwrite
           // (5.6-sol verify #6: mismatch was logged and then clobbered anyway).
           process.stderr.write(`[hook] ${this.id} SessionStart sid MISMATCH: hook=${sid} learned=${this.claudeSessionId} — keeping learned\n`);
-        } else if (sid) {
+        } else if (sid && this.status !== "starting") {
+          // Already-active session: the hook refines an existing binding.
           this.claudeSessionId = sid;
         }
+        // Starting sessions get the sid ONLY via activity confirmation (the
+        // staged-binding contract: hooks never carry the binding alone).
         if (sid && tp) this.#pendingHookBinding = { sid, path: tp, at: Date.now() };
         if (tp && tp !== this.transcriptPath) {
           if (this.#tailer) {
