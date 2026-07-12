@@ -1190,6 +1190,7 @@ export class RelaySession {
       let { messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq);
       if (messages.length > 0) log(`pull ${this.relaySessionId}: got ${messages.length} msgs, lastSeq=${this.lastSeq}`);
       let advanced = false;
+      let deliveryHalted = false;
       while (messages.length > 0) {
         const roundStart = this.lastSeq;
         for (const msg of messages) {
@@ -1214,9 +1215,13 @@ export class RelaySession {
             continue;
           }
           this.decryptFailures.delete(msg.seq);
-          if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; }
           log(`pull msg seq=${msg.seq} dec=${JSON.stringify(dec)?.slice(0, 120)}`);
-          if (!isObj(dec)) continue;
+          // Confirmed-cursor contract (codex review finding 2): for rows that
+          // require DELIVERY (user text → onMessage), the cursor advances only
+          // AFTER delivery resolves — see below. Non-deliverable rows (session
+          // events, own-sends, non-user roles) are consumed here as before.
+          const advance = () => { if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; } };
+          if (!isObj(dec)) { advance(); continue; }
           const role = dec['role'];
 
           // File attachment envelope: role='session', ev.t='file'. App sends
@@ -1228,10 +1233,11 @@ export class RelaySession {
             if (c?.type === 'session' && ev?.t === 'file' && typeof ev.ref === 'string' && typeof ev.name === 'string' && typeof ev.size === 'number') {
               this.onFileEvent({ ref: ev.ref, name: ev.name, size: ev.size, mimeType: ev.mimeType });
             }
+            advance();
             continue;
           }
 
-          if (role !== 'user') continue;
+          if (role !== 'user') { advance(); continue; }
           // H1: skip messages sent by joy itself to avoid double-injecting into tmux.
           // Log the skip: this is the ONLY silent drop on the pull path, and an
           // app message swallowed here (mis-tagged meta) is otherwise undiagnosable
@@ -1239,31 +1245,37 @@ export class RelaySession {
           const meta = dec['meta'] as { sentFrom?: string } | undefined;
           if (meta?.sentFrom === 'joy') {
             log(`pull: skip own-send seq=${msg.seq} sentFrom=joy`);
+            advance();
             continue;
           }
           if (meta?.sentFrom) log(`pull: user msg seq=${msg.seq} sentFrom=${meta.sentFrom}`);
           const c = dec['content'] as { type?: string; text?: string } | undefined;
           if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
-            // onMessage now hands the text to the session's in-memory verified
-            // dispatch queue (it no longer types straight into tmux); the queue
-            // does the actual ready+empty-box gated typing afterward. We still
-            // AWAIT it so messages enter the queue in strict seq order (an earlier
-            // one awaiting an attachment can't be overtaken by a later text-only
-            // one). NOTE: lastSeq is advanced earlier, right after decrypt (see
-            // above) — i.e. before this delivery is even attempted — so the
-            // persisted cursor means "read + decrypted + handed off attempted",
-            // NOT "delivered to Claude". Caveat (B1): a crash between that advance
-            // and the enqueue (or items still queued-but-untyped) loses those
-            // messages; a durable replay (B2) that re-pulls from a confirmed-seq
-            // watermark and skips already-delivered ones is a separate project. A
-            // failed hand-off is logged, not retried, to avoid a poison-pill loop.
+            // CONFIRMED-CURSOR (codex review finding 2, closes B1/B2): the
+            // cursor advances only after onMessage resolves — which itself
+            // resolves only after durable handoff (spool write for queued
+            // text, typing landed for steer commands). On failure the pull
+            // HALTS here: later rows are not processed (advancing past a
+            // failed seq would break cursor contiguity), the cursor persists
+            // at the last confirmed row, and the next 3s tick retries this
+            // seq. Poison-pill risk is bounded by the spool seq-dedupe (a
+            // re-pulled seq that already staged is a no-op) and by delivery
+            // failures being environmental (disk, pane) rather than
+            // content-dependent.
             try {
               await this.onMessage(c.text.trim(), msg.seq);
             } catch (e) {
-              log(`pull: onMessage failed for seq=${msg.seq}: ${e}`);
+              log(`pull: delivery failed for seq=${msg.seq} — HALTING at confirmed cursor ${this.lastSeq} (retry next tick): ${e}`);
+              deliveryHalted = true;
+              break;
             }
+            advance();
+            continue;
           }
+          // User row with no deliverable text — consumed.
+          advance();
         }
+        if (deliveryHalted) break;
         if (!hasMore) break;
         // Spin guard: if this whole page advanced the cursor by nothing (every
         // row undecryptable and not yet quarantined), refetching from the same
