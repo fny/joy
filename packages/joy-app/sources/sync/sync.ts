@@ -80,7 +80,16 @@ type SendMessageOptions = {
     source?: 'chat' | 'new_session' | 'option' | 'question' | 'voice';
     /** Optional image attachments to send before the text message. */
     attachments?: AttachmentPreview[];
+    /** Caller-supplied localId — the draft-release path passes a persisted,
+     *  STABLE id so retries dedupe at both the reducer and the server. */
+    localId?: string;
 };
+
+/** sendMessage's success contract: ok only after the optimistic row is in the
+ *  store AND the outbox row is enqueued (durable handoff to persist-and-retry).
+ *  Early returns (missing encryption/session) report ok:false so callers like
+ *  the draft-release lease can revert instead of losing the message. */
+export type SendMessageResult = { ok: true; localId: string } | { ok: false; reason: string };
 
 /**
  * Thinking state implied by a message's embedded turn-lifecycle event:
@@ -289,9 +298,8 @@ class Sync {
         // session's turn completes. Lazy import — the module reads storage +
         // sync only at runtime, avoiding a static cycle.
         void import('@/-session/draftQueueRelease').then(({ initDraftQueueRelease }) => {
-            initDraftQueueRelease((sessionId, text) => {
-                this.sendMessage(sessionId, text, { source: 'chat' });
-            });
+            initDraftQueueRelease((sessionId, text, localId) =>
+                this.sendMessage(sessionId, text, { source: 'chat', localId }));
         });
         this.credentials = credentials;
         this.encryption = encryption;
@@ -659,7 +667,7 @@ class Sync {
         return { uploaded, failed };
     }
 
-    async sendMessage(sessionId: string, text: string, options?: SendMessageOptions) {
+    async sendMessage(sessionId: string, text: string, options?: SendMessageOptions): Promise<SendMessageResult> {
 
         // Get encryption — may not be ready yet if sessions are still syncing
         let encryption = this.encryption.getSessionEncryption(sessionId);
@@ -669,7 +677,7 @@ class Sync {
             encryption = this.encryption.getSessionEncryption(sessionId);
             if (!encryption) {
                 console.error(`Session ${sessionId} not found after sync`);
-                return;
+                return { ok: false, reason: 'session encryption not ready' };
             }
         }
 
@@ -680,7 +688,7 @@ class Sync {
             session = storage.getState().sessions[sessionId];
             if (!session) {
                 console.error(`Session ${sessionId} not found in storage after sync`);
-                return;
+                return { ok: false, reason: 'session not found' };
             }
         }
 
@@ -770,8 +778,8 @@ class Sync {
             }
         }
 
-        // Generate local ID
-        const localId = randomUUID();
+        // Local ID: caller-supplied (stable across draft-release retries) or fresh.
+        const localId = options?.localId ?? randomUUID();
 
         // Determine sentFrom based on platform
         let sentFrom: string;
@@ -828,6 +836,8 @@ class Sync {
 
         this.getSendSync(sessionId).invalidate();
         this.maybeStartBackgroundSendWatchdog();
+        // Durable handoff complete: optimistic row applied + outbox row queued.
+        return { ok: true, localId };
     }
 
     /** Server sent us settings — merge any pending local changes on top, then apply as one update. */

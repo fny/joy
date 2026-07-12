@@ -13,6 +13,15 @@ export interface QueuedDraft {
     /** When the draft was queued — drives the max-hold TTL (older persisted
      *  drafts without it fall back to the id's timestamp prefix). */
     queuedAt?: number;
+    /** Lease-based two-phase release (codex review finding 3): 'releasing'
+     *  is a LEASE, not a terminal state — an app reload or send failure
+     *  reverts/retries with the SAME releaseLocalId so the reducer and the
+     *  server both dedupe. Absent = 'queued' (older persisted drafts). */
+    state?: 'queued' | 'releasing';
+    releaseLocalId?: string;
+    leaseUntil?: number;
+    attempt?: number;
+    lastError?: string;
 }
 
 interface DraftQueueState {
@@ -20,6 +29,12 @@ interface DraftQueueState {
     add: (sessionId: string, text: string) => void;
     update: (sessionId: string, id: string, text: string) => void;
     remove: (sessionId: string, id: string) => void;
+    /** Two-phase release: take the lease (persisted) before sendMessage. Keeps
+     *  the existing releaseLocalId on retry so the send stays idempotent. */
+    markReleasing: (sessionId: string, id: string, releaseLocalId: string, leaseUntil: number) => void;
+    /** Send failed/lease action: back to 'queued' with attempt+1 and the error
+     *  recorded — draft stays visible and editable, never silently lost. */
+    revertRelease: (sessionId: string, id: string, error: string) => void;
 }
 
 const mmkv = new MMKV();
@@ -80,6 +95,28 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
             bySession: {
                 ...s.bySession,
                 [sessionId]: (s.bySession[sessionId] ?? []).filter((d) => d.id !== id),
+            },
+        }));
+        persist(get().bySession);
+    },
+    markReleasing: (sessionId, id, releaseLocalId, leaseUntil) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
+                    ? { ...d, state: 'releasing' as const, releaseLocalId, leaseUntil }
+                    : d)),
+            },
+        }));
+        persist(get().bySession);
+    },
+    revertRelease: (sessionId, id, error) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
+                    ? { ...d, state: 'queued' as const, leaseUntil: undefined, attempt: (d.attempt ?? 0) + 1, lastError: error.slice(0, 200) }
+                    : d)),
             },
         }));
         persist(get().bySession);

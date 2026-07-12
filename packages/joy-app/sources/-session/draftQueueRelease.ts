@@ -1,5 +1,6 @@
 import { storage, isFresh } from '@/sync/storage';
 import { useDraftQueueStore } from './draftQueue';
+import type { SendMessageResult } from '@/sync/sync';
 
 /**
  * Auto-release for the app-side message queue (draft queue).
@@ -19,10 +20,16 @@ import { useDraftQueueStore } from './draftQueue';
  *    driven, persisted mirror) are joy's.
  */
 
-type SendFn = (sessionId: string, text: string) => void;
+type SendFn = (sessionId: string, text: string, localId: string) => Promise<SendMessageResult>;
 
 const inFlightUntil = new Map<string, number>();
 const RELEASE_BACKSTOP_MS = 15_000;
+// Lease horizon for a 'releasing' draft: past this, a retry (same
+// releaseLocalId — idempotent) is allowed. Covers app reloads mid-send.
+const RELEASE_LEASE_MS = 30_000;
+// After this many failed attempts, stop auto-retrying every sweep; the draft
+// stays visible/editable with its error and the user can send it manually.
+const MAX_AUTO_ATTEMPTS = 5;
 // Hard invariant (codex design review, 2026-07-11): NO app-side state may
 // indefinitely prevent user input from reaching the CLI. The fresh-busy gate
 // has a residual hostage case — activeAt refreshes from the daemon's generic
@@ -65,10 +72,26 @@ export function initDraftQueueRelease(send: SendFn): void {
             }
             const until = inFlightUntil.get(sessionId);
             if (until !== undefined && now < until) continue;
-            // Idle (or held past the TTL) + not mid-release → send the head.
+            // Two-phase (codex finding 3): the draft is never removed before
+            // the send's durable handoff. Take/respect the lease, send with a
+            // STABLE releaseLocalId (idempotent at reducer + server on retry),
+            // remove only on {ok}; revert with the error otherwise.
+            if (head.state === 'releasing' && (head.leaseUntil ?? 0) > now) continue; // another pass owns it
+            if ((head.attempt ?? 0) >= MAX_AUTO_ATTEMPTS) continue; // parked for manual action
+            const releaseLocalId = head.releaseLocalId ?? `${sessionId}-${head.id}`;
             inFlightUntil.set(sessionId, now + RELEASE_BACKSTOP_MS);
-            useDraftQueueStore.getState().remove(sessionId, head.id);
-            send(sessionId, head.text);
+            useDraftQueueStore.getState().markReleasing(sessionId, head.id, releaseLocalId, now + RELEASE_LEASE_MS);
+            void send(sessionId, head.text, releaseLocalId)
+                .then((res) => {
+                    if (res.ok) {
+                        useDraftQueueStore.getState().remove(sessionId, head.id);
+                    } else {
+                        useDraftQueueStore.getState().revertRelease(sessionId, head.id, res.reason);
+                    }
+                })
+                .catch((e) => {
+                    useDraftQueueStore.getState().revertRelease(sessionId, head.id, String(e));
+                });
         }
     };
 
