@@ -1906,6 +1906,18 @@ export class Session {
     return fresh;
   }
 
+  /** Entry types the daemon knows how to handle — the semantic-health
+   *  baseline. Unknown types are fine in small numbers (forward compat);
+   *  a long unbroken streak means the format moved under us. */
+  static #KNOWN_ENTRY_TYPES = new Set([
+    // Baseline measured against real transcripts (2026-07-12): the top-level
+    // types Claude Code 2.1.x writes today.
+    "user", "assistant", "system", "attachment", "queue-operation",
+    "summary", "last-prompt", "file-history-snapshot", "progress",
+    "agent-name", "ai-title", "custom-title", "mode", "permission-mode",
+  ]);
+  #unknownEntryStreak = 0;
+
   /** Receipt uuid staged by #shouldEmitNote for the #emitAgentNote that
    *  immediately follows it (same synchronous block) — stamped onto the
    *  note's last queued relay row. */
@@ -2255,6 +2267,16 @@ export class Session {
       },
       () => this.status !== "ended",
       this.#transcriptStartOffset,
+      // Tailer health (codex review finding 6): a format/read breakdown used
+      // to look exactly like an idle session. Surface a one-shot loud note so
+      // the user learns the daemon needs an update instead of assuming Claude
+      // went quiet.
+      (h) => {
+        const what = h.kind === "parse"
+          ? "transcript format unrecognized — a Claude Code update likely changed it; update joy-tmux"
+          : "transcript unreadable — daemon cannot read the session transcript";
+        this.#emitAgentNote(`${what} (${h.consecutive} consecutive failures)`, Date.now(), this.claudeSessionId);
+      },
     );
   }
 
@@ -2691,6 +2713,21 @@ export class Session {
     // timestamp (one clock for both user and agent messages), so a --resume
     // replay sorts in true chronological order in the app instead of
     // splitting into "all agent, then all user" from daemon/relay clock skew.
+    // Semantic format health (codex review finding 6): valid JSON whose SHAPE
+    // we no longer recognize (the system/local_command class) is invisible to
+    // JSON-parse health. Count consecutive unknown-typed entries; alarm once.
+    const entryTypeForHealth = String(entry.type ?? "");
+    if (Session.#KNOWN_ENTRY_TYPES.has(entryTypeForHealth)) {
+      this.#unknownEntryStreak = 0;
+    } else {
+      this.#unknownEntryStreak++;
+      if (this.#unknownEntryStreak === 25) {
+        this.#emitAgentNote(
+          `transcript entries unrecognized (type "${entryTypeForHealth || "?"}" ×${this.#unknownEntryStreak}) — a Claude Code update likely changed the format; update joy-tmux`,
+          Date.now(), this.claudeSessionId,
+        );
+      }
+    }
     // Falls back to now() for entries without a parseable timestamp.
     const entryTimeMs = Date.parse(String(entry.timestamp || "")) || Date.now();
 
