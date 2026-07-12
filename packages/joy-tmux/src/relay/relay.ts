@@ -906,6 +906,9 @@ export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
   inFlight: string | null;
   paused: boolean;
+  /** ALL undelivered items incl. hidden app-sends — the app's "N queued". */
+  pendingCount?: number;
+  hidden?: { id: string; text: string; createdAt: number }[];
 }
 
 export class RelaySession {
@@ -1096,7 +1099,12 @@ export class RelaySession {
    * snapshot identical to the current one (the queue broadcasts can repeat).
    */
   async updateQueue(info: JoyQueueInfo): Promise<void> {
-    const empty = info.queue.length === 0 && !info.inFlight && !info.paused;
+    // "Empty" must consider the HIDDEN app-sends and the total pending count —
+    // a hidden message held mid-turn with no prior joy__queue metadata hit the
+    // early-return below and the app never saw its pending count (codex review
+    // 2026-07-11, finding 5).
+    const empty = info.queue.length === 0 && !info.inFlight && !info.paused
+      && (info.pendingCount ?? 0) === 0 && (info.hidden?.length ?? 0) === 0;
     const cur = this.metadata?.joy__queue as JoyQueueInfo | null | undefined;
     if (empty && cur == null) return;
     if (cur && JSON.stringify(cur) === JSON.stringify(info)) return;
