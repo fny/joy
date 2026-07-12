@@ -629,6 +629,15 @@ export class SessionRegistry {
         : (fallback && !claimed.has(fallback) ? fallback : undefined);
       const claudeSessionId = transcriptPath ? basename(transcriptPath, ".jsonl") : undefined;
 
+      // Replay checkpoint (codex review finding 8): resume the tail where the
+      // previous daemon left off instead of replaying the whole file from 0 —
+      // receipts then only dedupe the small post-checkpoint overlap. Path-
+      // scoped: applies only when we bind the SAME transcript file.
+      const checkpoint = rec?.transcriptCheckpoint;
+      const startOffset = (checkpoint && transcriptPath && checkpoint.path === transcriptPath
+        && existsSync(transcriptPath) && statSync(transcriptPath).size >= checkpoint.offset)
+        ? checkpoint.offset : 0;
+
       const session = new Session({
         id, pid, tmuxWindow, cwd,
         flags: [],
@@ -636,7 +645,9 @@ export class SessionRegistry {
         startedAt: transcriptPath ? statSync(transcriptPath).mtimeMs : Date.now(),
         claudeSessionId,
         transcriptPath: transcriptPath ?? undefined,
+        transcriptStartOffset: startOffset,
       }, this.#sessionDeps());
+      if (startOffset > 0) process.stderr.write(`[recover] ${id} resuming transcript at checkpoint offset ${startOffset}\n`);
 
       this.#sessions.set(id, session);
       // Attach the relay (binds the session RPCs) even for ENDED sessions whose
