@@ -669,7 +669,11 @@ export class Session {
     this.#transcriptStartOffset = init.transcriptStartOffset ?? 0;
     this.#backfillCapBytes = init.backfillCapBytes ?? 0;
     // Title lock survives restarts via the window record.
-    this.#titleLocked = loadWindowRecord(this.id)?.titleLockedByUser === true;
+    const rec = loadWindowRecord(this.id);
+    this.#titleLocked = rec?.titleLockedByUser === true;
+    // Attachment refs staged before a crash — their file rows are already
+    // cursor-confirmed, so the refs must survive into this process.
+    if (rec?.pendingAttachments?.length) this.#pendingAttachments = rec.pendingAttachments;
     // Reload any queue items a previous daemon left undelivered (B1). They
     // drain on the first idle exactly like freshly queued messages.
     const persisted = loadQueue(this.id);
@@ -863,9 +867,12 @@ export class Session {
     rs.onFileEvent = (ev) => {
       // Stage the REF only; download happens when the accompanying text
       // message consumes it (see #pendingAttachments doc). Duplicate refs
-      // from a re-pulled file row are collapsed.
+      // from a re-pulled file row are collapsed. PERSISTED (5.6-sol verify
+      // #4): the file row's cursor confirm is only sound if the ref survives
+      // a daemon crash until its text row consumes it.
       if (!this.#pendingAttachments.some((a) => a.ref === ev.ref)) {
         this.#pendingAttachments.push({ ref: ev.ref, name: ev.name });
+        saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
       }
     };
 
@@ -1225,9 +1232,16 @@ export class Session {
           resolve();
         } catch (e) { reject(e as Error); }
       }, ENTER_SUBMIT_DELAY_MS);
-      // A NEWER steer superseding this one clears the timer: the text was
-      // deliberately replaced — resolve (the newer steer owns delivery now).
-      this.#steerSubmitTimer = Object.assign(timer, { onSuperseded: resolve }) as typeof timer;
+      // A NEWER steer superseding this one clears the timer. For a RELAY
+      // steer that must not read as delivered — its text never got Enter —
+      // so REJECT and let the pull retry it (5.6-sol verify #5). Pull
+      // serialization makes this path rare (only an RPC steer can preempt a
+      // relay steer mid-delay). Non-relay callers get resolve (fire-and-
+      // forget semantics preserved).
+      const onSuperseded = opts.source === "relay"
+        ? () => reject(new Error("steer superseded before submit"))
+        : resolve;
+      this.#steerSubmitTimer = Object.assign(timer, { onSuperseded }) as typeof timer;
     });
   }
 
@@ -1869,6 +1883,7 @@ export class Session {
         this.#pendingAttachments = drained.concat(this.#pendingAttachments);
         throw e;
       }
+      saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
       if (paths.length > 0) {
         // Bare relative paths appended after the text, space-separated.
         // tmux send-keys -l + Enter sends a single line, so line breaks
@@ -2305,9 +2320,15 @@ export class Session {
     }
     this.#backfillCapBytes = 0;
     this.#tailBoundAt = Date.now();
-    this.#tailer = tailJsonl(
+    // Identity guard (5.6-sol verify #6): a queued callback from a CLOSED
+    // old tailer must not process entries as if from the new binding — it
+    // could confirm a staged binding against the wrong file. Each callback
+    // checks it still belongs to the ACTIVE tailer.
+    let self: TranscriptTailer | null = null;
+    this.#tailer = self = tailJsonl(
       transcriptPath,
       (entry) => {
+        if (this.#tailer !== self) return; // stale tailer — rebound since
         this.onTranscriptEntry(entry);
         this.#deps.broadcast("transcript_entry", { session_id: this.claudeSessionId, entry });
         this.#scheduleCheckpoint(transcriptPath);
@@ -2579,13 +2600,16 @@ export class Session {
         // even when entries stop carrying entry.sessionId, without hooks ever
         // carrying the binding alone. Conflicts with an already-learned sid
         // are logged loudly, not silently overwritten.
-        if (sid && this.claudeSessionId && sid !== this.claudeSessionId) {
-          process.stderr.write(`[hook] ${this.id} SessionStart sid MISMATCH: hook=${sid} learned=${this.claudeSessionId}\n`);
-        }
-        if (sid) {
+        const learnedConflict = !!(sid && this.claudeSessionId && sid !== this.claudeSessionId && this.status !== "starting");
+        if (learnedConflict) {
+          // A LEARNED (transcript-confirmed) sid outranks a hook claim — log
+          // loudly, stage for activity-confirmation, but do NOT overwrite
+          // (5.6-sol verify #6: mismatch was logged and then clobbered anyway).
+          process.stderr.write(`[hook] ${this.id} SessionStart sid MISMATCH: hook=${sid} learned=${this.claudeSessionId} — keeping learned\n`);
+        } else if (sid) {
           this.claudeSessionId = sid;
-          if (tp) this.#pendingHookBinding = { sid, path: tp, at: Date.now() };
         }
+        if (sid && tp) this.#pendingHookBinding = { sid, path: tp, at: Date.now() };
         if (tp && tp !== this.transcriptPath) {
           if (this.#tailer) {
             // Bound to a DIFFERENT file (mtime discovery guessed wrong, or a
@@ -2769,10 +2793,17 @@ export class Session {
     const c = code.trim();
     if (!c) return;
     const pane = await tmux.captureFresh(this.tmuxWindow);
-    if (!pane.ok || !authUrlFromPane(pane.out)) return; // box gone — drop it
-    if (!(await this.#typeLines(c))) return;
+    // Login box GONE is a deliberate drop (login already completed/cancelled —
+    // typing the code into a normal prompt would submit garbage), but capture
+    // FAILURE and typing/submit failures must THROW: the relay-borne caller
+    // awaits this, and a swallowed failure confirmed the cursor for a code
+    // that never landed (5.6-sol verify #5).
+    if (!pane.ok) throw new Error("login-code: pane capture failed");
+    if (!authUrlFromPane(pane.out)) return; // box gone — deliberate drop
+    if (!(await this.#typeLines(c))) throw new Error("login-code: typing failed");
     await sleep(ENTER_SUBMIT_DELAY_MS); // paste-detection swallows an immediate Enter
-    await tmux.key(this.tmuxWindow, "Enter");
+    const e = await tmux.key(this.tmuxWindow, "Enter");
+    if (!e.ok) throw new Error("login-code: submit Enter failed");
   }
 
   // ── Transcript entry semantics ──────────────────────────────────────────────

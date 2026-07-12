@@ -918,7 +918,7 @@ export class RelaySession {
   private readonly sessionKey: Uint8Array;
   private readonly variant: EncryptionVariant;
   private lastSeq: number;
-  private queue: Array<{ localId: string; wire: WireRecord; attempts: number; receipt?: { uuid: string; turn: string } }> = [];
+  private queue: Array<{ localId: string; wire: WireRecord; attempts: number; receipt?: { uuid: string; turn: string; poisoned?: boolean } }> = [];
   /** Receipt payloads acked before a Session registered the sink (restart
    *  drain can outrun attachRelay) — flushed on setReceiptSink. Persisted. */
   private ackedReceipts: { uuid: string; turn: string }[] = [];
@@ -1362,8 +1362,10 @@ export class RelaySession {
         await this.client.append(this.relaySessionId, enc, item.localId);
         this.queue.shift();
         // Group receipt rides the entry's LAST row — its ack means every row
-        // of that transcript entry is durably on the server.
-        if (item.receipt) this.deliverReceipt(item.receipt);
+        // of that transcript entry is durably on the server. A POISONED
+        // receipt (a sibling row was dropped) is discarded instead: partial
+        // delivery must not read as forwarded.
+        if (item.receipt && !item.receipt.poisoned) this.deliverReceipt(item.receipt);
         this.persistOutbound();
       } catch (e) {
         item.attempts++;
@@ -1385,10 +1387,17 @@ export class RelaySession {
           // entry stays unreceipted and a later rebind/replay can retry it
           // whole. Rows already sent stay sent (server localId dedupe absorbs
           // the replay's duplicates).
-          let groupEnd = this.queue.findIndex((q) => q.receipt !== undefined);
+          // POISON (not strip) the group's terminator receipt: stripping
+          // removed the group boundary, so a SECOND failed row in the same
+          // group walked into the NEXT group and killed its receipt too
+          // (5.6-sol verify #1). The poisoned marker keeps the delimiter in
+          // place; ack discards it instead of delivering.
+          const groupEnd = this.queue.findIndex((q) => q.receipt !== undefined);
           if (groupEnd >= 0) {
-            log(`send permanently failed (HTTP ${status}) mid-group — withholding group receipt ${this.queue[groupEnd].receipt!.uuid}`);
-            this.queue[groupEnd].receipt = undefined;
+            if (!this.queue[groupEnd].receipt!.poisoned) {
+              log(`send permanently failed (HTTP ${status}) mid-group — poisoning group receipt ${this.queue[groupEnd].receipt!.uuid}`);
+              this.queue[groupEnd].receipt!.poisoned = true;
+            }
           } else {
             log(`send permanently failed (HTTP ${status}), dropping row (receipt withheld): ${e}`);
           }

@@ -31,6 +31,9 @@ export interface WindowRecord {
    *  (receipts only need to cover post-checkpoint overlap). Path-scoped: a
    *  /clear rotation binds a NEW file, where offset 0 is correct. */
   transcriptCheckpoint?: { path: string; offset: number };
+  /** Attachment refs staged (file rows cursor-confirmed) but not yet consumed
+   *  by their text message — must survive a daemon crash (5.6-sol verify #4). */
+  pendingAttachments?: { ref: string; name?: string }[];
   updatedAt: number;
 }
 
@@ -55,7 +58,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number } },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[] },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -66,6 +69,7 @@ export function saveWindowRecord(
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,
+      pendingAttachments: patch.pendingAttachments ?? prev?.pendingAttachments,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet
