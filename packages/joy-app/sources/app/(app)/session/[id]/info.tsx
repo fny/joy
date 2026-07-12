@@ -4,6 +4,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
 import { Item } from '@/components/Item';
+import { sync } from '@/sync/sync';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
@@ -162,6 +163,20 @@ function SessionInfoContent({ session }: { session: Session }) {
     }, [session]);
 
     // Use HappyAction for archiving - it handles errors automatically
+    const handleResetChatState = React.useCallback(() => {
+        Modal.confirm(
+            t('sessionInfo.resetChatState'),
+            t('sessionInfo.resetChatStateWarning'),
+        ).then((confirmed) => {
+            if (!confirmed) return;
+            // Drops local messages/cursors/reducer for THIS session and
+            // refetches from the server — the force-heal for a frozen or
+            // behind chat. Nothing server-side is touched.
+            sync.resetSessionChatState(session.id);
+            router.back();
+        });
+    }, [session.id, router]);
+
     const [archivingSession, performArchive] = useHappyAction(async () => {
         // Prompt for worktree cleanup before killing (needs an active machine connection)
         await maybeCleanupWorktree(session.id, session.metadata?.path, session.metadata?.machineId);
@@ -390,6 +405,12 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={() => router.push(`/session/${session.metadata!.parentSessionId}`)}
                         />
                     )}
+                    <Item
+                        title={t('sessionInfo.resetChatState')}
+                        subtitle={t('sessionInfo.resetChatStateSubtitle')}
+                        icon={<Ionicons name="refresh-circle-outline" size={29} color="#FF9500" />}
+                        onPress={handleResetChatState}
+                    />
                     <Item
                         title={t('sessionInfo.archiveSession')}
                         subtitle={t('sessionInfo.archiveSessionSubtitle')}
