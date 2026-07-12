@@ -104,6 +104,22 @@ export interface TranscriptTailer {
   close(): void;
 }
 
+/** Tailer health counters (codex review finding 6): an upstream format change
+ *  that breaks every line — or a persistent read error — used to look
+ *  IDENTICAL to an idle session. The tailer counts failures and reports
+ *  threshold crossings via onHealth; consumers surface them (agent note,
+ *  health flag). Parse health (schema/content degraded) is tracked separately
+ *  from read health (fs degraded). */
+export interface TailerHealth {
+  kind: "parse" | "read";
+  consecutive: number;
+  total: number;
+  detail: string;
+}
+
+const HEALTH_ALERT_THRESHOLD = 25;
+const HEALTH_LOG_EVERY = 100;
+
 /**
  * Tail a JSONL file, invoking onEntry for each complete parsed line as it is
  * appended. Reads incrementally from a byte offset, carrying incomplete
@@ -115,11 +131,37 @@ export function tailJsonl(
   onEntry: (entry: Record<string, unknown>) => void,
   shouldRetry: () => boolean = () => true,
   startOffset = 0,
+  onHealth?: (h: TailerHealth) => void,
 ): TranscriptTailer {
   let byteOffset = startOffset;
   let leftover = ""; // incomplete line carried across reads
   let fsWatcher: ReturnType<typeof watch> | null = null;
   let closed = false;
+  // Health (codex finding 6): skip-and-advance stays — a garbage line must
+  // not wedge the tailer (liveness) — but failures are now COUNTED and
+  // surfaced instead of indistinguishable from idleness.
+  let parseConsecutive = 0, parseTotal = 0;
+  let readConsecutive = 0, readTotal = 0;
+
+  function noteParseFailure(line: string) {
+    parseConsecutive++; parseTotal++;
+    if (parseTotal === 1 || parseTotal % HEALTH_LOG_EVERY === 0) {
+      process.stderr.write(`[tail] parse failure #${parseTotal} (consec ${parseConsecutive}) at ~byte ${byteOffset} of ${path}: ${JSON.stringify(line.slice(0, 80))}\n`);
+    }
+    if (parseConsecutive === HEALTH_ALERT_THRESHOLD) {
+      onHealth?.({ kind: "parse", consecutive: parseConsecutive, total: parseTotal, detail: line.slice(0, 120) });
+    }
+  }
+
+  function noteReadFailure(e: unknown) {
+    readConsecutive++; readTotal++;
+    if (readTotal === 1 || readTotal % HEALTH_LOG_EVERY === 0) {
+      process.stderr.write(`[tail] read failure #${readTotal} (consec ${readConsecutive}) on ${path}: ${e}\n`);
+    }
+    if (readConsecutive === HEALTH_ALERT_THRESHOLD) {
+      onHealth?.({ kind: "read", consecutive: readConsecutive, total: readTotal, detail: String(e).slice(0, 120) });
+    }
+  }
 
   function readNew() {
     try {
@@ -130,16 +172,24 @@ export function tailJsonl(
       const bytesRead = readSync(fd, buf, 0, buf.length, byteOffset);
       closeSync(fd);
       byteOffset += bytesRead;
+      readConsecutive = 0;
       const chunk = leftover + buf.subarray(0, bytesRead).toString("utf-8");
       const parts = chunk.split("\n");
       leftover = parts.pop() ?? ""; // last part is incomplete if no trailing \n
       for (const line of parts) {
         if (!line.trim()) continue;
         try {
-          onEntry(JSON.parse(line));
-        } catch {}
+          const entry = JSON.parse(line);
+          parseConsecutive = 0;
+          onEntry(entry);
+        } catch (e) {
+          // onEntry throwing is a CONSUMER bug, but counting it as parse
+          // health keeps the alarm honest either way.
+          if (e instanceof SyntaxError) noteParseFailure(line);
+          else process.stderr.write(`[tail] onEntry threw for ${path}: ${e}\n`);
+        }
       }
-    } catch {}
+    } catch (e) { noteReadFailure(e); }
   }
 
   function attach() {
