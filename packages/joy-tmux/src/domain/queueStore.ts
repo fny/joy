@@ -30,17 +30,23 @@ function queuePath(sessionId: string, baseDir: string): string {
   return join(baseDir, `queue-${sessionId}.json`);
 }
 
-export function saveQueue(sessionId: string, items: PersistedQueueItem[], baseDir = joyStateDir()): void {
+/** Returns whether the spool write actually landed. The inbound relay path
+ *  treats this as the durable-handoff ack (codex review finding 2): a
+ *  swallowed write failure let the cursor advance past a message that only
+ *  ever existed in memory. Other callers may ignore the return. */
+export function saveQueue(sessionId: string, items: PersistedQueueItem[], baseDir = joyStateDir()): boolean {
   try {
     const p = queuePath(sessionId, baseDir);
     if (items.length === 0) {
       rmSync(p, { force: true });
-      return;
+      return true;
     }
     mkdirSync(baseDir, { recursive: true });
     writeFileSync(p, JSON.stringify(items));
+    return true;
   } catch (e) {
     process.stderr.write(`[queue-store] save failed for ${sessionId}: ${e}\n`);
+    return false;
   }
 }
 

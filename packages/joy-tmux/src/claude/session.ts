@@ -1060,7 +1060,7 @@ export class Session {
    * seq,visible:false} (the app already has the bubble); /send passes
    * {mirrorToRelay:true,visible:false}; 5xx retry passes {visible:false}.
    */
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
     // Joy-owned commands are handled HERE — before the text is queued or reaches Claude.
     //   /steer <msg>  type <msg> straight into the pane and submit it now, BYPASSING the
     //                 queue + its idle gate, so it lands immediately (mid-turn if a turn
@@ -1096,6 +1096,18 @@ export class Session {
       }
       return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
     }
+    // Seq-dedupe (codex review finding 2): the confirmed-cursor contract
+    // creates a benign crash window — spool written, cursor not yet
+    // persisted, restart re-pulls the same seq. The spool itself is the
+    // dedupe: an item with this seq is already staged.
+    if (opts?.seq != null) {
+      const dup = this.#queue.find((q) => q.seq === opts.seq)
+        ?? (this.#dispatchInFlight?.seq === opts.seq ? this.#dispatchInFlight : undefined);
+      if (dup) {
+        process.stderr.write(`[queue] ${this.id}: dedupe re-pulled seq=${opts.seq} (already staged as ${dup.id})\n`);
+        return { id: dup.id, text: dup.text, createdAt: dup.createdAt };
+      }
+    }
     const item: QueuedItem = {
       id: crypto.randomUUID().slice(0, 8),
       text,
@@ -1106,7 +1118,16 @@ export class Session {
       visible: opts?.visible ?? true,
     };
     this.#queue.push(item);
-    this.#broadcastQueue();
+    const durable = this.#broadcastQueue();
+    if (opts?.requireDurable && !durable) {
+      // Inbound relay contract: no durable spool = no ack. Unstage and throw
+      // so the pull loop HALTS with its cursor at the last confirmed row and
+      // retries this seq next tick, instead of consuming a message that only
+      // ever existed in memory.
+      this.#queue = this.#queue.filter((q) => q.id !== item.id);
+      this.#broadcastQueue();
+      throw new Error("queue spool write failed — message not durably staged");
+    }
     this.#maybeDrainQueue(); // drains immediately if Claude is idle
     return { id: item.id, text: item.text, createdAt: item.createdAt };
   }
@@ -1241,7 +1262,8 @@ export class Session {
     this.#broadcastQueue();
   }
 
-  #broadcastQueue(): void {
+  /** Returns whether the spool persisted — the inbound path's durable ack. */
+  #broadcastQueue(): boolean {
     const state = this.queueState();
     this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...state });
     // Push to the app via session metadata so it doesn't have to poll.
@@ -1249,7 +1271,7 @@ export class Session {
     // Persist undelivered items (in-flight first — it's undelivered until its
     // confirm rebroadcasts without it), so a daemon restart can't eat queued
     // messages (B1: the pull cursor persists ahead of delivery).
-    saveQueue(this.id, [
+    return saveQueue(this.id, [
       ...(this.#dispatchInFlight ? [this.#dispatchInFlight] : []),
       ...this.#queue,
     ].map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible })));
@@ -1813,14 +1835,36 @@ export class Session {
         augmented = text + " " + paths.join(" ");
       }
     }
+    // Joy-owned commands from the RELAY are AWAITED (not fire-and-forget):
+    // the pull cursor only advances when #onRelayMessage resolves, so holding
+    // it until the steer's typing lands means a crash mid-steer re-pulls and
+    // retries instead of silently consuming the command (codex review
+    // finding 2 — the /steer bypass hole). The narrow double-window (typed+
+    // submitted, crash before cursor persist → replay re-types) is bounded by
+    // the submit delay and preferred over loss.
+    const cmd = parseJoyCommand(augmented);
+    if (cmd) {
+      if (cmd.name === "steer" && cmd.args.trim()) {
+        await this.#steer(cmd.args, { seq, source: "relay", mirrorToRelay: false });
+      } else if (cmd.name === "btw" && cmd.args.trim()) {
+        await this.#steer(augmented, { seq, source: "relay", mirrorToRelay: false });
+      } else if (cmd.name === "title") {
+        this.#setTitle(cmd.args, { byUser: true });
+      } else if (cmd.name === "login-code" && cmd.args.trim()) {
+        await this.#submitLoginCode(cmd.args);
+      }
+      return;
+    }
     // Route through the verified dispatch queue (NOT sendText directly): the app
     // send is serialized behind any in-flight turn and only typed into an empty,
     // ready box — never on top of a busy turn or stuck text (the lost/merged-send
     // bugs). visible:false — the app already has this message in its chat history,
     // so it must not also appear as an editable queue chip. mirrorToRelay:false —
     // it came FROM the relay. seq is carried so receipt-matching still pairs the
-    // transcript echo with this send.
-    this.enqueue(augmented, { seq, source: "relay", mirrorToRelay: false, visible: false });
+    // transcript echo with this send. requireDurable: the spool write is the
+    // ack — if it fails, this throws and the pull loop halts at the confirmed
+    // cursor (codex review finding 2).
+    this.enqueue(augmented, { seq, source: "relay", mirrorToRelay: false, visible: false, requireDurable: true });
   }
 
   /**
