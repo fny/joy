@@ -7,6 +7,7 @@ import { FileIcon } from '@/components/FileIcon';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { getPatchDiffStats } from '@/components/diff/calculateDiff';
 import { sessionBash, sessionReadFile } from '@/sync/ops';
+import { isBinaryPath } from '@/utils/binaryFile';
 import { storage, useSessionGitStatusFiles, useSettingMutable } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
 import { GitFileStatus } from '@/sync/gitStatusFiles';
@@ -24,7 +25,8 @@ interface AllFilesDiffViewProps {
 
 type DiffContent =
     | { kind: 'patch'; patch: string }
-    | { kind: 'newFile'; contents: string };
+    | { kind: 'newFile'; contents: string }
+    | { kind: 'binary' };
 
 type FileDiffResult = {
     file: GitFileStatus;
@@ -136,6 +138,11 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                     }
 
                     try {
+                        // Un-diffable (image/binary): never read the bytes — a
+                        // text render is garbage. Placeholder instead.
+                        if (isBinaryPath(file.fullPath)) {
+                            return { file, content: { kind: 'binary' as const }, error: null };
+                        }
                         if (file.status === 'untracked') {
                             // Use the native sessionReadFile RPC instead of `cat`
                             // — `cat` doesn't behave the same on Windows
@@ -339,13 +346,14 @@ const FileDiffSection = React.memo(function FileDiffSection({
     const [collapsed, setCollapsed] = React.useState(false);
 
     const fileName = file.fullPath.split('/').pop() || file.fullPath;
+    const isBinary = content?.kind === 'binary';
     const isEmpty =
-        content === null ? false :
+        content === null || content.kind === 'binary' ? false :
         content.kind === 'patch' ? content.patch.trim() === '' :
         content.contents === '';
 
     const stats = React.useMemo(() => {
-        if (!content) return null;
+        if (!content || content.kind === 'binary') return null;
         if (content.kind === 'patch') return getPatchDiffStats(content.patch);
         const lineCount = content.contents === '' ? 0 : content.contents.split('\n').length;
         return { additions: lineCount, deletions: 0 };
@@ -397,6 +405,10 @@ const FileDiffSection = React.memo(function FileDiffSection({
                 error ? (
                     <View style={styles.sectionMessage}>
                         <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{error}</Text>
+                    </View>
+                ) : isBinary ? (
+                    <View style={styles.sectionMessage}>
+                        <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{t('files.binaryNoDiff')}</Text>
                     </View>
                 ) : !content || isEmpty ? (
                     <View style={styles.sectionMessage}>

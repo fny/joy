@@ -679,6 +679,7 @@ export const pt: TranslationStructure = {
         file: 'Arquivo',
         fileEmpty: 'Arquivo está vazio',
         noChanges: 'Nenhuma alteração para exibir',
+        binaryNoDiff: 'Arquivo binário — sem pré-visualização',
         noChangesTitle: 'Sem alterações',
         noChangesSubtitle: 'A árvore de trabalho está limpa',
         deleted: 'Excluído',

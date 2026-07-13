@@ -680,6 +680,7 @@ export const ca: TranslationStructure = {
         file: 'Fitxer',
         fileEmpty: 'El fitxer està buit',
         noChanges: 'No hi ha canvis a mostrar',
+        binaryNoDiff: 'Fitxer binari — sense previsualització',
         noChangesTitle: 'Sense canvis',
         noChangesSubtitle: 'L\'arbre de treball està net',
         deleted: 'Eliminat',
