@@ -1874,8 +1874,12 @@ export class Session {
           bytes: await this.#deps.relayClient!.downloadAndDecryptAttachment(rs.relaySessionId, a.ref, sessionKey, variant),
           name: a.name,
         })));
+        // ALL-OR-NOTHING (5.6-sol file-upload diagnosis): a single failed
+        // download used to be silently skipped while the rest + text went
+        // through — one attachment permanently lost. Throw instead so the
+        // pull halts and the WHOLE message retries with every attachment.
         for (const item of results) {
-          if (!item.bytes) continue;
+          if (!item.bytes) throw new Error("attachment download returned no bytes");
           const refPath = writeAttachmentToCwd(this.cwd, item.bytes, item.name);
           if (refPath === null) throw new Error("attachment write failed");
           paths.push(refPath);
@@ -1895,6 +1899,11 @@ export class Session {
         augmented = text + " " + paths.join(" ");
       }
     }
+    // Nothing to deliver: a blank caption that carried no (surviving)
+    // attachments. Return cleanly so the cursor advances — do NOT enqueue an
+    // empty message (it would type a bare Enter into the pane).
+    if (!augmented.trim() && drained.length === 0) return;
+
     // Joy-owned commands from the RELAY are AWAITED (not fire-and-forget):
     // the pull cursor only advances when #onRelayMessage resolves, so holding
     // it until the steer's typing lands means a crash mid-steer re-pulls and
