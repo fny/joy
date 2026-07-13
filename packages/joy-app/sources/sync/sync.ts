@@ -2110,13 +2110,20 @@ class Sync {
                     afterSeq = maxSeq; // MUST advance — continue skips the loop-tail assignment (was a tight same-page refetch loop)
                     continue;
                 }
-                // Full reset (cursors + store), then refetch like a cold open, inline — we already hold the session
-                // message lock and the encryption handle. Skipped interior
-                // history stays on the server; scroll-up re-pages it on demand.
-                log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} — re-anchoring at latest page`);
-                this.sessionLastSeq.delete(sessionId);
-                this.sessionOldestSeq.delete(sessionId);
-                storage.getState().resetSessionMessages(sessionId);
+                // Re-anchor at the latest page WITHOUT nuking the store. The
+                // old code called resetSessionMessages here, which erased every
+                // loaded message — including history the user had scrolled up to
+                // load — down to just the newest page. On a busy session (agent2)
+                // that routinely fell >5 pages behind, ANY slow-path fetch
+                // (including the one an interrupt triggers) wiped the visible
+                // conversation: THE "interrupt erases prior messages" report
+                // (2026-07-13, confirmed by e2e: the data pipeline preserves
+                // everything for a caught-up client; only this reset erased it).
+                // applyMessages MERGES by id, and these rows are all NEWER than
+                // what's loaded (safe for the order-dependent reducer), so the
+                // existing history survives; fetchInitialLatestPage re-anchors
+                // both cursors and the middle gap fills via scroll-up.
+                log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} — re-anchoring at latest page (history preserved)`);
                 await this.fetchInitialLatestPage(sessionId, encryption);
                 return;
             }
