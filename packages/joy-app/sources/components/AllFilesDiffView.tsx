@@ -7,7 +7,8 @@ import { FileIcon } from '@/components/FileIcon';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { getPatchDiffStats } from '@/components/diff/calculateDiff';
 import { sessionBash, sessionReadFile } from '@/sync/ops';
-import { isBinaryPath } from '@/utils/binaryFile';
+import { isBinaryPath, isImagePath } from '@/utils/binaryFile';
+import { JoyImage } from '@/components/JoyImage';
 import { storage, useSessionGitStatusFiles, useSettingMutable } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
 import { GitFileStatus } from '@/sync/gitStatusFiles';
@@ -26,7 +27,8 @@ interface AllFilesDiffViewProps {
 type DiffContent =
     | { kind: 'patch'; patch: string }
     | { kind: 'newFile'; contents: string }
-    | { kind: 'binary' };
+    | { kind: 'binary' }
+    | { kind: 'image'; path: string };
 
 type FileDiffResult = {
     file: GitFileStatus;
@@ -138,8 +140,11 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                     }
 
                     try {
-                        // Un-diffable (image/binary): never read the bytes — a
-                        // text render is garbage. Placeholder instead.
+                        // Images: show the actual picture (JoyImage fetches the
+                        // bytes on mount). Other binaries: placeholder, no read.
+                        if (isImagePath(file.fullPath)) {
+                            return { file, content: { kind: 'image' as const, path: resolved.absolutePath }, error: null };
+                        }
                         if (isBinaryPath(file.fullPath)) {
                             return { file, content: { kind: 'binary' as const }, error: null };
                         }
@@ -294,6 +299,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                     {results.map((result) => (
                         <FileDiffSection
                             key={result.file.fullPath}
+                            sessionId={sessionId}
                             result={result}
                             diffStyle={diffStyle}
                             isHighlighted={scrollToFile === result.file.fullPath}
@@ -331,11 +337,13 @@ const DiffHeaderRight = React.memo(function DiffHeaderRight({
 
 /** Single file section: header + pre-loaded diff content */
 const FileDiffSection = React.memo(function FileDiffSection({
+    sessionId,
     result,
     diffStyle,
     isHighlighted,
     onLayout,
 }: {
+    sessionId: string;
     result: FileDiffResult;
     diffStyle: 'unified' | 'split';
     isHighlighted: boolean;
@@ -347,13 +355,14 @@ const FileDiffSection = React.memo(function FileDiffSection({
 
     const fileName = file.fullPath.split('/').pop() || file.fullPath;
     const isBinary = content?.kind === 'binary';
+    const isImage = content?.kind === 'image';
     const isEmpty =
-        content === null || content.kind === 'binary' ? false :
+        content === null || content.kind === 'binary' || content.kind === 'image' ? false :
         content.kind === 'patch' ? content.patch.trim() === '' :
         content.contents === '';
 
     const stats = React.useMemo(() => {
-        if (!content || content.kind === 'binary') return null;
+        if (!content || content.kind === 'binary' || content.kind === 'image') return null;
         if (content.kind === 'patch') return getPatchDiffStats(content.patch);
         const lineCount = content.contents === '' ? 0 : content.contents.split('\n').length;
         return { additions: lineCount, deletions: 0 };
@@ -405,6 +414,10 @@ const FileDiffSection = React.memo(function FileDiffSection({
                 error ? (
                     <View style={styles.sectionMessage}>
                         <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{error}</Text>
+                    </View>
+                ) : isImage && content?.kind === 'image' ? (
+                    <View style={{ padding: 12 }}>
+                        <JoyImage sessionId={sessionId} src={content.path} width={null} height={null} alt={fileName} />
                     </View>
                 ) : isBinary ? (
                     <View style={styles.sectionMessage}>
