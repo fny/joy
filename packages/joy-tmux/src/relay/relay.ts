@@ -1250,7 +1250,13 @@ export class RelaySession {
           }
           if (meta?.sentFrom) log(`pull: user msg seq=${msg.seq} sentFrom=${meta.sentFrom}`);
           const c = dec['content'] as { type?: string; text?: string } | undefined;
-          if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
+          // Deliver ANY text-type user row — including BLANK text (5.6-sol
+          // file-upload diagnosis): an attachment-only send carries an empty
+          // caption, and gating on text.trim() meant onMessage never fired,
+          // so the file rows staged their refs and NOTHING ever drained them
+          // — images silently never reached Claude. #onRelayMessage no-ops
+          // when there's truly nothing (blank text AND no staged attachment).
+          if (c?.type === 'text' && typeof c.text === 'string') {
             // CONFIRMED-CURSOR (codex review finding 2, closes B1/B2): the
             // cursor advances only after onMessage resolves — which itself
             // resolves only after durable handoff (spool write for queued
@@ -1263,7 +1269,7 @@ export class RelaySession {
             // failures being environmental (disk, pane) rather than
             // content-dependent.
             try {
-              await this.onMessage(c.text.trim(), msg.seq);
+              await this.onMessage(c.text, msg.seq);
             } catch (e) {
               log(`pull: delivery failed for seq=${msg.seq} — HALTING at confirmed cursor ${this.lastSeq} (retry next tick): ${e}`);
               deliveryHalted = true;
