@@ -757,7 +757,24 @@ export const sessionOps: SessionOp[] = [
     http: { method: "POST", path: "/sessions/:id/readFile" },
     // Second allowed root: the session's own ~/.joy/sessions/<id>/ so the app
     // can fetch joy-img media the agent saved there — scoped per session.
-    handler: (session, params) => handleReadFile(session.cwd, params as unknown as Parameters<typeof handleReadFile>[1], [joySessionDir(session.id)]),
+    handler: (session, params) => {
+      const p = params as unknown as Parameters<typeof handleReadFile>[1];
+      // Remap a joy-media path that names the WRONG session id onto THIS
+      // session's media dir (2026-07-13). The agent hand-constructs the
+      // <joy-img src> absolute path and can put the wrong session id in it
+      // (e.g. a claude conversation UUID instead of $JOY_SESSION_ID) while
+      // saving the bytes to the correct dir — the image then 404s in the app.
+      // The basename + media/ namespace are preserved and the result is still
+      // jailed to this session's dir, so this can't reach another session.
+      const m = typeof p?.path === "string" ? /[/\\]\.joy[/\\]sessions[/\\][^/\\]+[/\\]media[/\\](.+)$/.exec(p.path) : null;
+      if (m) {
+        const remapped = join(joySessionDir(session.id), "media", m[1]);
+        if (remapped !== p.path && existsSync(remapped)) {
+          return handleReadFile(session.cwd, { ...p, path: remapped }, [joySessionDir(session.id)]);
+        }
+      }
+      return handleReadFile(session.cwd, p, [joySessionDir(session.id)]);
+    },
   },
   {
     name: "writeFile",
