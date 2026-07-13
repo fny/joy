@@ -28,3 +28,13 @@ export function isBinaryPath(path: string): boolean {
     const ext = path.split('.').pop()?.toLowerCase();
     return ext ? BINARY_EXTENSIONS.has(ext) : false;
 }
+
+// Renderable image formats — the subset of binaries the app can DISPLAY
+// (expo-image). A superset like heic renders on iOS but not web/Android, so
+// keep to the broadly-safe set; others fall back to the binary placeholder.
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'avif']);
+
+export function isImagePath(path: string): boolean {
+    const ext = path.split('.').pop()?.toLowerCase();
+    return ext ? IMAGE_EXTENSIONS.has(ext) : false;
+}
