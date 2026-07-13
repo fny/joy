@@ -7,6 +7,7 @@ import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
 import { sessionReadFile, sessionBash } from '@/sync/ops';
 import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
+import { isBinaryPath } from '@/utils/binaryFile';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { storeTempText } from '@/sync/persistence';
@@ -212,20 +213,7 @@ export default React.memo(function FileScreen() {
     }, []);
 
     // Check if file is likely binary based on extension
-    const isBinaryFile = React.useCallback((path: string): boolean => {
-        const ext = path.split('.').pop()?.toLowerCase();
-        const binaryExtensions = [
-            'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'ico',
-            'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm',
-            'mp3', 'wav', 'flac', 'aac', 'ogg',
-            'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-            'zip', 'tar', 'gz', 'rar', '7z',
-            'exe', 'dmg', 'deb', 'rpm',
-            'woff', 'woff2', 'ttf', 'otf',
-            'db', 'sqlite', 'sqlite3'
-        ];
-        return ext ? binaryExtensions.includes(ext) : false;
-    }, []);
+    const isBinaryFile = React.useCallback((path: string): boolean => isBinaryPath(path), []);
 
     // Load file content (fetches in background even if cache exists)
     React.useEffect(() => {

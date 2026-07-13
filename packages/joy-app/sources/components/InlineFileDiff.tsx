@@ -5,6 +5,7 @@ import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { FileIcon } from '@/components/FileIcon';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
+import { isBinaryPath } from '@/utils/binaryFile';
 import { getPatchDiffStats } from '@/components/diff/calculateDiff';
 import { sessionBash } from '@/sync/ops';
 import { storage, useSettingMutable } from '@/sync/storage';
@@ -24,7 +25,8 @@ interface InlineFileDiffProps {
 
 type DiffContent =
     | { kind: 'patch'; patch: string }
-    | { kind: 'newFile'; contents: string };
+    | { kind: 'newFile'; contents: string }
+    | { kind: 'binary' };
 
 export const InlineFileDiff = React.memo(function InlineFileDiff({ sessionId, fullPath, status, onClose }: InlineFileDiffProps) {
     const { theme } = useUnistyles();
@@ -53,6 +55,12 @@ export const InlineFileDiff = React.memo(function InlineFileDiff({ sessionId, fu
                 return;
             }
             try {
+                // Un-diffable (image/binary): never fetch the raw bytes — a text
+                // render is garbage. Show a compact "Binary file" placeholder.
+                if (isBinaryPath(fullPath)) {
+                    if (!cancelled) setContent({ kind: 'binary' });
+                    return;
+                }
                 if (status === 'untracked') {
                     const res = await sessionBash(sessionId, {
                         command: `cat -- "${gitDiffPath}"`,
@@ -90,13 +98,14 @@ export const InlineFileDiff = React.memo(function InlineFileDiff({ sessionId, fu
     }, [sessionId, sessionPath, gitDiffPath, status]);
 
     const fileName = fullPath.split('/').pop() || fullPath;
+    const isBinary = content?.kind === 'binary';
     const isEmpty =
-        content === null ? false :
+        content === null || content.kind === 'binary' ? false :
         content.kind === 'patch' ? content.patch.trim() === '' :
         content.contents === '';
 
     const stats = React.useMemo(() => {
-        if (!content) return null;
+        if (!content || content.kind === 'binary') return null;
         if (content.kind === 'patch') return getPatchDiffStats(content.patch);
         const lineCount = content.contents === '' ? 0 : content.contents.split('\n').length;
         return { additions: lineCount, deletions: 0 };
@@ -121,6 +130,10 @@ export const InlineFileDiff = React.memo(function InlineFileDiff({ sessionId, fu
                 ) : error ? (
                     <View style={styles.centered}>
                         <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{error}</Text>
+                    </View>
+                ) : isBinary ? (
+                    <View style={styles.centered}>
+                        <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{t('files.binaryNoDiff')}</Text>
                     </View>
                 ) : !content || isEmpty ? (
                     <View style={styles.centered}>

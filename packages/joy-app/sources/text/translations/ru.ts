@@ -696,6 +696,7 @@ export const ru: TranslationStructure = {
         file: 'Файл',
         fileEmpty: 'Файл пустой',
         noChanges: 'Нет изменений для отображения',
+        binaryNoDiff: 'Двоичный файл — предпросмотр недоступен',
         noChangesTitle: 'Нет изменений',
         noChangesSubtitle: 'Рабочее дерево чистое',
         deleted: 'Удалён',

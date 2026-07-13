@@ -722,6 +722,7 @@ export const en = {
         file: 'File',
         fileEmpty: 'File is empty',
         noChanges: 'No changes to display',
+        binaryNoDiff: 'Binary file — no preview',
         noChangesTitle: 'No changes',
         noChangesSubtitle: 'Working tree is clean',
         deleted: 'Deleted',
