@@ -98,8 +98,8 @@ export function splitJoySegments(text: string): JoySegment[] {
     return segments;
 }
 
-/** Mime type from the file extension — the tag points at agent-encoded files
- *  (webp by contract, jpeg/png as fallbacks), so extension sniffing suffices. */
+/** Mime type from the file extension — the tag points at files the agent saved
+ *  as-is (typically png/jpeg screenshots), so extension sniffing suffices. */
 export function joyImgMime(src: string): string {
     const ext = src.toLowerCase().split('.').pop() ?? '';
     if (ext === 'png') return 'image/png';
