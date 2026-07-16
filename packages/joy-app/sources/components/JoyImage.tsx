@@ -5,7 +5,6 @@ import { StyleSheet } from 'react-native-unistyles';
 import { sessionReadFile } from '@/sync/ops';
 import { joyImgMime } from '@/utils/joyImg';
 import { writeAsStringAsync, deleteAsync, cacheDirectory, EncodingType } from 'expo-file-system/legacy';
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import * as Sharing from 'expo-sharing';
 import * as Clipboard from 'expo-clipboard';
 import { Modal as AppModal } from '@/modal';
@@ -89,26 +88,18 @@ export const JoyImage = React.memo((props: {
     }, [key, sessionId, src]);
 
     // Copy / share (share sheet includes "Save Image" on iOS — no photo-library
-    // permission needed). Bytes are already local as a data URI; both actions
-    // stage them through a cache file. Pasteboards don't accept webp (the tag's
-    // default encoding), so copy converts to PNG first.
+    // permission needed). Bytes are already local as a data URI and are handed
+    // over AS IS — no re-encoding anywhere in the pipeline. Native pasteboards
+    // only accept png/jpeg, so copy on other formats surfaces the failure
+    // alert; Share always works with the original bytes.
     const copyImage = React.useCallback(async () => {
         if (!uri) return;
         try {
-            let base64 = uri.split(',')[1];
-            if (!/\.(png|jpe?g)$/i.test(src)) {
-                const tmp = `${cacheDirectory}joy-img-${Date.now()}.webp`;
-                await writeAsStringAsync(tmp, base64, { encoding: EncodingType.Base64 });
-                const png = await manipulateAsync(tmp, [], { base64: true, format: SaveFormat.PNG });
-                void deleteAsync(tmp, { idempotent: true });
-                if (!png.base64) throw new Error('convert failed');
-                base64 = png.base64;
-            }
-            await Clipboard.setImageAsync(base64);
+            await Clipboard.setImageAsync(uri.split(',')[1]);
         } catch {
             AppModal.alert(t('common.error'), t('errors.operationFailed'));
         }
-    }, [uri, src]);
+    }, [uri]);
 
     const shareImage = React.useCallback(async () => {
         if (!uri) return;
