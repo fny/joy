@@ -300,6 +300,7 @@ export type Metadata = {
     updatedAt: number
   },
   machineId?: string,
+  gitBranch?: string,
   claudeSessionId?: string, // Claude Code session ID
   codexThreadId?: string, // Codex app-server thread ID
   tools?: string[],
@@ -326,13 +327,51 @@ export type Metadata = {
   forkedFromMessageId?: string
 };
 
+export type AgentGoalStatus = {
+  source: 'claude' | 'codex',
+  observedAt: number,
+  sourceSessionId?: string,
+  sourceRevision?: string | number,
+} & (
+  | {
+      status: 'unavailable',
+      reason?: 'unsupported' | 'not_loaded' | 'stale' | 'malformed' | 'error' | 'unknown',
+    }
+  | {
+      status: 'inactive',
+      reason?: 'none' | 'cleared' | 'completed' | 'unknown',
+    }
+  | {
+      status: 'active',
+      sourceSessionId: string,
+      text: string,
+      capabilities?: {
+        clear?: boolean,
+        stop?: boolean,
+        edit?: boolean,
+      },
+      progress?: {
+        currentStep?: number,
+        totalSteps?: number,
+        steps?: Array<{
+          text: string,
+          status: 'pending' | 'in_progress' | 'completed',
+        }>,
+      },
+    }
+);
+
 export type AgentState = {
   controlledByUser?: boolean | null | undefined
   requests?: {
     [id: string]: {
       tool: string,
       arguments: any,
-      createdAt: number
+      createdAt: number,
+      // Raw provider tool-use id when the request id is scoped (e.g. claude
+      // subagent ids are `agentID:toolUseID`); the app joins the permission
+      // card to its tool call through this.
+      toolUseId?: string
     }
   }
   completedRequests?: {
@@ -345,7 +384,9 @@ export type AgentState = {
       reason?: string,
       mode?: PermissionMode,
       decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort',
-      allowTools?: string[]
+      allowTools?: string[],
+      toolUseId?: string
     }
   }
+  agentGoalStatus?: AgentGoalStatus
 }

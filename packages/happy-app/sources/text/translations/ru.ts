@@ -147,6 +147,26 @@ export const ru: TranslationStructure = {
             light: 'Всегда использовать светлую тему',
             dark: 'Всегда использовать тёмную тему',
         },
+        chat: 'Чат',
+        chatDescription: 'Настройте внешний вид сообщений в чате',
+        sessionStatusBar: 'Информация о сессии',
+        sessionStatusBarDescription: 'Выберите, где показывать ветку, модель, усилия и контекст',
+        sessionStatusDisplayOptions: {
+            hidden: 'Скрыто',
+            hiddenOnMobile: 'Скрыто на телефоне',
+            above: 'Над полем ввода',
+            below: 'Под полем ввода',
+        },
+        userMessageBubbleColor: 'Цвет ваших сообщений',
+        userMessageBubbleColorDescription: 'Сделайте ваши сообщения заметнее в длинных чатах',
+        userMessageBubbleColorOptions: {
+            blue: 'Синий',
+            green: 'Зелёный',
+            purple: 'Фиолетовый',
+            rose: 'Розовый',
+            sand: 'Песочный',
+            gray: 'Серый',
+        },
         display: 'Отображение',
         displayDescription: 'Управление макетом и интервалами',
         inlineToolCalls: 'Встроенные вызовы инструментов',
@@ -205,7 +225,7 @@ export const ru: TranslationStructure = {
         analyticsDisabled: 'Вся аналитика и телеметрия отключены',
         analyticsEnabled: 'Анонимная аналитика использования активна',
         imageUpload: 'Загрузка изображений',
-        imageUploadSubtitle: 'Прикрепляйте изображения к сообщениям для анализа Claude',
+        imageUploadSubtitle: 'Прикрепляйте изображения к сообщениям для анализа поддерживаемыми агентами',
     },
 
     errors: {
@@ -368,6 +388,16 @@ export const ru: TranslationStructure = {
             scanQrCode: 'Отсканируйте QR-код',
             openCamera: 'Открыть камеру',
         },
+        agentGoalBar: {
+            currentGoal: 'Текущая цель',
+            accessibilityLabel: ({ goal }: { goal: string }) => `Текущая цель: ${goal}`,
+            clearGoal: 'Очистить цель',
+            stopGoal: 'Остановить цель',
+            editGoal: 'Изменить цель',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Контекст ${used} из ${total} токенов, ${percent}%`,
+        },
     },
 
     profile: {
@@ -406,6 +436,8 @@ export const ru: TranslationStructure = {
         inactiveArchived: 'Эта сессия неактивна.',
         resumeFromTerminal: 'Чтобы возобновить её из терминала:',
         newChat: 'Новый чат',
+        statusBarContext: 'Контекст',
+        statusBarPathTitle: 'Рабочая директория',
         forkAction: 'Форкнуть сессию',
         forkSubtitle: 'Продолжить в новой сессии с тем же контекстом',
         duplicateAction: 'Откатиться к сообщению…',
@@ -460,6 +492,10 @@ export const ru: TranslationStructure = {
             readOnly: 'Read Only Mode',
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
+            defaultDescription: 'спрашивать перед недоверенными командами',
+            readOnlyDescription: 'без записи',
+            safeYoloDescription: 'без запросов, песочница рабочей папки',
+            yoloDescription: 'без запросов, полный доступ',
             badgeReadOnly: 'Только чтение',
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
@@ -841,6 +877,7 @@ export const ru: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `Переключено в режим ${mode}`,
         unknownEvent: 'Неизвестное событие',
         usageLimitUntil: ({ time }: { time: string }) => `Лимит использования достигнут до ${time}`,
+        sentAsGoal: 'Отправлено в качестве цели',
         unknownTime: 'неизвестное время',
     },
 
@@ -1009,7 +1046,7 @@ export const ru: TranslationStructure = {
             ? 'Одно изображение не удалось загрузить — оно не было отправлено.'
             : `${count} изображений не удалось загрузить — они не были отправлены.`,
         notSupportedTitle: 'Изображения не поддерживаются',
-        notSupportedMessage: 'Этот агент не поддерживает изображения. Отправлен только текст.',
+        notSupportedMessage: 'Этот агент не поддерживает вложения изображений. Изображения не были отправлены.',
     },
 
     feed: {

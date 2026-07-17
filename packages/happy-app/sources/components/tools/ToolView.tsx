@@ -310,7 +310,7 @@ const styles = StyleSheet.create((theme) => ({
     container: {
         backgroundColor: theme.colors.surfaceHigh,
         borderRadius: 8,
-        marginVertical: 4,
+        marginVertical: 8,
         overflow: 'hidden'
     },
     compactContainer: {
@@ -334,7 +334,7 @@ const styles = StyleSheet.create((theme) => ({
         flexDirection: 'row',
         alignItems: 'center',
         minHeight: 28,
-        paddingHorizontal: 4,
+        paddingHorizontal: 8,
         paddingVertical: 3,
         borderRadius: 4,
         backgroundColor: 'transparent',

@@ -159,6 +159,26 @@ export const en = {
             light: 'Always use light theme',
             dark: 'Always use dark theme',
         },
+        chat: 'Chat',
+        chatDescription: 'Customize chat message appearance',
+        sessionStatusBar: 'Session Status Info',
+        sessionStatusBarDescription: 'Choose where branch, model, effort, and context appear',
+        sessionStatusDisplayOptions: {
+            hidden: 'Hidden',
+            hiddenOnMobile: 'Hidden on mobile',
+            above: 'Above composer',
+            below: 'Below composer',
+        },
+        userMessageBubbleColor: 'User Bubble Color',
+        userMessageBubbleColorDescription: 'Make your messages easier to spot in long chats',
+        userMessageBubbleColorOptions: {
+            blue: 'Blue',
+            green: 'Green',
+            purple: 'Purple',
+            rose: 'Rose',
+            sand: 'Sand',
+            gray: 'Gray',
+        },
         display: 'Display',
         displayDescription: 'Control layout and spacing',
         inlineToolCalls: 'Inline Tool Calls',
@@ -217,7 +237,7 @@ export const en = {
         analyticsDisabled: 'All tracking and telemetry disabled',
         analyticsEnabled: 'Anonymous usage analytics active',
         imageUpload: 'Image Upload',
-        imageUploadSubtitle: 'Attach images to messages for Claude to analyze',
+        imageUploadSubtitle: 'Attach images to messages for supported agents to analyze',
     },
 
     imageUpload: {
@@ -232,7 +252,7 @@ export const en = {
             ? 'One image could not be uploaded and was not sent.'
             : `${count} images could not be uploaded and were not sent.`,
         notSupportedTitle: 'Images Not Supported',
-        notSupportedMessage: 'This agent does not support image attachments. Only the text was sent.',
+        notSupportedMessage: 'This agent does not support image attachments. Images were not sent.',
     },
 
     errors: {
@@ -306,6 +326,8 @@ export const en = {
         inactiveArchived: 'This session is inactive.',
         resumeFromTerminal: 'To resume it from the terminal:',
         newChat: 'New chat',
+        statusBarContext: 'Context',
+        statusBarPathTitle: 'Working directory',
         // Fork / duplicate / rewind flow (Claude only)
         forkAction: 'Fork session',
         forkSubtitle: 'Continue in a new session with the same context',
@@ -425,6 +447,16 @@ export const en = {
             scanQrCode: 'Scan the QR code',
             openCamera: 'Open Camera',
         },
+        agentGoalBar: {
+            currentGoal: 'Current goal',
+            accessibilityLabel: ({ goal }: { goal: string }) => `Current goal: ${goal}`,
+            clearGoal: 'Clear goal',
+            stopGoal: 'Stop goal',
+            editGoal: 'Edit goal',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Context ${used} of ${total} tokens, ${percent}%`,
+        },
     },
 
     agentInput: {
@@ -458,6 +490,10 @@ export const en = {
             readOnly: 'read-only',
             safeYolo: 'safe yolo',
             yolo: 'yolo',
+            defaultDescription: 'ask before untrusted commands',
+            readOnlyDescription: 'no writes',
+            safeYoloDescription: 'no prompts, workspace sandbox',
+            yoloDescription: 'no prompts, full access',
             badgeReadOnly: 'read-only',
             badgeSafeYolo: 'safe yolo',
             badgeYolo: 'yolo',
@@ -852,6 +888,7 @@ export const en = {
         switchedToMode: ({ mode }: { mode: string }) => `Switched to ${mode} mode`,
         unknownEvent: 'Unknown event',
         usageLimitUntil: ({ time }: { time: string }) => `Usage limit reached until ${time}`,
+        sentAsGoal: 'Sent as goal',
         unknownTime: 'unknown time',
     },
 

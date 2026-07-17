@@ -61,6 +61,12 @@ export type ResumeConversationParams = {
 
 export type ResumeConversationResponse = NewConversationResponse;
 
+export type CollabAgentTool = "spawnAgent" | "sendInput" | "resumeAgent" | "wait" | "closeAgent";
+export type CollabAgentToolCallStatus = "inProgress" | "completed" | "failed";
+export type CollabAgentStatus = "pendingInit" | "running" | "interrupted" | "completed" | "errored" | "shutdown" | "notFound";
+export type CollabAgentState = { status: CollabAgentStatus | string; message?: string | null };
+export type SubAgentActivityKind = "started" | "interacted" | "interrupted";
+
 export type ThreadItem =
     | { type: "userMessage"; id: string; content: InputItem[] }
     | { type: "agentMessage"; id: string; text: string; phase?: string | null; memoryCitation?: unknown | null }
@@ -68,6 +74,19 @@ export type ThreadItem =
     | { type: "commandExecution"; id: string; command: string; cwd?: string; status?: string; aggregatedOutput?: string | null; exitCode?: number | null; durationMs?: number | null }
     | { type: "fileChange"; id: string; changes: unknown[]; status?: string }
     | { type: "mcpToolCall"; id: string; server: string; tool: string; status?: string; arguments?: unknown; result?: unknown; error?: unknown; durationMs?: number | null }
+    | {
+        type: "collabAgentToolCall";
+        id: string;
+        tool: CollabAgentTool | string;
+        status: CollabAgentToolCallStatus | string;
+        senderThreadId?: string;
+        receiverThreadIds?: string[];
+        prompt?: string | null;
+        model?: string | null;
+        reasoningEffort?: ReasoningEffort | string | null;
+        agentsStates?: Record<string, CollabAgentState | undefined>;
+    }
+    | { type: "subAgentActivity"; id: string; kind: SubAgentActivityKind | string; agentThreadId: string; agentPath?: string }
     | ({ type: string; id: string } & Record<string, unknown>);
 
 export type ThreadTurn = {
@@ -88,6 +107,48 @@ export type Thread = {
     cwd?: string;
     turns?: ThreadTurn[];
     [key: string]: unknown;
+};
+
+export type ThreadGoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+
+export type ThreadGoal = {
+    threadId: ThreadId;
+    objective: string;
+    status: ThreadGoalStatus;
+    tokenBudget: number | null;
+    tokensUsed: number;
+    timeUsedSeconds: number;
+    createdAt: number;
+    updatedAt: number;
+};
+
+export type ThreadGoalUpdatedNotification = {
+    threadId: ThreadId;
+    turnId: string | null;
+    goal: ThreadGoal;
+};
+
+export type ThreadGoalClearedNotification = {
+    threadId: ThreadId;
+};
+
+export type ThreadGoalSetParams = {
+    threadId: ThreadId;
+    objective?: string | null;
+    status?: ThreadGoalStatus | null;
+    tokenBudget?: number | null;
+};
+
+export type ThreadGoalSetResponse = {
+    goal: ThreadGoal;
+};
+
+export type ThreadGoalClearParams = {
+    threadId: ThreadId;
+};
+
+export type ThreadGoalClearResponse = {
+    cleared: boolean;
 };
 
 export type ForkConversationParams = {
@@ -209,10 +270,12 @@ export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "
 export type ReasoningSummary = "auto" | "concise" | "detailed" | "none";
 export type TurnAbortReason = "interrupted" | "replaced" | "review_ended";
 
+export type ImageDetail = "auto" | "low" | "high";
+
 export type InputItem =
     | { type: "text"; text: string; text_elements?: unknown[] }
-    | { type: "image"; url: string }
-    | { type: "localImage"; path: string };
+    | { type: "image"; detail?: ImageDetail; url: string }
+    | { type: "localImage"; detail?: ImageDetail; path: string };
 
 export type SandboxPolicy =
     | { type: "dangerFullAccess" }

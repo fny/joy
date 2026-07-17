@@ -60,16 +60,77 @@ export const MetadataSchema = z.object({
      */
     parentSessionId: z.string().optional(),
     forkedFromMessageId: z.string().optional(),
-});
+    /**
+     * Per-session permission / model / effort picks made in any client.
+     * Synced through session metadata so every device shows the same
+     * selection (#1492). Explicit null means "reset to default"; absent
+     * means "never picked".
+     */
+    permissionMode: z.string().nullish(),
+    modelMode: z.string().nullish(),
+    effortLevel: z.string().nullish(),
+    // Passthrough so read-modify-write metadata updates from this app never
+    // drop fields written by newer CLI or app versions.
+}).passthrough();
 
 export type Metadata = z.infer<typeof MetadataSchema>;
+
+export const AgentGoalSourceSchema = z.enum(['claude', 'codex']);
+
+export const AgentGoalProgressStepSchema = z.object({
+    text: z.string().trim().min(1),
+    status: z.enum(['pending', 'in_progress', 'completed']),
+}).strict();
+
+export const AgentGoalProgressSchema = z.object({
+    currentStep: z.number().int().positive().optional(),
+    totalSteps: z.number().int().positive().optional(),
+    steps: z.array(AgentGoalProgressStepSchema).optional(),
+}).strict();
+
+export const AgentGoalCapabilitiesSchema = z.object({
+    clear: z.boolean().optional(),
+    stop: z.boolean().optional(),
+    edit: z.boolean().optional(),
+}).strict();
+
+const AgentGoalStatusBaseSchema = z.object({
+    source: AgentGoalSourceSchema,
+    observedAt: z.number().int().nonnegative(),
+    sourceSessionId: z.string().trim().min(1).optional(),
+    sourceRevision: z.union([z.string().trim().min(1), z.number()]).optional(),
+});
+
+export const AgentGoalStatusSchema = z.discriminatedUnion('status', [
+    AgentGoalStatusBaseSchema.extend({
+        status: z.literal('unavailable'),
+        reason: z.enum(['unsupported', 'not_loaded', 'stale', 'malformed', 'error', 'unknown']).optional(),
+    }).strict(),
+    AgentGoalStatusBaseSchema.extend({
+        status: z.literal('inactive'),
+        reason: z.enum(['none', 'cleared', 'completed', 'unknown']).optional(),
+    }).strict(),
+    AgentGoalStatusBaseSchema.extend({
+        status: z.literal('active'),
+        sourceSessionId: z.string().trim().min(1),
+        text: z.string().trim().min(1),
+        capabilities: AgentGoalCapabilitiesSchema.optional(),
+        progress: AgentGoalProgressSchema.optional(),
+    }).strict(),
+]);
+
+export type AgentGoalStatus = z.infer<typeof AgentGoalStatusSchema>;
 
 export const AgentStateSchema = z.object({
     controlledByUser: z.boolean().nullish(),
     requests: z.record(z.string(), z.object({
         tool: z.string(),
         arguments: z.any(),
-        createdAt: z.number().nullish()
+        createdAt: z.number().nullish(),
+        // Raw provider tool-use id when the request id is scoped (e.g. claude
+        // subagent ids are `agentID:toolUseID`); used to join the permission
+        // to its tool call, while the request id stays the response key.
+        toolUseId: z.string().nullish()
     })).nullish(),
     completedRequests: z.record(z.string(), z.object({
         tool: z.string(),
@@ -80,8 +141,10 @@ export const AgentStateSchema = z.object({
         reason: z.string().nullish(),
         mode: z.string().nullish(),
         allowedTools: z.array(z.string()).nullish(),
-        decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).nullish()
-    })).nullish()
+        decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).nullish(),
+        toolUseId: z.string().nullish()
+    })).nullish(),
+    agentGoalStatus: AgentGoalStatusSchema.optional(),
 });
 
 export type AgentState = z.infer<typeof AgentStateSchema>;
@@ -96,6 +159,16 @@ export const TodoItemSchema = z.object({
 export const TodoItemsSchema = z.array(TodoItemSchema);
 
 export type TodoItem = z.infer<typeof TodoItemSchema>;
+
+/**
+ * Per-session agent mode picks that sync across devices via session metadata (#1492).
+ * null clears a pick back to defaults, undefined leaves the field untouched.
+ */
+export interface SessionAgentModesPatch {
+    permissionMode?: string | null;
+    modelMode?: string | null;
+    effortLevel?: string | null;
+}
 
 export interface Session {
     id: string,
@@ -113,9 +186,9 @@ export interface Session {
     presence: "online" | number, // "online" when active, timestamp when last seen
     todos?: TodoItem[];
     draft?: string | null; // Local draft message, not synced to server
-    permissionMode?: string | null; // Local permission mode key, not synced to server
-    modelMode?: string | null; // Local model key, not synced to server
-    effortLevel?: string | null; // Local effort level key, not synced to server
+    permissionMode?: string | null; // Permission pick; local mirror of synced metadata.permissionMode (#1492)
+    modelMode?: string | null; // Model pick; local mirror of synced metadata.modelMode (#1492)
+    effortLevel?: string | null; // Effort pick; local mirror of synced metadata.effortLevel (#1492)
     // IMPORTANT: latestUsage is extracted from reducerState.latestUsage after message processing.
     // We store it directly on Session to ensure it's available immediately on load.
     // Do NOT store reducerState itself on Session - it's mutable and should only exist in SessionMessages.
@@ -125,6 +198,7 @@ export interface Session {
         cacheCreation: number;
         cacheRead: number;
         contextSize: number;
+        contextWindow?: number;
         timestamp: number;
     } | null;
 }
@@ -161,6 +235,7 @@ export const MachineMetadataSchema = z.object({
         codex: z.boolean(),
         gemini: z.boolean(),
         openclaw: z.boolean(),
+        agy: z.boolean().optional(), // optional: older CLIs don't report agy
         detectedAt: z.number(),
     }).optional(),
     resumeSupport: z.object({
