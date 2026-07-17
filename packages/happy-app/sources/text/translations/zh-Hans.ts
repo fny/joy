@@ -162,6 +162,26 @@ export const zhHans: TranslationStructure = {
             light: '始终使用浅色主题',
             dark: '始终使用深色主题',
         },
+        chat: '聊天',
+        chatDescription: '自定义聊天消息外观',
+        sessionStatusBar: '会话状态信息',
+        sessionStatusBarDescription: '选择分支、模型、工作量和上下文的显示位置',
+        sessionStatusDisplayOptions: {
+            hidden: '隐藏',
+            hiddenOnMobile: '在手机上隐藏',
+            above: '输入框上方',
+            below: '输入框下方',
+        },
+        userMessageBubbleColor: '用户气泡颜色',
+        userMessageBubbleColorDescription: '让您的消息在长聊天中更容易找到',
+        userMessageBubbleColorOptions: {
+            blue: '蓝色',
+            green: '绿色',
+            purple: '紫色',
+            rose: '玫瑰色',
+            sand: '沙色',
+            gray: '灰色',
+        },
         display: '显示',
         displayDescription: '控制布局和间距',
         inlineToolCalls: '内联工具调用',
@@ -220,7 +240,7 @@ export const zhHans: TranslationStructure = {
         analyticsDisabled: '所有跟踪和遥测已禁用',
         analyticsEnabled: '匿名使用分析已启用',
         imageUpload: '图片上传',
-        imageUploadSubtitle: '将图片附加到消息中让 Claude 分析',
+        imageUploadSubtitle: '将图片附加到消息中，以便受支持的代理进行分析',
     },
 
     errors: {
@@ -294,6 +314,8 @@ export const zhHans: TranslationStructure = {
         inactiveArchived: '此会话处于非活动状态。',
         resumeFromTerminal: '要从终端恢复它：',
         newChat: '新对话',
+        statusBarContext: '上下文',
+        statusBarPathTitle: '工作目录',
         forkAction: '分叉会话',
         forkSubtitle: '在相同上下文中开启新会话继续',
         duplicateAction: '从消息处复制…',
@@ -412,6 +434,16 @@ export const zhHans: TranslationStructure = {
             scanQrCode: '扫描二维码',
             openCamera: '打开相机',
         },
+        agentGoalBar: {
+            currentGoal: '当前目标',
+            accessibilityLabel: ({ goal }: { goal: string }) => `当前目标：${goal}`,
+            clearGoal: '清除目标',
+            stopGoal: '停止目标',
+            editGoal: '编辑目标',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `上下文 ${used}/${total} 个令牌，${percent}%`,
+        },
     },
 
     agentInput: {
@@ -445,6 +477,10 @@ export const zhHans: TranslationStructure = {
             readOnly: 'Read Only Mode',
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
+            defaultDescription: '不受信任的命令前询问',
+            readOnlyDescription: '禁止写入',
+            safeYoloDescription: '无需确认，工作区沙盒',
+            yoloDescription: '无需确认，完全访问',
             badgeReadOnly: 'Read Only Mode',
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
@@ -838,6 +874,7 @@ export const zhHans: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `已切换到 ${mode} 模式`,
         unknownEvent: '未知事件',
         usageLimitUntil: ({ time }: { time: string }) => `使用限制到 ${time}`,
+        sentAsGoal: 'Sent as goal',
         unknownTime: '未知时间',
     },
 
@@ -981,7 +1018,7 @@ export const zhHans: TranslationStructure = {
             ? '一张图片上传失败，未发送。'
             : `${count} 张图片上传失败，未发送。`,
         notSupportedTitle: '不支持图片',
-        notSupportedMessage: '该代理不支持图片附件。仅发送了文本。',
+        notSupportedMessage: '此代理不支持图片附件。图片未发送。',
     },
 
     feed: {

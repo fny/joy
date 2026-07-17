@@ -160,6 +160,26 @@ export const pt: TranslationStructure = {
             light: 'Sempre usar tema claro',
             dark: 'Sempre usar tema escuro',
         },
+        chat: 'Chat',
+        chatDescription: 'Personalize a aparência das mensagens do chat',
+        sessionStatusBar: 'Informações de status da sessão',
+        sessionStatusBarDescription: 'Escolha onde a branch, o modelo, o esforço e o contexto aparecem',
+        sessionStatusDisplayOptions: {
+            hidden: 'Oculto',
+            hiddenOnMobile: 'Oculto no celular',
+            above: 'Acima do compositor',
+            below: 'Abaixo do compositor',
+        },
+        userMessageBubbleColor: 'Cor das suas mensagens',
+        userMessageBubbleColorDescription: 'Torne suas mensagens mais fáceis de encontrar em chats longos',
+        userMessageBubbleColorOptions: {
+            blue: 'Azul',
+            green: 'Verde',
+            purple: 'Roxo',
+            rose: 'Rosa',
+            sand: 'Areia',
+            gray: 'Cinza',
+        },
         display: 'Exibição',
         displayDescription: 'Controle layout e espaçamento',
         inlineToolCalls: 'Chamadas de ferramentas inline',
@@ -218,7 +238,7 @@ export const pt: TranslationStructure = {
         analyticsDisabled: 'Todo rastreamento e telemetria desativados',
         analyticsEnabled: 'Análises anônimas de uso ativas',
         imageUpload: 'Upload de imagens',
-        imageUploadSubtitle: 'Anexe imagens às mensagens para Claude analisar',
+        imageUploadSubtitle: 'Anexe imagens às mensagens para que agentes compatíveis as analisem',
     },
 
     errors: {
@@ -292,6 +312,8 @@ export const pt: TranslationStructure = {
         inactiveArchived: 'Esta sessão está inativa.',
         resumeFromTerminal: 'Para retomá-la pelo terminal:',
         newChat: 'Novo chat',
+        statusBarContext: 'Contexto',
+        statusBarPathTitle: 'Diretório de trabalho',
         forkAction: 'Bifurcar sessão',
         forkSubtitle: 'Continuar em uma nova sessão com o mesmo contexto',
         duplicateAction: 'Duplicar a partir da mensagem…',
@@ -410,6 +432,16 @@ export const pt: TranslationStructure = {
             scanQrCode: 'Escaneie o código QR',
             openCamera: 'Abrir câmera',
         },
+        agentGoalBar: {
+            currentGoal: 'Objetivo atual',
+            accessibilityLabel: ({ goal }: { goal: string }) => `Objetivo atual: ${goal}`,
+            clearGoal: 'Limpar objetivo',
+            stopGoal: 'Parar objetivo',
+            editGoal: 'Editar objetivo',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Contexto ${used} de ${total} tokens, ${percent}%`,
+        },
     },
 
     agentInput: {
@@ -443,6 +475,10 @@ export const pt: TranslationStructure = {
             readOnly: 'Read Only Mode',
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
+            defaultDescription: 'perguntar antes de comandos não confiáveis',
+            readOnlyDescription: 'sem escrita',
+            safeYoloDescription: 'sem perguntas, sandbox do espaço de trabalho',
+            yoloDescription: 'sem perguntas, acesso total',
             badgeReadOnly: 'Read Only Mode',
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
@@ -836,6 +872,7 @@ export const pt: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `Mudou para o modo ${mode}`,
         unknownEvent: 'Evento desconhecido',
         usageLimitUntil: ({ time }: { time: string }) => `Limite de uso atingido até ${time}`,
+        sentAsGoal: 'Sent as goal',
         unknownTime: 'horário desconhecido',
     },
 
@@ -979,7 +1016,7 @@ export const pt: TranslationStructure = {
             ? 'Não foi possível enviar uma imagem e não foi enviada.'
             : `Não foi possível enviar ${count} imagens e não foram enviadas.`,
         notSupportedTitle: 'Imagens não suportadas',
-        notSupportedMessage: 'Este agente não suporta anexos de imagem. Apenas o texto foi enviado.',
+        notSupportedMessage: 'Este agente não suporta anexos de imagem. As imagens não foram enviadas.',
     },
 
     feed: {

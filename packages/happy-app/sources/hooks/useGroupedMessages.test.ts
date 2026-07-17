@@ -3,14 +3,17 @@ import { groupMessagesForDisplay, groupToolCallsForDisplay } from './useGroupedM
 import { Message, ToolCallMessage } from '@/sync/typesMessage';
 
 vi.mock('@/components/tools/knownTools', () => ({
-    knownTools: {},
+    knownTools: {
+        Skill: { hidden: true },
+    },
 }));
 
 vi.mock('@/text', () => ({
     t: (key: string, params?: { count?: number }) => `${key}:${params?.count ?? ''}`,
 }));
 
-function toolMessage(id: string, createdAt: number, options: { pendingPermission?: boolean } = {}): ToolCallMessage {
+function toolMessage(id: string, createdAt: number, options: { pendingPermission?: boolean; state?: ToolCallMessage['tool']['state'] } = {}): ToolCallMessage {
+    const state = options.state ?? 'completed';
     return {
         kind: 'tool-call',
         id,
@@ -18,11 +21,11 @@ function toolMessage(id: string, createdAt: number, options: { pendingPermission
         createdAt,
         tool: {
             name: 'CodexBash',
-            state: 'completed',
+            state,
             input: { command: id },
             createdAt,
             startedAt: createdAt,
-            completedAt: createdAt + 1,
+            completedAt: state === 'running' ? null : createdAt + 1,
             description: id,
             ...(options.pendingPermission
                 ? {
@@ -34,6 +37,17 @@ function toolMessage(id: string, createdAt: number, options: { pendingPermission
                 : {}),
         },
         children: [],
+    };
+}
+
+function namedToolMessage(id: string, name: string, createdAt: number): ToolCallMessage {
+    const message = toolMessage(id, createdAt);
+    return {
+        ...message,
+        tool: {
+            ...message.tool,
+            name,
+        },
     };
 }
 
@@ -144,6 +158,35 @@ describe('useGroupedMessages', () => {
             'agent-progress',
             'tool-earliest',
         ]);
+    });
+
+    it('does not mark completed agent work as running when a hidden tool is stale', () => {
+        const messages: Message[] = [
+            {
+                kind: 'agent-text',
+                id: 'agent-final',
+                localId: null,
+                createdAt: 5,
+                text: 'done',
+            },
+            toolMessage('tool-stale-running', 4, { state: 'running' }),
+            {
+                kind: 'user-text',
+                id: 'user',
+                localId: null,
+                createdAt: 1,
+                text: 'run tools',
+            },
+        ];
+
+        const items = groupMessagesForDisplay(messages, true);
+        const group = items.find((item) => item.type === 'agent-work-group');
+
+        expect(group).toMatchObject({
+            type: 'agent-work-group',
+            hasRunning: false,
+            completedAt: 5,
+        });
     });
 
     it('does not collapse the current turn while the agent is still working', () => {
@@ -259,6 +302,30 @@ describe('useGroupedMessages', () => {
 
         expect(items.map((item) => item.type)).toEqual(['message', 'message']);
         expect(items[0]).toMatchObject({ type: 'message', id: 'tool-only' });
+    });
+
+    it('hides Claude Skill tool calls from the display list', () => {
+        const messages: Message[] = [
+            {
+                kind: 'agent-text',
+                id: 'agent-final',
+                localId: null,
+                createdAt: 3,
+                text: 'done',
+            },
+            namedToolMessage('skill-tool', 'Skill', 2),
+            {
+                kind: 'user-text',
+                id: 'user',
+                localId: null,
+                createdAt: 1,
+                text: 'run skill',
+            },
+        ];
+
+        const items = groupMessagesForDisplay(messages, true);
+
+        expect(items.map((item) => item.id)).toEqual(['agent-final', 'user']);
     });
 
     it('can collapse single standalone tool calls for nested work details', () => {

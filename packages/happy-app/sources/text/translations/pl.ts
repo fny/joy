@@ -178,6 +178,26 @@ export const pl: TranslationStructure = {
             light: 'Zawsze używaj jasnego motywu',
             dark: 'Zawsze używaj ciemnego motywu',
         },
+        chat: 'Czat',
+        chatDescription: 'Dostosuj wygląd wiadomości czatu',
+        sessionStatusBar: 'Informacje o stanie sesji',
+        sessionStatusBarDescription: 'Wybierz, gdzie wyświetlać gałąź, model, wysiłek i kontekst',
+        sessionStatusDisplayOptions: {
+            hidden: 'Ukryte',
+            hiddenOnMobile: 'Ukryte na telefonie',
+            above: 'Nad polem wprowadzania',
+            below: 'Pod polem wprowadzania',
+        },
+        userMessageBubbleColor: 'Kolor Twoich wiadomości',
+        userMessageBubbleColorDescription: 'Ułatw znajdowanie swoich wiadomości w długich czatach',
+        userMessageBubbleColorOptions: {
+            blue: 'Niebieski',
+            green: 'Zielony',
+            purple: 'Fioletowy',
+            rose: 'Różowy',
+            sand: 'Piaskowy',
+            gray: 'Szary',
+        },
         display: 'Wyświetlanie',
         displayDescription: 'Kontroluj układ i odstępy',
         inlineToolCalls: 'Wbudowane wywołania narzędzi',
@@ -236,7 +256,7 @@ export const pl: TranslationStructure = {
         analyticsDisabled: 'Wszystkie śledzenie i telemetria wyłączone',
         analyticsEnabled: 'Anonimowa analityka użytkowania aktywna',
         imageUpload: 'Przesyłanie obrazów',
-        imageUploadSubtitle: 'Dołącz obrazy do wiadomości, aby Claude mógł je przeanalizować',
+        imageUploadSubtitle: 'Dołączaj obrazy do wiadomości, aby obsługiwani agenci mogli je analizować',
     },
 
     errors: {
@@ -310,6 +330,8 @@ export const pl: TranslationStructure = {
         inactiveArchived: 'Ta sesja jest nieaktywna.',
         resumeFromTerminal: 'Aby wznowić ją z terminala:',
         newChat: 'Nowy czat',
+        statusBarContext: 'Kontekst',
+        statusBarPathTitle: 'Katalog roboczy',
         forkAction: 'Rozwidl sesję',
         forkSubtitle: 'Kontynuuj w nowej sesji z tym samym kontekstem',
         duplicateAction: 'Duplikuj od wiadomości…',
@@ -427,6 +449,16 @@ export const pl: TranslationStructure = {
             scanQrCode: 'Zeskanuj kod QR',
             openCamera: 'Otwórz kamerę',
         },
+        agentGoalBar: {
+            currentGoal: 'Bieżący cel',
+            accessibilityLabel: ({ goal }: { goal: string }) => `Bieżący cel: ${goal}`,
+            clearGoal: 'Wyczyść cel',
+            stopGoal: 'Zatrzymaj cel',
+            editGoal: 'Edytuj cel',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Kontekst ${used} z ${total} tokenów, ${percent}%`,
+        },
     },
 
     agentInput: {
@@ -460,6 +492,10 @@ export const pl: TranslationStructure = {
             readOnly: 'Read Only Mode',
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
+            defaultDescription: 'pytaj przed niezaufanymi poleceniami',
+            readOnlyDescription: 'bez zapisu',
+            safeYoloDescription: 'bez pytań, piaskownica obszaru roboczego',
+            yoloDescription: 'bez pytań, pełny dostęp',
             badgeReadOnly: 'Read Only Mode',
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
@@ -853,6 +889,7 @@ export const pl: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `Przełączono na tryb ${mode}`,
         unknownEvent: 'Nieznane zdarzenie',
         usageLimitUntil: ({ time }: { time: string }) => `Osiągnięto limit użycia do ${time}`,
+        sentAsGoal: 'Sent as goal',
         unknownTime: 'nieznany czas',
     },
 
@@ -1010,7 +1047,7 @@ export const pl: TranslationStructure = {
             ? 'Nie udało się przesłać jednego zdjęcia i nie zostało wysłane.'
             : `Nie udało się przesłać ${count} zdjęć i nie zostały wysłane.`,
         notSupportedTitle: 'Obrazy nieobsługiwane',
-        notSupportedMessage: 'Ten agent nie obsługuje załączników obrazów. Wysłano tylko tekst.',
+        notSupportedMessage: 'Ten agent nie obsługuje załączników obrazów. Obrazy nie zostały wysłane.',
     },
 
     feed: {

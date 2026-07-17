@@ -162,6 +162,26 @@ export const ja: TranslationStructure = {
             light: '常にライトテーマを使用',
             dark: '常にダークテーマを使用',
         },
+        chat: 'チャット',
+        chatDescription: 'チャットメッセージの見た目をカスタマイズ',
+        sessionStatusBar: 'セッションステータス情報',
+        sessionStatusBarDescription: 'ブランチ、モデル、エフォート、コンテキストの表示場所を選択',
+        sessionStatusDisplayOptions: {
+            hidden: '非表示',
+            hiddenOnMobile: 'モバイルで非表示',
+            above: '入力欄の上',
+            below: '入力欄の下',
+        },
+        userMessageBubbleColor: 'ユーザーバブルの色',
+        userMessageBubbleColorDescription: '長いチャットで自分のメッセージを見つけやすくします',
+        userMessageBubbleColorOptions: {
+            blue: 'ブルー',
+            green: 'グリーン',
+            purple: 'パープル',
+            rose: 'ローズ',
+            sand: 'サンド',
+            gray: 'グレー',
+        },
         display: '表示',
         displayDescription: 'レイアウトと間隔を調整',
         inlineToolCalls: 'ツール呼び出しをインライン表示',
@@ -220,7 +240,7 @@ export const ja: TranslationStructure = {
         analyticsDisabled: 'すべてのトラッキングとテレメトリが無効',
         analyticsEnabled: '匿名の使用状況分析がアクティブ',
         imageUpload: '画像アップロード',
-        imageUploadSubtitle: 'メッセージに画像を添付してClaudeに分析させる',
+        imageUploadSubtitle: '対応エージェントに分析させるため、メッセージに画像を添付する',
     },
 
     errors: {
@@ -294,6 +314,8 @@ export const ja: TranslationStructure = {
         inactiveArchived: 'このセッションは非アクティブです。',
         resumeFromTerminal: 'ターミナルから再開するには:',
         newChat: '新規チャット',
+        statusBarContext: 'コンテキスト',
+        statusBarPathTitle: '作業ディレクトリ',
         forkAction: 'セッションをフォーク',
         forkSubtitle: '同じコンテキストで新しいセッションを続行',
         duplicateAction: 'メッセージから複製…',
@@ -412,6 +434,16 @@ export const ja: TranslationStructure = {
             scanQrCode: 'QRコードをスキャン',
             openCamera: 'カメラを開く',
         },
+        agentGoalBar: {
+            currentGoal: '現在の目標',
+            accessibilityLabel: ({ goal }: { goal: string }) => `現在の目標: ${goal}`,
+            clearGoal: '目標をクリア',
+            stopGoal: '目標を停止',
+            editGoal: '目標を編集',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `コンテキスト ${total}トークン中${used}、${percent}%`,
+        },
     },
 
     agentInput: {
@@ -445,6 +477,10 @@ export const ja: TranslationStructure = {
             readOnly: '読み取り専用モード',
             safeYolo: 'セーフYOLO',
             yolo: 'YOLO',
+            defaultDescription: '信頼されていないコマンドの前に確認',
+            readOnlyDescription: '書き込みなし',
+            safeYoloDescription: '確認なし、ワークスペースサンドボックス',
+            yoloDescription: '確認なし、フルアクセス',
             badgeReadOnly: '読み取り専用モード',
             badgeSafeYolo: 'セーフYOLO',
             badgeYolo: 'YOLO',
@@ -838,6 +874,7 @@ export const ja: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `${mode}モードに切り替えました`,
         unknownEvent: '不明なイベント',
         usageLimitUntil: ({ time }: { time: string }) => `${time}まで使用制限中`,
+        sentAsGoal: 'Sent as goal',
         unknownTime: '不明な時間',
     },
 
@@ -982,7 +1019,7 @@ export const ja: TranslationStructure = {
             ? '1枚の画像をアップロードできず、送信されませんでした。'
             : `${count}枚の画像をアップロードできず、送信されませんでした。`,
         notSupportedTitle: '画像はサポートされていません',
-        notSupportedMessage: 'このエージェントは画像の添付に対応していません。テキストのみが送信されました。',
+        notSupportedMessage: 'このエージェントは画像の添付に対応していません。画像は送信されませんでした。',
     },
 
     feed: {

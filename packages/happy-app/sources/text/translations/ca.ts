@@ -161,6 +161,26 @@ export const ca: TranslationStructure = {
             light: 'Usa sempre el tema clar',
             dark: 'Usa sempre el tema fosc',
         },
+        chat: 'Xat',
+        chatDescription: 'Personalitza l\'aspecte dels missatges del xat',
+        sessionStatusBar: 'Informació d\'estat de la sessió',
+        sessionStatusBarDescription: 'Tria on es mostren la branca, el model, l\'esforç i el context',
+        sessionStatusDisplayOptions: {
+            hidden: 'Ocult',
+            hiddenOnMobile: 'Ocult al mòbil',
+            above: 'Sobre el compositor',
+            below: 'Sota el compositor',
+        },
+        userMessageBubbleColor: 'Color dels teus missatges',
+        userMessageBubbleColorDescription: 'Fes que els teus missatges siguin més fàcils de trobar en xats llargs',
+        userMessageBubbleColorOptions: {
+            blue: 'Blau',
+            green: 'Verd',
+            purple: 'Porpra',
+            rose: 'Rosa',
+            sand: 'Sorra',
+            gray: 'Gris',
+        },
         display: 'Pantalla',
         displayDescription: 'Controla la disposició i l\'espaiat',
         inlineToolCalls: 'Crides d\'eines en línia',
@@ -219,7 +239,7 @@ export const ca: TranslationStructure = {
         analyticsDisabled: 'Tot el seguiment i telemetria desactivats',
         analyticsEnabled: 'Analítica anònima d\'ús activa',
         imageUpload: 'Pujada d\'imatges',
-        imageUploadSubtitle: 'Adjunta imatges als missatges perquè Claude les analitzi',
+        imageUploadSubtitle: 'Adjunta imatges als missatges perquè els agents compatibles les analitzin',
     },
 
     errors: {
@@ -293,6 +313,8 @@ export const ca: TranslationStructure = {
         inactiveArchived: 'Aquesta sessió està inactiva.',
         resumeFromTerminal: 'Per reprendre-la des del terminal:',
         newChat: 'Nou xat',
+        statusBarContext: 'Context',
+        statusBarPathTitle: 'Directori de treball',
         forkAction: 'Bifurca la sessió',
         forkSubtitle: 'Continua en una nova sessió amb el mateix context',
         duplicateAction: 'Duplica des d\'un missatge…',
@@ -411,6 +433,16 @@ export const ca: TranslationStructure = {
             scanQrCode: 'Escaneja el codi QR',
             openCamera: 'Obre la càmera',
         },
+        agentGoalBar: {
+            currentGoal: 'Objectiu actual',
+            accessibilityLabel: ({ goal }: { goal: string }) => `Objectiu actual: ${goal}`,
+            clearGoal: 'Esborra objectiu',
+            stopGoal: 'Atura objectiu',
+            editGoal: 'Edita objectiu',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Context ${used} de ${total} tokens, ${percent}%`,
+        },
     },
 
     agentInput: {
@@ -444,6 +476,10 @@ export const ca: TranslationStructure = {
             readOnly: 'Read Only Mode',
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
+            defaultDescription: "pregunta abans d'ordres no fiables",
+            readOnlyDescription: 'sense escriptura',
+            safeYoloDescription: "sense preguntes, sandbox de l'espai de treball",
+            yoloDescription: 'sense preguntes, accés complet',
             badgeReadOnly: 'Read Only Mode',
             badgeSafeYolo: 'Safe YOLO',
             badgeYolo: 'YOLO',
@@ -837,6 +873,7 @@ export const ca: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `S'ha canviat al mode ${mode}`,
         unknownEvent: 'Esdeveniment desconegut',
         usageLimitUntil: ({ time }: { time: string }) => `Límit d'ús assolit fins a ${time}`,
+        sentAsGoal: 'Sent as goal',
         unknownTime: 'temps desconegut',
     },
 
@@ -980,7 +1017,7 @@ export const ca: TranslationStructure = {
             ? 'No s\'ha pogut pujar una imatge i no s\'ha enviat.'
             : `No s'han pogut pujar ${count} imatges i no s'han enviat.`,
         notSupportedTitle: 'Imatges no compatibles',
-        notSupportedMessage: 'Aquest agent no admet imatges adjuntes. Només s\'ha enviat el text.',
+        notSupportedMessage: 'Aquest agent no admet fitxers adjunts d\'imatge. Les imatges no s\'han enviat.',
     },
 
     feed: {

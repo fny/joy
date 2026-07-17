@@ -159,6 +159,26 @@ export const it: TranslationStructure = {
             light: 'Usa sempre il tema chiaro',
             dark: 'Usa sempre il tema scuro',
         },
+        chat: 'Chat',
+        chatDescription: 'Personalizza l\'aspetto dei messaggi della chat',
+        sessionStatusBar: 'Informazioni sullo stato della sessione',
+        sessionStatusBarDescription: 'Scegli dove mostrare branch, modello, impegno e contesto',
+        sessionStatusDisplayOptions: {
+            hidden: 'Nascosto',
+            hiddenOnMobile: 'Nascosto su mobile',
+            above: 'Sopra il compositore',
+            below: 'Sotto il compositore',
+        },
+        userMessageBubbleColor: 'Colore dei tuoi messaggi',
+        userMessageBubbleColorDescription: 'Rendi i tuoi messaggi più facili da trovare nelle chat lunghe',
+        userMessageBubbleColorOptions: {
+            blue: 'Blu',
+            green: 'Verde',
+            purple: 'Viola',
+            rose: 'Rosa',
+            sand: 'Sabbia',
+            gray: 'Grigio',
+        },
         display: 'Schermo',
         displayDescription: 'Controlla layout e spaziatura',
         inlineToolCalls: 'Chiamate strumenti inline',
@@ -217,7 +237,7 @@ export const it: TranslationStructure = {
         analyticsDisabled: 'Tutto il tracciamento e la telemetria disabilitati',
         analyticsEnabled: 'Analisi anonime di utilizzo attive',
         imageUpload: 'Caricamento immagini',
-        imageUploadSubtitle: 'Allega immagini ai messaggi per farle analizzare da Claude',
+        imageUploadSubtitle: 'Allega immagini ai messaggi per farle analizzare dagli agenti supportati',
     },
 
     errors: {
@@ -291,6 +311,8 @@ export const it: TranslationStructure = {
         inactiveArchived: 'Questa sessione è inattiva.',
         resumeFromTerminal: 'Per riprenderla dal terminale:',
         newChat: 'Nuova chat',
+        statusBarContext: 'Contesto',
+        statusBarPathTitle: 'Directory di lavoro',
         forkAction: 'Biforca sessione',
         forkSubtitle: 'Continua in una nuova sessione con lo stesso contesto',
         duplicateAction: 'Duplica da un messaggio…',
@@ -409,6 +431,16 @@ export const it: TranslationStructure = {
             scanQrCode: 'Scansiona il codice QR',
             openCamera: 'Apri fotocamera',
         },
+        agentGoalBar: {
+            currentGoal: 'Obiettivo attuale',
+            accessibilityLabel: ({ goal }: { goal: string }) => `Obiettivo attuale: ${goal}`,
+            clearGoal: 'Cancella obiettivo',
+            stopGoal: 'Ferma obiettivo',
+            editGoal: 'Modifica obiettivo',
+        },
+        sessionStatusBar: {
+            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Contesto ${used} di ${total} token, ${percent}%`,
+        },
     },
 
     agentInput: {
@@ -442,6 +474,10 @@ export const it: TranslationStructure = {
             readOnly: 'Modalità sola lettura',
             safeYolo: 'YOLO sicuro',
             yolo: 'YOLO',
+            defaultDescription: 'chiedi prima dei comandi non attendibili',
+            readOnlyDescription: 'nessuna scrittura',
+            safeYoloDescription: "nessuna richiesta, sandbox dell'area di lavoro",
+            yoloDescription: 'nessuna richiesta, accesso completo',
             badgeReadOnly: 'Modalità sola lettura',
             badgeSafeYolo: 'YOLO sicuro',
             badgeYolo: 'YOLO',
@@ -835,6 +871,7 @@ export const it: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `Passato alla modalità ${mode}`,
         unknownEvent: 'Evento sconosciuto',
         usageLimitUntil: ({ time }: { time: string }) => `Limite di utilizzo raggiunto fino a ${time}`,
+        sentAsGoal: 'Sent as goal',
         unknownTime: 'ora sconosciuta',
     },
 
@@ -979,7 +1016,7 @@ export const it: TranslationStructure = {
             ? 'Un\'immagine non è stata caricata e non è stata inviata.'
             : `Non è stato possibile caricare ${count} immagini e non sono state inviate.`,
         notSupportedTitle: 'Immagini non supportate',
-        notSupportedMessage: 'Questo agente non supporta gli allegati immagine. È stato inviato solo il testo.',
+        notSupportedMessage: 'Questo agente non supporta gli allegati immagine. Le immagini non sono state inviate.',
     },
 
     feed: {
