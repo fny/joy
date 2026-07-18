@@ -12,8 +12,17 @@ import { Modal } from '@/modal';
 import { useDraftQueueStore } from '@/-session/draftQueue';
 import { t } from '@/text';
 import type { useJoyQueue } from '@/hooks/useJoyQueue';
+import { useDelayedAppearance } from '@/hooks/useDelayedAppearance';
 
 type Queue = ReturnType<typeof useJoyQueue>;
+
+// Every app send transits the daemon dispatch queue for ~a second even when
+// the agent is idle; hidden items younger than this are in-transit, not held,
+// and rendering them flashed every send as "queued". Anything older is
+// genuinely waiting (busy agent / stuck dispatch) and appears.
+const HIDDEN_APPEAR_MS = 2500;
+// Stable sentinel so the old-daemon count-only fallback rides the same gate.
+const COUNT_SENTINEL = [{ id: '__pending-count__' }];
 
 export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; sessionId: string }) => {
     const { theme } = useUnistyles();
@@ -23,10 +32,18 @@ export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; s
     // and moves the text into the on-device drafts strip (it can't be edited
     // in place — the message is already an immutable server row); Delete just
     // cancels. Older daemons don't send `hidden` — fall back to a count line.
-    const hidden = queue.hidden ?? [];
-    const hiddenCountOnly = queue.hidden === undefined
+    // Both are age-gated (paused bypasses — a fault state must show at once):
+    // explicit user queue-adds below are NOT gated, queueing them was the
+    // user's own action.
+    const hiddenCountRaw = queue.hidden === undefined
         ? Math.max(0, (queue.pendingCount ?? 0) - queue.queue.length)
         : 0;
+    const hidden = useDelayedAppearance(queue.hidden ?? [], HIDDEN_APPEAR_MS, queue.paused);
+    const hiddenCountOnly = useDelayedAppearance(
+        hiddenCountRaw > 0 ? COUNT_SENTINEL : [],
+        HIDDEN_APPEAR_MS,
+        queue.paused,
+    ).length > 0 ? hiddenCountRaw : 0;
     const hasItems = queue.queue.length > 0 || queue.paused || hidden.length > 0 || hiddenCountOnly > 0;
     if (!hasItems) return null;
 
