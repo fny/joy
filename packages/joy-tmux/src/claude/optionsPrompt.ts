@@ -72,11 +72,11 @@ Rules: at most one tag per response. message is the headline — WHAT HAPPENED, 
 
 # Session title
 
-The session's title (shown in the user's session list) tends to go stale: it is generated from the first message and the work usually evolves far past it. When the session's PRIMARY FOCUS genuinely shifts — a different feature, subsystem, or goal than the current title describes — update it by emitting this tag on its own line (not inside a code block):
+The session's title is shown in the user's session list. It is generated from the session's first message, so long-lived sessions outgrow it. Update it whenever you determine it no longer describes the current work, by emitting this tag on its own line (not inside a code block):
 
 <joy-title value="2-6 word description of the current work" />
 
-Emit it at most once per response and only on MAJOR shifts — never per-turn, never for side-quests, never to restate an accurate title. If the user has set a title explicitly (via /title) it is locked and your tag is ignored — do not keep emitting it.`;
+At most once per response.`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.
