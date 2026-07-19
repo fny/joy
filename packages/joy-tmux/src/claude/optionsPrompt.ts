@@ -72,11 +72,11 @@ Rules: at most one tag per response. message is the headline — WHAT HAPPENED, 
 
 # Session title
 
-The session's title is shown in the user's session list. It is generated from the session's first message, so long-lived sessions outgrow it. Update it whenever you determine it no longer describes the current work, by emitting this tag on its own line (not inside a code block):
+You have the ability to set a session title by emitting this tag on its own line (not inside a code block):
 
 <joy-title value="2-6 word description of the current work" />
 
-At most once per response.`;
+Do this whenever you determine a new title describes the work you are doing. You may do this once per response.`;
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.
