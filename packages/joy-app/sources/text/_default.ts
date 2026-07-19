@@ -289,6 +289,12 @@ export const en = {
     },
 
     imageUpload: {
+        attachTitle: 'Attach',
+        photoLibrary: 'Photo Library',
+        chooseFile: 'Choose File',
+        pasteImage: 'Paste Image',
+        pasteNoImageTitle: 'No Image',
+        pasteNoImageMessage: 'The clipboard does not contain an image.',
         permissionTitle: 'Photo Library Access',
         permissionMessage: 'Allow access to your photo library to attach images to messages.',
         limitTitle: 'Image Limit Reached',

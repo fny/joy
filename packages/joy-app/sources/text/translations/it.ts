@@ -1005,6 +1005,12 @@ export const it: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: 'Allega',
+        photoLibrary: 'Libreria foto',
+        chooseFile: 'Scegli file',
+        pasteImage: 'Incolla immagine',
+        pasteNoImageTitle: 'Nessuna immagine',
+        pasteNoImageMessage: 'Gli appunti non contengono immagini.',
         permissionTitle: 'Accesso alla libreria foto',
         permissionMessage: "Consenti l'accesso alla tua libreria foto per allegare immagini ai messaggi.",
         limitTitle: 'Limite immagini raggiunto',

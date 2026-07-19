@@ -560,7 +560,21 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     // Image attachment state (expImageUpload feature flag)
     const expImageUpload = useSetting('expImageUpload');
-    const { selectedImages, pickImages, removeImage, clearImages, addImages } = useImagePicker();
+    const { selectedImages, pickImages, pickFromLibrary, pasteImage, removeImage, clearImages, addImages } = useImagePicker();
+
+    // Attach menu (native): the Files picker can't browse Photos and RN text
+    // inputs drop image pastes, so photos and clipboard images need explicit
+    // entries. Web keeps the direct file picker — its file input covers
+    // everything and paste is intercepted at the document level.
+    const handleAttach = React.useCallback(() => {
+        if (Platform.OS === 'web') { void pickImages(); return; }
+        Modal.alert(t('imageUpload.attachTitle'), undefined, [
+            { text: t('imageUpload.photoLibrary'), onPress: () => { void pickFromLibrary(); } },
+            { text: t('imageUpload.chooseFile'), onPress: () => { void pickImages(); } },
+            { text: t('imageUpload.pasteImage'), onPress: () => { void pasteImage(); } },
+            { text: t('common.cancel'), style: 'cancel' },
+        ]);
+    }, [pickImages, pickFromLibrary, pasteImage]);
 
     // ChatComposer owns the message state + useDraft subscription. We only
     // hold an imperative handle so handleSend can read the live text and
@@ -830,7 +844,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
             onFileViewerPress={experiments && !isTablet ? handleFileViewerPress : undefined}
             selectedImages={expImageUpload ? selectedImages : undefined}
-            onPickImages={expImageUpload ? pickImages : undefined}
+            onPickImages={expImageUpload ? handleAttach : undefined}
             onRemoveImage={expImageUpload ? removeImage : undefined}
             onAddImages={expImageUpload ? addImages : undefined}
             autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}

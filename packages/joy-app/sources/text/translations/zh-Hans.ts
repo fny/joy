@@ -1007,6 +1007,12 @@ export const zhHans: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: '附加',
+        photoLibrary: '照片图库',
+        chooseFile: '选择文件',
+        pasteImage: '粘贴图片',
+        pasteNoImageTitle: '没有图片',
+        pasteNoImageMessage: '剪贴板中没有图片。',
         permissionTitle: '访问照片库',
         permissionMessage: '允许访问您的照片库以在消息中附加图片。',
         limitTitle: '已达到图片限制',

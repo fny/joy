@@ -1035,6 +1035,12 @@ export const ru: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: 'Прикрепить',
+        photoLibrary: 'Фототека',
+        chooseFile: 'Выбрать файл',
+        pasteImage: 'Вставить изображение',
+        pasteNoImageTitle: 'Нет изображения',
+        pasteNoImageMessage: 'В буфере обмена нет изображения.',
         permissionTitle: 'Доступ к библиотеке фото',
         permissionMessage: 'Разрешите доступ к вашей библиотеке фото, чтобы прикреплять изображения к сообщениям.',
         limitTitle: 'Достигнут лимит изображений',

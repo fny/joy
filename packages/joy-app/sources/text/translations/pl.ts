@@ -1036,6 +1036,12 @@ export const pl: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: 'Załącz',
+        photoLibrary: 'Biblioteka zdjęć',
+        chooseFile: 'Wybierz plik',
+        pasteImage: 'Wklej obraz',
+        pasteNoImageTitle: 'Brak obrazu',
+        pasteNoImageMessage: 'Schowek nie zawiera obrazu.',
         permissionTitle: 'Dostęp do biblioteki zdjęć',
         permissionMessage: 'Zezwól na dostęp do biblioteki zdjęć, aby załączać obrazy do wiadomości.',
         limitTitle: 'Osiągnięto limit obrazów',

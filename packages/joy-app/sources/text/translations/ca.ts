@@ -1006,6 +1006,12 @@ export const ca: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: 'Adjunta',
+        photoLibrary: 'Fototeca',
+        chooseFile: 'Tria un fitxer',
+        pasteImage: 'Enganxa una imatge',
+        pasteNoImageTitle: 'Cap imatge',
+        pasteNoImageMessage: 'El porta-retalls no conté cap imatge.',
         permissionTitle: 'Accés a la biblioteca de fotos',
         permissionMessage: "Permet l'accés a la teva biblioteca de fotos per adjuntar imatges als missatges.",
         limitTitle: "Límit d'imatges assolit",
