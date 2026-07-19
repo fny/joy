@@ -1008,6 +1008,12 @@ export const ja: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: '添付',
+        photoLibrary: 'フォトライブラリ',
+        chooseFile: 'ファイルを選択',
+        pasteImage: '画像をペースト',
+        pasteNoImageTitle: '画像がありません',
+        pasteNoImageMessage: 'クリップボードに画像がありません。',
         permissionTitle: 'フォトライブラリへのアクセス',
         permissionMessage: 'メッセージに画像を添付するには、フォトライブラリへのアクセスを許可してください。',
         limitTitle: '画像の上限に達しました',

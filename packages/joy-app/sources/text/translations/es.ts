@@ -1007,6 +1007,12 @@ export const es: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: 'Adjuntar',
+        photoLibrary: 'Fototeca',
+        chooseFile: 'Elegir archivo',
+        pasteImage: 'Pegar imagen',
+        pasteNoImageTitle: 'Sin imagen',
+        pasteNoImageMessage: 'El portapapeles no contiene ninguna imagen.',
         permissionTitle: 'Acceso a la biblioteca de fotos',
         permissionMessage: 'Permite el acceso a tu biblioteca de fotos para adjuntar imágenes a los mensajes.',
         limitTitle: 'Límite de imágenes alcanzado',

@@ -1005,6 +1005,12 @@ export const pt: TranslationStructure = {
     },
 
     imageUpload: {
+        attachTitle: 'Anexar',
+        photoLibrary: 'Fototeca',
+        chooseFile: 'Escolher arquivo',
+        pasteImage: 'Colar imagem',
+        pasteNoImageTitle: 'Sem imagem',
+        pasteNoImageMessage: 'A área de transferência não contém uma imagem.',
         permissionTitle: 'Acesso à biblioteca de fotos',
         permissionMessage: 'Permita o acesso à sua biblioteca de fotos para anexar imagens às mensagens.',
         limitTitle: 'Limite de imagens atingido',
