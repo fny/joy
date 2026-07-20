@@ -902,6 +902,18 @@ export interface JoyLoginInfo {
   error?: string;  // a rejection/error message shown in the box (e.g. bad code)
 }
 
+/**
+ * Interactive CLI dialog occupying the pane (model picker, "Switch model?"
+ * confirm, /effort slider…). These dialogs block dispatch and write nothing to
+ * the transcript until answered — the app shows a "answer this in the
+ * terminal" banner while one is up; cleared when the pane moves on.
+ */
+export interface JoyDialogInfo {
+  title: string | null;   // the dialog's heading line, e.g. "Switch model?"
+  options: string[];      // numbered option rows, selection marker stripped
+  since: number;          // epoch ms when it was first detected
+}
+
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
 export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
@@ -1110,6 +1122,11 @@ export class RelaySession {
   async updateLogin(info: JoyLoginInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__login == null) return;
     await this.mergeMetadata({ joy__login: info });
+  }
+
+  async updateDialog(info: JoyDialogInfo | null): Promise<void> {
+    if (info == null && this.metadata?.joy__dialog == null) return;
+    await this.mergeMetadata({ joy__dialog: info });
   }
 
   /**

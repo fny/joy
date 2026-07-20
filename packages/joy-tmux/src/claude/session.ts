@@ -27,6 +27,7 @@ import {
   type RelaySession,
   type JoyGoalInfo,
   type JoyLoginInfo,
+  type JoyDialogInfo,
 } from "../relay/relay.ts";
 import {
   initDeliveryState,
@@ -533,6 +534,12 @@ export class Session {
   // debounces detection: a URL must persist across two polls before we push it.
   #login: JoyLoginInfo | null = null;
   #loginUrlPending: string | null = null;
+  // Interactive CLI dialog (model picker / switch confirm / effort slider…)
+  // currently occupying the pane — surfaced as joy__dialog ("answer this in
+  // the terminal"). Same two-poll debounce contract as #login.
+  #dialog: JoyDialogInfo | null = null;
+  #dialogKey: string | null = null;
+  #dialogPendingKey: string | null = null;
   // The (retrying) archive POST fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -812,6 +819,8 @@ export class Session {
     // while the bar was up (fresh #login=null, URL gone from the pane) left it
     // stuck server-side forever. updateLogin(null) no-ops when already clear.
     if (!this.#login) void rs.updateLogin(null);
+    // Same for a stale dialog banner (daemon restart while a dialog was up).
+    if (!this.#dialog) void rs.updateDialog(null);
     // Same reconcile for the compacting banner: a daemon restart mid-compaction
     // rebuilds the Session with #compacting=null while joy__compacting persisted
     // server-side. The in-memory backstop timer is also gone, so without this the
@@ -1578,6 +1587,17 @@ export class Session {
     const working = pane.ok && (paneShowsGenerating(pane.out) || paneShowsWorking(pane.out));
     if (working && this.#dispatchExtends < MAX_DISPATCH_EXTENDS) {
       this.#dispatchExtends += 1;
+      this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
+      return;
+    }
+    // The command opened an interactive DIALOG (model picker / switch confirm /
+    // effort slider): it DID land — the CLI is waiting on a human, and the echo
+    // (local_command entry) arrives when the dialog resolves. Hold the window
+    // open without consuming extends and WITHOUT a cap: each re-check requires
+    // the dialog to still be on screen, and #reconcileDialog has already told
+    // the app to go answer it. Failing here would requeue + pause and then
+    // RE-TYPE the command on resume — double-executing it.
+    if (pane.ok && dialogFromPane(pane.out) != null) {
       this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
       return;
     }
@@ -2413,7 +2433,11 @@ export class Session {
         this.pid = fresh;
       } else {
         const pane = tmux.captureCached(this.tmuxWindow);
-        if (!(pane.ok && paneShowsClaudeRunning(pane.out))) {
+        // An open dialog hides every "claude is running" marker (verified live:
+        // model picker/confirm/effort all read running=false) — but a dialog on
+        // screen IS a live claude. Without this, a stale pid + open dialog
+        // would tear the session down as process_exited.
+        if (!(pane.ok && (paneShowsClaudeRunning(pane.out) || dialogFromPane(pane.out) != null))) {
           this.end("process_exited");
           return;
         }
@@ -2765,9 +2789,37 @@ export class Session {
           this.#idlePolls = 0;
         }
         this.#reconcileLogin(pane.out);
+        this.#reconcileDialog(pane.out);
       }
     }
     setTimeout(() => this.#pollThinking(), 3000);
+  }
+
+  /** Surface an interactive CLI dialog (model picker / switch confirm / effort
+   *  slider…) as joy__dialog so the app can say "answer this in the terminal".
+   *  Same debounce contract as #reconcileLogin: two consecutive sightings of
+   *  the same dialog before pushing (a mid-repaint capture can transiently
+   *  look like anything), cleared as soon as the pane no longer shows it. */
+  #reconcileDialog(paneText: string): void {
+    const dialog = dialogFromPane(paneText);
+    if (!dialog) {
+      this.#dialogPendingKey = null;
+      if (this.#dialog) {
+        this.#dialog = null;
+        void this.#relay?.updateDialog(null);
+      }
+      return;
+    }
+    const key = `${dialog.title ?? ""} ${dialog.options.join(" ")}`;
+    if (!this.#dialog && this.#dialogPendingKey !== key) {
+      this.#dialogPendingKey = key; // first sighting — confirm next poll
+      return;
+    }
+    if (this.#dialog && this.#dialogKey === key) return; // no change
+    this.#dialogPendingKey = null;
+    this.#dialogKey = key;
+    this.#dialog = { title: dialog.title, options: dialog.options, since: this.#dialog?.since ?? Date.now() };
+    void this.#relay?.updateDialog(this.#dialog);
   }
 
   // Consecutive not-generating poll reads while thinking (see #pollThinking).
@@ -3422,6 +3474,45 @@ export function loginFromPane(text: string): PaneLogin | null {
 /** Convenience: just the auth URL (or null). */
 export function authUrlFromPane(text: string): string | null {
   return loginFromPane(text)?.url ?? null;
+}
+
+/**
+ * Detect an interactive CLI dialog (model picker, "Switch model?" confirm,
+ * /effort slider, and future kin) occupying the pane. These dialogs REPLACE
+ * the input box, write NO transcript entry until resolved, and show neither
+ * the ready prompt nor "esc to interrupt" — so a dispatched command that
+ * opened one used to false-fail on the echo timeout and wedge the queue
+ * (verified live: /model opus's confirm produced zero transcript entries
+ * while open, and every pane matcher read false; captures 2026-07-20).
+ *
+ * Shape (verified on claude 2.1.198 live captures):
+ *   ▔▔▔▔▔▔▔▔…                     ← upper-block rule: the dialog's top border.
+ *      <title line>                  The normal input box uses ─/━, never ▔.
+ *      1. option / ❯ 1. option    ← numbered picker rows (confirm/model), OR
+ *      ←/→ to adjust · Enter to confirm · Esc to cancel   ← footer (slider/model)
+ *
+ * A ▔-rule alone is not enough (could echo in scrollback content): require
+ * numbered options or a dialog footer below it.
+ */
+const DIALOG_RULE_RE = /^\s*▔{8,}\s*$/;
+const DIALOG_OPTION_RE = /^\s*(?:❯\s*)?\d+\.\s+\S/;
+const DIALOG_FOOTER_RE = /Esc to cancel|Enter to confirm/i;
+export interface PaneDialog { title: string | null; options: string[] }
+export function dialogFromPane(text: string): PaneDialog | null {
+  const lines = text.split("\n");
+  let rule = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (DIALOG_RULE_RE.test(lines[i])) { rule = i; break; }
+  }
+  if (rule < 0) return null;
+  const region = lines.slice(rule + 1);
+  const options = region
+    .filter((l) => DIALOG_OPTION_RE.test(l))
+    .map((l) => l.trim().replace(/^❯\s*/, "").slice(0, 120));
+  const hasFooter = region.some((l) => DIALOG_FOOTER_RE.test(l));
+  if (options.length === 0 && !hasFooter) return null;
+  const title = region.find((l) => l.trim())?.trim().slice(0, 120) ?? null;
+  return { title, options };
 }
 
 /**
