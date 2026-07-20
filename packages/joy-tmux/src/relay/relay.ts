@@ -1165,7 +1165,10 @@ export class RelaySession {
       for (;;) {
         const want = this.desiredDialog;
         if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined) && !this.dialogWriteUncertain) return;
-        const acked = await this.mergeMetadata({ joy__dialog: want });
+        // Rejection normalized to false IN the loop (verify round 5): exiting
+        // through the outer catch skipped the moved-desired retry, so a SET
+        // that threw while desired became null lost teardown's clear.
+        const acked = await this.mergeMetadata({ joy__dialog: want }).catch(() => false);
         if (acked) {
           this.dialogWriteUncertain = false; // loop re-checks a moved desired
           continue;
