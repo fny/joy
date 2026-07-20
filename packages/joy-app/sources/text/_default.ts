@@ -407,6 +407,11 @@ export const en = {
         editMessage: 'Set a new goal for the agent. Empty to keep the current one.',
     },
 
+    joyDialog: {
+        label: 'ACTION NEEDED',
+        fallbackTitle: 'Claude Code is asking a question',
+        openTerminal: 'Open the terminal to answer',
+    },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
         label: 'SIGN IN',

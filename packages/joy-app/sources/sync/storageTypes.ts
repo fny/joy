@@ -131,6 +131,14 @@ export const MetadataSchema = z.object({
         since: z.number().optional(),
         error: z.string().optional(), // rejection message (e.g. bad/expired code)
     }).nullable().optional(),
+    // Interactive CLI dialog occupying the pane (model picker, "Switch model?"
+    // confirm, /effort slider…) — the harness is waiting on a human in the
+    // terminal, not Claude. Drives the "answer this in the terminal" banner.
+    joy__dialog: z.object({
+        title: z.string().nullable().optional(),
+        options: z.array(z.string()),
+        since: z.number().optional(),
+    }).nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;

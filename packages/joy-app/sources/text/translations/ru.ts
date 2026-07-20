@@ -475,6 +475,11 @@ export const ru: TranslationStructure = {
         editMessage: 'Задайте новую цель для агента. Оставьте пустым, чтобы сохранить текущую.',
     },
 
+    joyDialog: {
+        label: 'ТРЕБУЕТСЯ ДЕЙСТВИЕ',
+        fallbackTitle: 'Claude Code задаёт вопрос',
+        openTerminal: 'Откройте терминал, чтобы ответить',
+    },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
         label: 'ВХОД',

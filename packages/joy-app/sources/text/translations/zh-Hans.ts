@@ -360,6 +360,11 @@ export const zhHans: TranslationStructure = {
         editMessage: '为智能体设置新目标。留空则保留当前目标。',
     },
 
+    joyDialog: {
+        label: '需要操作',
+        fallbackTitle: 'Claude Code 正在提问',
+        openTerminal: '打开终端进行回答',
+    },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
         label: '登录',

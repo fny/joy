@@ -359,6 +359,11 @@ export const zhHant: TranslationStructure = {
         editMessage: '為智能體設定新目標。留空則保留目前目標。',
     },
 
+    joyDialog: {
+        label: '需要操作',
+        fallbackTitle: 'Claude Code 正在提問',
+        openTerminal: '開啟終端機進行回答',
+    },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
         label: '登入',
