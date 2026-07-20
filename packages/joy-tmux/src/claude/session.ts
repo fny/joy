@@ -621,6 +621,9 @@ export class Session {
   // Claude is visibly working (slow turn-start on a huge context) — bounded so a
   // genuinely-lost dispatch still surfaces. Reset on confirm / requeue.
   #dispatchExtends = 0;
+  // When the current in-flight dispatch typed + submitted (epoch ms) — the
+  // causal guard for dialog-based delivery confirmation.
+  #dispatchSubmittedAt: number | null = null;
   #drainRetry: ReturnType<typeof setTimeout> | null = null;
   // A human-typed draft captured from the input box right before a dispatch-
   // driven clear wiped it (drain gate / steer). Restored — typed back, never
@@ -1558,7 +1561,29 @@ export class Session {
     // Arm the echo-confirmation timeout: a successful dispatch produces a new turn.
     // If none appears, the message didn't land.
     this.#dispatchExtends = 0;
+    this.#dispatchSubmittedAt = Date.now();
     this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
+  }
+
+  /** Delivery confirmed by a post-submit interactive DIALOG (not by echo):
+   *  slash commands like /model open one and may resolve via Esc with NO echo
+   *  ever — waiting on the echo would requeue a consumed command. Called from
+   *  #reconcileDialog on dialog appearance (~6s: two debounce polls) and from
+   *  the timeout as a backstop. Slash-only by design: a plain message cannot
+   *  open a dialog, and confirming one here would be silent message loss. */
+  #confirmDispatchOnDialog(dialogSince: number): void {
+    const inflight = this.#dispatchInFlight;
+    if (!inflight || !inflight.text.trimStart().startsWith("/")) return;
+    // Causal guard: the dialog must have APPEARED after this dispatch
+    // submitted. Mostly automatic (the drain gate refuses to type while a
+    // dialog is up — no ready prompt), but a pre-existing dialog that raced
+    // the gate's capture must not confirm a command it didn't come from.
+    if (dialogSince < (this.#dispatchSubmittedAt ?? Number.POSITIVE_INFINITY)) return;
+    this.#dispatchExtends = 0;
+    this.#dispatchInFlight = null;
+    this.#clearSubmitTimer();
+    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    this.#broadcastQueue();
   }
 
   /** Called from onTranscriptEntry when a new turn starts — confirms the dispatch landed. */
@@ -1614,11 +1639,11 @@ export class Session {
     // the drain when it clears.
     if (pane.ok && dialogFromPane(pane.out) != null) {
       if (inflight.text.trimStart().startsWith("/")) {
-        this.#dispatchExtends = 0;
-        this.#dispatchInFlight = null;
-        this.#clearSubmitTimer();
-        this.#broadcastQueue();
-        return;
+        // Backstop for the reconcile-time confirm (no relay → no 3s poll).
+        this.#confirmDispatchOnDialog(Date.now());
+        if (!this.#dispatchInFlight) return;
+        // Causal guard refused (dialog predates the dispatch) → fall through
+        // to the plain-message bounded hold below.
       }
       // A PLAIN message cannot open a dialog — this one is blocked by a dialog
       // someone opened in the terminal. Auto-confirming would risk silent
@@ -2869,6 +2894,11 @@ export class Session {
       this.#dialog = { title: dialog.title, options: dialog.options, since: Date.now() };
       this.#dialogKey = key;
     }
+    // A dialog that appeared after a slash dispatch submitted IS its delivery
+    // confirmation — do it HERE, on appearance, not only at the 30s deadline:
+    // a quick Esc-close before the deadline left the timeout with no dialog to
+    // see and requeued the consumed command (verify round, finding 1 gap).
+    this.#confirmDispatchOnDialog(this.#dialog.since);
     // Same convergence contract as the clear: assert every poll, dedupe on ack.
     void this.#relay?.updateDialog(this.#dialog);
   }
@@ -3550,12 +3580,6 @@ const DIALOG_OPTION_RE = /^\s*(?:❯\s*)?\d+\.\s+\S/;
 const DIALOG_FOOTER_RE = /Esc to cancel|Enter to confirm/i;
 export interface PaneDialog { title: string | null; options: string[] }
 export function dialogFromPane(text: string): PaneDialog | null {
-  // A REAL dialog replaces the input box — it cannot coexist with a live ready
-  // prompt or a generating footer. Without this, dialog-shaped content QUOTED
-  // in conversation output (scrollback above the box) matched and could pin a
-  // false ACTION NEEDED banner, hold a lost dispatch forever, and count as
-  // liveness (gpt-5.6-sol review finding 2, reproduced).
-  if (paneShowsReadyPrompt(text) || paneShowsGenerating(text)) return null;
   const lines = text.split("\n");
   let rule = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -3563,6 +3587,14 @@ export function dialogFromPane(text: string): PaneDialog | null {
   }
   if (rule < 0) return null;
   const region = lines.slice(rule + 1);
+  // A REAL dialog replaces the input box — it cannot coexist with a live ready
+  // prompt or a generating footer BELOW its rule. Checking the region (not the
+  // whole pane — verify round caught that): dialog-shaped content QUOTED in
+  // scrollback above the live box must not match (the live prompt sits below
+  // the quoted rule), while a quoted ready-box above a REAL dialog must not
+  // UN-match it (that quote sits above the dialog's rule, outside the region).
+  const regionText = region.join("\n");
+  if (paneShowsReadyPrompt(regionText) || paneShowsGenerating(regionText)) return null;
   const options = region
     .filter((l) => DIALOG_OPTION_RE.test(l))
     .map((l) => l.trim().replace(/^❯\s*/, "").slice(0, 120));
