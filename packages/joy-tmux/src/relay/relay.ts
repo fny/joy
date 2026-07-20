@@ -1002,14 +1002,17 @@ export class RelaySession {
    * daemon is the only writer of session metadata, so serializing here means each
    * merge reads an already-updated `this.metadata` and no field is lost.
    */
-  private mergeMetadata(patch: Record<string, unknown>): Promise<void> {
+  /** Resolves TRUE only when the patch was server-ACKED (metadata advanced).
+   *  Callers that need write certainty (the dialog pump) use the result;
+   *  fire-and-forget callers ignore it. */
+  private mergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
     const run = this.metadataChain.then(() => this.doMergeMetadata(patch));
-    this.metadataChain = run.catch(() => {}); // keep the chain alive past a failure
+    this.metadataChain = run.then(() => undefined, () => undefined); // keep the chain alive past a failure
     return run;
   }
 
-  private async doMergeMetadata(patch: Record<string, unknown>): Promise<void> {
-    if (!this.metadata) return;
+  private async doMergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
+    if (!this.metadata) return false;
     for (let attempt = 0; attempt < 3; attempt++) {
       // Recompute merged + enc from CURRENT metadata each attempt, so a
       // version bump re-merges the patch onto fresh state instead of re-sending
@@ -1021,7 +1024,7 @@ export class RelaySession {
       if (ack.result === 'success') {
         this.metadata = merged;
         if (typeof ack.version === 'number') this.metadataVersion = ack.version;
-        return;
+        return true;
       }
       if (ack.result === 'version-mismatch' && typeof ack.version === 'number') {
         this.metadataVersion = ack.version;
@@ -1035,8 +1038,9 @@ export class RelaySession {
         }
         continue; // retry with the server's current version
       }
-      return;
+      return false;
     }
+    return false;
   }
 
   /**
@@ -1153,18 +1157,22 @@ export class RelaySession {
     this.dialogWriteBusy = true;
     try {
       // Loop until an ACKED write matches the (possibly re-updated) desired
-      // value. A no-ack write sets the uncertain flag and breaks instead of
-      // spinning — the next 3s assertion re-enters the pump.
+      // value. Certainty comes from mergeMetadata's RETURN (verify round 4:
+      // inferring it from local state let a forced re-write of an already-
+      // equal value clear uncertainty without any ack). After a failed write,
+      // stop ONLY if desired hasn't moved meanwhile — teardown's clear has no
+      // next poll to retry from, so a moved desired gets one immediate try.
       for (;;) {
         const want = this.desiredDialog;
         if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined) && !this.dialogWriteUncertain) return;
-        await this.mergeMetadata({ joy__dialog: want });
-        if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined)) {
-          this.dialogWriteUncertain = false; // acked — loop re-checks a moved desired
-        } else {
-          this.dialogWriteUncertain = true;
-          return;
+        const acked = await this.mergeMetadata({ joy__dialog: want });
+        if (acked) {
+          this.dialogWriteUncertain = false; // loop re-checks a moved desired
+          continue;
         }
+        this.dialogWriteUncertain = true;
+        if (this.desiredDialog === want) return; // unmoved — next assertion retries
+        // desired moved while writing → loop and try it now
       }
     } catch {
       this.dialogWriteUncertain = true; // next assertion retries
