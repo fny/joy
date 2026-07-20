@@ -540,6 +540,11 @@ export class Session {
   #dialog: JoyDialogInfo | null = null;
   #dialogKey: string | null = null;
   #dialogPendingKey: string | null = null;
+  // Distinct-dialog observation tracking (undebounced): key of the dialog
+  // currently on the pane and when it was FIRST sighted — drives the causal
+  // guard for dispatch confirmation, which must not wait for the debounce.
+  #dialogObservedKey: string | null = null;
+  #dialogFirstSeenAt = 0;
   // Consecutive #pollEnd passes where ONLY a pane dialog vouched for liveness
   // (no live pid, no running markers) — bounded grace, see #pollEnd.
   #dialogLivenessPasses = 0;
@@ -2869,6 +2874,7 @@ export class Session {
     const dialog = dialogFromPane(paneText);
     if (!dialog) {
       this.#dialogPendingKey = null;
+      this.#dialogObservedKey = null;
       if (this.#dialog) {
         this.#dialog = null;
         this.#dialogKey = null;
@@ -2885,20 +2891,25 @@ export class Session {
       return;
     }
     const key = `${dialog.title ?? ""} ${dialog.options.join(" ")}`;
+    // FIRST-sighting timestamp per distinct dialog — the causal input for
+    // dispatch confirmation. Confirmation must run on the FIRST sighting
+    // (verify round 3): a dialog opened and Esc-closed inside one poll gap
+    // would otherwise escape both the debounced publish AND the timeout
+    // backstop, requeuing a consumed command. Only the BANNER stays debounced.
+    if (this.#dialogObservedKey !== key) {
+      this.#dialogObservedKey = key;
+      this.#dialogFirstSeenAt = Date.now();
+    }
+    this.#confirmDispatchOnDialog(this.#dialogFirstSeenAt);
     if (!this.#dialog && this.#dialogPendingKey !== key) {
-      this.#dialogPendingKey = key; // first sighting — confirm next poll
+      this.#dialogPendingKey = key; // first sighting — publish on next poll
       return;
     }
     this.#dialogPendingKey = null;
     if (!this.#dialog || this.#dialogKey !== key) {
-      this.#dialog = { title: dialog.title, options: dialog.options, since: Date.now() };
+      this.#dialog = { title: dialog.title, options: dialog.options, since: this.#dialogFirstSeenAt };
       this.#dialogKey = key;
     }
-    // A dialog that appeared after a slash dispatch submitted IS its delivery
-    // confirmation — do it HERE, on appearance, not only at the 30s deadline:
-    // a quick Esc-close before the deadline left the timeout with no dialog to
-    // see and requeued the consumed command (verify round, finding 1 gap).
-    this.#confirmDispatchOnDialog(this.#dialog.since);
     // Same convergence contract as the clear: assert every poll, dedupe on ack.
     void this.#relay?.updateDialog(this.#dialog);
   }
