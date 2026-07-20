@@ -360,6 +360,11 @@ export const ja: TranslationStructure = {
         editMessage: '新しいゴールを設定します。空欄のままにすると現在のゴールを維持します。',
     },
 
+    joyDialog: {
+        label: '要対応',
+        fallbackTitle: 'Claude Code が質問しています',
+        openTerminal: 'ターミナルを開いて回答してください',
+    },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
         label: 'サインイン',

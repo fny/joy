@@ -59,6 +59,7 @@ import { JoyQueueStrip } from '@/components/JoyQueueStrip';
 import { DraftQueueStrip } from './DraftQueueStrip';
 import { GoalBar } from './GoalBar';
 import { LoginBar } from './LoginBar';
+import { DialogBar } from './DialogBar';
 import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
 
@@ -796,6 +797,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     let content = (
         <>
             <LoginBar sessionId={sessionId} />
+            <DialogBar sessionId={sessionId} />
             <GoalBar sessionId={sessionId} />
             <Deferred>
                 {messages.length > 0 && (

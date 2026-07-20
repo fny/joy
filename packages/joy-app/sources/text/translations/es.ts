@@ -359,6 +359,11 @@ export const es: TranslationStructure = {
         editMessage: 'Establece un nuevo objetivo para el agente. Déjalo vacío para mantener el actual.',
     },
 
+    joyDialog: {
+        label: 'ACCIÓN REQUERIDA',
+        fallbackTitle: 'Claude Code está haciendo una pregunta',
+        openTerminal: 'Abre la terminal para responder',
+    },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
         label: 'INICIAR SESIÓN',
