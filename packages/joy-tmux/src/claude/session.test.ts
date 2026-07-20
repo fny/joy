@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -474,7 +474,7 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
     setThinking(v: boolean) { thinkingCalls.push(v); },
     updateRetry() {},
     async clearThinkingMeta() {},
-    async updateLogin() {},
+    async updateLogin() {}, async updateDialog() {},
     setReceiptSink() {},
     stampReceiptOnLastQueued() {},
     updateQueue() {},
@@ -509,7 +509,7 @@ test("compacting: PreCompact mark sets the banner, compact_boundary clears it", 
   const rs: any = {
     relaySessionId: "rs-c1",
     start() {}, stop() {}, send() {},
-    setThinking() {}, updateRetry() {}, async clearThinkingMeta() {}, async updateLogin() {}, setReceiptSink() {}, stampReceiptOnLastQueued() {}, updateQueue() {}, async updateBgTasks() {}, async updateContext() {}, updateGoal() {},
+    setThinking() {}, updateRetry() {}, async clearThinkingMeta() {}, async updateLogin() {}, async updateDialog() {}, setReceiptSink() {}, stampReceiptOnLastQueued() {}, updateQueue() {}, async updateBgTasks() {}, async updateContext() {}, updateGoal() {},
     updateCompacting(info: any) { compactingCalls.push(info); },
     notify() {},
   };
@@ -884,7 +884,7 @@ function mkSession(id: string) {
   const rs: any = {
     relaySessionId: `rs-${id}`,
     start() {}, stop() {}, send() {},
-    setThinking() {}, updateRetry() {}, async clearThinkingMeta() {}, async updateLogin() {},
+    setThinking() {}, updateRetry() {}, async clearThinkingMeta() {}, async updateLogin() {}, async updateDialog() {},
     setReceiptSink() {}, stampReceiptOnLastQueued() {},
     updateQueue() {}, async updateBgTasks() {}, async updateContext() {}, updateCompacting() {}, updateGoal() {}, notify() {},
   };
@@ -908,4 +908,91 @@ test("enqueue with requireDurable throws when the spool write fails — cursor m
   // a failing write returns false (queueStore), and enqueue() maps false to a
   // throw + unstage (verified by code path below with a poisoned baseDir).
   expect(saveQueue("x", [{ id: "a", text: "t", createdAt: 1, source: "relay", mirrorToRelay: false, visible: false }], "/dev/null/impossible")).toBe(false);
+});
+
+// ── dialogFromPane — live captures, claude 2.1.198 (2026-07-20) ──────────────
+// The three known interactive dialogs REPLACE the input box: no ready prompt,
+// no "esc to interrupt", no transcript echo until resolved. All matched on the
+// ▔-run top border + (numbered options OR a confirm/cancel footer).
+
+const DIALOG_MODEL_PICKER = [
+  "✻ Cogitated for 1s",
+  "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+  "   Select model",
+  "   Switch between Claude models. Your pick becomes the default for new sessions.",
+  "     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks",
+  "     2. Opus                   Opus 4.8 with 1M context · Best for everyday, complex tasks",
+  "     3. Fable                  Fable 5 · Most capable for your hardest and longest-running tasks",
+  "     4. Sonnet                 Sonnet 5 · Efficient for routine tasks",
+  "   ❯ 5. Haiku ✔                Haiku 4.5 · Fastest for quick answers",
+  "   ○ Effort not supported for Haiku",
+  "   Use /fast to turn on Fast mode (Opus 4.8).",
+  "   Enter to set as default · s to use this session only · Esc to cancel",
+].join("\n");
+
+const DIALOG_SWITCH_CONFIRM = [
+  "❯ /model",
+  "  ⎿  Kept model as Haiku 4.5",
+  "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+  "   Switch model?",
+  "   Your next response will be slower and use more tokens",
+  "   This conversation is cached for the current model. Switching to Opus 4.8 means the full history gets re-read.",
+  "   ❯ 1. Yes, switch to Opus 4.8",
+  "     2. No, go back",
+].join("\n");
+
+const DIALOG_EFFORT_SLIDER = [
+  "❯ /model opus",
+  "  ⎿  Kept model as Haiku 4.5",
+  "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+  "   Effort",
+  "                                       Faster                             Smarter",
+  "                                       low     medium     high     xhigh      max",
+  "   ←/→ to adjust · Enter to confirm · Esc to cancel",
+].join("\n");
+
+const PANE_READY_IDLE = [
+  "● ok",
+  "────────────────────────────────────────",
+  "❯ ",
+  "────────────────────────────────────────",
+  "  ? for shortcuts · ← for agents",
+].join("\n");
+
+test("dialogFromPane: model picker — title + numbered options", () => {
+  const d = dialogFromPane(DIALOG_MODEL_PICKER);
+  expect(d).not.toBeNull();
+  expect(d!.title).toBe("Select model");
+  expect(d!.options.length).toBe(5);
+  expect(d!.options[4]).toContain("Haiku");
+  expect(d!.options[4].startsWith("❯")).toBe(false); // selection marker stripped
+});
+
+test("dialogFromPane: switch-model confirm — footerless, options carry it", () => {
+  const d = dialogFromPane(DIALOG_SWITCH_CONFIRM);
+  expect(d).not.toBeNull();
+  expect(d!.title).toBe("Switch model?");
+  expect(d!.options).toEqual(["1. Yes, switch to Opus 4.8", "2. No, go back"]);
+});
+
+test("dialogFromPane: /effort slider — no numbered options, footer carries it", () => {
+  const d = dialogFromPane(DIALOG_EFFORT_SLIDER);
+  expect(d).not.toBeNull();
+  expect(d!.title).toBe("Effort");
+  expect(d!.options).toEqual([]);
+});
+
+test("dialogFromPane: null on the ready prompt and generating panes", () => {
+  expect(dialogFromPane(PANE_READY_IDLE)).toBeNull();
+  expect(dialogFromPane("✻ Pondering… (esc to interrupt)")).toBeNull();
+  // A ▔-run alone in scrolled content (no options, no footer) is not a dialog.
+  expect(dialogFromPane("some output\n▔▔▔▔▔▔▔▔▔▔▔▔\nplain text below")).toBeNull();
+});
+
+test("dialogFromPane: no existing pane matcher claims the dialogs (regression guard)", () => {
+  for (const pane of [DIALOG_MODEL_PICKER, DIALOG_SWITCH_CONFIRM, DIALOG_EFFORT_SLIDER]) {
+    expect(paneShowsReadyPrompt(pane)).toBe(false);
+    expect(paneShowsGenerating(pane)).toBe(false);
+    expect(paneInputText(pane)).toBeNull();
+  }
 });
