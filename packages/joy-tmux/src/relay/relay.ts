@@ -1124,8 +1124,19 @@ export class RelaySession {
     await this.mergeMetadata({ joy__login: info });
   }
 
+  /** Convergent by design: callers assert the desired value every pane poll,
+   *  and this dedupes against server-ACKED metadata (doMergeMetadata only
+   *  advances this.metadata on ack) — so a failed set/clear retries on the
+   *  next poll instead of being silently lost. `since` is excluded from the
+   *  comparison (same dialog, same banner). */
   async updateDialog(info: JoyDialogInfo | null): Promise<void> {
-    if (info == null && this.metadata?.joy__dialog == null) return;
+    const cur = this.metadata?.joy__dialog as JoyDialogInfo | null | undefined;
+    if (info == null) {
+      if (cur == null) return;
+      await this.mergeMetadata({ joy__dialog: null });
+      return;
+    }
+    if (cur && cur.title === info.title && JSON.stringify(cur.options) === JSON.stringify(info.options)) return;
     await this.mergeMetadata({ joy__dialog: info });
   }
 

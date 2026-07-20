@@ -540,6 +540,9 @@ export class Session {
   #dialog: JoyDialogInfo | null = null;
   #dialogKey: string | null = null;
   #dialogPendingKey: string | null = null;
+  // Consecutive #pollEnd passes where ONLY a pane dialog vouched for liveness
+  // (no live pid, no running markers) — bounded grace, see #pollEnd.
+  #dialogLivenessPasses = 0;
   // The (retrying) archive POST fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -751,6 +754,10 @@ export class Session {
     if (this.status === "ended" || this.status === "active") return; // already resolved
     const pane = tmux.captureCached(this.tmuxWindow);
     if (pane.ok && paneShowsClaudeRunning(pane.out)) return; // Claude is visibly up
+    // An open dialog hides all "running" markers but IS a live claude — e.g. a
+    // /model dispatched into a still-starting session (no transcript exists
+    // until the dialog resolves, so status stays 'starting' past the deadline).
+    if (pane.ok && dialogFromPane(pane.out) != null) return;
     if (attempts >= STARTUP_DEADLINE_ATTEMPTS) {
       process.stderr.write(`[startup] ${this.id}: claude never came up within deadline → detached\n`);
       this.end("process_exited");
@@ -950,6 +957,12 @@ export class Session {
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#clearCompacting(); // every end path — a kill mid-compaction leaked the 10-min backstop timer
+    // Clear the dialog banner on BOTH end paths while the relay is still
+    // attached: #pollThinking stops at status==='ended', so a teardown racing
+    // the 3s reconcile (e.g. process_exited right after the dialog resolved)
+    // would otherwise pin ACTION NEEDED on a detached session forever.
+    if (this.#dialog) { this.#dialog = null; this.#dialogKey = null; }
+    void this.#relay?.updateDialog(null);
     this.#clearSubmitTimer();
     this.#cancelSteerSubmit();
     this.#queue = [];
@@ -1591,15 +1604,32 @@ export class Session {
       return;
     }
     // The command opened an interactive DIALOG (model picker / switch confirm /
-    // effort slider): it DID land — the CLI is waiting on a human, and the echo
-    // (local_command entry) arrives when the dialog resolves. Hold the window
-    // open without consuming extends and WITHOUT a cap: each re-check requires
-    // the dialog to still be on screen, and #reconcileDialog has already told
-    // the app to go answer it. Failing here would requeue + pause and then
-    // RE-TYPE the command on resume — double-executing it.
+    // effort slider): the CLI is waiting on a human. For a SLASH COMMAND this
+    // is delivery CONFIRMATION — the command executed far enough to open its
+    // dialog, and an Esc-close may produce NO echo at all, so holding the
+    // window would eventually requeue an already-consumed command and resume
+    // would re-type it (double execution; gpt-5.6-sol review finding 1).
+    // Confirm and move on: the drain gate's ready-prompt check holds any
+    // queued messages until the dialog resolves, and #reconcileDialog kicks
+    // the drain when it clears.
     if (pane.ok && dialogFromPane(pane.out) != null) {
-      this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
-      return;
+      if (inflight.text.trimStart().startsWith("/")) {
+        this.#dispatchExtends = 0;
+        this.#dispatchInFlight = null;
+        this.#clearSubmitTimer();
+        this.#broadcastQueue();
+        return;
+      }
+      // A PLAIN message cannot open a dialog — this one is blocked by a dialog
+      // someone opened in the terminal. Auto-confirming would risk silent
+      // message LOSS (the text may be sitting in the hidden input box), so
+      // hold instead — but BOUNDED, unlike the slash case: a matcher false
+      // positive must not pin a lost dispatch forever.
+      if (this.#dispatchExtends < MAX_DISPATCH_EXTENDS * 3) {
+        this.#dispatchExtends += 1;
+        this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
+        return;
+      }
     }
     // No turn started in time and Claude isn't visibly working → the message
     // didn't land. Re-queue the WHOLE item at the head (so its seq/source/mirror/
@@ -2431,19 +2461,29 @@ export class Session {
       const fresh = this.#resolvePidFromPane();
       if (fresh !== undefined) {
         this.pid = fresh;
+        this.#dialogLivenessPasses = 0; // real process evidence resets the grace
       } else {
         const pane = tmux.captureCached(this.tmuxWindow);
         // An open dialog hides every "claude is running" marker (verified live:
         // model picker/confirm/effort all read running=false) — but a dialog on
         // screen IS a live claude. Without this, a stale pid + open dialog
-        // would tear the session down as process_exited.
-        if (!(pane.ok && (paneShowsClaudeRunning(pane.out) || dialogFromPane(pane.out) != null))) {
+        // would tear the session down as process_exited. BOUNDED grace though:
+        // pane TEXT is not process evidence — a dead claude can leave dialog
+        // content on screen (frozen pane, dialog above the returned shell
+        // prompt), so after ~1 min of dialog-only liveness we require real
+        // markers again and tear down (gpt-5.6-sol review finding 4).
+        const dialogAlive = pane.ok && dialogFromPane(pane.out) != null && this.#dialogLivenessPasses < 12;
+        if (dialogAlive) this.#dialogLivenessPasses += 1;
+        if (!(pane.ok && paneShowsClaudeRunning(pane.out)) && !dialogAlive) {
           this.end("process_exited");
           return;
         }
+        if (pane.ok && paneShowsClaudeRunning(pane.out)) this.#dialogLivenessPasses = 0;
         // The pane still shows Claude (pid unresolvable right now — e.g. mid
         // re-exec). Keep watching; the next tick re-resolves.
       }
+    } else {
+      this.#dialogLivenessPasses = 0; // pid alive — dialog grace not in use
     }
     setTimeout(() => this.#pollEnd(), 5000);
   }
@@ -2806,8 +2846,17 @@ export class Session {
       this.#dialogPendingKey = null;
       if (this.#dialog) {
         this.#dialog = null;
-        void this.#relay?.updateDialog(null);
+        this.#dialogKey = null;
+        // Dialog resolved → the ready prompt is (about to be) back. Kick the
+        // drain so anything queued behind the dialog goes out promptly instead
+        // of waiting for the next natural trigger.
+        this.#maybeDrainQueue();
       }
+      // Assert the clear EVERY poll, not just on the transition: updateDialog
+      // dedupes against server-ACKED metadata, so a clear whose write failed
+      // retries next poll instead of being lost (finding 6 — the old
+      // transition-only clear was fire-and-forget).
+      void this.#relay?.updateDialog(null);
       return;
     }
     const key = `${dialog.title ?? ""} ${dialog.options.join(" ")}`;
@@ -2815,10 +2864,12 @@ export class Session {
       this.#dialogPendingKey = key; // first sighting — confirm next poll
       return;
     }
-    if (this.#dialog && this.#dialogKey === key) return; // no change
     this.#dialogPendingKey = null;
-    this.#dialogKey = key;
-    this.#dialog = { title: dialog.title, options: dialog.options, since: this.#dialog?.since ?? Date.now() };
+    if (!this.#dialog || this.#dialogKey !== key) {
+      this.#dialog = { title: dialog.title, options: dialog.options, since: Date.now() };
+      this.#dialogKey = key;
+    }
+    // Same convergence contract as the clear: assert every poll, dedupe on ack.
     void this.#relay?.updateDialog(this.#dialog);
   }
 
@@ -3499,6 +3550,12 @@ const DIALOG_OPTION_RE = /^\s*(?:❯\s*)?\d+\.\s+\S/;
 const DIALOG_FOOTER_RE = /Esc to cancel|Enter to confirm/i;
 export interface PaneDialog { title: string | null; options: string[] }
 export function dialogFromPane(text: string): PaneDialog | null {
+  // A REAL dialog replaces the input box — it cannot coexist with a live ready
+  // prompt or a generating footer. Without this, dialog-shaped content QUOTED
+  // in conversation output (scrollback above the box) matched and could pin a
+  // false ACTION NEEDED banner, hold a lost dispatch forever, and count as
+  // liveness (gpt-5.6-sol review finding 2, reproduced).
+  if (paneShowsReadyPrompt(text) || paneShowsGenerating(text)) return null;
   const lines = text.split("\n");
   let rule = -1;
   for (let i = lines.length - 1; i >= 0; i--) {

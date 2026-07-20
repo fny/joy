@@ -996,3 +996,22 @@ test("dialogFromPane: no existing pane matcher claims the dialogs (regression gu
     expect(paneInputText(pane)).toBeNull();
   }
 });
+
+test("dialogFromPane: QUOTED dialog in scrollback above a live ready prompt is NOT a dialog", () => {
+  // Reproduced by the gpt-5.6-sol review (finding 2): agent output quoting a
+  // dialog, with the real input box alive below it. A real dialog REPLACES the
+  // box, so a live ready prompt disproves the dialog.
+  const pane = [
+    "▔▔▔▔▔▔▔▔▔▔▔▔",
+    "Select model",
+    "1. Opus",
+    "────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────",
+    "  ? for shortcuts · ← for agents",
+  ].join("\n");
+  expect(dialogFromPane(pane)).toBeNull();
+  // Same content while claude is generating below it — also not a dialog.
+  const generating = pane.replace("❯ ", "❯ ") + "\n✻ Pondering… (esc to interrupt)";
+  expect(dialogFromPane(generating)).toBeNull();
+});
