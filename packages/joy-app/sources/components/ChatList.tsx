@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { useSession, useSessionMessages, useSetting } from "@/sync/storage";
 import { sync } from '@/sync/sync';
-import { ActivityIndicator, AppState, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
+import { ActivityIndicator, AppState, InteractionManager, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useCallback } from 'react';
 import { useHeaderHeight } from '@/utils/responsive';
@@ -19,21 +20,55 @@ import { Modal } from '@/modal';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 
 const SCROLL_THRESHOLD = 300;
+// "Live" (pinned to the newest message) is a SEPARATE, much tighter band than
+// the 300px scroll-button threshold: someone 250px up is reading, and their
+// position must not be discarded as "basically at the bottom".
+const LIVE_THRESHOLD = 48;
 
-// Last scroll position per session, surviving unmounts. Navigating away
-// (sessions list, tmux pane on some layouts) remounts ChatList, and
-// startRenderingFromBottom repainted at the newest message — reading position
-// lost. Restored on the list's first onLoad; a position near the bottom is NOT
-// restored (bottom is already the default and where streaming keeps you).
-// Module-level and capped: a handful of entries, ~16 bytes each.
-const savedScroll = new Map<string, { offset: number; nearBottom: boolean; newestId: string | null }>();
+// Saved viewport per session, surviving unmounts AND screen retention (the
+// terminal-pane push keeps this screen mounted — only navigation focus moves).
+// Semantic snapshot, committed ONLY on blur/background/unmount — never from
+// onScroll, whose stream includes FlashList's own multi-pass initial
+// positioning and programmatic corrections (writing those corrupted the
+// snapshot: a user who never scrolled acquired a garbage offset).
+// `reading` restores by ANCHOR ROW + intra-row offset, not pixels: a raw
+// offset lands wherever the fresh mount's height ESTIMATES say it is, and the
+// cumulative estimate error across hundreds of variable-height rows is
+// exactly the reported "messages jump up a lot" (codex gpt-5.6-sol root-cause
+// review, 2026-07-20). newestMessageId is the raw newest message id (not a
+// display-row id — new tool messages get absorbed into existing group rows).
+type SavedViewport =
+    | { mode: 'live'; newestMessageId: string | null }
+    | {
+        mode: 'reading';
+        anchorDisplayId: string;
+        anchorMessageId: string | null;
+        intraItemOffset: number;
+        newestMessageId: string | null;
+    };
+const savedViewport = new Map<string, SavedViewport>();
 const SAVED_SCROLL_MAX = 30;
-function rememberScroll(sessionId: string, offset: number, nearBottom: boolean, newestId: string | null) {
-    if (!savedScroll.has(sessionId) && savedScroll.size >= SAVED_SCROLL_MAX) {
-        const oldest = savedScroll.keys().next().value;
-        if (oldest !== undefined) savedScroll.delete(oldest);
+function rememberViewport(sessionId: string, snapshot: SavedViewport) {
+    if (!savedViewport.has(sessionId) && savedViewport.size >= SAVED_SCROLL_MAX) {
+        const oldest = savedViewport.keys().next().value;
+        if (oldest !== undefined) savedViewport.delete(oldest);
     }
-    savedScroll.set(sessionId, { offset, nearBottom, newestId });
+    savedViewport.set(sessionId, snapshot);
+}
+
+/** Canonical (oldest) underlying message of a display row — the regroup-proof
+ *  anchor fallback. tool-group messages are chronological (oldest first);
+ *  agent-work-group messages are NEWEST-first, so its oldest is `.at(-1)`. */
+function anchorMessageIdFor(row: DisplayItem): string | null {
+    if (row.type === 'message') return row.message.id;
+    if (row.type === 'tool-group') return row.messages[0]?.id ?? null;
+    if (row.type === 'agent-work-group') return row.messages[row.messages.length - 1]?.id ?? null;
+    return null;
+}
+
+function rowContainsMessage(row: DisplayItem, messageId: string): boolean {
+    if (row.type === 'message') return row.message.id === messageId;
+    return row.messages.some((m) => m.id === messageId);
 }
 
 // Count a row as "visible" as soon as any sliver of it is in view, so the
@@ -157,6 +192,15 @@ const ChatListInternal = React.memo((props: {
     }, [displayItems]);
     const promptIndicesRef = React.useRef<number[]>(promptIndices);
     promptIndicesRef.current = promptIndices;
+    // FlashList indexes into orderedItems (oldest→newest) — every save/restore
+    // index lookup MUST use this ref, not displayItemsRef (newest→oldest):
+    // indexing the wrong array anchors to the mirrored end of the conversation.
+    const orderedItemsRef = React.useRef(orderedItems);
+    orderedItemsRef.current = orderedItems;
+    // Whether the user is pinned within LIVE_THRESHOLD of the end. Starts true:
+    // a blur before the first scroll event must not manufacture a 'reading'
+    // snapshot out of default-initialized refs.
+    const nearBottomRef = React.useRef(true);
 
     // Tracks which groups are explicitly collapsed. Groups start collapsed;
     // pending approval groups are the only ones we auto-expand.
@@ -224,7 +268,11 @@ const ChatListInternal = React.memo((props: {
     const displayItemsRef = React.useRef(displayItems);
     displayItemsRef.current = displayItems;
 
-    // Auto-collapse completed groups when app goes to background / tab hidden
+    // Auto-collapse completed groups when app goes to background / tab hidden.
+    // (Viewport capture on background lives in the focus-scoped AppState
+    // listener below — registered AFTER this one, so on the background event it
+    // still reads pre-collapse layout: both listeners run in the same task,
+    // the collapse setState renders only afterwards.)
     React.useEffect(() => {
         const sub = AppState.addEventListener('change', (state) => {
             if (state !== 'active') {
@@ -343,8 +391,10 @@ const ChatListInternal = React.memo((props: {
     const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
         const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
         const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+        // Refs only — the snapshot is committed at lifecycle boundaries, never
+        // from the scroll stream (see SavedViewport).
+        nearBottomRef.current = distanceFromBottom <= LIVE_THRESHOLD;
         const next = distanceFromBottom > SCROLL_THRESHOLD;
-        rememberScroll(sessionId, contentOffset.y, !next, newestIdRef.current);
         if (next !== showScrollButtonRef.current) {
             showScrollButtonRef.current = next;
             setShowScrollButton(next);
@@ -357,21 +407,181 @@ const ChatListInternal = React.memo((props: {
         }
     }, [sessionId]);
 
-    // Restore the pre-navigation position on the list's first paint. onLoad
-    // fires once, after FlashList has laid out the initial window — early enough
-    // that the bottom-pinned first frame barely shows.
+    // ── Viewport save/restore ─────────────────────────────────────────────
+    // Commit points: navigation blur (terminal-pane push RETAINS this screen —
+    // no unmount, no AppState change), app background, and unmount as a
+    // fallback. Restore points: first onLoad (remount) and refocus of a
+    // retained screen (onLoad never re-fires there).
+
+    // True while restoreViewport's staged scrollToIndex is running. A blur
+    // mid-restore must NOT snapshot the intermediate scroll position —
+    // FlashList can't cancel a started scroll, so the pre-restore snapshot
+    // (exactly what was being restored) stays the best record.
+    const restoreInFlightRef = React.useRef(false);
+    const captureViewport = useCallback(() => {
+        if (restoreInFlightRef.current) return;
+        const newestMessageId = newestIdRef.current;
+        if (nearBottomRef.current) {
+            rememberViewport(sessionId, { mode: 'live', newestMessageId });
+            return;
+        }
+        const list = flatListRef.current;
+        const items = orderedItemsRef.current;
+        const index = list?.getFirstVisibleIndex() ?? -1;
+        if (!list || index < 0 || index >= items.length) {
+            // Can't resolve an anchor — drop the entry rather than keep a stale
+            // one that would restore an OLD position later. Default = bottom.
+            savedViewport.delete(sessionId);
+            return;
+        }
+        const row = items[index];
+        // Intra-row offset in the row's own coordinates. layout.y excludes the
+        // ListHeaderComponent while the absolute offset includes it — subtract
+        // getFirstItemOffset() or every snapshot is off by the header height.
+        // NEGATIVE is legitimate near the very top (part of the header spacer
+        // visible above the first row) — zeroing it would shift the restore up
+        // by the visible header gap.
+        let intra = 0;
+        const layout = list.getLayout(index);
+        if (layout) {
+            intra = list.getAbsoluteLastScrollOffset() - list.getFirstItemOffset() - layout.y;
+            if (!Number.isFinite(intra)) intra = 0;
+        }
+        rememberViewport(sessionId, {
+            mode: 'reading',
+            anchorDisplayId: row.id,
+            anchorMessageId: anchorMessageIdFor(row),
+            intraItemOffset: intra,
+            newestMessageId,
+        });
+    }, [sessionId]);
+
+    // Guards a restore across its awaits: any newer capture/restore cycle
+    // (refocus, remount) invalidates in-flight completions so a late async
+    // scroll can't yank a viewport the user has since taken over.
+    const restoreGenRef = React.useRef(0);
+    const restoreViewport = useCallback(async (opts: { retained: boolean }) => {
+        const gen = ++restoreGenRef.current;
+        const list = flatListRef.current;
+        if (!list) return;
+        const saved = savedViewport.get(sessionId);
+        if (!saved) return;
+        if (saved.mode === 'live') {
+            // Fresh mounts already start at the bottom; a retained screen may
+            // have drifted while hidden (rows grew, groups regrouped) — assert.
+            if (opts.retained) list.scrollToEnd({ animated: false });
+            return;
+        }
+        if (saved.newestMessageId !== newestIdRef.current) {
+            // New content arrived while away → product rule: go to the bottom.
+            savedViewport.delete(sessionId);
+            if (opts.retained) list.scrollToEnd({ animated: false });
+            return;
+        }
+        const items = orderedItemsRef.current;
+        let index = items.findIndex((i) => i.id === saved.anchorDisplayId);
+        let intra = saved.intraItemOffset;
+        if (index < 0 && saved.anchorMessageId) {
+            // Regrouping swallowed the display row — land at the top of the row
+            // now containing the anchor message (the old intra offset is
+            // meaningless in a different row).
+            index = items.findIndex((i) => rowContainsMessage(i, saved.anchorMessageId!));
+            intra = 0;
+        }
+        if (index < 0) {
+            if (opts.retained) list.scrollToEnd({ animated: false });
+            return;
+        }
+        // A collapsed-while-away group is shorter than the saved offset into
+        // it — clamp so the restore can't land past the row. Only against a
+        // MEASURED height: on a remount the anchor usually starts as an
+        // estimate (often ~100px), and clamping a legitimate intra=500 against
+        // it would permanently truncate the restore before scrollToIndex ever
+        // measures the row.
+        const isMeasured = (l: ReturnType<typeof list.getLayout>) =>
+            Boolean(l && (l as { isHeightMeasured?: boolean }).isHeightMeasured);
+        const clampIntra = (l: NonNullable<ReturnType<typeof list.getLayout>>, v: number) =>
+            v > l.height - 1 ? Math.max(0, l.height - 1) : v;
+        const layout = list.getLayout(index);
+        if (layout && isMeasured(layout) && layout.height > 0) intra = clampIntra(layout, intra);
+        restoreInFlightRef.current = true;
+        try {
+            await list.scrollToIndex({ index, animated: false, viewPosition: 0, viewOffset: intra });
+            if (restoreGenRef.current !== gen) return;
+            // scrollToIndex staged its own re-measurement passes. At most one
+            // corrective call, for either: the data shifted under it (same id
+            // now at a new index), or the anchor's real measured height turned
+            // out shorter than the saved intra (collapsed-while-away group).
+            const itemsAfter = orderedItemsRef.current;
+            let idx2 = index;
+            if (itemsAfter[index]?.id !== saved.anchorDisplayId) {
+                idx2 = itemsAfter.findIndex((i) => i.id === saved.anchorDisplayId);
+            }
+            if (idx2 < 0) return;
+            const layoutAfter = list.getLayout(idx2);
+            const intra2 = layoutAfter && isMeasured(layoutAfter) && layoutAfter.height > 0
+                ? clampIntra(layoutAfter, intra)
+                : intra;
+            if (idx2 !== index || intra2 !== intra) {
+                await list.scrollToIndex({ index: idx2, animated: false, viewPosition: 0, viewOffset: intra2 });
+            }
+        } finally {
+            restoreInFlightRef.current = false;
+        }
+    }, [sessionId]);
+
+    // Remount path: onLoad fires once after the initial window is laid out.
     const restoredRef = React.useRef(false);
     const handleLoad = useCallback(() => {
         if (restoredRef.current) return;
         restoredRef.current = true;
-        const saved = savedScroll.get(sessionId);
-        // Restore only when NOTHING new arrived since the position was saved —
-        // otherwise stay at the bottom where the new messages are (restoring
-        // the old position would bury them above the fold).
-        if (saved && !saved.nearBottom && saved.newestId === newestIdRef.current) {
-            flatListRef.current?.scrollToOffset({ offset: saved.offset, animated: false });
-        }
-    }, [sessionId]);
+        void restoreViewport({ retained: false });
+    }, [restoreViewport]);
+
+    // Retained-screen path: capture on blur, restore on refocus. The first
+    // focus of a mount is skipped — onLoad owns that one (the list may not
+    // even have laid out yet). Restore waits for the navigation transition so
+    // it measures the settled viewport, and a blur cancels it via the token.
+    const blurredSinceMountRef = React.useRef(false);
+    useFocusEffect(
+        useCallback(() => {
+            let task = blurredSinceMountRef.current
+                ? InteractionManager.runAfterInteractions(() => { void restoreViewport({ retained: true }); })
+                : null;
+            // App background/foreground does NOT blur the route, so it's
+            // handled here — and ONLY while this chat is the focused route: a
+            // chat retained under the terminal must not overwrite the good
+            // blur snapshot with its detached geometry. Capture once per
+            // non-active cycle (iOS fires active→inactive→background; the
+            // second event would re-capture AFTER the group collapse rendered)
+            // and restore when the app returns to the foreground (the
+            // background collapse changed row geometry under the viewport).
+            let bgCaptured = false;
+            const sub = AppState.addEventListener('change', (state) => {
+                if (state !== 'active') {
+                    if (!bgCaptured) {
+                        bgCaptured = true;
+                        captureViewport();
+                    }
+                } else if (bgCaptured) {
+                    bgCaptured = false;
+                    task?.cancel();
+                    task = InteractionManager.runAfterInteractions(() => { void restoreViewport({ retained: true }); });
+                }
+            });
+            return () => {
+                sub.remove();
+                task?.cancel();
+                restoreGenRef.current++; // invalidate any in-flight restore
+                blurredSinceMountRef.current = true;
+                captureViewport();
+            };
+        }, [captureViewport, restoreViewport]),
+    );
+
+    // Unmount fallback (layout-effect cleanup runs before children detach, so
+    // the FlashList ref is still readable — a plain effect cleanup is not).
+    React.useLayoutEffect(() => () => { captureViewport(); }, [captureViewport]);
 
     const scrollToBottom = useCallback(() => {
         // Don't pin topVisibleIndex to MAX here: onViewableItemsChanged corrects
