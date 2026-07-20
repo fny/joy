@@ -1134,6 +1134,12 @@ export class RelaySession {
    *  backlog of redundant writes behind slow no-ack retries. */
   private desiredDialog: JoyDialogInfo | null = null;
   private dialogWriteBusy = false;
+  // A write completed WITHOUT an ack: the server may or may not hold it, so
+  // the local acked view can't be trusted for skipping — force-assert the
+  // desired value until a write acks (verify round 3: a set whose ack was
+  // lost, followed by desired→null, matched "already clear" locally and never
+  // sent the clear, stranding the banner server-side).
+  private dialogWriteUncertain = false;
   updateDialog(info: JoyDialogInfo | null): void {
     this.desiredDialog = info;
     if (this.dialogWriteBusy) return; // in-flight write re-checks desired on completion
@@ -1141,26 +1147,28 @@ export class RelaySession {
   }
 
   async #pumpDialog(): Promise<void> {
+    const eq = (a: JoyDialogInfo | null | undefined, b: JoyDialogInfo | null | undefined) =>
+      a == null ? b == null
+        : b != null && b.title === a.title && JSON.stringify(b.options) === JSON.stringify(a.options);
     this.dialogWriteBusy = true;
     try {
-      // Loop until acked state matches the (possibly re-updated) desired value.
-      // A failed/no-ack write leaves acked ≠ desired; break instead of spinning —
-      // the next 3s assertion re-enters the pump.
+      // Loop until an ACKED write matches the (possibly re-updated) desired
+      // value. A no-ack write sets the uncertain flag and breaks instead of
+      // spinning — the next 3s assertion re-enters the pump.
       for (;;) {
         const want = this.desiredDialog;
-        const cur = this.metadata?.joy__dialog as JoyDialogInfo | null | undefined;
-        const same = want == null
-          ? cur == null
-          : cur != null && cur.title === want.title && JSON.stringify(cur.options) === JSON.stringify(want.options);
-        if (same) return;
+        if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined) && !this.dialogWriteUncertain) return;
         await this.mergeMetadata({ joy__dialog: want });
-        const acked = this.metadata?.joy__dialog as JoyDialogInfo | null | undefined;
-        const landed = want == null
-          ? acked == null
-          : acked != null && acked.title === want.title;
-        if (!landed) return; // write didn't ack — next assertion retries
+        if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined)) {
+          this.dialogWriteUncertain = false; // acked — loop re-checks a moved desired
+        } else {
+          this.dialogWriteUncertain = true;
+          return;
+        }
       }
-    } catch { /* next assertion retries */ } finally {
+    } catch {
+      this.dialogWriteUncertain = true; // next assertion retries
+    } finally {
       this.dialogWriteBusy = false;
     }
   }
