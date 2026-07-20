@@ -1566,7 +1566,11 @@ export class Session {
     // Arm the echo-confirmation timeout: a successful dispatch produces a new turn.
     // If none appears, the message didn't land.
     this.#dispatchExtends = 0;
-    this.#dispatchSubmittedAt = Date.now();
+    // null until the delayed Enter ACTUALLY lands (#armSubmit): the dialog
+    // causal guard treats null as +Infinity, so a dialog first sighted before
+    // our submit — including one racing the type→Enter window — can never be
+    // credited to this dispatch (verify round 4).
+    this.#dispatchSubmittedAt = null;
     this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
   }
 
@@ -2343,6 +2347,7 @@ export class Session {
       // this only catches an externally-changed state.)
       const st: string = this.status; // re-read: it may have flipped to "ended" during the await
       if (st === "ended" || this.#turn || !target || this.#dispatchInFlight !== target) return;
+      this.#dispatchSubmittedAt = Date.now(); // Enter is out — dialogs after this are ours
       if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
       this.#setThinking(true);
       this.#thinkingLeaseUntil = Date.now() + Session.#THINKING_LEASE_MS; // trusted edge — pane can't clear
