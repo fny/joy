@@ -1124,20 +1124,45 @@ export class RelaySession {
     await this.mergeMetadata({ joy__login: info });
   }
 
-  /** Convergent by design: callers assert the desired value every pane poll,
-   *  and this dedupes against server-ACKED metadata (doMergeMetadata only
-   *  advances this.metadata on ack) — so a failed set/clear retries on the
-   *  next poll instead of being silently lost. `since` is excluded from the
-   *  comparison (same dialog, same banner). */
-  async updateDialog(info: JoyDialogInfo | null): Promise<void> {
-    const cur = this.metadata?.joy__dialog as JoyDialogInfo | null | undefined;
-    if (info == null) {
-      if (cur == null) return;
-      await this.mergeMetadata({ joy__dialog: null });
-      return;
+  /** Single-flight latest-desired-value reconciler. Callers assert the desired
+   *  dialog every pane poll; at most ONE metadata write is in flight, always
+   *  targeting the LATEST desired value, and the acked-state comparison runs
+   *  inside the loop (doMergeMetadata only advances this.metadata on ack).
+   *  This closes two races the naive dedupe-then-queue version had (verify
+   *  round): a clear skipped because a not-yet-acked SET made acked state look
+   *  clear (stranding the banner after end()), and 3s assertions queueing a
+   *  backlog of redundant writes behind slow no-ack retries. */
+  private desiredDialog: JoyDialogInfo | null = null;
+  private dialogWriteBusy = false;
+  updateDialog(info: JoyDialogInfo | null): void {
+    this.desiredDialog = info;
+    if (this.dialogWriteBusy) return; // in-flight write re-checks desired on completion
+    void this.#pumpDialog();
+  }
+
+  async #pumpDialog(): Promise<void> {
+    this.dialogWriteBusy = true;
+    try {
+      // Loop until acked state matches the (possibly re-updated) desired value.
+      // A failed/no-ack write leaves acked ≠ desired; break instead of spinning —
+      // the next 3s assertion re-enters the pump.
+      for (;;) {
+        const want = this.desiredDialog;
+        const cur = this.metadata?.joy__dialog as JoyDialogInfo | null | undefined;
+        const same = want == null
+          ? cur == null
+          : cur != null && cur.title === want.title && JSON.stringify(cur.options) === JSON.stringify(want.options);
+        if (same) return;
+        await this.mergeMetadata({ joy__dialog: want });
+        const acked = this.metadata?.joy__dialog as JoyDialogInfo | null | undefined;
+        const landed = want == null
+          ? acked == null
+          : acked != null && acked.title === want.title;
+        if (!landed) return; // write didn't ack — next assertion retries
+      }
+    } catch { /* next assertion retries */ } finally {
+      this.dialogWriteBusy = false;
     }
-    if (cur && cur.title === info.title && JSON.stringify(cur.options) === JSON.stringify(info.options)) return;
-    await this.mergeMetadata({ joy__dialog: info });
   }
 
   /**

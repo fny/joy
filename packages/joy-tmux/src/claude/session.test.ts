@@ -1015,3 +1015,23 @@ test("dialogFromPane: QUOTED dialog in scrollback above a live ready prompt is N
   const generating = pane.replace("❯ ", "❯ ") + "\n✻ Pondering… (esc to interrupt)";
   expect(dialogFromPane(generating)).toBeNull();
 });
+
+test("dialogFromPane: quoted ready-box ABOVE a real dialog does not un-match it", () => {
+  // Verify-round regression: the ready/generating disqualification must be
+  // scoped BELOW the dialog rule — a conversation quoting the input box in
+  // scrollback, with a real dialog open beneath, is still a dialog.
+  const pane = [
+    "● Here is what the prompt looks like:",
+    "────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────",
+    "  ? for shortcuts · ← for agents",
+    "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+    "   Switch model?",
+    "   ❯ 1. Yes, switch to Opus 4.8",
+    "     2. No, go back",
+  ].join("\n");
+  const d = dialogFromPane(pane);
+  expect(d).not.toBeNull();
+  expect(d!.title).toBe("Switch model?");
+});
