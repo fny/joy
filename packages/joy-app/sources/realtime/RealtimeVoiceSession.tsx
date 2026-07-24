@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { useConversation } from '@elevenlabs/react-native';
-import { registerVoiceSession } from './RealtimeSession';
+import { registerVoiceSession, notifyVoiceConnected, notifyVoiceUnexpectedDisconnect } from './RealtimeSession';
+import { recordVoiceMessage } from './voiceTranscript';
 import { storage } from '@/sync/storage';
 import { realtimeClientTools } from './realtimeClientTools';
 import { getElevenLabsCodeFromPreference } from '@/constants/Languages';
@@ -14,6 +15,9 @@ const VAD_THRESHOLD = 0.5;
 const VAD_SILENCE_MS = 300;
 let vadSilenceTimer: ReturnType<typeof setTimeout> | null = null;
 let agentIsSpeaking = false;
+// Tracks whether this session ever connected — read in onDisconnect instead of
+// the store status, because onError flips the status to 'disconnected' first.
+let sessionWasLive = false;
 
 // Global voice session implementation
 class RealtimeVoiceSessionImpl implements VoiceSession {
@@ -110,6 +114,8 @@ export const RealtimeVoiceSession: React.FC = () => {
         clientTools: realtimeClientTools,
         onConnect: (data) => {
             console.log('Realtime session connected:', data);
+            sessionWasLive = true;
+            notifyVoiceConnected();
             storage.getState().setRealtimeStatus('connected');
             storage.getState().setRealtimeMode('idle');
         },
@@ -118,16 +124,22 @@ export const RealtimeVoiceSession: React.FC = () => {
             // Bump generation only when an active session ends — skipping the
             // initial 'disconnected' state avoids remounting on cold launch
             // (which previously caused a phantom keyboard).
-            const prev = storage.getState().realtimeStatus;
             storage.getState().setRealtimeStatus('disconnected');
             storage.getState().setRealtimeMode('idle', true);
             storage.getState().clearRealtimeModeDebounce();
-            if (prev === 'connected' || prev === 'connecting') {
+            const wasLive = sessionWasLive;
+            sessionWasLive = false;
+            if (wasLive) {
+                // Remount for a clean SDK instance, then let the orchestrator
+                // decide whether to auto-reconnect (no-ops on intentional stop /
+                // exhausted budget).
                 storage.getState().incrementVoiceSessionGeneration();
+                notifyVoiceUnexpectedDisconnect();
             }
         },
         onMessage: (data) => {
             console.log('Realtime message:', data);
+            recordVoiceMessage(data);
         },
         onError: (error) => {
             // Log but don't block app - voice features will be unavailable
