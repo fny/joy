@@ -193,6 +193,22 @@ export const machineOps: MachineOp[] = [
     handler: (registry) => registry.list().map(s => s.toJSON()),
   },
   {
+    name: "codexModels",
+    scope: "machine",
+    rpcName: "joy-codex-models",
+    http: { method: "GET", path: "/codex/models" },
+    // The codex model catalog (model/list) via a short-lived app-server, for
+    // the app's codex model picker. Best-effort: returns [] if codex is absent.
+    handler: async () => {
+      try {
+        const { fetchCodexModels } = await import("../codex/appServerClient");
+        return { ok: true, models: await fetchCodexModels() };
+      } catch (e) {
+        return { ok: false, models: [], error: String(e) };
+      }
+    },
+  },
+  {
     name: "refreshCommands",
     scope: "machine",
     rpcName: "joy-refresh-commands",

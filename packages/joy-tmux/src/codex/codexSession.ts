@@ -71,6 +71,12 @@ export class CodexSession implements AgentSession {
   #resumeThreadId?: string;
   #developerInstructions?: string;
   #thinking = false;
+  // Model/effort overrides to apply on the NEXT turn only, then clear — codex
+  // persists a turn/start override "for this and subsequent turns", so sending
+  // once is enough and avoids clobbering a model the user later picks in the
+  // attached TUI (review #4). Seeded with the create-time effort.
+  #pendingModel: string | null = null;
+  #pendingEffort: string | null = null;
   #activeTurnId: string | null = null;
   #started = false;
   #archivePromise: Promise<boolean> | null = null;
@@ -92,6 +98,7 @@ export class CodexSession implements AgentSession {
     this.#deps = deps;
     this.#resumeThreadId = init.codexThreadId;
     this.#developerInstructions = init.developerInstructions;
+    this.#pendingEffort = init.effort ?? null; // applied on the first turn
     this.#socketPath = join(joyStateDir(), `codex-${init.id}.sock`);
     this.#norm = new CodexNormalizer();
   }
@@ -248,12 +255,16 @@ export class CodexSession implements AgentSession {
     const client = this.#client;
     if (!client || !this.#threadId) return; // not ready yet — drained after start
     try {
-      // Do NOT pass model/effort on every turn — that would overwrite a model
-      // the user picked in the attached TUI (review #4).
+      // Only send model/effort when there's a PENDING joy-side change — codex
+      // persists the override, so we don't resend it every turn (which would
+      // clobber a model the user picked in the attached TUI — review #4).
       await client.turnStart(this.#threadId, item.text, {
         clientUserMessageId: item.clientId,
         permissionMode: this.#permissionMode,
+        model: this.#pendingModel ?? undefined,
+        effort: this.#pendingEffort ?? undefined,
       });
+      this.#pendingModel = null; this.#pendingEffort = null; // applied (persists thread-side)
       if (item.state === "queued") { item.state = "sentUnknown"; saveCodexInbound(this.id, this.#inbound); }
     } catch (e) {
       process.stderr.write(`[codex ${this.id}] turn/start failed: ${e}\n`);

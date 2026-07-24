@@ -15,7 +15,9 @@
 // clientUserMessageId receipts) is in the stable app-server schema.
 
 import { spawn, type ChildProcess } from "child_process";
+import { join } from "path";
 import WebSocket from "ws";
+import { joyStateDir } from "../paths";
 import { resolveCodexExecutionPolicy, sandboxModeToPolicy } from "./executionPolicy";
 
 export interface AppServerSpawnOpts {
@@ -51,6 +53,37 @@ export interface TurnStartOpts {
   permissionMode?: string;
   model?: string;
   effort?: string;
+}
+
+export interface CodexModel {
+  id: string;
+  model: string;
+  displayName: string;
+  hidden: boolean;
+  isDefault: boolean;
+  supportedReasoningEfforts: string[];
+  defaultReasoningEffort: string | null;
+}
+
+/** Fetch the codex model catalog via a short-lived app-server connection —
+ *  for a machine-level picker before any session exists. */
+export async function fetchCodexModels(bin?: string): Promise<CodexModel[]> {
+  const socketPath = join(joyStateDir(), `codex-models-${process.pid}-${Date.now()}.sock`);
+  const proc = spawnCodexAppServer({ socketPath, bin });
+  proc.stderr?.on("data", () => {});
+  const client = new CodexAppServerClient();
+  try {
+    // wait for bind, then connect with a few retries
+    let connected = false;
+    for (let i = 0; i < 25 && !connected; i++) {
+      try { await client.connect(socketPath); connected = true; } catch { await new Promise((r) => setTimeout(r, 200)); }
+    }
+    if (!connected) throw new Error("model catalog: could not connect");
+    return (await client.modelList()).filter((m) => !m.hidden);
+  } finally {
+    try { client.close(); } catch { /* ignore */ }
+    try { proc.kill(); } catch { /* ignore */ }
+  }
 }
 
 type Notification = { method: string; params?: Record<string, unknown> };
@@ -226,6 +259,35 @@ export class CodexAppServerClient {
   /** turn/interrupt → stop the active turn. */
   async turnInterrupt(threadId: string, turnId: string): Promise<void> {
     await this.request("turn/interrupt", { threadId, turnId });
+  }
+
+  /** model/list → the model catalog (paged). Returns {id, model, displayName,
+   *  supportedReasoningEfforts, defaultReasoningEffort, isDefault}. */
+  async modelList(): Promise<CodexModel[]> {
+    const out: CodexModel[] = [];
+    let cursor: string | null | undefined = undefined;
+    for (let page = 0; page < 20; page++) {
+      const res = await this.request("model/list", { cursor: cursor ?? null }) as { data?: unknown[]; nextCursor?: string | null };
+      for (const m of (res.data ?? [])) {
+        const mm = m as Record<string, unknown>;
+        if (typeof mm.model === "string") {
+          out.push({
+            id: typeof mm.id === "string" ? mm.id : mm.model,
+            model: mm.model,
+            displayName: typeof mm.displayName === "string" ? mm.displayName : mm.model,
+            hidden: mm.hidden === true,
+            isDefault: mm.isDefault === true,
+            supportedReasoningEfforts: Array.isArray(mm.supportedReasoningEfforts)
+              ? mm.supportedReasoningEfforts.map((e) => String((e as Record<string, unknown>).reasoningEffort)).filter(Boolean)
+              : [],
+            defaultReasoningEffort: typeof mm.defaultReasoningEffort === "string" ? mm.defaultReasoningEffort : null,
+          });
+        }
+      }
+      cursor = res.nextCursor;
+      if (!cursor) break;
+    }
+    return out;
   }
 
   close(): void {
