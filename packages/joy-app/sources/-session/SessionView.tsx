@@ -678,6 +678,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         const busy = latest?.thinking === true
             && latest?.presence === 'online'
             && isFresh(latest);
+        // OFFLINE HOLD: with no network there's nothing to POST to, so hold the
+        // message in the SAME app-side queue as the busy-hold. draftQueueRelease
+        // won't drain the queue while the socket is down, and fires on reconnect
+        // — so an offline send queues (visibly, durably via MMKV) and retries
+        // automatically when the connection returns, exactly like a busy-hold.
+        const offline = storage.getState().socketStatus !== 'connected';
         // Only commands that actually EXECUTE mid-turn bypass the hold: the
         // CLI's immediate set (verified against the 2.1.198 binary — /model,
         // /compact, /clear are NOT in it; typed mid-turn they'd just sit in
@@ -685,7 +691,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // plus joy's daemon-intercepted commands, which exist for mid-turn use.
         const cmdMatch = /^\/([a-z-]+)/i.exec(liveMessage.trim());
         const isImmediateCommand = cmdMatch != null && IMMEDIATE_COMMANDS.has(cmdMatch[1].toLowerCase());
-        if (isJoyTmux && busy && !isImmediateCommand && !hasImages) {
+        if (isJoyTmux && (busy || offline) && !isImmediateCommand && !hasImages) {
             composerHandleRef.current?.clearMessage();
             useDraftQueueStore.getState().add(sessionId, liveMessage);
             return;
