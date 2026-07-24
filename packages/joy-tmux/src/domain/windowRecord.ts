@@ -34,6 +34,13 @@ export interface WindowRecord {
   /** Attachment refs staged (file rows cursor-confirmed) but not yet consumed
    *  by their text message — must survive a daemon crash (5.6-sol verify #4). */
   pendingAttachments?: { ref: string; name?: string }[];
+  /** Agent type — the discriminator recovery uses to reconstruct the right
+   *  session class (claude Session vs CodexSession). Absent = claude (legacy). */
+  agent?: "claude" | "codex";
+  /** Codex app-server thread id, for thread/resume on recovery. */
+  codexThreadId?: string;
+  /** Codex app-server unix socket path (per session). */
+  codexSocketPath?: string;
   updatedAt: number;
 }
 
@@ -58,7 +65,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[] },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex"; codexThreadId?: string; codexSocketPath?: string },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -70,6 +77,9 @@ export function saveWindowRecord(
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,
       pendingAttachments: patch.pendingAttachments ?? prev?.pendingAttachments,
+      agent: patch.agent ?? prev?.agent,
+      codexThreadId: patch.codexThreadId ?? prev?.codexThreadId,
+      codexSocketPath: patch.codexSocketPath ?? prev?.codexSocketPath,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet
