@@ -82,7 +82,9 @@ export class CodexAppServerClient {
     ws.on("close", () => { this.#failAllPending(new Error("app-server socket closed")); });
     const result = await this.request("initialize", {
       clientInfo: { name: "joy-tmux", title: "Joy", version: "0.1.0" },
-      capabilities: {},
+      // Explicit stable capabilities (review #9). We don't do attestation or
+      // OpenAI-form elicitation, and stay off the experimental API.
+      capabilities: { experimentalApi: false, requestAttestation: false, mcpServerOpenaiFormElicitation: false },
     }) as Record<string, unknown>;
     this.notify("initialized", {});
     return result;
@@ -121,7 +123,17 @@ export class CodexAppServerClient {
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
       if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) { reject(new Error("app-server not connected")); return; }
-      this.#pending.set(id, { resolve, reject });
+      // Timeout so a dead server / unresolved request can't leak a pending
+      // promise forever (review #9). turn/start can legitimately take a while
+      // (the whole agent turn), so give it a generous window.
+      const timeoutMs = method === "turn/start" || method === "turn/steer" ? 300_000 : 30_000;
+      const timer = setTimeout(() => {
+        if (this.#pending.delete(id)) reject(new Error(`app-server request '${method}' timed out`));
+      }, timeoutMs);
+      this.#pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
       this.#send({ jsonrpc: "2.0", id, method, params });
     });
   }
@@ -141,8 +153,9 @@ export class CodexAppServerClient {
 
   // ── Typed method wrappers ──────────────────────────────────────────────────
 
-  /** thread/start → { threadId, rolloutPath }. Uses `sandbox` (kebab string). */
-  async threadStart(opts: ThreadStartOpts): Promise<{ threadId: string; rolloutPath: string | null }> {
+  /** thread/start → { threadId, rolloutPath, model }. Uses `sandbox` (kebab
+   *  string). Returns the effective top-level model the thread resolved to. */
+  async threadStart(opts: ThreadStartOpts): Promise<{ threadId: string; rolloutPath: string | null; model: string | null }> {
     const policy = resolveCodexExecutionPolicy(opts.permissionMode);
     const params: Record<string, unknown> = {
       cwd: opts.cwd,
@@ -151,8 +164,10 @@ export class CodexAppServerClient {
     };
     if (opts.model) params.model = opts.model;
     if (opts.developerInstructions) params.developerInstructions = opts.developerInstructions;
-    const res = await this.request("thread/start", params) as { thread?: { id?: string; path?: string } };
-    return { threadId: res.thread?.id ?? "", rolloutPath: res.thread?.path ?? null };
+    const res = await this.request("thread/start", params) as { thread?: { id?: string; path?: string }; model?: string };
+    const threadId = res.thread?.id;
+    if (!threadId) throw new Error("thread/start returned no thread id");
+    return { threadId, rolloutPath: res.thread?.path ?? null, model: res.model ?? null };
   }
 
   /** thread/resume → reattach to an existing thread. */

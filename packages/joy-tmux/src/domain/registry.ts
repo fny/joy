@@ -562,6 +562,8 @@ export class SessionRegistry {
       permissionMode: opts.permissionMode ?? "yolo",
       status: "starting",
       startedAt: Date.now(),
+      // resume_id (a codex thread id) → thread/resume instead of thread/start.
+      codexThreadId: opts.resume_id,
     };
     const session = new CodexSession(init, this.#sessionDeps());
     this.#sessions.set(id, session);
@@ -590,6 +592,24 @@ export class SessionRegistry {
     if (!existing && !opts.cwd && !rec) throw new Error(`unknown session: ${opts.id}`);
 
     const cwd = existing?.cwd ?? rec?.launchCwd ?? opts.cwd!;
+
+    // Codex restart (review #5): restarting a codex session must NOT fall
+    // through to the claude create path. Rebuild a codex session resuming its
+    // thread. (A live `existing` codex session provides no claude id anyway.)
+    const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
+    if (isCodex) {
+      const codexThreadId = rec?.codexThreadId; // persisted thread for resume
+      if (existing) existing.forceKill();
+      return this.create({
+        agent: "codex",
+        id: existing ? undefined : opts.id,
+        cwd,
+        resume_id: codexThreadId,
+        model: existing?.model,
+        effort: existing?.effort,
+      });
+    }
+
     // Resume THIS session's specific conversation — its learned Claude id, or
     // failing that the exact transcript file it was tailing (basename = the
     // Claude session uuid). Crucially, do NOT fall back to `--continue` for a

@@ -5,7 +5,10 @@
 //   - turn/start takes `sandboxPolicy` = a tagged OBJECT.
 // Both are produced here.
 
-export type CodexApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+// The 0.144.6 AskForApproval union (verified against the generated schema —
+// gpt-5.6-sol review #7). NOTE: there is NO "on-failure" (that was invalid and
+// would be rejected). Object `granular` variant omitted — joy uses the strings.
+export type CodexApprovalPolicy = "untrusted" | "on-request" | "never";
 export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
 export interface CodexExecutionPolicy {
@@ -19,10 +22,10 @@ export interface CodexExecutionPolicy {
 export function resolveCodexExecutionPolicy(permissionMode: string | undefined): CodexExecutionPolicy {
   switch (permissionMode) {
     case "read-only": return { approvalPolicy: "never", sandbox: "read-only" };
-    case "safe-yolo": return { approvalPolicy: "on-failure", sandbox: "workspace-write" };
+    case "safe-yolo": return { approvalPolicy: "never", sandbox: "workspace-write" };
     case "acceptEdits": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
-    case "plan": return { approvalPolicy: "untrusted", sandbox: "workspace-write" };
-    case "default": return { approvalPolicy: "untrusted", sandbox: "workspace-write" };
+    case "plan": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    case "default": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
     case "yolo":
     case "bypassPermissions": return { approvalPolicy: "never", sandbox: "danger-full-access" };
     default: return { approvalPolicy: "never", sandbox: "danger-full-access" }; // yolo default
