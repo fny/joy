@@ -14,6 +14,8 @@ import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
 import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
+import type { AgentSession } from "./agentSession";
+import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
@@ -21,6 +23,9 @@ import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 
 export interface CreateSessionOpts {
   cwd: string;
+  /** Agent type. Absent/'claude' → the claude CLI path; 'codex' → the codex
+   *  app-server adapter (CodexSession). */
+  agent?: "claude" | "codex";
   /** Reuse a specific joy session id (and thus the same relay tag/card) instead
    *  of minting a fresh one — used when restarting a daemon-forgotten session so
    *  it reattaches to its existing app card rather than spawning a duplicate. */
@@ -97,7 +102,7 @@ export class SessionRegistry {
   /** Daemon boot time — exposed via the status op as uptime. */
   readonly startedAt = Date.now();
   #claudeInfo: { available: boolean; version: string | null } | null = null;
-  #sessions = new Map<string, Session>();
+  #sessions = new Map<string, AgentSession>();
   #sseListeners = new Set<(data: string) => void>();
   #messages: StoredChatMessage[] = [];
   #nextChatId = 1;
@@ -146,7 +151,7 @@ export class SessionRegistry {
 
   // ── Lookup ──────────────────────────────────────────────────────────────────
 
-  get(id: string): Session | undefined {
+  get(id: string): AgentSession | undefined {
     return this.#sessions.get(id);
   }
 
@@ -155,11 +160,11 @@ export class SessionRegistry {
   // else the machine page's "Active Sessions" inflates with every kill until the
   // next daemon restart. Detached (process_exited) sessions remain listed — their
   // window/cwd is still around and their file/git RPCs still answer.
-  #isKilled(s: Session): boolean {
+  #isKilled(s: AgentSession): boolean {
     return s.status === "ended" && s.endReason === "killed";
   }
 
-  list(): Session[] {
+  list(): AgentSession[] {
     return [...this.#sessions.values()].filter(s => !this.#isKilled(s));
   }
 
@@ -217,7 +222,7 @@ export class SessionRegistry {
 
   // ── Create ──────────────────────────────────────────────────────────────────
 
-  async create(opts: CreateSessionOpts): Promise<Session> {
+  async create(opts: CreateSessionOpts): Promise<AgentSession> {
     const id = opts.id ?? crypto.randomUUID().replace(/-/g, "").slice(0, 8);
     const windowName = `j-${id}`;
 
@@ -234,7 +239,7 @@ export class SessionRegistry {
     const target = resolve(cwd);
     // Identity of a session, resolved the way restart() does: its learned Claude id,
     // else the basename of the transcript it's tailing (= the Claude session uuid).
-    const sessionIdentity = (s: Session): string | undefined =>
+    const sessionIdentity = (s: AgentSession): string | undefined =>
       s.claudeSessionId ?? (s.transcriptPath ? basename(s.transcriptPath, ".jsonl") : undefined);
     const inCwd = [...this.#sessions.values()].filter((s) => resolve(s.cwd) === target);
     const liveInCwd = inCwd.find((s) => s.status === "active" || s.status === "starting");
@@ -286,6 +291,13 @@ export class SessionRegistry {
       // connector — app or terminal — owns the width. Filtered so the daemon's own
       // control-mode client does NOT count as an attach that resizes.
       tmux.runSync("set-hook", "-t", this.tmuxSession, "client-attached", CLIENT_ATTACHED_HOOK);
+    }
+
+    // ── Codex path: a separate, minimal flow (app-server drive + attached TUI)
+    // that shares the window bootstrap above but NONE of claude's flag/transcript
+    // machinery. Kept isolated so the claude create path is untouched.
+    if (opts.agent === "codex") {
+      return await this.#createCodexSession(opts, id, windowName, cwd);
     }
 
     // Validate user-supplied fields to prevent shell injection via send-keys
@@ -524,7 +536,52 @@ export class SessionRegistry {
    * still has the path in relay metadata, and --continue in that cwd picks
    * up the most recent conversation there.
    */
-  async restart(opts: { id: string; cwd?: string }): Promise<Session> {
+  /** Codex session creation: window + shell + CodexSession (which owns the
+   *  app-server) + relay. Directory existence is validated by the shared create()
+   *  before this is reached; here we only build the window and the session. */
+  async #createCodexSession(opts: CreateSessionOpts, id: string, windowName: string, cwd: string): Promise<AgentSession> {
+    if (!existsSync(cwd)) {
+      if (opts.createDir) mkdirSync(cwd, { recursive: true });
+      else throw new DirectoryCreationApprovalRequired(cwd);
+    }
+    const tmuxWindow = `${this.tmuxSession}:${windowName}`;
+    const abortCreate = (why: string): never => {
+      void tmux.command(["kill-window", "-t", tmuxWindow]);
+      throw new Error(`codex session create failed: ${why}`);
+    };
+    if (!(await tmux.commandOnce(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd])).ok) abortCreate("new-window");
+    await tmux.command(["resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40"]);
+    const shell = process.env.SHELL || "/bin/bash";
+    if (!(await tmux.literal(tmuxWindow, `exec ${shell} -l`)).ok) abortCreate("exec-shell");
+    if (!(await tmux.key(tmuxWindow, "Enter")).ok) abortCreate("exec-shell-enter");
+
+    const init: CodexInit = {
+      id, tmuxWindow, cwd,
+      model: opts.model,
+      effort: opts.effort,
+      permissionMode: opts.permissionMode ?? "yolo",
+      status: "starting",
+      startedAt: Date.now(),
+    };
+    const session = new CodexSession(init, this.#sessionDeps());
+    this.#sessions.set(id, session);
+    saveWindowRecord(id, { launchCwd: cwd, agent: "codex" });
+    this.broadcast("session_update", session.toJSON());
+
+    if (this.relayClient) {
+      try {
+        const rs = await createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id });
+        session.attachRelay(rs);
+      } catch (e) {
+        process.stderr.write(`[relay] failed to create codex session for ${id}: ${e}\n`);
+      }
+    }
+    // beginWatching spawns the app-server + connects + thread/start (after relay).
+    session.beginWatching();
+    return session;
+  }
+
+  async restart(opts: { id: string; cwd?: string }): Promise<AgentSession> {
     const existing = this.get(opts.id);
     // A daemon-forgotten session (window already gone after a daemon restart) has
     // no Session object — fall back to its persisted record so we can resume the
@@ -608,6 +665,23 @@ export class SessionRegistry {
       }
 
       const isAlive = pid !== undefined && run("kill", "-0", String(pid)).ok;
+
+      // ── Codex recovery: reconstruct a CodexSession that respawns its own
+      // app-server (the old one died with the daemon) and thread/resumes.
+      if (rec?.agent === "codex") {
+        const session = new CodexSession({
+          id, tmuxWindow, cwd,
+          permissionMode: "yolo",
+          status: isAlive ? "active" : "ended",
+          startedAt: Date.now(),
+          codexThreadId: rec.codexThreadId,
+        }, this.#sessionDeps());
+        this.#sessions.set(id, session);
+        this.#attachRelayAsync(session, isAlive ? () => session.beginWatching() : undefined);
+        process.stderr.write(`[recover] codex ${id} cwd=${cwd} alive=${isAlive} thread=${rec.codexThreadId}\n`);
+        continue;
+      }
+
       // Prefer the persisted claudeSessionId — binding by newest-mtime transcript
       // adopts an unrelated conversation when this window's transcript isn't the
       // newest in the dir (detached window, or another claude/codex run touched
@@ -692,7 +766,7 @@ export class SessionRegistry {
   // afterAttach runs once the relay is attached (or immediately if there's no
   // relay / attach fails) — recovery uses it to start the transcript tailer only
   // AFTER the relay is live, so the replay-from-0 backfill has somewhere to go.
-  #attachRelayAsync(session: Session, afterAttach?: () => void): void {
+  #attachRelayAsync(session: AgentSession, afterAttach?: () => void): void {
     if (!this.relayClient) { afterAttach?.(); return; }
     // A session recovered as ended (window present, Claude dead) is detached;
     // anything else attaching here is running.
