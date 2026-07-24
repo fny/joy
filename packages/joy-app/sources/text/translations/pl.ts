@@ -376,6 +376,11 @@ export const pl: TranslationStructure = {
         editMessage: 'Ustaw nowy cel dla agenta. Pozostaw puste, aby zachować obecny.',
     },
 
+    codexApproval: {
+        label: 'ZATWIERDZENIE',
+        allow: 'Zezwól',
+        deny: 'Odmów',
+    },
     joyDialog: {
         label: 'WYMAGANE DZIAŁANIE',
         fallbackTitle: 'Claude Code zadaje pytanie',

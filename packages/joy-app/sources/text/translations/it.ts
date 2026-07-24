@@ -357,6 +357,11 @@ export const it: TranslationStructure = {
         editMessage: 'Imposta un nuovo obiettivo per l\'agente. Lascia vuoto per mantenere quello attuale.',
     },
 
+    codexApproval: {
+        label: 'APPROVAZIONE',
+        allow: 'Consenti',
+        deny: 'Nega',
+    },
     joyDialog: {
         label: 'AZIONE RICHIESTA',
         fallbackTitle: 'Claude Code sta facendo una domanda',

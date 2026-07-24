@@ -407,6 +407,11 @@ export const en = {
         editMessage: 'Set a new goal for the agent. Empty to keep the current one.',
     },
 
+    codexApproval: {
+        label: 'APPROVAL',
+        allow: 'Allow',
+        deny: 'Deny',
+    },
     joyDialog: {
         label: 'ACTION NEEDED',
         fallbackTitle: 'Claude Code is asking a question',

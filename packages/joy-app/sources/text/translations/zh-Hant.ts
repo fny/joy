@@ -359,6 +359,11 @@ export const zhHant: TranslationStructure = {
         editMessage: '為智能體設定新目標。留空則保留目前目標。',
     },
 
+    codexApproval: {
+        label: '批准',
+        allow: '允許',
+        deny: '拒絕',
+    },
     joyDialog: {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提問',

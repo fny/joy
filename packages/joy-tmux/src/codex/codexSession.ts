@@ -85,6 +85,8 @@ export class CodexSession implements AgentSession {
   // Turns whose output was fully delivered — skipped wholesale on reconcile
   // (item ids differ live vs history, but turn ids are stable — review #2).
   #deliveredTurns = new Set<string>();
+  // Codex approval requests awaiting the app (non-yolo), keyed by codex req id.
+  #pendingApprovals = new Map<string, { answer: (allow: boolean) => void }>();
 
   constructor(init: CodexInit, deps: SessionDeps) {
     this.id = init.id;
@@ -118,6 +120,8 @@ export class CodexSession implements AgentSession {
     rs.setReceiptSink(() => { /* M1: receipts are informational; outbound rows
       are already exactly-once via localId dedup at the append layer. */ });
     this.#deps.onRelayAttached?.(this, rs);
+    // The app answers held approval requests through this session-scoped RPC.
+    rs.registerRpc("joy-codex-approve", async (params) => this.#answerApproval(params as Record<string, unknown> | undefined));
     rs.start();
     void rs.updateJoyState(this.status === "ended" ? "detached" : "running");
     return true;
@@ -293,27 +297,55 @@ export class CodexSession implements AgentSession {
   // {decision:'accept'} to every method (review #3). Non-yolo approval cards in
   // the app are M2.
   #onServerRequest(req: { id: number | string; method: string; params?: Record<string, unknown> }): unknown {
+    const p = req.params ?? {};
     switch (req.method) {
-      // v2 command/patch approval families — accept under yolo.
+      // Command/patch approvals (fire under non-yolo modes) → surface to the app
+      // as an Allow/Deny bar and HOLD the request until the user answers.
       case "item/commandExecution/requestApproval":
+      case "execCommandApproval": {
+        const cmd = Array.isArray(p.command) ? (p.command as string[]).join(" ") : String(p.command ?? "run a command");
+        return this.#surfaceApproval(req, "command", cmd, typeof p.reason === "string" ? p.reason : undefined);
+      }
       case "item/fileChange/requestApproval":
-        return { decision: "accept" };
-      // Legacy-named approval methods still in the 0.144.6 schema.
-      case "execCommandApproval":
-      case "applyPatchApproval":
-        return { decision: "approved" };
+      case "applyPatchApproval": {
+        const files = Array.isArray(p.fileChanges) ? (p.fileChanges as unknown[]).length : (Array.isArray(p.changes) ? (p.changes as unknown[]).length : 0);
+        return this.#surfaceApproval(req, "patch", files ? `Apply patch to ${files} file(s)` : "Apply patch", typeof p.reason === "string" ? p.reason : undefined);
+      }
       // Can't answer meaningfully in v1 — reject so the server proceeds/cancels
       // rather than wedging on a wrong-shaped success.
       case "item/tool/requestUserInput":
       case "mcpServer/elicitation/request":
       case "item/permissions/requestApproval":
         throw new JsonRpcError(-32601, `joy v1 cannot answer ${req.method}`);
-      // We don't own ChatGPT tokens; surface as unanswerable, not fake creds.
       case "account/chatgptAuthTokens/refresh":
         throw new JsonRpcError(-32601, "joy does not manage codex auth tokens");
       default:
         throw new JsonRpcError(-32601, `unhandled server request: ${req.method}`);
     }
+  }
+
+  /** Hold a codex approval request until the app answers (or a timeout auto-
+   *  declines so codex isn't wedged). Legacy-named methods want the legacy
+   *  decision strings. */
+  #surfaceApproval(req: { id: number | string; method: string }, kind: "command" | "patch", title: string, detail?: string): Promise<unknown> {
+    const requestId = String(req.id);
+    const legacy = req.method === "execCommandApproval" || req.method === "applyPatchApproval";
+    return new Promise((resolve) => {
+      const done = (allow: boolean) => resolve(legacy ? { decision: allow ? "approved" : "denied" } : { decision: allow ? "accept" : "decline" });
+      const timer = setTimeout(() => { if (this.#pendingApprovals.delete(requestId)) { void this.#relay?.updateCodexApproval(null); done(false); } }, 300_000);
+      this.#pendingApprovals.set(requestId, { answer: (allow) => { clearTimeout(timer); this.#pendingApprovals.delete(requestId); void this.#relay?.updateCodexApproval(null); done(allow); } });
+      void this.#relay?.updateCodexApproval({ requestId, kind, title, detail, since: Date.now() });
+    });
+  }
+
+  /** joy-codex-approve RPC handler: the app answers a pending approval. */
+  #answerApproval(params: Record<string, unknown> | undefined): { ok: boolean } {
+    const requestId = String(params?.requestId ?? "");
+    const allow = params?.decision === "allow" || params?.decision === true;
+    const p = this.#pendingApprovals.get(requestId);
+    if (!p) return { ok: false };
+    p.answer(allow);
+    return { ok: true };
   }
 
   // ── output (codex notifications → relay wire) ────────────────────────────────
@@ -328,6 +360,13 @@ export class CodexSession implements AgentSession {
         ? (p.thread as Record<string, unknown> | undefined)?.id
         : p.threadId;
       if (typeof nThread === "string" && nThread !== this.#threadId) return;
+    }
+    if (n.method === "serverRequest/resolved") {
+      // The request was answered elsewhere (the attached TUI) or cleared by an
+      // interrupt — drop our pending UI without resolving (codex already has it).
+      const rid = String((n.params ?? {}).requestId ?? "");
+      if (rid && this.#pendingApprovals.delete(rid)) void this.#relay?.updateCodexApproval(null);
+      return;
     }
     if (n.method === "turn/started") {
       const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
@@ -463,6 +502,11 @@ export class CodexSession implements AgentSession {
     this.status = "ended";
     this.endReason = reason;
     const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
+    // Decline any pending approvals so codex isn't left waiting, and clear the
+    // app bar.
+    for (const p of this.#pendingApprovals.values()) { try { p.answer(false); } catch { /* ignore */ } }
+    this.#pendingApprovals.clear();
+    void this.#relay?.updateCodexApproval(null);
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
     // Kill the app-server: our own child, or (when we rejoined an orphan) the
