@@ -101,6 +101,7 @@ function NewJoyTmuxSessionScreen() {
     // repo's machine + path when this page is the default New session).
     const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string }>();
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
+    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex'>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
@@ -284,6 +285,7 @@ function NewJoyTmuxSessionScreen() {
         const sendCreateRpc = (createDir: boolean) => Promise.race<JoyCreateResult>([
             apiSocket.machineRPC<JoyCreateResult, {
                 cwd: string;
+                agent?: string;
                 gitUrl?: string;
                 model?: string;
                 effort?: string;
@@ -299,9 +301,12 @@ function NewJoyTmuxSessionScreen() {
                 extraArgs?: string;
             }>(selectedMachineId, 'joy-create-session', {
                 cwd,
+                agent: selectedAgent === 'codex' ? 'codex' : undefined,
                 gitUrl: gitClone?.url,
-                model: currentModel?.key,
-                effort: currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
+                // Claude model/effort keys don't apply to codex — omit so the
+                // daemon uses codex defaults (M1). A codex model picker is M2.
+                model: selectedAgent === 'codex' ? undefined : currentModel?.key,
+                effort: selectedAgent === 'codex' ? undefined : (currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined),
                 // resume a specific conversation by id; it takes precedence over
                 // `continue` (most-recent), so don't send both.
                 resume_id: resumeId.trim() || undefined,
@@ -465,11 +470,13 @@ function NewJoyTmuxSessionScreen() {
                                 <Text style={styles.configLabel} numberOfLines={1}>{displayPath}</Text>
                             </Pressable>
 
-                            {/* Claude badge + model + effort */}
+                            {/* Agent badge (tap to toggle claude ↔ codex) + model + effort */}
                             <View style={styles.configRow}>
                                 <Ionicons name="terminal-outline" size={15} color={theme.colors.textSecondary} />
-                                <Text style={styles.configLabel} numberOfLines={1}>claude code</Text>
-                                {modelModes.length > 1 && (
+                                <Pressable onPress={() => setSelectedAgent(a => a === 'codex' ? 'claude' : 'codex')} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : 'claude code'}</Text>
+                                </Pressable>
+                                {selectedAgent !== 'codex' && modelModes.length > 1 && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
                                         <Pressable onPress={cycleModel} style={(p) => [p.pressed && styles.configRowPressed]}>

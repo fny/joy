@@ -570,7 +570,7 @@ export class SessionRegistry {
 
     if (this.relayClient) {
       try {
-        const rs = await createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id });
+        const rs = await createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id, flavor: "codex" });
         session.attachRelay(rs);
       } catch (e) {
         process.stderr.write(`[relay] failed to create codex session for ${id}: ${e}\n`);
