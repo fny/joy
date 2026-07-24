@@ -16,6 +16,7 @@
 
 import { spawn, type ChildProcess } from "child_process";
 import { join } from "path";
+import { rmSync } from "fs";
 import WebSocket from "ws";
 import { joyStateDir } from "../paths";
 import { resolveCodexExecutionPolicy, sandboxModeToPolicy } from "./executionPolicy";
@@ -67,22 +68,29 @@ export interface CodexModel {
 
 /** Fetch the codex model catalog via a short-lived app-server connection —
  *  for a machine-level picker before any session exists. */
-export async function fetchCodexModels(bin?: string): Promise<CodexModel[]> {
-  const socketPath = join(joyStateDir(), `codex-models-${process.pid}-${Date.now()}.sock`);
+export async function fetchCodexModels(bin?: string, baseDir = joyStateDir()): Promise<CodexModel[]> {
+  const socketPath = join(baseDir, `codex-models-${process.pid}-${Date.now()}.sock`);
   const proc = spawnCodexAppServer({ socketPath, bin });
   proc.stderr?.on("data", () => {});
+  // A missing/unspawnable codex binary emits an ASYNC 'error' event; without a
+  // listener that becomes an unhandled 'error' and CRASHES the daemon (finding
+  // #8). Capture it and surface as a rejected connect instead.
+  let spawnError: Error | null = null;
+  proc.on("error", (e) => { spawnError = e instanceof Error ? e : new Error(String(e)); });
   const client = new CodexAppServerClient();
   try {
     // wait for bind, then connect with a few retries
     let connected = false;
     for (let i = 0; i < 25 && !connected; i++) {
+      if (spawnError) throw spawnError;
       try { await client.connect(socketPath); connected = true; } catch { await new Promise((r) => setTimeout(r, 200)); }
     }
-    if (!connected) throw new Error("model catalog: could not connect");
+    if (!connected) throw spawnError ?? new Error("model catalog: could not connect");
     return (await client.modelList()).filter((m) => !m.hidden);
   } finally {
     try { client.close(); } catch { /* ignore */ }
     try { proc.kill(); } catch { /* ignore */ }
+    try { rmSync(socketPath, { force: true }); } catch { /* ignore */ } // don't leak the socket file
   }
 }
 
@@ -95,12 +103,25 @@ export class JsonRpcError extends Error {
   constructor(public readonly code: number, message: string) { super(message); }
 }
 
+/** Rejection type for a JSON-RPC ERROR RESPONSE to one of OUR requests — i.e.
+ *  the server explicitly rejected the call (as opposed to a transport failure /
+ *  timeout). Callers use this to distinguish "definitely not accepted, safe to
+ *  requeue" from "ambiguous, might have landed" (finding #3d). */
+export class JsonRpcResponseError extends Error {
+  constructor(public readonly code: number, message: string) { super(message); }
+}
+
 export class CodexAppServerClient {
   #ws: WebSocket | null = null;
   #nextId = 1;
   #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   #onNotification: (n: Notification) => void = () => {};
   #onServerRequest: (r: ServerRequest) => Promise<unknown> | unknown = () => ({});
+  #onClose: () => void = () => {};
+  // Server-request ids resolved EXTERNALLY (the attached TUI answered, or an
+  // interrupt cleared it) — when the held handler later settles we must NOT
+  // also send a response (finding #6). String-keyed to match notification ids.
+  #externallyResolved = new Set<string>();
   #closed = false;
 
   onNotification(cb: (n: Notification) => void): void { this.#onNotification = cb; }
@@ -108,25 +129,48 @@ export class CodexAppServerClient {
    *  the JSON-RPC result; unhandled methods should return {} so the server
    *  doesn't hang. */
   onServerRequest(cb: (r: ServerRequest) => Promise<unknown> | unknown): void { this.#onServerRequest = cb; }
+  /** Fired when the underlying socket closes (server died / was killed). Lets a
+   *  session react whether it SPAWNED the server or REJOINED an orphan (finding
+   *  #7 — the rejoin path previously had no exit signal). */
+  onClose(cb: () => void): void { this.#onClose = cb; }
 
-  /** Connect to the socket and complete the initialize handshake. */
-  async connect(socketPath: string): Promise<Record<string, unknown>> {
+  /** Mark an in-flight server→client request as resolved elsewhere. The held
+   *  handler Promise should still be settled by the caller (to avoid a leak);
+   *  this just suppresses the duplicate JSON-RPC response we'd otherwise send. */
+  resolveServerRequestExternally(id: number | string): void { this.#externallyResolved.add(String(id)); }
+
+  /** Connect to the socket and complete the initialize handshake, bounded by a
+   *  deadline so a half-dead server that accepts the unix connection but never
+   *  finishes the upgrade/initialize can't wedge startup forever (finding #7). */
+  async connect(socketPath: string, deadlineMs = 10_000): Promise<Record<string, unknown>> {
     const ws = new WebSocket(`ws+unix://${socketPath}:/`, { perMessageDeflate: false });
     this.#ws = ws;
-    await new Promise<void>((resolve, reject) => {
-      ws.once("open", () => resolve());
-      ws.once("error", (e) => reject(e instanceof Error ? e : new Error(String(e))));
-    });
-    ws.on("message", (data) => this.#onMessage(data.toString()));
-    ws.on("close", () => { this.#failAllPending(new Error("app-server socket closed")); });
-    const result = await this.request("initialize", {
-      clientInfo: { name: "joy-tmux", title: "Joy", version: "0.1.0" },
-      // Explicit stable capabilities (review #9). We don't do attestation or
-      // OpenAI-form elicitation, and stay off the experimental API.
-      capabilities: { experimentalApi: false, requestAttestation: false, mcpServerOpenaiFormElicitation: false },
-    }) as Record<string, unknown>;
-    this.notify("initialized", {});
-    return result;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("app-server connect timed out")), deadlineMs); });
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          ws.once("open", () => resolve());
+          ws.once("error", (e) => reject(e instanceof Error ? e : new Error(String(e))));
+        }),
+        deadline,
+      ]);
+      ws.on("message", (data) => this.#onMessage(data.toString()));
+      ws.on("close", () => { this.#failAllPending(new Error("app-server socket closed")); if (!this.#closed) { this.#closed = true; this.#onClose(); } });
+      const result = await Promise.race([
+        this.request("initialize", {
+          clientInfo: { name: "joy-tmux", title: "Joy", version: "0.1.0" },
+          // Explicit stable capabilities (review #9). We don't do attestation or
+          // OpenAI-form elicitation, and stay off the experimental API.
+          capabilities: { experimentalApi: false, requestAttestation: false, mcpServerOpenaiFormElicitation: false },
+        }) as Promise<Record<string, unknown>>,
+        deadline,
+      ]);
+      this.notify("initialized", {});
+      return result;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   #onMessage(line: string): void {
@@ -137,8 +181,14 @@ export class CodexAppServerClient {
       const p = this.#pending.get(msg.id as number);
       if (!p) return;
       this.#pending.delete(msg.id as number);
-      if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
-      else p.resolve(msg.result);
+      if (msg.error) {
+        // A JSON-RPC ERROR RESPONSE = an EXPLICIT server rejection (distinct
+        // from a transport failure/timeout). Reject with a typed error so the
+        // caller can safely requeue rather than assume the request may have
+        // landed (finding #3d).
+        const err = msg.error as { code?: number; message?: string };
+        p.reject(new JsonRpcResponseError(typeof err.code === "number" ? err.code : -32603, err.message ?? JSON.stringify(msg.error)));
+      } else p.resolve(msg.result);
       return;
     }
     // Server→client request (has id AND method).
@@ -153,10 +203,16 @@ export class CodexAppServerClient {
   }
 
   async #handleServerRequest(req: ServerRequest): Promise<void> {
+    const key = String(req.id);
     try {
       const result = await this.#onServerRequest(req);
+      // Suppress the response if the request was resolved externally while the
+      // handler was held (the TUI answered it, or an interrupt cleared it) —
+      // sending a second response for the same id is a protocol error (#6).
+      if (this.#externallyResolved.delete(key)) return;
       this.#send({ jsonrpc: "2.0", id: req.id, result });
     } catch (e) {
+      if (this.#externallyResolved.delete(key)) return;
       const code = e instanceof JsonRpcError ? e.code : -32603;
       const message = e instanceof Error ? e.message : String(e);
       this.#send({ jsonrpc: "2.0", id: req.id, error: { code, message } });
@@ -168,9 +224,12 @@ export class CodexAppServerClient {
     return new Promise((resolve, reject) => {
       if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) { reject(new Error("app-server not connected")); return; }
       // Timeout so a dead server / unresolved request can't leak a pending
-      // promise forever (review #9). turn/start can legitimately take a while
-      // (the whole agent turn), so give it a generous window.
-      const timeoutMs = method === "turn/start" || method === "turn/steer" ? 300_000 : 30_000;
+      // promise forever (review #9). NOTE (finding #4): turn/start returns
+      // IMMEDIATELY with the new turn id — it does NOT block for the whole
+      // agent turn (that streams via notifications). So it gets the normal
+      // window, not a 5-minute one; only thread/read (full history backfill)
+      // gets extra time.
+      const timeoutMs = method === "thread/read" ? 120_000 : 30_000;
       const timer = setTimeout(() => {
         if (this.#pending.delete(id)) reject(new Error(`app-server request '${method}' timed out`));
       }, timeoutMs);
@@ -214,8 +273,12 @@ export class CodexAppServerClient {
     return { threadId, rolloutPath: res.thread?.path ?? null, model: res.model ?? null };
   }
 
-  /** thread/resume → reattach to an existing thread. */
-  async threadResume(threadId: string, opts: ThreadStartOpts): Promise<{ threadId: string }> {
+  /** thread/resume → reattach to an existing thread. Returns the AUTHORITATIVE
+   *  model + reasoning effort the resumed thread is configured with (finding
+   *  #8) — the caller must trust these over any stale local settings. Rejects
+   *  if the server returns no thread id (don't silently pretend we resumed the
+   *  requested thread — finding #10). */
+  async threadResume(threadId: string, opts: ThreadStartOpts): Promise<{ threadId: string; model: string | null; reasoningEffort: string | null }> {
     const policy = resolveCodexExecutionPolicy(opts.permissionMode);
     const params: Record<string, unknown> = {
       threadId, cwd: opts.cwd,
@@ -223,8 +286,10 @@ export class CodexAppServerClient {
       sandbox: policy.sandbox,
     };
     if (opts.developerInstructions) params.developerInstructions = opts.developerInstructions;
-    const res = await this.request("thread/resume", params) as { thread?: { id?: string } };
-    return { threadId: res.thread?.id ?? threadId };
+    const res = await this.request("thread/resume", params) as { thread?: { id?: string }; model?: string; reasoningEffort?: string };
+    const id = res.thread?.id;
+    if (!id) throw new Error("thread/resume returned no thread id");
+    return { threadId: id, model: res.model ?? null, reasoningEffort: res.reasoningEffort ?? null };
   }
 
   /** thread/read → full history for reconciliation. */
@@ -246,7 +311,11 @@ export class CodexAppServerClient {
     if (opts.model) params.model = opts.model;
     if (opts.effort) params.effort = opts.effort;
     const res = await this.request("turn/start", params) as { turn?: { id?: string } };
-    return { turnId: res.turn?.id ?? "" };
+    const turnId = res.turn?.id;
+    // A missing turn id means we can't track/serialize this turn — treat it as a
+    // failure rather than returning "" and pretending it started (finding #10).
+    if (!turnId) throw new Error("turn/start returned no turn id");
+    return { turnId };
   }
 
   /** turn/steer → inject into the active turn (stable in 0.144). */
@@ -286,6 +355,7 @@ export class CodexAppServerClient {
       }
       cursor = res.nextCursor;
       if (!cursor) break;
+      if (page === 19 && cursor) process.stderr.write(`[codex] model/list truncated at 20 pages (${out.length} models) — more remain\n`);
     }
     return out;
   }

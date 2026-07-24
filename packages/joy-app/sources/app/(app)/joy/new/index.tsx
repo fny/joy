@@ -49,7 +49,7 @@ import {
     type ModelMode,
     type EffortLevel,
 } from '@/components/modelModeOptions';
-import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES } from '@/sync/joyModels';
+import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES, JOY_CODEX_PERMISSION_MODES } from '@/sync/joyModels';
 
 const COMPOSER_INPUT_VERTICAL_PADDING = Platform.OS === 'web' ? 10 : 8;
 const COMPOSER_INPUT_MAX_HEIGHT = Platform.OS === 'web' ? 480 : 240;
@@ -244,11 +244,23 @@ function NewJoyTmuxSessionScreen() {
             .catch(() => { /* codex not present / offline — picker stays empty */ });
         return () => { cancelled = true; };
     }, [selectedAgent, selectedMachineId]);
+    // Switching agents swaps the permission-mode list (claude vs codex) — reset
+    // the index so a stale claude index can't select the wrong codex mode.
+    React.useEffect(() => { setModeIndex(0); }, [selectedAgent]);
     const codexModel = codexModels[codexModelIndex];
     const codexEfforts = codexModel?.supportedReasoningEfforts ?? [];
     const codexEffort = codexEfforts[codexEffortIndex];
-    const cycleCodexModel = React.useCallback(() => { setCodexModelIndex(i => codexModels.length ? (i + 1) % codexModels.length : 0); setCodexEffortIndex(0); }, [codexModels.length]);
+    const cycleCodexModel = React.useCallback(() => { setCodexModelIndex(i => codexModels.length ? (i + 1) % codexModels.length : 0); }, [codexModels.length]);
     const cycleCodexEffort = React.useCallback(() => { setCodexEffortIndex(i => codexEfforts.length ? (i + 1) % codexEfforts.length : 0); }, [codexEfforts.length]);
+    // Seed the effort picker to the model's OWN default (finding #8): an
+    // untouched index-0 pick would otherwise override codex's defaultReasoning-
+    // Effort on every new turn. Re-runs whenever the selected model changes.
+    React.useEffect(() => {
+        if (!codexModel) return;
+        const def = codexModel.defaultReasoningEffort;
+        const idx = def ? (codexModel.supportedReasoningEfforts ?? []).indexOf(def) : -1;
+        setCodexEffortIndex(idx >= 0 ? idx : 0);
+    }, [codexModelIndex, codexModels]);
 
     // Reset effort to a sensible default when model changes
     React.useEffect(() => {
@@ -270,11 +282,14 @@ function NewJoyTmuxSessionScreen() {
         setEffortIndex(i => (i + 1) % effortLevels.length);
     }, [effortLevels.length]);
 
-    const currentMode = JOY_CLAUDE_PERMISSION_MODES[modeIndex] ?? JOY_CLAUDE_PERMISSION_MODES[0];
-    const isYolo = currentMode.key === 'bypassPermissions';
+    // Codex uses its OWN permission modes — the claude modes silently escalate
+    // when mapped onto codex (finding #1). Pick the list by selected agent.
+    const permissionModes = selectedAgent === 'codex' ? JOY_CODEX_PERMISSION_MODES : JOY_CLAUDE_PERMISSION_MODES;
+    const currentMode = permissionModes[modeIndex] ?? permissionModes[0];
+    const isYolo = currentMode.key === 'bypassPermissions' || currentMode.key === 'yolo';
     const cycleMode = React.useCallback(() => {
-        setModeIndex(i => (i + 1) % JOY_CLAUDE_PERMISSION_MODES.length);
-    }, []);
+        setModeIndex(i => (i + 1) % permissionModes.length);
+    }, [permissionModes.length]);
 
     // 'none' plus the model catalog — claude falls back when the primary
     // model is overloaded.

@@ -51,7 +51,7 @@ import { useActiveInterval } from '@/hooks/useActiveInterval';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
-import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES } from '@/sync/joyModels';
+import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES, JOY_CODEX_PERMISSION_MODES } from '@/sync/joyModels';
 import { apiSocket } from '@/sync/apiSocket';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
@@ -510,9 +510,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
         // cycling matches). happy's list has dontAsk (unreachable) and lacks
-        // auto.
+        // auto. CODEX joy sessions use codex's OWN modes — the claude modes
+        // (esp. `auto`) silently escalate to full access on codex (finding #1).
         const modes = isJoyTmux
-            ? JOY_CLAUDE_PERMISSION_MODES
+            ? (flavor === 'codex' ? JOY_CODEX_PERMISSION_MODES : JOY_CLAUDE_PERMISSION_MODES)
             : getAvailablePermissionModes(flavor, session.metadata, t);
         return modes;
     }, [isJoyTmux, flavor, session.metadata]);

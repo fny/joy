@@ -922,6 +922,10 @@ export interface JoyCodexApprovalInfo {
   title: string;          // e.g. the command line, or "Apply patch to N files"
   detail?: string;        // reason / extra context
   since: number;
+  // Correlation ids (finding #6) — which thread/turn/item this approval is for.
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
 }
 
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */

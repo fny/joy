@@ -559,7 +559,8 @@ export class SessionRegistry {
       id, tmuxWindow, cwd,
       model: opts.model,
       effort: opts.effort,
-      permissionMode: opts.permissionMode ?? "yolo",
+      // Fail closed (finding #1): absent mode → collaborative default, not yolo.
+      permissionMode: opts.permissionMode ?? "default",
       status: "starting",
       startedAt: Date.now(),
       // resume_id (a codex thread id) → thread/resume instead of thread/start.
@@ -598,7 +599,10 @@ export class SessionRegistry {
     // thread. (A live `existing` codex session provides no claude id anyway.)
     const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
     if (isCodex) {
-      const codexThreadId = rec?.codexThreadId; // persisted thread for resume
+      // Resume the SAME thread. When a live session exists, `rec` is null, so
+      // read the thread id off the session itself — otherwise restart would
+      // start a brand-new thread instead of resuming (finding #7).
+      const codexThreadId = (existing instanceof CodexSession ? existing.codexThreadId : undefined) ?? rec?.codexThreadId;
       if (existing) existing.forceKill();
       return this.create({
         agent: "codex",
@@ -688,21 +692,25 @@ export class SessionRegistry {
 
       // ── Codex recovery: reconstruct a CodexSession that respawns its own
       // app-server (the old one died with the daemon) and thread/resumes.
+      // Codex recovery does NOT depend on the pane-child (attach TUI) being
+      // alive (finding #7): the daemon-owned app-server died with the daemon
+      // regardless, and a cleanly-exited TUI can coexist with a resumable
+      // thread. So always attempt to respawn + resume.
       if (rec?.agent === "codex") {
         const s = rec.codexSettings ?? {};
         const session = new CodexSession({
           id, tmuxWindow, cwd,
           model: s.model,
           effort: s.effort,
-          permissionMode: s.permissionMode ?? "yolo",
+          permissionMode: s.permissionMode ?? "default",
           developerInstructions: s.developerInstructions,
-          status: isAlive ? "active" : "ended",
+          status: "active",
           startedAt: Date.now(),
           codexThreadId: rec.codexThreadId,
         }, this.#sessionDeps());
         this.#sessions.set(id, session);
-        this.#attachRelayAsync(session, isAlive ? () => session.beginWatching() : undefined);
-        process.stderr.write(`[recover] codex ${id} cwd=${cwd} alive=${isAlive} thread=${rec.codexThreadId}\n`);
+        this.#attachRelayAsync(session, () => session.beginWatching());
+        process.stderr.write(`[recover] codex ${id} cwd=${cwd} thread=${rec.codexThreadId} (respawn+resume)\n`);
         continue;
       }
 
