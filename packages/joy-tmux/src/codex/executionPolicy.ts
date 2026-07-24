@@ -16,19 +16,32 @@ export interface CodexExecutionPolicy {
   sandbox: CodexSandboxMode;
 }
 
-/** Map joy/claude permission-mode strings to codex approval + sandbox.
- *  joy defaults sessions to yolo (never + danger-full-access), matching the
- *  claude `--dangerously-skip-permissions` default. */
+// Codex's OWN four permission modes (the app presents these when codex is the
+// selected agent — NOT the claude modes). Anything else is treated as unknown.
+export type CodexPermissionMode = "default" | "read-only" | "safe-yolo" | "yolo";
+
+/** Map a codex permission-mode string to a codex approval + sandbox policy.
+ *
+ *  SECURITY (gpt-5.6-sol M2 finding #1): this MUST fail closed. An UNKNOWN mode
+ *  string — e.g. a claude mode like `auto` accidentally routed here — must NOT
+ *  silently grant `danger-full-access`. Unknown → the collaborative default
+ *  (on-request + workspace-write), the least-privileged mode that still lets a
+ *  turn make progress. Only the explicit `yolo` opt-in reaches full access. */
 export function resolveCodexExecutionPolicy(permissionMode: string | undefined): CodexExecutionPolicy {
   switch (permissionMode) {
-    case "read-only": return { approvalPolicy: "never", sandbox: "read-only" };
-    case "safe-yolo": return { approvalPolicy: "never", sandbox: "workspace-write" };
-    case "acceptEdits": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
-    case "plan": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    // Collaborative default: the agent asks before running/patching.
     case "default": return { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    // Read-only: the agent can read the workspace and asks to escalate.
+    case "read-only": return { approvalPolicy: "on-request", sandbox: "read-only" };
+    // Safe-yolo: no prompts, but confined to the workspace (no full-disk access).
+    case "safe-yolo": return { approvalPolicy: "never", sandbox: "workspace-write" };
+    // Yolo: no prompts, full access — the explicit, clearly-labelled opt-in.
     case "yolo":
     case "bypassPermissions": return { approvalPolicy: "never", sandbox: "danger-full-access" };
-    default: return { approvalPolicy: "never", sandbox: "danger-full-access" }; // yolo default
+    // FAIL CLOSED: any other/unknown value (including claude modes like `auto`,
+    // `acceptEdits`, `plan`) gets the least-privileged workable policy — never
+    // danger-full-access.
+    default: return { approvalPolicy: "on-request", sandbox: "workspace-write" };
   }
 }
 

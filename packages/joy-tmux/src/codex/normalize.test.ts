@@ -88,9 +88,11 @@ test("fileChange item → CodexPatch tool call", () => {
     method: "item/started",
     params: { turnId: "t1", item: { type: "fileChange", id: "fc1", changes: [{ path: "a.ts", kind: "update", diff: "..." }] } },
   });
-  expect(ev(started[0])).toMatchObject({ t: "tool-call-start", name: "CodexPatch", call: "fc1", args: { changes: [{ path: "a.ts", kind: "update", diff: "..." }] } });
+  // The tool `call` field is the CANONICAL (turn, type, ordinal) identity — NOT
+  // the transient item id — so it matches across live vs history replay (#5).
+  expect(ev(started[0])).toMatchObject({ t: "tool-call-start", name: "CodexPatch", call: "t1:fileChange:0", args: { changes: [{ path: "a.ts", kind: "update", diff: "..." }] } });
   const done = norm.handle({ method: "item/completed", params: { turnId: "t1", item: { type: "fileChange", id: "fc1", status: "completed" } } });
-  expect(ev(done[0])).toEqual({ t: "tool-call-end", call: "fc1" });
+  expect(ev(done[0])).toEqual({ t: "tool-call-end", call: "t1:fileChange:0" });
 });
 
 test("mcpToolCall item → McpTool tool call", () => {
@@ -100,7 +102,7 @@ test("mcpToolCall item → McpTool tool call", () => {
     method: "item/started",
     params: { turnId: "t1", item: { type: "mcpToolCall", id: "m1", server: "fs", tool: "read", arguments: { path: "x" } } },
   });
-  expect(ev(started[0])).toMatchObject({ t: "tool-call-start", name: "McpTool", call: "m1" });
+  expect(ev(started[0])).toMatchObject({ t: "tool-call-start", name: "McpTool", call: "t1:mcpToolCall:0" });
 });
 
 test("interrupted turn → cancelled turn-end", () => {
@@ -110,10 +112,10 @@ test("interrupted turn → cancelled turn-end", () => {
   expect(ev(end[0])).toEqual({ t: "turn-end", status: "cancelled" });
 });
 
-test("thread/settings/updated → model effect (there is no thread.model)", () => {
+test("thread/settings/updated → model + effort effects (there is no thread.model)", () => {
   const norm = normalizer();
   const eff = norm.handle({ method: "thread/settings/updated", params: { threadId: "x", threadSettings: { model: "gpt-5.5", effort: "medium" } } });
-  expect(eff).toEqual([{ kind: "model", code: "gpt-5.5" }]);
+  expect(eff).toEqual([{ kind: "model", code: "gpt-5.5" }, { kind: "effort", effort: "medium" }]);
 });
 
 test("open tool calls are closed when the turn ends", () => {
@@ -123,7 +125,7 @@ test("open tool calls are closed when the turn ends", () => {
   // turn ends WITHOUT an item/completed for c1 → normalizer must close it.
   const end = norm.handle({ method: "turn/completed", params: { turn: { id: "t1", status: "completed" } } });
   const evs = end.filter((e) => e.kind === "wire").map((e) => (e as any).record.content.data.ev);
-  expect(evs).toContainEqual({ t: "tool-call-end", call: "c1" });
+  expect(evs).toContainEqual({ t: "tool-call-end", call: "t1:commandExecution:0" });
   expect(evs).toContainEqual({ t: "turn-end", status: "completed" });
 });
 
@@ -137,8 +139,9 @@ test("wire effects carry deterministic localIds keyed on the codex event identit
   const done = norm.handle({ method: "item/completed", params: { threadId: tid, turnId: "t1", item: { type: "commandExecution", id: "c1", status: "completed" } } });
   const end = norm.handle({ method: "turn/completed", params: { threadId: tid, turn: { id: "t1", status: "completed" } } });
   const lid = (e: any) => e.kind === "wire" ? e.localId : null;
-  expect(lid(started[0])).toBe("codex:T7:turn:t1:item:c1:tool-start");
-  expect(lid(done[0])).toBe("codex:T7:turn:t1:item:c1:tool-end");
+  // Canonical (turn, type, ordinal) — stable across live vs history replay (#5).
+  expect(lid(started[0])).toBe("codex:T7:turn:t1:item:commandExecution:0:tool-start");
+  expect(lid(done[0])).toBe("codex:T7:turn:t1:item:commandExecution:0:tool-end");
   expect(lid(end.find((e: any) => e.kind === "wire" && e.record.content.data.ev.t === "turn-end"))).toBe("codex:T7:turn:t1:complete");
 });
 
