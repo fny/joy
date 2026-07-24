@@ -242,6 +242,26 @@ silently overridden. Permission table from happy's `executionPolicy.ts`;
 claude default. Non-yolo approval routing with two attached clients stays
 deferred (the TUI answers in the meantime).
 
+## Status
+
+**M1 — BUILT & PROVEN (2026-07-24).** Live against codex 0.144.6:
+- Transport: `ws+unix://…:/` + `perMessageDeflate:false` (appServerClient.ts).
+- Normalizer: codex notifications → the exact claude-shaped wire sequence
+  (turn-start/tool-call/text/turn-end) + thinking/receipt/model/context;
+  10 fixture-driven parity tests off a real capture.
+- CodexSession (AgentSession impl): spawn app-server → thread/start → deliver
+  via turn/start → mirror to relay. Two integration proofs pass: transport-
+  level and full-CodexSession-level (enqueue → codex → relay wire sequence,
+  clientId dispatch-confirm, thinking cycle).
+- Registry create+recover branch on agent; app flavor + agent picker.
+- 213 daemon tests green (zero claude regression); daemon + app typecheck clean.
+
+Operational requirements: codex ≥0.144 on the daemon's PATH (or `JOY_CODEX_BIN`)
+— clientUserMessageId receipts need it; a stale 0.130 workspace copy silently
+drops the echo. Deferred to M2: thread/read reconciliation on reconnect, full
+receipt-checkpoint machinery (M1 leans on append-layer localId dedup), non-yolo
+approvals, codex model/effort picker, attach-TUI hardening.
+
 ## Phasing
 
 - **M1 — text loop**: appServerClient (unix ws, stable schema),
