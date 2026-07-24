@@ -13,6 +13,7 @@
 // unwrapped 201, kill's 404) are expressed via the optional httpShape.
 
 import type { Session } from "../claude/session";
+import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
 import type { RelaySession } from "../relay/relay.ts";
 import {
@@ -176,7 +177,7 @@ export interface SessionOp {
   rpcName: string;
   /** null → no dedicated HTTP route (killSession is covered by DELETE /sessions/:id). */
   http: { method: HttpMethod; path: string } | null;
-  handler: (session: Session, params: Record<string, unknown>) => Promise<unknown> | unknown;
+  handler: (session: AgentSession, params: Record<string, unknown>) => Promise<unknown> | unknown;
 }
 
 export type Op = MachineOp | SessionOp;
@@ -819,7 +820,7 @@ export const sessionOps: SessionOp[] = [
  * onRelayAttached hook (server.ts), so launch/recover/reconnect all get the
  * identical op surface.
  */
-export function bindSessionOps(session: Session, rs: RelaySession): void {
+export function bindSessionOps(session: AgentSession, rs: RelaySession): void {
   for (const op of sessionOps) {
     rs.registerRpc(op.rpcName, async (params) => op.handler(session, (params ?? {}) as Record<string, unknown>));
   }
