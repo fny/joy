@@ -1369,8 +1369,13 @@ export class RelaySession {
     finally { this.pulling = false; }
   }
 
-  send(wire: WireRecord): void {
-    this.queue.push({ localId: crypto.randomUUID(), wire, attempts: 0 });
+  /** Enqueue a wire record for exactly-once delivery. `localId` is the
+   *  server-side dedupe key: claude passes none (random per row, deduped at the
+   *  transcript layer via forwardedUuids), but codex passes a DETERMINISTIC key
+   *  derived from the codex event identity so a reconnect+replay re-sends the
+   *  same localId and the server rejects the duplicate. */
+  send(wire: WireRecord, localId?: string): void {
+    this.queue.push({ localId: localId ?? crypto.randomUUID(), wire, attempts: 0 });
     this.persistOutbound();
     void this.drain();
   }
