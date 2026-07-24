@@ -1,10 +1,10 @@
 // Pending-message strip shown above the composer for joy-tmux sessions. Lists
-// only messages still WAITING behind a processing turn — once the daemon
-// dispatches one it leaves the queue and shows up in chat, so there's no
-// "sending…" limbo row here. Edit/Delete live behind a long-press (touch) or
-// right-click (web) menu so they're not hit by accident.
+// messages still WAITING behind a processing turn — once the daemon dispatches
+// one it leaves the queue and shows up in chat. Each row carries VISIBLE
+// Edit / ✕ actions (no long-press guessing); the strip is width-matched to the
+// composer by its CenteredInputWidth wrapper in SessionView.
 import * as React from 'react';
-import { View, Text, Pressable, Platform } from 'react-native';
+import { View, Text, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
@@ -24,17 +24,45 @@ const HIDDEN_APPEAR_MS = 2500;
 // Stable sentinel so the old-daemon count-only fallback rides the same gate.
 const COUNT_SENTINEL = [{ id: '__pending-count__' }];
 
-export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; sessionId: string }) => {
+// One queued message: text (single line, ellipsized so it can never exceed the
+// strip) + inline Edit and ✕. Deliberately no background boxes on the actions —
+// they read as plain tappable affordances, not buttons.
+const QueuedRow = React.memo(function QueuedRow(props: {
+    text: string;
+    onEdit: () => void;
+    onDelete: () => void;
+}) {
     const { theme } = useUnistyles();
-    // Visible chips, the paused banner, and HIDDEN pending items (rapid app
-    // sends queue with visible:false — their chat bubbles already exist).
-    // Hidden items get actionable chips too: Edit cancels the queued delivery
-    // and moves the text into the on-device drafts strip (it can't be edited
-    // in place — the message is already an immutable server row); Delete just
-    // cancels. Older daemons don't send `hidden` — fall back to a count line.
-    // Both are age-gated (paused bypasses — a fault state must show at once):
-    // explicit user queue-adds below are NOT gated, queueing them was the
-    // user's own action.
+    return (
+        <View style={styles.row}>
+            <Text style={styles.text} numberOfLines={1}>{props.text}</Text>
+            <Pressable
+                onPress={props.onEdit}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel={t('common.edit')}
+                style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
+            >
+                <Text style={styles.editLabel}>{t('common.edit')}</Text>
+            </Pressable>
+            <Pressable
+                onPress={props.onDelete}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel={t('common.delete')}
+                style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
+            >
+                <Ionicons name="close" size={19} color={theme.colors.deleteAction} />
+            </Pressable>
+        </View>
+    );
+});
+
+export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; sessionId: string }) => {
+    // Hidden items are rapid app-sends (visible:false — their chat bubbles
+    // already exist). Both hidden and visible items get the same Edit / ✕ row.
+    // Age-gated (paused bypasses — a fault state must show at once); older
+    // daemons don't send `hidden`, so fall back to a count-only line.
     const hiddenCountRaw = queue.hidden === undefined
         ? Math.max(0, (queue.pendingCount ?? 0) - queue.queue.length)
         : 0;
@@ -44,8 +72,10 @@ export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; s
         HIDDEN_APPEAR_MS,
         queue.paused,
     ).length > 0 ? hiddenCountRaw : 0;
-    const hasItems = queue.queue.length > 0 || queue.paused || hidden.length > 0 || hiddenCountOnly > 0;
-    if (!hasItems) return null;
+
+    const visible = queue.queue;
+    const total = visible.length + hidden.length + hiddenCountOnly;
+    if (total === 0 && !queue.paused) return null;
 
     // Reason-specific paused banner — distinguishes "the pane input has stray
     // text blocking dispatch" from a plain failed/timed-out send.
@@ -56,104 +86,117 @@ export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; s
                 ? t('joyQueue.pausedDispatchMismatch')
                 : t('joyQueue.pausedDefault');
 
-    const editItem = async (id: string, current: string) => {
+    // Visible (user-queued) item: edit in place via the daemon queue op.
+    const editVisible = async (id: string, current: string) => {
         const next = await Modal.prompt(t('joyQueue.editTitle'), '', { defaultValue: current });
         if (next != null && next.trim() && next.trim() !== current) queue.edit(id, next.trim());
     };
-
-    // Hidden (app-sent) queued item: Edit = cancel delivery + move text into
-    // the drafts strip for reworking; Delete = cancel delivery. The original
-    // chat bubble stays (immutable history) — it just won't be answered.
-    const showHiddenMenu = (id: string, text: string) => {
-        Modal.alert(t('joyQueue.queuedMessage'), text, [
-            {
-                text: t('common.edit'), onPress: () => {
-                    void queue.cancel(id);
-                    useDraftQueueStore.getState().add(sessionId, text);
-                }
-            },
-            { text: t('common.delete'), style: 'destructive', onPress: () => { void queue.cancel(id); } },
-            { text: t('common.cancel'), style: 'cancel' },
-        ]);
-    };
-
-    const showMenu = (id: string, text: string) => {
-        Modal.alert(t('joyQueue.queuedMessage'), text, [
-            { text: t('common.edit'), onPress: () => { void editItem(id, text); } },
-            { text: t('common.delete'), style: 'destructive', onPress: () => { void queue.cancel(id); } },
-            { text: t('common.cancel'), style: 'cancel' },
-        ]);
+    // Hidden (app-sent) item: the message is already an immutable server row, so
+    // "edit" cancels the queued delivery and drops the text into the on-device
+    // drafts strip for reworking. The original chat bubble stays; it just won't
+    // be answered.
+    const editHidden = (id: string, text: string) => {
+        void queue.cancel(id);
+        useDraftQueueStore.getState().add(sessionId, text);
     };
 
     return (
         <View style={styles.wrap}>
-            {hiddenCountOnly > 0 && (
-                <View style={styles.pendingLine}>
-                    <Text style={styles.pendingText}>{t('joyQueue.pendingCount', { count: hiddenCountOnly })}</Text>
+            {total > 0 && (
+                <View style={styles.header}>
+                    <Ionicons name="time-outline" size={13} color={styles.headerText.color as string} />
+                    <Text style={styles.headerText}>{t('joyQueue.header', { count: total })}</Text>
                 </View>
             )}
-            {hidden.map((item) => (
-                <Pressable
-                    key={item.id}
-                    onPress={() => showHiddenMenu(item.id, item.text)}
-                    style={styles.pendingLine}
-                    accessibilityRole="button"
-                >
-                    <Text style={styles.pendingText} numberOfLines={1}>{t('joyQueue.pendingItem', { text: item.text })}</Text>
-                </Pressable>
-            ))}
+
             {queue.paused && (
                 <Pressable style={styles.pausedRow} onPress={() => queue.resume()}>
                     <Ionicons name="warning-outline" size={15} color="#FF9500" />
-                    <Text style={styles.pausedText} numberOfLines={2}>
-                        {pausedMessage}
-                    </Text>
+                    <Text style={styles.pausedText} numberOfLines={2}>{pausedMessage}</Text>
                 </Pressable>
             )}
 
-            {queue.queue.map((m, i) => (
-                <Pressable
-                    key={m.id}
-                    style={(p) => [styles.row, p.pressed && styles.rowPressed]}
-                    onLongPress={() => showMenu(m.id, m.text)}
-                    delayLongPress={350}
-                    // Desktop web: right-click opens the same menu.
-                    {...(Platform.OS === 'web'
-                        ? { onContextMenu: (e: any) => { e?.preventDefault?.(); showMenu(m.id, m.text); } }
-                        : {})}
-                >
-                    <Ionicons name="time-outline" size={13} color={theme.colors.textSecondary} />
-                    <Text style={styles.idx}>{i + 1}</Text>
-                    <Text style={styles.text} numberOfLines={2}>{m.text}</Text>
-                </Pressable>
+            {hidden.map((item) => (
+                <QueuedRow
+                    key={item.id}
+                    text={item.text}
+                    onEdit={() => editHidden(item.id, item.text)}
+                    onDelete={() => { void queue.cancel(item.id); }}
+                />
             ))}
 
-            {queue.queue.length > 0 && (
-                <Text style={styles.hint}>
-                    {Platform.OS === 'web' ? t('joyQueue.hintWeb') : t('joyQueue.hintTouch')}
-                </Text>
+            {visible.map((m) => (
+                <QueuedRow
+                    key={m.id}
+                    text={m.text}
+                    onEdit={() => { void editVisible(m.id, m.text); }}
+                    onDelete={() => { void queue.cancel(m.id); }}
+                />
+            ))}
+
+            {/* Legacy daemons without per-item `hidden` data: count only. */}
+            {hiddenCountOnly > 0 && (
+                <View style={styles.row}>
+                    <Text style={styles.countOnly}>{t('joyQueue.pendingCount', { count: hiddenCountOnly })}</Text>
+                </View>
             )}
         </View>
     );
 });
 
 const styles = StyleSheet.create((theme) => ({
-    pendingLine: {
-        paddingHorizontal: 14,
-        paddingVertical: 4,
-    },
-    pendingText: {
-        fontSize: 12,
-        color: theme.colors.textSecondary,
-        fontStyle: 'italic',
-    },
     wrap: {
-        marginHorizontal: 8,
         marginBottom: 6,
         backgroundColor: theme.colors.input.background,
         borderRadius: 12,
-        paddingVertical: 4,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: theme.colors.divider,
         overflow: 'hidden',
+    },
+    header: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 12,
+        paddingTop: 8,
+        paddingBottom: 6,
+    },
+    headerText: {
+        fontSize: 11,
+        letterSpacing: 0.4,
+        textTransform: 'uppercase',
+        color: theme.colors.textSecondary,
+        ...Typography.default('semiBold'),
+    },
+    row: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingHorizontal: 12,
+        paddingVertical: 7,
+        borderTopWidth: StyleSheet.hairlineWidth,
+        borderTopColor: theme.colors.divider,
+    },
+    text: {
+        flex: 1,
+        fontSize: 14,
+        color: theme.colors.text,
+        ...Typography.default(),
+    },
+    action: {
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+    },
+    editLabel: {
+        fontSize: 14,
+        color: theme.colors.textLink,
+        ...Typography.default('semiBold'),
+    },
+    countOnly: {
+        flex: 1,
+        fontSize: 13,
+        color: theme.colors.textSecondary,
+        fontStyle: 'italic',
     },
     pausedRow: {
         flexDirection: 'row',
@@ -161,42 +204,13 @@ const styles = StyleSheet.create((theme) => ({
         gap: 6,
         paddingHorizontal: 12,
         paddingVertical: 8,
+        borderTopWidth: StyleSheet.hairlineWidth,
+        borderTopColor: theme.colors.divider,
     },
     pausedText: {
         flex: 1,
-        fontSize: 12,
+        fontSize: 13,
         color: '#FF9500',
         ...Typography.default('semiBold'),
-    },
-    row: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 8,
-        paddingHorizontal: 12,
-        paddingVertical: 7,
-    },
-    rowPressed: {
-        backgroundColor: theme.colors.surfacePressed,
-    },
-    idx: {
-        fontSize: 11,
-        minWidth: 12,
-        textAlign: 'center',
-        color: theme.colors.textSecondary,
-        ...Typography.mono(),
-    },
-    text: {
-        flex: 1,
-        fontSize: 13,
-        color: theme.colors.text,
-        ...Typography.default(),
-    },
-    hint: {
-        fontSize: 10,
-        color: theme.colors.textSecondary,
-        paddingHorizontal: 12,
-        paddingTop: 2,
-        paddingBottom: 4,
-        ...Typography.default(),
     },
 }));

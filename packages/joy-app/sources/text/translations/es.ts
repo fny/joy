@@ -378,6 +378,7 @@ export const es: TranslationStructure = {
         resumeThisSession: 'Reanudar esta sesión…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => count === 1 ? '1 en cola' : `${count} en cola`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'El cuadro de entrada de la sesión tiene texto pendiente — toca para limpiarlo y reanudar',
         pausedDispatchMismatch: 'Es posible que un envío no se haya completado correctamente — toca para reanudar',

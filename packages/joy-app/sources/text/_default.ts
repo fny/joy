@@ -426,6 +426,7 @@ export const en = {
         resumeThisSession: 'Resume this session…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => count === 1 ? '1 queued' : `${count} queued`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'The session’s input box has stray text — tap to clear and resume',
         pausedDispatchMismatch: 'A send may not have gone through cleanly — tap to resume',

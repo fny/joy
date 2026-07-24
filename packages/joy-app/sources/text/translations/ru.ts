@@ -494,6 +494,7 @@ export const ru: TranslationStructure = {
         resumeThisSession: 'Возобновить эту сессию…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => count === 1 ? '1 в очереди' : `${count} в очереди`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'В поле ввода сессии остался текст — нажмите, чтобы очистить и продолжить',
         pausedDispatchMismatch: 'Отправка могла пройти некорректно — нажмите, чтобы продолжить',

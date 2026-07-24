@@ -395,6 +395,7 @@ export const pl: TranslationStructure = {
         resumeThisSession: 'Wznów tę sesję…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => count === 1 ? '1 w kolejce' : `${count} w kolejce`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'W polu wprowadzania sesji pozostał tekst — dotknij, aby wyczyścić i wznowić',
         pausedDispatchMismatch: 'Wysyłanie mogło nie przebiec poprawnie — dotknij, aby wznowić',

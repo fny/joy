@@ -378,6 +378,7 @@ export const zhHant: TranslationStructure = {
         resumeThisSession: '恢復此工作階段…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => `${count} 則排隊中`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: '工作階段輸入框中殘留未傳送的文字 — 點按以清除並恢復',
         pausedDispatchMismatch: '有一次傳送可能未正常完成 — 點按以恢復',

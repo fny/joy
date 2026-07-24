@@ -376,6 +376,7 @@ export const it: TranslationStructure = {
         resumeThisSession: 'Riprendi questa sessione…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => count === 1 ? '1 in coda' : `${count} in coda`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'Il campo di input della sessione contiene testo residuo — tocca per pulirlo e riprendere',
         pausedDispatchMismatch: 'Un invio potrebbe non essere andato a buon fine — tocca per riprendere',
