@@ -215,7 +215,7 @@ function NewJoyTmuxSessionScreen() {
         return Array.from(paths).sort();
     }, [selectedMachineId, sessions]);
 
-    // Claude models / effort levels (this page is Claude-only)
+    // Claude models / effort levels
     const modelModes = React.useMemo<ModelMode[]>(() => JOY_CLAUDE_MODELS, []);
     const currentModel = modelModes[modelIndex] ?? modelModes[0];
     const currentModelKey = currentModel?.key ?? 'default';
@@ -224,6 +224,31 @@ function NewJoyTmuxSessionScreen() {
         [currentModelKey],
     );
     const currentEffort = effortLevels[effortIndex] ?? effortLevels[0];
+
+    // Codex model catalog (model/list), fetched from the daemon when codex is
+    // selected. Independent index state so switching agents doesn't clobber the
+    // claude picker.
+    const [codexModels, setCodexModels] = React.useState<{ model: string; displayName: string; supportedReasoningEfforts: string[]; defaultReasoningEffort: string | null; isDefault?: boolean }[]>([]);
+    const [codexModelIndex, setCodexModelIndex] = React.useState(0);
+    const [codexEffortIndex, setCodexEffortIndex] = React.useState(0);
+    React.useEffect(() => {
+        if (selectedAgent !== 'codex' || !selectedMachineId) return;
+        let cancelled = false;
+        apiSocket.machineRPC<{ ok?: boolean; models?: typeof codexModels }, {}>(selectedMachineId, 'joy-codex-models', {})
+            .then((res) => {
+                if (cancelled || !res.models?.length) return;
+                setCodexModels(res.models);
+                const def = res.models.findIndex((m) => m.isDefault);
+                setCodexModelIndex(def >= 0 ? def : 0);
+            })
+            .catch(() => { /* codex not present / offline — picker stays empty */ });
+        return () => { cancelled = true; };
+    }, [selectedAgent, selectedMachineId]);
+    const codexModel = codexModels[codexModelIndex];
+    const codexEfforts = codexModel?.supportedReasoningEfforts ?? [];
+    const codexEffort = codexEfforts[codexEffortIndex];
+    const cycleCodexModel = React.useCallback(() => { setCodexModelIndex(i => codexModels.length ? (i + 1) % codexModels.length : 0); setCodexEffortIndex(0); }, [codexModels.length]);
+    const cycleCodexEffort = React.useCallback(() => { setCodexEffortIndex(i => codexEfforts.length ? (i + 1) % codexEfforts.length : 0); }, [codexEfforts.length]);
 
     // Reset effort to a sensible default when model changes
     React.useEffect(() => {
@@ -303,10 +328,10 @@ function NewJoyTmuxSessionScreen() {
                 cwd,
                 agent: selectedAgent === 'codex' ? 'codex' : undefined,
                 gitUrl: gitClone?.url,
-                // Claude model/effort keys don't apply to codex — omit so the
-                // daemon uses codex defaults (M1). A codex model picker is M2.
-                model: selectedAgent === 'codex' ? undefined : currentModel?.key,
-                effort: selectedAgent === 'codex' ? undefined : (currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined),
+                // Codex sends its own model/effort from the model/list catalog;
+                // claude sends its keys.
+                model: selectedAgent === 'codex' ? codexModel?.model : currentModel?.key,
+                effort: selectedAgent === 'codex' ? codexEffort : (currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined),
                 // resume a specific conversation by id; it takes precedence over
                 // `continue` (most-recent), so don't send both.
                 resume_id: resumeId.trim() || undefined,
@@ -476,6 +501,22 @@ function NewJoyTmuxSessionScreen() {
                                 <Pressable onPress={() => setSelectedAgent(a => a === 'codex' ? 'claude' : 'codex')} style={(p) => [p.pressed && styles.configRowPressed]}>
                                     <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : 'claude code'}</Text>
                                 </Pressable>
+                                {selectedAgent === 'codex' && codexModel && (
+                                    <>
+                                        <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
+                                        <Pressable onPress={cycleCodexModel} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{codexModel.displayName}</Text>
+                                        </Pressable>
+                                        {codexEfforts.length > 0 && (
+                                            <>
+                                                <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
+                                                <Pressable onPress={cycleCodexEffort} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                                    <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{codexEffort}</Text>
+                                                </Pressable>
+                                            </>
+                                        )}
+                                    </>
+                                )}
                                 {selectedAgent !== 'codex' && modelModes.length > 1 && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
