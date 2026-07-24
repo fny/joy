@@ -126,3 +126,31 @@ test("open tool calls are closed when the turn ends", () => {
   expect(evs).toContainEqual({ t: "tool-call-end", call: "c1" });
   expect(evs).toContainEqual({ t: "turn-end", status: "completed" });
 });
+
+test("wire effects carry deterministic localIds keyed on the codex event identity", () => {
+  const norm = normalizer();
+  const tid = "T7";
+  norm.handle({ method: "turn/started", params: { threadId: tid, turn: { id: "t1" } } });
+  const ts = norm.handle({ method: "turn/started", params: { threadId: tid, turn: { id: "t1" } } });
+  void ts;
+  const started = norm.handle({ method: "item/started", params: { threadId: tid, turnId: "t1", item: { type: "commandExecution", id: "c1", command: "ls", cwd: "/" } } });
+  const done = norm.handle({ method: "item/completed", params: { threadId: tid, turnId: "t1", item: { type: "commandExecution", id: "c1", status: "completed" } } });
+  const end = norm.handle({ method: "turn/completed", params: { threadId: tid, turn: { id: "t1", status: "completed" } } });
+  const lid = (e: any) => e.kind === "wire" ? e.localId : null;
+  expect(lid(started[0])).toBe("codex:T7:turn:t1:item:c1:tool-start");
+  expect(lid(done[0])).toBe("codex:T7:turn:t1:item:c1:tool-end");
+  expect(lid(end.find((e: any) => e.kind === "wire" && e.record.content.data.ev.t === "turn-end"))).toBe("codex:T7:turn:t1:complete");
+});
+
+test("replaying the SAME events yields the SAME localIds (idempotent reconciliation)", () => {
+  const build = () => {
+    const n = new CodexNormalizer(() => "x");
+    const out: string[] = [];
+    const push = (effs: any[]) => { for (const e of effs) if (e.kind === "wire") out.push(e.localId); };
+    push(n.handle({ method: "turn/started", params: { threadId: "T", turn: { id: "t1" } } }));
+    push(n.handle({ method: "item/completed", params: { threadId: "T", turnId: "t1", item: { type: "agentMessage", id: "m1", text: "hi" } } }));
+    push(n.handle({ method: "turn/completed", params: { threadId: "T", turn: { id: "t1", status: "completed" } } }));
+    return out;
+  };
+  expect(build()).toEqual(build());
+});

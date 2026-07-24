@@ -1,0 +1,55 @@
+// Durable inbound spool for codex sessions (gpt-5.6-sol review #1). App→codex
+// messages must survive a daemon crash between "relay delivered it to us" and
+// "codex confirmed it", because clientUserMessageId is CORRELATION, not
+// idempotency — resending the same id can create a second turn. So we persist
+// each message with a lifecycle before touching the wire:
+//   queued      — persisted, not yet sent to codex
+//   sentUnknown — turn/start returned, but no userMessage echo confirms it
+// On the echo (item userMessage.clientId), the entry is removed (delivered).
+// On recovery, thread/read's userMessage items tell us which clientIds already
+// landed; the rest are resent.
+
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from "fs";
+import { join } from "path";
+import { joyStateDir } from "../paths";
+
+export type CodexInboundState = "queued" | "sentUnknown";
+export interface CodexInboundItem {
+  clientId: string;   // stable clientUserMessageId (created once, reused on retry)
+  text: string;
+  state: CodexInboundState;
+  at: number;
+}
+
+function fileFor(id: string, baseDir: string): string {
+  return join(baseDir, `codex-inbound-${id}.json`);
+}
+
+export function loadCodexInbound(id: string, baseDir = joyStateDir()): CodexInboundItem[] {
+  try {
+    const p = fileFor(id, baseDir);
+    if (!existsSync(p)) return [];
+    const parsed = JSON.parse(readFileSync(p, "utf8"));
+    return Array.isArray(parsed) ? parsed as CodexInboundItem[] : [];
+  } catch { return []; }
+}
+
+/** Atomic tmp+rename. Returns false on failure so the caller can refuse to
+ *  advance the relay cursor (a swallowed write = a lost message on crash). */
+export function saveCodexInbound(id: string, items: CodexInboundItem[], baseDir = joyStateDir()): boolean {
+  try {
+    mkdirSync(baseDir, { recursive: true });
+    const p = fileFor(id, baseDir);
+    const tmp = `${p}.tmp`;
+    writeFileSync(tmp, JSON.stringify(items));
+    renameSync(tmp, p);
+    return true;
+  } catch (e) {
+    process.stderr.write(`[codex-inbound] save failed for ${id}: ${e}\n`);
+    return false;
+  }
+}
+
+export function clearCodexInbound(id: string, baseDir = joyStateDir()): void {
+  try { rmSync(fileFor(id, baseDir), { force: true }); } catch { /* best effort */ }
+}

@@ -28,9 +28,11 @@ import {
 export interface CodexNotification { method: string; params?: Record<string, unknown>; }
 
 /** Side-effects a CodexSession applies to its RelaySession. Kept as data (not
- *  direct relay calls) so the mapping is pure and unit-testable. */
+ *  direct relay calls) so the mapping is pure and unit-testable. Each `wire`
+ *  effect carries a DETERMINISTIC localId (the codex event identity) so a
+ *  reconnect+replay re-sends the same id and the relay append layer dedupes. */
 export type CodexEffect =
-  | { kind: "wire"; record: WireRecord }
+  | { kind: "wire"; record: WireRecord; localId: string }
   | { kind: "thinking"; value: boolean }
   | { kind: "receipt"; uuid: string; turn: string }
   | { kind: "confirmDispatch"; clientId: string }
@@ -57,6 +59,9 @@ export class CodexNormalizer {
   #openTools = new Map<string, string>();
   // The codex turn id currently in flight.
   #currentTurn: string | null = null;
+  // The root thread id — the namespace for deterministic event ids. Captured
+  // from the first notification carrying one (or set explicitly).
+  #threadId = "";
 
   // The joy wire `turn` field IS the codex turn id (a stable UUIDv7). Using it
   // directly — rather than minting a random id per turn — makes turn identity
@@ -66,8 +71,22 @@ export class CodexNormalizer {
     this.#mintId = mintId;
   }
 
+  setThreadId(id: string): void { if (id) this.#threadId = id; }
+
+  /** Deterministic relay localId for a wire event — a reconnect replay of the
+   *  same codex event produces the same id, so the append layer dedupes it. */
+  #eventId(suffix: string): string { return `codex:${this.#threadId}:${suffix}`; }
+  #wire(record: WireRecord, suffix: string): CodexEffect {
+    return { kind: "wire", record, localId: this.#eventId(suffix) };
+  }
+
   handle(n: CodexNotification): CodexEffect[] {
     const p = n.params ?? {};
+    // Capture the thread id lazily from any notification that carries one.
+    if (!this.#threadId) {
+      const tid = typeof p.threadId === "string" ? p.threadId : ((p.thread as Item | undefined)?.id);
+      if (typeof tid === "string") this.#threadId = tid;
+    }
     switch (n.method) {
       case "thread/status/changed": return this.#status(p);
       case "turn/started": return this.#turnStarted(p);
@@ -110,7 +129,7 @@ export class CodexNormalizer {
     const codexTurnId = str(turn.id);
     if (!codexTurnId) return [];
     this.#currentTurn = codexTurnId;
-    return [{ kind: "wire", record: encodeTurnStart({ turn: codexTurnId }) }];
+    return [this.#wire(encodeTurnStart({ turn: codexTurnId }), `turn:${codexTurnId}:start`)];
   }
 
   #turnEnded(p: Item): CodexEffect[] {
@@ -125,11 +144,11 @@ export class CodexNormalizer {
     const out: CodexEffect[] = [];
     // Close any tool calls still open at turn end so their cards don't spin.
     for (const [call, turnId] of this.#openTools) {
-      if (turnId === codexTurnId) out.push({ kind: "wire", record: encodeToolCallEnd(call, { turn: codexTurnId }) });
+      if (turnId === codexTurnId) out.push(this.#wire(encodeToolCallEnd(call, { turn: codexTurnId }), `turn:${codexTurnId}:item:${call}:tool-end`));
     }
     for (const call of [...this.#openTools.keys()]) if (this.#openTools.get(call) === codexTurnId) this.#openTools.delete(call);
     this.#currentTurn = null;
-    out.push({ kind: "wire", record: encodeTurnEnd(status, { turn: codexTurnId }) });
+    out.push(this.#wire(encodeTurnEnd(status, { turn: codexTurnId }), `turn:${codexTurnId}:complete`));
     out.push({ kind: "thinking", value: false });
     return out;
   }
@@ -163,7 +182,7 @@ export class CodexNormalizer {
       case "agentMessage": {
         const text = str(item.text).trim();
         if (!text) return [];
-        const out: CodexEffect[] = [{ kind: "wire", record: encodeTextEvent(text, { turn: joyTurn }) }];
+        const out: CodexEffect[] = [this.#wire(encodeTextEvent(text, { turn: joyTurn }), `turn:${joyTurn}:item:${id}:text`)];
         // Receipt on the group terminator so replay dedupes on the item id.
         if (id) out.push({ kind: "receipt", uuid: id, turn: joyTurn });
         return out;
@@ -180,14 +199,14 @@ export class CodexNormalizer {
   #toolStart(item: Item, joyTurn: string, name: string, input: unknown): CodexEffect[] {
     const call = str(item.id) || this.#mintId();
     this.#openTools.set(call, joyTurn);
-    return [{ kind: "wire", record: encodeToolCallStart({ call, name, input, turn: joyTurn }) }];
+    return [this.#wire(encodeToolCallStart({ call, name, input, turn: joyTurn }), `turn:${joyTurn}:item:${call}:tool-start`)];
   }
 
   #toolEnd(call: string): CodexEffect[] {
     if (!call) return [];
     const turn = this.#openTools.get(call) ?? this.#currentTurn ?? "";
     this.#openTools.delete(call);
-    return [{ kind: "wire", record: encodeToolCallEnd(call, { turn }) }];
+    return [this.#wire(encodeToolCallEnd(call, { turn }), `turn:${turn}:item:${call}:tool-end`)];
   }
 
   #turnFor(p: Item): string {

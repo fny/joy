@@ -11,7 +11,7 @@
 
 import { randomUUID } from "crypto";
 import { type ChildProcess } from "child_process";
-import { mkdirSync, chmodSync } from "fs";
+import { mkdirSync, chmodSync, rmSync } from "fs";
 import { join, dirname } from "path";
 import { tmux } from "../tmux/driver";
 import { joyStateDir } from "../paths";
@@ -26,6 +26,8 @@ import type { AgentSession } from "../domain/agentSession";
 import { spawnCodexAppServer, CodexAppServerClient } from "./appServerClient";
 import { CodexNormalizer, type CodexNotification } from "./normalize";
 import { buildCodexAttachCommand } from "./attach";
+import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "./codexInboundStore";
+import { loadDeliveredTurns, saveDeliveredTurns, clearDeliveredTurns } from "./codexCheckpointStore";
 
 export interface CodexInit {
   id: string;
@@ -72,6 +74,11 @@ export class CodexSession implements AgentSession {
   #activeTurnId: string | null = null;
   #started = false;
   #archivePromise: Promise<boolean> | null = null;
+  // Durable inbound spool (review #1): app messages persisted before delivery.
+  #inbound: CodexInboundItem[] = [];
+  // Turns whose output was fully delivered — skipped wholesale on reconcile
+  // (item ids differ live vs history, but turn ids are stable — review #2).
+  #deliveredTurns = new Set<string>();
 
   constructor(init: CodexInit, deps: SessionDeps) {
     this.id = init.id;
@@ -123,6 +130,11 @@ export class CodexSession implements AgentSession {
       const dir = dirname(this.#socketPath);
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
+      // Remove a stale socket file from a prior (dead) app-server so bind()
+      // doesn't fail with EADDRINUSE. The daemon is the sole owner of this
+      // per-session socket, so a lingering file after our own restart is stale.
+      // (A full orphan-probe-and-rejoin is review #5 / M2.)
+      try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ }
       this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath });
       this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
       // spawn failures (e.g. missing codex binary) are ASYNC — not caught by
@@ -139,16 +151,35 @@ export class CodexSession implements AgentSession {
       this.#client = client;
 
       if (this.#resumeThreadId) {
+        // Recover the persisted inbound spool + delivered-turn checkpoint BEFORE
+        // reconciling — the checkpoint tells reconcile which turns to skip, and
+        // reconcile's userMessage echoes remove delivered inbound entries.
+        this.#inbound = loadCodexInbound(this.id);
+        this.#deliveredTurns = loadDeliveredTurns(this.id);
         const r = await client.threadResume(this.#resumeThreadId, { cwd: this.cwd, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions });
         this.#threadId = r.threadId;
+        this.#norm.setThreadId(r.threadId);
+        // Reconcile missed output: replay thread history through the SAME
+        // normalizer. Deterministic localIds make re-sent rows idempotent at
+        // the relay append layer, so already-delivered events are deduped.
+        await this.#reconcileHistory(client);
       } else {
+        // Fresh conversation: no prior inbound / checkpoint belongs to it.
+        clearCodexInbound(this.id);
+        clearDeliveredTurns(this.id);
+        this.#inbound = [];
+        this.#deliveredTurns = new Set();
         const r = await client.threadStart({ cwd: this.cwd, permissionMode: this.#permissionMode, model: this.model, developerInstructions: this.#developerInstructions });
         this.#threadId = r.threadId;
+        this.#norm.setThreadId(r.threadId);
         this.transcriptPath = r.rolloutPath ?? undefined;
         // Mirror the effective model the thread resolved to (thread/start's
         // top-level `model` — there is no thread.model on notifications).
         if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
       }
+      // Deliver anything spooled (queued during startup, or undelivered after
+      // a resume+reconcile).
+      await this.#drainInbound();
       saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "codex", codexThreadId: this.#threadId ?? undefined, codexSocketPath: this.#socketPath });
       if (this.status === "starting") this.status = "active";
       this.#deps.broadcast("session_update", this.toJSON());
@@ -180,25 +211,51 @@ export class CodexSession implements AgentSession {
 
   async #onRelayMessage(text: string, _seq: number): Promise<void> {
     if (this.status === "ended") return;
-    await this.#deliver(text, { mirror: true });
+    // Persist BEFORE anything else and THROW on failure so the relay's
+    // confirmed cursor does not advance past an unpersisted message (a lost
+    // inbound message is worse than a redelivered one — review #1).
+    const item: CodexInboundItem = { clientId: randomUUID(), text, state: "queued", at: Date.now() };
+    this.#inbound.push(item);
+    if (!saveCodexInbound(this.id, this.#inbound)) {
+      this.#inbound.pop();
+      throw new Error("codex inbound persist failed");
+    }
+    if (this.#relay) this.#relay.send(encodeUserMessage(text, item.at));
+    await this.#deliverItem(item);
   }
 
-  async #deliver(text: string, opts: { mirror: boolean }): Promise<void> {
+  /** turn/start a spooled item with its STABLE clientUserMessageId. On success
+   *  → 'sentUnknown' (the echo confirms delivery, not this return). On failure
+   *  leave it 'queued' and do NOT resend now (resending could double). */
+  async #deliverItem(item: CodexInboundItem): Promise<void> {
     const client = this.#client;
-    if (!client || !this.#threadId) return;
-    const clientId = randomUUID();
-    if (opts.mirror) this.#relay?.send(encodeUserMessage(text, Date.now()));
+    if (!client || !this.#threadId) return; // not ready yet — drained after start
     try {
       // Do NOT pass model/effort on every turn — that would overwrite a model
-      // the user picked in the attached TUI (review #4). The thread setting
-      // persists; a deliberate joy-side model change (M2) would send it once.
-      await client.turnStart(this.#threadId, text, {
-        clientUserMessageId: clientId,
+      // the user picked in the attached TUI (review #4).
+      await client.turnStart(this.#threadId, item.text, {
+        clientUserMessageId: item.clientId,
         permissionMode: this.#permissionMode,
       });
+      if (item.state === "queued") { item.state = "sentUnknown"; saveCodexInbound(this.id, this.#inbound); }
     } catch (e) {
       process.stderr.write(`[codex ${this.id}] turn/start failed: ${e}\n`);
     }
+  }
+
+  /** A userMessage echo (live or from history replay) confirms delivery —
+   *  remove the spooled entry. */
+  #onDispatchEchoed(clientId: string): void {
+    const before = this.#inbound.length;
+    this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
+    if (this.#inbound.length !== before) saveCodexInbound(this.id, this.#inbound);
+  }
+
+  /** Deliver every still-spooled item. Called after the thread is ready (fresh
+   *  start) and after resume+reconcile (where echoed items were already
+   *  removed, so the remainder is genuinely undelivered). */
+  async #drainInbound(): Promise<void> {
+    for (const item of [...this.#inbound]) await this.#deliverItem(item);
   }
 
   // ── output (codex notifications → relay wire) ────────────────────────────────
@@ -218,17 +275,60 @@ export class CodexSession implements AgentSession {
       const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
       if (typeof turn.id === "string") this.#activeTurnId = turn.id;
     } else if (n.method === "turn/completed") {
+      const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
+      // A completed turn's output is fully delivered — checkpoint it so a
+      // future reconcile skips it (its items won't be double-shown).
+      if (typeof turn.id === "string") { this.#deliveredTurns.add(turn.id); saveDeliveredTurns(this.id, this.#deliveredTurns); }
       this.#activeTurnId = null;
     }
-    for (const eff of this.#norm.handle(n)) {
+    this.#applyEffects(this.#norm.handle(n));
+  }
+
+  #applyEffects(effects: ReturnType<CodexNormalizer["handle"]>): void {
+    for (const eff of effects) {
       switch (eff.kind) {
-        case "wire": this.#relay?.send(eff.record); break;
+        case "wire": this.#relay?.send(eff.record, eff.localId); break;
         case "thinking": this.#thinking = eff.value; this.#relay?.setThinking(eff.value); break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "model": this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
-        case "confirmDispatch": /* delivery confirmed (app-side draft queue owns release) */ break;
+        case "confirmDispatch": this.#onDispatchEchoed(eff.clientId); break;
       }
+    }
+  }
+
+  /** Replay thread history through the SAME normalizer on resume. Deterministic
+   *  localIds make re-sent rows idempotent (the relay append layer dedupes what
+   *  the app already has); only output missed during downtime is delivered. */
+  async #reconcileHistory(client: CodexAppServerClient): Promise<void> {
+    if (!this.#threadId) return;
+    try {
+      const res = await client.threadRead(this.#threadId);
+      const thread = ((res.thread ?? res) as Record<string, unknown>);
+      const turns = Array.isArray(thread.turns) ? thread.turns as Record<string, unknown>[] : [];
+      for (const turn of turns) {
+        const tid = String(turn.id ?? "");
+        if (!tid) continue;
+        // Already delivered before the restart — skip wholesale (its item ids
+        // in history differ from the live ones, so replaying would double-show).
+        if (this.#deliveredTurns.has(tid)) continue;
+        this.#applyEffects(this.#norm.handle({ method: "turn/started", params: { turn: { id: tid } } }));
+        const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
+        for (const item of items) {
+          const t = String(item.type ?? "");
+          // Tool items produce start+end; feed both so localIds match the live path.
+          if (t === "commandExecution" || t === "fileChange" || t === "mcpToolCall") {
+            this.#applyEffects(this.#norm.handle({ method: "item/started", params: { turnId: tid, item } }));
+          }
+          this.#applyEffects(this.#norm.handle({ method: "item/completed", params: { turnId: tid, item } }));
+        }
+        this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: turn.status ?? "completed" } } }));
+        // A replayed (previously-undelivered) completed turn is now delivered.
+        if ((turn.status ?? "completed") !== "inProgress") { this.#deliveredTurns.add(tid); }
+      }
+      saveDeliveredTurns(this.id, this.#deliveredTurns);
+    } catch (e) {
+      process.stderr.write(`[codex ${this.id}] history reconcile failed: ${e}\n`);
     }
   }
 
@@ -237,9 +337,15 @@ export class CodexSession implements AgentSession {
   busy(): boolean { return this.#thinking; }
 
   enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
-    const id = String(Date.now());
-    void this.#deliver(text, { mirror: opts?.mirrorToRelay ?? true });
-    return { id, text, createdAt: Date.now() };
+    const item: CodexInboundItem = { clientId: randomUUID(), text, state: "queued", at: Date.now() };
+    this.#inbound.push(item);
+    if (!saveCodexInbound(this.id, this.#inbound) && opts?.requireDurable) {
+      this.#inbound.pop();
+      throw new Error("codex inbound persist failed");
+    }
+    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at));
+    void this.#deliverItem(item);
+    return { id: String(item.at), text, createdAt: item.at };
   }
 
   queueState(): QueueState {
@@ -320,6 +426,8 @@ export class CodexSession implements AgentSession {
       if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
       try { void tmux.command(["kill-window", "-t", this.tmuxWindow]); } catch { /* ignore */ }
       this.#relay?.stop();
+      clearCodexInbound(this.id); // a killed session will never deliver — drop the spool
+      clearDeliveredTurns(this.id);
     }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
