@@ -34,13 +34,27 @@ const PAID_VOICE_ONBOARDING_PROMPT = `# Paid voice onboarding
 - Phase 1: if voice_message_count is 0 or 1, the user has not really tried voice enough yet. If they ask what you can do or how this works, start by saying one short sentence about what this is: "I'm the voice interface for Joy, connecting you to coding agents running in your sessions." Then focus on helping them try it. You may say: "I can see multiple open sessions and voice works across sessions. Try asking me to send something to the current session or just talk out loud - I will listen and take notes, and once you are ready I will send it." Do not push paid.
 - Phase 2: if voice_message_count is 2 or more, or the user has sent 2 messages in this voice session, the user has already tried voice enough. Explain to the user: "You get 20 minutes free, then voice blocks unless you upgrade in Settings." You may add one short sentence that upgrading supports the voice feature and Joy open source development.`;
 
+// Prepended when a session is being CONTINUED after a dropped connection, so
+// the agent doesn't re-introduce itself and instead picks up the thread from
+// the recent voice conversation below.
+const CONTINUATION_NOTICE = `# Continuing an interrupted session
+- This voice conversation was interrupted (the connection dropped) and is now being resumed. It is NOT a new conversation.
+- Do NOT greet the user again or reintroduce yourself. Continue naturally from where you left off.
+- The "Recent voice conversation" section below is what was said just before the interruption — use it to pick up the thread.`;
+
 export function buildVoiceSystemPrompt(options: {
     initialContext?: string;
     onboardingPromptLoadCount: number;
     voiceMessageCount: number;
     includePaidVoiceOnboarding: boolean;
+    isContinuation?: boolean;
+    voiceTranscript?: string | null;
 }): string {
     const sections = [VOICE_SYSTEM_PROMPT_BASE];
+
+    if (options.isContinuation) {
+        sections.push(CONTINUATION_NOTICE);
+    }
 
     if (options.includePaidVoiceOnboarding) {
         sections.push(PAID_VOICE_ONBOARDING_PROMPT);
@@ -56,6 +70,10 @@ export function buildVoiceSystemPrompt(options: {
         sections.push(`# Conversation history so far\n${options.initialContext.trim()}`);
     }
 
+    if (options.isContinuation && options.voiceTranscript?.trim()) {
+        sections.push(`# Recent voice conversation (before the interruption)\n${options.voiceTranscript.trim()}`);
+    }
+
     return sections.join('\n\n');
 }
 
@@ -63,7 +81,13 @@ export function buildVoiceFirstMessage(options: {
     hasPro: boolean;
     onboardingPromptLoadCount: number;
     includePaidVoiceOnboarding: boolean;
+    isContinuation?: boolean;
 }): string {
+    // A continuation must not re-greet — briefly acknowledge the reconnect and
+    // hand the floor back to the user.
+    if (options.isContinuation) {
+        return 'Sorry, we got cut off — go on.';
+    }
     if (
         !options.hasPro &&
         options.includePaidVoiceOnboarding &&
