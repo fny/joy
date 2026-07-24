@@ -50,44 +50,51 @@ function str(v: unknown): string { return typeof v === "string" ? v : ""; }
 
 export class CodexNormalizer {
   #mintId: () => string;
-  // codex turn id → joy turn id (joy mints its own, as claude does).
-  #turnIds = new Map<string, string>();
-  // codex tool item id → joy turn id it belongs to (survives turn close, like
-  // claude's #openTools, so tool-call-end resolves after turn-end).
+  // codex tool item id → codex turn id it belongs to (survives turn close, like
+  // claude's #openTools, so tool-call-end resolves after turn-end). Also the
+  // set used to close any still-open tools when a turn terminates (so app tool
+  // cards can't spin forever — gpt-5.6-sol review #10).
   #openTools = new Map<string, string>();
-  // The joy turn id of the turn currently in flight (for stamping receipts).
+  // The codex turn id currently in flight.
   #currentTurn: string | null = null;
 
+  // The joy wire `turn` field IS the codex turn id (a stable UUIDv7). Using it
+  // directly — rather than minting a random id per turn — makes turn identity
+  // survive restarts, keeps reconciliation dedupe possible, and makes the
+  // session's synthesized cancellation id match (gpt-5.6-sol review #6).
   constructor(mintId: () => string = randomUUID) {
     this.#mintId = mintId;
-  }
-
-  /** joy turn id for a codex turn id, minting + remembering on first sight. */
-  #joyTurn(codexTurnId: string): string {
-    let id = this.#turnIds.get(codexTurnId);
-    if (!id) { id = this.#mintId(); this.#turnIds.set(codexTurnId, id); }
-    return id;
   }
 
   handle(n: CodexNotification): CodexEffect[] {
     const p = n.params ?? {};
     switch (n.method) {
-      case "thread/started": return this.#threadStarted(p);
       case "thread/status/changed": return this.#status(p);
       case "turn/started": return this.#turnStarted(p);
-      case "turn/completed":
-      case "turn/aborted": return this.#turnEnded(n.method, p);
+      case "turn/completed": return this.#turnEnded(p);
       case "item/started": return this.#itemStarted(p);
       case "item/completed": return this.#itemCompleted(p);
       case "thread/tokenUsage/updated": return this.#tokenUsage(p);
+      case "thread/settings/updated": return this.#settings(p);
+      case "error": return this.#error(p);
       default: return [];
     }
   }
 
-  #threadStarted(p: Item): CodexEffect[] {
-    const thread = (p.thread ?? {}) as Item;
-    const model = str(thread.model);
+  #settings(p: Item): CodexEffect[] {
+    // The authoritative configured model for the thread (there is no
+    // `thread.model` on thread/started — review #4).
+    const s = (p.threadSettings ?? {}) as Item;
+    const model = str(s.model);
     return model ? [{ kind: "model", code: model }] : [];
+  }
+
+  #error(p: Item): CodexEffect[] {
+    // `error {threadId, turnId, error, willRetry}` — a non-retrying error still
+    // gets a terminal turn/completed(status:failed) after it, which closes the
+    // turn. Nothing to emit as a wire record here (M1); surface later.
+    void p;
+    return [];
   }
 
   #status(p: Item): CodexEffect[] {
@@ -102,32 +109,34 @@ export class CodexNormalizer {
     const turn = (p.turn ?? {}) as Item;
     const codexTurnId = str(turn.id);
     if (!codexTurnId) return [];
-    const joyTurn = this.#joyTurn(codexTurnId);
-    this.#currentTurn = joyTurn;
-    return [{ kind: "wire", record: encodeTurnStart({ turn: joyTurn }) }];
+    this.#currentTurn = codexTurnId;
+    return [{ kind: "wire", record: encodeTurnStart({ turn: codexTurnId }) }];
   }
 
-  #turnEnded(method: string, p: Item): CodexEffect[] {
+  #turnEnded(p: Item): CodexEffect[] {
     const turn = (p.turn ?? {}) as Item;
-    const codexTurnId = str(turn.id);
-    const joyTurn = codexTurnId ? this.#joyTurn(codexTurnId) : (this.#currentTurn ?? "");
-    if (!joyTurn) return [];
+    const codexTurnId = str(turn.id) || (this.#currentTurn ?? "");
+    if (!codexTurnId) return [];
     const codexStatus = str(turn.status);
     const status: "completed" | "failed" | "cancelled" =
-      method === "turn/aborted" || codexStatus === "interrupted" ? "cancelled"
+      codexStatus === "interrupted" ? "cancelled"
         : codexStatus === "failed" ? "failed"
           : "completed";
+    const out: CodexEffect[] = [];
+    // Close any tool calls still open at turn end so their cards don't spin.
+    for (const [call, turnId] of this.#openTools) {
+      if (turnId === codexTurnId) out.push({ kind: "wire", record: encodeToolCallEnd(call, { turn: codexTurnId }) });
+    }
+    for (const call of [...this.#openTools.keys()]) if (this.#openTools.get(call) === codexTurnId) this.#openTools.delete(call);
     this.#currentTurn = null;
-    this.#turnIds.delete(codexTurnId);
-    return [
-      { kind: "wire", record: encodeTurnEnd(status, { turn: joyTurn }) },
-      { kind: "thinking", value: false },
-    ];
+    out.push({ kind: "wire", record: encodeTurnEnd(status, { turn: codexTurnId }) });
+    out.push({ kind: "thinking", value: false });
+    return out;
   }
 
   #itemStarted(p: Item): CodexEffect[] {
     const item = (p.item ?? {}) as Item;
-    const joyTurn = this.#turnForItem(p);
+    const joyTurn = this.#turnFor(p);
     switch (itemType(item)) {
       case "userMessage": {
         // The echo of a dispatched message — confirms delivery by clientId,
@@ -148,7 +157,7 @@ export class CodexNormalizer {
 
   #itemCompleted(p: Item): CodexEffect[] {
     const item = (p.item ?? {}) as Item;
-    const joyTurn = this.#turnForItem(p);
+    const joyTurn = this.#turnFor(p);
     const id = str(item.id);
     switch (itemType(item)) {
       case "agentMessage": {
@@ -181,15 +190,18 @@ export class CodexNormalizer {
     return [{ kind: "wire", record: encodeToolCallEnd(call, { turn }) }];
   }
 
-  #turnForItem(p: Item): string {
-    const codexTurnId = str(p.turnId);
-    return codexTurnId ? this.#joyTurn(codexTurnId) : (this.#currentTurn ?? "");
+  #turnFor(p: Item): string {
+    return str(p.turnId) || (this.#currentTurn ?? "");
   }
 
   #tokenUsage(p: Item): CodexEffect[] {
+    // `total` is CUMULATIVE billing usage (incl. output) — not current context
+    // size. `last.inputTokens` is the closest analog to claude's context gauge
+    // (gpt-5.6-sol review #10).
     const usage = (p.tokenUsage ?? {}) as Item;
-    const total = (usage.total ?? {}) as Item;
-    const tokens = typeof total.totalTokens === "number" ? total.totalTokens : null;
+    const last = (usage.last ?? {}) as Item;
+    const tokens = typeof last.inputTokens === "number" ? last.inputTokens
+      : (typeof (usage.total as Item)?.totalTokens === "number" ? (usage.total as Item).totalTokens as number : null);
     return tokens != null ? [{ kind: "context", tokens }] : [];
   }
 }

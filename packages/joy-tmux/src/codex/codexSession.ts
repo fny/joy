@@ -11,7 +11,8 @@
 
 import { randomUUID } from "crypto";
 import { type ChildProcess } from "child_process";
-import { join } from "path";
+import { mkdirSync, chmodSync } from "fs";
+import { join, dirname } from "path";
 import { tmux } from "../tmux/driver";
 import { joyStateDir } from "../paths";
 import { saveWindowRecord } from "../domain/windowRecord";
@@ -117,8 +118,16 @@ export class CodexSession implements AgentSession {
 
   async #start(): Promise<void> {
     try {
+      // The app-server unix socket exposes danger-full-access execution — its
+      // directory must be 0700 so other UIDs can't dial it (review #8).
+      const dir = dirname(this.#socketPath);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
       this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath });
       this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
+      // spawn failures (e.g. missing codex binary) are ASYNC — not caught by
+      // this try/catch — so handle them explicitly (review #9).
+      this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
       this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
       this.pid = this.#proc.pid;
 
@@ -136,6 +145,9 @@ export class CodexSession implements AgentSession {
         const r = await client.threadStart({ cwd: this.cwd, permissionMode: this.#permissionMode, model: this.model, developerInstructions: this.#developerInstructions });
         this.#threadId = r.threadId;
         this.transcriptPath = r.rolloutPath ?? undefined;
+        // Mirror the effective model the thread resolved to (thread/start's
+        // top-level `model` — there is no thread.model on notifications).
+        if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
       }
       saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "codex", codexThreadId: this.#threadId ?? undefined, codexSocketPath: this.#socketPath });
       if (this.status === "starting") this.status = "active";
@@ -177,11 +189,12 @@ export class CodexSession implements AgentSession {
     const clientId = randomUUID();
     if (opts.mirror) this.#relay?.send(encodeUserMessage(text, Date.now()));
     try {
+      // Do NOT pass model/effort on every turn — that would overwrite a model
+      // the user picked in the attached TUI (review #4). The thread setting
+      // persists; a deliberate joy-side model change (M2) would send it once.
       await client.turnStart(this.#threadId, text, {
         clientUserMessageId: clientId,
         permissionMode: this.#permissionMode,
-        model: this.model,
-        effort: this.effort,
       });
     } catch (e) {
       process.stderr.write(`[codex ${this.id}] turn/start failed: ${e}\n`);
@@ -191,10 +204,20 @@ export class CodexSession implements AgentSession {
   // ── output (codex notifications → relay wire) ────────────────────────────────
 
   #onNotification(n: CodexNotification): void {
+    // Only the ROOT thread's traffic drives this session. Subagents, reviews,
+    // and forks run on their own thread ids on the same server and must not
+    // contaminate the transcript / active turn (review #6).
+    if (this.#threadId) {
+      const p = n.params ?? {};
+      const nThread = n.method === "thread/started"
+        ? (p.thread as Record<string, unknown> | undefined)?.id
+        : p.threadId;
+      if (typeof nThread === "string" && nThread !== this.#threadId) return;
+    }
     if (n.method === "turn/started") {
       const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
       if (typeof turn.id === "string") this.#activeTurnId = turn.id;
-    } else if (n.method === "turn/completed" || n.method === "turn/aborted") {
+    } else if (n.method === "turn/completed") {
       this.#activeTurnId = null;
     }
     for (const eff of this.#norm.handle(n)) {
@@ -280,7 +303,13 @@ export class CodexSession implements AgentSession {
     this.#client = null;
     try { this.#proc?.kill(); } catch { /* ignore */ }
     this.#proc = null;
-    try { this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#activeTurnId ?? "codex" })); } catch { /* ignore */ }
+    // Synthesize a cancellation ONLY for a genuinely open turn (a turn-start
+    // was materialized with no terminal event) — using the real codex turn id
+    // so it matches the normalizer's turn-start (review #6).
+    if (this.#activeTurnId) {
+      try { this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#activeTurnId })); } catch { /* ignore */ }
+      this.#activeTurnId = null;
+    }
     if (this.#relay) this.#relay.setThinking(false);
     tmux.untrack(this.tmuxWindow);
     if (reason === "process_exited") {

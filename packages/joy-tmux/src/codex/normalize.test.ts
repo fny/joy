@@ -42,13 +42,13 @@ test("live capture → the exact claude-shaped wire sequence for a command turn"
   ]);
 });
 
-test("all wire records in a turn share one joy turn id", () => {
+test("all wire records in a turn share the codex turn id (used directly)", () => {
   const effects = run(CAPTURE);
   const turns = new Set(
     effects.filter((e) => e.kind === "wire").map((e) => ((e as any).record.content.data.turn)),
   );
   expect(turns.size).toBe(1);
-  expect([...turns][0]).toBe("turn-1");
+  expect([...turns][0]).toBe("019f9261-f759-7062-91be-b1956956959a");
 });
 
 test("userMessage echo → confirmDispatch by clientId (no wire record)", () => {
@@ -69,7 +69,7 @@ test("agentMessage completion stamps a receipt keyed on the item id", () => {
   const effects = run(CAPTURE);
   const receipts = effects.filter((e) => e.kind === "receipt");
   expect(receipts.length).toBe(1);
-  expect((receipts[0] as any).turn).toBe("turn-1");
+  expect((receipts[0] as any).turn).toBe("019f9261-f759-7062-91be-b1956956959a");
   expect(typeof (receipts[0] as any).uuid).toBe("string");
 });
 
@@ -110,8 +110,19 @@ test("interrupted turn → cancelled turn-end", () => {
   expect(ev(end[0])).toEqual({ t: "turn-end", status: "cancelled" });
 });
 
-test("thread/started with a model → model effect", () => {
+test("thread/settings/updated → model effect (there is no thread.model)", () => {
   const norm = normalizer();
-  const eff = norm.handle({ method: "thread/started", params: { thread: { id: "x", model: "gpt-5.5" } } });
+  const eff = norm.handle({ method: "thread/settings/updated", params: { threadId: "x", threadSettings: { model: "gpt-5.5", effort: "medium" } } });
   expect(eff).toEqual([{ kind: "model", code: "gpt-5.5" }]);
+});
+
+test("open tool calls are closed when the turn ends", () => {
+  const norm = normalizer();
+  norm.handle({ method: "turn/started", params: { turn: { id: "t1" } } });
+  norm.handle({ method: "item/started", params: { turnId: "t1", item: { type: "commandExecution", id: "c1", command: "sleep 1", cwd: "/" } } });
+  // turn ends WITHOUT an item/completed for c1 → normalizer must close it.
+  const end = norm.handle({ method: "turn/completed", params: { turn: { id: "t1", status: "completed" } } });
+  const evs = end.filter((e) => e.kind === "wire").map((e) => (e as any).record.content.data.ev);
+  expect(evs).toContainEqual({ t: "tool-call-end", call: "c1" });
+  expect(evs).toContainEqual({ t: "turn-end", status: "completed" });
 });
