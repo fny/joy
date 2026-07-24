@@ -52,6 +52,12 @@ export function initDraftQueueRelease(send: SendFn): void {
 
     const releasePass = () => {
         const state = storage.getState();
+        // OFFLINE HOLD: releasing means POSTing, which can't succeed with no
+        // network — so hold the WHOLE queue until the socket is connected. This
+        // is what makes an offline send "queue and retry": the message waits in
+        // the draft queue (visible, MMKV-durable) and drains here on reconnect
+        // (storage.subscribe fires when setSocketStatus flips to 'connected').
+        if (state.socketStatus !== 'connected') return;
         const drafts = useDraftQueueStore.getState().bySession;
         const now = Date.now();
         for (const [sessionId, queue] of Object.entries(drafts)) {
