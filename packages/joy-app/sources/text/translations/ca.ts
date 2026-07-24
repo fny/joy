@@ -378,6 +378,7 @@ export const ca: TranslationStructure = {
         resumeThisSession: 'Reprèn aquesta sessió…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => count === 1 ? '1 a la cua' : `${count} a la cua`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'El quadre d\'entrada de la sessió té text pendent — toca per netejar-lo i reprendre',
         pausedDispatchMismatch: 'És possible que un enviament no s\'hagi completat correctament — toca per reprendre',

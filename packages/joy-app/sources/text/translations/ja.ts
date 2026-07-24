@@ -379,6 +379,7 @@ export const ja: TranslationStructure = {
         resumeThisSession: 'このセッションを再開…',
     },
     joyQueue: {
+        header: ({ count }: { count: number }) => `${count} 件待機中`,
         // Queued-message strip above the composer (JoyQueueStrip)
         pausedInputDirty: 'セッションの入力欄に未送信のテキストが残っています — タップしてクリアし再開',
         pausedDispatchMismatch: '送信が正しく完了していない可能性があります — タップして再開',
