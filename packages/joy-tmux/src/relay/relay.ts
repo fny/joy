@@ -914,6 +914,16 @@ export interface JoyDialogInfo {
   since: number;          // epoch ms when it was first detected
 }
 
+/** A codex approval request awaiting the user (non-yolo). The app shows an
+ *  Allow/Deny bar and answers via the joy-codex-approve RPC. */
+export interface JoyCodexApprovalInfo {
+  requestId: string;
+  kind: "command" | "patch";
+  title: string;          // e.g. the command line, or "Apply patch to N files"
+  detail?: string;        // reason / extra context
+  since: number;
+}
+
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
 export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
@@ -1126,6 +1136,11 @@ export class RelaySession {
   async updateLogin(info: JoyLoginInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__login == null) return;
     await this.mergeMetadata({ joy__login: info });
+  }
+
+  async updateCodexApproval(info: JoyCodexApprovalInfo | null): Promise<void> {
+    if (info == null && this.metadata?.joy__codexApproval == null) return;
+    await this.mergeMetadata({ joy__codexApproval: info });
   }
 
   /** Single-flight latest-desired-value reconciler. Callers assert the desired

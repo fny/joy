@@ -60,6 +60,7 @@ import { DraftQueueStrip } from './DraftQueueStrip';
 import { GoalBar } from './GoalBar';
 import { LoginBar } from './LoginBar';
 import { DialogBar } from './DialogBar';
+import { CodexApprovalBar } from './CodexApprovalBar';
 import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
 
@@ -800,6 +801,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         <>
             <LoginBar sessionId={sessionId} />
             <DialogBar sessionId={sessionId} />
+            <CodexApprovalBar sessionId={sessionId} />
             <GoalBar sessionId={sessionId} />
             <Deferred>
                 {messages.length > 0 && (

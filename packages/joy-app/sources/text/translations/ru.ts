@@ -475,6 +475,11 @@ export const ru: TranslationStructure = {
         editMessage: 'Задайте новую цель для агента. Оставьте пустым, чтобы сохранить текущую.',
     },
 
+    codexApproval: {
+        label: 'ПОДТВЕРЖДЕНИЕ',
+        allow: 'Разрешить',
+        deny: 'Отклонить',
+    },
     joyDialog: {
         label: 'ТРЕБУЕТСЯ ДЕЙСТВИЕ',
         fallbackTitle: 'Claude Code задаёт вопрос',

@@ -360,6 +360,11 @@ export const zhHans: TranslationStructure = {
         editMessage: '为智能体设置新目标。留空则保留当前目标。',
     },
 
+    codexApproval: {
+        label: '批准',
+        allow: '允许',
+        deny: '拒绝',
+    },
     joyDialog: {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提问',

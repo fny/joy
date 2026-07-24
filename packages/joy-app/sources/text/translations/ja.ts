@@ -360,6 +360,11 @@ export const ja: TranslationStructure = {
         editMessage: '新しいゴールを設定します。空欄のままにすると現在のゴールを維持します。',
     },
 
+    codexApproval: {
+        label: '承認',
+        allow: '許可',
+        deny: '拒否',
+    },
     joyDialog: {
         label: '要対応',
         fallbackTitle: 'Claude Code が質問しています',

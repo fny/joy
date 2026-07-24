@@ -139,6 +139,15 @@ export const MetadataSchema = z.object({
         options: z.array(z.string()),
         since: z.number().optional(),
     }).nullable().optional(),
+    // A codex approval request (non-yolo): the agent wants to run a command or
+    // apply a patch and is waiting for the user to Allow/Deny.
+    joy__codexApproval: z.object({
+        requestId: z.string(),
+        kind: z.enum(['command', 'patch']),
+        title: z.string(),
+        detail: z.string().optional(),
+        since: z.number().optional(),
+    }).nullable().optional(),
 });
 
 export type Metadata = z.infer<typeof MetadataSchema>;
