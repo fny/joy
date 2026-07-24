@@ -244,6 +244,25 @@ deferred (the TUI answers in the meantime).
 
 ## Status
 
+**M2 — BUILT & PROVEN (2026-07-24), latest-codex only.** All items from the
+gpt-5.6-sol M1 review resolved, each with a live proof against 0.144.6:
+- Inbound durability state machine (persist-before-send, confirm-on-echo).
+- Restart reconciliation via thread/read + a TURN-level delivery checkpoint —
+  LIVE FINDING: per-item ids differ between live (msg_/call_) and thread/read
+  history (item-N), so item-id dedup fails across a restart; turn ids are
+  stable, so delivered turns are skipped wholesale. Proof: a restart does not
+  double-show a delivered turn and a new message continues the thread.
+- Recovery hardening: orphan-app-server rejoin, persisted model/effort/
+  permission/developerInstructions + server pid.
+- model/list picker: fetchCodexModels + machine RPC joy-codex-models; app
+  codex model+effort picker. Proof: gpt-5.5 create → thread on gpt-5.5.
+- Non-yolo approval surfacing: daemon holds command/patch approvals, app
+  Allow/Deny bar via joy-codex-approve RPC. Proof: codex escalated a command →
+  surfaced with its reason → answer resolved it.
+- Deterministic output localIds; correctness fixes (valid AskForApproval,
+  turn-id from codex, tokenUsage.last, thread/settings model, open-tool cleanup).
+- Proofs in src/codex/__fixtures__/*.mjs. 223 daemon tests; both packages typecheck.
+
 **M1 — BUILT & PROVEN (2026-07-24).** Live against codex 0.144.6:
 - Transport: `ws+unix://…:/` + `perMessageDeflate:false` (appServerClient.ts).
 - Normalizer: codex notifications → the exact claude-shaped wire sequence
