@@ -263,8 +263,15 @@ deferred (the TUI answers in the meantime).
    the newer-than-last-receipt cut (amendment to review #2's proposal).
 2. Subagent/fork `thread/started` shapes on a per-session server — confirm
    the root-thread filter policy against real subagent traffic.
-3. `ws` library over unix socket against the app-server listener (spike
-   verified the WebSocket upgrade manually, not the library path).
+3. ~~`ws` library over unix socket against the app-server listener.~~
+   **RESOLVED (2026-07-24 spike, codex 0.144.6):** dial with
+   `new WebSocket("ws+unix://<socketPath>:/", { perMessageDeflate: false })`.
+   The `perMessageDeflate: false` is REQUIRED — the app-server hangs up
+   (closes the connection mid-handshake) when the client advertises the
+   `permessage-deflate` extension, which `ws` sends by default; that was the
+   "socket hang up". Dead ends: the `ws+unix://…` scheme WITH deflate hangs;
+   the http `socketPath` option is silently IGNORED by `ws` (it dials TCP to
+   localhost instead). So `ws+unix` + no-deflate is the only working combo.
 4. Orphan rejoin: confirm a daemon-respawned connection can resubscribe to a
    surviving server's live turn mid-stream and reconcile cleanly.
 5. Per-session server footprint benchmark (RSS/FD/startup at 1/10/50).
