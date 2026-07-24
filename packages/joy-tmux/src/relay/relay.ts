@@ -902,18 +902,6 @@ export interface JoyLoginInfo {
   error?: string;  // a rejection/error message shown in the box (e.g. bad code)
 }
 
-/**
- * Interactive CLI dialog occupying the pane (model picker, "Switch model?"
- * confirm, /effort slider…). These dialogs block dispatch and write nothing to
- * the transcript until answered — the app shows a "answer this in the
- * terminal" banner while one is up; cleared when the pane moves on.
- */
-export interface JoyDialogInfo {
-  title: string | null;   // the dialog's heading line, e.g. "Switch model?"
-  options: string[];      // numbered option rows, selection marker stripped
-  since: number;          // epoch ms when it was first detected
-}
-
 /** Message-queue snapshot the app reads from metadata (replaces joy-queue-list polling). */
 export interface JoyQueueInfo {
   queue: { id: string; text: string; createdAt: number }[];
@@ -1002,17 +990,14 @@ export class RelaySession {
    * daemon is the only writer of session metadata, so serializing here means each
    * merge reads an already-updated `this.metadata` and no field is lost.
    */
-  /** Resolves TRUE only when the patch was server-ACKED (metadata advanced).
-   *  Callers that need write certainty (the dialog pump) use the result;
-   *  fire-and-forget callers ignore it. */
-  private mergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
+  private mergeMetadata(patch: Record<string, unknown>): Promise<void> {
     const run = this.metadataChain.then(() => this.doMergeMetadata(patch));
-    this.metadataChain = run.then(() => undefined, () => undefined); // keep the chain alive past a failure
+    this.metadataChain = run.catch(() => {}); // keep the chain alive past a failure
     return run;
   }
 
-  private async doMergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
-    if (!this.metadata) return false;
+  private async doMergeMetadata(patch: Record<string, unknown>): Promise<void> {
+    if (!this.metadata) return;
     for (let attempt = 0; attempt < 3; attempt++) {
       // Recompute merged + enc from CURRENT metadata each attempt, so a
       // version bump re-merges the patch onto fresh state instead of re-sending
@@ -1024,7 +1009,7 @@ export class RelaySession {
       if (ack.result === 'success') {
         this.metadata = merged;
         if (typeof ack.version === 'number') this.metadataVersion = ack.version;
-        return true;
+        return;
       }
       if (ack.result === 'version-mismatch' && typeof ack.version === 'number') {
         this.metadataVersion = ack.version;
@@ -1038,9 +1023,8 @@ export class RelaySession {
         }
         continue; // retry with the server's current version
       }
-      return false;
+      return;
     }
-    return false;
   }
 
   /**
@@ -1126,62 +1110,6 @@ export class RelaySession {
   async updateLogin(info: JoyLoginInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__login == null) return;
     await this.mergeMetadata({ joy__login: info });
-  }
-
-  /** Single-flight latest-desired-value reconciler. Callers assert the desired
-   *  dialog every pane poll; at most ONE metadata write is in flight, always
-   *  targeting the LATEST desired value, and the acked-state comparison runs
-   *  inside the loop (doMergeMetadata only advances this.metadata on ack).
-   *  This closes two races the naive dedupe-then-queue version had (verify
-   *  round): a clear skipped because a not-yet-acked SET made acked state look
-   *  clear (stranding the banner after end()), and 3s assertions queueing a
-   *  backlog of redundant writes behind slow no-ack retries. */
-  private desiredDialog: JoyDialogInfo | null = null;
-  private dialogWriteBusy = false;
-  // A write completed WITHOUT an ack: the server may or may not hold it, so
-  // the local acked view can't be trusted for skipping — force-assert the
-  // desired value until a write acks (verify round 3: a set whose ack was
-  // lost, followed by desired→null, matched "already clear" locally and never
-  // sent the clear, stranding the banner server-side).
-  private dialogWriteUncertain = false;
-  updateDialog(info: JoyDialogInfo | null): void {
-    this.desiredDialog = info;
-    if (this.dialogWriteBusy) return; // in-flight write re-checks desired on completion
-    void this.#pumpDialog();
-  }
-
-  async #pumpDialog(): Promise<void> {
-    const eq = (a: JoyDialogInfo | null | undefined, b: JoyDialogInfo | null | undefined) =>
-      a == null ? b == null
-        : b != null && b.title === a.title && JSON.stringify(b.options) === JSON.stringify(a.options);
-    this.dialogWriteBusy = true;
-    try {
-      // Loop until an ACKED write matches the (possibly re-updated) desired
-      // value. Certainty comes from mergeMetadata's RETURN (verify round 4:
-      // inferring it from local state let a forced re-write of an already-
-      // equal value clear uncertainty without any ack). After a failed write,
-      // stop ONLY if desired hasn't moved meanwhile — teardown's clear has no
-      // next poll to retry from, so a moved desired gets one immediate try.
-      for (;;) {
-        const want = this.desiredDialog;
-        if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined) && !this.dialogWriteUncertain) return;
-        // Rejection normalized to false IN the loop (verify round 5): exiting
-        // through the outer catch skipped the moved-desired retry, so a SET
-        // that threw while desired became null lost teardown's clear.
-        const acked = await this.mergeMetadata({ joy__dialog: want }).catch(() => false);
-        if (acked) {
-          this.dialogWriteUncertain = false; // loop re-checks a moved desired
-          continue;
-        }
-        this.dialogWriteUncertain = true;
-        if (this.desiredDialog === want) return; // unmoved — next assertion retries
-        // desired moved while writing → loop and try it now
-      }
-    } catch {
-      this.dialogWriteUncertain = true; // next assertion retries
-    } finally {
-      this.dialogWriteBusy = false;
-    }
   }
 
   /**
@@ -1643,10 +1571,13 @@ export function initRelay(): RelayClient | null {
 
 export async function createRelaySession(
   client: RelayClient,
-  opts: { tag: string; cwd: string; id: string; state?: JoyLifecycleState },
+  opts: { tag: string; cwd: string; id: string; state?: JoyLifecycleState; flavor?: string },
 ): Promise<RelaySession> {
   const state = opts.state ?? 'running';
-  const metadata = { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id, joy__state: state };
+  const metadata: Record<string, unknown> = { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-tmux', joy__sessionId: opts.id, joy__state: state };
+  // Agent flavor drives the app's per-agent rendering (codex diff/patch views).
+  // Absent → the app treats a joy-tmux session as claude.
+  if (opts.flavor) metadata.flavor = opts.flavor;
   const result = await client.createSession({ tag: opts.tag, metadata });
   // Resume from persisted seq so messages sent during downtime are delivered.
   // On first-ever start (no saved seq), fetch to end to avoid replaying history.

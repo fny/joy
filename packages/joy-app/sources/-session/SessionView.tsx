@@ -498,7 +498,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isJoyTmux = session.metadata?.joy__source === 'joy-tmux';
     // joy sessions carry no `flavor` in metadata (just joy__source); they're
     // always Claude, so coerce it so model/effort lookups resolve.
-    const flavor = isJoyTmux ? 'claude' : session.metadata?.flavor;
+    // joy-tmux sessions carry their agent in metadata.flavor ('codex'); absent
+    // → claude (legacy joy-tmux sessions and the claude path send no flavor).
+    const flavor = isJoyTmux ? (session.metadata?.flavor ?? 'claude') : session.metadata?.flavor;
     const joySessionId = session.metadata?.joy__sessionId;
     const availableModels = React.useMemo(() => (
         isJoyTmux ? JOY_CLAUDE_MODELS : getAvailableModels(flavor, session.metadata, t)
