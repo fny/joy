@@ -23,7 +23,7 @@ import {
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
 import type { DeliverySource } from "../domain/receipts";
 import type { AgentSession } from "../domain/agentSession";
-import { spawnCodexAppServer, CodexAppServerClient } from "./appServerClient";
+import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError } from "./appServerClient";
 import { CodexNormalizer, type CodexNotification } from "./normalize";
 import { buildCodexAttachCommand } from "./attach";
 import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "./codexInboundStore";
@@ -146,7 +146,7 @@ export class CodexSession implements AgentSession {
       // Give the server a moment to bind the socket, then connect (with retry).
       const client = new CodexAppServerClient();
       client.onNotification((n) => this.#onNotification(n));
-      client.onServerRequest(() => ({ decision: "accept" })); // yolo: nothing should ask
+      client.onServerRequest((req) => this.#onServerRequest(req));
       await this.#connectWithRetry(client);
       this.#client = client;
 
@@ -256,6 +256,36 @@ export class CodexSession implements AgentSession {
    *  removed, so the remainder is genuinely undelivered). */
   async #drainInbound(): Promise<void> {
     for (const item of [...this.#inbound]) await this.#deliverItem(item);
+  }
+
+  // ── server→client requests (approvals / elicitations) ───────────────────────
+  // v1 is yolo (approvalPolicy 'never'), so ordinary command/patch approvals
+  // shouldn't fire — but respond with the CORRECT per-method shape if they do,
+  // and JSON-RPC-error anything we can't answer rather than sending an invalid
+  // {decision:'accept'} to every method (review #3). Non-yolo approval cards in
+  // the app are M2.
+  #onServerRequest(req: { id: number | string; method: string; params?: Record<string, unknown> }): unknown {
+    switch (req.method) {
+      // v2 command/patch approval families — accept under yolo.
+      case "item/commandExecution/requestApproval":
+      case "item/fileChange/requestApproval":
+        return { decision: "accept" };
+      // Legacy-named approval methods still in the 0.144.6 schema.
+      case "execCommandApproval":
+      case "applyPatchApproval":
+        return { decision: "approved" };
+      // Can't answer meaningfully in v1 — reject so the server proceeds/cancels
+      // rather than wedging on a wrong-shaped success.
+      case "item/tool/requestUserInput":
+      case "mcpServer/elicitation/request":
+      case "item/permissions/requestApproval":
+        throw new JsonRpcError(-32601, `joy v1 cannot answer ${req.method}`);
+      // We don't own ChatGPT tokens; surface as unanswerable, not fake creds.
+      case "account/chatgptAuthTokens/refresh":
+        throw new JsonRpcError(-32601, "joy does not manage codex auth tokens");
+      default:
+        throw new JsonRpcError(-32601, `unhandled server request: ${req.method}`);
+    }
   }
 
   // ── output (codex notifications → relay wire) ────────────────────────────────

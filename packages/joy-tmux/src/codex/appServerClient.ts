@@ -56,6 +56,12 @@ export interface TurnStartOpts {
 type Notification = { method: string; params?: Record<string, unknown> };
 type ServerRequest = { id: number | string; method: string; params?: Record<string, unknown> };
 
+/** Throw from an onServerRequest handler to reply with a JSON-RPC error instead
+ *  of a result (e.g. -32601 for a request we can't answer). */
+export class JsonRpcError extends Error {
+  constructor(public readonly code: number, message: string) { super(message); }
+}
+
 export class CodexAppServerClient {
   #ws: WebSocket | null = null;
   #nextId = 1;
@@ -114,9 +120,14 @@ export class CodexAppServerClient {
   }
 
   async #handleServerRequest(req: ServerRequest): Promise<void> {
-    let result: unknown = {};
-    try { result = await this.#onServerRequest(req); } catch { result = {}; }
-    this.#send({ jsonrpc: "2.0", id: req.id, result });
+    try {
+      const result = await this.#onServerRequest(req);
+      this.#send({ jsonrpc: "2.0", id: req.id, result });
+    } catch (e) {
+      const code = e instanceof JsonRpcError ? e.code : -32603;
+      const message = e instanceof Error ? e.message : String(e);
+      this.#send({ jsonrpc: "2.0", id: req.id, error: { code, message } });
+    }
   }
 
   request(method: string, params: Record<string, unknown>): Promise<unknown> {
