@@ -689,9 +689,13 @@ export class SessionRegistry {
       // ── Codex recovery: reconstruct a CodexSession that respawns its own
       // app-server (the old one died with the daemon) and thread/resumes.
       if (rec?.agent === "codex") {
+        const s = rec.codexSettings ?? {};
         const session = new CodexSession({
           id, tmuxWindow, cwd,
-          permissionMode: "yolo",
+          model: s.model,
+          effort: s.effort,
+          permissionMode: s.permissionMode ?? "yolo",
+          developerInstructions: s.developerInstructions,
           status: isAlive ? "active" : "ended",
           startedAt: Date.now(),
           codexThreadId: rec.codexThreadId,
