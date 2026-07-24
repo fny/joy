@@ -11,11 +11,11 @@
 
 import { randomUUID } from "crypto";
 import { type ChildProcess } from "child_process";
-import { mkdirSync, chmodSync, rmSync } from "fs";
+import { mkdirSync, chmodSync, rmSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { tmux } from "../tmux/driver";
 import { joyStateDir } from "../paths";
-import { saveWindowRecord } from "../domain/windowRecord";
+import { saveWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import {
   createRelaySession, encodeUserMessage, encodeTurnEnd,
   type RelaySession,
@@ -125,29 +125,40 @@ export class CodexSession implements AgentSession {
 
   async #start(): Promise<void> {
     try {
-      // The app-server unix socket exposes danger-full-access execution — its
-      // directory must be 0700 so other UIDs can't dial it (review #8).
-      const dir = dirname(this.#socketPath);
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
-      // Remove a stale socket file from a prior (dead) app-server so bind()
-      // doesn't fail with EADDRINUSE. The daemon is the sole owner of this
-      // per-session socket, so a lingering file after our own restart is stale.
-      // (A full orphan-probe-and-rejoin is review #5 / M2.)
-      try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ }
-      this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath });
-      this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
-      // spawn failures (e.g. missing codex binary) are ASYNC — not caught by
-      // this try/catch — so handle them explicitly (review #9).
-      this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
-      this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
-      this.pid = this.#proc.pid;
-
-      // Give the server a moment to bind the socket, then connect (with retry).
       const client = new CodexAppServerClient();
       client.onNotification((n) => this.#onNotification(n));
       client.onServerRequest((req) => this.#onServerRequest(req));
-      await this.#connectWithRetry(client);
+
+      // Orphan rejoin (review #5): if a live app-server already answers on our
+      // socket — it survived a daemon crash — reuse it (rejoining the live
+      // thread + any in-flight turn) instead of spawning a duplicate.
+      let rejoined = false;
+      if (existsSync(this.#socketPath)) {
+        try {
+          await client.connect(this.#socketPath);
+          rejoined = true;
+          const rec = loadWindowRecord(this.id);
+          if (rec?.codexServerPid) this.pid = rec.codexServerPid; // so end() can kill it
+          process.stderr.write(`[codex ${this.id}] rejoined orphan app-server\n`);
+        } catch { /* not alive — spawn a fresh one below */ }
+      }
+
+      if (!rejoined) {
+        // The app-server unix socket exposes danger-full-access execution — its
+        // directory must be 0700 so other UIDs can't dial it (review #8).
+        const dir = dirname(this.#socketPath);
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
+        try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ } // remove stale socket file
+        this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath });
+        this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
+        // spawn failures (e.g. missing codex binary) are ASYNC — not caught by
+        // this try/catch — so handle them explicitly (review #9).
+        this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
+        this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
+        this.pid = this.#proc.pid;
+        await this.#connectWithRetry(client);
+      }
       this.#client = client;
 
       if (this.#resumeThreadId) {
@@ -180,7 +191,13 @@ export class CodexSession implements AgentSession {
       // Deliver anything spooled (queued during startup, or undelivered after
       // a resume+reconcile).
       await this.#drainInbound();
-      saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "codex", codexThreadId: this.#threadId ?? undefined, codexSocketPath: this.#socketPath });
+      saveWindowRecord(this.id, {
+        launchCwd: this.cwd, agent: "codex",
+        codexThreadId: this.#threadId ?? undefined,
+        codexSocketPath: this.#socketPath,
+        codexServerPid: this.#proc?.pid,
+        codexSettings: { model: this.model, effort: this.effort, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions },
+      });
       if (this.status === "starting") this.status = "active";
       this.#deps.broadcast("session_update", this.toJSON());
       // Best-effort: launch the attach TUI in the tmux window (poll rollout →
@@ -437,7 +454,9 @@ export class CodexSession implements AgentSession {
     const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
-    try { this.#proc?.kill(); } catch { /* ignore */ }
+    // Kill the app-server: our own child, or (when we rejoined an orphan) the
+    // recovered pid.
+    try { if (this.#proc) this.#proc.kill(); else if (this.pid) process.kill(this.pid); } catch { /* ignore */ }
     this.#proc = null;
     // Synthesize a cancellation ONLY for a genuinely open turn (a turn-start
     // was materialized with no terminal event) — using the real codex turn id
