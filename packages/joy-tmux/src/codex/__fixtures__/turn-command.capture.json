@@ -1,0 +1,255 @@
+[
+ {
+  "method": "thread/started",
+  "params": {
+   "thread": {
+    "id": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+    "extra": null,
+    "sessionId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+    "forkedFromId": null,
+    "parentThreadId": null,
+    "preview": "",
+    "ephemeral": false,
+    "historyMode": "legacy",
+    "modelProvider": "openai",
+    "createdAt": 1784867321,
+    "updatedAt": 1784867321,
+    "recencyAt": 1784867321,
+    "status": {
+     "type": "idle"
+    },
+    "path": "/home/claude/.codex/sessions/2026/07/24/rollout-2026-07-24T04-28-41-019f9261-f610-7ca2-8ac3-2d0a32af6c10.jsonl",
+    "cwd": "/tmp/claude-1000/cxwork",
+    "cliVersion": "0.144.6",
+    "source": "vscode",
+    "threadSource": null,
+    "agentNickname": null,
+    "agentRole": null,
+    "gitInfo": null,
+    "name": null,
+    "turns": []
+   }
+  }
+ },
+ {
+  "method": "thread/status/changed",
+  "params": {
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "status": {
+    "type": "active",
+    "activeFlags": []
+   }
+  }
+ },
+ {
+  "method": "turn/started",
+  "params": {
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turn": {
+    "id": "019f9261-f759-7062-91be-b1956956959a",
+    "items": [],
+    "itemsView": "notLoaded",
+    "status": "inProgress",
+    "error": null,
+    "startedAt": 1784867321,
+    "completedAt": null,
+    "durationMs": null
+   }
+  }
+ },
+ {
+  "method": "item/started",
+  "params": {
+   "item": {
+    "type": "userMessage",
+    "id": "019f9261-ff1e-7fa2-8c66-2a618db4c053",
+    "clientId": "joy-local-1",
+    "content": [
+     {
+      "type": "text",
+      "text": "Run the shell command: echo hello-from-codex. Then reply with the single word done.",
+      "text_elements": []
+     }
+    ]
+   },
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "startedAtMs": 1784867323678
+  }
+ },
+ {
+  "method": "item/completed",
+  "params": {
+   "item": {
+    "type": "userMessage",
+    "id": "019f9261-ff1e-7fa2-8c66-2a618db4c053",
+    "clientId": "joy-local-1",
+    "content": [
+     {
+      "type": "text",
+      "text": "Run the shell command: echo hello-from-codex. Then reply with the single word done.",
+      "text_elements": []
+     }
+    ]
+   },
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "completedAtMs": 1784867323678
+  }
+ },
+ {
+  "method": "item/started",
+  "params": {
+   "item": {
+    "type": "commandExecution",
+    "id": "call_MqHM7YV0OX6mYq55wPL0AGwd",
+    "command": "/bin/bash -lc 'echo hello-from-codex'",
+    "cwd": "/tmp/claude-1000/cxwork",
+    "processId": "3375",
+    "source": "unifiedExecStartup",
+    "status": "inProgress",
+    "commandActions": [
+     {
+      "type": "unknown",
+      "command": "echo hello-from-codex"
+     }
+    ],
+    "aggregatedOutput": null,
+    "exitCode": null,
+    "durationMs": null
+   },
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "startedAtMs": 1784867325663
+  }
+ },
+ {
+  "method": "item/completed",
+  "params": {
+   "item": {
+    "type": "commandExecution",
+    "id": "call_MqHM7YV0OX6mYq55wPL0AGwd",
+    "command": "/bin/bash -lc 'echo hello-from-codex'",
+    "cwd": "/tmp/claude-1000/cxwork",
+    "processId": "3375",
+    "source": "unifiedExecStartup",
+    "status": "completed",
+    "commandActions": [
+     {
+      "type": "unknown",
+      "command": "echo hello-from-codex"
+     }
+    ],
+    "aggregatedOutput": "hello-from-codex\n",
+    "exitCode": 0,
+    "durationMs": 0
+   },
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "completedAtMs": 1784867325665
+  }
+ },
+ {
+  "method": "thread/tokenUsage/updated",
+  "params": {
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "tokenUsage": {
+    "total": {
+     "totalTokens": 13567,
+     "inputTokens": 13530,
+     "cachedInputTokens": 1408,
+     "outputTokens": 37,
+     "reasoningOutputTokens": 0
+    },
+    "last": {
+     "totalTokens": 13567,
+     "inputTokens": 13530,
+     "cachedInputTokens": 1408,
+     "outputTokens": 37,
+     "reasoningOutputTokens": 0
+    },
+    "modelContextWindow": 258400
+   }
+  }
+ },
+ {
+  "method": "item/started",
+  "params": {
+   "item": {
+    "type": "agentMessage",
+    "id": "msg_09f0d88b03349d5f016a62e9ff4e9081959f49c57a341d7e47",
+    "text": "",
+    "phase": "final_answer",
+    "memoryCitation": null
+   },
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "startedAtMs": 1784867327331
+  }
+ },
+ {
+  "method": "item/completed",
+  "params": {
+   "item": {
+    "type": "agentMessage",
+    "id": "msg_09f0d88b03349d5f016a62e9ff4e9081959f49c57a341d7e47",
+    "text": "done",
+    "phase": "final_answer",
+    "memoryCitation": null
+   },
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "completedAtMs": 1784867327426
+  }
+ },
+ {
+  "method": "thread/tokenUsage/updated",
+  "params": {
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turnId": "019f9261-f759-7062-91be-b1956956959a",
+   "tokenUsage": {
+    "total": {
+     "totalTokens": 27191,
+     "inputTokens": 27149,
+     "cachedInputTokens": 14080,
+     "outputTokens": 42,
+     "reasoningOutputTokens": 0
+    },
+    "last": {
+     "totalTokens": 13624,
+     "inputTokens": 13619,
+     "cachedInputTokens": 12672,
+     "outputTokens": 5,
+     "reasoningOutputTokens": 0
+    },
+    "modelContextWindow": 258400
+   }
+  }
+ },
+ {
+  "method": "thread/status/changed",
+  "params": {
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "status": {
+    "type": "idle"
+   }
+  }
+ },
+ {
+  "method": "turn/completed",
+  "params": {
+   "threadId": "019f9261-f610-7ca2-8ac3-2d0a32af6c10",
+   "turn": {
+    "id": "019f9261-f759-7062-91be-b1956956959a",
+    "items": [],
+    "itemsView": "notLoaded",
+    "status": "completed",
+    "error": null,
+    "startedAt": 1784867321,
+    "completedAt": 1784867327,
+    "durationMs": 5790
+   }
+  }
+ }
+]
