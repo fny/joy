@@ -442,6 +442,11 @@ export const en = {
         editTitle: 'Edit queued message',
         hintWeb: 'right-click a message to edit or delete',
         hintTouch: 'hold a message to edit or delete',
+        // App-side pending queue (PendingQueueStrip) + offline banner.
+        pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 waiting to send' : `${count} waiting to send`,
+        waitingForNetwork: 'Waiting for connection…',
+        sendFailedOffline: 'Couldn’t send — no connection',
+        offlineBanner: 'No connection — queued messages will send when you’re back online',
     },
 
     commandPalette: {

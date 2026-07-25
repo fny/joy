@@ -394,6 +394,10 @@ export const ca: TranslationStructure = {
         editTitle: 'Edita el missatge de la cua',
         hintWeb: 'fes clic dret en un missatge per editar-lo o eliminar-lo',
         hintTouch: 'mantén premut un missatge per editar-lo o eliminar-lo',
+        pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 pendent d\'enviar' : `${count} pendents d\'enviar`,
+        waitingForNetwork: 'Esperant connexió…',
+        sendFailedOffline: 'No s\'ha pogut enviar — sense connexió',
+        offlineBanner: 'Sense connexió — els missatges en cua s\'enviaran quan tornis a estar en línia',
     },
 
     commandPalette: {
