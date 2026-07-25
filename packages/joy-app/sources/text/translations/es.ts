@@ -394,6 +394,10 @@ export const es: TranslationStructure = {
         editTitle: 'Editar mensaje en cola',
         hintWeb: 'haz clic derecho en un mensaje para editarlo o eliminarlo',
         hintTouch: 'mantén pulsado un mensaje para editarlo o eliminarlo',
+        pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 pendiente de enviar' : `${count} pendientes de enviar`,
+        waitingForNetwork: 'Esperando conexión…',
+        sendFailedOffline: 'No se pudo enviar — sin conexión',
+        offlineBanner: 'Sin conexión — los mensajes en cola se enviarán cuando vuelvas a estar en línea',
     },
 
     commandPalette: {

@@ -395,6 +395,10 @@ export const zhHans: TranslationStructure = {
         editTitle: '编辑队列中的消息',
         hintWeb: '右键点击消息以编辑或删除',
         hintTouch: '长按消息以编辑或删除',
+        pendingHeader: ({ count }: { count: number }) => `${count} 条待发送`,
+        waitingForNetwork: '正在等待连接…',
+        sendFailedOffline: '无法发送 — 无连接',
+        offlineBanner: '无连接 — 队列中的消息将在恢复联网后发送',
     },
 
     commandPalette: {

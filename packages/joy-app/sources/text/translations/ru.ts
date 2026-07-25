@@ -510,6 +510,10 @@ export const ru: TranslationStructure = {
         editTitle: 'Изменить сообщение в очереди',
         hintWeb: 'щёлкните правой кнопкой по сообщению, чтобы изменить или удалить',
         hintTouch: 'удерживайте сообщение, чтобы изменить или удалить',
+        pendingHeader: ({ count }: { count: number }) => plural({ count, one: '1 сообщение ждёт отправки', few: `${count} сообщения ждут отправки`, many: `${count} сообщений ждут отправки` }),
+        waitingForNetwork: 'Ожидание подключения…',
+        sendFailedOffline: 'Не удалось отправить — нет подключения',
+        offlineBanner: 'Нет подключения — сообщения из очереди отправятся, когда вы снова будете в сети',
     },
 
     commandPalette: {

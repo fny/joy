@@ -395,6 +395,10 @@ export const ja: TranslationStructure = {
         editTitle: 'キュー内のメッセージを編集',
         hintWeb: 'メッセージを右クリックで編集・削除',
         hintTouch: 'メッセージを長押しで編集・削除',
+        pendingHeader: ({ count }: { count: number }) => `${count} 件送信待ち`,
+        waitingForNetwork: '接続を待っています…',
+        sendFailedOffline: '送信できませんでした — 接続がありません',
+        offlineBanner: '接続がありません — キュー内のメッセージはオンラインに戻ると送信されます',
     },
 
     commandPalette: {
