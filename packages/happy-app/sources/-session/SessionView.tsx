@@ -1,4 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
+import { MobileGlassBackdrop } from '@/components/MobileGlass';
 import { AgentGoalBar, type AgentGoalAction } from '@/components/AgentGoalBar';
 import { AgentInput } from '@/components/AgentInput';
 import { resolveVisibleAgentGoalStatus } from '@/components/agentGoalStatus';
@@ -8,6 +9,7 @@ import {
     getAvailableModels,
     getAvailablePermissionModes,
     getEffortLevelsForModel,
+    getRigCurrentModelOptionKey,
     resolveCurrentOption,
     EffortLevel,
 } from '@/components/modelModeOptions';
@@ -25,9 +27,12 @@ import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
 import { gitStatusSync } from '@/sync/gitStatusSync';
-import { sessionAbort, sessionGoalAction, sessionSetAgentModes } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionGitStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { sessionAbort, sessionGoalAction, sessionSetAgentModes, spawnSideChat, sessionKill, sessionArchive } from '@/sync/ops';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionGitStatus, useSessionMessages, useSessionUsage, useSetting, useSideChatSessions } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
+import { getSessionForkSource } from '@/utils/sessionFork';
+import { useHappyAction } from '@/hooks/useHappyAction';
+import { HappyError } from '@/utils/errors';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
@@ -53,10 +58,25 @@ import { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming, Easing } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useUnistyles } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { performAgentGoalAction } from './agentGoalActionHandler';
+import { MOBILE_GLASS_HEADER_HEIGHT } from '@/components/navigation/headerMetrics';
+import {
+    getRigIdentity,
+    getRigReasoningSelection,
+    isRigMetadata,
+    isRigModelSelectionEnabled,
+    isRigPermissionSelectionEnabled,
+    isRigReasoningSelectionEnabled,
+    rigCanAbort,
+    rigCanBrowseFiles,
+    rigCanReadFiles,
+    rigCanUseAttachments,
+    rigCanUseShell,
+} from '@/sync/rig';
+import { RigActivityBar } from '@/components/RigActivityBar';
 
 export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
@@ -68,16 +88,28 @@ export const SessionView = React.memo((props: { id: string }) => {
     const isLandscape = useIsLandscape();
     const deviceType = useDeviceType();
     const headerHeight = useHeaderHeight();
+    const mobileHeaderHeight = deviceType === 'phone' && Platform.OS !== 'web'
+        ? Math.max(headerHeight, MOBILE_GLASS_HEADER_HEIGHT)
+        : headerHeight;
+    const contentRunsUnderHeader = deviceType === 'phone'
+        && Platform.OS !== 'web'
+        && !isLandscape;
     const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
     const { width: windowWidth } = useWindowDimensions();
     const fileDiffsSidebarEnabled = useSetting('fileDiffsSidebar');
     const zenMode = useLocalSetting('zenMode');
+    const [headerBackdropVisible, setHeaderBackdropVisible] = React.useState(false);
+
+    React.useEffect(() => {
+        setHeaderBackdropVisible(false);
+    }, [sessionId]);
 
     // Base condition: can we show the diff sidebar at all?
     const canShowSidebar = fileDiffsSidebarEnabled
         && (isRunningOnMac() || Platform.OS === 'web')
         && windowWidth >= SIDEBAR_MIN_WINDOW_WIDTH
+        && (!session || (rigCanBrowseFiles(session.metadata) && rigCanUseShell(session.metadata)))
         && isDataReady && !!session;
 
     const showSidebar = canShowSidebar && !zenMode;
@@ -106,7 +138,131 @@ export const SessionView = React.memo((props: { id: string }) => {
         overflow: 'hidden' as const,
     }));
 
-    const [sidebarMode, setSidebarMode] = React.useState<SidebarMode>('changes');
+    // Sidebar panels are user-managed and persisted in local settings so the
+    // layout (which panels are open + which is active) survives reloads and
+    // long absences. State is device-local, shared across sessions.
+    const sidebarPanelsOpen = useLocalSetting('sidebarPanelsOpen') as SidebarMode[];
+    const sidebarPanelActiveRaw = useLocalSetting('sidebarPanelActive') as SidebarMode | null;
+    // Guard against an inconsistent persisted value: the active panel must be
+    // one of the open panels, otherwise fall back to the last opened (or none).
+    const sidebarPanelActive = React.useMemo<SidebarMode | null>(() => {
+        if (sidebarPanelActiveRaw && sidebarPanelsOpen.includes(sidebarPanelActiveRaw)) {
+            return sidebarPanelActiveRaw;
+        }
+        return sidebarPanelsOpen[sidebarPanelsOpen.length - 1] ?? null;
+    }, [sidebarPanelActiveRaw, sidebarPanelsOpen]);
+
+    const openSidebarPanel = React.useCallback((panel: SidebarMode) => {
+        const cur = storage.getState().localSettings.sidebarPanelsOpen as SidebarMode[];
+        const open = cur.includes(panel) ? cur : [...cur, panel];
+        storage.getState().applyLocalSettings({ sidebarPanelsOpen: open, sidebarPanelActive: panel });
+    }, []);
+    const selectSidebarPanel = React.useCallback((panel: SidebarMode) => {
+        const cur = storage.getState().localSettings.sidebarPanelsOpen as SidebarMode[];
+        if (cur.includes(panel)) {
+            storage.getState().applyLocalSettings({ sidebarPanelActive: panel });
+        }
+    }, []);
+    // Raw panel removal (no side-chat teardown). Public closeSidebarPanel below
+    // wraps this so closing the "Side chat" chip also tears down its children.
+    const removeSidebarPanel = React.useCallback((panel: SidebarMode) => {
+        const state = storage.getState().localSettings;
+        const open = (state.sidebarPanelsOpen as SidebarMode[]).filter((p) => p !== panel);
+        const active = state.sidebarPanelActive === panel
+            ? (open[open.length - 1] ?? null)
+            : (state.sidebarPanelActive as SidebarMode | null);
+        storage.getState().applyLocalSettings({ sidebarPanelsOpen: open, sidebarPanelActive: active });
+    }, []);
+
+    // Side chats live inside the single "sideChat" panel as switchable tabs.
+    // Creation is unified into the sidebar panel picker (the top "+") so there
+    // is no separate per-tab add button. Which side chat is focused lives here
+    // (not in the panel) so the picker can create-and-focus a new one in one go.
+    const rawSideChats = useSideChatSessions(sessionId);
+    const sideChatForkSource = session ? getSessionForkSource(session) : null;
+    const [activeSideChatId, setActiveSideChatId] = React.useState<string | null>(null);
+    // Optimistically hide a side chat the instant it's closed. The server's
+    // /archive only flips active=false (not lifecycleState), so if the CLI is
+    // already dead the fallback archive wouldn't drop the tab via
+    // useSideChatSessions — this makes the tab disappear immediately regardless.
+    const [closedSideChatIds, setClosedSideChatIds] = React.useState<Set<string>>(() => new Set());
+    const sideChats = React.useMemo(
+        () => rawSideChats.filter((s) => !closedSideChatIds.has(s.id)),
+        [rawSideChats, closedSideChatIds],
+    );
+    // Prune closed ids once the underlying sessions actually leave the store, so
+    // the set can't grow without bound.
+    React.useEffect(() => {
+        setClosedSideChatIds((prev) => {
+            if (prev.size === 0) return prev;
+            const live = new Set(rawSideChats.map((s) => s.id));
+            const next = new Set<string>();
+            let changed = false;
+            prev.forEach((id) => { if (live.has(id)) next.add(id); else changed = true; });
+            return changed ? next : prev;
+        });
+    }, [rawSideChats]);
+
+    // Best-effort close: kill the agent, fall back to server-side archive.
+    const archiveSideChatSession = React.useCallback((id: string) => {
+        (async () => {
+            const killed = await sessionKill(id);
+            if (!killed.success) {
+                await sessionArchive(id);
+            }
+            try {
+                await sync.refreshSessions();
+            } catch {
+                // Broadcast sync reconciles shortly even if this flaked.
+            }
+        })();
+    }, []);
+
+    const [creatingSideChat, createSideChat] = useHappyAction(async () => {
+        if (!sideChatForkSource) {
+            throw new HappyError(t('sideChat.unavailable'), false);
+        }
+        const result = await spawnSideChat(sideChatForkSource);
+        if (result.type === 'error') {
+            throw new HappyError(result.errorMessage, true);
+        }
+        if (result.type === 'success') {
+            setActiveSideChatId(result.sessionId);
+            openSidebarPanel('sideChat');
+        }
+    });
+
+    const closeSideChat = React.useCallback((id: string) => {
+        const idx = sideChats.findIndex((s) => s.id === id);
+        const neighbour = idx !== -1 ? (sideChats[idx - 1] ?? sideChats[idx + 1] ?? null) : null;
+        setActiveSideChatId(neighbour?.id ?? null);
+        setClosedSideChatIds((prev) => new Set(prev).add(id));
+        if (!neighbour) {
+            removeSidebarPanel('sideChat');
+        }
+        archiveSideChatSession(id);
+    }, [sideChats, removeSidebarPanel, archiveSideChatSession]);
+
+    // Closing the "Side chat" panel chip tears down every side chat at once.
+    const closeAllSideChats = React.useCallback(() => {
+        const ids = sideChats.map((s) => s.id);
+        setActiveSideChatId(null);
+        setClosedSideChatIds((prev) => {
+            const next = new Set(prev);
+            ids.forEach((id) => next.add(id));
+            return next;
+        });
+        removeSidebarPanel('sideChat');
+        ids.forEach(archiveSideChatSession);
+    }, [sideChats, removeSidebarPanel, archiveSideChatSession]);
+
+    const closeSidebarPanel = React.useCallback((panel: SidebarMode) => {
+        if (panel === 'sideChat') {
+            closeAllSideChats();
+            return;
+        }
+        removeSidebarPanel(panel);
+    }, [closeAllSideChats, removeSidebarPanel]);
 
     // Overlay state is managed as a browser-style history stack so the
     // sidebar's back / forward arrows can navigate between chat ↔ diff ↔ file
@@ -184,19 +340,23 @@ export const SessionView = React.memo((props: { id: string }) => {
     // Compute header props based on session state
     const headerProps = useMemo(() => {
         if (!isDataReady) {
-            return { title: '', folderName: undefined, isConnected: false };
+            return { title: '', folderName: undefined, isConnected: false, identityLine: undefined };
         }
         if (!session) {
-            return { title: t('errors.sessionDeleted'), folderName: undefined, isConnected: false };
+            return { title: t('errors.sessionDeleted'), folderName: undefined, isConnected: false, identityLine: undefined };
         }
         const isConnected = session.presence === 'online';
         const pathSegments = session.metadata?.path?.split(/[/\\]/).filter(Boolean);
         const folderName = pathSegments?.[pathSegments.length - 1];
         const sessionName = getSessionName(session);
+        const rigIdentity = getRigIdentity(session.metadata);
         return {
             title: sessionName,
             folderName,
             isConnected,
+            identityLine: rigIdentity
+                ? `${rigIdentity.clientName} · ${rigIdentity.providerName}${rigIdentity.modelName ? ` — ${rigIdentity.modelName}` : ''}`
+                : undefined,
         };
     }, [session, isDataReady]);
     const headerRight = session && deviceType === 'phone' && Platform.OS !== 'web'
@@ -210,6 +370,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                     size={28}
                     monochrome={!headerProps.isConnected}
                     flavor={session.metadata?.flavor}
+                    clientId={session.metadata?.client?.id}
                 />
             </Pressable>
         )
@@ -217,6 +378,7 @@ export const SessionView = React.memo((props: { id: string }) => {
 
     const mainContent = (
         <>
+            <MobileGlassBackdrop enabled={deviceType === 'phone' && Platform.OS !== 'web'} />
             {/* Status bar shadow for landscape mode */}
             {isLandscape && deviceType === 'phone' && (
                 <View style={{
@@ -238,7 +400,40 @@ export const SessionView = React.memo((props: { id: string }) => {
                 }} />
             )}
 
-            {/* Header - always shown on desktop/Mac, hidden in landscape mode only on actual phones */}
+            {/* Content based on state */}
+            <View
+                style={{
+                    flex: 1,
+                    paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web')
+                        ? contentRunsUnderHeader
+                            ? 0
+                            : safeArea.top + mobileHeaderHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 32 : 0)
+                        : 0,
+                }}
+            >
+                {!isDataReady ? (
+                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                        <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                    </View>
+                ) : !session ? (
+                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                        <Ionicons name="trash-outline" size={48} color={theme.colors.textSecondary} />
+                        <Text style={{ color: theme.colors.text, fontSize: 20, marginTop: 16, fontWeight: '600' }}>{t('errors.sessionDeleted')}</Text>
+                        <Text style={{ color: theme.colors.textSecondary, fontSize: 15, marginTop: 8, textAlign: 'center', paddingHorizontal: 32 }}>{t('errors.sessionDeletedDescription')}</Text>
+                    </View>
+                ) : (
+                    <SessionViewLoaded
+                        key={sessionId}
+                        sessionId={sessionId}
+                        session={session}
+                        onHeaderBackdropVisibilityChange={contentRunsUnderHeader
+                            ? setHeaderBackdropVisible
+                            : undefined}
+                    />
+                )}
+            </View>
+
+            {/* Render the overlay header after the dynamic list so native blur samples its content. */}
             {!(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') && (
                 <View style={{
                     position: 'absolute',
@@ -251,6 +446,8 @@ export const SessionView = React.memo((props: { id: string }) => {
                         title={headerProps.title}
                         folderName={headerProps.folderName}
                         isConnected={headerProps.isConnected}
+                        backdropVisible={headerBackdropVisible}
+                        identityLine={headerProps.identityLine}
                         extraPathSegment={fileViewPath ?? undefined}
                         rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : headerRight}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
@@ -262,23 +459,6 @@ export const SessionView = React.memo((props: { id: string }) => {
                     )}
                 </View>
             )}
-
-            {/* Content based on state */}
-            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 32 : 0) : 0 }}>
-                {!isDataReady ? (
-                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-                        <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                    </View>
-                ) : !session ? (
-                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-                        <Ionicons name="trash-outline" size={48} color={theme.colors.textSecondary} />
-                        <Text style={{ color: theme.colors.text, fontSize: 20, marginTop: 16, fontWeight: '600' }}>{t('errors.sessionDeleted')}</Text>
-                        <Text style={{ color: theme.colors.textSecondary, fontSize: 15, marginTop: 8, textAlign: 'center', paddingHorizontal: 32 }}>{t('errors.sessionDeletedDescription')}</Text>
-                    </View>
-                ) : (
-                    <SessionViewLoaded key={sessionId} sessionId={sessionId} session={session} />
-                )}
-            </View>
         </>
     );
 
@@ -308,7 +488,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         pointerEvents="box-none"
                         style={{
                             position: 'absolute',
-                            top: safeArea.top + headerHeight,
+                            top: safeArea.top + mobileHeaderHeight,
                             left: 0,
                             right: 0,
                             bottom: 0,
@@ -327,7 +507,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         pointerEvents="box-none"
                         style={{
                             position: 'absolute',
-                            top: safeArea.top + headerHeight,
+                            top: safeArea.top + mobileHeaderHeight,
                             left: 0,
                             right: 0,
                             bottom: 0,
@@ -346,11 +526,21 @@ export const SessionView = React.memo((props: { id: string }) => {
                 <View style={{ width: sidebarWidth, flex: 1 }}>
                     <FilesSidebar
                         sessionId={sessionId}
-                        selectedPath={sidebarMode === 'changes' ? scrollToFile : fileViewPath}
+                        selectedPath={sidebarPanelActive === 'changes' ? scrollToFile : sidebarPanelActive === 'allFiles' ? fileViewPath : null}
                         onFilePress={handleSidebarFilePress}
-                        mode={sidebarMode}
-                        onModeChange={setSidebarMode}
+                        openPanels={sidebarPanelsOpen}
+                        activePanel={sidebarPanelActive}
+                        onOpenPanel={openSidebarPanel}
+                        onSelectPanel={selectSidebarPanel}
+                        onClosePanel={closeSidebarPanel}
                         onAllFilesFilePress={handleAllFilesFilePress}
+                        sideChats={sideChats}
+                        activeSideChatId={activeSideChatId}
+                        onSelectSideChat={setActiveSideChatId}
+                        onCloseSideChat={closeSideChat}
+                        onCreateSideChat={createSideChat}
+                        canCreateSideChat={!!sideChatForkSource}
+                        creatingSideChat={creatingSideChat}
                     />
                 </View>
             </Animated.View>
@@ -428,7 +618,17 @@ const ChatComposer = React.memo(function ChatComposer(props: ChatComposerProps) 
     );
 });
 
-function SessionViewLoaded({ sessionId, session }: { sessionId: string, session: Session }) {
+export function SessionViewLoaded({
+    sessionId,
+    session,
+    embedded = false,
+    onHeaderBackdropVisibilityChange,
+}: {
+    sessionId: string;
+    session: Session;
+    embedded?: boolean;
+    onHeaderBackdropVisibilityChange?: (visible: boolean) => void;
+}) {
     const { theme } = useUnistyles();
     const router = useRouter();
     const safeArea = useSafeAreaInsets();
@@ -440,6 +640,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
     const zenMode = useLocalSetting('zenMode');
     const sessionInputHorizontalPadding = Platform.OS === 'web' || isRunningOnMac() || isTablet ? 12 : 8;
+    const chatListTopContentInset = embedded || (isLandscape && deviceType === 'phone')
+        ? 12
+        : deviceType === 'phone' && Platform.OS !== 'web'
+            ? safeArea.top
+                + MOBILE_GLASS_HEADER_HEIGHT
+                + (realtimeStatus !== 'disconnected' ? 32 : 0)
+                + 12
+            : undefined;
 
     // Check if CLI version is outdated and not already acknowledged
     const cliVersion = session.metadata?.version;
@@ -448,12 +656,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isAcknowledged = machineId && acknowledgedCliVersions[machineId] === cliVersion;
     const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
     const flavor = session.metadata?.flavor;
+    const isRig = isRigMetadata(session.metadata);
     const availableModels = React.useMemo(() => (
-        getAvailableModels(flavor, session.metadata, t)
-    ), [flavor, session.metadata]);
+        getAvailableModels(flavor, session.metadata, t, session.modelMode)
+    ), [flavor, session.metadata, session.modelMode]);
     const availableModes = React.useMemo(() => (
-        getAvailablePermissionModes(flavor, session.metadata, t)
-    ), [flavor, session.metadata]);
+        getAvailablePermissionModes(flavor, session.metadata, t, session.permissionMode)
+    ), [flavor, session.metadata, session.permissionMode]);
     const agentDefaultOverrides = useSetting('agentDefaultOverrides');
     const effectiveAgentDefaults = React.useMemo(() => (
         resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
@@ -462,30 +671,36 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const permissionMode = React.useMemo<PermissionMode | null>(() => (
         resolveCurrentOption(availableModes, [
             session.permissionMode,
-            effectiveAgentDefaults.permissionMode,
-            session.metadata?.currentOperatingModeCode,
+            ...(isRig ? [
+                session.metadata?.currentOperatingModeCode,
+                session.metadata?.permissionMode,
+                session.metadata?.session?.permissionMode,
+            ] : [
+                effectiveAgentDefaults.permissionMode,
+                session.metadata?.currentOperatingModeCode,
+            ]),
         ])
-    ), [availableModes, session.permissionMode, effectiveAgentDefaults.permissionMode, session.metadata?.currentOperatingModeCode]);
+    ), [availableModes, session.permissionMode, effectiveAgentDefaults.permissionMode, session.metadata?.currentOperatingModeCode, session.metadata?.permissionMode, session.metadata?.session?.permissionMode, isRig]);
 
     const modelMode = React.useMemo<ModelMode | null>(() => (
         resolveCurrentOption(availableModels, [
             session.modelMode,
-            effectiveAgentDefaults.modelMode,
-            session.metadata?.currentModelCode,
+            isRig ? getRigCurrentModelOptionKey(session.metadata) : effectiveAgentDefaults.modelMode,
+            isRig ? undefined : session.metadata?.currentModelCode,
         ])
-    ), [availableModels, session.modelMode, effectiveAgentDefaults.modelMode, session.metadata?.currentModelCode]);
+    ), [availableModels, session.modelMode, effectiveAgentDefaults.modelMode, session.metadata, isRig]);
 
     // Effort level state
     const modelKey = modelMode?.key ?? 'default';
     const availableEffortLevels = React.useMemo<EffortLevel[]>(() => (
-        getEffortLevelsForModel(flavor, modelKey)
-    ), [flavor, modelKey]);
+        getEffortLevelsForModel(flavor, modelKey, session.metadata)
+    ), [flavor, modelKey, session.metadata]);
     const effortLevel = React.useMemo<EffortLevel | null>(() => (
         resolveCurrentOption(availableEffortLevels, [
             session.effortLevel,
-            effectiveAgentDefaults.effortLevel,
+            isRig ? getRigReasoningSelection(session.metadata, modelKey) : effectiveAgentDefaults.effortLevel,
         ])
-    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel]);
+    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel, session.metadata, modelKey, isRig]);
 
     const sessionStatus = useSessionStatus(session);
     const sessionUsage = useSessionUsage(sessionId);
@@ -501,6 +716,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // Image attachment state (expImageUpload feature flag)
     const expImageUpload = useSetting('expImageUpload');
     const { selectedImages, pickImages, removeImage, clearImages, addImages } = useImagePicker();
+    const canUseAttachments = rigCanUseAttachments(session.metadata);
+    React.useEffect(() => {
+        if (!canUseAttachments && selectedImages.length > 0) {
+            clearImages();
+        }
+    }, [canUseAttachments, selectedImages.length, clearImages]);
 
     // ChatComposer owns the message state + useDraft subscription. We only
     // hold an imperative handle so handleSend can read the live text and
@@ -526,8 +747,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [sessionId]);
 
     const updateModelMode = React.useCallback((mode: ModelMode) => {
-        sessionSetAgentModes(sessionId, { modelMode: mode.key });
-    }, [sessionId]);
+        const nextEffortLevels = getEffortLevelsForModel(flavor, mode.key, session.metadata);
+        const currentEffortSupported = session.effortLevel
+            ? nextEffortLevels.some((level) => level.key === session.effortLevel)
+            : true;
+        sessionSetAgentModes(sessionId, {
+            modelMode: mode.key,
+            ...(!currentEffortSupported ? { effortLevel: mode.defaultThinkingLevel ?? null } : {}),
+        });
+    }, [sessionId, flavor, session.metadata, session.effortLevel]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
         sessionSetAgentModes(sessionId, { effortLevel: level.key });
@@ -558,9 +786,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const handleAbort = React.useCallback(() => {
         // Mode picks live in synced metadata — clear them there, otherwise the
         // next inbound metadata update resurrects them (#1492)
-        sessionSetAgentModes(sessionId, { permissionMode: null, modelMode: null, effortLevel: null });
+        if (!isRig) {
+            sessionSetAgentModes(sessionId, { permissionMode: null, modelMode: null, effortLevel: null });
+        }
         sessionAbort(sessionId);
-    }, [sessionId]);
+    }, [sessionId, isRig]);
 
     const handleFileViewerPress = React.useCallback(() => {
         router.push(`/session/${sessionId}/files`);
@@ -679,26 +909,38 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // Trigger session sync
         sync.onSessionVisible(sessionId);
 
-        // Mark session as currently being viewed (clears unread)
-        storage.getState().setCurrentViewingSession(sessionId);
+        // Mark session as currently being viewed (clears unread). Skipped when
+        // embedded (e.g. the side-chat panel) so a second mounted chat body
+        // doesn't steal "currently viewing" from the primary session.
+        if (!embedded) {
+            storage.getState().setCurrentViewingSession(sessionId);
+        }
 
         // Initialize git status sync for this session
         gitStatusSync.getSync(sessionId).invalidate();
 
         return () => {
+            if (embedded) {
+                return;
+            }
             // Clear viewing session on unmount
             const current = storage.getState().currentViewingSessionId;
             if (current === sessionId) {
                 storage.getState().setCurrentViewingSession(null);
             }
         };
-    }, [sessionId, realtimeStatus]);
+    }, [sessionId, realtimeStatus, embedded]);
 
     let content = (
         <>
             <Deferred>
                 {messages.length > 0 && (
-                    <ChatList session={session} />
+                    <ChatList
+                        session={session}
+                        topContentInset={chatListTopContentInset}
+                        headerOverlayHeight={safeArea.top + MOBILE_GLASS_HEADER_HEIGHT}
+                        onHeaderBackdropVisibilityChange={onHeaderBackdropVisibilityChange}
+                    />
                 )}
             </Deferred>
         </>
@@ -719,27 +961,29 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             placeholder={t('session.inputPlaceholder')}
             sessionId={sessionId}
             permissionMode={permissionMode}
-            onPermissionModeChange={updatePermissionMode}
+            onPermissionModeChange={isRigPermissionSelectionEnabled(session.metadata) ? updatePermissionMode : undefined}
             availableModes={availableModes}
             modelMode={modelMode}
             availableModels={availableModels}
-            onModelModeChange={updateModelMode}
+            onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
             effortLevel={effortLevel}
             availableEffortLevels={availableEffortLevels}
-            onEffortLevelChange={updateEffortLevel}
+            onEffortLevelChange={isRigReasoningSelectionEnabled(session.metadata) ? updateEffortLevel : undefined}
             metadata={session.metadata}
             connectionStatus={connectionStatus}
-            blockSend={false}
+            blockSend={isRig && session.thinking && session.metadata?.capabilities?.steering !== true}
             onSend={handleSend}
-            onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
-            isMicActive={isDisconnected ? false : micButtonState.isMicActive}
-            onAbort={isDisconnected ? undefined : handleAbort}
-            showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
-            onFileViewerPress={experiments && !isTablet ? handleFileViewerPress : undefined}
-            selectedImages={expImageUpload ? selectedImages : undefined}
-            onPickImages={expImageUpload ? pickImages : undefined}
-            onRemoveImage={expImageUpload ? removeImage : undefined}
-            onAddImages={expImageUpload ? addImages : undefined}
+            onMicPress={(embedded || isDisconnected) ? undefined : micButtonState.onMicPress}
+            isMicActive={(embedded || isDisconnected) ? false : micButtonState.isMicActive}
+            onAbort={isDisconnected || !rigCanAbort(session.metadata) ? undefined : handleAbort}
+            showAbortButton={rigCanAbort(session.metadata) && (Platform.OS === 'web'
+                ? sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'
+                : sessionStatus.state === 'thinking')}
+            onFileViewerPress={experiments && !isTablet && rigCanBrowseFiles(session.metadata) && rigCanReadFiles(session.metadata) ? handleFileViewerPress : undefined}
+            selectedImages={expImageUpload && canUseAttachments ? selectedImages : undefined}
+            onPickImages={expImageUpload && canUseAttachments ? pickImages : undefined}
+            onRemoveImage={expImageUpload && canUseAttachments ? removeImage : undefined}
+            onAddImages={expImageUpload && canUseAttachments ? addImages : undefined}
             autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}
             autocompleteSuggestions={handleAutocompleteSuggestions}
             usageData={usageData}
@@ -759,7 +1003,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // Resume button when canResume is true, falls back to the
     // copy-this-command hint when the experiments toggle is off or the
     // machine isn't reachable.
-    const inactiveHint = isDisconnected ? (
+    const inactiveHint = isDisconnected && !isRig ? (
         <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
             <InactiveArchivedHint
                 resumeCommandBlock={expResumeSession ? resumeCommandBlock : null}
@@ -770,11 +1014,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         </CenteredInputWidth>
     ) : null;
 
-    // 'hiddenOnMobile' hides the bar on phones but still shows it (below the
-    // composer) on tablet/desktop/web. 'above'/'below' show it everywhere.
-    const showSessionStatusBar = sessionStatusBarDisplay === 'above'
-        || sessionStatusBarDisplay === 'below'
-        || (sessionStatusBarDisplay === 'hiddenOnMobile' && deviceType !== 'phone');
+    const showSessionStatusBar = sessionStatusBarDisplay === 'above' || sessionStatusBarDisplay === 'below';
     const sessionStatusBarPosition = sessionStatusBarDisplay === 'above' ? 'above' : 'below';
     const sessionStatusBar = showSessionStatusBar ? (
         <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
@@ -783,13 +1023,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 modelLabel={statusBarModelLabel}
                 modelMode={modelMode}
                 availableModels={availableModels}
-                onModelModeChange={updateModelMode}
+                onModelModeChange={isRigModelSelectionEnabled(session.metadata) ? updateModelMode : undefined}
                 effortLabel={statusBarEffortLabel}
                 effortLevel={effortLevel}
                 availableEffortLevels={availableEffortLevels}
-                onEffortLevelChange={updateEffortLevel}
+                onEffortLevelChange={isRigReasoningSelectionEnabled(session.metadata) ? updateEffortLevel : undefined}
                 contextSize={usageData?.contextSize}
                 contextWindow={usageData?.contextWindow}
+                usageLimits={session.agentState?.usageLimits}
             />
         </CenteredInputWidth>
     ) : null;
@@ -807,6 +1048,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 </CenteredInputWidth>
             )}
             {sessionStatusBarPosition === 'above' ? sessionStatusBar : null}
+            <RigActivityBar metadata={session.metadata} />
             {composer}
             {sessionStatusBarPosition === 'below' ? sessionStatusBar : null}
         </>
@@ -935,19 +1177,24 @@ function InactiveArchivedHint(props: {
                     onPress={props.onResume}
                     disabled={props.resuming}
                     style={({ pressed }) => ({
-                        height: 40,
-                        borderRadius: 10,
-                        backgroundColor: theme.colors.button.primary.background,
-                        opacity: props.resuming ? 0.6 : pressed ? 0.8 : 1,
+                        height: Platform.select({ web: 40, default: 44 }),
+                        borderRadius: Platform.select({ web: 10, default: 18 }),
+                        backgroundColor: Platform.select({
+                            web: theme.colors.button.primary.background,
+                            default: pressed ? theme.colors.surfacePressed : theme.colors.surfaceHigh,
+                        }),
+                        borderWidth: Platform.select({ web: 0, default: StyleSheet.hairlineWidth }),
+                        borderColor: theme.colors.divider,
                         alignItems: 'center',
                         justifyContent: 'center',
+                        opacity: props.resuming ? 0.6 : Platform.OS === 'web' && pressed ? 0.8 : 1,
                         marginHorizontal: 8,
                     })}
                 >
                     {props.resuming ? (
-                        <ActivityIndicator size="small" color={theme.colors.button.primary.tint} />
+                        <ActivityIndicator size="small" color={Platform.select({ web: theme.colors.button.primary.tint, default: theme.colors.text })} />
                     ) : (
-                        <Text style={{ color: theme.colors.button.primary.tint, fontSize: 15, fontWeight: '600' }}>
+                        <Text style={{ color: Platform.select({ web: theme.colors.button.primary.tint, default: theme.colors.text }), fontSize: 15, fontWeight: '600' }}>
                             {t('sessionInfo.resumeSession')}
                         </Text>
                     )}
@@ -972,16 +1219,21 @@ function ResumeCommandCopyBlock({ resumeCommandBlock }: {
                 setCopied(true);
                 setTimeout(() => setCopied(false), 2000);
             }}
-            style={{
+            style={({ pressed }) => ({
                 minHeight: 48,
-                borderRadius: 14,
-                backgroundColor: theme.colors.surfaceHigh,
+                borderRadius: Platform.select({ web: 14, default: 18 }),
+                backgroundColor: Platform.select({
+                    web: theme.colors.surfaceHigh,
+                    default: pressed ? theme.colors.surfacePressed : theme.colors.surface,
+                }),
+                borderWidth: Platform.select({ web: 0, default: StyleSheet.hairlineWidth }),
+                borderColor: theme.colors.divider,
                 flexDirection: 'row',
                 gap: 8,
                 paddingHorizontal: 16,
                 paddingVertical: 12,
                 alignItems: 'flex-start',
-            }}
+            })}
         >
             <View style={{ flex: 1 }}>
                 {resumeCommandBlock.lines.map((line, index) => (
