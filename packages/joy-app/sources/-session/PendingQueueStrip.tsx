@@ -9,16 +9,13 @@ import { t } from '@/text';
 import { useDrafts, useDraftQueueStore, draftReason, type QueuedDraft } from './draftQueue';
 
 // App-side QUEUE ITEMS — messages auto-held because a turn is processing ahead
-// ('busy') or the device is offline ('network'). Distinct from deliberate
-// drafts (DraftQueueStrip) and from the daemon's own server queue
-// (JoyQueueStrip). draftQueueRelease drains these automatically: busy items when
-// the turn completes, network items on reconnect (with a 2-min timeout).
+// ('busy'). Distinct from deliberate drafts (DraftQueueStrip) and from the
+// daemon's own server queue (JoyQueueStrip). draftQueueRelease drains these when
+// the turn completes. (Offline sends are NOT here — they ride the outbox with a
+// per-message delivery status.)
 export const PendingQueueStrip = React.memo(function PendingQueueStrip({ sessionId }: { sessionId: string }) {
     const all = useDrafts(sessionId);
-    const items = React.useMemo(
-        () => all.filter((d) => { const r = draftReason(d); return r === 'busy' || r === 'network'; }),
-        [all],
-    );
+    const items = React.useMemo(() => all.filter((d) => draftReason(d) === 'busy'), [all]);
     if (items.length === 0) return null;
     return (
         <View style={styles.wrap}>
@@ -37,10 +34,6 @@ const PendingRow = React.memo(function PendingRow({ sessionId, item }: { session
     const { theme } = useUnistyles();
     const update = useDraftQueueStore((s) => s.update);
     const remove = useDraftQueueStore((s) => s.remove);
-    const retry = useDraftQueueStore((s) => s.retry);
-
-    const isNetwork = draftReason(item) === 'network';
-    const failed = item.timedOut === true;
 
     const onEdit = React.useCallback(async () => {
         const next = await Modal.prompt(t('joyQueue.editTitle'), '', { defaultValue: item.text });
@@ -49,25 +42,7 @@ const PendingRow = React.memo(function PendingRow({ sessionId, item }: { session
 
     return (
         <View style={styles.row}>
-            <View style={styles.textCol}>
-                <Text style={styles.text} numberOfLines={1}>{item.text}</Text>
-                {failed ? (
-                    <Text style={styles.failed} numberOfLines={1}>{t('joyQueue.sendFailedOffline')}</Text>
-                ) : isNetwork ? (
-                    <Text style={styles.waiting} numberOfLines={1}>{t('joyQueue.waitingForNetwork')}</Text>
-                ) : null}
-            </View>
-            {failed && (
-                <Pressable
-                    onPress={() => retry(sessionId, item.id)}
-                    hitSlop={8}
-                    accessibilityRole="button"
-                    accessibilityLabel={t('common.retry')}
-                    style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
-                >
-                    <Text style={styles.retryLabel}>{t('common.retry')}</Text>
-                </Pressable>
-            )}
+            <Text style={styles.text} numberOfLines={1}>{item.text}</Text>
             <Pressable
                 onPress={onEdit}
                 hitSlop={8}
@@ -123,23 +98,10 @@ const styles = StyleSheet.create((theme) => ({
         borderTopWidth: StyleSheet.hairlineWidth,
         borderTopColor: theme.colors.divider,
     },
-    textCol: {
-        flex: 1,
-        gap: 2,
-    },
     text: {
+        flex: 1,
         fontSize: 14,
         color: theme.colors.text,
-        ...Typography.default(),
-    },
-    waiting: {
-        fontSize: 11,
-        color: theme.colors.textSecondary,
-        ...Typography.default(),
-    },
-    failed: {
-        fontSize: 11,
-        color: theme.colors.deleteAction,
         ...Typography.default(),
     },
     action: {
@@ -147,11 +109,6 @@ const styles = StyleSheet.create((theme) => ({
         paddingVertical: 2,
     },
     editLabel: {
-        fontSize: 14,
-        color: theme.colors.textLink,
-        ...Typography.default('semiBold'),
-    },
-    retryLabel: {
         fontSize: 14,
         color: theme.colors.textLink,
         ...Typography.default('semiBold'),

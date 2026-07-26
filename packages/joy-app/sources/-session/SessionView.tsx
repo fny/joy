@@ -680,12 +680,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         const busy = latest?.thinking === true
             && latest?.presence === 'online'
             && isFresh(latest);
-        // OFFLINE HOLD: with no network there's nothing to POST to, so hold the
-        // message in the SAME app-side queue as the busy-hold. draftQueueRelease
-        // won't drain the queue while the socket is down, and fires on reconnect
-        // — so an offline send queues (visibly, durably via MMKV) and retries
-        // automatically when the connection returns, exactly like a busy-hold.
-        const offline = storage.getState().socketStatus !== 'connected';
+        // NOTE: offline sends are NOT diverted here. They go through the normal
+        // send path (optimistic echo + durable outbox, which auto-retries and
+        // re-flushes on reconnect); their delivery state shows as a per-message
+        // status (sending / waiting for connection / not delivered), iMessage-
+        // style — see MessageDeliveryStatus. Only a message held behind a
+        // processing turn ('busy') is queued app-side.
         // Only commands that actually EXECUTE mid-turn bypass the hold: the
         // CLI's immediate set (verified against the 2.1.198 binary — /model,
         // /compact, /clear are NOT in it; typed mid-turn they'd just sit in
@@ -693,13 +693,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // plus joy's daemon-intercepted commands, which exist for mid-turn use.
         const cmdMatch = /^\/([a-z-]+)/i.exec(liveMessage.trim());
         const isImmediateCommand = cmdMatch != null && IMMEDIATE_COMMANDS.has(cmdMatch[1].toLowerCase());
-        if (isJoyTmux && (busy || offline) && !isImmediateCommand && !hasImages) {
+        if (isJoyTmux && busy && !isImmediateCommand && !hasImages) {
             composerHandleRef.current?.clearMessage();
-            // A held send is a QUEUE ITEM, not a draft: 'network' when offline
-            // (retries on reconnect, 2-min timeout), else 'busy' (releases when
-            // the turn ahead completes). Offline takes precedence — it can't
-            // send regardless of busy.
-            useDraftQueueStore.getState().add(sessionId, liveMessage, offline ? 'network' : 'busy');
+            // A message held because a turn is processing ahead is a QUEUE ITEM
+            // ('busy'), not a draft — released by draftQueueRelease when the turn
+            // completes.
+            useDraftQueueStore.getState().add(sessionId, liveMessage, 'busy');
             return;
         }
         composerHandleRef.current?.clearMessage();

@@ -417,6 +417,13 @@ export const pl: TranslationStructure = {
         offlineBanner: 'Brak połączenia — wiadomości z kolejki zostaną wysłane po ponownym połączeniu',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: 'Wysyłanie…',
+        waitingForConnection: 'Oczekiwanie na połączenie…',
+        notDeliveredRetry: 'Nie wysłano · Dotknij, aby ponowić',
+    },
+
     commandPalette: {
         placeholder: 'Wpisz polecenie lub wyszukaj...',
     },

@@ -418,6 +418,13 @@ export const en: TranslationStructure = {
         offlineBanner: 'No connection — queued messages will send when you’re back online',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: 'Sending…',
+        waitingForConnection: 'Waiting for connection…',
+        notDeliveredRetry: 'Not delivered · Tap to retry',
+    },
+
     commandPalette: {
         placeholder: 'Type a command or search...',
     },

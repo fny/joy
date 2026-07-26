@@ -401,6 +401,13 @@ export const zhHans: TranslationStructure = {
         offlineBanner: '无连接 — 队列中的消息将在恢复联网后发送',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: '发送中…',
+        waitingForConnection: '正在等待连接…',
+        notDeliveredRetry: '未送达 · 点按重试',
+    },
+
     commandPalette: {
         placeholder: '输入命令或搜索...',
     },

@@ -400,6 +400,13 @@ export const zhHant: TranslationStructure = {
         offlineBanner: '無連線 — 佇列中的訊息將在恢復連線後傳送',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: '傳送中…',
+        waitingForConnection: '正在等待連線…',
+        notDeliveredRetry: '未送達 · 點按重試',
+    },
+
     commandPalette: {
         placeholder: '輸入命令或搜尋...',
     },

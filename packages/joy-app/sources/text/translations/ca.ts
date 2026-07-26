@@ -400,6 +400,13 @@ export const ca: TranslationStructure = {
         offlineBanner: 'Sense connexió — els missatges en cua s\'enviaran quan tornis a estar en línia',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: 'Enviant…',
+        waitingForConnection: 'Esperant connexió…',
+        notDeliveredRetry: 'No enviat · Toca per reintentar',
+    },
+
     commandPalette: {
         placeholder: 'Escriu una comanda o cerca...',
     },

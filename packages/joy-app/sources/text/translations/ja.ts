@@ -401,6 +401,13 @@ export const ja: TranslationStructure = {
         offlineBanner: '接続がありません — キュー内のメッセージはオンラインに戻ると送信されます',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: '送信中…',
+        waitingForConnection: '接続を待っています…',
+        notDeliveredRetry: '未送信 · タップして再試行',
+    },
+
     commandPalette: {
         placeholder: 'コマンドを入力または検索...',
     },
