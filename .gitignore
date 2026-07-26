@@ -39,6 +39,7 @@ yarn-error.*
 .env*.local
 .env
 .env.production
+.env.apple
 
 # typescript
 *.tsbuildinfo
