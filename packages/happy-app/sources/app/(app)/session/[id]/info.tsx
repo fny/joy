@@ -1,5 +1,5 @@
 import React, { useCallback } from 'react';
-import { View, Text, Animated } from 'react-native';
+import { View, Text, Animated, Platform } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
@@ -23,6 +23,8 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { copySessionMetadataToClipboard, copySessionMetadataAndLogsToClipboard } from '@/utils/copySessionMetadataToClipboard';
 import { HappyError } from '@/utils/errors';
+import { MobileGlassSurface } from '@/components/MobileGlass';
+import { getRigIdentity, isRigMetadata } from '@/sync/rig';
 
 // Animated status dot component
 function StatusDot({ color, isPulsing, size = 8 }: { color: string; isPulsing?: boolean; size?: number }) {
@@ -233,8 +235,31 @@ function SessionInfoContent({ session }: { session: Session }) {
             <ItemList>
                 {/* Session Header */}
                 <View style={{ maxWidth: layout.maxWidth, alignSelf: 'center', width: '100%' }}>
-                    <View style={{ alignItems: 'center', paddingVertical: 24, backgroundColor: theme.colors.surface, marginBottom: 8, borderRadius: 12, marginHorizontal: 16, marginTop: 16 }}>
-                        <Avatar id={getSessionAvatarId(session)} size={80} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} />
+                    <MobileGlassSurface
+                        enabled={Platform.OS !== 'web'}
+                        intensity={68}
+                        style={{
+                            alignItems: 'center',
+                            paddingVertical: 24,
+                            backgroundColor: Platform.select({
+                                web: theme.colors.surface,
+                                android: theme.colors.glass.backgroundStrong,
+                                default: 'transparent',
+                            }),
+                            marginBottom: 8,
+                            borderRadius: Platform.select({ web: 12, default: 22 }),
+                            marginHorizontal: 16,
+                            marginTop: 16,
+                            overflow: 'hidden',
+                            borderWidth: Platform.OS === 'web' ? 0 : 0.5,
+                            borderColor: theme.colors.glass.border,
+                            shadowColor: theme.colors.glass.shadow,
+                            shadowOffset: { width: 0, height: 10 },
+                            shadowOpacity: Platform.OS === 'web' ? 0 : 1,
+                            shadowRadius: 24,
+                        }}
+                    >
+                        <Avatar id={getSessionAvatarId(session)} size={80} monochrome={!sessionStatus.isConnected} flavor={session.metadata?.flavor} clientId={session.metadata?.client?.id} />
                         <Text style={{
                             fontSize: 20,
                             fontWeight: '600',
@@ -256,7 +281,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                                 {sessionStatus.statusText}
                             </Text>
                         </View>
-                    </View>
+                    </MobileGlassSurface>
                 </View>
 
                 {/* CLI Version Warning */}
@@ -435,9 +460,19 @@ function SessionInfoContent({ session }: { session: Session }) {
                                 showChevron={false}
                             />
                         )}
+                        {isRigMetadata(session.metadata) && (
+                            <Item
+                                title="Client"
+                                subtitle={`${session.metadata.client?.name ?? 'Rig'}${session.metadata.client?.version ? ` ${session.metadata.client.version}` : ''}`}
+                                icon={<Ionicons name="terminal-outline" size={29} color="#5856D6" />}
+                                showChevron={false}
+                            />
+                        )}
                         <Item
                             title={t('sessionInfo.aiProvider')}
                             subtitle={(() => {
+                                const rigIdentity = getRigIdentity(session.metadata);
+                                if (rigIdentity) return rigIdentity.providerName;
                                 const flavor = session.metadata.flavor || 'claude';
                                 if (flavor === 'claude') return 'Claude';
                                 if (flavor === 'gpt' || flavor === 'openai') return 'Codex';
@@ -448,13 +483,21 @@ function SessionInfoContent({ session }: { session: Session }) {
                             icon={<Ionicons name="sparkles-outline" size={29} color="#5856D6" />}
                             showChevron={false}
                         />
-                        <Item
+                        {getRigIdentity(session.metadata)?.modelName && (
+                            <Item
+                                title="Model"
+                                subtitle={getRigIdentity(session.metadata)!.modelName!}
+                                icon={<Ionicons name="hardware-chip-outline" size={29} color="#5856D6" />}
+                                showChevron={false}
+                            />
+                        )}
+                        {!isRigMetadata(session.metadata) && <Item
                             title="Sandbox"
                             subtitle={formatSandboxMetadata(session.metadata.sandbox, session.metadata.homeDir)}
                             icon={<Ionicons name="shield-outline" size={29} color="#5856D6" />}
                             showChevron={false}
-                        />
-                        <Item
+                        />}
+                        {!isRigMetadata(session.metadata) && <Item
                             title="Dangerously Skip Permissions"
                             subtitle={formatDangerouslySkipPermissionsMetadata(
                                 session.metadata.dangerouslySkipPermissions,
@@ -464,7 +507,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                             )}
                             icon={<Ionicons name="warning-outline" size={29} color="#5856D6" />}
                             showChevron={false}
-                        />
+                        />}
                         {session.metadata.hostPid && (
                             <Item
                                 title={t('sessionInfo.processId')}
@@ -495,7 +538,7 @@ function SessionInfoContent({ session }: { session: Session }) {
                 )}
 
                 {/* Agent State */}
-                {session.agentState && (
+                {session.agentState && session.metadata?.client?.id !== 'rig' && (
                     <ItemGroup title={t('sessionInfo.agentState')}>
                         <Item
                             title={t('sessionInfo.controlledByUser')}
@@ -529,6 +572,23 @@ function SessionInfoContent({ session }: { session: Session }) {
                             icon={<Ionicons name="timer-outline" size={29} color="#FFCC00" />}
                             showChevron={false}
                         />
+                    )}
+                    {(session.metadata?.activity?.subagents.running ?? 0) + (session.metadata?.activity?.subagents.queued ?? 0) > 0 && (
+                        <Item
+                            title="Subagents"
+                            detail={`${session.metadata!.activity!.subagents.running} running · ${session.metadata!.activity!.subagents.queued} queued`}
+                            icon={<Ionicons name="people-outline" size={29} color="#5856D6" />}
+                            showChevron={false}
+                        />
+                    )}
+                    {(session.metadata?.activity?.workflows.running ?? 0) > 0 && (
+                        <Item title="Workflows" detail={`${session.metadata!.activity!.workflows.running} running`} icon={<Ionicons name="git-network-outline" size={29} color="#5856D6" />} showChevron={false} />
+                    )}
+                    {(session.metadata?.activity?.processes.running ?? 0) > 0 && (
+                        <Item title="Background processes" detail={`${session.metadata!.activity!.processes.running} running`} icon={<Ionicons name="terminal-outline" size={29} color="#5856D6" />} showChevron={false} />
+                    )}
+                    {(session.metadata?.activity?.tasks.pending ?? 0) + (session.metadata?.activity?.tasks.inProgress ?? 0) > 0 && (
+                        <Item title="Tasks" detail={`${session.metadata!.activity!.tasks.inProgress} in progress · ${session.metadata!.activity!.tasks.pending} pending`} icon={<Ionicons name="checkbox-outline" size={29} color="#5856D6" />} showChevron={false} />
                     )}
                 </ItemGroup>
 

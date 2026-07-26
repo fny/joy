@@ -8,6 +8,15 @@ import { sync } from './sync';
 import { storage } from './storage';
 import type { MachineMetadata, SessionAgentModesPatch } from './storageTypes';
 import { markAgentModePushPending, clearAgentModePushPending, type AgentModeField } from './agentModesPending';
+import {
+    isRigMetadata,
+    rigCanAbort,
+    rigCanReadFiles,
+    rigCanSearchFiles,
+    rigCanUseShell,
+    rigCanWriteFiles,
+    rigHasRpcMethod,
+} from './rig';
 
 export type { SessionAgentModesPatch };
 
@@ -167,6 +176,8 @@ export interface SpawnSessionOptions {
     parentSessionId?: string;
     /** Happy message id used as the rewind point (only set for "duplicate"). */
     forkedFromMessageId?: string;
+    /** Marks the spawned session as a hidden side chat of `parentSessionId`. */
+    isSideChat?: boolean;
 }
 
 // Options for forking a Claude session on a machine
@@ -226,7 +237,7 @@ export interface ResumeSessionOptions {
  */
 export async function machineSpawnNewSession(options: SpawnSessionOptions): Promise<SpawnSessionResult> {
 
-    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, permissionMode, modelMode, effortLevel, resumeClaudeSessionId, resumeCodexThreadId, parentSessionId, forkedFromMessageId } = options;
+    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, permissionMode, modelMode, effortLevel, resumeClaudeSessionId, resumeCodexThreadId, parentSessionId, forkedFromMessageId, isSideChat } = options;
 
     try {
         const result = await apiSocket.machineRPC<SpawnSessionResult, {
@@ -242,10 +253,11 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
             resumeCodexThreadId?: string,
             parentSessionId?: string,
             forkedFromMessageId?: string,
+            isSideChat?: boolean,
         }>(
             machineId,
             'spawn-happy-session',
-            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, permissionMode, modelMode, effortLevel, resumeClaudeSessionId, resumeCodexThreadId, parentSessionId, forkedFromMessageId }
+            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, permissionMode, modelMode, effortLevel, resumeClaudeSessionId, resumeCodexThreadId, parentSessionId, forkedFromMessageId, isSideChat }
         );
         return result;
     } catch (error) {
@@ -685,7 +697,11 @@ export function sessionSetAgentModes(sessionId: string, patch: SessionAgentModes
  * Abort the current session operation
  */
 export async function sessionAbort(sessionId: string): Promise<void> {
-    await apiSocket.sessionRPC(sessionId, 'abort', {
+    const metadata = storage.getState().sessions[sessionId]?.metadata;
+    if (!rigCanAbort(metadata)) {
+        throw new Error('Abort is not available for this session');
+    }
+    await apiSocket.sessionRPC(sessionId, 'abort', isRigMetadata(metadata) ? {} : {
         reason: `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.`
     });
 }
@@ -738,6 +754,10 @@ export async function sessionGoalAction(
  */
 export async function sessionBash(sessionId: string, request: SessionBashRequest): Promise<SessionBashResponse> {
     try {
+        const metadata = storage.getState().sessions[sessionId]?.metadata;
+        if (!rigCanUseShell(metadata)) {
+            throw new Error('Shell access is not available for this session');
+        }
         const response = await apiSocket.sessionRPC<SessionBashResponse, SessionBashRequest>(
             sessionId,
             'bash',
@@ -760,6 +780,10 @@ export async function sessionBash(sessionId: string, request: SessionBashRequest
  */
 export async function sessionReadFile(sessionId: string, path: string): Promise<SessionReadFileResponse> {
     try {
+        const metadata = storage.getState().sessions[sessionId]?.metadata;
+        if (!rigCanReadFiles(metadata)) {
+            throw new Error('File reading is not available for this session');
+        }
         const request: SessionReadFileRequest = { path };
         const response = await apiSocket.sessionRPC<SessionReadFileResponse, SessionReadFileRequest>(
             sessionId,
@@ -785,6 +809,10 @@ export async function sessionWriteFile(
     expectedHash?: string | null
 ): Promise<SessionWriteFileResponse> {
     try {
+        const metadata = storage.getState().sessions[sessionId]?.metadata;
+        if (!rigCanWriteFiles(metadata)) {
+            throw new Error('File writing is not available for this session');
+        }
         const request: SessionWriteFileRequest = { path, content, expectedHash };
         const response = await apiSocket.sessionRPC<SessionWriteFileResponse, SessionWriteFileRequest>(
             sessionId,
@@ -805,6 +833,10 @@ export async function sessionWriteFile(
  */
 export async function sessionListDirectory(sessionId: string, path: string): Promise<SessionListDirectoryResponse> {
     try {
+        const metadata = storage.getState().sessions[sessionId]?.metadata;
+        if (isRigMetadata(metadata) && !rigHasRpcMethod(metadata, 'listDirectory')) {
+            throw new Error('Directory listing is not advertised by this Rig session');
+        }
         const request: SessionListDirectoryRequest = { path };
         const response = await apiSocket.sessionRPC<SessionListDirectoryResponse, SessionListDirectoryRequest>(
             sessionId,
@@ -829,6 +861,10 @@ export async function sessionGetDirectoryTree(
     maxDepth: number
 ): Promise<SessionGetDirectoryTreeResponse> {
     try {
+        const metadata = storage.getState().sessions[sessionId]?.metadata;
+        if (isRigMetadata(metadata) && !rigHasRpcMethod(metadata, 'getDirectoryTree')) {
+            throw new Error('Directory tree is not advertised by this Rig session');
+        }
         const request: SessionGetDirectoryTreeRequest = { path, maxDepth };
         const response = await apiSocket.sessionRPC<SessionGetDirectoryTreeResponse, SessionGetDirectoryTreeRequest>(
             sessionId,
@@ -853,6 +889,10 @@ export async function sessionRipgrep(
     cwd?: string
 ): Promise<SessionRipgrepResponse> {
     try {
+        const metadata = storage.getState().sessions[sessionId]?.metadata;
+        if (!rigCanSearchFiles(metadata)) {
+            throw new Error('File search is not available for this session');
+        }
         const request: SessionRipgrepRequest = { args, cwd };
         const response = await apiSocket.sessionRPC<SessionRipgrepResponse, SessionRipgrepRequest>(
             sessionId,
@@ -957,6 +997,8 @@ type ForkOptions = {
     cutAfterUuid?: string;
     cutAfterItemId?: string;
     forkedFromMessageId?: string;
+    /** Marks the forked child as a hidden side chat (kept out of the session list). */
+    isSideChat?: boolean;
 };
 
 /**
@@ -1001,6 +1043,7 @@ export async function forkAndSpawn(
             resumeCodexThreadId: forkResult.newCodexThreadId,
             parentSessionId: source.sessionId,
             forkedFromMessageId: opts.forkedFromMessageId,
+            isSideChat: opts.isSideChat,
         });
 
         if (spawnResult.type === 'success') {
@@ -1039,6 +1082,7 @@ export async function forkAndSpawn(
         resumeClaudeSessionId: forkResult.newClaudeSessionId,
         parentSessionId: source.sessionId,
         forkedFromMessageId: opts.forkedFromMessageId,
+        isSideChat: opts.isSideChat,
     });
 
     // Pull the newly-created session row into local sync state before we
@@ -1055,6 +1099,18 @@ export async function forkAndSpawn(
     }
 
     return spawnResult;
+}
+
+/**
+ * Create a "side chat" for a session: a forked child that inherits the
+ * parent's full context but is provably isolated (writes only to its own
+ * transcript, never back into the parent) and is flagged `isSideChat` so it
+ * stays out of the top-level session list. Rendered only inside the parent's
+ * sidebar panel. Reuses the fork/spawn machinery; the only difference from a
+ * normal fork is the `isSideChat` marker.
+ */
+export async function spawnSideChat(source: ForkSource): Promise<SpawnSessionResult> {
+    return forkAndSpawn(source, { isSideChat: true });
 }
 
 // Export types for external use
