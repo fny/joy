@@ -1267,7 +1267,11 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
         return {
             id: reducerMsg.id,
             seq: reducerMsg.seq,
-            localId: null,
+            // Before the server acks (seq == null), realID holds the outbox
+            // localId (a local send normalizes id === localId), so surface it —
+            // the per-message delivery status uses it to resend idempotently.
+            // After ack, realID is the server id, which the UI doesn't need.
+            localId: reducerMsg.seq == null ? reducerMsg.realID : null,
             createdAt: reducerMsg.createdAt,
             kind: 'user-text',
             text: reducerMsg.text,

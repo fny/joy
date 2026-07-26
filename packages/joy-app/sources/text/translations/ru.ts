@@ -516,6 +516,13 @@ export const ru: TranslationStructure = {
         offlineBanner: 'Нет подключения — сообщения из очереди отправятся, когда вы снова будете в сети',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: 'Отправка…',
+        waitingForConnection: 'Ожидание подключения…',
+        notDeliveredRetry: 'Не доставлено · Нажмите, чтобы повторить',
+    },
+
     commandPalette: {
         placeholder: 'Введите команду или поиск...',
     },

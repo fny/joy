@@ -399,6 +399,13 @@ export const pt: TranslationStructure = {
         offlineBanner: 'Sem conexão — as mensagens na fila serão enviadas quando você voltar a ficar online',
     },
 
+    // Per-message delivery status under a sent user message (iMessage-style).
+    messageStatus: {
+        sending: 'Enviando…',
+        waitingForConnection: 'Aguardando conexão…',
+        notDeliveredRetry: 'Não enviado · Toque para tentar novamente',
+    },
+
     commandPalette: {
         placeholder: 'Digite um comando ou pesquise...',
     },
