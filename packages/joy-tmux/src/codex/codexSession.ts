@@ -3,15 +3,21 @@
 // TUI + transcript. It reproduces the SAME wire output the claude Session emits
 // (via CodexNormalizer) so the app renders both identically.
 //
-// M1 scope: spawn app-server, connect, start/resume a thread, deliver app
-// messages via turn/start, mirror codex notifications to the relay, thinking,
-// interrupt, kill/archive. Codex's native turn queueing replaces claude's
-// pane-dispatch queue, so the daemon-side queue is trivial here (the app-side
-// draft queue is agent-agnostic and unchanged).
+// M2 durability model (post gpt-5.6-sol review):
+//  - INBOUND: app messages persist to a durable spool BEFORE the socket write;
+//    dedupe by relay seq; deterministic clientId per seq; explicit reject →
+//    requeue, ambiguous → hold. The daemon owns a FIFO — one turn/start at a
+//    time (codex has no native turn queue).
+//  - OUTBOUND: turn identity is the stable codex turn id; item identity is a
+//    canonical (turn, type, ordinal). Reconnect replays history through the same
+//    normalizer; deterministic localIds dedupe at the relay append layer. A
+//    turn is checkpointed as delivered only AFTER its terminal row is ACKed.
+//  - RECOVERY: rejoin a live app-server transactionally (connect+resume+read),
+//    else spawn fresh and thread/resume.
 
 import { randomUUID } from "crypto";
 import { type ChildProcess } from "child_process";
-import { mkdirSync, chmodSync, rmSync, existsSync } from "fs";
+import { mkdirSync, chmodSync, rmSync, existsSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { tmux } from "../tmux/driver";
 import { joyStateDir } from "../paths";
@@ -23,11 +29,14 @@ import {
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
 import type { DeliverySource } from "../domain/receipts";
 import type { AgentSession } from "../domain/agentSession";
-import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError } from "./appServerClient";
+import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
 import { CodexNormalizer, type CodexNotification } from "./normalize";
 import { buildCodexAttachCommand } from "./attach";
 import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "./codexInboundStore";
-import { loadDeliveredTurns, saveDeliveredTurns, clearDeliveredTurns } from "./codexCheckpointStore";
+import {
+  loadCheckpoint, saveCheckpoint, clearCheckpoint, isTurnDelivered, markTurnDelivered,
+  type CodexCheckpoint,
+} from "./codexCheckpointStore";
 
 export interface CodexInit {
   id: string;
@@ -43,6 +52,11 @@ export interface CodexInit {
   developerInstructions?: string;
 }
 
+interface PendingApproval {
+  info: { requestId: string; kind: "command" | "patch"; title: string; detail?: string; since: number; threadId?: string; turnId?: string; itemId?: string };
+  answer: (allow: boolean) => void;
+}
+
 export class CodexSession implements AgentSession {
   readonly id: string;
   readonly cwd: string;
@@ -55,6 +69,7 @@ export class CodexSession implements AgentSession {
   relaySessionId?: string;
   summary?: string;
   currentModel?: string;
+  currentEffort?: string;
   pid?: number;                          // app-server pid
 
   readonly tmuxWindow: string;
@@ -71,22 +86,39 @@ export class CodexSession implements AgentSession {
   #resumeThreadId?: string;
   #developerInstructions?: string;
   #thinking = false;
-  // Model/effort overrides to apply on the NEXT turn only, then clear — codex
-  // persists a turn/start override "for this and subsequent turns", so sending
-  // once is enough and avoids clobbering a model the user later picks in the
-  // attached TUI (review #4). Seeded with the create-time effort.
-  #pendingModel: string | null = null;
+  // Reasoning effort to apply on the NEXT turn only, then clear — codex persists
+  // a turn/start override "for this and subsequent turns", so sending once is
+  // enough and avoids clobbering an effort the user later picks in the attached
+  // TUI. Seeded ONLY on a fresh create (never on resume/recover — finding #8:
+  // re-seeding from stale local settings would overwrite an authoritative
+  // resumed/TUI value).
   #pendingEffort: string | null = null;
+  // FIFO turn serialization (finding #4): codex has no native turn queue, so a
+  // second turn/start during an active turn can be rejected. We dispatch one
+  // queued item only while no turn is active, re-draining on turn/completed.
   #activeTurnId: string | null = null;
+  #dispatching = false;
   #started = false;
   #archivePromise: Promise<boolean> | null = null;
-  // Durable inbound spool (review #1): app messages persisted before delivery.
+  // True when we REJOINED a live app-server (vs spawned a fresh one). On a
+  // rejoin we must NOT resend 'sentUnknown' items — the live turn may still be
+  // in flight and not yet in thread/read (finding #3c) — so we hold them
+  // (at-most-once). On a fresh spawn the old server (and its in-flight turn)
+  // died, so unconfirmed sends are requeued (at-least-once).
+  #rejoined = false;
+  // Durable inbound spool (finding #3): app messages persisted before delivery.
+  // Loaded in the constructor BEFORE the relay starts pulling (finding #3 race).
   #inbound: CodexInboundItem[] = [];
-  // Turns whose output was fully delivered — skipped wholesale on reconcile
-  // (item ids differ live vs history, but turn ids are stable — review #2).
-  #deliveredTurns = new Set<string>();
-  // Codex approval requests awaiting the app (non-yolo), keyed by codex req id.
-  #pendingApprovals = new Map<string, { answer: (allow: boolean) => void }>();
+  // Delivered-turn checkpoint — advanced only on terminal-row ACK (finding #2).
+  #checkpoint: CodexCheckpoint;
+  // Notifications are BUFFERED from connect until reconcile finishes (finding
+  // #10): the thread filter is inactive until #threadId is known, and live
+  // traffic must not interleave with synthetic history replay.
+  #buffering = true;
+  #notifBuffer: CodexNotification[] = [];
+  // Codex approval requests awaiting the app (non-yolo). Insertion-ordered Map
+  // = a FIFO; the app bar always shows the HEAD (finding #6).
+  #pendingApprovals = new Map<string, PendingApproval>();
 
   constructor(init: CodexInit, deps: SessionDeps) {
     this.id = init.id;
@@ -95,17 +127,34 @@ export class CodexSession implements AgentSession {
     this.effort = init.effort;
     this.status = init.status;
     this.tmuxWindow = init.tmuxWindow;
-    this.#permissionMode = init.permissionMode ?? "yolo";
+    // Fail closed: an absent mode becomes the collaborative default, NOT yolo
+    // (finding #1 — resolveCodexExecutionPolicy also fails closed).
+    this.#permissionMode = init.permissionMode ?? "default";
     this.#startedAt = init.startedAt;
     this.#deps = deps;
     this.#resumeThreadId = init.codexThreadId;
     this.#developerInstructions = init.developerInstructions;
-    this.#pendingEffort = init.effort ?? null; // applied on the first turn
     this.#socketPath = join(joyStateDir(), `codex-${init.id}.sock`);
     this.#norm = new CodexNormalizer();
+    // Load durable state SYNCHRONOUSLY here, before attachRelay starts the relay
+    // pull, so an inbound message can't race the load (finding #3 startup race).
+    if (init.codexThreadId) {
+      this.#inbound = loadCodexInbound(init.id);
+      this.#checkpoint = loadCheckpoint(init.id);
+      // Do NOT seed pendingEffort on resume/recover (finding #8).
+    } else {
+      clearCodexInbound(init.id);
+      clearCheckpoint(init.id);
+      this.#inbound = [];
+      this.#checkpoint = { threadId: null, deliveredThroughTurnId: null };
+      this.#pendingEffort = init.effort ?? null; // fresh session: apply on turn 1
+    }
   }
 
   get relayAttached(): boolean { return this.#relay !== null; }
+  /** The codex thread id, once known — used by registry.restart to resume the
+   *  SAME thread even when the persisted record is absent (finding #7). */
+  get codexThreadId(): string | undefined { return this.#threadId ?? this.#resumeThreadId; }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -116,9 +165,10 @@ export class CodexSession implements AgentSession {
     if (this.status === "ended") rs.pausePull();
     // Inbound app messages → deliver to codex via turn/start.
     rs.onMessage = async (text, seq) => { await this.#onRelayMessage(text, seq); };
-    // Output receipts persist through the same sink shape as claude.
-    rs.setReceiptSink(() => { /* M1: receipts are informational; outbound rows
-      are already exactly-once via localId dedup at the append layer. */ });
+    // Terminal-row ACK → advance the delivered-turn checkpoint (finding #2). The
+    // receipt effect for a turn's turn-end row carries its turn id; the checkpoint
+    // advances only when the relay server has durably accepted the terminal row.
+    rs.setReceiptSink((r) => { this.#markTurnDelivered(r.turn); });
     this.#deps.onRelayAttached?.(this, rs);
     // The app answers held approval requests through this session-scoped RPC.
     rs.registerRpc("joy-codex-approve", async (params) => this.#answerApproval(params as Record<string, unknown> | undefined));
@@ -135,84 +185,35 @@ export class CodexSession implements AgentSession {
   }
 
   async #start(): Promise<void> {
+    this.#buffering = true;
     try {
-      const client = new CodexAppServerClient();
-      client.onNotification((n) => this.#onNotification(n));
-      client.onServerRequest((req) => this.#onServerRequest(req));
-
-      // Orphan rejoin (review #5): if a live app-server already answers on our
-      // socket — it survived a daemon crash — reuse it (rejoining the live
-      // thread + any in-flight turn) instead of spawning a duplicate.
-      let rejoined = false;
-      if (existsSync(this.#socketPath)) {
-        try {
-          await client.connect(this.#socketPath);
-          rejoined = true;
-          const rec = loadWindowRecord(this.id);
-          if (rec?.codexServerPid) this.pid = rec.codexServerPid; // so end() can kill it
-          process.stderr.write(`[codex ${this.id}] rejoined orphan app-server\n`);
-        } catch { /* not alive — spawn a fresh one below */ }
+      // Transactional rejoin (finding #7): only trust a live orphan server after
+      // connect + resume + read + validate all succeed. Any failure → fresh spawn.
+      let client: CodexAppServerClient | null = null;
+      if (this.#resumeThreadId && existsSync(this.#socketPath)) {
+        client = await this.#tryRejoin();
       }
-
-      if (!rejoined) {
-        // The app-server unix socket exposes danger-full-access execution — its
-        // directory must be 0700 so other UIDs can't dial it (review #8).
-        const dir = dirname(this.#socketPath);
-        mkdirSync(dir, { recursive: true, mode: 0o700 });
-        try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
-        try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ } // remove stale socket file
-        this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath });
-        this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
-        // spawn failures (e.g. missing codex binary) are ASYNC — not caught by
-        // this try/catch — so handle them explicitly (review #9).
-        this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
-        this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
-        this.pid = this.#proc.pid;
-        await this.#connectWithRetry(client);
+      if (!client) {
+        client = await this.#spawnFresh();
       }
       this.#client = client;
 
-      if (this.#resumeThreadId) {
-        // Recover the persisted inbound spool + delivered-turn checkpoint BEFORE
-        // reconciling — the checkpoint tells reconcile which turns to skip, and
-        // reconcile's userMessage echoes remove delivered inbound entries.
-        this.#inbound = loadCodexInbound(this.id);
-        this.#deliveredTurns = loadDeliveredTurns(this.id);
-        const r = await client.threadResume(this.#resumeThreadId, { cwd: this.cwd, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions });
-        this.#threadId = r.threadId;
-        this.#norm.setThreadId(r.threadId);
-        // Reconcile missed output: replay thread history through the SAME
-        // normalizer. Deterministic localIds make re-sent rows idempotent at
-        // the relay append layer, so already-delivered events are deduped.
-        await this.#reconcileHistory(client);
-      } else {
-        // Fresh conversation: no prior inbound / checkpoint belongs to it.
-        clearCodexInbound(this.id);
-        clearDeliveredTurns(this.id);
-        this.#inbound = [];
-        this.#deliveredTurns = new Set();
-        const r = await client.threadStart({ cwd: this.cwd, permissionMode: this.#permissionMode, model: this.model, developerInstructions: this.#developerInstructions });
-        this.#threadId = r.threadId;
-        this.#norm.setThreadId(r.threadId);
-        this.transcriptPath = r.rolloutPath ?? undefined;
-        // Mirror the effective model the thread resolved to (thread/start's
-        // top-level `model` — there is no thread.model on notifications).
-        if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
+      // Deliver anything spooled once reconcile has settled the confirmed set.
+      // Fresh spawn: the old server + its in-flight turn are gone, so requeue
+      // unconfirmed 'sentUnknown' items (at-least-once). Rejoin: hold them.
+      if (!this.#rejoined) {
+        for (const it of this.#inbound) if (it.state === "sentUnknown") it.state = "queued";
+        saveCodexInbound(this.id, this.#inbound);
       }
-      // Deliver anything spooled (queued during startup, or undelivered after
-      // a resume+reconcile).
-      await this.#drainInbound();
-      saveWindowRecord(this.id, {
-        launchCwd: this.cwd, agent: "codex",
-        codexThreadId: this.#threadId ?? undefined,
-        codexSocketPath: this.#socketPath,
-        codexServerPid: this.#proc?.pid,
-        codexSettings: { model: this.model, effort: this.effort, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions },
-      });
+
+      // Reconcile done → resume live notification flow (flush buffered).
+      this.#buffering = false;
+      this.#flushNotifBuffer();
+
+      this.#pumpDispatch();
+      this.#persistWindowRecord();
       if (this.status === "starting") this.status = "active";
       this.#deps.broadcast("session_update", this.toJSON());
-      // Best-effort: launch the attach TUI in the tmux window (poll rollout →
-      // codex --remote resume). Non-fatal if it can't attach.
       this.#launchAttach();
     } catch (e) {
       process.stderr.write(`[codex ${this.id}] start failed: ${e}\n`);
@@ -220,13 +221,138 @@ export class CodexSession implements AgentSession {
     }
   }
 
+  /** Attempt to rejoin a live orphaned app-server. Returns the connected client
+   *  ONLY if the full transaction (connect → resume → read+validate) succeeds;
+   *  otherwise tears down and returns null so the caller spawns fresh. */
+  async #tryRejoin(): Promise<CodexAppServerClient | null> {
+    const client = new CodexAppServerClient();
+    this.#wireClient(client);
+    try {
+      await client.connect(this.#socketPath);
+      const rec = loadWindowRecord(this.id);
+      const r = await client.threadResume(this.#resumeThreadId!, {
+        cwd: this.cwd, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions,
+      });
+      if (r.threadId !== this.#resumeThreadId) throw new Error(`resumed wrong thread ${r.threadId} != ${this.#resumeThreadId}`);
+      this.#threadId = r.threadId;
+      this.#norm.setThreadId(r.threadId);
+      this.#applyResumeSettings(r);
+      // Mark rejoined BEFORE reconcile so it leaves any in-progress turn OPEN
+      // (a live orphan whose real notifications will arrive) rather than closing
+      // it (finding #5).
+      this.#rejoined = true;
+      await this.#reconcileHistory(client); // proves the thread is readable
+      if (rec?.codexServerPid) this.pid = rec.codexServerPid; // so end() can kill it
+      // Persist the (unchanged) thread binding + recovered pid immediately.
+      this.#persistWindowRecord();
+      process.stderr.write(`[codex ${this.id}] rejoined orphan app-server thread=${r.threadId}\n`);
+      return client;
+    } catch (e) {
+      process.stderr.write(`[codex ${this.id}] rejoin failed (${e}) — spawning fresh\n`);
+      try { client.close(); } catch { /* ignore */ }
+      // Reset any partial state so the fresh path starts clean.
+      this.#threadId = null;
+      this.#rejoined = false;
+      return null;
+    }
+  }
+
+  /** Spawn a fresh app-server and thread/start (new) or thread/resume (recover).
+   *  Verifies + reaps a recorded-but-unrejoinable server before unlinking. */
+  async #spawnFresh(): Promise<CodexAppServerClient> {
+    const client = new CodexAppServerClient();
+    this.#wireClient(client);
+
+    // If a prior server pid is recorded and is verifiably ours-and-alive but we
+    // couldn't rejoin it, reap it before taking over the socket (finding #7).
+    const rec = loadWindowRecord(this.id);
+    if (rec?.codexServerPid && this.#isOurServer(rec.codexServerPid)) {
+      try { process.kill(rec.codexServerPid); } catch { /* already gone */ }
+    }
+
+    // The app-server unix socket exposes danger-full-access execution — its
+    // directory must be 0700 so other UIDs can't dial it.
+    const dir = dirname(this.#socketPath);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
+    try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ }
+
+    this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath });
+    this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
+    this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
+    this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
+    this.pid = this.#proc.pid;
+    // Persist the pid RIGHT AWAY so a crash before thread/start still leaves a
+    // reapable binding (finding #7).
+    this.#persistWindowRecord();
+
+    await this.#connectWithRetry(client);
+
+    if (this.#resumeThreadId) {
+      const r = await client.threadResume(this.#resumeThreadId, {
+        cwd: this.cwd, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions,
+      });
+      this.#threadId = r.threadId;
+      this.#norm.setThreadId(r.threadId);
+      this.#persistWindowRecord(); // bind thread id immediately after the response
+      this.#applyResumeSettings(r);
+      await this.#reconcileHistory(client);
+    } else {
+      const r = await client.threadStart({ cwd: this.cwd, permissionMode: this.#permissionMode, model: this.model, developerInstructions: this.#developerInstructions });
+      this.#threadId = r.threadId;
+      this.#norm.setThreadId(r.threadId);
+      this.transcriptPath = r.rolloutPath ?? undefined;
+      this.#checkpoint = { ...this.#checkpoint, threadId: r.threadId };
+      this.#persistWindowRecord();
+      if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
+    }
+    return client;
+  }
+
+  /** Wire the notification / server-request / close handlers onto a client. */
+  #wireClient(client: CodexAppServerClient): void {
+    client.onNotification((n) => this.#onNotification(n));
+    client.onServerRequest((req) => this.#onServerRequest(req));
+    // Socket close (server died / killed) ends the session — for BOTH the
+    // spawned and rejoined paths (finding #7: rejoin previously had no signal).
+    client.onClose(() => { if (this.status !== "ended") this.end("process_exited"); });
+  }
+
+  /** Apply the authoritative model/effort a thread/resume returned (finding #8)
+   *  — these override any stale local settings. */
+  #applyResumeSettings(r: { model: string | null; reasoningEffort: string | null }): void {
+    if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
+    if (r.reasoningEffort) this.currentEffort = r.reasoningEffort;
+    this.#checkpoint = { ...this.#checkpoint, threadId: this.#threadId };
+  }
+
+  /** Is `pid` actually one of OUR codex app-servers (not a recycled pid)? Guards
+   *  process.kill from hitting an unrelated process (finding #7). */
+  #isOurServer(pid: number): boolean {
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      return cmdline.includes("app-server") && cmdline.includes(this.#socketPath);
+    } catch { return false; }
+  }
+
   async #connectWithRetry(client: CodexAppServerClient): Promise<void> {
     let lastErr: unknown;
     for (let i = 0; i < 30; i++) {
+      if (this.#proc && this.#proc.exitCode !== null) throw new Error(`app-server exited during startup (code ${this.#proc.exitCode})`);
       try { await client.connect(this.#socketPath); return; }
       catch (e) { lastErr = e; await new Promise((r) => setTimeout(r, 200)); }
     }
     throw new Error(`could not connect to app-server: ${lastErr}`);
+  }
+
+  #persistWindowRecord(): void {
+    saveWindowRecord(this.id, {
+      launchCwd: this.cwd, agent: "codex",
+      codexThreadId: this.#threadId ?? this.#resumeThreadId ?? undefined,
+      codexSocketPath: this.#socketPath,
+      codexServerPid: this.#proc?.pid ?? this.pid,
+      codexSettings: { model: this.currentModel ?? this.model, effort: this.currentEffort ?? this.effort, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions },
+    });
   }
 
   #launchAttach(): void {
@@ -237,41 +363,69 @@ export class CodexSession implements AgentSession {
 
   // ── delivery (inbound app → codex) ──────────────────────────────────────────
 
-  async #onRelayMessage(text: string, _seq: number): Promise<void> {
+  async #onRelayMessage(text: string, seq: number): Promise<void> {
     if (this.status === "ended") return;
-    // Persist BEFORE anything else and THROW on failure so the relay's
-    // confirmed cursor does not advance past an unpersisted message (a lost
-    // inbound message is worse than a redelivered one — review #1).
-    const item: CodexInboundItem = { clientId: randomUUID(), text, state: "queued", at: Date.now() };
+    // Dedupe by relay seq (finding #3b): the confirmed cursor can redeliver a
+    // seq after a crash-before-cursor-persist. A seq already spooled is a no-op
+    // (idempotent) — do NOT throw, so the cursor advances past it.
+    if (this.#inbound.some((i) => i.seq === seq)) { this.#pumpDispatch(); return; }
+    // Deterministic clientId per seq so a redelivery reuses the SAME id (no
+    // second turn). Persist BEFORE anything else and THROW on failure so the
+    // relay's confirmed cursor does not advance past an unpersisted message.
+    const item: CodexInboundItem = { clientId: `codex-in:${this.id}:${seq}`, text, state: "queued", at: Date.now(), seq };
     this.#inbound.push(item);
     if (!saveCodexInbound(this.id, this.#inbound)) {
       this.#inbound.pop();
       throw new Error("codex inbound persist failed");
     }
-    if (this.#relay) this.#relay.send(encodeUserMessage(text, item.at));
-    await this.#deliverItem(item);
+    // Deterministic echo localId so a redelivered seq dedupes the local mirror.
+    if (this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `codex:in:${this.id}:${seq}`);
+    this.#pumpDispatch();
   }
 
-  /** turn/start a spooled item with its STABLE clientUserMessageId. On success
-   *  → 'sentUnknown' (the echo confirms delivery, not this return). On failure
-   *  leave it 'queued' and do NOT resend now (resending could double). */
-  async #deliverItem(item: CodexInboundItem): Promise<void> {
+  /** FIFO dispatch pump (finding #4). Sends ONE queued item's turn/start only
+   *  when no turn is active; re-invoked on turn/completed, explicit rejection,
+   *  and recovery. Single-flight via #dispatching. */
+  #pumpDispatch(): void {
+    if (this.status === "ended") return;
+    if (this.#dispatching || this.#activeTurnId) return;
+    if (!this.#client || !this.#threadId) return; // not ready — drained after start
+    const item = this.#inbound.find((i) => i.state === "queued");
+    if (!item) return;
+    this.#dispatching = true;
+    void this.#dispatch(item).finally(() => { this.#dispatching = false; });
+  }
+
+  async #dispatch(item: CodexInboundItem): Promise<void> {
     const client = this.#client;
-    if (!client || !this.#threadId) return; // not ready yet — drained after start
+    if (!client || !this.#threadId) return;
+    // Persist 'sentUnknown' BEFORE the socket write (finding #3d): a crash after
+    // codex accepts but before the response is processed must NOT leave it
+    // 'queued' (which would blindly resend). Ambiguous outcomes stay sentUnknown.
+    item.state = "sentUnknown";
+    saveCodexInbound(this.id, this.#inbound);
     try {
-      // Only send model/effort when there's a PENDING joy-side change — codex
-      // persists the override, so we don't resend it every turn (which would
-      // clobber a model the user picked in the attached TUI — review #4).
-      await client.turnStart(this.#threadId, item.text, {
+      const { turnId } = await client.turnStart(this.#threadId, item.text, {
         clientUserMessageId: item.clientId,
         permissionMode: this.#permissionMode,
-        model: this.#pendingModel ?? undefined,
         effort: this.#pendingEffort ?? undefined,
       });
-      this.#pendingModel = null; this.#pendingEffort = null; // applied (persists thread-side)
-      if (item.state === "queued") { item.state = "sentUnknown"; saveCodexInbound(this.id, this.#inbound); }
+      this.#pendingEffort = null; // applied (codex persists it thread-side)
+      this.#activeTurnId = turnId; // serialize: no further dispatch until this completes
     } catch (e) {
-      process.stderr.write(`[codex ${this.id}] turn/start failed: ${e}\n`);
+      if (e instanceof JsonRpcResponseError) {
+        // EXPLICIT server rejection (definitely not accepted) → safe to requeue.
+        // Common cause: a turn is already active — the pending turn/completed
+        // (or turn/started, which sets #activeTurnId) will re-trigger the pump,
+        // so we do NOT hot-loop by re-pumping here.
+        item.state = "queued";
+        saveCodexInbound(this.id, this.#inbound);
+        process.stderr.write(`[codex ${this.id}] turn/start rejected (${e.code}) — requeued\n`);
+      } else {
+        // AMBIGUOUS (timeout / socket loss): it MIGHT have landed — hold as
+        // sentUnknown (at-most-once) rather than risk a duplicate turn.
+        process.stderr.write(`[codex ${this.id}] turn/start ambiguous failure: ${e}\n`);
+      }
     }
   }
 
@@ -283,24 +437,16 @@ export class CodexSession implements AgentSession {
     if (this.#inbound.length !== before) saveCodexInbound(this.id, this.#inbound);
   }
 
-  /** Deliver every still-spooled item. Called after the thread is ready (fresh
-   *  start) and after resume+reconcile (where echoed items were already
-   *  removed, so the remainder is genuinely undelivered). */
-  async #drainInbound(): Promise<void> {
-    for (const item of [...this.#inbound]) await this.#deliverItem(item);
+  #markTurnDelivered(turnId: string): void {
+    if (!turnId) return;
+    const next = markTurnDelivered(this.#checkpoint, turnId);
+    if (next !== this.#checkpoint) { this.#checkpoint = next; saveCheckpoint(this.id, this.#checkpoint); }
   }
 
   // ── server→client requests (approvals / elicitations) ───────────────────────
-  // v1 is yolo (approvalPolicy 'never'), so ordinary command/patch approvals
-  // shouldn't fire — but respond with the CORRECT per-method shape if they do,
-  // and JSON-RPC-error anything we can't answer rather than sending an invalid
-  // {decision:'accept'} to every method (review #3). Non-yolo approval cards in
-  // the app are M2.
   #onServerRequest(req: { id: number | string; method: string; params?: Record<string, unknown> }): unknown {
     const p = req.params ?? {};
     switch (req.method) {
-      // Command/patch approvals (fire under non-yolo modes) → surface to the app
-      // as an Allow/Deny bar and HOLD the request until the user answers.
       case "item/commandExecution/requestApproval":
       case "execCommandApproval": {
         const cmd = Array.isArray(p.command) ? (p.command as string[]).join(" ") : String(p.command ?? "run a command");
@@ -311,12 +457,15 @@ export class CodexSession implements AgentSession {
         const files = Array.isArray(p.fileChanges) ? (p.fileChanges as unknown[]).length : (Array.isArray(p.changes) ? (p.changes as unknown[]).length : 0);
         return this.#surfaceApproval(req, "patch", files ? `Apply patch to ${files} file(s)` : "Apply patch", typeof p.reason === "string" ? p.reason : undefined);
       }
-      // Can't answer meaningfully in v1 — reject so the server proceeds/cancels
-      // rather than wedging on a wrong-shaped success.
+      // Can't answer meaningfully — reject so the server proceeds/cancels rather
+      // than wedging on a wrong-shaped success. NOTE: item/permissions,
+      // requestUserInput and MCP elicitation each have DISTINCT response shapes
+      // we don't yet implement, so turns needing them will fail (non-yolo
+      // support is command/patch approvals only — NOT comprehensive).
       case "item/tool/requestUserInput":
       case "mcpServer/elicitation/request":
       case "item/permissions/requestApproval":
-        throw new JsonRpcError(-32601, `joy v1 cannot answer ${req.method}`);
+        throw new JsonRpcError(-32601, `joy cannot answer ${req.method}`);
       case "account/chatgptAuthTokens/refresh":
         throw new JsonRpcError(-32601, "joy does not manage codex auth tokens");
       default:
@@ -325,20 +474,31 @@ export class CodexSession implements AgentSession {
   }
 
   /** Hold a codex approval request until the app answers (or a timeout auto-
-   *  declines so codex isn't wedged). Legacy-named methods want the legacy
-   *  decision strings. */
-  #surfaceApproval(req: { id: number | string; method: string }, kind: "command" | "patch", title: string, detail?: string): Promise<unknown> {
+   *  declines so codex isn't wedged). FIFO: the app bar always shows the head. */
+  #surfaceApproval(req: { id: number | string; method: string; params?: Record<string, unknown> }, kind: "command" | "patch", title: string, detail?: string): Promise<unknown> {
     const requestId = String(req.id);
     const legacy = req.method === "execCommandApproval" || req.method === "applyPatchApproval";
+    const p = req.params ?? {};
     return new Promise((resolve) => {
       const done = (allow: boolean) => resolve(legacy ? { decision: allow ? "approved" : "denied" } : { decision: allow ? "accept" : "decline" });
-      const timer = setTimeout(() => { if (this.#pendingApprovals.delete(requestId)) { void this.#relay?.updateCodexApproval(null); done(false); } }, 300_000);
-      this.#pendingApprovals.set(requestId, { answer: (allow) => { clearTimeout(timer); this.#pendingApprovals.delete(requestId); void this.#relay?.updateCodexApproval(null); done(allow); } });
-      void this.#relay?.updateCodexApproval({ requestId, kind, title, detail, since: Date.now() });
+      const timer = setTimeout(() => { if (this.#pendingApprovals.delete(requestId)) { this.#publishApprovalHead(); done(false); } }, 300_000);
+      this.#pendingApprovals.set(requestId, {
+        info: { requestId, kind, title, detail, since: Date.now(), threadId: this.#threadId ?? undefined, turnId: typeof p.turnId === "string" ? p.turnId : undefined, itemId: typeof p.itemId === "string" ? p.itemId : undefined },
+        answer: (allow) => { clearTimeout(timer); this.#pendingApprovals.delete(requestId); this.#publishApprovalHead(); done(allow); },
+      });
+      this.#publishApprovalHead();
     });
   }
 
-  /** joy-codex-approve RPC handler: the app answers a pending approval. */
+  /** Publish the current head of the approval FIFO to the app bar (or clear it
+   *  when none remain) — so a second concurrent request surfaces after the
+   *  first is resolved (finding #6). */
+  #publishApprovalHead(): void {
+    const head = this.#pendingApprovals.values().next().value as PendingApproval | undefined;
+    void this.#relay?.updateCodexApproval(head ? head.info : null);
+  }
+
+  /** joy-codex-approve RPC handler: the app answers the head approval. */
   #answerApproval(params: Record<string, unknown> | undefined): { ok: boolean } {
     const requestId = String(params?.requestId ?? "");
     const allow = params?.decision === "allow" || params?.decision === true;
@@ -351,9 +511,22 @@ export class CodexSession implements AgentSession {
   // ── output (codex notifications → relay wire) ────────────────────────────────
 
   #onNotification(n: CodexNotification): void {
-    // Only the ROOT thread's traffic drives this session. Subagents, reviews,
-    // and forks run on their own thread ids on the same server and must not
-    // contaminate the transcript / active turn (review #6).
+    // Buffer during resume/reconcile so live traffic can't interleave with the
+    // synthetic history replay and the thread filter is active before we apply
+    // anything (finding #10).
+    if (this.#buffering) { this.#notifBuffer.push(n); return; }
+    this.#dispatchNotification(n);
+  }
+
+  #flushNotifBuffer(): void {
+    const buffered = this.#notifBuffer;
+    this.#notifBuffer = [];
+    for (const n of buffered) this.#dispatchNotification(n);
+  }
+
+  #dispatchNotification(n: CodexNotification): void {
+    // Only the ROOT thread's traffic drives this session. Subagents / reviews /
+    // forks run on their own thread ids on the same server (review #6/#10).
     if (this.#threadId) {
       const p = n.params ?? {};
       const nThread = n.method === "thread/started"
@@ -361,22 +534,28 @@ export class CodexSession implements AgentSession {
         : p.threadId;
       if (typeof nThread === "string" && nThread !== this.#threadId) return;
     }
+    // Lifecycle: a closed/deleted ROOT thread detaches this session (finding #10).
+    if (n.method === "thread/closed" || n.method === "thread/deleted") {
+      if (this.status !== "ended") this.end("process_exited");
+      return;
+    }
     if (n.method === "serverRequest/resolved") {
-      // The request was answered elsewhere (the attached TUI) or cleared by an
-      // interrupt — drop our pending UI without resolving (codex already has it).
+      // The request was answered elsewhere (attached TUI) or cleared by an
+      // interrupt. Settle our held handler AND suppress the duplicate response
+      // (finding #6): tell the client to drop the outgoing reply, then resolve.
       const rid = String((n.params ?? {}).requestId ?? "");
-      if (rid && this.#pendingApprovals.delete(rid)) void this.#relay?.updateCodexApproval(null);
+      const p = this.#pendingApprovals.get(rid);
+      if (p) { this.#client?.resolveServerRequestExternally(rid); p.answer(false); }
       return;
     }
     if (n.method === "turn/started") {
       const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
       if (typeof turn.id === "string") this.#activeTurnId = turn.id;
     } else if (n.method === "turn/completed") {
-      const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
-      // A completed turn's output is fully delivered — checkpoint it so a
-      // future reconcile skips it (its items won't be double-shown).
-      if (typeof turn.id === "string") { this.#deliveredTurns.add(turn.id); saveDeliveredTurns(this.id, this.#deliveredTurns); }
       this.#activeTurnId = null;
+      // Checkpoint is advanced by the terminal-row ACK (setReceiptSink), NOT
+      // here (finding #2). Just re-drain the FIFO now the turn is done.
+      queueMicrotask(() => this.#pumpDispatch());
     }
     this.#applyEffects(this.#norm.handle(n));
   }
@@ -388,6 +567,7 @@ export class CodexSession implements AgentSession {
         case "thinking": this.#thinking = eff.value; this.#relay?.setThinking(eff.value); break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "model": this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); break;
+        case "effort": this.currentEffort = eff.effort; break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
         case "confirmDispatch": this.#onDispatchEchoed(eff.clientId); break;
       }
@@ -395,62 +575,92 @@ export class CodexSession implements AgentSession {
   }
 
   /** Replay thread history through the SAME normalizer on resume. Deterministic
-   *  localIds make re-sent rows idempotent (the relay append layer dedupes what
-   *  the app already has); only output missed during downtime is delivered. */
+   *  localIds (turn-level + canonical item ordinals) make re-sent rows idempotent
+   *  at the relay append layer, so only output missed during downtime lands. */
   async #reconcileHistory(client: CodexAppServerClient): Promise<void> {
     if (!this.#threadId) return;
-    try {
-      const res = await client.threadRead(this.#threadId);
-      const thread = ((res.thread ?? res) as Record<string, unknown>);
-      const turns = Array.isArray(thread.turns) ? thread.turns as Record<string, unknown>[] : [];
-      for (const turn of turns) {
-        const tid = String(turn.id ?? "");
-        if (!tid) continue;
-        // Already delivered before the restart — skip wholesale (its item ids
-        // in history differ from the live ones, so replaying would double-show).
-        if (this.#deliveredTurns.has(tid)) continue;
-        this.#applyEffects(this.#norm.handle({ method: "turn/started", params: { turn: { id: tid } } }));
-        const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
-        for (const item of items) {
-          const t = String(item.type ?? "");
-          // Tool items produce start+end; feed both so localIds match the live path.
-          if (t === "commandExecution" || t === "fileChange" || t === "mcpToolCall") {
-            this.#applyEffects(this.#norm.handle({ method: "item/started", params: { turnId: tid, item } }));
-          }
-          this.#applyEffects(this.#norm.handle({ method: "item/completed", params: { turnId: tid, item } }));
-        }
-        this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: turn.status ?? "completed" } } }));
-        // A replayed (previously-undelivered) completed turn is now delivered.
-        if ((turn.status ?? "completed") !== "inProgress") { this.#deliveredTurns.add(tid); }
-      }
-      saveDeliveredTurns(this.id, this.#deliveredTurns);
-    } catch (e) {
-      process.stderr.write(`[codex ${this.id}] history reconcile failed: ${e}\n`);
+    const res = await client.threadRead(this.#threadId);
+    const thread = ((res.thread ?? res) as Record<string, unknown>);
+    const turns = Array.isArray(thread.turns) ? thread.turns as Record<string, unknown>[] : [];
+
+    // Rewind detection (finding #5): if our delivered high-water turn is no
+    // longer in history, the TUI rolled back the tail. Surface it rather than
+    // silently skipping turns the app still shows.
+    const high = this.#checkpoint.deliveredThroughTurnId;
+    if (high && !turns.some((t) => String(t.id ?? "") === high)) {
+      process.stderr.write(`[codex ${this.id}] history rewound past ${high} — resetting checkpoint\n`);
+      this.#checkpoint = { threadId: this.#threadId, deliveredThroughTurnId: null };
     }
+
+    for (const turn of turns) {
+      const tid = String(turn.id ?? "");
+      if (!tid) continue;
+      // Already delivered before the restart — skip wholesale.
+      if (isTurnDelivered(this.#checkpoint, tid)) continue;
+      const status = String(turn.status ?? "completed");
+      const view = String(turn.itemsView ?? "full");
+      // A turn whose items history did NOT fully return can't be faithfully
+      // replayed — skip its items and do NOT checkpoint it (finding #2/#5).
+      if (view && view !== "full") {
+        process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay\n`);
+        continue;
+      }
+      this.#applyEffects(this.#norm.handle({ method: "turn/started", params: { turn: { id: tid } } }));
+      const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
+      for (const item of items) {
+        // Feed item/started for EVERY item (incl. userMessage) so canonical
+        // ordinals allocate identically to the live path AND user-message
+        // echoes drain the inbound spool (finding #3a / #5).
+        this.#applyEffects(this.#norm.handle({ method: "item/started", params: { turnId: tid, item } }));
+        this.#applyEffects(this.#norm.handle({ method: "item/completed", params: { turnId: tid, item } }));
+      }
+      // Synthesize turn/completed for a TERMINAL turn — its terminal row's ACK
+      // advances the checkpoint (setReceiptSink); we do NOT mark it here.
+      // For an inProgress turn the handling depends on how we started (#5):
+      //   - REJOIN: leave it OPEN — it's a live orphan whose real notifications
+      //     (buffered now, flushed after reconcile) will complete it.
+      //   - FRESH SPAWN: the old server (and its in-flight turn) died, so the
+      //     turn is dead — close it as cancelled so the card doesn't spin.
+      if (status !== "inProgress") {
+        this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status } } }));
+      } else if (!this.#rejoined) {
+        this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: "interrupted" } } }));
+      }
+    }
+    // The high-water advances via terminal-row ACKs (setReceiptSink); just make
+    // sure the thread binding is persisted.
+    if (this.#checkpoint.threadId !== this.#threadId) {
+      this.#checkpoint = { ...this.#checkpoint, threadId: this.#threadId };
+    }
+    saveCheckpoint(this.id, this.#checkpoint);
   }
 
-  // ── app-facing intake / queue (codex queues turns natively) ──────────────────
+  // ── app-facing intake / queue (daemon-owned FIFO) ────────────────────────────
 
   busy(): boolean { return this.#thinking; }
 
   enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
-    const item: CodexInboundItem = { clientId: randomUUID(), text, state: "queued", at: Date.now() };
+    // Non-relay intake (app RPC / local). If a seq is provided, dedupe like the
+    // relay path; otherwise a random clientId (these are not cursor-replayed).
+    const seq = opts?.seq;
+    if (seq != null && this.#inbound.some((i) => i.seq === seq)) { this.#pumpDispatch(); return { id: String(seq), text, createdAt: Date.now() }; }
+    const item: CodexInboundItem = { clientId: seq != null ? `codex-in:${this.id}:${seq}` : randomUUID(), text, state: "queued", at: Date.now(), seq };
     this.#inbound.push(item);
     if (!saveCodexInbound(this.id, this.#inbound) && opts?.requireDurable) {
       this.#inbound.pop();
       throw new Error("codex inbound persist failed");
     }
-    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at));
-    void this.#deliverItem(item);
+    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `codex:in:${this.id}:${seq ?? item.at}`);
+    this.#pumpDispatch();
     return { id: String(item.at), text, createdAt: item.at };
   }
 
   queueState(): QueueState {
-    // Codex delivers immediately (native queueing); no daemon-side dispatch queue.
-    return { queue: [], pendingCount: 0, hidden: [], inFlight: null, paused: false };
+    const pending = this.#inbound.filter((i) => i.state === "queued").length;
+    return { queue: [], pendingCount: pending, hidden: [], inFlight: this.#activeTurnId, paused: false };
   }
 
-  resumeQueue(): void { /* no dispatch queue to resume */ }
+  resumeQueue(): void { this.#pumpDispatch(); }
   editQueued(): boolean { return false; }
   cancelQueued(): boolean { return false; }
   reorderQueued(): boolean { return false; }
@@ -475,7 +685,6 @@ export class CodexSession implements AgentSession {
   }
 
   async sendRawKeys(script: string, opts?: { literal?: boolean }): Promise<{ ok: boolean; segments: number; error?: string }> {
-    // Forward raw keys to the attached TUI (manual-intervention escape hatch).
     const r = opts?.literal ? await tmux.literal(this.tmuxWindow, script) : await tmux.key(this.tmuxWindow, script);
     return { ok: r.ok, segments: 1, error: r.ok ? undefined : "send failed" };
   }
@@ -483,8 +692,10 @@ export class CodexSession implements AgentSession {
   detectPermissionMode(): string | null { return this.#permissionMode; }
 
   async setPermissionMode(target: string): Promise<{ ok: boolean; mode?: string; error?: string }> {
-    // Applied per-turn on the next turn/start (no pane cycling needed).
+    // Applied per-turn on the next turn/start (no pane cycling needed). Persist
+    // so a restart/recover keeps the chosen mode (finding #8).
     this.#permissionMode = target;
+    this.#persistWindowRecord();
     return { ok: true, mode: target };
   }
 
@@ -502,22 +713,24 @@ export class CodexSession implements AgentSession {
     this.status = "ended";
     this.endReason = reason;
     const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
-    // Decline any pending approvals so codex isn't left waiting, and clear the
-    // app bar.
+    // Decline any pending approvals so codex isn't left waiting, and clear the bar.
     for (const p of this.#pendingApprovals.values()) { try { p.answer(false); } catch { /* ignore */ } }
     this.#pendingApprovals.clear();
     void this.#relay?.updateCodexApproval(null);
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
-    // Kill the app-server: our own child, or (when we rejoined an orphan) the
-    // recovered pid.
-    try { if (this.#proc) this.#proc.kill(); else if (this.pid) process.kill(this.pid); } catch { /* ignore */ }
+    // Kill the app-server: our own child, or (rejoined orphan) the recovered pid
+    // — but only if it's verifiably OURS (guards a recycled pid — finding #7).
+    try {
+      if (this.#proc) this.#proc.kill();
+      else if (this.pid && this.#isOurServer(this.pid)) process.kill(this.pid);
+    } catch { /* ignore */ }
     this.#proc = null;
-    // Synthesize a cancellation ONLY for a genuinely open turn (a turn-start
-    // was materialized with no terminal event) — using the real codex turn id
-    // so it matches the normalizer's turn-start (review #6).
+    // Synthesize a cancellation ONLY for a genuinely open turn, with a
+    // DETERMINISTIC localId matching the normalizer's turn-end (finding #9) so
+    // it dedupes against a real turn-end the app may already hold.
     if (this.#activeTurnId) {
-      try { this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#activeTurnId })); } catch { /* ignore */ }
+      try { this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#activeTurnId }), `codex:${this.#threadId}:turn:${this.#activeTurnId}:complete`); } catch { /* ignore */ }
       this.#activeTurnId = null;
     }
     if (this.#relay) this.#relay.setThinking(false);
@@ -531,7 +744,7 @@ export class CodexSession implements AgentSession {
       try { void tmux.command(["kill-window", "-t", this.tmuxWindow]); } catch { /* ignore */ }
       this.#relay?.stop();
       clearCodexInbound(this.id); // a killed session will never deliver — drop the spool
-      clearDeliveredTurns(this.id);
+      clearCheckpoint(this.id);
     }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;

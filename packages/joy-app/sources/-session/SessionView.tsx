@@ -51,12 +51,14 @@ import { useActiveInterval } from '@/hooks/useActiveInterval';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
-import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES } from '@/sync/joyModels';
+import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES, JOY_CODEX_PERMISSION_MODES } from '@/sync/joyModels';
 import { apiSocket } from '@/sync/apiSocket';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
 import { JoyQueueStrip } from '@/components/JoyQueueStrip';
 import { DraftQueueStrip } from './DraftQueueStrip';
+import { PendingQueueStrip } from './PendingQueueStrip';
+import { DisconnectedBanner } from './DisconnectedBanner';
 import { GoalBar } from './GoalBar';
 import { LoginBar } from './LoginBar';
 import { DialogBar } from './DialogBar';
@@ -510,9 +512,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
         // cycling matches). happy's list has dontAsk (unreachable) and lacks
-        // auto.
+        // auto. CODEX joy sessions use codex's OWN modes — the claude modes
+        // (esp. `auto`) silently escalate to full access on codex (finding #1).
         const modes = isJoyTmux
-            ? JOY_CLAUDE_PERMISSION_MODES
+            ? (flavor === 'codex' ? JOY_CODEX_PERMISSION_MODES : JOY_CLAUDE_PERMISSION_MODES)
             : getAvailablePermissionModes(flavor, session.metadata, t);
         return modes;
     }, [isJoyTmux, flavor, session.metadata]);
@@ -677,6 +680,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         const busy = latest?.thinking === true
             && latest?.presence === 'online'
             && isFresh(latest);
+        // OFFLINE HOLD: with no network there's nothing to POST to, so hold the
+        // message in the SAME app-side queue as the busy-hold. draftQueueRelease
+        // won't drain the queue while the socket is down, and fires on reconnect
+        // — so an offline send queues (visibly, durably via MMKV) and retries
+        // automatically when the connection returns, exactly like a busy-hold.
+        const offline = storage.getState().socketStatus !== 'connected';
         // Only commands that actually EXECUTE mid-turn bypass the hold: the
         // CLI's immediate set (verified against the 2.1.198 binary — /model,
         // /compact, /clear are NOT in it; typed mid-turn they'd just sit in
@@ -684,9 +693,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // plus joy's daemon-intercepted commands, which exist for mid-turn use.
         const cmdMatch = /^\/([a-z-]+)/i.exec(liveMessage.trim());
         const isImmediateCommand = cmdMatch != null && IMMEDIATE_COMMANDS.has(cmdMatch[1].toLowerCase());
-        if (isJoyTmux && busy && !isImmediateCommand && !hasImages) {
+        if (isJoyTmux && (busy || offline) && !isImmediateCommand && !hasImages) {
             composerHandleRef.current?.clearMessage();
-            useDraftQueueStore.getState().add(sessionId, liveMessage);
+            // A held send is a QUEUE ITEM, not a draft: 'network' when offline
+            // (retries on reconnect, 2-min timeout), else 'busy' (releases when
+            // the turn ahead completes). Offline takes precedence — it can't
+            // send regardless of busy.
+            useDraftQueueStore.getState().add(sessionId, liveMessage, offline ? 'network' : 'busy');
             return;
         }
         composerHandleRef.current?.clearMessage();
@@ -700,7 +713,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const handleSaveDraft = React.useCallback(() => {
         const text = composerHandleRef.current?.getMessage() ?? '';
         if (!text.trim()) return;
-        useDraftQueueStore.getState().add(sessionId, text);
+        useDraftQueueStore.getState().add(sessionId, text, 'draft');
         composerHandleRef.current?.clearMessage();
     }, [sessionId]);
 
@@ -800,6 +813,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     let content = (
         <>
             <LoginBar sessionId={sessionId} />
+            <DisconnectedBanner />
             <DialogBar sessionId={sessionId} />
             <CodexApprovalBar sessionId={sessionId} />
             <GoalBar sessionId={sessionId} />
@@ -825,6 +839,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         {isJoyTmux && (
             <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                 <JoyQueueStrip queue={joyQueue} sessionId={sessionId} />
+            </CenteredInputWidth>
+        )}
+        {isJoyTmux && (
+            <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
+                <PendingQueueStrip sessionId={sessionId} />
             </CenteredInputWidth>
         )}
         <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>

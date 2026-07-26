@@ -1,0 +1,39 @@
+# EAS Build uses this file INSTEAD of .gitignore when it exists, so it must list
+# everything heavy or secret we don't want uploaded — not just the native dirs.
+# Mirrors the repo .gitignore, plus /ios and /android so EAS prebuilds the native
+# projects fresh from app.config.js for each APP_ENV. Without ignoring /ios, a
+# stale dev-prebuilt ios/ would be used as-is and a `preview` build would ship as
+# vip.faraz.joy.dev instead of vip.faraz.joy.preview.
+
+# dependencies (EAS reinstalls on the server)
+node_modules/
+
+# Expo / build output
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native projects — force a fresh server-side prebuild per profile
+/ios
+/android
+
+# secrets / signing material — never upload
+.env
+.env*.local
+.env.production
+.env.apple
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# misc
+.DS_Store
+*.tsbuildinfo
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*

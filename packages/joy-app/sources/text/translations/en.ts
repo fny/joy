@@ -408,6 +408,14 @@ export const en: TranslationStructure = {
         editTitle: 'Edit queued message',
         hintWeb: 'right-click a message to edit or delete',
         hintTouch: 'hold a message to edit or delete',
+        // Header + row states for the app-side pending queue (PendingQueueStrip):
+        // messages held because a turn is processing ahead, or the device is
+        // offline. Distinct from the daemon's own queue above.
+        pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 waiting to send' : `${count} waiting to send`,
+        waitingForNetwork: 'Waiting for connection…',
+        sendFailedOffline: 'Couldn’t send — no connection',
+        // Discrete offline banner at the top of the session.
+        offlineBanner: 'No connection — queued messages will send when you’re back online',
     },
 
     commandPalette: {

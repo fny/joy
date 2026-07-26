@@ -19,6 +19,12 @@ export interface CodexInboundItem {
   text: string;
   state: CodexInboundState;
   at: number;
+  // Relay sequence this message came from (finding #3b). The relay's confirmed
+  // cursor can redeliver the same seq after a crash-before-cursor-persist; the
+  // seq lets us DEDUPE the spool insertion (same seq → same logical message)
+  // and derive a STABLE clientId, so a redelivery never creates a second turn.
+  // Absent for non-relay sends (app RPC/local), which aren't cursor-replayed.
+  seq?: number;
 }
 
 function fileFor(id: string, baseDir: string): string {

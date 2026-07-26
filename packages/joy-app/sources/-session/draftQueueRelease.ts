@@ -1,5 +1,5 @@
 import { storage, isFresh } from '@/sync/storage';
-import { useDraftQueueStore } from './draftQueue';
+import { useDraftQueueStore, draftReason } from './draftQueue';
 import type { SendMessageResult } from '@/sync/sync';
 import { randomUUID } from 'expo-crypto';
 
@@ -38,6 +38,9 @@ const MAX_AUTO_ATTEMPTS = 5;
 // "fresh busy" forever. A draft held longer than this releases regardless;
 // the CLI's native mid-turn queue absorbs it.
 const MAX_HOLD_MS = 3 * 60_000;
+// A network-queued message (sent while offline) keeps trying for this long; past
+// it, the item is marked failed and auto-retry stops — the user resends manually.
+const NETWORK_TIMEOUT_MS = 2 * 60_000;
 
 function draftAge(d: { id: string; queuedAt?: number }, now: number): number {
     const t = d.queuedAt ?? Number.parseInt(d.id, 10);
@@ -52,24 +55,52 @@ export function initDraftQueueRelease(send: SendFn): void {
 
     const releasePass = () => {
         const state = storage.getState();
+        const online = state.socketStatus === 'connected';
         const drafts = useDraftQueueStore.getState().bySession;
         const now = Date.now();
         for (const [sessionId, queue] of Object.entries(drafts)) {
             if (!queue || queue.length === 0) continue;
             const session = state.sessions[sessionId];
             if (!session || session.metadata?.joy__source !== 'joy-tmux') continue;
-            // Busy must be FRESH and provable (mirrors the capture gate): a
-            // stale thinking flag held sends hostage. Stale presence = treat
-            // as idle and release — the daemon/TUI queue absorbs a mid-turn
-            // arrival harmlessly; a silently-held message does not.
-            const head = queue[0];
-            const busy = session.thinking === true
-                && session.presence === 'online'
-                && isFresh(session);
-            if (busy && draftAge(head, now) < MAX_HOLD_MS) {
-                // Turn running — the previous release (if any) landed.
-                inFlightUntil.delete(sessionId);
-                continue;
+
+            // Time out network-queued items that have waited too long to be sent
+            // (only while NOT already releasing — a releasing item is mid-POST).
+            // Runs regardless of connectivity so the 2-min window is real even if
+            // the network never comes back.
+            for (const d of queue) {
+                if (draftReason(d) === 'network' && !d.timedOut && d.state !== 'releasing'
+                    && draftAge(d, now) > NETWORK_TIMEOUT_MS) {
+                    useDraftQueueStore.getState().markTimedOut(sessionId, d.id);
+                }
+            }
+
+            // Nothing can be POSTed while offline — hold. Network items keep
+            // counting down to their timeout above; busy items just wait.
+            if (!online) continue;
+
+            // Auto-release only QUEUE ITEMS (busy/network), never deliberate
+            // drafts, and never a timed-out network item. Pick the first such
+            // item in order (a manual draft sitting at the head must not block
+            // the queue items behind it).
+            const head = queue.find((d) => {
+                const r = draftReason(d);
+                return (r === 'busy' || r === 'network') && !d.timedOut;
+            });
+            if (!head) continue;
+
+            // A 'busy' item waits while the agent is FRESH-and-provably busy (a
+            // stale thinking flag would hold sends hostage — a wrongly-held
+            // message is worse than a wrongly-immediate one; the daemon/TUI queue
+            // absorbs the latter). 'network' items have no such gate — once
+            // online they release immediately.
+            if (draftReason(head) === 'busy') {
+                const busy = session.thinking === true
+                    && session.presence === 'online'
+                    && isFresh(session);
+                if (busy && draftAge(head, now) < MAX_HOLD_MS) {
+                    inFlightUntil.delete(sessionId); // turn running — prior release landed
+                    continue;
+                }
             }
             const until = inFlightUntil.get(sessionId);
             if (until !== undefined && now < until) continue;

@@ -7,11 +7,25 @@ import { MMKV } from 'react-native-mmkv';
 // message. Persisted to MMKV (same manual hydrate/persist idiom as
 // useNewSessionDraft), so queued drafts survive a reload / app restart.
 
+// Why an item is in the queue — this is what separates a deliberate DRAFT from
+// a pending QUEUE ITEM (user model, 2026-07-25):
+//   'draft'   — the user deliberately stashed it (Save-draft). Lives in the
+//               Drafts view; NEVER auto-sends — only a manual tap sends it.
+//   'busy'    — auto-held because a message ahead is still being processed.
+//               Auto-releases when the turn completes (a "queue item").
+//   'network' — auto-held because the device is offline. Auto-releases on
+//               reconnect; times out after 2 min if it can't be sent.
+// Absent = 'draft' (safe default for older persisted entries — never auto-send
+// something whose intent we don't know).
+export type DraftReason = 'draft' | 'busy' | 'network';
+
 export interface QueuedDraft {
     id: string;
     text: string;
+    reason?: DraftReason;
     /** When the draft was queued — drives the max-hold TTL (older persisted
-     *  drafts without it fall back to the id's timestamp prefix). */
+     *  drafts without it fall back to the id's timestamp prefix) and the
+     *  network 2-min send timeout. */
     queuedAt?: number;
     /** Lease-based two-phase release (codex review finding 3): 'releasing'
      *  is a LEASE, not a terminal state — an app reload or send failure
@@ -22,11 +36,14 @@ export interface QueuedDraft {
     leaseUntil?: number;
     attempt?: number;
     lastError?: string;
+    /** A 'network' item that couldn't be sent within the 2-min window. Stops
+     *  auto-retry; stays visible with a failed affordance for a manual resend. */
+    timedOut?: boolean;
 }
 
 interface DraftQueueState {
     bySession: Record<string, QueuedDraft[]>;
-    add: (sessionId: string, text: string) => void;
+    add: (sessionId: string, text: string, reason?: DraftReason) => void;
     update: (sessionId: string, id: string, text: string) => void;
     remove: (sessionId: string, id: string) => void;
     /** Two-phase release: take the lease (persisted) before sendMessage. Keeps
@@ -35,6 +52,12 @@ interface DraftQueueState {
     /** Send failed/lease action: back to 'queued' with attempt+1 and the error
      *  recorded — draft stays visible and editable, never silently lost. */
     revertRelease: (sessionId: string, id: string, error: string) => void;
+    /** A 'network' item exhausted its 2-min send window — mark it failed so the
+     *  release loop stops auto-retrying and the UI offers a manual resend. */
+    markTimedOut: (sessionId: string, id: string) => void;
+    /** Manual resend of a timed-out item: clears the failure and RESETS the
+     *  queuedAt window so it gets a fresh 2 minutes to send. */
+    retry: (sessionId: string, id: string) => void;
 }
 
 const mmkv = new MMKV();
@@ -69,13 +92,13 @@ function persistDebounced(get: () => DraftQueueState) {
 
 export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
     bySession: load(),
-    add: (sessionId, text) => {
+    add: (sessionId, text, reason = 'draft') => {
         set((s) => ({
             bySession: {
                 ...s.bySession,
                 [sessionId]: [
                     ...(s.bySession[sessionId] ?? []),
-                    { id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, text, queuedAt: Date.now() },
+                    { id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, text, reason, queuedAt: Date.now() },
                 ],
             },
         }));
@@ -91,7 +114,10 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
                 // releaseLocalId), and the next release mints a fresh localId
                 // instead of colliding with the server's dedupe of the old one.
                 [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
-                    ? { ...d, text, state: 'queued' as const, releaseLocalId: undefined, leaseUntil: undefined }
+                    // Editing RECLAIMS the item: clear the release identity AND
+                    // reset the timeout window so an edited network item gets a
+                    // fresh 2 minutes instead of instantly re-timing-out.
+                    ? { ...d, text, state: 'queued' as const, releaseLocalId: undefined, leaseUntil: undefined, timedOut: false, queuedAt: Date.now() }
                     : d)),
             },
         }));
@@ -128,12 +154,36 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
         }));
         persist(get().bySession);
     },
+    markTimedOut: (sessionId, id) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
+                    ? { ...d, state: 'queued' as const, leaseUntil: undefined, timedOut: true, lastError: 'network timeout' }
+                    : d)),
+            },
+        }));
+        persist(get().bySession);
+    },
+    retry: (sessionId, id) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
+                    ? { ...d, state: 'queued' as const, timedOut: false, attempt: 0, releaseLocalId: undefined, leaseUntil: undefined, queuedAt: Date.now() }
+                    : d)),
+            },
+        }));
+        persist(get().bySession);
+    },
 }));
 
 const EMPTY: QueuedDraft[] = [];
 
-// Subscribe to one session's drafts. The empty case returns a stable reference
-// so a session with no drafts never re-renders on unrelated changes.
+export function draftReason(d: QueuedDraft): DraftReason { return d.reason ?? 'draft'; }
+
+// Subscribe to one session's items. The empty case returns a stable reference
+// so a session with no items never re-renders on unrelated changes.
 export function useDrafts(sessionId: string): QueuedDraft[] {
     return useDraftQueueStore((s) => s.bySession[sessionId] ?? EMPTY);
 }

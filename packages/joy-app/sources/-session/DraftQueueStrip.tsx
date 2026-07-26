@@ -5,15 +5,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { sync } from '@/sync/sync';
 import { Typography } from '@/constants/Typography';
-import { useDrafts, useDraftQueueStore, type QueuedDraft } from './draftQueue';
+import { useDrafts, useDraftQueueStore, draftReason, type QueuedDraft } from './draftQueue';
 
-// Pinned at the bottom of the chat (above the input). Lists the on-device draft
-// messages the user has queued up — each can be edited inline, deleted, or sent.
-// Sending routes through the normal send path; nothing here reaches joy-tmux
-// until the user hits send.
+// Pinned above the input. Lists DELIBERATE drafts only — messages the user
+// explicitly stashed (Save-draft). These NEVER auto-send: each is edited inline,
+// deleted, or sent by hand. Auto-held QUEUE ITEMS (busy/offline) render
+// separately in PendingQueueStrip, not here.
 export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }: { sessionId: string }) {
     const { theme } = useUnistyles();
-    const drafts = useDrafts(sessionId);
+    const all = useDrafts(sessionId);
+    const drafts = React.useMemo(() => all.filter((d) => draftReason(d) === 'draft'), [all]);
     const [collapsed, setCollapsed] = React.useState(false);
     if (drafts.length === 0) return null;
     return (
