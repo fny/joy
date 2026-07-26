@@ -29,3 +29,19 @@ export const JOY_CLAUDE_PERMISSION_MODES: PermissionMode[] = [
     { key: 'acceptEdits', name: 'accept edits', description: null },
     { key: 'plan', name: 'plan', description: null },
 ];
+
+// Codex has its OWN approval/sandbox modes — the claude modes above (esp.
+// `auto`) map WRONGLY onto codex and would silently escalate to full access
+// (gpt-5.6-sol M2 finding #1). These keys are what the daemon's
+// resolveCodexExecutionPolicy understands; the daemon fails closed on anything
+// else. Order: safest first, `yolo` last so it's a deliberate pick.
+//   default   → on-request + workspace-write (agent asks before running/patching)
+//   read-only → on-request + read-only
+//   safe-yolo → never + workspace-write (no prompts, workspace-confined)
+//   yolo      → never + danger-full-access (no prompts, full access)
+export const JOY_CODEX_PERMISSION_MODES: PermissionMode[] = [
+    { key: 'default', name: 'default', description: null },
+    { key: 'read-only', name: 'read only', description: null },
+    { key: 'safe-yolo', name: 'safe yolo', description: null },
+    { key: 'yolo', name: 'yolo', description: null },
+];

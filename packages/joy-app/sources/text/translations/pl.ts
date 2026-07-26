@@ -411,6 +411,10 @@ export const pl: TranslationStructure = {
         editTitle: 'Edytuj wiadomość w kolejce',
         hintWeb: 'kliknij wiadomość prawym przyciskiem, aby edytować lub usunąć',
         hintTouch: 'przytrzymaj wiadomość, aby edytować lub usunąć',
+        pendingHeader: ({ count }: { count: number }) => plural({ count, one: '1 wiadomość oczekuje na wysłanie', few: `${count} wiadomości oczekują na wysłanie`, many: `${count} wiadomości oczekuje na wysłanie` }),
+        waitingForNetwork: 'Oczekiwanie na połączenie…',
+        sendFailedOffline: 'Nie udało się wysłać — brak połączenia',
+        offlineBanner: 'Brak połączenia — wiadomości z kolejki zostaną wysłane po ponownym połączeniu',
     },
 
     commandPalette: {

@@ -392,6 +392,10 @@ export const it: TranslationStructure = {
         editTitle: 'Modifica messaggio in coda',
         hintWeb: 'clic destro su un messaggio per modificarlo o eliminarlo',
         hintTouch: 'tieni premuto un messaggio per modificarlo o eliminarlo',
+        pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 in attesa di invio' : `${count} in attesa di invio`,
+        waitingForNetwork: 'In attesa di connessione…',
+        sendFailedOffline: 'Impossibile inviare — nessuna connessione',
+        offlineBanner: 'Nessuna connessione — i messaggi in coda verranno inviati quando tornerai online',
     },
 
     commandPalette: {

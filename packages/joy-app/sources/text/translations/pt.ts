@@ -393,6 +393,10 @@ export const pt: TranslationStructure = {
         editTitle: 'Editar mensagem na fila',
         hintWeb: 'clique com o botão direito em uma mensagem para editar ou excluir',
         hintTouch: 'segure uma mensagem para editar ou excluir',
+        pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 aguardando envio' : `${count} aguardando envio`,
+        waitingForNetwork: 'Aguardando conexão…',
+        sendFailedOffline: 'Não foi possível enviar — sem conexão',
+        offlineBanner: 'Sem conexão — as mensagens na fila serão enviadas quando você voltar a ficar online',
     },
 
     commandPalette: {

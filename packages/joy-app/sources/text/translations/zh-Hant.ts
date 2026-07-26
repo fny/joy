@@ -394,6 +394,10 @@ export const zhHant: TranslationStructure = {
         editTitle: '編輯佇列中的訊息',
         hintWeb: '右鍵點按訊息以編輯或刪除',
         hintTouch: '長按訊息以編輯或刪除',
+        pendingHeader: ({ count }: { count: number }) => `${count} 則待傳送`,
+        waitingForNetwork: '正在等待連線…',
+        sendFailedOffline: '無法傳送 — 無連線',
+        offlineBanner: '無連線 — 佇列中的訊息將在恢復連線後傳送',
     },
 
     commandPalette: {

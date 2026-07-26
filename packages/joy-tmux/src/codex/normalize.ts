@@ -37,6 +37,7 @@ export type CodexEffect =
   | { kind: "receipt"; uuid: string; turn: string }
   | { kind: "confirmDispatch"; clientId: string }
   | { kind: "model"; code: string }
+  | { kind: "effort"; effort: string }
   | { kind: "context"; tokens: number };
 
 // Tool-name parity with happy-app's codex renderers (CodexDiffView /
@@ -52,16 +53,26 @@ function str(v: unknown): string { return typeof v === "string" ? v : ""; }
 
 export class CodexNormalizer {
   #mintId: () => string;
-  // codex tool item id → codex turn id it belongs to (survives turn close, like
-  // claude's #openTools, so tool-call-end resolves after turn-end). Also the
-  // set used to close any still-open tools when a turn terminates (so app tool
-  // cards can't spin forever — gpt-5.6-sol review #10).
-  #openTools = new Map<string, string>();
+  // canonical tool call id → codex turn id it belongs to (survives turn close,
+  // like claude's #openTools, so tool-call-end resolves after turn-end). Also
+  // the set used to close any still-open tools when a turn terminates (so app
+  // tool cards can't spin forever — review #10).
+  #openTools = new Map<string, { turn: string; core: string }>();
   // The codex turn id currently in flight.
   #currentTurn: string | null = null;
   // The root thread id — the namespace for deterministic event ids. Captured
   // from the first notification carrying one (or set explicitly).
   #threadId = "";
+
+  // CANONICAL ITEM IDENTITY (gpt-5.6-sol M2 finding #5). Live notifications and
+  // thread/read history use DIFFERENT transient item ids (live msg_…/call_…;
+  // history positional item-N), so keying wire dedup on the transient id
+  // double-shows items across a restart. Instead we key on an ORDINAL within
+  // (turnId, itemType): the Nth commandExecution of a turn is `…:commandExecution:N`
+  // in BOTH live and history, because items appear in the same order. We map
+  // each transient id → its canonical core on first sighting and reuse it.
+  #ordinals = new Map<string, number>();       // `${turnId}|${type}` → next ordinal
+  #canonicalById = new Map<string, string>();  // transient item id → `${type}:${ord}`
 
   // The joy wire `turn` field IS the codex turn id (a stable UUIDv7). Using it
   // directly — rather than minting a random id per turn — makes turn identity
@@ -72,6 +83,19 @@ export class CodexNormalizer {
   }
 
   setThreadId(id: string): void { if (id) this.#threadId = id; }
+
+  /** Allocate (or reuse) the canonical `${type}:${ordinal}` core for an item,
+   *  keyed by its transient id. Same order of items → same ordinals live vs
+   *  history, regardless of the transient id strings. */
+  #canonicalCore(turnId: string, type: string, transientId: string): string {
+    if (transientId && this.#canonicalById.has(transientId)) return this.#canonicalById.get(transientId)!;
+    const key = `${turnId}|${type}`;
+    const ord = this.#ordinals.get(key) ?? 0;
+    this.#ordinals.set(key, ord + 1);
+    const core = `${type}:${ord}`;
+    if (transientId) this.#canonicalById.set(transientId, core);
+    return core;
+  }
 
   /** Deterministic relay localId for a wire event — a reconnect replay of the
    *  same codex event produces the same id, so the append layer dedupes it. */
@@ -95,16 +119,29 @@ export class CodexNormalizer {
       case "item/completed": return this.#itemCompleted(p);
       case "thread/tokenUsage/updated": return this.#tokenUsage(p);
       case "thread/settings/updated": return this.#settings(p);
+      case "model/rerouted": return this.#rerouted(p);
       case "error": return this.#error(p);
       default: return [];
     }
   }
 
   #settings(p: Item): CodexEffect[] {
-    // The authoritative configured model for the thread (there is no
-    // `thread.model` on thread/started — review #4).
+    // The authoritative configured model AND reasoning effort for the thread
+    // (there is no `thread.model` on thread/started — review #4; settings
+    // carries BOTH — finding #8).
     const s = (p.threadSettings ?? {}) as Item;
+    const out: CodexEffect[] = [];
     const model = str(s.model);
+    if (model) out.push({ kind: "model", code: model });
+    const effort = str(s.effort) || str(s.reasoningEffort);
+    if (effort) out.push({ kind: "effort", effort });
+    return out;
+  }
+
+  #rerouted(p: Item): CodexEffect[] {
+    // The server rerouted the turn to a different model — reflect it so the
+    // displayed model metadata doesn't go stale (finding #10).
+    const model = str(p.model) || str((p.to as Item | undefined)?.model);
     return model ? [{ kind: "model", code: model }] : [];
   }
 
@@ -143,12 +180,17 @@ export class CodexNormalizer {
           : "completed";
     const out: CodexEffect[] = [];
     // Close any tool calls still open at turn end so their cards don't spin.
-    for (const [call, turnId] of this.#openTools) {
-      if (turnId === codexTurnId) out.push(this.#wire(encodeToolCallEnd(call, { turn: codexTurnId }), `turn:${codexTurnId}:item:${call}:tool-end`));
+    for (const [call, meta] of this.#openTools) {
+      if (meta.turn === codexTurnId) out.push(this.#wire(encodeToolCallEnd(call, { turn: codexTurnId }), `turn:${codexTurnId}:item:${meta.core}:tool-end`));
     }
-    for (const call of [...this.#openTools.keys()]) if (this.#openTools.get(call) === codexTurnId) this.#openTools.delete(call);
+    for (const [call, meta] of [...this.#openTools]) if (meta.turn === codexTurnId) this.#openTools.delete(call);
     this.#currentTurn = null;
     out.push(this.#wire(encodeTurnEnd(status, { turn: codexTurnId }), `turn:${codexTurnId}:complete`));
+    // Delivery receipt on the turn's TERMINAL row (the turn-end just queued).
+    // The session advances the delivered-turn checkpoint only when THIS row is
+    // ACKed by the relay server — never before (gpt-5.6-sol M2 finding #2), so
+    // a crash before the terminal records are durable replays the turn.
+    out.push({ kind: "receipt", uuid: `turn:${codexTurnId}`, turn: codexTurnId });
     out.push({ kind: "thinking", value: false });
     return out;
   }
@@ -156,19 +198,23 @@ export class CodexNormalizer {
   #itemStarted(p: Item): CodexEffect[] {
     const item = (p.item ?? {}) as Item;
     const joyTurn = this.#turnFor(p);
-    switch (itemType(item)) {
+    const type = itemType(item);
+    // Allocate this item's canonical ordinal on first sighting (started), so
+    // live and history agree — even for types that emit no wire record.
+    const core = this.#canonicalCore(joyTurn, type, str(item.id));
+    switch (type) {
       case "userMessage": {
         // The echo of a dispatched message — confirms delivery by clientId,
         // does NOT re-emit as a wire record (the app already has the row).
-        const clientId = str(item.clientId);
+        const clientId = str(item.clientId) || str(item.clientUserMessageId);
         return clientId ? [{ kind: "confirmDispatch", clientId }] : [];
       }
       case "commandExecution":
-        return this.#toolStart(item, joyTurn, TOOL_BASH, { command: str(item.command), cwd: str(item.cwd) });
+        return this.#toolStart(joyTurn, core, TOOL_BASH, { command: str(item.command), cwd: str(item.cwd) });
       case "fileChange":
-        return this.#toolStart(item, joyTurn, TOOL_PATCH, { changes: item.changes ?? item.content ?? null });
+        return this.#toolStart(joyTurn, core, TOOL_PATCH, { changes: item.changes ?? item.content ?? null });
       case "mcpToolCall":
-        return this.#toolStart(item, joyTurn, TOOL_MCP, { server: item.server ?? null, tool: item.tool ?? item.name ?? null, arguments: item.arguments ?? null });
+        return this.#toolStart(joyTurn, core, TOOL_MCP, { server: item.server ?? null, tool: item.tool ?? item.name ?? null, arguments: item.arguments ?? null });
       default:
         return [];
     }
@@ -177,36 +223,35 @@ export class CodexNormalizer {
   #itemCompleted(p: Item): CodexEffect[] {
     const item = (p.item ?? {}) as Item;
     const joyTurn = this.#turnFor(p);
-    const id = str(item.id);
-    switch (itemType(item)) {
+    const type = itemType(item);
+    const core = this.#canonicalCore(joyTurn, type, str(item.id));
+    switch (type) {
       case "agentMessage": {
         const text = str(item.text).trim();
         if (!text) return [];
-        const out: CodexEffect[] = [this.#wire(encodeTextEvent(text, { turn: joyTurn }), `turn:${joyTurn}:item:${id}:text`)];
-        // Receipt on the group terminator so replay dedupes on the item id.
-        if (id) out.push({ kind: "receipt", uuid: id, turn: joyTurn });
-        return out;
+        // Canonical (turn, ordinal) localId — same across live + history replay.
+        return [this.#wire(encodeTextEvent(text, { turn: joyTurn }), `turn:${joyTurn}:item:${core}:text`)];
       }
       case "commandExecution":
       case "fileChange":
       case "mcpToolCall":
-        return this.#toolEnd(id);
+        return this.#toolEnd(joyTurn, core);
       default:
         return [];
     }
   }
 
-  #toolStart(item: Item, joyTurn: string, name: string, input: unknown): CodexEffect[] {
-    const call = str(item.id) || this.#mintId();
-    this.#openTools.set(call, joyTurn);
-    return [this.#wire(encodeToolCallStart({ call, name, input, turn: joyTurn }), `turn:${joyTurn}:item:${call}:tool-start`)];
+  #toolStart(joyTurn: string, core: string, name: string, input: unknown): CodexEffect[] {
+    const call = `${joyTurn}:${core}`;
+    this.#openTools.set(call, { turn: joyTurn, core });
+    return [this.#wire(encodeToolCallStart({ call, name, input, turn: joyTurn }), `turn:${joyTurn}:item:${core}:tool-start`)];
   }
 
-  #toolEnd(call: string): CodexEffect[] {
-    if (!call) return [];
-    const turn = this.#openTools.get(call) ?? this.#currentTurn ?? "";
+  #toolEnd(joyTurn: string, core: string): CodexEffect[] {
+    const call = `${joyTurn}:${core}`;
+    const turn = this.#openTools.get(call)?.turn ?? this.#currentTurn ?? joyTurn;
     this.#openTools.delete(call);
-    return [this.#wire(encodeToolCallEnd(call, { turn }), `turn:${turn}:item:${call}:tool-end`)];
+    return [this.#wire(encodeToolCallEnd(call, { turn }), `turn:${turn}:item:${core}:tool-end`)];
   }
 
   #turnFor(p: Item): string {
@@ -214,13 +259,12 @@ export class CodexNormalizer {
   }
 
   #tokenUsage(p: Item): CodexEffect[] {
-    // `total` is CUMULATIVE billing usage (incl. output) — not current context
-    // size. `last.inputTokens` is the closest analog to claude's context gauge
-    // (gpt-5.6-sol review #10).
+    // `last.inputTokens` is the current context size (the analog to claude's
+    // context gauge). The cumulative `total.totalTokens` is billing usage incl.
+    // output — NOT context — so we do NOT fall back to it (finding #10): a wrong
+    // gauge is worse than a briefly-absent one.
     const usage = (p.tokenUsage ?? {}) as Item;
     const last = (usage.last ?? {}) as Item;
-    const tokens = typeof last.inputTokens === "number" ? last.inputTokens
-      : (typeof (usage.total as Item)?.totalTokens === "number" ? (usage.total as Item).totalTokens as number : null);
-    return tokens != null ? [{ kind: "context", tokens }] : [];
+    return typeof last.inputTokens === "number" ? [{ kind: "context", tokens: last.inputTokens }] : [];
   }
 }
