@@ -1035,3 +1035,62 @@ test("dialogFromPane: quoted ready-box ABOVE a real dialog does not un-match it"
   expect(d).not.toBeNull();
   expect(d!.title).toBe("Switch model?");
 });
+
+// ── Title auto-update e2e (daemon side) ──────────────────────────────────────
+// The two AI title paths: Claude's ai-title transcript entries and the agent's
+// <joy-title/> tag in assistant text. Driven through onTranscriptEntry against
+// a real Session + mock relay — the exact live path minus the file watcher.
+function titleSession() {
+  const summaries: string[] = [];
+  const s = new Session(
+    { id: "t1", tmuxWindow: "joy:j-t1", cwd: "/tmp/t", flags: [], status: "active", startedAt: 0, claudeSessionId: "sid-t1" } as any,
+    { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
+  );
+  const rs: any = {
+    relaySessionId: "rs-t1",
+    start() {}, stop() {}, send() {},
+    setThinking() {}, updateRetry() {}, async clearThinkingMeta() {}, async updateLogin() {}, async updateDialog() {},
+    setReceiptSink() {}, stampReceiptOnLastQueued() {}, updateQueue() {}, async updateBgTasks() {}, async updateContext() {},
+    updateCompacting() {}, updateGoal() {}, notify() {}, notifyCustom() {},
+    async updateSummary(t: string) { summaries.push(t); },
+  };
+  s.attachRelay(rs, true);
+  return { s, summaries };
+}
+
+test("title e2e: ai-title entry applies live", () => {
+  const { s, summaries } = titleSession();
+  s.onTranscriptEntry({ type: "ai-title", aiTitle: "First real title", timestamp: new Date().toISOString() } as any);
+  expect(summaries).toEqual(["First real title"]);
+  expect(s.toJSON().summary).toBe("First real title");
+});
+
+test("title e2e: <joy-title/> tag in assistant text applies live", () => {
+  const { s, summaries } = titleSession();
+  s.onTranscriptEntry({
+    type: "assistant", uuid: "u-jt-1", timestamp: new Date().toISOString(),
+    message: { role: "assistant", content: [{ type: "text", text: 'Working on X now.\n\n<joy-title value="Session title e2e" />\n' }] },
+  } as any);
+  expect(summaries).toContain("Session title e2e");
+  expect(s.toJSON().summary).toBe("Session title e2e");
+});
+
+test("title e2e: stale ai-title re-emission does NOT stomp an agent title; a NEW ai-title does", () => {
+  const { s, summaries } = titleSession();
+  const ts = () => new Date().toISOString();
+  // Claude titles the session, then keeps re-emitting the same value on resume.
+  s.onTranscriptEntry({ type: "ai-title", aiTitle: "Disable suggestions", timestamp: ts() } as any);
+  // Agent re-titles via the tag.
+  s.onTranscriptEntry({
+    type: "assistant", uuid: "u-jt-2", timestamp: ts(),
+    message: { role: "assistant", content: [{ type: "text", text: '<joy-title value="Queue debugging" />' }] },
+  } as any);
+  expect(s.toJSON().summary).toBe("Queue debugging");
+  // Stale re-emission (identical value) — must NOT revert the agent title.
+  s.onTranscriptEntry({ type: "ai-title", aiTitle: "Disable suggestions", timestamp: ts() } as any);
+  expect(s.toJSON().summary).toBe("Queue debugging");
+  // A genuinely NEW ai-title still applies (real re-title, e.g. user renamed in CLI).
+  s.onTranscriptEntry({ type: "ai-title", aiTitle: "Brand new topic", timestamp: ts() } as any);
+  expect(s.toJSON().summary).toBe("Brand new topic");
+  expect(summaries).toEqual(["Disable suggestions", "Queue debugging", "Brand new topic"]);
+});

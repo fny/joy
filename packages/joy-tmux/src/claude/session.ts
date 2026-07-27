@@ -640,6 +640,11 @@ export class Session {
   #preservedDraft: string | null = null;
   // User-set title lock (see joyTitleValue / windowRecord.titleLockedByUser).
   #titleLocked = false;
+  // Last ai-title VALUE seen from the transcript. Claude re-emits its (often
+  // ancient) ai-title verbatim on every resume without re-generating it — a
+  // repeat carries no new information and must not stomp a fresher agent
+  // (<joy-title>) title. Only a genuinely NEW ai-title value applies.
+  #lastAiTitle: string | null = null;
   // The pending delayed-Enter (submit) for a just-typed message. Cancellable so an
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
   // into the pane (re-submitting an aborted message, or submitting into a turn).
@@ -3020,10 +3025,16 @@ export class Session {
     if (entryType === "ai-title") {
       const title = typeof entry.aiTitle === "string" ? entry.aiTitle.trim() : "";
       if (this.#titleLocked) return; // user-set title wins until a bare /title unlocks
-      if (title) {
-        this.summary = title;
-        void this.#relay?.updateSummary(title);
-        this.#deps.broadcast("session_update", this.toJSON());
+      // Repeat of the last-seen ai-title = Claude re-emitting its stale title
+      // on resume (observed: 1252 identical entries in one session) — skip so
+      // it can't stomp an agent <joy-title> re-title. New values still apply.
+      if (title && title !== this.#lastAiTitle) {
+        this.#lastAiTitle = title;
+        if (title !== this.summary) {
+          this.summary = title;
+          void this.#relay?.updateSummary(title);
+          this.#deps.broadcast("session_update", this.toJSON());
+        }
       }
       return;
     }
