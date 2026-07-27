@@ -57,7 +57,25 @@ function load(): Record<string, QueuedDraft[]> {
     if (!raw) return {};
     try {
         const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === 'object' ? parsed : {};
+        if (!parsed || typeof parsed !== 'object') return {};
+        // MIGRATION (2026-07-27): the retired offline-queue shipped items with
+        // reason 'network' (+ a timedOut flag) that the current code would
+        // silently hide — losing the user's stuck messages. Surface them as
+        // plain DRAFTS instead: visible in the Drafts strip, manually sendable
+        // or deletable. Clear stale release state so nothing auto-fires.
+        for (const queue of Object.values(parsed as Record<string, QueuedDraft[]>)) {
+            if (!Array.isArray(queue)) continue;
+            for (const d of queue) {
+                if ((d as { reason?: string }).reason === 'network') {
+                    d.reason = 'draft';
+                    d.state = 'queued';
+                    delete (d as { timedOut?: boolean }).timedOut;
+                    d.releaseLocalId = undefined;
+                    d.leaseUntil = undefined;
+                }
+            }
+        }
+        return parsed;
     } catch {
         return {};
     }
