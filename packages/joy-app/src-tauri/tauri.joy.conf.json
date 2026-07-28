@@ -3,7 +3,7 @@
   "productName": "Joy",
   "identifier": "vip.faraz.joy",
   "build": {
-    "frontendDist": "https://joy.expo.app"
+    "frontendDist": "bootstrap"
   },
   "bundle": {
     "macOS": {

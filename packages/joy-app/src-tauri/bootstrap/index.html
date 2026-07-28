@@ -1,0 +1,97 @@
+<!doctype html>
+<!--
+  Desktop launch bootstrap (baked into Joy.app; frontendDist in tauri.joy.conf.json).
+
+  The desktop app loads its real UI from https://joy.expo.app (EAS Hosting) so
+  JS ships OTA like the phones. But a remote-only frontendDist means an OFFLINE
+  launch would render a blank webview — so the shell ships this tiny local page
+  instead: it probes the hosted bundle and hands off the moment it's reachable;
+  until then it shows an offline notice with Retry (plus auto-retry and the
+  browser 'online' event). This file is deliberately dependency-free and stable
+  — it never needs an update, so the shell never needs rebuilding for JS changes.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Joy</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: #f7f7f7; color: #1c1c1e;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none; -webkit-user-select: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0d0d0f; color: #ffffff; }
+    .sub { color: #8e8e93; }
+    .retry { background: #2c2c2e; color: #ffffff; }
+    .retry:hover { background: #3a3a3c; }
+  }
+  .wrap { text-align: center; padding: 24px; max-width: 420px; }
+  .icon { font-size: 40px; margin-bottom: 14px; }
+  h1 { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+  .sub { font-size: 13px; color: #6b6b70; line-height: 1.45; margin-bottom: 18px; }
+  .retry {
+    appearance: none; border: 0; border-radius: 10px; cursor: pointer;
+    padding: 9px 22px; font-size: 14px; font-weight: 600;
+    background: #e5e5ea; color: #1c1c1e;
+  }
+  .retry:hover { background: #dcdce0; }
+  .retry:active { opacity: .7; }
+  .retry[disabled] { opacity: .5; cursor: default; }
+  /* Hidden until the first probe fails — a normal online launch shows nothing
+     but a brief blank frame before handoff, never a flash of the offline UI. */
+  #offline { display: none; }
+  .spin {
+    width: 22px; height: 22px; margin: 0 auto;
+    border: 2px solid rgba(128,128,128,.3); border-top-color: currentColor;
+    border-radius: 50%; animation: r .8s linear infinite;
+  }
+  @keyframes r { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="loading"><div class="spin"></div></div>
+    <div id="offline">
+      <div class="icon">☁️</div>
+      <h1>You're offline</h1>
+      <p class="sub">Joy needs an internet connection to start.<br/>It will connect automatically when you're back online.</p>
+      <button class="retry" id="retryBtn">Retry</button>
+    </div>
+  </div>
+<script>
+  var APP_URL = "https://joy.expo.app";
+  var RETRY_EVERY_MS = 5000;
+  var PROBE_TIMEOUT_MS = 6000;
+  var probing = false;
+
+  function probe() {
+    if (probing) return;
+    probing = true;
+    var btn = document.getElementById("retryBtn");
+    btn.disabled = true;
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, PROBE_TIMEOUT_MS);
+    // no-cors: an opaque response is enough — we only need "the host answered".
+    fetch(APP_URL + "/?probe=" + Date.now(), { mode: "no-cors", cache: "no-store", signal: ctl.signal })
+      .then(function () { window.location.replace(APP_URL); })
+      .catch(function () {
+        document.getElementById("loading").style.display = "none";
+        document.getElementById("offline").style.display = "block";
+      })
+      .finally(function () { clearTimeout(timer); probing = false; btn.disabled = false; });
+  }
+
+  document.getElementById("retryBtn").addEventListener("click", probe);
+  window.addEventListener("online", probe);
+  setInterval(probe, RETRY_EVERY_MS);
+  probe();
+</script>
+</body>
+</html>
