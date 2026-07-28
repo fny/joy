@@ -5,6 +5,11 @@
   "windows": [
     "main"
   ],
+  "remote": {
+    "urls": [
+      "https://joy.expo.app"
+    ]
+  },
   "permissions": [
     "core:default",
     "core:webview:allow-set-webview-zoom",
