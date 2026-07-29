@@ -582,6 +582,10 @@ export class Session {
   // on a server error, so we re-send the failed prompt (#lastUserText) on
   // RETRY_SCHEDULE_SEC. #retry holds the live backoff timer + attempt count.
   #retry: { attempts: number; timer: ReturnType<typeof setTimeout> | null } | null = null;
+  // Last pane-derived retry banner key (`status:attempt/total`) we published —
+  // the CLI's own API-retry spinner parsed from the pane (retryFromPane), the
+  // only 529/overload signal since api_error transcript entries disappeared.
+  #paneRetryKey: string | null = null;
   #turn5xxStatus: number | null = null;
   #lastUserText: string | null = null;
   // joy: Claude is compacting its context (the PreCompact hook fired). Surfaced
@@ -2872,6 +2876,7 @@ export class Session {
         }
         this.#reconcileLogin(pane.out);
         this.#reconcileDialog(pane.out);
+        this.#reconcileRetryBanner(pane.out);
       }
     }
     setTimeout(() => this.#pollThinking(), 3000);
@@ -2882,6 +2887,26 @@ export class Session {
    *  Same debounce contract as #reconcileLogin: two consecutive sightings of
    *  the same dialog before pushing (a mid-repaint capture can transiently
    *  look like anything), cleared as soon as the pane no longer shows it. */
+  /** Surface the CLI's own API-retry spinner (`✻ 529 Overloaded · Retrying in
+   *  18s · attempt N/M`) as the joy__retry banner. Claude Code stopped writing
+   *  api_error transcript entries for these retries, so without this the app
+   *  shows a silent stall while the CLI backs off. Publishes on each distinct
+   *  (status, attempt) sighting; clears when the spinner leaves the pane —
+   *  unless the api_error-driven #retry episode owns a live banner. */
+  #reconcileRetryBanner(paneText: string): void {
+    const r = retryFromPane(paneText);
+    if (r) {
+      const key = `${r.status}:${r.attempt}/${r.total}`;
+      if (this.#paneRetryKey !== key) {
+        this.#paneRetryKey = key;
+        void this.#relay?.updateRetry({ attempt: r.attempt, total: r.total, nextAt: Date.now() + r.delaySec * 1000, status: r.status });
+      }
+    } else if (this.#paneRetryKey) {
+      this.#paneRetryKey = null;
+      if (!this.#retry) void this.#relay?.updateRetry(null);
+    }
+  }
+
   #reconcileDialog(paneText: string): void {
     const dialog = dialogFromPane(paneText);
     if (!dialog) {
@@ -3608,6 +3633,17 @@ const DIALOG_RULE_RE = /^\s*▔{8,}\s*$/;
 const DIALOG_OPTION_RE = /^\s*(?:❯\s*)?\d+\.\s+\S/;
 const DIALOG_FOOTER_RE = /Esc to cancel|Enter to confirm/i;
 export interface PaneDialog { title: string | null; options: string[] }
+/** Parse the CLI's API-retry spinner line from pane text, e.g.
+ *  `✻ 529 Overloaded · Retrying in 18s · attempt 10/10`.
+ *  Claude Code ≥2.1.x stopped writing api_error transcript entries for these
+ *  (verified 2026-07-29: a 10-attempt 529 storm left ZERO entries), so the
+ *  pane is the ONLY signal — without this the app shows a silent stall. */
+export function retryFromPane(text: string): { status: number; attempt: number; total: number; delaySec: number } | null {
+  const m = /\b([45]\d\d)\s+[A-Za-z][\w ]{0,30}·\s*Retrying in\s+(\d+)\s*s\b.*?attempt\s+(\d+)\/(\d+)/i.exec(text);
+  if (!m) return null;
+  return { status: parseInt(m[1], 10), delaySec: parseInt(m[2], 10), attempt: parseInt(m[3], 10), total: parseInt(m[4], 10) };
+}
+
 export function dialogFromPane(text: string): PaneDialog | null {
   const lines = text.split("\n");
   let rule = -1;

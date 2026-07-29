@@ -1094,3 +1094,23 @@ test("title e2e: stale ai-title re-emission does NOT stomp an agent title; a NEW
   expect(s.toJSON().summary).toBe("Brand new topic");
   expect(summaries).toEqual(["Disable suggestions", "Queue debugging", "Brand new topic"]);
 });
+
+// ── retryFromPane: the CLI's API-retry spinner is the ONLY 529 signal ────────
+// (api_error transcript entries stopped appearing in 2.1.x — verified live
+// 2026-07-29 against a 10-attempt 529 storm that left zero entries.)
+import { retryFromPane } from "./session";
+
+test("retryFromPane: parses the live 529 spinner line", () => {
+  const pane = "✻ 529 Overloaded · Retrying in 18s · attempt 10/10\n  ⎿  If it persists, check https://status.claude.com.";
+  expect(retryFromPane(pane)).toEqual({ status: 529, delaySec: 18, attempt: 10, total: 10 });
+});
+
+test("retryFromPane: variants and non-matches", () => {
+  expect(retryFromPane("✻ 429 Rate limited · Retrying in 5s · attempt 2/10"))
+    .toEqual({ status: 429, delaySec: 5, attempt: 2, total: 10 });
+  expect(retryFromPane("✻ 500 Internal server error · Retrying in 60s · attempt 7/10"))
+    .toEqual({ status: 500, delaySec: 60, attempt: 7, total: 10 });
+  expect(retryFromPane("plain working pane")).toBeNull();
+  // A user merely TALKING about a 529 in chat text must not trigger the banner.
+  expect(retryFromPane("I saw a 529 yesterday, attempt 1/10 of my diet")).toBeNull();
+});
