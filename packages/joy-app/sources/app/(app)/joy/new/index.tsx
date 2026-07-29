@@ -353,15 +353,18 @@ function NewJoyTmuxSessionScreen() {
                 // history (MB) to backfill; default 2, 0 = full. Applies to BOTH
                 // resume-by-id and --continue (the daemon caps continue's replay
                 // at bind time), so send it whenever either path is active.
-                resume_limit_mb: (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
-                continue: (continueLast && !resumeId.trim()) || undefined,
+                // Claude-only params are never sent for codex (their UI rows are
+                // hidden there too): continue/fork/fallback/chrome/detached/
+                // extraArgs/resume_limit_mb are claude CLI concepts.
+                resume_limit_mb: selectedAgent !== 'codex' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
+                continue: (selectedAgent !== 'codex' && continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: currentMode.key,
-                fallbackModel: currentFallback.key ?? undefined,
-                forkSession: ((continueLast || resumeId.trim()) && forkSession) || undefined,
-                chrome: chrome || undefined,
-                detached: detached || undefined,
-                extraArgs: extraArgs.trim() || undefined,
+                fallbackModel: selectedAgent !== 'codex' ? (currentFallback.key ?? undefined) : undefined,
+                forkSession: (selectedAgent !== 'codex' && (continueLast || resumeId.trim()) && forkSession) || undefined,
+                chrome: (selectedAgent !== 'codex' && chrome) || undefined,
+                detached: (selectedAgent !== 'codex' && detached) || undefined,
+                extraArgs: selectedAgent !== 'codex' ? (extraArgs.trim() || undefined) : undefined,
             }),
             new Promise<never>((_, reject) => setTimeout(
                 () => reject(new Error(gitClone
@@ -542,7 +545,8 @@ function NewJoyTmuxSessionScreen() {
                                         </Pressable>
                                     </>
                                 )}
-                                {effortLevels.length > 0 && currentEffort && (
+                                {/* Claude effort — codex has its own effort item above. */}
+                                {selectedAgent !== 'codex' && effortLevels.length > 0 && currentEffort && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
                                         <Pressable onPress={cycleEffort} style={(p) => [p.pressed && styles.configRowPressed]}>
@@ -573,6 +577,11 @@ function NewJoyTmuxSessionScreen() {
                                 </Text>
                             </Pressable>
 
+                            {/* Claude-only rows: fallback model (--fallback-model),
+                                continue (--continue) and fork (--fork-session) are
+                                claude CLI concepts — meaningless for codex and were
+                                wrongly shown there (bug 2026-07-29). */}
+                            {selectedAgent !== 'codex' && (<>
                             {/* Fallback model — tap to cycle. */}
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
@@ -627,9 +636,10 @@ function NewJoyTmuxSessionScreen() {
                                     {continueLast ? 'continue under a new session id' : 'requires continue'}
                                 </Text>
                             </Pressable>
+                            </>)}
 
-                            {/* Resume a specific Claude conversation by session id
-                                (--resume). Overrides continue when set. */}
+                            {/* Resume a specific conversation by id (claude session id,
+                                or codex thread id). Overrides continue when set. */}
                             <View style={styles.configRow}>
                                 <Ionicons name="refresh-outline" size={15} color={theme.colors.textSecondary} />
                                 <TextInput
@@ -646,8 +656,9 @@ function NewJoyTmuxSessionScreen() {
                             </View>
 
                             {/* History to backfill (MB). Relevant when resuming by
-                                id OR continuing the last conversation. 0 = full. */}
-                            {(resumeId.trim() || continueLast) ? (
+                                id OR continuing the last conversation. 0 = full.
+                                Claude-only: codex resume replays via thread/read. */}
+                            {selectedAgent !== 'codex' && (resumeId.trim() || continueLast) ? (
                                 <View style={styles.configRow}>
                                     <Ionicons name="time-outline" size={15} color={theme.colors.textSecondary} />
                                     <TextInput
@@ -664,6 +675,9 @@ function NewJoyTmuxSessionScreen() {
                                 </View>
                             ) : null}
 
+                            {/* Claude-only rows: chrome integration, detached (spawn
+                                without launching claude), extra claude CLI args. */}
+                            {selectedAgent !== 'codex' && (<>
                             {/* Chrome integration */}
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
@@ -709,6 +723,7 @@ function NewJoyTmuxSessionScreen() {
                                     autoCorrect={false}
                                 />
                             </View>
+                            </>)}
                         </View>
                     </View>
 
