@@ -378,8 +378,11 @@ export class CodexSession implements AgentSession {
       this.#inbound.pop();
       throw new Error("codex inbound persist failed");
     }
-    // Deterministic echo localId so a redelivered seq dedupes the local mirror.
-    if (this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `codex:in:${this.id}:${seq}`);
+    // Do NOT mirror back to the relay here: the app already appended the user's
+    // row to the card — that row is what this pull delivered. Re-sending it
+    // created a DUPLICATE user bubble for every codex message (bug 2026-07-29).
+    // The claude path does the same (session.ts relay-source enqueue passes
+    // mirrorToRelay:false). Mirroring is only for non-relay intake (enqueue()).
     this.#pumpDispatch();
   }
 
