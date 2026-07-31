@@ -1,0 +1,25 @@
+# Publish @fny/joy-tmux to npm via TRUSTED PUBLISHING (GitHub OIDC — no npm
+# token anywhere). Requires the one-time npmjs.com side: package Settings →
+# Trusted Publisher → GitHub Actions → repo fny/joy, workflow
+# publish-joy-tmux.yml. Trigger manually (Run workflow) or by pushing a
+# joy-tmux-v* tag.
+name: publish-joy-tmux
+on:
+  workflow_dispatch:
+  push:
+    tags: ['joy-tmux-v*']
+permissions:
+  contents: read
+  id-token: write   # OIDC — this is what replaces the npm token
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
+      - run: npm publish --provenance --access public
+        working-directory: packages/joy-tmux
