@@ -505,9 +505,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // → claude (legacy joy-tmux sessions and the claude path send no flavor).
     const flavor = isJoyTmux ? (session.metadata?.flavor ?? 'claude') : session.metadata?.flavor;
     const joySessionId = session.metadata?.joy__sessionId;
-    const availableModels = React.useMemo(() => (
-        isJoyTmux ? JOY_CLAUDE_MODELS : getAvailableModels(flavor, session.metadata, t)
-    ), [isJoyTmux, flavor, session.metadata]);
+    const availableModels = React.useMemo(() => {
+        if (!isJoyTmux) return getAvailableModels(flavor, session.metadata, t);
+        // Codex models are dynamic slugs (gpt-5.6-sol…), not the claude family
+        // catalog — resolving currentModelCode against JOY_CLAUDE_MODELS never
+        // matched, so codex sessions showed NO model label (bug 2026-07-31).
+        // Synthesize a one-entry catalog from the daemon-published code.
+        if (flavor === 'codex') {
+            const code = session.metadata?.currentModelCode;
+            return code ? [{ key: code, name: code, description: null }] : [];
+        }
+        return JOY_CLAUDE_MODELS;
+    }, [isJoyTmux, flavor, session.metadata]);
     const availableModes = React.useMemo(() => {
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
