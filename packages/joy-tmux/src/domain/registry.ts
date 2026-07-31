@@ -555,6 +555,22 @@ export class SessionRegistry {
     if (!(await tmux.literal(tmuxWindow, `exec ${shell} -l`)).ok) abortCreate("exec-shell");
     if (!(await tmux.key(tmuxWindow, "Enter")).ok) abortCreate("exec-shell-enter");
 
+    // continue → resume the NEWEST codex thread that ran in this cwd (rollout
+    // scan). Explicit resume_id wins. Fails loudly rather than silently
+    // starting fresh — "continue" with nothing to continue is a user error.
+    let resumeThread = opts.resume_id;
+    if (!resumeThread && opts.continue) {
+      const { findLatestCodexThreadForCwd } = await import("../codex/codexThreads");
+      resumeThread = findLatestCodexThreadForCwd(cwd) ?? undefined;
+      if (!resumeThread) abortCreate(`no prior codex conversation found in ${cwd}`);
+    }
+    // extraArgs for codex = `-c key=value` config overrides on the app-server.
+    let codexConfig: Record<string, string> | undefined;
+    if (opts.extraArgs?.trim()) {
+      const { parseCodexConfigArgs } = await import("../codex/codexThreads");
+      const parsed = parseCodexConfigArgs(opts.extraArgs);
+      if (Object.keys(parsed).length > 0) codexConfig = parsed;
+    }
     const init: CodexInit = {
       id, tmuxWindow, cwd,
       model: opts.model,
@@ -564,7 +580,8 @@ export class SessionRegistry {
       status: "starting",
       startedAt: Date.now(),
       // resume_id (a codex thread id) → thread/resume instead of thread/start.
-      codexThreadId: opts.resume_id,
+      codexThreadId: resumeThread,
+      config: codexConfig,
     };
     const session = new CodexSession(init, this.#sessionDeps());
     this.#sessions.set(id, session);
@@ -707,6 +724,7 @@ export class SessionRegistry {
           effort: s.effort,
           permissionMode: s.permissionMode ?? "default",
           developerInstructions: s.developerInstructions,
+          config: s.config,
           status: "active",
           startedAt: Date.now(),
           codexThreadId: rec.codexThreadId,
@@ -813,6 +831,7 @@ export class SessionRegistry {
         model: s.model, effort: s.effort,
         permissionMode: s.permissionMode ?? "default",
         developerInstructions: s.developerInstructions,
+        config: s.config,
         status: "active", startedAt: Date.now(),
         codexThreadId: rec.codexThreadId,
       }, this.#sessionDeps());

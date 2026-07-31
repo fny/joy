@@ -50,6 +50,8 @@ export interface CodexInit {
   /** Resume an existing thread (recovery). */
   codexThreadId?: string;
   developerInstructions?: string;
+  /** `-c key=value` config overrides for the app-server spawn (user extraArgs). */
+  config?: Record<string, string>;
 }
 
 interface PendingApproval {
@@ -85,6 +87,7 @@ export class CodexSession implements AgentSession {
   #threadId: string | null = null;
   #resumeThreadId?: string;
   #developerInstructions?: string;
+  #config?: Record<string, string>;
   #thinking = false;
   // Reasoning effort to apply on the NEXT turn only, then clear — codex persists
   // a turn/start override "for this and subsequent turns", so sending once is
@@ -134,6 +137,7 @@ export class CodexSession implements AgentSession {
     this.#deps = deps;
     this.#resumeThreadId = init.codexThreadId;
     this.#developerInstructions = init.developerInstructions;
+    this.#config = init.config;
     this.#socketPath = join(joyStateDir(), `codex-${init.id}.sock`);
     this.#norm = new CodexNormalizer();
     // Load durable state SYNCHRONOUSLY here, before attachRelay starts the relay
@@ -277,7 +281,7 @@ export class CodexSession implements AgentSession {
     try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
     try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ }
 
-    this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath });
+    this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath, config: this.#config });
     this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
     this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
     this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
@@ -351,7 +355,7 @@ export class CodexSession implements AgentSession {
       codexThreadId: this.#threadId ?? this.#resumeThreadId ?? undefined,
       codexSocketPath: this.#socketPath,
       codexServerPid: this.#proc?.pid ?? this.pid,
-      codexSettings: { model: this.currentModel ?? this.model, effort: this.currentEffort ?? this.effort, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions },
+      codexSettings: { model: this.currentModel ?? this.model, effort: this.currentEffort ?? this.effort, permissionMode: this.#permissionMode, developerInstructions: this.#developerInstructions, config: this.#config },
     });
   }
 

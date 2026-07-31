@@ -357,14 +357,14 @@ function NewJoyTmuxSessionScreen() {
                 // hidden there too): continue/fork/fallback/chrome/detached/
                 // extraArgs/resume_limit_mb are claude CLI concepts.
                 resume_limit_mb: selectedAgent !== 'codex' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
-                continue: (selectedAgent !== 'codex' && continueLast && !resumeId.trim()) || undefined,
+                continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: currentMode.key,
                 fallbackModel: selectedAgent !== 'codex' ? (currentFallback.key ?? undefined) : undefined,
                 forkSession: (selectedAgent !== 'codex' && (continueLast || resumeId.trim()) && forkSession) || undefined,
                 chrome: (selectedAgent !== 'codex' && chrome) || undefined,
                 detached: (selectedAgent !== 'codex' && detached) || undefined,
-                extraArgs: selectedAgent !== 'codex' ? (extraArgs.trim() || undefined) : undefined,
+                extraArgs: extraArgs.trim() || undefined,
             }),
             new Promise<never>((_, reject) => setTimeout(
                 () => reject(new Error(gitClone
@@ -577,10 +577,7 @@ function NewJoyTmuxSessionScreen() {
                                 </Text>
                             </Pressable>
 
-                            {/* Claude-only rows: fallback model (--fallback-model),
-                                continue (--continue) and fork (--fork-session) are
-                                claude CLI concepts — meaningless for codex and were
-                                wrongly shown there (bug 2026-07-29). */}
+                            {/* Claude-only: fallback model (--fallback-model). */}
                             {selectedAgent !== 'codex' && (<>
                             {/* Fallback model — tap to cycle. */}
                             <Pressable
@@ -599,8 +596,11 @@ function NewJoyTmuxSessionScreen() {
                                 )}
                             </Pressable>
 
-                            {/* Continue — resume the most recent Claude conversation in
-                                this cwd instead of starting fresh. */}
+                            </>)}
+
+                            {/* Continue — resume the most recent conversation in this
+                                cwd (claude: --continue; codex: newest thread whose
+                                rollout ran here). */}
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={() => setContinueLast(v => !v)}
@@ -615,12 +615,13 @@ function NewJoyTmuxSessionScreen() {
                                 />
                                 <Text style={styles.configLabel} numberOfLines={1}>continue</Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
-                                    {continueLast ? 'resume last claude conversation' : 'start fresh'}
+                                    {continueLast ? (selectedAgent === 'codex' ? 'resume last codex conversation' : 'resume last claude conversation') : 'start fresh'}
                                 </Text>
                             </Pressable>
 
-                            {/* Fork — only meaningful with continue (claude rejects
-                                --fork-session on a fresh session), so dim it until then. */}
+                            {/* Fork — claude-only; only meaningful with continue (claude
+                                rejects --fork-session on a fresh session). */}
+                            {selectedAgent !== 'codex' && (<>
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed, !continueLast && { opacity: 0.4 }]}
                                 onPress={() => setForkSession(v => !v)}
@@ -676,7 +677,7 @@ function NewJoyTmuxSessionScreen() {
                             ) : null}
 
                             {/* Claude-only rows: chrome integration, detached (spawn
-                                without launching claude), extra claude CLI args. */}
+                                without launching claude). */}
                             {selectedAgent !== 'codex' && (<>
                             {/* Chrome integration */}
                             <Pressable
@@ -710,20 +711,22 @@ function NewJoyTmuxSessionScreen() {
                                 </Text>
                             </Pressable>
 
-                            {/* Extra CLI arguments, appended verbatim to the claude command */}
+                            </>)}
+
+                            {/* Extra arguments — claude: CLI args appended verbatim;
+                                codex: -c config overrides (key=value …). */}
                             <View style={styles.configRow}>
                                 <Ionicons name="options-outline" size={15} color={theme.colors.textSecondary} />
                                 <TextInput
                                     value={extraArgs}
                                     onChangeText={setExtraArgs}
-                                    placeholder="extra arguments"
+                                    placeholder={selectedAgent === 'codex' ? 'config overrides (key=value …)' : 'extra arguments'}
                                     placeholderTextColor={theme.colors.textSecondary}
                                     style={styles.argsInput}
                                     autoCapitalize="none"
                                     autoCorrect={false}
                                 />
                             </View>
-                            </>)}
                         </View>
                     </View>
 
