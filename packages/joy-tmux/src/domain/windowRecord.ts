@@ -45,7 +45,7 @@ export interface WindowRecord {
   codexServerPid?: number;
   /** Codex session settings — restored on recovery so a resumed session keeps
    *  its model/effort/permission rather than resetting to defaults. */
-  codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string };
+  codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> };
   updatedAt: number;
 }
 
@@ -91,7 +91,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string } },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> } },
   baseDir = defaultStateDir(),
 ): void {
   try {
