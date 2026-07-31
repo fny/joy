@@ -50,7 +50,7 @@ const PendingRow = React.memo(function PendingRow({ sessionId, item }: { session
                 accessibilityLabel={t('common.edit')}
                 style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
             >
-                <Text style={styles.editLabel}>{t('common.edit')}</Text>
+                <Ionicons name="pencil-outline" size={18} color={theme.colors.text} />
             </Pressable>
             <Pressable
                 onPress={() => remove(sessionId, item.id)}
@@ -59,7 +59,7 @@ const PendingRow = React.memo(function PendingRow({ sessionId, item }: { session
                 accessibilityLabel={t('common.delete')}
                 style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
             >
-                <Ionicons name="close" size={19} color={theme.colors.deleteAction} />
+                <Ionicons name="close" size={19} color={theme.colors.text} />
             </Pressable>
         </View>
     );
