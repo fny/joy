@@ -203,6 +203,8 @@ export const ca: TranslationStructure = {
         chatFontSizeDescription: 'Fes més gran o més petit el text dels missatges del xat',
         chatFontSizeIncrease: 'Augmenta la mida del text del xat',
         chatFontSizeDecrease: 'Redueix la mida del text del xat',
+        chatFontSizePreviewUser: 'Com canvio la mida del text?',
+        chatFontSizePreviewAgent: 'Així — ajusta-la amb els botons + i −.',
     },
 
     settingsMods: {

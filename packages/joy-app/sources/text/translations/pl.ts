@@ -220,6 +220,8 @@ export const pl: TranslationStructure = {
         chatFontSizeDescription: 'Powiększ lub pomniejsz tekst wiadomości w czacie',
         chatFontSizeIncrease: 'Zwiększ rozmiar tekstu czatu',
         chatFontSizeDecrease: 'Zmniejsz rozmiar tekstu czatu',
+        chatFontSizePreviewUser: 'Jak zmienić rozmiar tekstu?',
+        chatFontSizePreviewAgent: 'Tak — dostosuj go przyciskami + i −.',
     },
 
     settingsMods: {

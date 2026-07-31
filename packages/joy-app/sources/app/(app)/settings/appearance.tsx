@@ -23,6 +23,27 @@ const isKnownAvatarStyle = (style: string): style is KnownAvatarStyle => {
     return style === 'pixelated' || style === 'gradient' || style === 'brutalist';
 };
 
+// Live preview of chat text at the current scale, mirroring the real chat
+// metrics (16/24 × scale, per MessageView/MarkdownView): a user bubble on the
+// right and a plain agent line on the left. Rendered as a component (not a
+// bare View) so the showDivider prop ItemGroup clones onto children is
+// silently swallowed.
+function ChatFontSizePreview({ scale }: { scale: number; showDivider?: boolean }) {
+    const scaledText = { fontSize: 16 * scale, lineHeight: 24 * scale };
+    return (
+        <View style={styles.previewContainer}>
+            <View style={styles.previewBubble}>
+                <Text style={[styles.previewUserText, scaledText]} selectable={false}>
+                    {t('settingsAppearance.chatFontSizePreviewUser')}
+                </Text>
+            </View>
+            <Text style={[styles.previewAgentText, scaledText]} selectable={false}>
+                {t('settingsAppearance.chatFontSizePreviewAgent')}
+            </Text>
+        </View>
+    );
+}
+
 export default function AppearanceSettingsScreen() {
     const { theme } = useUnistyles();
     const router = useRouter();
@@ -167,6 +188,7 @@ export default function AppearanceSettingsScreen() {
                         </View>
                     }
                 />
+                <ChatFontSizePreview scale={chatFontScale} />
             </ItemGroup>
 
             {/* Text Settings */}
@@ -369,5 +391,32 @@ const styles = StyleSheet.create((theme) => ({
         ...Typography.default(),
         fontSize: 13,
         color: theme.colors.textSecondary,
+    },
+    // Chat font size preview — styled after the real chat: user bubble on the
+    // right (userMessageBackground), agent text plain on the left.
+    previewContainer: {
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        borderTopWidth: StyleSheet.hairlineWidth,
+        borderTopColor: theme.colors.divider,
+    },
+    previewBubble: {
+        alignSelf: 'flex-end',
+        backgroundColor: theme.colors.userMessageBackground,
+        paddingHorizontal: 12,
+        borderRadius: 12,
+        marginBottom: 8,
+        maxWidth: '85%',
+    },
+    previewUserText: {
+        ...Typography.default(),
+        color: theme.colors.text,
+        marginVertical: 8,
+    },
+    previewAgentText: {
+        ...Typography.default(),
+        color: theme.colors.text,
+        alignSelf: 'flex-start',
+        maxWidth: '85%',
     },
 }));

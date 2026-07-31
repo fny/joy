@@ -202,6 +202,8 @@ export const pt: TranslationStructure = {
         chatFontSizeDescription: 'Aumente ou diminua o texto das mensagens do chat',
         chatFontSizeIncrease: 'Aumentar o tamanho do texto do chat',
         chatFontSizeDecrease: 'Diminuir o tamanho do texto do chat',
+        chatFontSizePreviewUser: 'Como mudo o tamanho do texto?',
+        chatFontSizePreviewAgent: 'Assim — ajuste com os botões + e −.',
     },
 
     settingsMods: {

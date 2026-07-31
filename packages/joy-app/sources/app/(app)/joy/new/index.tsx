@@ -29,10 +29,12 @@ import { Typography } from '@/constants/Typography';
 import { layout } from '@/components/layout';
 import {
     MultiTextInput,
+    MULTI_TEXT_INPUT_FONT_SIZE,
     MULTI_TEXT_INPUT_LINE_HEIGHT,
     type KeyPressEvent,
     type MultiTextInputHandle,
 } from '@/components/MultiTextInput';
+import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { t } from '@/text';
 import { useAllMachines, useSessions, useSetting, useSettingMutable, storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
@@ -58,6 +60,23 @@ const COMPOSER_SEND_BUTTON_MARGIN_BOTTOM = Math.max(
     0,
     Math.round((MULTI_TEXT_INPUT_LINE_HEIGHT + COMPOSER_INPUT_VERTICAL_PADDING * 2 - COMPOSER_SEND_BUTTON_SIZE) / 2),
 );
+
+// Chat-font-scaled composer metrics. The send button hugs the input's LAST
+// LINE (alignItems flex-end + a margin that centers it against one line), so
+// the margin must be recomputed from the SCALED line height or the button
+// drifts off-center when the chat font scale changes.
+function scaledComposerMetrics(scale: number) {
+    const lineHeight = Math.round(MULTI_TEXT_INPUT_LINE_HEIGHT * scale);
+    return {
+        fontSize: MULTI_TEXT_INPUT_FONT_SIZE * scale,
+        lineHeight,
+        maxHeight: Math.round(COMPOSER_INPUT_MAX_HEIGHT * scale),
+        sendButtonMarginBottom: Math.max(
+            0,
+            Math.round((lineHeight + COMPOSER_INPUT_VERTICAL_PADDING * 2 - COMPOSER_SEND_BUTTON_SIZE) / 2),
+        ),
+    };
+}
 
 function getMachineName(machine: Machine): string {
     return machine.metadata?.displayName || machine.metadata?.host || 'unknown';
@@ -86,6 +105,9 @@ type JoyCreateResult =
 
 function NewJoyTmuxSessionScreen() {
     const { theme } = useUnistyles();
+    // See scaledComposerMetrics: keeps the send button centered on the
+    // input's (scaled) last line.
+    const composerMetrics = scaledComposerMetrics(useChatFontScale());
     const safeArea = useSafeAreaInsets();
     const router = useRouter();
     const navigateToSession = useNavigateToSession();
@@ -739,10 +761,11 @@ function NewJoyTmuxSessionScreen() {
                                     value={prompt}
                                     onChangeText={setPrompt}
                                     placeholder="initial prompt (optional)"
-                                    lineHeight={MULTI_TEXT_INPUT_LINE_HEIGHT}
+                                    fontSize={composerMetrics.fontSize}
+                                    lineHeight={composerMetrics.lineHeight}
                                     paddingTop={COMPOSER_INPUT_VERTICAL_PADDING}
                                     paddingBottom={COMPOSER_INPUT_VERTICAL_PADDING}
-                                    maxHeight={COMPOSER_INPUT_MAX_HEIGHT}
+                                    maxHeight={composerMetrics.maxHeight}
                                     onKeyPress={handleKeyPress}
                                 />
                             </View>
@@ -753,6 +776,7 @@ function NewJoyTmuxSessionScreen() {
                                 testID="joy-new-create-button"
                                 style={[
                                     styles.sendButton,
+                                    { marginBottom: composerMetrics.sendButtonMarginBottom },
                                     canSend ? styles.sendButtonActive : styles.sendButtonInactive,
                                 ]}
                             >
