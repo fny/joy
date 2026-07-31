@@ -21,6 +21,7 @@ import { parseHarnessBlock } from './parseHarnessBlock';
 import { stripAnsi } from '@/utils/ansi';
 import { Ionicons } from '@expo/vector-icons';
 import { useUnistyles } from 'react-native-unistyles';
+import { useChatFontScale } from '@/hooks/useChatFontScale';
 
 
 export const MessageView = React.memo((props: {
@@ -103,6 +104,13 @@ function UserTextBlock(props: {
     sync.sendMessage(props.sessionId, option.title, { source: 'option' });
   }, [props.sessionId]);
 
+  // Chat font size setting: scale the 16/24 bubble text metrics. null at 100%
+  // so the static unistyles objects pass through untouched.
+  const chatFontScale = useChatFontScale();
+  const scaledBubbleText = chatFontScale !== 1
+    ? { fontSize: 16 * chatFontScale, lineHeight: 24 * chatFontScale }
+    : null;
+
   const claudeUuid = props.message.claudeUuid;
   const canFork = Boolean(claudeUuid) && Boolean(props.onForkFromUserMessage);
   const handleLongPress = React.useCallback(() => {
@@ -161,9 +169,9 @@ function UserTextBlock(props: {
         style={styles.userMessageBubble}
       >
         {isMonoCommand
-          ? <Text style={styles.monoMessageText} selectable>{bodyText}</Text>
+          ? <Text style={[styles.monoMessageText, scaledBubbleText]} selectable>{bodyText}</Text>
           : slashMatch
-            ? <Text style={styles.slashMessageText} selectable>
+            ? <Text style={[styles.slashMessageText, scaledBubbleText]} selectable>
                 <Text style={styles.slashCommandToken}>{slashMatch[1]}</Text>
                 {slashMatch[2]}
               </Text>

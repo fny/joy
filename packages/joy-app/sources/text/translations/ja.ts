@@ -200,6 +200,10 @@ export const ja: TranslationStructure = {
         },
         showFlavorIcons: 'AIプロバイダーアイコンを表示',
         showFlavorIconsDescription: 'セッションアバターにAIプロバイダーアイコンを表示',
+        chatFontSize: 'チャットの文字サイズ',
+        chatFontSizeDescription: 'チャットのメッセージ文字を拡大・縮小します',
+        chatFontSizeIncrease: 'チャットの文字サイズを大きくする',
+        chatFontSizeDecrease: 'チャットの文字サイズを小さくする',
     },
 
     settingsMods: {

@@ -199,6 +199,10 @@ export const zhHant: TranslationStructure = {
         },
         showFlavorIcons: '顯示 AI 提供者圖示',
         showFlavorIconsDescription: '在工作階段頭像上顯示 AI 提供者圖示',
+        chatFontSize: '聊天字型大小',
+        chatFontSizeDescription: '放大或縮小聊天訊息文字',
+        chatFontSizeIncrease: '增大聊天字型',
+        chatFontSizeDecrease: '減小聊天字型',
     },
 
     settingsMods: {

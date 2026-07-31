@@ -24,6 +24,7 @@ export const LocalSettingsSchema = z.object({
     limitSessionMemory: z.number().nullable().describe('Max sessions to keep in memory (most-recently-viewed; unload the rest, reloaded on revisit). null/empty = keep all'),
     fileViewerFontSize: z.number().describe('Code/file viewer font size in px'),
     fileViewerWrap: z.boolean().describe('Code/file viewer word wrap (off = horizontal scroll)'),
+    chatFontScale: z.number().describe('Chat message text scale multiplier (1 = 100%), clamped to [0.8, 1.4]'),
     // CLI version acknowledgments - keyed by machineId
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
 });
@@ -55,6 +56,7 @@ export const localSettingsDefaults: LocalSettings = {
     limitSessionMemory: 5,
     fileViewerFontSize: 14,
     fileViewerWrap: true,
+    chatFontScale: 1,
     terminalTheme: 'default',
     markdownCopyV2: false,
     consoleLoggingEnabled: false,

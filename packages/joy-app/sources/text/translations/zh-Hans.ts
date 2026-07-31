@@ -200,6 +200,10 @@ export const zhHans: TranslationStructure = {
         },
         showFlavorIcons: '显示 AI 提供商图标',
         showFlavorIconsDescription: '在会话头像上显示 AI 提供商图标',
+        chatFontSize: '聊天字体大小',
+        chatFontSizeDescription: '放大或缩小聊天消息文字',
+        chatFontSizeIncrease: '增大聊天字体',
+        chatFontSizeDecrease: '减小聊天字体',
     },
 
     settingsMods: {

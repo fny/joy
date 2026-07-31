@@ -198,6 +198,10 @@ export const pt: TranslationStructure = {
         },
         showFlavorIcons: 'Mostrar ícones de provedores de IA',
         showFlavorIconsDescription: 'Exibir ícones do provedor de IA nos avatares de sessão',
+        chatFontSize: 'Tamanho do texto do chat',
+        chatFontSizeDescription: 'Aumente ou diminua o texto das mensagens do chat',
+        chatFontSizeIncrease: 'Aumentar o tamanho do texto do chat',
+        chatFontSizeDecrease: 'Diminuir o tamanho do texto do chat',
     },
 
     settingsMods: {

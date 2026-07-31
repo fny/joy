@@ -178,6 +178,10 @@ export const ru: TranslationStructure = {
         },
         showFlavorIcons: 'Показывать иконки провайдеров ИИ',
         showFlavorIconsDescription: 'Отображать иконки провайдеров ИИ на аватарах сессий',
+        chatFontSize: 'Размер текста чата',
+        chatFontSizeDescription: 'Увеличьте или уменьшите текст сообщений в чате',
+        chatFontSizeIncrease: 'Увеличить размер текста чата',
+        chatFontSizeDecrease: 'Уменьшить размер текста чата',
     },
 
     settingsMods: {
