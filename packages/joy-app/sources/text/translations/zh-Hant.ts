@@ -203,6 +203,8 @@ export const zhHant: TranslationStructure = {
         chatFontSizeDescription: '放大或縮小聊天訊息文字',
         chatFontSizeIncrease: '增大聊天字型',
         chatFontSizeDecrease: '減小聊天字型',
+        chatFontSizePreviewUser: '如何調整文字大小？',
+        chatFontSizePreviewAgent: '像這樣 — 用 + 和 − 按鈕調整。',
     },
 
     settingsMods: {

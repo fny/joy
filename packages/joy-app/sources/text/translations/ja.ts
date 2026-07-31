@@ -204,6 +204,8 @@ export const ja: TranslationStructure = {
         chatFontSizeDescription: 'チャットのメッセージ文字を拡大・縮小します',
         chatFontSizeIncrease: 'チャットの文字サイズを大きくする',
         chatFontSizeDecrease: 'チャットの文字サイズを小さくする',
+        chatFontSizePreviewUser: '文字サイズはどう変えますか？',
+        chatFontSizePreviewAgent: 'このように、＋と−のボタンで調整できます。',
     },
 
     settingsMods: {

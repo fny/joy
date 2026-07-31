@@ -22,9 +22,11 @@ import { Typography } from '@/constants/Typography';
 import { layout } from '@/components/layout';
 import {
     MultiTextInput,
+    MULTI_TEXT_INPUT_FONT_SIZE,
     MULTI_TEXT_INPUT_LINE_HEIGHT,
     type KeyPressEvent,
 } from '@/components/MultiTextInput';
+import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -88,6 +90,23 @@ const COMPOSER_SEND_BUTTON_MARGIN_BOTTOM = Math.max(
     0,
     Math.round((MULTI_TEXT_INPUT_LINE_HEIGHT + COMPOSER_INPUT_VERTICAL_PADDING * 2 - COMPOSER_SEND_BUTTON_SIZE) / 2),
 );
+
+// Chat-font-scaled composer metrics. The send button hugs the input's LAST
+// LINE (alignItems flex-end + a margin that centers it against one line), so
+// the margin must be recomputed from the SCALED line height or the button
+// drifts off-center when the chat font scale changes.
+function scaledComposerMetrics(scale: number) {
+    const lineHeight = Math.round(MULTI_TEXT_INPUT_LINE_HEIGHT * scale);
+    return {
+        fontSize: MULTI_TEXT_INPUT_FONT_SIZE * scale,
+        lineHeight,
+        maxHeight: Math.round(COMPOSER_INPUT_MAX_HEIGHT * scale),
+        sendButtonMarginBottom: Math.max(
+            0,
+            Math.round((lineHeight + COMPOSER_INPUT_VERTICAL_PADDING * 2 - COMPOSER_SEND_BUTTON_SIZE) / 2),
+        ),
+    };
+}
 const WORKTREE_PATH_DEBOUNCE_MS = 300;
 
 function trimPathInput(path: string | null | undefined): string {
@@ -481,16 +500,18 @@ const PromptInput = React.memo(React.forwardRef<MultiTextInputHandle, PromptInpu
     function PromptInput(props, ref) {
         const value = useNewSessionDraft((s) => s.input);
         const onChangeText = useNewSessionDraft((s) => s.setInput);
+        const metrics = scaledComposerMetrics(useChatFontScale());
         return (
             <MultiTextInput
                 ref={ref}
                 value={value}
                 onChangeText={onChangeText}
                 placeholder={props.placeholder}
-                lineHeight={MULTI_TEXT_INPUT_LINE_HEIGHT}
+                fontSize={metrics.fontSize}
+                lineHeight={metrics.lineHeight}
                 paddingTop={COMPOSER_INPUT_VERTICAL_PADDING}
                 paddingBottom={COMPOSER_INPUT_VERTICAL_PADDING}
-                maxHeight={COMPOSER_INPUT_MAX_HEIGHT}
+                maxHeight={metrics.maxHeight}
                 onKeyPress={props.onKeyPress}
             />
         );
@@ -499,6 +520,9 @@ const PromptInput = React.memo(React.forwardRef<MultiTextInputHandle, PromptInpu
 
 function NewSessionScreen() {
     const { theme } = useUnistyles();
+    // See scaledComposerMetrics: keeps the send button centered on the
+    // input's (scaled) last line.
+    const composerMetrics = scaledComposerMetrics(useChatFontScale());
     const safeArea = useSafeAreaInsets();
     const headerHeight = useHeaderHeight();
     const router = useRouter();
@@ -1236,6 +1260,7 @@ function NewSessionScreen() {
                             </View>
                             <View style={[
                                 styles.sendButton,
+                                { marginBottom: composerMetrics.sendButtonMarginBottom },
                                 canSend ? styles.sendButtonActive : styles.sendButtonInactive,
                             ]}>
                                 <Pressable

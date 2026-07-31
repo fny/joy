@@ -6,8 +6,9 @@ import { AgentInputAttachmentStrip } from './AgentInputAttachmentStrip';
 import type { AttachmentPreview } from '@/sync/attachmentTypes';
 import { generateThumbhash } from '@/utils/thumbhash';
 import { layout } from './layout';
-import { MultiTextInput, KeyPressEvent } from './MultiTextInput';
+import { MultiTextInput, KeyPressEvent, MULTI_TEXT_INPUT_FONT_SIZE, MULTI_TEXT_INPUT_LINE_HEIGHT } from './MultiTextInput';
 import { Typography } from '@/constants/Typography';
+import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { PermissionMode, ModelMode } from './PermissionModeSelector';
 import { EffortLevel } from './modelModeOptions';
 import { hapticsLight, hapticsError } from './haptics';
@@ -560,6 +561,17 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const { theme } = useUnistyles();
     const screenWidth = useWindowDimensions().width;
     const isSendBlocked = props.blockSend ?? false;
+
+    // Chat font size setting: the composer text mirrors the chat scale so
+    // typed text matches how it will render once sent. The max height scales
+    // with the line height so the maximum VISIBLE LINE COUNT stays constant
+    // (on web MultiTextInput also derives maxRows from maxHeight/lineHeight,
+    // which stays consistent because both are scaled together). Status pills,
+    // chips and action buttons keep their fixed metrics.
+    const chatFontScale = useChatFontScale();
+    const inputFontSize = MULTI_TEXT_INPUT_FONT_SIZE * chatFontScale;
+    const inputLineHeight = Math.round(MULTI_TEXT_INPUT_LINE_HEIGHT * chatFontScale);
+    const inputMaxHeight = Math.round((Platform.OS === 'web' ? 480 : 120) * chatFontScale);
 
     // `hasText` drives only the send-button appearance/enabled state. It's
     // updated via startTransition from the keystroke handler so a busy reducer
@@ -1232,11 +1244,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             defaultValue={props.initialValue}
                             paddingTop={Platform.OS === 'web' ? 10 : 8}
                             paddingBottom={Platform.OS === 'web' ? 10 : 8}
+                            fontSize={inputFontSize}
+                            lineHeight={inputLineHeight}
                             onChangeText={handleTextChange}
                             placeholder={props.placeholder}
                             onKeyPress={handleKeyPress}
                             onStateChange={handleInputStateChange}
-                            maxHeight={Platform.OS === 'web' ? 480 : 120}
+                            maxHeight={inputMaxHeight}
                         />
                     </View>
 

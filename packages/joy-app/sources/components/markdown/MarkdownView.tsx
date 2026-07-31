@@ -283,6 +283,12 @@ function RenderOptionsBlock(props: {
     onOptionPress?: (option: Option) => void
 }) {
     const { armedKey, requireDoubleTap } = useDoubleTap();
+    // Option chips scale with the chat font: label text follows the body
+    // metrics and the vertical padding grows proportionally so the chips keep
+    // their visual balance instead of getting cramped at larger scales.
+    const scale = useChatFontScale();
+    const scaledLabel = useScaledBodyStyle();
+    const scaledChip = scale === 1 ? null : { paddingVertical: Math.round(12 * scale), minHeight: Math.round(48 * scale) };
     return (
         <View style={[style.optionsContainer, props.first && style.first, props.last && style.last]}>
             {props.items.map((item, index) => {
@@ -294,20 +300,21 @@ function RenderOptionsBlock(props: {
                             key={index}
                             style={({ pressed }) => [
                                 style.optionItem,
+                                scaledChip,
                                 pressed && style.optionItemPressed,
                                 isArmed && style.optionItemArmed,
                             ]}
                             onPress={() => requireDoubleTap(optionKey, () => props.onOptionPress?.({ title: item }))}
                         >
-                            <Text selectable={props.selectable && !isArmed} style={style.optionText}>
+                            <Text selectable={props.selectable && !isArmed} style={[style.optionText, scaledLabel]}>
                                 {isArmed ? t('common.tapAgainToConfirm', { label: item }) : item}
                             </Text>
                         </Pressable>
                     );
                 } else {
                     return (
-                        <View key={index} style={style.optionItem}>
-                            <Text selectable={props.selectable} style={style.optionText}>{item}</Text>
+                        <View key={index} style={[style.optionItem, scaledChip]}>
+                            <Text selectable={props.selectable} style={[style.optionText, scaledLabel]}>{item}</Text>
                         </View>
                     );
                 }

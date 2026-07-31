@@ -182,6 +182,8 @@ export const ru: TranslationStructure = {
         chatFontSizeDescription: 'Увеличьте или уменьшите текст сообщений в чате',
         chatFontSizeIncrease: 'Увеличить размер текста чата',
         chatFontSizeDecrease: 'Уменьшить размер текста чата',
+        chatFontSizePreviewUser: 'Как изменить размер текста?',
+        chatFontSizePreviewAgent: 'Вот так — настройте кнопками + и −.',
     },
 
     settingsMods: {

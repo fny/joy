@@ -204,6 +204,8 @@ export const zhHans: TranslationStructure = {
         chatFontSizeDescription: '放大或缩小聊天消息文字',
         chatFontSizeIncrease: '增大聊天字体',
         chatFontSizeDecrease: '减小聊天字体',
+        chatFontSizePreviewUser: '如何调整文字大小？',
+        chatFontSizePreviewAgent: '像这样 — 用 + 和 − 按钮调整。',
     },
 
     settingsMods: {

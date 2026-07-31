@@ -201,6 +201,8 @@ export const it: TranslationStructure = {
         chatFontSizeDescription: 'Ingrandisci o riduci il testo dei messaggi in chat',
         chatFontSizeIncrease: 'Aumenta la dimensione del testo della chat',
         chatFontSizeDecrease: 'Riduci la dimensione del testo della chat',
+        chatFontSizePreviewUser: 'Come cambio la dimensione del testo?',
+        chatFontSizePreviewAgent: 'Così — regolala con i pulsanti + e −.',
     },
 
     settingsMods: {

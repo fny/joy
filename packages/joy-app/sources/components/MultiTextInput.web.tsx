@@ -40,6 +40,7 @@ interface MultiTextInputProps {
     onChangeText?: (text: string) => void;
     placeholder?: string;
     maxHeight?: number;
+    fontSize?: number;
     lineHeight?: number;
     paddingTop?: number;
     paddingBottom?: number;
@@ -57,6 +58,7 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         onChangeText,
         placeholder,
         maxHeight = 120,
+        fontSize = MULTI_TEXT_INPUT_FONT_SIZE,
         lineHeight = MULTI_TEXT_INPUT_LINE_HEIGHT,
         onKeyPress,
         onSelectionChange,
@@ -189,7 +191,7 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
                 style={{
                     width: '100%',
                     padding: '0',
-                    fontSize: `${MULTI_TEXT_INPUT_FONT_SIZE}px`,
+                    fontSize: `${fontSize}px`,
                     color: theme.colors.input.text,
                     border: 'none',
                     outline: 'none',

@@ -43,6 +43,7 @@ interface MultiTextInputProps {
     placeholder?: string;
     editable?: boolean;
     maxHeight?: number;
+    fontSize?: number;
     lineHeight?: number;
     paddingTop?: number;
     paddingBottom?: number;
@@ -61,6 +62,7 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
         placeholder,
         editable = true,
         maxHeight = 120,
+        fontSize = MULTI_TEXT_INPUT_FONT_SIZE,
         lineHeight = MULTI_TEXT_INPUT_LINE_HEIGHT,
         onKeyPress,
         onSelectionChange,
@@ -105,7 +107,7 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
     const isShellLine = /^\s*[!&]/.test(text);
     const textStyle = {
         width: '100%' as const,
-        fontSize: MULTI_TEXT_INPUT_FONT_SIZE,
+        fontSize,
         lineHeight,
         maxHeight,
         color: theme.colors.input.text,

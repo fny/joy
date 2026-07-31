@@ -201,6 +201,8 @@ export const en = {
         chatFontSizeDescription: 'Make message text in chats larger or smaller',
         chatFontSizeIncrease: 'Increase chat font size',
         chatFontSizeDecrease: 'Decrease chat font size',
+        chatFontSizePreviewUser: 'How do I resize text?',
+        chatFontSizePreviewAgent: 'Like this — adjust with the + and − buttons.',
     },
 
     settingsSessions: {
