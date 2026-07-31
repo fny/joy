@@ -43,7 +43,7 @@ const QueuedRow = React.memo(function QueuedRow(props: {
                 accessibilityLabel={t('common.edit')}
                 style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
             >
-                <Text style={styles.editLabel}>{t('common.edit')}</Text>
+                <Ionicons name="pencil-outline" size={18} color={theme.colors.text} />
             </Pressable>
             <Pressable
                 onPress={props.onDelete}
@@ -52,7 +52,7 @@ const QueuedRow = React.memo(function QueuedRow(props: {
                 accessibilityLabel={t('common.delete')}
                 style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
             >
-                <Ionicons name="close" size={19} color={theme.colors.deleteAction} />
+                <Ionicons name="close" size={19} color={theme.colors.text} />
             </Pressable>
         </View>
     );
