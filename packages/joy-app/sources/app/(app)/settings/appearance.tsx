@@ -6,13 +6,15 @@ import { useSettingMutable, useLocalSettingMutable, storage } from '@/sync/stora
 import { applyAppearance, applyDarkAppearance } from '@/palettes';
 import { useRouter } from 'expo-router';
 import * as Localization from 'expo-localization';
-import { useUnistyles, UnistylesRuntime } from 'react-native-unistyles';
+import { useUnistyles, UnistylesRuntime, StyleSheet } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
-import { Appearance, Platform } from 'react-native';
+import { Appearance, Platform, Pressable, Text, View } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
 import { t, getLanguageNativeName, SUPPORTED_LANGUAGES } from '@/text';
 import { TerminalControls } from '@/components/dev/TerminalControls';
+import { Typography } from '@/constants/Typography';
+import { clampChatFontScale, CHAT_FONT_SCALE_MIN, CHAT_FONT_SCALE_MAX, CHAT_FONT_SCALE_STEP } from '@/hooks/useChatFontScale';
 
 // Define known avatar styles for this version of the app
 type KnownAvatarStyle = 'pixelated' | 'gradient' | 'brutalist';
@@ -35,6 +37,9 @@ export default function AppearanceSettingsScreen() {
     const [showFlavorIcons, setShowFlavorIcons] = useSettingMutable('showFlavorIcons');
     const [themePreference, setThemePreference] = useLocalSettingMutable('themePreference');
     const [preferredLanguage] = useSettingMutable('preferredLanguage');
+    const [chatFontScaleRaw, setChatFontScale] = useLocalSettingMutable('chatFontScale');
+    const chatFontScale = clampChatFontScale(chatFontScaleRaw);
+    const bumpChatFontScale = (dir: 1 | -1) => setChatFontScale(clampChatFontScale(chatFontScale + dir * CHAT_FONT_SCALE_STEP));
     
     // Ensure we have a valid style for display, defaulting to gradient for unknown values
     const displayStyle: KnownAvatarStyle = isKnownAvatarStyle(avatarStyle) ? avatarStyle : 'gradient';
@@ -110,6 +115,57 @@ export default function AppearanceSettingsScreen() {
                     icon={<Ionicons name="language-outline" size={29} color={theme.colors.accents.blue} />}
                     detail={getLanguageDisplayText()}
                     onPress={() => router.push('/settings/language')}
+                />
+            </ItemGroup>
+
+            {/* Chat text size */}
+            <ItemGroup title={t('settingsAppearance.chatFontSize')} footer={t('settingsAppearance.chatFontSizeDescription')}>
+                <Item
+                    title={t('settingsAppearance.chatFontSize')}
+                    icon={<Ionicons name="text-outline" size={29} color={theme.colors.accents.orange} />}
+                    rightElement={
+                        <View style={styles.fontScaleControls}>
+                            {chatFontScale !== 1 && (
+                                <Pressable
+                                    onPress={() => setChatFontScale(1)}
+                                    hitSlop={8}
+                                    accessibilityRole="button"
+                                    style={({ pressed }) => [styles.fontScaleReset, pressed && styles.fontScalePressed]}
+                                >
+                                    <Text style={styles.fontScaleResetText}>{t('common.reset')}</Text>
+                                </Pressable>
+                            )}
+                            <Pressable
+                                onPress={() => bumpChatFontScale(-1)}
+                                disabled={chatFontScale <= CHAT_FONT_SCALE_MIN}
+                                hitSlop={8}
+                                accessibilityRole="button"
+                                accessibilityLabel={t('settingsAppearance.chatFontSizeDecrease')}
+                                style={({ pressed }) => [
+                                    styles.fontScaleButton,
+                                    pressed && styles.fontScalePressed,
+                                    chatFontScale <= CHAT_FONT_SCALE_MIN && styles.fontScaleDisabled,
+                                ]}
+                            >
+                                <Ionicons name="remove" size={18} color={theme.colors.text} />
+                            </Pressable>
+                            <Text style={styles.fontScaleValue}>{`${Math.round(chatFontScale * 100)}%`}</Text>
+                            <Pressable
+                                onPress={() => bumpChatFontScale(1)}
+                                disabled={chatFontScale >= CHAT_FONT_SCALE_MAX}
+                                hitSlop={8}
+                                accessibilityRole="button"
+                                accessibilityLabel={t('settingsAppearance.chatFontSizeIncrease')}
+                                style={({ pressed }) => [
+                                    styles.fontScaleButton,
+                                    pressed && styles.fontScalePressed,
+                                    chatFontScale >= CHAT_FONT_SCALE_MAX && styles.fontScaleDisabled,
+                                ]}
+                            >
+                                <Ionicons name="add" size={18} color={theme.colors.text} />
+                            </Pressable>
+                        </View>
+                    }
                 />
             </ItemGroup>
 
@@ -277,3 +333,41 @@ export default function AppearanceSettingsScreen() {
         </ItemList>
     );
 }
+
+const styles = StyleSheet.create((theme) => ({
+    fontScaleControls: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+    fontScaleButton: {
+        width: 32,
+        height: 32,
+        borderRadius: 16,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: theme.colors.surfaceHighest,
+    },
+    fontScalePressed: {
+        opacity: 0.6,
+    },
+    fontScaleDisabled: {
+        opacity: 0.35,
+    },
+    fontScaleValue: {
+        ...Typography.default('semiBold'),
+        fontSize: 14,
+        color: theme.colors.text,
+        minWidth: 44,
+        textAlign: 'center',
+    },
+    fontScaleReset: {
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+    },
+    fontScaleResetText: {
+        ...Typography.default(),
+        fontSize: 13,
+        color: theme.colors.textSecondary,
+    },
+}));

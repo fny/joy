@@ -197,6 +197,10 @@ export const it: TranslationStructure = {
         },
         showFlavorIcons: 'Mostra icone provider IA',
         showFlavorIconsDescription: 'Mostra le icone del provider IA sugli avatar di sessione',
+        chatFontSize: 'Dimensione testo chat',
+        chatFontSizeDescription: 'Ingrandisci o riduci il testo dei messaggi in chat',
+        chatFontSizeIncrease: 'Aumenta la dimensione del testo della chat',
+        chatFontSizeDecrease: 'Riduci la dimensione del testo della chat',
     },
 
     settingsMods: {

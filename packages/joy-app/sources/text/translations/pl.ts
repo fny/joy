@@ -216,6 +216,10 @@ export const pl: TranslationStructure = {
         },
         showFlavorIcons: 'Pokaż ikony dostawcy AI',
         showFlavorIconsDescription: 'Wyświetlaj ikony dostawcy AI na awatarach sesji',
+        chatFontSize: 'Rozmiar tekstu czatu',
+        chatFontSizeDescription: 'Powiększ lub pomniejsz tekst wiadomości w czacie',
+        chatFontSizeIncrease: 'Zwiększ rozmiar tekstu czatu',
+        chatFontSizeDecrease: 'Zmniejsz rozmiar tekstu czatu',
     },
 
     settingsMods: {

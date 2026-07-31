@@ -199,6 +199,10 @@ export const ca: TranslationStructure = {
         },
         showFlavorIcons: "Mostrar icones de proveïdors d'IA",
         showFlavorIconsDescription: "Mostrar icones del proveïdor d'IA als avatars de sessió",
+        chatFontSize: 'Mida del text del xat',
+        chatFontSizeDescription: 'Fes més gran o més petit el text dels missatges del xat',
+        chatFontSizeIncrease: 'Augmenta la mida del text del xat',
+        chatFontSizeDecrease: 'Redueix la mida del text del xat',
     },
 
     settingsMods: {

@@ -197,6 +197,10 @@ export const en = {
         },
         showFlavorIcons: 'Show AI Provider Icons',
         showFlavorIconsDescription: 'Display AI provider icons on session avatars',
+        chatFontSize: 'Chat Font Size',
+        chatFontSizeDescription: 'Make message text in chats larger or smaller',
+        chatFontSizeIncrease: 'Increase chat font size',
+        chatFontSizeDecrease: 'Decrease chat font size',
     },
 
     settingsSessions: {

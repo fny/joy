@@ -17,6 +17,7 @@ import { t } from '@/text';
 import { isHttpMarkdownLink } from './linkUtils';
 import { openExternalUrl } from '@/utils/openExternalUrl';
 import { useDoubleTap } from '@/hooks/useDoubleTap';
+import { useChatFontScale } from '@/hooks/useChatFontScale';
 
 // Option type for callback
 export type Option = {
@@ -123,18 +124,46 @@ type RenderSpanProps = {
     onLinkPress: (url: string) => void;
 };
 
+// Chat font size setting (Appearance → Chat Font Size): an override that
+// multiplies the static 16/24 body metrics of `style.text` / `style.code`
+// below. Returns null at 100% so the unistyles objects pass through
+// untouched. Each block renderer calls this so the whole message body scales
+// consistently; headers scale via HEADER_BASE_METRICS. Non-body chrome (code
+// blocks, tables, captions) intentionally keeps its fixed size.
+function useScaledBodyStyle(): { fontSize: number; lineHeight: number } | null {
+    const scale = useChatFontScale();
+    return React.useMemo(
+        () => scale === 1 ? null : { fontSize: 16 * scale, lineHeight: 24 * scale },
+        [scale],
+    );
+}
+
+// Base metrics of style.header1..6 below — kept in sync so headers can be
+// multiplied by the chat font scale (otherwise a scaled-up body would render
+// larger than its own headings).
+const HEADER_BASE_METRICS: Record<1 | 2 | 3 | 4 | 5 | 6, { fontSize: number; lineHeight: number }> = {
+    1: { fontSize: 16, lineHeight: 24 },
+    2: { fontSize: 20, lineHeight: 24 },
+    3: { fontSize: 16, lineHeight: 28 },
+    4: { fontSize: 16, lineHeight: 24 },
+    5: { fontSize: 16, lineHeight: 24 },
+    6: { fontSize: 16, lineHeight: 24 },
+};
+
 function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
-    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last]}><RenderSpans spans={props.spans} baseStyle={style.text} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
+    const scaled = useScaledBodyStyle();
+    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last, scaled]}><RenderSpans spans={props.spans} baseStyle={[style.text, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
 }
 
 function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean, onLinkPress: (url: string) => void }) {
+    const scaled = useScaledBodyStyle();
     return (
         <View style={style.quote}>
             {props.lines.map((spans, i) => (
                 spans.length === 0
                     ? <View key={i} style={{ height: 8 }} />
-                    : <Text key={i} selectable={props.selectable} style={[style.text, style.quoteText]}>
-                        <RenderSpans spans={spans} baseStyle={[style.text, style.quoteText]} selectable={props.selectable} onLinkPress={props.onLinkPress} />
+                    : <Text key={i} selectable={props.selectable} style={[style.text, style.quoteText, scaled]}>
+                        <RenderSpans spans={spans} baseStyle={[style.text, style.quoteText, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} />
                     </Text>
             ))}
         </View>
@@ -142,15 +171,19 @@ function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean,
 }
 
 function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+    const scale = useChatFontScale();
+    const base = HEADER_BASE_METRICS[props.level];
+    const scaled = scale === 1 ? null : { fontSize: base.fontSize * scale, lineHeight: base.lineHeight * scale };
     const s = (style as any)[`header${props.level}`];
-    const headerStyle = [style.header, s, props.first && style.first, props.last && style.last];
+    const headerStyle = [style.header, s, props.first && style.first, props.last && style.last, scaled];
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
 }
 
 const BULLETS = ['•', '◦', '▪'] as const;
 
 function RenderListBlock(props: { items: { depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
-    const listStyle = [style.text, style.list];
+    const scaled = useScaledBodyStyle();
+    const listStyle = [style.text, style.list, scaled];
     return (
         <View style={{ flexDirection: 'column', marginBottom: 8, gap: 6 }}>
             {props.items.map((item, index) => (
@@ -164,7 +197,8 @@ function RenderListBlock(props: { items: { depth: number, spans: MarkdownSpan[] 
 }
 
 function RenderNumberedListBlock(props: { items: { number: number, depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
-    const listStyle = [style.text, style.list];
+    const scaled = useScaledBodyStyle();
+    const listStyle = [style.text, style.list, scaled];
     return (
         <View style={{ flexDirection: 'column', marginBottom: 8, gap: 6 }}>
             {props.items.map((item, index) => (
@@ -283,8 +317,12 @@ function RenderOptionsBlock(props: {
 }
 
 function RenderSpans(props: RenderSpanProps) {
+    // Inline `code` spans carry their own fixed 16/24 metrics which would
+    // otherwise undo the chat font scale applied by the surrounding block.
+    const scaled = useScaledBodyStyle();
     return (<>
         {props.spans.map((span, index) => {
+            const spanStyles = [span.styles.map(s => style[s]), span.styles.includes('code') ? scaled : null];
             if (span.url) {
                 const isExternalLink = isHttpMarkdownLink(span.url);
                 return (
@@ -292,7 +330,7 @@ function RenderSpans(props: RenderSpanProps) {
                         key={index}
                         selectable={props.selectable}
                         accessibilityRole={isExternalLink ? 'link' : undefined}
-                        style={[props.baseStyle, isExternalLink && style.link, span.styles.map(s => style[s])]}
+                        style={[props.baseStyle, isExternalLink && style.link, spanStyles]}
                         {...(isExternalLink && Platform.OS === 'web' ? { onClick: () => props.onLinkPress(span.url!) } as any : {})}
                         onPress={isExternalLink && Platform.OS !== 'web'
                             ? () => props.onLinkPress(span.url!)
@@ -302,7 +340,7 @@ function RenderSpans(props: RenderSpanProps) {
                     </Text>
                 );
             } else {
-                return <Text key={index} selectable={props.selectable} style={[props.baseStyle, span.styles.map(s => style[s])]}>{span.text}</Text>
+                return <Text key={index} selectable={props.selectable} style={[props.baseStyle, spanStyles]}>{span.text}</Text>
             }
         })}
     </>)
