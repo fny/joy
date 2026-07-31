@@ -80,7 +80,15 @@
     var timer = setTimeout(function () { ctl.abort(); }, PROBE_TIMEOUT_MS);
     // no-cors: an opaque response is enough — we only need "the host answered".
     fetch(APP_URL + "/?probe=" + Date.now(), { mode: "no-cors", cache: "no-store", signal: ctl.signal })
-      .then(function () { window.location.replace(APP_URL); })
+      .then(function () {
+        // Cache-bust the NAVIGATION, not just the probe: EAS Hosting serves
+        // index.html with NO cache-control header, so WKWebView heuristic-
+        // caches it (10% of Last-Modified age) and keeps launching a STALE
+        // bundle list after new deploys. A unique query makes every launch
+        // fetch a fresh index; the hashed _expo assets it references stay
+        // efficiently cached.
+        window.location.replace(APP_URL + "/?b=" + Date.now());
+      })
       .catch(function () {
         document.getElementById("loading").style.display = "none";
         document.getElementById("offline").style.display = "block";
