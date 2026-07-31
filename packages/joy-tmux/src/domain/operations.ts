@@ -92,6 +92,10 @@ export interface OpMeta {
 /** Per-message text cap so a few huge turns can't bloat the RPC envelope. */
 const LOG_MESSAGE_CHARS = 4000;
 
+// Memoized app-server catalog fetch — only used when codex's on-disk
+// models_cache.json is absent (see the codexModels op).
+let codexModelsMemo: Promise<import("../codex/appServerClient").CodexModel[]> | null = null;
+
 /** Flatten a transcript entry's content into plain text (string or text blocks). */
 function transcriptEntryText(content: unknown): string {
   if (typeof content === "string") return content.trim();
@@ -197,12 +201,18 @@ export const machineOps: MachineOp[] = [
     scope: "machine",
     rpcName: "joy-codex-models",
     http: { method: "GET", path: "/codex/models" },
-    // The codex model catalog (model/list) via a short-lived app-server, for
-    // the app's codex model picker. Best-effort: returns [] if codex is absent.
+    // The codex model catalog for the app's picker. FAST PATH: codex's own
+    // on-disk cache ($CODEX_HOME/models_cache.json — codex refreshes it on
+    // every run), served instantly with no process spawn. Fallback (fresh
+    // machine where codex never ran): the old short-lived app-server fetch,
+    // memoized for the daemon's lifetime. Best-effort: [] if codex is absent.
     handler: async () => {
       try {
-        const { fetchCodexModels } = await import("../codex/appServerClient");
-        return { ok: true, models: await fetchCodexModels() };
+        const { loadCodexModelsCacheFile, fetchCodexModels } = await import("../codex/appServerClient");
+        const cached = loadCodexModelsCacheFile();
+        if (cached) return { ok: true, models: cached.filter((m) => !m.hidden) };
+        if (!codexModelsMemo) codexModelsMemo = fetchCodexModels().catch((e) => { codexModelsMemo = null; throw e; });
+        return { ok: true, models: await codexModelsMemo };
       } catch (e) {
         return { ok: false, models: [], error: String(e) };
       }

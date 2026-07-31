@@ -16,7 +16,7 @@
 
 import { spawn, type ChildProcess } from "child_process";
 import { join } from "path";
-import { rmSync } from "fs";
+import { rmSync, readFileSync } from "fs";
 import WebSocket from "ws";
 import { joyStateDir } from "../paths";
 import { resolveCodexExecutionPolicy, sandboxModeToPolicy } from "./executionPolicy";
@@ -64,6 +64,45 @@ export interface CodexModel {
   isDefault: boolean;
   supportedReasoningEfforts: string[];
   defaultReasoningEffort: string | null;
+}
+
+/** Read the model catalog from codex's OWN on-disk cache
+ *  (`$CODEX_HOME/models_cache.json`, refreshed by codex itself with an etag on
+ *  every run). Instant — no app-server spawn — and carries everything the
+ *  picker needs: slug, display name, default/supported reasoning levels,
+ *  visibility ('list'/'hide') and priority (1 = top = the catalog default).
+ *  Returns null when the file is missing/unreadable (fresh machine where codex
+ *  never ran) so the caller can fall back to fetchCodexModels(). */
+export function loadCodexModelsCacheFile(codexHome?: string): CodexModel[] | null {
+  try {
+    const home = codexHome ?? process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex");
+    const raw = JSON.parse(readFileSync(join(home, "models_cache.json"), "utf8")) as {
+      models?: Array<Record<string, unknown>>;
+    };
+    if (!Array.isArray(raw.models) || raw.models.length === 0) return null;
+    const sorted = [...raw.models]
+      .filter((m) => typeof m.slug === "string")
+      .sort((a, b) => (Number(a.priority) || 999) - (Number(b.priority) || 999));
+    let sawDefault = false;
+    const out: CodexModel[] = [];
+    for (const m of sorted) {
+      const hidden = m.visibility !== "list";
+      const isDefault = !hidden && !sawDefault;
+      if (isDefault) sawDefault = true;
+      out.push({
+        id: String(m.slug),
+        model: String(m.slug),
+        displayName: typeof m.display_name === "string" ? m.display_name : String(m.slug),
+        hidden,
+        isDefault,
+        supportedReasoningEfforts: Array.isArray(m.supported_reasoning_levels)
+          ? (m.supported_reasoning_levels as Array<Record<string, unknown>>).map((l) => String(l.effort)).filter(Boolean)
+          : [],
+        defaultReasoningEffort: typeof m.default_reasoning_level === "string" ? m.default_reasoning_level : null,
+      });
+    }
+    return out.length > 0 ? out : null;
+  } catch { return null; }
 }
 
 /** Fetch the codex model catalog via a short-lived app-server connection —
