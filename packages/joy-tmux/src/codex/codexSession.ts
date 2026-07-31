@@ -21,7 +21,7 @@ import { mkdirSync, chmodSync, rmSync, existsSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { tmux } from "../tmux/driver";
 import { joyStateDir } from "../paths";
-import { saveWindowRecord, loadWindowRecord } from "../domain/windowRecord";
+import { saveWindowRecord, loadWindowRecord, deleteWindowRecord } from "../domain/windowRecord";
 import {
   createRelaySession, encodeUserMessage, encodeTurnEnd,
   type RelaySession,
@@ -748,6 +748,9 @@ export class CodexSession implements AgentSession {
       this.#relay?.stop();
       clearCodexInbound(this.id); // a killed session will never deliver — drop the spool
       clearCheckpoint(this.id);
+      // Intentional kill → drop the record so record-based codex recovery
+      // can't resurrect this session on the next daemon boot.
+      deleteWindowRecord(this.id);
     }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
