@@ -11,25 +11,23 @@ import { StyleSheet } from 'react-native-unistyles';
 type TerminalKey = { label: string; script: string; literal?: boolean };
 
 const KEYS: TerminalKey[] = [
+    // Order per Faraz 2026-07-31: most-used first, exact requested sequence.
     { label: 'Enter', script: '<Enter>' },
     { label: 'Esc', script: '<Esc>' },
+    { label: '^U', script: '<C-u>' },
     { label: '^C', script: '<C-c>' },
-    { label: '⌫', script: '<BS>' },
-    { label: '←', script: '<Left>' },
-    { label: '→', script: '<Right>' },
-    { label: '↑', script: '<Up>' },
-    { label: '↓', script: '<Down>' },
-    // Word-wise motion (readline M-b/M-f, honored by claude's box + most TUIs).
-    { label: '←W', script: '<M-b>' },
-    { label: '→W', script: '<M-f>' },
+    { label: 'P↑', script: '<PgUp>' },
+    { label: 'P↓', script: '<PgDn>' },
     { label: 'Tab', script: '<Tab>' },
     { label: 'Home', script: '<Home>' },
     { label: 'End', script: '<End>' },
-    { label: '^U', script: '<C-u>' },
-    { label: '^D', script: '<C-d>' },
-    { label: 'PgUp', script: '<PgUp>' },
-    { label: 'PgDn', script: '<PgDn>' },
+    { label: '↑', script: '<Up>' },
+    { label: '↓', script: '<Down>' },
+    { label: '←', script: '<Left>' },
+    { label: '→', script: '<Right>' },
+    { label: '⌫', script: '<BS>' },
     { label: '⇧Tab', script: '<S-Tab>' },
+    { label: '^D', script: '<C-d>' },
 ];
 
 export const TerminalKeyBar = React.memo(({ onKey, disabled }: {
