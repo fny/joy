@@ -5,7 +5,7 @@
 // the debug page (SSE + bounded chat log).
 
 import { setTimeout as sleep } from "timers/promises";
-import { existsSync, mkdirSync, statSync } from "fs";
+import { existsSync, mkdirSync, statSync, readFileSync } from "fs";
 import { join, basename, resolve } from "path";
 import { homedir } from "os";
 import { run } from "../tmux/shell";
@@ -17,7 +17,7 @@ import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
-import { loadWindowRecord, saveWindowRecord } from "./windowRecord";
+import { loadWindowRecord, saveWindowRecord, listWindowRecords } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 
@@ -665,9 +665,12 @@ export class SessionRegistry {
     // Startup scan — spawn (runs before the control client is reliably attached; kept
     // synchronous so daemon boot doesn't depend on the connection coming up first).
     const result = tmux.runSync("list-windows", "-t", this.tmuxSession, "-F", "#{window_name}");
-    if (!result.ok) return;
+    // No tmux session at all → no windows to scan, but codex sessions can still
+    // be resurrected from their records below (their substance is the
+    // daemon-owned app-server + thread, not the window).
+    const windowNames = result.ok ? result.out.split("\n").map(l => l.trim()).filter(Boolean) : [];
 
-    for (const winName of result.out.split("\n").map(l => l.trim()).filter(Boolean)) {
+    for (const winName of windowNames) {
       if (!/^j-[0-9a-f]{8}$/.test(winName)) continue;
       const id = winName.slice(2);
       if (this.#sessions.has(id)) continue;
@@ -768,6 +771,56 @@ export class SessionRegistry {
       // so only the downtime delta reaches the app.
       this.#attachRelayAsync(session, isAlive ? () => session.beginWatching() : undefined);
       process.stderr.write(`[recover] ${id} cwd=${cwd} alive=${isAlive} transcript=${transcriptPath}\n`);
+    }
+
+    this.#resurrectCodexOrphans();
+  }
+
+  /** RECORD-based codex recovery (2026-07-31): a codex session whose tmux
+   *  window vanished (window churn, tmux death) but whose app-server is STILL
+   *  RUNNING was previously forgotten forever — the window scan above never
+   *  sees it, the card in the app goes dead (`session_not_found`) while the
+   *  live thread keeps running orphaned. A codex session's substance is the
+   *  daemon-owned app-server + thread; the window only hosts the attach TUI.
+   *  So: scan the persisted window records and resurrect any codex session
+   *  whose recorded app-server is VERIFIABLY alive (socket present + recorded
+   *  pid running `codex app-server` on that exact socket — never a recycled
+   *  pid), recreating its window. Intentional kills can't resurrect: end
+   *  ('killed') deletes the record. */
+  #resurrectCodexOrphans(): void {
+    for (const rec of listWindowRecords()) {
+      if (rec.agent !== "codex" || !rec.id || this.#sessions.has(rec.id)) continue;
+      const sock = rec.codexSocketPath;
+      const pid = rec.codexServerPid;
+      if (!sock || !pid || !existsSync(sock) || !existsSync(rec.launchCwd)) continue;
+      let cmdline = "";
+      try { cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8"); } catch { continue; }
+      if (!cmdline.includes("app-server") || !cmdline.includes(sock)) continue;
+
+      const winName = `j-${rec.id}`;
+      const tmuxWindow = `${this.tmuxSession}:${winName}`;
+      if (!tmux.runSync("has-session", "-t", this.tmuxSession).ok) {
+        tmux.runSync("new-session", "-d", "-s", this.tmuxSession, "-c", rec.launchCwd);
+      }
+      if (!tmux.runSync("new-window", "-t", this.tmuxSession, "-n", winName, "-c", rec.launchCwd).ok) continue;
+      const shell = process.env.SHELL || "/bin/bash";
+      tmux.runSync("send-keys", "-t", tmuxWindow, "-l", `exec ${shell} -l`);
+      tmux.runSync("send-keys", "-t", tmuxWindow, "Enter");
+
+      const s = rec.codexSettings ?? {};
+      const session = new CodexSession({
+        id: rec.id, tmuxWindow, cwd: rec.launchCwd,
+        model: s.model, effort: s.effort,
+        permissionMode: s.permissionMode ?? "default",
+        developerInstructions: s.developerInstructions,
+        status: "active", startedAt: Date.now(),
+        codexThreadId: rec.codexThreadId,
+      }, this.#sessionDeps());
+      this.#sessions.set(rec.id, session);
+      // beginWatching's orphan-rejoin path connects to the live socket and
+      // reconciles the thread; the attach TUI relaunches into the new window.
+      this.#attachRelayAsync(session, () => session.beginWatching());
+      process.stderr.write(`[recover] codex ${rec.id} resurrected from record (window was gone, app-server pid ${pid} alive) thread=${rec.codexThreadId}\n`);
     }
   }
 

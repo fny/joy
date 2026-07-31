@@ -9,7 +9,7 @@
 // wrong jsonl (BUG-6/13/15). This record is the authoritative binding, written
 // when the id/cwd are first learned and preferred during recover()/restart().
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, readdirSync } from "fs";
 import { join } from "path";
 import { defaultStateDir } from "./receipts";
 
@@ -52,6 +52,27 @@ export interface WindowRecord {
 function recordPath(id: string, baseDir = defaultStateDir()): string {
   if (!existsSync(baseDir)) mkdirSync(baseDir, { recursive: true });
   return join(baseDir, `window-${id}.json`);
+}
+
+/** Delete a session's record — call on intentional kill so record-based
+ *  recovery (codex) can't resurrect a session the user ended. */
+export function deleteWindowRecord(id: string, baseDir = defaultStateDir()): void {
+  try { rmSync(join(baseDir, `window-${id}.json`), { force: true }); } catch { /* best effort */ }
+}
+
+/** All persisted window records (recovery scan). */
+export function listWindowRecords(baseDir = defaultStateDir()): WindowRecord[] {
+  try {
+    if (!existsSync(baseDir)) return [];
+    const out: WindowRecord[] = [];
+    for (const f of readdirSync(baseDir)) {
+      const m = /^window-([0-9a-f]{8})\.json$/.exec(f);
+      if (!m) continue;
+      const rec = loadWindowRecord(m[1], baseDir);
+      if (rec) out.push(rec);
+    }
+    return out;
+  } catch { return []; }
 }
 
 export function loadWindowRecord(id: string, baseDir = defaultStateDir()): WindowRecord | null {
