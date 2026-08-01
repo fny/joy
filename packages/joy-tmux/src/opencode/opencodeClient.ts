@@ -13,11 +13,35 @@
 //    assistant message (the "Failed to drain Session" silent drop) — callers
 //    must deadline "prompt admitted but no assistant activity".
 
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, execFileSync, type ChildProcess } from "child_process";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
 import * as http from "http";
+
+// Provider API keys (e.g. FIREWORKS_API_KEY for the opencode config's
+// {env:...} interpolation) typically live in the user's shell rc, which a
+// daemon started by systemd never sources. Claude sessions get them for free
+// (tmux runs interactive shells); opencode servers are spawned directly, so
+// capture the user's interactive-shell environment once per daemon lifetime
+// and overlay it. Changing shell env requires a daemon restart to be seen.
+let userShellEnvCache: Record<string, string> | null = null;
+export function userShellEnv(): Record<string, string> {
+  if (userShellEnvCache) return userShellEnvCache;
+  try {
+    const shell = process.env.SHELL || "/bin/bash";
+    const out = execFileSync(shell, ["-ic", "env -0"], { timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] });
+    const env: Record<string, string> = {};
+    for (const entry of out.toString().split("\0")) {
+      const eq = entry.indexOf("=");
+      if (eq > 0) env[entry.slice(0, eq)] = entry.slice(eq + 1);
+    }
+    userShellEnvCache = env;
+  } catch {
+    userShellEnvCache = {}; // shell probe failed — daemon env only
+  }
+  return userShellEnvCache;
+}
 
 export interface OpencodeSpawnResult {
   proc: ChildProcess;
@@ -35,7 +59,7 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string }): Openc
   const proc = spawn(bin, ["serve", "--port", "0"], {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NPM_CONFIG_USERCONFIG: cleanNpmrc },
+    env: { ...userShellEnv(), ...process.env, NPM_CONFIG_USERCONFIG: cleanNpmrc },
   });
   const port = new Promise<number>((resolve, reject) => {
     let buf = "";
