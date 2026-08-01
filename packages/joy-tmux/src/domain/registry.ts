@@ -17,6 +17,7 @@ import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
+import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord, listWindowRecords } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
@@ -551,10 +552,13 @@ export class SessionRegistry {
       if (opts.createDir) mkdirSync(cwd, { recursive: true });
       else throw new DirectoryCreationApprovalRequired(cwd);
     }
+    // Model must be on the curated allowlist; an unknown request falls back to
+    // the default rather than sending an arbitrary id to the provider.
+    const requested = OPENCODE_MODELS.find((m) => m.id === opts.model) ?? defaultOpencodeModel();
     const session = new OpencodeSession({
       id, cwd,
-      model: opts.model ?? "accounts/fireworks/models/kimi-k3",
-      providerID: "fireworks-ai",
+      model: requested.id,
+      providerID: requested.providerID,
       status: "starting",
       startedAt: Date.now(),
     }, this.#sessionDeps());
