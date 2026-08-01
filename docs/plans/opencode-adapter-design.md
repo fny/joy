@@ -69,7 +69,20 @@ messages intact — resume is a GET, not a protocol dance.
 - e2e: opencode runs the agent-agnostic chat suite + its own `suite-opencode.md`
   (mirrors suite-codex: options, model identity, resume, approvals, interrupt).
 
-## Open questions (resolve during build)
+## Decisions (Faraz, 2026-08-01)
+
+1. **Per-session servers** — `opencode serve --port 0` per session (ephemeral
+   localhost port + pid recorded in the window record); codex-shaped lifecycle,
+   recovery via the existing verifiable-liveness resurrect. Revisit shared
+   server only if concurrent-session count hurts.
+2. **Whole-block text for v1** — emit on `text.ended`; delta streaming deferred
+   to a cross-agent wire feature.
+3. **Auth: env/pre-authed only for v1** — missing-auth errors surface as a
+   legible chat note; login-bar surfacing is a fast-follow if hit.
+4. **Approvals in v1** — verify permission/question schemas during build with a
+   live approval-proof round-trip.
+
+## Open questions (resolved above — original framing kept for context)
 
 1. **Server-per-session vs shared server.** Sessions carry `projectID`/
    `location`; one shared server could host many sessions/dirs (workspace API
