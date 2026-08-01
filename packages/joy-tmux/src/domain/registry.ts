@@ -561,6 +561,8 @@ export class SessionRegistry {
       providerID: requested.providerID,
       status: "starting",
       startedAt: Date.now(),
+      // Resume an existing server-side opencode session (restart path).
+      opencodeSessionId: opts.resume_id,
     }, this.#sessionDeps());
     this.#sessions.set(id, session);
     saveWindowRecord(id, { launchCwd: cwd, agent: "opencode" });
@@ -652,6 +654,22 @@ export class SessionRegistry {
     // Codex restart (review #5): restarting a codex session must NOT fall
     // through to the claude create path. Rebuild a codex session resuming its
     // thread. (A live `existing` codex session provides no claude id anyway.)
+    // Opencode restart: same shape as codex — never fall through to the claude
+    // path; resume the same server-side opencode session in a fresh server.
+    const isOpencode = (existing instanceof OpencodeSession) || rec?.agent === "opencode";
+    if (isOpencode) {
+      const ocSessionId = (existing instanceof OpencodeSession ? existing.opencodeSessionId : undefined) ?? rec?.opencodeSessionId;
+      const model = (existing instanceof OpencodeSession ? existing.model : undefined) ?? rec?.opencodeSettings?.model;
+      if (existing) existing.forceKill();
+      return this.create({
+        agent: "opencode",
+        id: existing ? undefined : opts.id,
+        cwd,
+        resume_id: ocSessionId,
+        model,
+      });
+    }
+
     const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
     if (isCodex) {
       // Resume the SAME thread. When a live session exists, `rec` is null, so
