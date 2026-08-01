@@ -219,6 +219,17 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "opencodeModels",
+    scope: "machine",
+    rpcName: "joy-opencode-models",
+    http: { method: "GET", path: "/opencode/models" },
+    // Static curated allowlist (v1) — no server spawn, instant.
+    handler: async () => {
+      const { OPENCODE_MODELS } = await import("../opencode/models");
+      return { ok: true, models: OPENCODE_MODELS };
+    },
+  },
+  {
     name: "refreshCommands",
     scope: "machine",
     rpcName: "joy-refresh-commands",
