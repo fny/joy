@@ -141,7 +141,10 @@ export class OpencodeSession implements AgentSession {
         this.#ocSessionId = s.id;
       }
       this.#norm = new OpencodeNormalizer(this.#ocSessionId);
-      client.onEvent((e) => { if (this.#norm) this.#applyEffects(this.#norm.handle(e)); });
+      client.onEvent((e) => {
+        this.touchTurnActivity();
+        if (this.#norm) this.#applyEffects(this.#norm.handle(e));
+      });
       client.subscribeEvents();
 
       if (this.model && this.#providerID) {
@@ -203,7 +206,6 @@ export class OpencodeSession implements AgentSession {
         // via the normalizer too, but the ack alone is safe to remove on
         // (admittedSeq is the server's own ordering receipt).
         if (r.messageID) this.#removeInbound(item.clientId);
-        this.#armWaitDeadline(r.messageID);
       } catch (e) {
         process.stderr.write(`[opencode ${this.id}] prompt failed: ${e}\n`);
         // leave sentUnknown: the deterministic id makes a retry idempotent.
@@ -217,21 +219,32 @@ export class OpencodeSession implements AgentSession {
     if (this.#inbound.length !== before) saveCodexInbound(this.id, this.#inbound);
   }
 
-  /** Turn-end detection + silent-drop guard: wait() resolves on idle → emit
-   *  turn-end; a timeout surfaces the failure instead of spinning forever. */
-  #armWaitDeadline(turnID: string): void {
-    const client = this.#client;
-    const sid = this.#ocSessionId;
-    if (!client || !sid) return;
-    void client.wait(sid, WAIT_TIMEOUT_MS)
-      .then(() => this.#endTurn(turnID, "completed"))
-      .catch(() => {
-        this.#endTurn(turnID, "failed");
-        this.#relay?.send(encodeUserMessage(`⚠ opencode turn did not complete within ${WAIT_TIMEOUT_MS / 60000} min`, Date.now()));
-      });
+  /** Silent-drop guard: /wait is unusable (permanent 503 on 1.18.10), so turn
+   *  end comes from step-finish events — but a turn that dies server-side with
+   *  NO events (the "Failed to drain Session" drop) would spin forever. This
+   *  inactivity deadline is re-armed on every session event and surfaces the
+   *  failure instead. */
+  #turnDeadline: ReturnType<typeof setTimeout> | null = null;
+  #armTurnDeadline(turnID: string): void {
+    this.#clearTurnDeadline();
+    this.#turnDeadline = setTimeout(() => {
+      this.#endTurn(turnID, "failed");
+      this.#relay?.send(encodeUserMessage(`⚠ opencode turn produced no activity for ${WAIT_TIMEOUT_MS / 60000} min — giving up`, Date.now()));
+    }, WAIT_TIMEOUT_MS);
+  }
+
+  #clearTurnDeadline(): void {
+    if (this.#turnDeadline) { clearTimeout(this.#turnDeadline); this.#turnDeadline = null; }
+  }
+
+  /** Any event for an active turn counts as activity — push the deadline out. */
+  touchTurnActivity(): void {
+    const turn = this.#norm?.currentTurn;
+    if (turn && this.#turnDeadline) this.#armTurnDeadline(turn);
   }
 
   #endTurn(turnID: string, status: "completed" | "failed" | "cancelled"): void {
+    this.#clearTurnDeadline();
     if (!this.#norm) return;
     const turn = this.#norm.currentTurn ?? turnID;
     if (!turn) return;
@@ -248,9 +261,14 @@ export class OpencodeSession implements AgentSession {
       switch (eff.kind) {
         case "wire": this.#relay?.send(eff.record, eff.localId); break;
         case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
-        case "confirmPrompt": this.#removeInbound(eff.messageID); break;
+        case "confirmPrompt": this.#removeInbound(eff.messageID); this.#armTurnDeadline(eff.messageID); break;
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
+        case "turnDone": this.#endTurn(this.#norm?.currentTurn ?? "", "completed"); break;
+        case "turnFailed":
+          this.#relay?.send(encodeUserMessage(`⚠ opencode turn failed: ${eff.message}`, Date.now()));
+          this.#endTurn(this.#norm?.currentTurn ?? "", "failed");
+          break;
       }
     }
   }

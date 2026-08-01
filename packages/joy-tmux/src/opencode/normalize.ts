@@ -31,7 +31,12 @@ export type OpencodeEffect =
   | { kind: "thinking"; value: boolean }
   | { kind: "confirmPrompt"; messageID: string }
   | { kind: "model"; code: string }
-  | { kind: "receipt"; uuid: string; turn: string };
+  | { kind: "receipt"; uuid: string; turn: string }
+  // Terminal step (finish !== 'tool-calls') / turn failure. /wait is 503
+  // "not available yet" permanently on 1.18.10, and no session.idle flows on
+  // /api/event — step finish reasons are the only live turn-end signal.
+  | { kind: "turnDone"; finish: string }
+  | { kind: "turnFailed"; message: string };
 
 const TOOL_NAME_PREFIX = "Opencode";
 
@@ -125,6 +130,21 @@ export class OpencodeNormalizer {
         if (!callID || !this.#turn) return [];
         return [this.#wire(encodeToolCallEnd(core, { turn: this.#turn }), `${core}:tool-end`)];
       }
+      case "session.next.step.ended": {
+        // One step = one LLM call; finish 'tool-calls' means the turn
+        // continues with another step. Anything else ('stop', 'length', …)
+        // ends the joy turn.
+        const finish = str(d.finish);
+        if (!this.#turn || finish === "tool-calls") return [];
+        return [{ kind: "turnDone", finish }];
+      }
+      case "session.next.step.failed":
+      case "session.error": {
+        if (!this.#turn) return [];
+        const err = d.error as Record<string, unknown> | undefined;
+        const message = str(err?.message) || str(d.message) || e.type;
+        return [{ kind: "turnFailed", message }];
+      }
       // Whole-block policy: deltas and reasoning are deliberately silent.
       case "session.next.text.started":
       case "session.next.text.delta":
@@ -134,7 +154,6 @@ export class OpencodeNormalizer {
       case "session.next.tool.input.started":
       case "session.next.tool.input.delta":
       case "session.next.tool.input.ended":
-      case "session.next.step.ended":
       case "session.next.prompted":
         return [];
       default:
