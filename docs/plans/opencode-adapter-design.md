@@ -166,3 +166,22 @@ auth.json). Results:
   "Failed to drain Session" WITHOUT landing an error on the assistant message
   (the silent-drop) — the adapter must treat "prompt admitted but no assistant
   message within a deadline" as a failure and surface it, not wait forever.
+
+## Turn-end detection (build finding, 2026-08-01)
+
+`POST /api/session/{id}/wait` is unusable on 1.18.10: it answers 503
+`"Session wait is not available yet"` permanently (not just right after a
+prompt), and NO `session.idle` event ever flows on `/api/event` or `/event`
+(verified live — a full turn ends at `session.next.step.ended` with nothing
+after it). The working signal is the step finish reason:
+
+- `session.next.step.ended` carries `data.finish`: `"tool-calls"` = the turn
+  continues with another LLM call; anything else (`"stop"`, `"length"`, …)
+  ends the joy turn (completed).
+- `session.next.step.failed` / `session.error` end the turn as failed, with
+  the provider error message surfaced to the user.
+- The silent-drop guard is an inactivity deadline (10 min) armed at
+  prompt-admission and re-armed by every session event.
+
+Also config gotcha: an `opencode.jsonc` next to `opencode.json` in
+`~/.config/opencode/` can shadow the real config — keep exactly one.
