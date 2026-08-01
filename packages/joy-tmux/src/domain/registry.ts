@@ -16,6 +16,7 @@ import { CommandRegistry } from "./commands.ts";
 import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
+import { OpencodeSession } from "../opencode/opencodeSession";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord, listWindowRecords } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
@@ -25,7 +26,7 @@ export interface CreateSessionOpts {
   cwd: string;
   /** Agent type. Absent/'claude' → the claude CLI path; 'codex' → the codex
    *  app-server adapter (CodexSession). */
-  agent?: "claude" | "codex";
+  agent?: "claude" | "codex" | "opencode";
   /** Reuse a specific joy session id (and thus the same relay tag/card) instead
    *  of minting a fresh one — used when restarting a daemon-forgotten session so
    *  it reattaches to its existing app card rather than spawning a duplicate. */
@@ -299,6 +300,9 @@ export class SessionRegistry {
     if (opts.agent === "codex") {
       return await this.#createCodexSession(opts, id, windowName, cwd);
     }
+    if (opts.agent === "opencode") {
+      return await this.#createOpencodeSession(opts, id, cwd);
+    }
 
     // Validate user-supplied fields to prevent shell injection via send-keys
     const SAFE_ID = /^[a-zA-Z0-9:._/-]{1,128}$/;
@@ -539,6 +543,36 @@ export class SessionRegistry {
   /** Codex session creation: window + shell + CodexSession (which owns the
    *  app-server) + relay. Directory existence is validated by the shared create()
    *  before this is reached; here we only build the window and the session. */
+  /** Opencode session creation: NO tmux window — the session is an app-server
+   *  (opencode serve) + relay only. v1 model policy: curated fireworks pair
+   *  (kimi-k3 default) — see docs/plans/opencode-adapter-design.md. */
+  async #createOpencodeSession(opts: CreateSessionOpts, id: string, cwd: string): Promise<AgentSession> {
+    if (!existsSync(cwd)) {
+      if (opts.createDir) mkdirSync(cwd, { recursive: true });
+      else throw new DirectoryCreationApprovalRequired(cwd);
+    }
+    const session = new OpencodeSession({
+      id, cwd,
+      model: opts.model ?? "accounts/fireworks/models/kimi-k3",
+      providerID: "fireworks-ai",
+      status: "starting",
+      startedAt: Date.now(),
+    }, this.#sessionDeps());
+    this.#sessions.set(id, session);
+    saveWindowRecord(id, { launchCwd: cwd, agent: "opencode" });
+    this.broadcast("session_update", session.toJSON());
+    if (this.relayClient) {
+      try {
+        const rs = await createRelaySession(this.relayClient, { tag: `joy-tmux-${id}`, cwd, id, flavor: "opencode" });
+        session.attachRelay(rs);
+      } catch (e) {
+        process.stderr.write(`[relay] failed to create opencode session for ${id}: ${e}\n`);
+      }
+    }
+    session.beginWatching();
+    return session;
+  }
+
   async #createCodexSession(opts: CreateSessionOpts, id: string, windowName: string, cwd: string): Promise<AgentSession> {
     if (!existsSync(cwd)) {
       if (opts.createDir) mkdirSync(cwd, { recursive: true });
@@ -806,6 +840,25 @@ export class SessionRegistry {
    *  pid), recreating its window. Intentional kills can't resurrect: end
    *  ('killed') deletes the record. */
   #resurrectCodexOrphans(): void {
+    // Opencode recovery: window-less by design, so records are the ONLY
+    // discovery path. opencode persists sessions server-side per project dir,
+    // so recovery is simply: fresh server in the cwd + resume the stored
+    // session id (reaping any recorded live server pid on takeover).
+    for (const rec of listWindowRecords()) {
+      if (rec.agent !== "opencode" || !rec.id || this.#sessions.has(rec.id)) continue;
+      if (!existsSync(rec.launchCwd)) continue;
+      const session = new OpencodeSession({
+        id: rec.id, cwd: rec.launchCwd,
+        model: rec.opencodeSettings?.model,
+        providerID: rec.opencodeSettings?.providerID,
+        status: "active", startedAt: Date.now(),
+        opencodeSessionId: rec.opencodeSessionId,
+        opencodeServerPid: rec.opencodeServerPid,
+      }, this.#sessionDeps());
+      this.#sessions.set(rec.id, session);
+      this.#attachRelayAsync(session, () => session.beginWatching());
+      process.stderr.write(`[recover] opencode ${rec.id} respawn+resume session=${rec.opencodeSessionId}\n`);
+    }
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "codex" || !rec.id || this.#sessions.has(rec.id)) continue;
       const sock = rec.codexSocketPath;
