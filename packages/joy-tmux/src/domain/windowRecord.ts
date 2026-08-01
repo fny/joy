@@ -36,7 +36,7 @@ export interface WindowRecord {
   pendingAttachments?: { ref: string; name?: string }[];
   /** Agent type — the discriminator recovery uses to reconstruct the right
    *  session class (claude Session vs CodexSession). Absent = claude (legacy). */
-  agent?: "claude" | "codex";
+  agent?: "claude" | "codex" | "opencode";
   /** Codex app-server thread id, for thread/resume on recovery. */
   codexThreadId?: string;
   /** Codex app-server unix socket path (per session). */
@@ -46,6 +46,11 @@ export interface WindowRecord {
   /** Codex session settings — restored on recovery so a resumed session keeps
    *  its model/effort/permission rather than resetting to defaults. */
   codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> };
+  /** opencode: server-side session id (persists across server restarts). */
+  opencodeSessionId?: string;
+  /** opencode: last spawned server pid (reaped on takeover). */
+  opencodeServerPid?: number;
+  opencodeSettings?: { model?: string; providerID?: string };
   updatedAt: number;
 }
 
@@ -91,7 +96,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> } },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeSettings?: { model?: string; providerID?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -108,6 +113,9 @@ export function saveWindowRecord(
       codexSocketPath: patch.codexSocketPath ?? prev?.codexSocketPath,
       codexServerPid: patch.codexServerPid ?? prev?.codexServerPid,
       codexSettings: patch.codexSettings ?? prev?.codexSettings,
+      opencodeSessionId: patch.opencodeSessionId ?? prev?.opencodeSessionId,
+      opencodeServerPid: patch.opencodeServerPid ?? prev?.opencodeServerPid,
+      opencodeSettings: patch.opencodeSettings ?? prev?.opencodeSettings,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet
