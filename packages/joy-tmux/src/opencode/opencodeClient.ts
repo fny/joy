@@ -56,9 +56,14 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string }): Openc
   // poisoned ~/.npmrc; created once in the joy state dir.
   const cleanNpmrc = join(joyStateDir(), "opencode-clean-npmrc");
   try { writeFileSync(cleanNpmrc, "", { flag: "wx" }); } catch { /* exists */ }
+  // detached: the `opencode` bin is a launcher that spawns the real
+  // `opencode.exe` server as a child — killing just the launcher orphans the
+  // server (observed live 2026-08-01). Detached makes the launcher a process-
+  // group leader so killOpencodeServer can take the whole group down.
   const proc = spawn(bin, ["serve", "--port", "0"], {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
     env: { ...userShellEnv(), ...process.env, NPM_CONFIG_USERCONFIG: cleanNpmrc },
   });
   const port = new Promise<number>((resolve, reject) => {
@@ -217,6 +222,14 @@ export class OpencodeClient {
     this.#closed = true;
     try { this.#sse?.destroy(); } catch { /* ignore */ }
   }
+}
+
+/** Kill an opencode server (launcher + real opencode.exe child): group kill
+ *  first (spawned detached → launcher is group leader), plain kill fallback
+ *  for pre-detached records. */
+export function killOpencodeServerPid(pid: number): void {
+  try { process.kill(-pid, "SIGTERM"); return; } catch { /* not a group leader */ }
+  try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
 }
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
