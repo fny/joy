@@ -107,7 +107,11 @@ export class OpencodeClient {
           buf = buf.slice(idx + 1);
           if (line.startsWith("data:")) line = line.slice(5).trim();
           if (!line.startsWith("{")) continue;
-          try { this.#onEvent(JSON.parse(line) as OpencodeEvent); } catch { /* partial/garbage line */ }
+          try {
+            const ev = JSON.parse(line) as OpencodeEvent;
+            (globalThis as { __ocTap?: (e: OpencodeEvent) => void }).__ocTap?.(ev);
+            this.#onEvent(ev);
+          } catch { /* partial/garbage line */ }
         }
       });
       res.on("end", () => this.#resubscribe());
@@ -150,9 +154,23 @@ export class OpencodeClient {
     return { messageID: r?.data?.id ?? "", admittedSeq: r?.data?.admittedSeq ?? -1 };
   }
 
-  /** Blocks until the session goes idle (turn finished). */
+  /** Blocks until the session goes idle (turn finished). Right after a prompt
+   *  is admitted the wait service can answer 503 "not available yet" — that is
+   *  NOT turn completion/failure, so retry it inside the deadline. */
   async wait(sessionID: string, timeoutMs = 600_000): Promise<void> {
-    await this.request("POST", `/api/session/${sessionID}/wait`, {}, timeoutMs);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        await this.request("POST", `/api/session/${sessionID}/wait`, {}, Math.max(1_000, deadline - Date.now()));
+        return;
+      } catch (e) {
+        if (String(e).includes("503") && Date.now() + 2_000 < deadline) {
+          await new Promise((r) => setTimeout(r, 1_500));
+          continue;
+        }
+        throw e;
+      }
+    }
   }
 
   async interrupt(sessionID: string): Promise<void> {
