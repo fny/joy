@@ -1,0 +1,152 @@
+// Normalize opencode SSE events into joy wire records (same claude-shaped
+// sequence the other adapters emit: turn-start / tool-call-start /
+// tool-call-end / text / turn-end). Design: docs/plans/opencode-adapter-design.md.
+//
+// Identity model (verified live, 2026-08-01): opencode part ids are STABLE and
+// identical between live events and GET /message history (textID "text-0",
+// callID "bash_0", assistantMessageID msg_…), so deterministic localIds need no
+// ordinal machinery — `oc:<session>:<assistantMsg>:<partId>` is the same on
+// both paths and the relay append layer dedupes replays.
+//
+// Turn model: a JOY turn = one admitted user prompt → session idle. opencode
+// "steps" are individual LLM calls (a tool turn has several); we do NOT map
+// steps to turns. turn id = the admitted user messageID (stable, ours when we
+// supply it). turn-end is emitted by the SESSION (wait() resolution / idle),
+// not the normalizer — the event stream has no reliable single terminal event.
+//
+// Whole-block text policy (design decision #2): emit on text.ended, ignore
+// deltas. reasoning.* parts map to nothing (design: never chat text).
+
+import {
+  encodeTurnStart,
+  encodeTextEvent,
+  encodeToolCallStart,
+  encodeToolCallEnd,
+  type WireRecord,
+} from "../relay/relay";
+import type { OpencodeEvent } from "./opencodeClient";
+
+export type OpencodeEffect =
+  | { kind: "wire"; record: WireRecord; localId: string }
+  | { kind: "thinking"; value: boolean }
+  | { kind: "confirmPrompt"; messageID: string }
+  | { kind: "model"; code: string }
+  | { kind: "receipt"; uuid: string; turn: string };
+
+const TOOL_NAME_PREFIX = "Opencode";
+
+function str(v: unknown): string { return typeof v === "string" ? v : ""; }
+
+export class OpencodeNormalizer {
+  #sessionID: string;
+  // Current joy turn = the last admitted user messageID.
+  #turn: string | null = null;
+  // Open tool calls: callID → localId core, so turn-end can close leftovers.
+  #openTools = new Map<string, string>();
+  // durable.seq dedupe: events at or below this were already handled (SSE
+  // reconnects replay; history reconcile also feeds synthetic events).
+  #lastSeq = 0;
+
+  constructor(sessionID: string) { this.#sessionID = sessionID; }
+
+  get currentTurn(): string | null { return this.#turn; }
+  /** Start a turn explicitly (reconcile replay / recovered state). */
+  setTurn(t: string | null): void { this.#turn = t; }
+
+  #lid(suffix: string): string { return `oc:${this.#sessionID}:${suffix}`; }
+  #wire(record: WireRecord, suffix: string): OpencodeEffect {
+    return { kind: "wire", record, localId: this.#lid(suffix) };
+  }
+
+  /** Close any tools still open (turn end / interrupt) — cards must not spin. */
+  closeOpenTools(): OpencodeEffect[] {
+    const out: OpencodeEffect[] = [];
+    for (const [, core] of this.#openTools) {
+      out.push(this.#wire(encodeToolCallEnd(core, { turn: this.#turn ?? "" }), `${core}:tool-end`));
+    }
+    this.#openTools.clear();
+    return out;
+  }
+
+  handle(e: OpencodeEvent): OpencodeEffect[] {
+    const d = e.data ?? {};
+    // Only this session's events (the global stream carries every session).
+    const sid = str(d.sessionID) || str(e.durable?.aggregateID);
+    if (sid && sid !== this.#sessionID) return [];
+    // durable.seq dedupe (monotonic per session). Events without seq pass.
+    const seq = e.durable?.seq;
+    if (typeof seq === "number") {
+      if (seq <= this.#lastSeq) return [];
+      this.#lastSeq = seq;
+    }
+
+    switch (e.type) {
+      case "session.next.prompt.admitted": {
+        // Our own prompt entering the turn pipeline: confirms delivery (spool
+        // removal) and opens the joy turn.
+        const messageID = str(d.messageID);
+        if (!messageID) return [];
+        this.#turn = messageID;
+        return [
+          { kind: "confirmPrompt", messageID },
+          { kind: "thinking", value: true },
+          this.#wire(encodeTurnStart({ turn: messageID }), `${messageID}:turn-start`),
+        ];
+      }
+      case "session.next.step.started": {
+        // A step is one LLM call, not a joy turn — but it carries the
+        // authoritative model, worth mirroring.
+        const model = (d.model as Record<string, unknown> | undefined);
+        const code = model ? str(model.id) : "";
+        return code ? [{ kind: "model", code }] : [];
+      }
+      case "session.next.text.ended": {
+        const text = str(d.text).trim();
+        if (!text || !this.#turn) return text ? [this.#orphanText(text, d)] : [];
+        const core = `${str(d.assistantMessageID)}:${str(d.textID)}`;
+        return [this.#wire(encodeTextEvent(text, { turn: this.#turn }), `${core}:text`)];
+      }
+      case "session.next.tool.called": {
+        const callID = str(d.callID);
+        if (!callID || !this.#turn) return [];
+        const core = `${str(d.assistantMessageID)}:${callID}`;
+        this.#openTools.set(callID, core);
+        const name = TOOL_NAME_PREFIX + (str(d.tool) || "Tool").replace(/^[a-z]/, (c) => c.toUpperCase());
+        return [this.#wire(
+          encodeToolCallStart({ call: core, name, input: d.input ?? null, turn: this.#turn }),
+          `${core}:tool-start`,
+        )];
+      }
+      case "session.next.tool.success":
+      case "session.next.tool.error": {
+        const callID = str(d.callID);
+        const core = this.#openTools.get(callID) ?? `${str(d.assistantMessageID)}:${callID}`;
+        this.#openTools.delete(callID);
+        if (!callID || !this.#turn) return [];
+        return [this.#wire(encodeToolCallEnd(core, { turn: this.#turn }), `${core}:tool-end`)];
+      }
+      // Whole-block policy: deltas and reasoning are deliberately silent.
+      case "session.next.text.started":
+      case "session.next.text.delta":
+      case "session.next.reasoning.started":
+      case "session.next.reasoning.delta":
+      case "session.next.reasoning.ended":
+      case "session.next.tool.input.started":
+      case "session.next.tool.input.delta":
+      case "session.next.tool.input.ended":
+      case "session.next.step.ended":
+      case "session.next.prompted":
+        return [];
+      default:
+        return [];
+    }
+  }
+
+  /** Text arriving with no open turn (e.g. a TUI-driven or queued turn we
+   *  didn't admit) — still surface it under a deterministic synthetic turn so
+   *  nothing is silently lost. */
+  #orphanText(text: string, d: Record<string, unknown>): OpencodeEffect {
+    const amid = str(d.assistantMessageID) || "orphan";
+    return this.#wire(encodeTextEvent(text, { turn: amid }), `${amid}:${str(d.textID)}:text`);
+  }
+}
