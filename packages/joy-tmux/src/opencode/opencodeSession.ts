@@ -28,7 +28,7 @@ import {
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
 import type { DeliverySource } from "../domain/receipts";
 import type { AgentSession } from "../domain/agentSession";
-import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid } from "./opencodeClient";
+import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid, killOpencodeServerPid } from "./opencodeClient";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
 import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "../codex/codexInboundStore";
 
@@ -123,7 +123,7 @@ export class OpencodeSession implements AgentSession {
       // spawn fresh (sessions persist server-side; a fresh server is simpler
       // and safer than rejoining an unknown-state one).
       if (this.#reapPid && isOpencodeServerPid(this.#reapPid)) {
-        try { process.kill(this.#reapPid); } catch { /* gone */ }
+        killOpencodeServerPid(this.#reapPid);
       }
       const { proc, port } = spawnOpencodeServer(this.cwd);
       this.#proc = proc;
@@ -373,7 +373,7 @@ export class OpencodeSession implements AgentSession {
     const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
-    try { this.#proc?.kill(); } catch { /* ignore */ }
+    if (this.#proc?.pid) killOpencodeServerPid(this.#proc.pid);
     this.#proc = null;
     if (this.#activeTurn) this.#endTurn(this.#activeTurn, "cancelled");
     this.#relay?.setThinking(false);
