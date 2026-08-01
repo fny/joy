@@ -101,3 +101,26 @@ messages intact — resume is a GET, not a protocol dance.
 Comparable to codex M1 but smaller (no FIFO, no ordinal identity, no
 resume-reconcile checkpoint dance): transport+normalizer+session ~2 days,
 registry/app wiring ~1, approvals+e2e ~1.
+
+## Provider setup findings (fireworks, 2026-08-01)
+
+Verified working: `gpt-oss-120b` via fireworks-ai through `opencode serve`
+(2.4s gen). Setup = `fireconnect login` + `fireconnect opencode on`, THEN
+remove the `headers` block from the provider options in
+`~/.config/opencode/opencode.json` — opencode leaks `options.headers` into the
+request body and Fireworks 400s on it (report upstream; `apiKey` alone works).
+Operational gotchas the adapter must design around:
+- opencode's server process is named `opencode.exe` — match THAT for
+  liveness/kill, never the launch command string.
+- Runtime provider-SDK installs go through npm config; a broken ~/.npmrc
+  (dead token / ignore-scripts) breaks providers invisibly — the adapter
+  should spawn servers with a clean NPM_CONFIG_USERCONFIG and surface
+  provider errors from the message `error` field (they are per-message and
+  legible: 401/400 with upstream bodies).
+- fireconnect alias models (minimax-latest etc.) route to a gateway that
+  401s ("missing authorization") — use full `accounts/fireworks/models/...`
+  ids.
+- gpt-oss-120b leaks raw reasoning into text content via this path; the
+  normalizer should check for separate reasoning parts vs inline.
+- e2e default model: gpt-oss-120b (fireworks) now viable; free
+  `ling-3.0-flash-free` remains the zero-key CI fallback.
