@@ -124,3 +124,28 @@ Operational gotchas the adapter must design around:
   normalizer should check for separate reasoning parts vs inline.
 - e2e default model: gpt-oss-120b (fireworks) now viable; free
   `ling-3.0-flash-free` remains the zero-key CI fallback.
+
+## Model policy (Faraz, 2026-08-01)
+
+**v1 supports exactly two models, both verified through `opencode serve` on
+fireworks (chat + real tool execution + clean reasoning/text part separation):**
+- `accounts/fireworks/models/kimi-k3` — default (correct self-ID, ~1.5s)
+- `accounts/fireworks/models/glm-5p2`
+
+The joy picker offers ONLY these (codex-style cycle chip works again — no
+searchable-picker UI needed in v1). The daemon's joy-agent-models op for
+opencode returns this curated list, not opencode's full /api/model firehose
+(241 entries on a fully-keyed machine). The provider-blind architecture stays:
+the curation is a joy-side allowlist over whatever opencode serves, not a
+Fireworks dependency — widening later is config, not code.
+
+Verified matrix + test-design consequences:
+- kimi-k3 ✅ / glm-5p2 ✅ / deepseek-v4-pro ✅ (not in v1 set) /
+  gpt-oss-120b ✅ but leaks reasoning into text / fireconnect alias ids ❌
+  (gateway 401 — always use full accounts/fireworks/models/... ids).
+- glm-5p2 and deepseek self-report as "Claude by Anthropic" — e2e identity
+  assertions MUST use the assistant message's authoritative `model` metadata
+  field, never the model's self-description.
+- Reasoning arrives as a separate 'reasoning' part (kimi/glm/deepseek) — the
+  normalizer maps it to thinking presentation (or drops it), never chat text.
+- e2e default model: kimi-k3.
