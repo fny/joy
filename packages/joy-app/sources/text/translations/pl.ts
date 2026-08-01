@@ -550,6 +550,7 @@ export const pl: TranslationStructure = {
             codex: 'Codex',
             gemini: 'Gemini',
             openclaw: 'OpenClaw',
+            opencode: 'OpenCode',
         },
         model: {
             title: 'MODEL',
