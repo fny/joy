@@ -511,7 +511,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // catalog — resolving currentModelCode against JOY_CLAUDE_MODELS never
         // matched, so codex sessions showed NO model label (bug 2026-07-31).
         // Synthesize a one-entry catalog from the daemon-published code.
-        if (flavor === 'codex') {
+        if (flavor === 'codex' || flavor === 'opencode') {
             const code = session.metadata?.currentModelCode;
             return code ? [{ key: code, name: code, description: null }] : [];
         }
@@ -524,7 +524,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // auto. CODEX joy sessions use codex's OWN modes — the claude modes
         // (esp. `auto`) silently escalate to full access on codex (finding #1).
         const modes = isJoyTmux
-            ? (flavor === 'codex' ? JOY_CODEX_PERMISSION_MODES : JOY_CLAUDE_PERMISSION_MODES)
+            ? (flavor === 'codex' ? JOY_CODEX_PERMISSION_MODES
+                : flavor === 'opencode' ? [] // v1: opencode has no permission surface
+                : JOY_CLAUDE_PERMISSION_MODES)
             : getAvailablePermissionModes(flavor, session.metadata, t);
         return modes;
     }, [isJoyTmux, flavor, session.metadata]);

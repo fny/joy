@@ -123,7 +123,7 @@ function NewJoyTmuxSessionScreen() {
     // repo's machine + path when this page is the default New session).
     const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string }>();
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
-    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex'>('claude');
+    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode'>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
@@ -266,6 +266,26 @@ function NewJoyTmuxSessionScreen() {
             .catch(() => { /* codex not present / offline — picker stays empty */ });
         return () => { cancelled = true; };
     }, [selectedAgent, selectedMachineId]);
+    // Opencode model catalog: static curated allowlist from the daemon
+    // (joy-opencode-models — kimi-k3 default + glm-5p2 in v1).
+    const [ocModels, setOcModels] = React.useState<{ id: string; providerID: string; displayName: string; isDefault?: boolean }[]>([]);
+    const [ocModelIndex, setOcModelIndex] = React.useState(0);
+    React.useEffect(() => {
+        if (selectedAgent !== 'opencode' || !selectedMachineId) return;
+        let cancelled = false;
+        apiSocket.machineRPC<{ ok?: boolean; models?: typeof ocModels }, {}>(selectedMachineId, 'joy-opencode-models', {})
+            .then((res) => {
+                if (cancelled || !res.models?.length) return;
+                setOcModels(res.models);
+                const def = res.models.findIndex((m) => m.isDefault);
+                setOcModelIndex(def >= 0 ? def : 0);
+            })
+            .catch(() => { /* opencode op absent (old daemon) — chip stays empty */ });
+        return () => { cancelled = true; };
+    }, [selectedAgent, selectedMachineId]);
+    const ocModel = ocModels[ocModelIndex];
+    const cycleOcModel = React.useCallback(() => { setOcModelIndex(i => ocModels.length ? (i + 1) % ocModels.length : 0); }, [ocModels.length]);
+
     // Switching agents swaps the permission-mode list (claude vs codex) — reset
     // the index so a stale claude index can't select the wrong codex mode.
     React.useEffect(() => { setModeIndex(0); }, [selectedAgent]);
@@ -363,12 +383,12 @@ function NewJoyTmuxSessionScreen() {
                 extraArgs?: string;
             }>(selectedMachineId, 'joy-create-session', {
                 cwd,
-                agent: selectedAgent === 'codex' ? 'codex' : undefined,
+                agent: selectedAgent !== 'claude' ? selectedAgent : undefined,
                 gitUrl: gitClone?.url,
                 // Codex sends its own model/effort from the model/list catalog;
                 // claude sends its keys.
-                model: selectedAgent === 'codex' ? codexModel?.model : currentModel?.key,
-                effort: selectedAgent === 'codex' ? codexEffort : (currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined),
+                model: selectedAgent === 'codex' ? codexModel?.model : selectedAgent === 'opencode' ? ocModel?.id : currentModel?.key,
+                effort: selectedAgent === 'codex' ? codexEffort : selectedAgent === 'claude' && currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
                 // resume a specific conversation by id; it takes precedence over
                 // `continue` (most-recent), so don't send both.
                 resume_id: resumeId.trim() || undefined,
@@ -378,15 +398,15 @@ function NewJoyTmuxSessionScreen() {
                 // Claude-only params are never sent for codex (their UI rows are
                 // hidden there too): continue/fork/fallback/chrome/detached/
                 // extraArgs/resume_limit_mb are claude CLI concepts.
-                resume_limit_mb: selectedAgent !== 'codex' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
-                continue: (continueLast && !resumeId.trim()) || undefined,
+                resume_limit_mb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
+                continue: (selectedAgent !== 'opencode' && continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
-                permissionMode: currentMode.key,
-                fallbackModel: selectedAgent !== 'codex' ? (currentFallback.key ?? undefined) : undefined,
-                forkSession: (selectedAgent !== 'codex' && (continueLast || resumeId.trim()) && forkSession) || undefined,
-                chrome: (selectedAgent !== 'codex' && chrome) || undefined,
-                detached: (selectedAgent !== 'codex' && detached) || undefined,
-                extraArgs: extraArgs.trim() || undefined,
+                permissionMode: selectedAgent !== 'opencode' ? currentMode.key : undefined,
+                fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
+                forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
+                chrome: (selectedAgent === 'claude' && chrome) || undefined,
+                detached: (selectedAgent === 'claude' && detached) || undefined,
+                extraArgs: selectedAgent !== 'opencode' ? (extraArgs.trim() || undefined) : undefined,
             }),
             new Promise<never>((_, reject) => setTimeout(
                 () => reject(new Error(gitClone
@@ -538,8 +558,8 @@ function NewJoyTmuxSessionScreen() {
                             {/* Agent badge (tap to toggle claude ↔ codex) + model + effort */}
                             <View style={styles.configRow}>
                                 <Ionicons name="terminal-outline" size={15} color={theme.colors.textSecondary} />
-                                <Pressable onPress={() => setSelectedAgent(a => a === 'codex' ? 'claude' : 'codex')} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : 'claude code'}</Text>
+                                <Pressable onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : selectedAgent === 'opencode' ? 'opencode' : 'claude code'}</Text>
                                 </Pressable>
                                 {selectedAgent === 'codex' && codexModel && (
                                     <>
@@ -557,7 +577,15 @@ function NewJoyTmuxSessionScreen() {
                                         )}
                                     </>
                                 )}
-                                {selectedAgent !== 'codex' && modelModes.length > 1 && (
+                                {selectedAgent === 'opencode' && ocModel && (
+                                    <>
+                                        <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
+                                        <Pressable onPress={cycleOcModel} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{ocModel.displayName}</Text>
+                                        </Pressable>
+                                    </>
+                                )}
+                                {selectedAgent === 'claude' && modelModes.length > 1 && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
                                         <Pressable onPress={cycleModel} style={(p) => [p.pressed && styles.configRowPressed]}>
@@ -568,7 +596,7 @@ function NewJoyTmuxSessionScreen() {
                                     </>
                                 )}
                                 {/* Claude effort — codex has its own effort item above. */}
-                                {selectedAgent !== 'codex' && effortLevels.length > 0 && currentEffort && (
+                                {selectedAgent === 'claude' && effortLevels.length > 0 && currentEffort && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
                                         <Pressable onPress={cycleEffort} style={(p) => [p.pressed && styles.configRowPressed]}>
@@ -581,7 +609,10 @@ function NewJoyTmuxSessionScreen() {
                             </View>
 
                             {/* Permission mode — tap to cycle through the same order as
-                                claude's Shift+Tab. yolo (bypassPermissions) is the default. */}
+                                claude's Shift+Tab. yolo (bypassPermissions) is the default.
+                                Hidden for opencode: v1 has no permission surface (approvals
+                                land as chat prompts). */}
+                            {selectedAgent !== 'opencode' && (
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={cycleMode}
@@ -598,9 +629,10 @@ function NewJoyTmuxSessionScreen() {
                                     {isYolo ? 'permission prompts are skipped' : 'permission mode'}
                                 </Text>
                             </Pressable>
+                            )}
 
                             {/* Claude-only: fallback model (--fallback-model). */}
-                            {selectedAgent !== 'codex' && (<>
+                            {selectedAgent === 'claude' && (<>
                             {/* Fallback model — tap to cycle. */}
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
@@ -622,7 +654,8 @@ function NewJoyTmuxSessionScreen() {
 
                             {/* Continue — resume the most recent conversation in this
                                 cwd (claude: --continue; codex: newest thread whose
-                                rollout ran here). */}
+                                rollout ran here). Not supported for opencode. */}
+                            {selectedAgent !== 'opencode' && (
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={() => setContinueLast(v => !v)}
@@ -640,10 +673,11 @@ function NewJoyTmuxSessionScreen() {
                                     {continueLast ? (selectedAgent === 'codex' ? 'resume last codex conversation' : 'resume last claude conversation') : 'start fresh'}
                                 </Text>
                             </Pressable>
+                            )}
 
                             {/* Fork — claude-only; only meaningful with continue (claude
                                 rejects --fork-session on a fresh session). */}
-                            {selectedAgent !== 'codex' && (<>
+                            {selectedAgent === 'claude' && (<>
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed, !continueLast && { opacity: 0.4 }]}
                                 onPress={() => setForkSession(v => !v)}
@@ -681,7 +715,7 @@ function NewJoyTmuxSessionScreen() {
                             {/* History to backfill (MB). Relevant when resuming by
                                 id OR continuing the last conversation. 0 = full.
                                 Claude-only: codex resume replays via thread/read. */}
-                            {selectedAgent !== 'codex' && (resumeId.trim() || continueLast) ? (
+                            {selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (
                                 <View style={styles.configRow}>
                                     <Ionicons name="time-outline" size={15} color={theme.colors.textSecondary} />
                                     <TextInput
@@ -700,7 +734,7 @@ function NewJoyTmuxSessionScreen() {
 
                             {/* Claude-only rows: chrome integration, detached (spawn
                                 without launching claude). */}
-                            {selectedAgent !== 'codex' && (<>
+                            {selectedAgent === 'claude' && (<>
                             {/* Chrome integration */}
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
@@ -736,7 +770,9 @@ function NewJoyTmuxSessionScreen() {
                             </>)}
 
                             {/* Extra arguments — claude: CLI args appended verbatim;
-                                codex: -c config overrides (key=value …). */}
+                                codex: -c config overrides (key=value …). opencode has
+                                no extra-args surface. */}
+                            {selectedAgent !== 'opencode' && (
                             <View style={styles.configRow}>
                                 <Ionicons name="options-outline" size={15} color={theme.colors.textSecondary} />
                                 <TextInput
@@ -749,6 +785,7 @@ function NewJoyTmuxSessionScreen() {
                                     autoCorrect={false}
                                 />
                             </View>
+                            )}
                         </View>
                     </View>
 

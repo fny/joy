@@ -535,6 +535,7 @@ export const ja: TranslationStructure = {
             codex: 'Codex',
             gemini: 'Gemini',
             openclaw: 'OpenClaw',
+            opencode: 'OpenCode',
         },
         model: {
             title: 'モデル',
