@@ -149,3 +149,20 @@ Verified matrix + test-design consequences:
 - Reasoning arrives as a separate 'reasoning' part (kimi/glm/deepseek) — the
   normalizer maps it to thinking presentation (or drops it), never chat text.
 - e2e default model: kimi-k3.
+
+## ChatGPT-subscription auth (tested 2026-08-01, opencode 1.18.10)
+
+Connected via `opencode auth login` → OpenAI → "ChatGPT Pro/Plus (headless)"
+(device-code flow — works fine on a headless box; credential = type:oauth in
+auth.json). Results:
+- `opencode run -m openai/gpt-5.6-sol` keyless: ✅ works on the subscription.
+- `opencode serve`: ❌ 401 "Missing bearer" — server mode does not attach the
+  oauth credential (latest version; file upstream). Until fixed, subscription
+  OpenAI is unusable through the adapter (which is serve-based). Not blocking:
+  v1 models are fireworks kimi-k3/glm-5p2, both serve-verified.
+- Codex auth does NOT carry over — opencode never reads ~/.codex/auth.json;
+  stores are siloed per tool.
+- Second upstream bug seen here: turn failures in serve can be logged as
+  "Failed to drain Session" WITHOUT landing an error on the assistant message
+  (the silent-drop) — the adapter must treat "prompt admitted but no assistant
+  message within a deadline" as a failure and surface it, not wait forever.
