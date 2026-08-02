@@ -399,7 +399,7 @@ function NewJoyTmuxSessionScreen() {
                 // hidden there too): continue/fork/fallback/chrome/detached/
                 // extraArgs/resume_limit_mb are claude CLI concepts.
                 resume_limit_mb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
-                continue: (selectedAgent !== 'opencode' && continueLast && !resumeId.trim()) || undefined,
+                continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: selectedAgent !== 'opencode' ? currentMode.key : undefined,
                 fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
@@ -654,8 +654,8 @@ function NewJoyTmuxSessionScreen() {
 
                             {/* Continue — resume the most recent conversation in this
                                 cwd (claude: --continue; codex: newest thread whose
-                                rollout ran here). Not supported for opencode. */}
-                            {selectedAgent !== 'opencode' && (
+                                rollout ran here; opencode: newest session in this
+                                directory). */}
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={() => setContinueLast(v => !v)}
@@ -670,10 +670,9 @@ function NewJoyTmuxSessionScreen() {
                                 />
                                 <Text style={styles.configLabel} numberOfLines={1}>continue</Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
-                                    {continueLast ? (selectedAgent === 'codex' ? 'resume last codex conversation' : 'resume last claude conversation') : 'start fresh'}
+                                    {continueLast ? (selectedAgent === 'claude' ? 'resume last claude conversation' : `resume last ${selectedAgent} conversation`) : 'start fresh'}
                                 </Text>
                             </Pressable>
-                            )}
 
                             {/* Fork — claude-only; only meaningful with continue (claude
                                 rejects --fork-session on a fresh session). */}

@@ -563,6 +563,7 @@ export class SessionRegistry {
       startedAt: Date.now(),
       // Resume an existing server-side opencode session (restart path).
       opencodeSessionId: opts.resume_id,
+      continueLast: opts.continue === true,
     }, this.#sessionDeps());
     this.#sessions.set(id, session);
     saveWindowRecord(id, { launchCwd: cwd, agent: "opencode" });

@@ -45,6 +45,29 @@ export interface OpencodeInit {
   opencodeServerPid?: number;
   /** Reconcile checkpoint: last fully-delivered message id (recovery). */
   opencodeDeliveredThrough?: string;
+  /** Continue: resume the newest existing opencode session in this cwd
+   *  (ignored when opencodeSessionId is set). Falls back to a fresh session
+   *  when the cwd has none. */
+  continueLast?: boolean;
+}
+
+/** Newest session for a cwd from GET /api/session. The directory filter is
+ *  load-bearing: non-git dirs all share opencode's "global" project, so the
+ *  list commingles sessions from unrelated directories. */
+export function pickNewestSessionForCwd(
+  sessions: Array<Record<string, unknown>>,
+  cwd: string,
+): string | null {
+  const dir = (s: Record<string, unknown>): string =>
+    String((s.location as Record<string, unknown> | undefined)?.directory ?? "");
+  const updated = (s: Record<string, unknown>): number => {
+    const t = s.time as Record<string, unknown> | undefined;
+    return Number(t?.updated ?? t?.created ?? 0);
+  };
+  const mine = sessions.filter((s) => dir(s) === cwd);
+  if (!mine.length) return null;
+  mine.sort((a, b) => updated(b) - updated(a));
+  return String(mine[0].id ?? "") || null;
 }
 
 /** Order history oldest-first (GET /message returns NEWEST-first) and drop
@@ -98,6 +121,10 @@ export class OpencodeSession implements AgentSession {
   // Reconcile checkpoint (persisted): last message id fully delivered to the
   // relay. Advanced on live turn completion and after reconcile replay.
   #deliveredThrough?: string;
+  #continueLast = false;
+  // Set when continue actually resolved to an existing session (drives the
+  // reconcile backfill; a fresh fallback session has nothing to replay).
+  #continuedInto = false;
 
   constructor(init: OpencodeInit, deps: SessionDeps) {
     this.id = init.id;
@@ -110,6 +137,7 @@ export class OpencodeSession implements AgentSession {
     this.#resumeOcSessionId = init.opencodeSessionId;
     this.#reapPid = init.opencodeServerPid;
     this.#deliveredThrough = init.opencodeDeliveredThrough;
+    this.#continueLast = init.continueLast === true;
     // Load the durable spool before the relay starts pulling.
     this.#inbound = init.opencodeSessionId ? loadCodexInbound(this.id) : [];
     if (!init.opencodeSessionId) clearCodexInbound(this.id);
@@ -159,8 +187,20 @@ export class OpencodeSession implements AgentSession {
       if (this.#resumeOcSessionId) {
         this.#ocSessionId = this.#resumeOcSessionId;
       } else {
-        const s = await client.createSession();
-        this.#ocSessionId = s.id;
+        if (this.#continueLast) {
+          try {
+            const found = pickNewestSessionForCwd(await client.request("GET", "/api/session").then((r) => ((r as { data?: Array<Record<string, unknown>> })?.data ?? [])), this.cwd);
+            if (found) {
+              this.#ocSessionId = found;
+              this.#continuedInto = true;
+              process.stderr.write(`[opencode ${this.id}] continue: resuming newest session ${found} in ${this.cwd}\n`);
+            }
+          } catch (e) { process.stderr.write(`[opencode ${this.id}] continue lookup failed (${e}) — starting fresh\n`); }
+        }
+        if (!this.#ocSessionId) {
+          const s = await client.createSession();
+          this.#ocSessionId = s.id;
+        }
       }
       this.#norm = new OpencodeNormalizer(this.#ocSessionId);
       client.onEvent((e) => {
@@ -177,7 +217,8 @@ export class OpencodeSession implements AgentSession {
         } catch (e) { process.stderr.write(`[opencode ${this.id}] model switch failed: ${e}\n`); }
       }
 
-      if (this.#resumeOcSessionId) await this.#reconcileHistory();
+      // Backfill for every non-fresh session: explicit resume AND continue.
+      if (this.#resumeOcSessionId || this.#continuedInto) await this.#reconcileHistory();
 
       this.#persistRecord();
       if (this.status === "starting") this.status = "active";
