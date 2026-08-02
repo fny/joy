@@ -51,10 +51,14 @@ export class OpencodeNormalizer {
   // durable.seq dedupe: events at or below this were already handled (SSE
   // reconnects replay; history reconcile also feeds synthetic events).
   #lastSeq = 0;
+  // Last user/assistant message id seen on the live stream — the session's
+  // reconcile checkpoint advances to this when a turn completes.
+  #lastMessageId: string | null = null;
 
   constructor(sessionID: string) { this.#sessionID = sessionID; }
 
   get currentTurn(): string | null { return this.#turn; }
+  get lastMessageId(): string | null { return this.#lastMessageId; }
   /** Start a turn explicitly (reconcile replay / recovered state). */
   setTurn(t: string | null): void { this.#turn = t; }
 
@@ -92,6 +96,7 @@ export class OpencodeNormalizer {
         const messageID = str(d.messageID);
         if (!messageID) return [];
         this.#turn = messageID;
+        this.#lastMessageId = messageID;
         return [
           { kind: "confirmPrompt", messageID },
           { kind: "thinking", value: true },
@@ -101,6 +106,8 @@ export class OpencodeNormalizer {
       case "session.next.step.started": {
         // A step is one LLM call, not a joy turn — but it carries the
         // authoritative model, worth mirroring.
+        const amid = str(d.assistantMessageID);
+        if (amid) this.#lastMessageId = amid;
         const model = (d.model as Record<string, unknown> | undefined);
         const code = model ? str(model.id) : "";
         return code ? [{ kind: "model", code }] : [];

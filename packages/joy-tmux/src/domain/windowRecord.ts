@@ -50,6 +50,8 @@ export interface WindowRecord {
   opencodeSessionId?: string;
   /** opencode: last spawned server pid (reaped on takeover). */
   opencodeServerPid?: number;
+  /** Reconcile checkpoint: last fully-delivered opencode message id. */
+  opencodeDeliveredThrough?: string;
   opencodeSettings?: { model?: string; providerID?: string };
   updatedAt: number;
 }
@@ -96,7 +98,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeSettings?: { model?: string; providerID?: string } },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -115,6 +117,7 @@ export function saveWindowRecord(
       codexSettings: patch.codexSettings ?? prev?.codexSettings,
       opencodeSessionId: patch.opencodeSessionId ?? prev?.opencodeSessionId,
       opencodeServerPid: patch.opencodeServerPid ?? prev?.opencodeServerPid,
+      opencodeDeliveredThrough: patch.opencodeDeliveredThrough ?? prev?.opencodeDeliveredThrough,
       opencodeSettings: patch.opencodeSettings ?? prev?.opencodeSettings,
       updatedAt: Date.now(),
     };
