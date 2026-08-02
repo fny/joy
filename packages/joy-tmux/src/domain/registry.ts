@@ -876,6 +876,7 @@ export class SessionRegistry {
         status: "active", startedAt: Date.now(),
         opencodeSessionId: rec.opencodeSessionId,
         opencodeServerPid: rec.opencodeServerPid,
+        opencodeDeliveredThrough: rec.opencodeDeliveredThrough,
       }, this.#sessionDeps());
       this.#sessions.set(rec.id, session);
       this.#attachRelayAsync(session, () => session.beginWatching());

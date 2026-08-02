@@ -43,6 +43,24 @@ export interface OpencodeInit {
   opencodeSessionId?: string;
   /** Reap this recorded server pid on takeover (recovery). */
   opencodeServerPid?: number;
+  /** Reconcile checkpoint: last fully-delivered message id (recovery). */
+  opencodeDeliveredThrough?: string;
+}
+
+/** Order history oldest-first (GET /message returns NEWEST-first) and drop
+ *  everything at or before the delivered checkpoint, so restart replay cost is
+ *  O(gap) instead of O(history). Unknown checkpoint (foreign session, server
+ *  rewound) → full list; localId dedupe makes that safe, just not free. */
+export function messagesForReplay(
+  msgs: Array<Record<string, unknown>>,
+  deliveredThrough?: string,
+): Array<Record<string, unknown>> {
+  const time = (m: Record<string, unknown>): number =>
+    Number((m.time as Record<string, unknown> | undefined)?.created ?? 0);
+  const asc = [...msgs].sort((a, b) => time(a) - time(b));
+  if (!deliveredThrough) return asc;
+  const at = asc.findIndex((m) => String(m.id ?? "") === deliveredThrough);
+  return at >= 0 ? asc.slice(at + 1) : asc;
 }
 
 const WAIT_TIMEOUT_MS = 10 * 60_000;
@@ -77,6 +95,9 @@ export class OpencodeSession implements AgentSession {
   #activeTurn: string | null = null;
   #archivePromise: Promise<boolean> | null = null;
   #inbound: CodexInboundItem[] = [];
+  // Reconcile checkpoint (persisted): last message id fully delivered to the
+  // relay. Advanced on live turn completion and after reconcile replay.
+  #deliveredThrough?: string;
 
   constructor(init: OpencodeInit, deps: SessionDeps) {
     this.id = init.id;
@@ -88,6 +109,7 @@ export class OpencodeSession implements AgentSession {
     this.#deps = deps;
     this.#resumeOcSessionId = init.opencodeSessionId;
     this.#reapPid = init.opencodeServerPid;
+    this.#deliveredThrough = init.opencodeDeliveredThrough;
     // Load the durable spool before the relay starts pulling.
     this.#inbound = init.opencodeSessionId ? loadCodexInbound(this.id) : [];
     if (!init.opencodeSessionId) clearCodexInbound(this.id);
@@ -172,6 +194,7 @@ export class OpencodeSession implements AgentSession {
       launchCwd: this.cwd, agent: "opencode",
       opencodeSessionId: this.#ocSessionId ?? undefined,
       opencodeServerPid: this.#proc?.pid,
+      opencodeDeliveredThrough: this.#deliveredThrough,
       opencodeSettings: { model: this.model, providerID: this.#providerID },
     });
   }
@@ -245,6 +268,13 @@ export class OpencodeSession implements AgentSession {
 
   #endTurn(turnID: string, status: "completed" | "failed" | "cancelled"): void {
     this.#clearTurnDeadline();
+    if (status !== "cancelled") {
+      const last = this.#norm?.lastMessageId;
+      if (last && last !== this.#deliveredThrough) {
+        this.#deliveredThrough = last;
+        this.#persistRecord();
+      }
+    }
     if (!this.#norm) return;
     const turn = this.#norm.currentTurn ?? turnID;
     if (!turn) return;
@@ -280,8 +310,16 @@ export class OpencodeSession implements AgentSession {
     const sid = this.#ocSessionId;
     if (!client || !sid || !this.#norm) return;
     try {
-      const msgs = await client.messages(sid);
+      const all = await client.messages(sid);
+      const msgs = messagesForReplay(all, this.#deliveredThrough);
+      if (this.#deliveredThrough && msgs.length < all.length) {
+        process.stderr.write(`[opencode ${this.id}] reconcile: ${all.length - msgs.length} messages already delivered, replaying ${msgs.length}\n`);
+      }
       let turn: string | null = null;
+      // Advance the checkpoint only through COMPLETED work: the last assistant
+      // message with a finish. A trailing user prompt / in-flight assistant is
+      // left past the checkpoint so the next reconcile picks it up whole.
+      let completedThrough: string | null = null;
       for (const m of msgs) {
         const type = String(m.type ?? "");
         const mid = String(m.id ?? "");
@@ -306,7 +344,14 @@ export class OpencodeSession implements AgentSession {
         }
         // Assistant message completed → close the turn row (deterministic id
         // means a live-emitted turn-end for the same turn dedupes).
-        if (m.finish) this.#relay?.send(encodeTurnEnd("completed", { turn }), `oc:${sid}:${turn}:turn-end`);
+        if (m.finish) {
+          this.#relay?.send(encodeTurnEnd("completed", { turn }), `oc:${sid}:${turn}:turn-end`);
+          completedThrough = mid;
+        }
+      }
+      if (completedThrough) {
+        this.#deliveredThrough = completedThrough;
+        this.#persistRecord();
       }
     } catch (e) {
       process.stderr.write(`[opencode ${this.id}] reconcile failed: ${e}\n`);

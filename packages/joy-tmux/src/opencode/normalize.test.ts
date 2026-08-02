@@ -112,3 +112,44 @@ describe("OpencodeNormalizer", () => {
     expect(n.closeOpenTools()).toEqual([]);
   });
 });
+
+// ── messagesForReplay (reconcile ordering + checkpoint) ─────────────────────
+import { messagesForReplay } from "./opencodeSession";
+
+describe("messagesForReplay", () => {
+  // GET /message returns NEWEST-first (verified live 2026-08-02).
+  const history = [
+    { id: "msg_a2", type: "assistant", finish: "stop", time: { created: 400 } },
+    { id: "msg_u2", type: "user", time: { created: 300 } },
+    { id: "msg_a1", type: "assistant", finish: "stop", time: { created: 200 } },
+    { id: "msg_u1", type: "user", time: { created: 100 } },
+  ];
+
+  it("orders oldest-first regardless of server order", () => {
+    expect(messagesForReplay(history).map((m) => m.id)).toEqual(["msg_u1", "msg_a1", "msg_u2", "msg_a2"]);
+  });
+
+  it("drops everything at or before the checkpoint", () => {
+    expect(messagesForReplay(history, "msg_a1").map((m) => m.id)).toEqual(["msg_u2", "msg_a2"]);
+    // checkpoint at the newest message → nothing to replay
+    expect(messagesForReplay(history, "msg_a2")).toEqual([]);
+  });
+
+  it("unknown checkpoint (foreign session / rewound history) → full replay", () => {
+    expect(messagesForReplay(history, "msg_gone").map((m) => m.id)).toEqual(["msg_u1", "msg_a1", "msg_u2", "msg_a2"]);
+  });
+});
+
+describe("normalizer lastMessageId (checkpoint source)", () => {
+  it("tracks the newest user/assistant id across a turn", () => {
+    const n = new OpencodeNormalizer(SID);
+    seqCounter = 0;
+    expect(n.lastMessageId).toBeNull();
+    n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user1" }));
+    expect(n.lastMessageId).toBe("msg_user1");
+    n.handle(ev("session.next.step.started", { assistantMessageID: "msg_asst1", model: { id: "m" } }));
+    expect(n.lastMessageId).toBe("msg_asst1");
+    n.handle(ev("session.next.step.started", { assistantMessageID: "msg_asst2", model: { id: "m" } }));
+    expect(n.lastMessageId).toBe("msg_asst2");
+  });
+});
