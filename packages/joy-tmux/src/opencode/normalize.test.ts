@@ -153,3 +153,33 @@ describe("normalizer lastMessageId (checkpoint source)", () => {
     expect(n.lastMessageId).toBe("msg_asst2");
   });
 });
+
+// ── pickNewestSessionForCwd (continue) ──────────────────────────────────────
+import { pickNewestSessionForCwd } from "./opencodeSession";
+
+describe("pickNewestSessionForCwd", () => {
+  const sessions = [
+    { id: "ses_other", location: { directory: "/other/dir" }, time: { created: 1, updated: 900 } },
+    { id: "ses_old", location: { directory: "/my/dir" }, time: { created: 1, updated: 100 } },
+    { id: "ses_new", location: { directory: "/my/dir" }, time: { created: 2, updated: 500 } },
+  ];
+
+  it("picks the newest session in the SAME directory only", () => {
+    // ses_other is globally newest — the directory filter must exclude it
+    // (non-git dirs share opencode's "global" project).
+    expect(pickNewestSessionForCwd(sessions, "/my/dir")).toBe("ses_new");
+  });
+
+  it("returns null when the cwd has no sessions", () => {
+    expect(pickNewestSessionForCwd(sessions, "/fresh/dir")).toBeNull();
+    expect(pickNewestSessionForCwd([], "/my/dir")).toBeNull();
+  });
+
+  it("falls back to time.created when updated is absent", () => {
+    const s = [
+      { id: "a", location: { directory: "/d" }, time: { created: 10 } },
+      { id: "b", location: { directory: "/d" }, time: { created: 20 } },
+    ];
+    expect(pickNewestSessionForCwd(s, "/d")).toBe("b");
+  });
+});
