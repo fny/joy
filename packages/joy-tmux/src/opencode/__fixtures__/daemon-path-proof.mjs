@@ -13,7 +13,8 @@ class MockRelay {
   send(r, localId) { this.wire.push({ ev: r.content?.data?.ev ?? { role: r.role }, localId }); }
   setThinking(v) { this.thinking.push(v); }
   setReceiptSink() {} stampReceiptOnLastQueued() {}
-  contexts = []; models = [];
+  contexts = []; models = []; titles = [];
+  async updateSummary(t) { this.titles.push(t); }
   updateModelCode(c) { this.models.push(c); } updateContext(t) { this.contexts.push(t); } updateJoyState() {} updateCodexApproval() {}
   registerRpc() {} start() {} pausePull() {} stop() {}
 }
@@ -53,6 +54,7 @@ console.log('sequence ok:', ok, '| deterministic localIds:', localIds, '| thinki
 const textEv = relay.wire.find(w => w.ev?.t === 'text');
 console.log('text:', textEv?.ev?.text?.slice(0, 60));
 console.log('context updates:', relay.contexts);
+console.log('auto-title:', JSON.stringify(relay.titles));
 // mid-session model switch
 const sw = await s.setModel('accounts/fireworks/models/glm-5p2', 'fireworks-ai');
 console.log('setModel:', JSON.stringify(sw), '| currentModel:', s.currentModel, '| relay saw:', relay.models.at(-1));

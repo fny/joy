@@ -230,6 +230,25 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "opencodeSessions",
+    scope: "machine",
+    rpcName: "joy-opencode-sessions",
+    http: { method: "GET", path: "/opencode/sessions" },
+    // Past-sessions picker: opencode sessions recorded for a directory,
+    // newest first. Spawns a short-lived server (see listOpencodeSessionsForCwd).
+    handler: async (_registry, params) => {
+      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      if (!cwd) return { ok: false, error: "cwd required", sessions: [] };
+      try {
+        const { listOpencodeSessionsForCwd } = await import("../opencode/opencodeClient");
+        const { expandHome } = await import("./registry");
+        return { ok: true, sessions: await listOpencodeSessionsForCwd(expandHome(cwd)) };
+      } catch (e) {
+        return { ok: false, error: String(e), sessions: [] };
+      }
+    },
+  },
+  {
     name: "opencodeSetModel",
     scope: "machine",
     rpcName: "joy-opencode-set-model",

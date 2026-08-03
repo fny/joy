@@ -285,6 +285,30 @@ function NewJoyTmuxSessionScreen() {
     }, [selectedAgent, selectedMachineId]);
     const ocModel = ocModels[ocModelIndex];
     const cycleOcModel = React.useCallback(() => { setOcModelIndex(i => ocModels.length ? (i + 1) % ocModels.length : 0); }, [ocModels.length]);
+    // Past-sessions picker: on-demand list of opencode sessions recorded for
+    // the chosen directory (daemon boots a short-lived server, so first load
+    // takes a few seconds).
+    const [ocPastOpen, setOcPastOpen] = React.useState(false);
+    const [ocPastLoading, setOcPastLoading] = React.useState(false);
+    const [ocPast, setOcPast] = React.useState<{ id: string; title: string; updatedAt: number }[]>([]);
+    const toggleOcPast = React.useCallback(() => {
+        if (ocPastOpen) { setOcPastOpen(false); return; }
+        setOcPastOpen(true);
+        if (!selectedMachineId) return;
+        setOcPastLoading(true);
+        const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
+        apiSocket.machineRPC<{ ok?: boolean; sessions?: typeof ocPast }, {}>(selectedMachineId, 'joy-opencode-sessions', { cwd })
+            .then((res) => { setOcPast(res.sessions ?? []); })
+            .catch(() => { setOcPast([]); })
+            .finally(() => setOcPastLoading(false));
+    }, [ocPastOpen, selectedMachineId, pathInput, selectedMachine?.metadata?.homeDir]);
+    const ocAge = (ts: number): string => {
+        const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
+        if (m < 60) return `${m}m ago`;
+        const h = Math.round(m / 60);
+        if (h < 48) return `${h}h ago`;
+        return `${Math.round(h / 24)}d ago`;
+    };
 
     // Switching agents swaps the permission-mode list (claude vs codex) — reset
     // the index so a stale claude index can't select the wrong codex mode.
@@ -710,6 +734,38 @@ function NewJoyTmuxSessionScreen() {
                                     autoComplete="off"
                                 />
                             </View>
+
+                            {/* Opencode: past sessions in this directory — tap one to
+                                fill the resume field. */}
+                            {selectedAgent === 'opencode' && (<>
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={toggleOcPast}
+                            >
+                                <Ionicons name={ocPastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
+                                <Text style={styles.configLabel} numberOfLines={1}>past sessions</Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
+                                    {ocPastLoading ? 'loading…' : ocPastOpen && !ocPast.length ? 'none in this directory' : 'resume an earlier conversation'}
+                                </Text>
+                            </Pressable>
+                            {ocPastOpen && !ocPastLoading && ocPast.slice(0, 8).map((ps) => (
+                                <Pressable
+                                    key={ps.id}
+                                    style={(p) => [styles.configRow, { paddingLeft: 34 }, p.pressed && styles.configRowPressed]}
+                                    onPress={() => { setResumeId(ps.id); setOcPastOpen(false); }}
+                                >
+                                    <Ionicons
+                                        name={resumeId === ps.id ? 'radio-button-on' : 'radio-button-off'}
+                                        size={13}
+                                        color={resumeId === ps.id ? theme.colors.button.primary.background : theme.colors.textSecondary}
+                                    />
+                                    <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
+                                        {ps.title?.startsWith('New session') ? ps.id.slice(0, 16) + '…' : (ps.title || ps.id)}
+                                    </Text>
+                                    <Text style={styles.configHint} numberOfLines={1}>{ocAge(ps.updatedAt)}</Text>
+                                </Pressable>
+                            ))}
+                            </>)}
 
                             {/* History to backfill (MB). Relevant when resuming by
                                 id OR continuing the last conversation. 0 = full.
