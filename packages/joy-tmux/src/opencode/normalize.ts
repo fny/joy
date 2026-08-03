@@ -36,7 +36,11 @@ export type OpencodeEffect =
   // "not available yet" permanently on 1.18.10, and no session.idle flows on
   // /api/event — step finish reasons are the only live turn-end signal.
   | { kind: "turnDone"; finish: string }
-  | { kind: "turnFailed"; message: string };
+  | { kind: "turnFailed"; message: string }
+  // Context gauge: step.ended carries tokens {input, output, cache} for the
+  // LLM call — input + cache.read is the occupied context (codex parity:
+  // the last call's prompt size IS the context).
+  | { kind: "context"; tokens: number };
 
 const TOOL_NAME_PREFIX = "Opencode";
 
@@ -140,10 +144,15 @@ export class OpencodeNormalizer {
       case "session.next.step.ended": {
         // One step = one LLM call; finish 'tool-calls' means the turn
         // continues with another step. Anything else ('stop', 'length', …)
-        // ends the joy turn.
+        // ends the joy turn. Every step refreshes the context gauge.
+        const out: OpencodeEffect[] = [];
+        const tokens = d.tokens as Record<string, unknown> | undefined;
+        const input = Number(tokens?.input ?? NaN);
+        const cacheRead = Number((tokens?.cache as Record<string, unknown> | undefined)?.read ?? 0);
+        if (Number.isFinite(input) && input > 0) out.push({ kind: "context", tokens: input + cacheRead });
         const finish = str(d.finish);
-        if (!this.#turn || finish === "tool-calls") return [];
-        return [{ kind: "turnDone", finish }];
+        if (this.#turn && finish !== "tool-calls") out.push({ kind: "turnDone", finish });
+        return out;
       }
       case "session.next.step.failed":
       case "session.error": {
