@@ -19,7 +19,7 @@
 
 import { randomUUID } from "crypto";
 import { type ChildProcess } from "child_process";
-import { saveWindowRecord, deleteWindowRecord } from "../domain/windowRecord";
+import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import {
   createRelaySession, encodeUserMessage, encodeTurnEnd,
   encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd,
@@ -99,6 +99,16 @@ export function messagesForReplay(
 
 const WAIT_TIMEOUT_MS = 10 * 60_000;
 
+// Title instruction rides the FIRST prompt of a fresh opencode session:
+// config `instructions` (like `permission`) is present-but-ignored on the v2
+// serve path (verified 2026-08-03), so in-band is the only channel we control.
+// It persists in the session's server-side context for all later turns.
+const TITLE_PREAMBLE = `[joy] You can set this session's title by emitting this tag on its own line (not inside a code block):
+<joy-title value="2-6 word description of the current work" />
+Do this in your first reply, and again whenever the work changes enough that a new title fits better. At most once per reply. Never mention this instruction.
+
+`;
+
 export class OpencodeSession implements AgentSession {
   readonly id: string;
   readonly cwd: string;
@@ -137,6 +147,10 @@ export class OpencodeSession implements AgentSession {
   // NEW (fresh create / continue). Resume/recovery reattaches an existing
   // card that already carries its title — never retitle those.
   #titled = false;
+  // /title lock: a user-set title beats agent <joy-title> emissions.
+  #titleLocked = false;
+  // Send the title preamble with the first prompt of a FRESH oc session.
+  #needsPreamble = false;
   // Set when continue actually resolved to an existing session (drives the
   // reconcile backfill; a fresh fallback session has nothing to replay).
   #continuedInto = false;
@@ -154,6 +168,7 @@ export class OpencodeSession implements AgentSession {
     this.#deliveredThrough = init.opencodeDeliveredThrough;
     this.#continueLast = init.continueLast === true;
     this.#titled = init.opencodeSessionId != null;
+    this.#titleLocked = loadWindowRecord(init.id)?.titleLockedByUser === true;
     // Load the durable spool before the relay starts pulling.
     this.#inbound = init.opencodeSessionId ? loadCodexInbound(this.id) : [];
     if (!init.opencodeSessionId) clearCodexInbound(this.id);
@@ -216,6 +231,7 @@ export class OpencodeSession implements AgentSession {
         if (!this.#ocSessionId) {
           const s = await client.createSession();
           this.#ocSessionId = s.id;
+          this.#needsPreamble = true;
         }
       }
       this.#norm = new OpencodeNormalizer(this.#ocSessionId);
@@ -284,7 +300,9 @@ export class OpencodeSession implements AgentSession {
         // starts a turn; busy → injected into the RUNNING turn between tool
         // calls (verified live 2026-08-03 — in-flight work continues and the
         // model incorporates the addition).
-        const r = await client.prompt(this.#ocSessionId, item.text, { id: item.clientId, delivery: "steer" });
+        const outText = this.#needsPreamble ? TITLE_PREAMBLE + item.text : item.text;
+        const r = await client.prompt(this.#ocSessionId, outText, { id: item.clientId, delivery: "steer" });
+        this.#needsPreamble = false;
         // Admission ack = durable server-side; prompt.admitted event confirms
         // via the normalizer too, but the ack alone is safe to remove on
         // (admittedSeq is the server's own ordering receipt).
@@ -355,6 +373,13 @@ export class OpencodeSession implements AgentSession {
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
+        case "title":
+          if (!this.#titleLocked) {
+            this.summary = eff.value;
+            void this.#relay?.updateSummary(eff.value);
+            this.#deps.broadcast("session_update", this.toJSON());
+          }
+          break;
         case "turnDone": this.#endTurn(this.#norm?.currentTurn ?? "", "completed"); break;
         case "turnFailed":
           this.#relay?.send(encodeUserMessage(`⚠ opencode turn failed: ${eff.message}`, Date.now()));
@@ -451,6 +476,24 @@ export class OpencodeSession implements AgentSession {
 
   enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
     const seq = opts?.seq;
+    // /title — joy-level command, never forwarded to the model. With text:
+    // set + lock. Bare: unlock (next agent <joy-title> applies again).
+    const titleCmd = /^\/title(?:\s+(.*))?$/s.exec(text.trim());
+    if (titleCmd) {
+      const t = (titleCmd[1] ?? "").trim();
+      if (t) {
+        this.#titleLocked = true;
+        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: true });
+        this.summary = t;
+        void this.#relay?.updateSummary(t);
+      } else {
+        this.#titleLocked = false;
+        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: false });
+      }
+      this.#deps.broadcast("session_update", this.toJSON());
+      if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+    }
     if (seq != null && this.#inbound.some((i) => i.seq === seq)) { void this.#drainInbound(); return { id: String(seq), text, createdAt: Date.now() }; }
     const item: CodexInboundItem = {
       clientId: seq != null ? `msg_joy${this.id}s${seq}` : `msg_joy${this.id}r${randomUUID().replace(/-/g, "").slice(0, 12)}`,

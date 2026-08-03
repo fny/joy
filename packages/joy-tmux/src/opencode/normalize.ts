@@ -40,9 +40,28 @@ export type OpencodeEffect =
   // Context gauge: step.ended carries tokens {input, output, cache} for the
   // LLM call — input + cache.read is the occupied context (codex parity:
   // the last call's prompt size IS the context).
-  | { kind: "context"; tokens: number };
+  | { kind: "context"; tokens: number }
+  // Agent re-title via the <joy-title/> convention (instruction rides the
+  // first-prompt preamble — config `instructions` is ignored by serve).
+  | { kind: "title"; value: string };
 
 const TOOL_NAME_PREFIX = "Opencode";
+
+/** Pull a `<joy-title value="…"/>` out of assistant text: returns the title
+ *  (last one wins) and the text with tag lines removed. */
+export function extractJoyTitle(text: string): { title: string | null; text: string } {
+  if (!text.includes("<joy-title")) return { title: null, text };
+  let title: string | null = null;
+  const re = /<joy-title[^>]*value="([^"]+)"[^>]*\/?>/gi;
+  for (const m of text.matchAll(re)) title = m[1].trim() || title;
+  const cleaned = text
+    .split("\n")
+    .filter((line) => !/^\s*<joy-title/i.test(line.trim()))
+    .join("\n")
+    .replace(re, "")
+    .trim();
+  return { title, text: cleaned };
+}
 
 function str(v: unknown): string { return typeof v === "string" ? v : ""; }
 
@@ -122,10 +141,15 @@ export class OpencodeNormalizer {
         return code ? [{ kind: "model", code }] : [];
       }
       case "session.next.text.ended": {
-        const text = str(d.text).trim();
-        if (!text || !this.#turn) return text ? [this.#orphanText(text, d)] : [];
+        const raw = str(d.text).trim();
+        const { title, text } = extractJoyTitle(raw);
+        const out: OpencodeEffect[] = [];
+        if (title) out.push({ kind: "title", value: title });
+        if (!text) return out;
+        if (!this.#turn) { out.push(this.#orphanText(text, d)); return out; }
         const core = `${str(d.assistantMessageID)}:${str(d.textID)}`;
-        return [this.#wire(encodeTextEvent(text, { turn: this.#turn }), `${core}:text`)];
+        out.push(this.#wire(encodeTextEvent(text, { turn: this.#turn }), `${core}:text`));
+        return out;
       }
       case "session.next.tool.called": {
         const callID = str(d.callID);

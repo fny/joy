@@ -124,7 +124,8 @@ describe("steer-into-open-turn", () => {
     expect(n.currentTurn).toBe("msg_user1");
     // output continues under the original turn
     const text = n.handle(ev("session.next.text.ended", { assistantMessageID: AMID, textID: "text-0", text: "done with banana" }));
-    expect((text[0] as { record: { content: { data: { ev: { tid: string } } } } }).record.content.data.ev.tid ?? n.currentTurn).toBeTruthy();
+    expect(wireTypes(text)).toEqual(["text"]);
+    expect(n.currentTurn).toBe("msg_user1");
   });
 });
 
@@ -212,5 +213,37 @@ describe("titleFromPrompt", () => {
     expect(t.length).toBeLessThanOrEqual(61);
     expect(t.endsWith("…")).toBe(true);
     expect(t).not.toMatch(/\s…$/);
+  });
+});
+
+// ── extractJoyTitle + title effect ──────────────────────────────────────────
+import { extractJoyTitle } from "./normalize";
+
+describe("agent titles (<joy-title/>)", () => {
+  it("extracts the title and strips the tag line", () => {
+    const r = extractJoyTitle('Working on it.\n<joy-title value="Fix login flow" />\nDone.');
+    expect(r.title).toBe("Fix login flow");
+    expect(r.text).toBe("Working on it.\nDone.");
+  });
+  it("last tag wins; tag-only text leaves empty text", () => {
+    const r = extractJoyTitle('<joy-title value="First" />\n<joy-title value="Second" />');
+    expect(r.title).toBe("Second");
+    expect(r.text).toBe("");
+  });
+  it("no tag → untouched", () => {
+    expect(extractJoyTitle("plain text")).toEqual({ title: null, text: "plain text" });
+  });
+  it("normalizer emits a title effect and clean text", () => {
+    const n = freshNorm();
+    n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user1" }));
+    const fx = n.handle(ev("session.next.text.ended", { assistantMessageID: AMID, textID: "text-0", text: 'Created the file.\n<joy-title value="Create hello file" />' }));
+    expect(fx[0]).toEqual({ kind: "title", value: "Create hello file" });
+    expect(wireTypes(fx)).toEqual(["text"]);
+  });
+  it("tag-only reply emits ONLY the title (no empty text wire)", () => {
+    const n = freshNorm();
+    n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user1" }));
+    const fx = n.handle(ev("session.next.text.ended", { assistantMessageID: AMID, textID: "text-1", text: '<joy-title value="Just a title" />' }));
+    expect(fx).toEqual([{ kind: "title", value: "Just a title" }]);
   });
 });
