@@ -280,8 +280,11 @@ export class OpencodeSession implements AgentSession {
       try {
         item.state = "sentUnknown";
         saveCodexInbound(this.id, this.#inbound);
-        // delivery:'queue' → opencode queues natively while a turn is running.
-        const r = await client.prompt(this.#ocSessionId, item.text, { id: item.clientId, delivery: "queue" });
+        // delivery:'steer' (the server default, claude-parity UX): idle →
+        // starts a turn; busy → injected into the RUNNING turn between tool
+        // calls (verified live 2026-08-03 — in-flight work continues and the
+        // model incorporates the addition).
+        const r = await client.prompt(this.#ocSessionId, item.text, { id: item.clientId, delivery: "steer" });
         // Admission ack = durable server-side; prompt.admitted event confirms
         // via the normalizer too, but the ack alone is safe to remove on
         // (admittedSeq is the server's own ordering receipt).

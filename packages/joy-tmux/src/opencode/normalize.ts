@@ -99,8 +99,13 @@ export class OpencodeNormalizer {
         // removal) and opens the joy turn.
         const messageID = str(d.messageID);
         if (!messageID) return [];
-        this.#turn = messageID;
         this.#lastMessageId = messageID;
+        // Steer-into-open-turn: an admission while a turn is running is the
+        // steered message joining THAT turn (verified live 2026-08-03: the
+        // assistant flow continues, no new turn) — confirm delivery but do
+        // NOT open a second turn; the original turn's end closes everything.
+        if (this.#turn) return [{ kind: "confirmPrompt", messageID }];
+        this.#turn = messageID;
         return [
           { kind: "confirmPrompt", messageID },
           { kind: "thinking", value: true },

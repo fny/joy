@@ -113,6 +113,21 @@ describe("OpencodeNormalizer", () => {
   });
 });
 
+describe("steer-into-open-turn", () => {
+  it("admission while a turn is open confirms delivery without a second turn", () => {
+    const n = freshNorm();
+    const first = n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user1", delivery: "steer" }));
+    expect(wireTypes(first)).toEqual(["turn-start"]);
+    // steered message joins the RUNNING turn: no turn-start, no thinking toggle
+    const steer = n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user2", delivery: "steer" }));
+    expect(steer).toEqual([{ kind: "confirmPrompt", messageID: "msg_user2" }]);
+    expect(n.currentTurn).toBe("msg_user1");
+    // output continues under the original turn
+    const text = n.handle(ev("session.next.text.ended", { assistantMessageID: AMID, textID: "text-0", text: "done with banana" }));
+    expect((text[0] as { record: { content: { data: { ev: { tid: string } } } } }).record.content.data.ev.tid ?? n.currentTurn).toBeTruthy();
+  });
+});
+
 // ── messagesForReplay (reconcile ordering + checkpoint) ─────────────────────
 import { messagesForReplay } from "./opencodeSession";
 
