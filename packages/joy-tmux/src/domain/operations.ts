@@ -230,6 +230,23 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "opencodeSetModel",
+    scope: "machine",
+    rpcName: "joy-opencode-set-model",
+    http: { method: "POST", path: "/sessions/:id/opencode/model" },
+    // Mid-session model switch, allowlist-validated (same policy as create).
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { ok: false, error: "session_not_found" };
+      const { OPENCODE_MODELS } = await import("../opencode/models");
+      const { OpencodeSession } = await import("../opencode/opencodeSession");
+      if (!(session instanceof OpencodeSession)) return { ok: false, error: "not an opencode session" };
+      const m = OPENCODE_MODELS.find((x) => x.id === params.model);
+      if (!m) return { ok: false, error: "unknown model" };
+      return await session.setModel(m.id, m.providerID);
+    },
+  },
+  {
     name: "refreshCommands",
     scope: "machine",
     rpcName: "joy-refresh-commands",

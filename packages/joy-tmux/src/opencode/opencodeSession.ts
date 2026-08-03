@@ -236,7 +236,7 @@ export class OpencodeSession implements AgentSession {
       opencodeSessionId: this.#ocSessionId ?? undefined,
       opencodeServerPid: this.#proc?.pid,
       opencodeDeliveredThrough: this.#deliveredThrough,
-      opencodeSettings: { model: this.model, providerID: this.#providerID },
+      opencodeSettings: { model: this.currentModel ?? this.model, providerID: this.#providerID },
     });
   }
 
@@ -335,6 +335,7 @@ export class OpencodeSession implements AgentSession {
         case "confirmPrompt": this.#removeInbound(eff.messageID); this.#armTurnDeadline(eff.messageID); break;
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
+        case "context": void this.#relay?.updateContext(eff.tokens); break;
         case "turnDone": this.#endTurn(this.#norm?.currentTurn ?? "", "completed"); break;
         case "turnFailed":
           this.#relay?.send(encodeUserMessage(`⚠ opencode turn failed: ${eff.message}`, Date.now()));
@@ -396,6 +397,24 @@ export class OpencodeSession implements AgentSession {
       }
     } catch (e) {
       process.stderr.write(`[opencode ${this.id}] reconcile failed: ${e}\n`);
+    }
+  }
+
+  /** Mid-session model switch (curated ids only — validated by the op). */
+  async setModel(modelId: string, providerID: string): Promise<{ ok: boolean; error?: string }> {
+    const client = this.#client;
+    const sid = this.#ocSessionId;
+    if (!client || !sid) return { ok: false, error: "session not started" };
+    try {
+      await client.switchModel(sid, providerID, modelId);
+      this.currentModel = modelId;
+      this.#providerID = providerID;
+      void this.#relay?.updateModelCode(modelId);
+      this.#persistRecord();
+      this.#deps.broadcast("session_update", this.toJSON());
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
     }
   }
 

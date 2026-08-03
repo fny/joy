@@ -505,18 +505,34 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // → claude (legacy joy-tmux sessions and the claude path send no flavor).
     const flavor = isJoyTmux ? (session.metadata?.flavor ?? 'claude') : session.metadata?.flavor;
     const joySessionId = session.metadata?.joy__sessionId;
+    // Opencode: the daemon's curated allowlist backs the model picker so the
+    // chip can CYCLE (codex stays a 1-entry display: its catalog is per-model
+    // efforts and switching rides the pane, not an RPC).
+    const [ocModels, setOcModels] = React.useState<{ id: string; displayName: string }[]>([]);
+    React.useEffect(() => {
+        if (flavor !== 'opencode' || !machineId) return;
+        let cancelled = false;
+        apiSocket.machineRPC<{ ok?: boolean; models?: { id: string; displayName: string }[] }, {}>(machineId, 'joy-opencode-models', {})
+            .then((res) => { if (!cancelled && res.models?.length) setOcModels(res.models); })
+            .catch(() => { /* old daemon — chip stays display-only */ });
+        return () => { cancelled = true; };
+    }, [flavor, machineId]);
+
     const availableModels = React.useMemo(() => {
         if (!isJoyTmux) return getAvailableModels(flavor, session.metadata, t);
         // Codex models are dynamic slugs (gpt-5.6-sol…), not the claude family
         // catalog — resolving currentModelCode against JOY_CLAUDE_MODELS never
         // matched, so codex sessions showed NO model label (bug 2026-07-31).
         // Synthesize a one-entry catalog from the daemon-published code.
+        if (flavor === 'opencode' && ocModels.length) {
+            return ocModels.map((m) => ({ key: m.id, name: m.displayName, description: null }));
+        }
         if (flavor === 'codex' || flavor === 'opencode') {
             const code = session.metadata?.currentModelCode;
             return code ? [{ key: code, name: code, description: null }] : [];
         }
         return JOY_CLAUDE_MODELS;
-    }, [isJoyTmux, flavor, session.metadata]);
+    }, [isJoyTmux, flavor, session.metadata, ocModels]);
     const availableModes = React.useMemo(() => {
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
@@ -635,13 +651,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [sessionId, isJoyTmux, machineId, joySessionId]);
 
     const updateModelMode = React.useCallback((mode: ModelMode) => {
-        if (isJoyTmux) {
+        if (isJoyTmux && flavor === 'opencode') {
+            // No pane: the daemon switches the opencode session server-side.
+            if (machineId && joySessionId) {
+                void apiSocket.machineRPC(machineId, 'joy-opencode-set-model', { id: joySessionId, model: mode.key })
+                    .catch(() => { /* best-effort; stored state still updates */ });
+            }
+        } else if (isJoyTmux) {
             // /model <key> switches the interactive session directly; keys in
             // JOY_CLAUDE_MODELS are valid /model arguments.
             sendJoyKeys(`/model ${mode.key}<Enter>`);
         }
         storage.getState().updateSessionModelMode(sessionId, mode.key);
-    }, [sessionId, isJoyTmux, sendJoyKeys]);
+    }, [sessionId, isJoyTmux, flavor, machineId, joySessionId, sendJoyKeys]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
         if (isJoyTmux) {

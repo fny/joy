@@ -73,9 +73,9 @@ describe("OpencodeNormalizer", () => {
     expect(wireTypes(text)).toEqual(["text"]);
     expect((text[0] as { localId: string }).localId).toBe(`oc:${SID}:msg_asst2:text-0:text`);
 
-    // Terminal step: turnDone.
-    expect(n.handle(ev("session.next.step.ended", { assistantMessageID: "msg_asst2", finish: "stop" })))
-      .toEqual([{ kind: "turnDone", finish: "stop" }]);
+    // Terminal step: context gauge from tokens + turnDone.
+    expect(n.handle(ev("session.next.step.ended", { assistantMessageID: "msg_asst2", finish: "stop", tokens: { input: 2615, output: 28, cache: { read: 100, write: 0 } } })))
+      .toEqual([{ kind: "context", tokens: 2715 }, { kind: "turnDone", finish: "stop" }]);
   });
 
   it("step.failed / session.error → turnFailed with the provider message", () => {
