@@ -185,3 +185,25 @@ after it). The working signal is the step finish reason:
 
 Also config gotcha: an `opencode.jsonc` next to `opencode.json` in
 `~/.config/opencode/` can shadow the real config — keep exactly one.
+
+## Permissions are NOT enforced on the v2 serve path (verified 2026-08-03)
+
+Third upstream issue: on 1.18.10, permission config has NO effect on turns
+driven through `POST /api/session/{id}/prompt`:
+
+- `OPENCODE_CONFIG_CONTENT='{"permission":{"bash":"deny"}}'` merges into the
+  resolved config (GET /config shows it, provider config intact) — but the
+  bash tool still executes. Same for agent-level
+  (`agent.build.permission.bash: deny`) and for sessions created with an
+  explicit `{"agent":"build"}`.
+- No `permission.ask` is emitted and `GET /api/permission/request` stays
+  empty — so a serve-based client cannot even be asked.
+- The full permission request/reply API surface exists
+  (`/api/session/{id}/permission/{requestID}/reply` etc.) but nothing on the
+  v2 prompt path produces requests. Enforcement appears to live only in the
+  client flows that implement an asking UI (TUI / `run --auto` / ACP).
+
+Consequences for joy: adapter sessions are unconditionally yolo on this
+version — an explicit `permission: "allow"` config would be a placebo, and a
+guarded mode / approval bar is blocked upstream until the serve path enforces
+permissions (retest on upgrade; the deny-repro above is the test).
