@@ -226,10 +226,23 @@ export class OpencodeClient {
 
 /** Kill an opencode server (launcher + real opencode.exe child): group kill
  *  first (spawned detached → launcher is group leader), plain kill fallback
- *  for pre-detached records. */
+ *  for pre-detached records. VERIFIED: a stray from a failed TERM was found
+ *  alive a day later (2026-08-03), so escalate to SIGKILL if the group is
+ *  still up after a grace period, and log the escalation. */
 export function killOpencodeServerPid(pid: number): void {
-  try { process.kill(-pid, "SIGTERM"); return; } catch { /* not a group leader */ }
-  try { process.kill(pid, "SIGTERM"); } catch { /* gone */ }
+  const groupKill = (sig: NodeJS.Signals): boolean => {
+    try { process.kill(-pid, sig); return true; } catch { /* not a group leader */ }
+    try { process.kill(pid, sig); return true; } catch { return false; /* gone */ }
+  };
+  if (!groupKill("SIGTERM")) return;
+  const timer = setTimeout(() => {
+    try {
+      process.kill(pid, 0); // still alive?
+      process.stderr.write(`[opencode] server ${pid} survived SIGTERM — escalating to SIGKILL\n`);
+      groupKill("SIGKILL");
+    } catch { /* dead — done */ }
+  }, 2_000);
+  timer.unref();
 }
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
@@ -239,4 +252,32 @@ export function isOpencodeServerPid(pid: number): boolean {
     const comm = readFileSync(`/proc/${pid}/comm`, "utf8").trim();
     return comm.includes("opencode");
   } catch { return false; }
+}
+
+/** List opencode sessions recorded for `cwd`, newest first — via a short-lived
+ *  server (the CLI's `session list` omits location, so it can't filter by
+ *  directory; the HTTP API can). Cost ≈ one server boot (~2-4s), acceptable
+ *  for an on-demand picker. */
+export async function listOpencodeSessionsForCwd(cwd: string): Promise<Array<{ id: string; title: string; updatedAt: number }>> {
+  const { proc, port } = spawnOpencodeServer(cwd);
+  try {
+    const p = await port;
+    const client = new OpencodeClient(p);
+    const r = await client.request<{ data?: Array<Record<string, unknown>> }>("GET", "/api/session", undefined, 15_000);
+    const out: Array<{ id: string; title: string; updatedAt: number }> = [];
+    for (const s of r?.data ?? []) {
+      const dir = String((s.location as Record<string, unknown> | undefined)?.directory ?? "");
+      if (dir !== cwd) continue;
+      const t = s.time as Record<string, unknown> | undefined;
+      out.push({
+        id: String(s.id ?? ""),
+        title: String(s.title ?? ""),
+        updatedAt: Number(t?.updated ?? t?.created ?? 0),
+      });
+    }
+    out.sort((a, b) => b.updatedAt - a.updatedAt);
+    return out;
+  } finally {
+    if (proc.pid) killOpencodeServerPid(proc.pid);
+  }
 }

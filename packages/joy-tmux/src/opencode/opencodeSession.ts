@@ -70,6 +70,17 @@ export function pickNewestSessionForCwd(
   return String(mine[0].id ?? "") || null;
 }
 
+/** Card title from the first user prompt: opencode's own title generation
+ *  never runs on the serve path (placeholder "New session - <date>" forever),
+ *  so joy derives one — first line, clipped to 60 chars on a word boundary. */
+export function titleFromPrompt(text: string): string {
+  const line = text.trim().split("\n")[0].replace(/\s+/g, " ");
+  if (line.length <= 60) return line;
+  const cut = line.slice(0, 60);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > 30 ? cut.slice(0, sp) : cut) + "…";
+}
+
 /** Order history oldest-first (GET /message returns NEWEST-first) and drop
  *  everything at or before the delivered checkpoint, so restart replay cost is
  *  O(gap) instead of O(history). Unknown checkpoint (foreign session, server
@@ -122,6 +133,10 @@ export class OpencodeSession implements AgentSession {
   // relay. Advanced on live turn completion and after reconcile replay.
   #deliveredThrough?: string;
   #continueLast = false;
+  // First-prompt auto-title fires once, and only for sessions whose card is
+  // NEW (fresh create / continue). Resume/recovery reattaches an existing
+  // card that already carries its title — never retitle those.
+  #titled = false;
   // Set when continue actually resolved to an existing session (drives the
   // reconcile backfill; a fresh fallback session has nothing to replay).
   #continuedInto = false;
@@ -138,6 +153,7 @@ export class OpencodeSession implements AgentSession {
     this.#reapPid = init.opencodeServerPid;
     this.#deliveredThrough = init.opencodeDeliveredThrough;
     this.#continueLast = init.continueLast === true;
+    this.#titled = init.opencodeSessionId != null;
     // Load the durable spool before the relay starts pulling.
     this.#inbound = init.opencodeSessionId ? loadCodexInbound(this.id) : [];
     if (!init.opencodeSessionId) clearCodexInbound(this.id);
@@ -400,6 +416,14 @@ export class OpencodeSession implements AgentSession {
     }
   }
 
+  /** First-prompt auto-title: once, fresh cards only (see #titled). */
+  #maybeTitle(text: string): void {
+    if (this.#titled || !this.#relay) return;
+    this.#titled = true;
+    const title = titleFromPrompt(text);
+    if (title) void this.#relay.updateSummary(title);
+  }
+
   /** Mid-session model switch (curated ids only — validated by the op). */
   async setModel(modelId: string, providerID: string): Promise<{ ok: boolean; error?: string }> {
     const client = this.#client;
@@ -435,6 +459,7 @@ export class OpencodeSession implements AgentSession {
       throw new Error("opencode inbound persist failed");
     }
     if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `oc:in:${this.id}:${seq ?? item.at}`);
+    this.#maybeTitle(text);
     void this.#drainInbound();
     return { id: String(item.at), text, createdAt: item.at };
   }

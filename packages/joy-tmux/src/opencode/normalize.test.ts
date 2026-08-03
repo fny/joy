@@ -183,3 +183,19 @@ describe("pickNewestSessionForCwd", () => {
     expect(pickNewestSessionForCwd(s, "/d")).toBe("b");
   });
 });
+
+// ── titleFromPrompt (auto-title) ────────────────────────────────────────────
+import { titleFromPrompt } from "./opencodeSession";
+
+describe("titleFromPrompt", () => {
+  it("first line, whitespace collapsed", () => {
+    expect(titleFromPrompt("  Fix the login bug\nand also tests ")).toBe("Fix the login bug");
+    expect(titleFromPrompt("a   b\t c")).toBe("a b c");
+  });
+  it("clips long prompts on a word boundary with ellipsis", () => {
+    const t = titleFromPrompt("Please refactor the authentication middleware to support rotating JWT signing keys");
+    expect(t.length).toBeLessThanOrEqual(61);
+    expect(t.endsWith("…")).toBe(true);
+    expect(t).not.toMatch(/\s…$/);
+  });
+});
