@@ -462,6 +462,7 @@ export interface SessionInit {
 }
 
 export class Session {
+  readonly agentFlavor = "claude" as const;
   readonly id: string;
   readonly tmuxWindow: string;
   readonly cwd: string;

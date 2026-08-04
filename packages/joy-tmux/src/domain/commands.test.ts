@@ -28,7 +28,7 @@ describe("scanCommandsDir", () => {
     write(".claude/commands/test.md");
     write(".claude/commands/frontend/build.md");
     write(".claude/commands/notes.txt"); // ignored (not .md)
-    expect(scanCommandsDir(join(root, ".claude/commands")).map((c) => c.name).sort())
+    expect(scanCommandsDir(join(root, ".claude/commands"), "claude:command").map((c) => c.name).sort())
       .toEqual(["deploy", "frontend:build", "test"]);
   });
 
@@ -36,14 +36,14 @@ describe("scanCommandsDir", () => {
     write(".claude/commands/deploy.md", "---\ndescription: Ship it\n---\nbody");
     write(".claude/commands/plain.md", "no frontmatter");
     const byName = Object.fromEntries(
-      scanCommandsDir(join(root, ".claude/commands")).map((c) => [c.name, c.description]),
+      scanCommandsDir(join(root, ".claude/commands"), "claude:command").map((c) => [c.name, c.description]),
     );
     expect(byName.deploy).toBe("Ship it");
     expect(byName.plain).toBeUndefined();
   });
 
   it("returns [] for a missing dir", () => {
-    expect(scanCommandsDir(join(root, "nope"))).toEqual([]);
+    expect(scanCommandsDir(join(root, "nope"), "claude:command")).toEqual([]);
   });
 });
 
@@ -52,7 +52,7 @@ describe("scanSkillsDir", () => {
     write(".claude/skills/codex/SKILL.md", "---\nname: codex\ndescription: x\n---\nbody");
     write(".claude/skills/weird-dir/SKILL.md", "---\ndescription: no name here\n---\nbody");
     write(".claude/skills/notaskill/readme.md", "no manifest"); // skipped (no SKILL.md)
-    expect(scanSkillsDir(join(root, ".claude/skills")).map((c) => c.name).sort())
+    expect(scanSkillsDir(join(root, ".claude/skills"), "claude:skill").map((c) => c.name).sort())
       .toEqual(["codex", "weird-dir"]);
   });
 });
@@ -81,8 +81,8 @@ describe("CommandRegistry", () => {
     const reg = new CommandRegistry({ relayClient: null, baseMachineMetadata: {}, homeDir: root });
     reg.rescanMachine();
 
-    reg.setProject("/proj/a", ["a-only"]);
-    reg.setProject("/proj/b", ["b-only"]);
+    reg.setProject("/proj/a", [{ name: "a-only", tags: ["claude:command"] }]);
+    reg.setProject("/proj/b", [{ name: "b-only", tags: ["claude:command"] }]);
 
     expect(reg.forProject("/proj/a")).toEqual(["a-only", "global"]);
     expect(reg.forProject("/proj/b")).toEqual(["b-only", "global"]);
@@ -93,7 +93,7 @@ describe("CommandRegistry", () => {
   it("refresh() re-validates projects so removed commands drop out", () => {
     const reg = new CommandRegistry({ relayClient: null, baseMachineMetadata: {}, homeDir: root });
     reg.rescanMachine();
-    reg.setProject(root, scanProject(root).map((c) => c.name)); // currently empty
+    reg.setProject(root, scanProject(root)); // currently empty
     write(".claude/commands/new.md");        // add a command after the initial scan
     expect(reg.refresh().slashCommands).toContain("new");
   });
@@ -123,5 +123,24 @@ describe("multi-agent discovery", () => {
     expect(names).toContain("oc-global");
     expect(names).not.toContain("nested:hidden");
     expect(names).not.toContain("hidden");
+  });
+});
+
+describe("flavor-filtered projection", () => {
+  it("each flavor's palette only offers what its harness loads", () => {
+    write(".claude/commands/cc.md");
+    write(".claude/skills/claude-skill/SKILL.md");
+    write(".codex/skills/codex-skill/SKILL.md");
+    write(".opencode/commands/oc-cmd.md");
+    write(".agents/skills/shared/SKILL.md");
+    const reg = new CommandRegistry({ relayClient: null, baseMachineMetadata: {}, homeDir: join(root, "nohome") });
+    reg.setProject(root, scanProject(root));
+    expect(reg.forProject(root, "claude")).toEqual(["cc", "claude-skill"]);
+    // codex: own skills + the cross-agent standard — NOT claude's anything
+    expect(reg.forProject(root, "codex")).toEqual(["codex-skill", "shared"]);
+    // opencode: own + .agents + claude SKILLS (compat) — not claude commands
+    expect(reg.forProject(root, "opencode")).toEqual(["claude-skill", "oc-cmd", "shared"]);
+    // no flavor → unfiltered union (machine-page semantics)
+    expect(reg.forProject(root)).toEqual(["cc", "claude-skill", "codex-skill", "oc-cmd", "shared"]);
   });
 });
