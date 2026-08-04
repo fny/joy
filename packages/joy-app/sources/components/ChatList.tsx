@@ -43,6 +43,11 @@ type SavedViewport =
         mode: 'reading';
         anchorDisplayId: string;
         anchorMessageId: string | null;
+        // Message ids of the rows adjacent to the anchor at capture time —
+        // tried in order when BOTH anchor lookups fail (history cap pruned the
+        // anchor, or regrouping swallowed it), so the restore lands on the
+        // nearest surviving neighbor instead of giving up.
+        neighborMessageIds: string[];
         intraItemOffset: number;
         newestMessageId: string | null;
     };
@@ -152,7 +157,8 @@ const ChatListInternal = React.memo((props: {
     const topVisibleIndexRef = React.useRef<number>(0);
     const sessionId = props.sessionId;
     // Newest message id, readable from the stable scroll callback — stamped
-    // into the saved position so a stale restore can be detected.
+    // into snapshots for diagnostics ('live' mode) — reading snapshots restore
+    // their anchor regardless of new content (see restoreViewport).
     const newestIdRef = React.useRef<string | null>(null);
     newestIdRef.current = props.messages[0]?.id ?? null;
     const session = useSession(props.sessionId);
@@ -447,10 +453,19 @@ const ChatListInternal = React.memo((props: {
             intra = list.getAbsoluteLastScrollOffset() - list.getFirstItemOffset() - layout.y;
             if (!Number.isFinite(intra)) intra = 0;
         }
+        // Neighbor fallbacks: rows just below then just above the anchor
+        // (below first — landing slightly later in the conversation reads
+        // better than jumping back before what the user already read).
+        const neighbors: string[] = [];
+        for (const j of [index + 1, index - 1, index + 2]) {
+            const id = items[j] ? anchorMessageIdFor(items[j]) : null;
+            if (id) neighbors.push(id);
+        }
         rememberViewport(sessionId, {
             mode: 'reading',
             anchorDisplayId: row.id,
             anchorMessageId: anchorMessageIdFor(row),
+            neighborMessageIds: neighbors,
             intraItemOffset: intra,
             newestMessageId,
         });
@@ -472,12 +487,12 @@ const ChatListInternal = React.memo((props: {
             if (opts.retained) list.scrollToEnd({ animated: false });
             return;
         }
-        if (saved.newestMessageId !== newestIdRef.current) {
-            // New content arrived while away → product rule: go to the bottom.
-            savedViewport.delete(sessionId);
-            if (opts.retained) list.scrollToEnd({ animated: false });
-            return;
-        }
+        // A reading anchor is restored even when new content arrived while
+        // away (the OLD rule discarded it and jumped to the bottom — which
+        // fired on essentially every terminal round-trip during a busy
+        // session, since visiting the terminal is exactly when messages
+        // stream in; joint claude+codex diagnosis 2026-08-04). Jumping to the
+        // new content is the user's call, via the down button.
         const items = orderedItemsRef.current;
         let index = items.findIndex((i) => i.id === saved.anchorDisplayId);
         let intra = saved.intraItemOffset;
@@ -489,7 +504,17 @@ const ChatListInternal = React.memo((props: {
             intra = 0;
         }
         if (index < 0) {
-            if (opts.retained) list.scrollToEnd({ animated: false });
+            // Anchor pruned (history cap) or dissolved — nearest surviving
+            // neighbor from capture time, below-first.
+            for (const nid of saved.neighborMessageIds ?? []) {
+                index = items.findIndex((i) => rowContainsMessage(i, nid));
+                if (index >= 0) { intra = 0; break; }
+            }
+        }
+        if (index < 0) {
+            // Nothing to anchor to. On a retained screen the native list is
+            // still sitting near the old offset — leaving it alone preserves
+            // more of the user's position than yanking to the bottom ever did.
             return;
         }
         // A collapsed-while-away group is shorter than the saved offset into
