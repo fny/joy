@@ -18,6 +18,7 @@ import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
 import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
+import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord, listWindowRecords } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
@@ -623,6 +624,10 @@ export class SessionRegistry {
       // resume_id (a codex thread id) → thread/resume instead of thread/start.
       codexThreadId: resumeThread,
       config: codexConfig,
+      // The joy tag vocabulary (options/img/file/notify/title) — codex's
+      // system-prompt channel. Resumed threads keep their original
+      // instructions (thread/resume doesn't retake them).
+      developerInstructions: codexJoyInstructions(),
     };
     const session = new CodexSession(init, this.#sessionDeps());
     this.#sessions.set(id, session);

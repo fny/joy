@@ -15,6 +15,7 @@
 // open tool calls, so CodexSession stays a thin applier of the effects.
 
 import { randomUUID } from "crypto";
+import { parseJoyTags } from "../domain/agentTagsPrompt";
 import {
   encodeTurnStart,
   encodeTextEvent,
@@ -38,7 +39,9 @@ export type CodexEffect =
   | { kind: "confirmDispatch"; clientId: string }
   | { kind: "model"; code: string }
   | { kind: "effort"; effort: string }
-  | { kind: "context"; tokens: number };
+  | { kind: "context"; tokens: number }
+  | { kind: "title"; value: string }
+  | { kind: "notify"; headline: string; detail: string | null };
 
 // Tool-name parity with happy-app's codex renderers (CodexDiffView /
 // CodexPatchView) and the claude wire vocabulary.
@@ -227,10 +230,15 @@ export class CodexNormalizer {
     const core = this.#canonicalCore(joyTurn, type, str(item.id));
     switch (type) {
       case "agentMessage": {
-        const text = str(item.text).trim();
-        if (!text) return [];
+        const raw = str(item.text).trim();
+        if (!raw) return [];
+        const { title, notifies, text } = parseJoyTags(raw);
+        const out: CodexEffect[] = [];
+        if (title) out.push({ kind: "title", value: title });
+        for (const n of notifies) out.push({ kind: "notify", headline: n.headline, detail: n.detail });
         // Canonical (turn, ordinal) localId — same across live + history replay.
-        return [this.#wire(encodeTextEvent(text, { turn: joyTurn }), `turn:${joyTurn}:item:${core}:text`)];
+        if (text) out.push(this.#wire(encodeTextEvent(text, { turn: joyTurn }), `turn:${joyTurn}:item:${core}:text`));
+        return out;
       }
       case "commandExecution":
       case "fileChange":

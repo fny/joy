@@ -109,6 +109,9 @@ export class CodexSession implements AgentSession {
   // (at-most-once). On a fresh spawn the old server (and its in-flight turn)
   // died, so unconfirmed sends are requeued (at-least-once).
   #rejoined = false;
+  // /title lock (parity with claude/opencode): a user-set title beats agent
+  // <joy-title> emissions. Loaded from the window record.
+  #titleLocked = false;
   // Durable inbound spool (finding #3): app messages persisted before delivery.
   // Loaded in the constructor BEFORE the relay starts pulling (finding #3 race).
   #inbound: CodexInboundItem[] = [];
@@ -137,6 +140,7 @@ export class CodexSession implements AgentSession {
     this.#deps = deps;
     this.#resumeThreadId = init.codexThreadId;
     this.#developerInstructions = init.developerInstructions;
+    this.#titleLocked = loadWindowRecord(this.id)?.titleLockedByUser === true;
     this.#config = init.config;
     this.#socketPath = join(joyStateDir(), `codex-${init.id}.sock`);
     this.#norm = new CodexNormalizer();
@@ -281,7 +285,7 @@ export class CodexSession implements AgentSession {
     try { chmodSync(dir, 0o700); } catch { /* best effort (umask) */ }
     try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ }
 
-    this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath, config: this.#config });
+    this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath, config: this.#config, joySessionId: this.id });
     this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
     this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
     this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
@@ -576,6 +580,14 @@ export class CodexSession implements AgentSession {
         case "model": this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); break;
         case "effort": this.currentEffort = eff.effort; break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
+        case "notify": this.#relay?.notifyCustom(eff.headline, eff.detail); break;
+        case "title":
+          if (!this.#titleLocked) {
+            this.summary = eff.value;
+            void this.#relay?.updateSummary(eff.value);
+            this.#deps.broadcast("session_update", this.toJSON());
+          }
+          break;
         case "confirmDispatch": this.#onDispatchEchoed(eff.clientId); break;
       }
     }
@@ -650,6 +662,18 @@ export class CodexSession implements AgentSession {
     // Non-relay intake (app RPC / local). If a seq is provided, dedupe like the
     // relay path; otherwise a random clientId (these are not cursor-replayed).
     const seq = opts?.seq;
+    // /title — joy-level, never forwarded to the model (parity with the other
+    // adapters). With text: set + lock. Bare: unlock.
+    const titleCmd = /^\/title(?:\s+(.*))?$/s.exec(text.trim());
+    if (titleCmd) {
+      const t = (titleCmd[1] ?? "").trim();
+      this.#titleLocked = t.length > 0;
+      saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: this.#titleLocked });
+      if (t) { this.summary = t; void this.#relay?.updateSummary(t); }
+      this.#deps.broadcast("session_update", this.toJSON());
+      if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? Date.now()}`);
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+    }
     if (seq != null && this.#inbound.some((i) => i.seq === seq)) { this.#pumpDispatch(); return { id: String(seq), text, createdAt: Date.now() }; }
     const item: CodexInboundItem = { clientId: seq != null ? `codex-in:${this.id}:${seq}` : randomUUID(), text, state: "queued", at: Date.now(), seq };
     this.#inbound.push(item);
