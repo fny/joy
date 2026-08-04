@@ -98,3 +98,30 @@ describe("CommandRegistry", () => {
     expect(reg.refresh().slashCommands).toContain("new");
   });
 });
+
+// ── multi-agent conventions (codex / opencode / .agents) ────────────────────
+describe("multi-agent discovery", () => {
+  it("scanProject sees codex, opencode, and .agents skills + opencode commands", () => {
+    write(".codex/skills/codex-skill/SKILL.md", "---\ndescription: c\n---");
+    write(".opencode/skills/oc-skill/SKILL.md", "---\ndescription: o\n---");
+    write(".agents/skills/shared-skill/SKILL.md", "---\ndescription: s\n---");
+    write(".opencode/commands/oc-cmd.md");
+    expect(scanProject(root).map((c) => c.name)).toEqual(["codex-skill", "oc-cmd", "oc-skill", "shared-skill"]);
+  });
+
+  it("scanMachine sees codex prompts (top-level only) + personal skills across conventions", () => {
+    write(".codex/prompts/draftpr.md", "---\ndescription: Draft a PR\n---");
+    // codex ignores subdirectories of prompts — so must we.
+    write(".codex/prompts/nested/hidden.md");
+    write(".codex/skills/personal-codex/SKILL.md");
+    write(".agents/skills/personal-shared/SKILL.md");
+    write(".config/opencode/commands/oc-global.md");
+    const names = scanMachine(root).map((c) => c.name);
+    expect(names).toContain("draftpr");
+    expect(names).toContain("personal-codex");
+    expect(names).toContain("personal-shared");
+    expect(names).toContain("oc-global");
+    expect(names).not.toContain("nested:hidden");
+    expect(names).not.toContain("hidden");
+  });
+});

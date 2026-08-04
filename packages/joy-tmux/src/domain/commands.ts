@@ -6,11 +6,20 @@
 // suggestion list (sync/suggestionCommands.ts) keys off names and supplies its
 // own descriptions.
 //
-// Sources (all best-effort; a missing/unreadable dir is just empty):
-//   <cwd>/.claude/commands/**.md        project commands   (sub/ → `sub:name`)
-//   <cwd>/.claude/skills/<name>/SKILL.md project skills
-//   ~/.claude/commands, ~/.claude/skills personal (machine-wide)
-//   ~/.claude/plugins/marketplaces/*/plugins/<p>/{commands,skills}  → `p:name`
+// Sources (all best-effort; a missing/unreadable dir is just empty).
+// Conventions verified against vendor docs 2026-08-04:
+//   claude:   <cwd>/.claude/commands/**.md (sub/ → `sub:name`),
+//             <cwd>/.claude/skills/<name>/SKILL.md; personal ~/.claude/{commands,skills};
+//             plugins marketplaces → `p:name` (machine scan excludes them — noise)
+//   codex:    <cwd>/.codex/skills; personal ~/.codex/skills (dot-dirs like
+//             .system are naturally skipped — no direct SKILL.md) and
+//             ~/.codex/prompts/*.md (TOP-LEVEL only; codex ignores subdirs)
+//   opencode: <cwd>/.opencode/{commands,skills}; personal
+//             ~/.config/opencode/{commands,skills}
+//   cross-agent standard (read by codex AND opencode): <cwd>/.agents/skills;
+//             personal ~/.agents/skills
+// Limitation: codex/opencode walk .agents/skills from cwd UP to the repo root;
+// we scan the session cwd only (joy sessions overwhelmingly launch at root).
 //
 // A session is a *projection* of the machine registry: its list is
 // (machine ∪ its project). The machine page shows the union across everything
@@ -59,13 +68,13 @@ function readFrontmatterField(path: string, field: string): string | undefined {
  * subdirectories namespaces them as `subdir:name`, matching Claude Code's
  * project-command namespacing.
  */
-export function scanCommandsDir(dir: string): ScannedCommand[] {
+export function scanCommandsDir(dir: string, opts?: { topLevelOnly?: boolean }): ScannedCommand[] {
   const out: ScannedCommand[] = [];
   for (const entry of safeReaddir(dir)) {
     const p = join(dir, entry);
     if (entry.endsWith(".md")) {
       out.push({ name: entry.slice(0, -3), description: readFrontmatterField(p, "description") });
-    } else if (isDir(p)) {
+    } else if (!opts?.topLevelOnly && isDir(p)) {
       for (const sub of safeReaddir(p)) {
         if (sub.endsWith(".md")) {
           out.push({ name: `${entry}:${sub.slice(0, -3)}`, description: readFrontmatterField(join(p, sub), "description") });
@@ -122,10 +131,16 @@ function dedupeSorted(cmds: ScannedCommand[]): ScannedCommand[] {
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Project-scoped commands + skills under `<cwd>/.claude`. */
+/** Project-scoped commands + skills across every agent convention. */
 export function scanProject(cwd: string): ScannedCommand[] {
-  const base = join(cwd, ".claude");
-  return dedupeSorted([...scanCommandsDir(join(base, "commands")), ...scanSkillsDir(join(base, "skills"))]);
+  return dedupeSorted([
+    ...scanCommandsDir(join(cwd, ".claude", "commands")),
+    ...scanSkillsDir(join(cwd, ".claude", "skills")),
+    ...scanSkillsDir(join(cwd, ".codex", "skills")),
+    ...scanCommandsDir(join(cwd, ".opencode", "commands")),
+    ...scanSkillsDir(join(cwd, ".opencode", "skills")),
+    ...scanSkillsDir(join(cwd, ".agents", "skills")),
+  ]);
 }
 
 /** Machine-wide commands: personal `~/.claude` only. Plugin commands
@@ -133,10 +148,15 @@ export function scanProject(cwd: string): ScannedCommand[] {
  *  the app's "/" autocomplete with noise (claude-code-setup, example-plugin,
  *  …) the user never invokes from chat ("I don't want any plugins"). */
 export function scanMachine(home: string): ScannedCommand[] {
-  const base = join(home, ".claude");
   return dedupeSorted([
-    ...scanCommandsDir(join(base, "commands")),
-    ...scanSkillsDir(join(base, "skills")),
+    ...scanCommandsDir(join(home, ".claude", "commands")),
+    ...scanSkillsDir(join(home, ".claude", "skills")),
+    // codex custom prompts are top-level-only by codex's own scan rules.
+    ...scanCommandsDir(join(home, ".codex", "prompts"), { topLevelOnly: true }),
+    ...scanSkillsDir(join(home, ".codex", "skills")),
+    ...scanCommandsDir(join(home, ".config", "opencode", "commands")),
+    ...scanSkillsDir(join(home, ".config", "opencode", "skills")),
+    ...scanSkillsDir(join(home, ".agents", "skills")),
   ]);
 }
 
