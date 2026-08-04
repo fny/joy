@@ -3650,7 +3650,7 @@ export function dialogFromPane(text: string): PaneDialog | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     if (DIALOG_RULE_RE.test(lines[i])) { rule = i; break; }
   }
-  if (rule < 0) return null;
+  if (rule < 0) return numberedPickerFromPane(lines);
   const region = lines.slice(rule + 1);
   // A REAL dialog replaces the input box — it cannot coexist with a live ready
   // prompt or a generating footer BELOW its rule. Checking the region (not the
@@ -3666,6 +3666,49 @@ export function dialogFromPane(text: string): PaneDialog | null {
   const hasFooter = region.some((l) => DIALOG_FOOTER_RE.test(l));
   if (options.length === 0 && !hasFooter) return null;
   const title = region.find((l) => l.trim())?.trim().slice(0, 120) ?? null;
+  return { title, options };
+}
+
+/** Fallback for pickers that do NOT use the ▔ modal rule (e.g. the
+ *  resume-from-summary dialog draws ─, and rule styles have changed across CLI
+ *  versions) — so this deliberately keys on the OPTIONS, not any border: a run
+ *  of numbered rows counting up from 1, one of which carries the ❯ selector
+ *  (pickers always render a default selection). A live input box anywhere on
+ *  screen disqualifies the pane — a real picker replaces the box, so numbered
+ *  content coexisting with a ready prompt or generating footer is scrollback
+ *  (e.g. a QUOTED picker pasted into chat). */
+function numberedPickerFromPane(lines: string[]): PaneDialog | null {
+  const full = lines.join("\n");
+  if (paneShowsReadyPrompt(full) || paneShowsGenerating(full)) return null;
+  // Collect numbered rows as (line index, number, selected) and split into
+  // runs that count up from 1 — scrollback lists and the live picker can both
+  // be on screen, so pick the run holding the ❯ selection.
+  type Row = { i: number; n: number; sel: boolean };
+  const rows: Row[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    const m = /^(❯\s*)?(\d+)\.\s+\S/.exec(t);
+    if (m) rows.push({ i, n: parseInt(m[2], 10), sel: !!m[1] });
+  }
+  let run: Row[] = [];
+  let best: Row[] | null = null;
+  for (const r of rows) {
+    if (r.n === 1) run = [r];
+    else if (run.length && r.n === run[run.length - 1].n + 1) run.push(r);
+    else run = [];
+    if (run.length >= 2 && run.some((x) => x.sel)) best = [...run];
+  }
+  if (!best) return null;
+  const options = best.map((r) => lines[r.i].trim().replace(/^❯\s*/, "").slice(0, 120));
+  // Title: nearest non-empty, non-rule line above the first option row.
+  let title: string | null = null;
+  for (let i = best[0].i - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    if (/^[─━▔]{3,}/.test(t)) break;
+    title = t.slice(0, 120);
+    break;
+  }
   return { title, options };
 }
 
