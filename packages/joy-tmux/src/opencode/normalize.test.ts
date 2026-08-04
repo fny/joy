@@ -247,3 +247,23 @@ describe("agent titles (<joy-title/>)", () => {
     expect(fx).toEqual([{ kind: "title", value: "Just a title" }]);
   });
 });
+
+// ── parseJoyTags (shared codex/opencode tag parser) ─────────────────────────
+import { parseJoyTags } from "../domain/agentTagsPrompt";
+
+describe("parseJoyTags", () => {
+  it("title + notify + clean text", () => {
+    const r = parseJoyTags('Deployed it.\n<joy-title value="Ship the deploy" />\n<joy-notify message="Deploy finished" detail="staging green" />\nAll done.');
+    expect(r.title).toBe("Ship the deploy");
+    expect(r.notifies).toEqual([{ headline: "Deploy finished", detail: "staging green" }]);
+    expect(r.text).toBe("Deployed it.\nAll done.");
+  });
+  it("notify without detail", () => {
+    const r = parseJoyTags('<joy-notify message="Need a decision" />');
+    expect(r.notifies).toEqual([{ headline: "Need a decision", detail: null }]);
+    expect(r.text).toBe("");
+  });
+  it("no tags → untouched fast path", () => {
+    expect(parseJoyTags("plain")).toEqual({ title: null, notifies: [], text: "plain" });
+  });
+});

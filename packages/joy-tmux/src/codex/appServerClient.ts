@@ -25,6 +25,9 @@ export interface AppServerSpawnOpts {
   socketPath: string;
   /** Extra `-c key=value` config overrides. */
   config?: Record<string, string>;
+  /** joy session id — exported as JOY_SESSION_ID so tools can use the joy-img
+   *  save-path convention. */
+  joySessionId?: string;
   /** codex binary (default from JOY_CODEX_BIN env or "codex"). Pinning matters:
    *  clientUserMessageId receipts need codex ≥ ~0.144, and PATH can resolve a
    *  stale workspace copy under some launchers. */
@@ -36,10 +39,11 @@ export interface AppServerSpawnOpts {
  *  keeps the update prompt from blocking startup. */
 export function spawnCodexAppServer(opts: AppServerSpawnOpts): ChildProcess {
   const bin = opts.bin ?? process.env.JOY_CODEX_BIN ?? "codex";
+  const env = opts.joySessionId ? { ...process.env, JOY_SESSION_ID: opts.joySessionId } : undefined;
   const args = ["app-server", "--listen", `unix://${opts.socketPath}`,
     "-c", "check_for_update_on_startup=false"];
   for (const [k, v] of Object.entries(opts.config ?? {})) { args.push("-c", `${k}=${v}`); }
-  return spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+  return spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env });
 }
 
 export interface ThreadStartOpts {

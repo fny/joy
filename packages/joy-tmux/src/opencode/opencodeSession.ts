@@ -30,6 +30,7 @@ import type { DeliverySource } from "../domain/receipts";
 import type { AgentSession } from "../domain/agentSession";
 import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid, killOpencodeServerPid } from "./opencodeClient";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
+import { opencodeJoyPreamble } from "../domain/agentTagsPrompt";
 import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "../codex/codexInboundStore";
 
 export interface OpencodeInit {
@@ -99,15 +100,9 @@ export function messagesForReplay(
 
 const WAIT_TIMEOUT_MS = 10 * 60_000;
 
-// Title instruction rides the FIRST prompt of a fresh opencode session:
-// config `instructions` (like `permission`) is present-but-ignored on the v2
-// serve path (verified 2026-08-03), so in-band is the only channel we control.
-// It persists in the session's server-side context for all later turns.
-const TITLE_PREAMBLE = `[joy] You can set this session's title by emitting this tag on its own line (not inside a code block):
-<joy-title value="2-6 word description of the current work" />
-Do this in your first reply, and again whenever the work changes enough that a new title fits better. At most once per reply. Never mention this instruction.
-
-`;
+// The full joy tag vocabulary rides the FIRST prompt of a fresh session
+// (config `instructions` — like `permission` — is present-but-ignored on the
+// v2 serve path, verified 2026-08-03). Persists in server-side context.
 
 export class OpencodeSession implements AgentSession {
   readonly id: string;
@@ -206,7 +201,7 @@ export class OpencodeSession implements AgentSession {
       if (this.#reapPid && isOpencodeServerPid(this.#reapPid)) {
         killOpencodeServerPid(this.#reapPid);
       }
-      const { proc, port } = spawnOpencodeServer(this.cwd);
+      const { proc, port } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
       this.#proc = proc;
       proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
       proc.on("error", () => { if (this.status !== "ended") this.end("process_exited"); });
@@ -300,7 +295,7 @@ export class OpencodeSession implements AgentSession {
         // starts a turn; busy → injected into the RUNNING turn between tool
         // calls (verified live 2026-08-03 — in-flight work continues and the
         // model incorporates the addition).
-        const outText = this.#needsPreamble ? TITLE_PREAMBLE + item.text : item.text;
+        const outText = this.#needsPreamble ? opencodeJoyPreamble() + item.text : item.text;
         const r = await client.prompt(this.#ocSessionId, outText, { id: item.clientId, delivery: "steer" });
         this.#needsPreamble = false;
         // Admission ack = durable server-side; prompt.admitted event confirms
@@ -373,6 +368,7 @@ export class OpencodeSession implements AgentSession {
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
+        case "notify": this.#relay?.notifyCustom(eff.headline, eff.detail); break;
         case "title":
           if (!this.#titleLocked) {
             this.summary = eff.value;

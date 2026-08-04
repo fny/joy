@@ -25,6 +25,7 @@ import {
   type WireRecord,
 } from "../relay/relay";
 import type { OpencodeEvent } from "./opencodeClient";
+import { parseJoyTags } from "../domain/agentTagsPrompt";
 
 export type OpencodeEffect =
   | { kind: "wire"; record: WireRecord; localId: string }
@@ -43,24 +44,16 @@ export type OpencodeEffect =
   | { kind: "context"; tokens: number }
   // Agent re-title via the <joy-title/> convention (instruction rides the
   // first-prompt preamble — config `instructions` is ignored by serve).
-  | { kind: "title"; value: string };
+  | { kind: "title"; value: string }
+  | { kind: "notify"; headline: string; detail: string | null };
 
 const TOOL_NAME_PREFIX = "Opencode";
 
 /** Pull a `<joy-title value="…"/>` out of assistant text: returns the title
  *  (last one wins) and the text with tag lines removed. */
 export function extractJoyTitle(text: string): { title: string | null; text: string } {
-  if (!text.includes("<joy-title")) return { title: null, text };
-  let title: string | null = null;
-  const re = /<joy-title[^>]*value="([^"]+)"[^>]*\/?>/gi;
-  for (const m of text.matchAll(re)) title = m[1].trim() || title;
-  const cleaned = text
-    .split("\n")
-    .filter((line) => !/^\s*<joy-title/i.test(line.trim()))
-    .join("\n")
-    .replace(re, "")
-    .trim();
-  return { title, text: cleaned };
+  const r = parseJoyTags(text);
+  return { title: r.title, text: r.text };
 }
 
 function str(v: unknown): string { return typeof v === "string" ? v : ""; }
@@ -142,9 +135,10 @@ export class OpencodeNormalizer {
       }
       case "session.next.text.ended": {
         const raw = str(d.text).trim();
-        const { title, text } = extractJoyTitle(raw);
+        const { title, notifies, text } = parseJoyTags(raw);
         const out: OpencodeEffect[] = [];
         if (title) out.push({ kind: "title", value: title });
+        for (const n of notifies) out.push({ kind: "notify", headline: n.headline, detail: n.detail });
         if (!text) return out;
         if (!this.#turn) { out.push(this.#orphanText(text, d)); return out; }
         const core = `${str(d.assistantMessageID)}:${str(d.textID)}`;

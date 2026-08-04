@@ -50,7 +50,7 @@ export interface OpencodeSpawnResult {
 
 /** Spawn `opencode serve --port 0` in `cwd`. Port is parsed from stdout
  *  ("opencode server listening on http://127.0.0.1:PORT"). */
-export function spawnOpencodeServer(cwd: string, opts?: { bin?: string }): OpencodeSpawnResult {
+export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessionId?: string }): OpencodeSpawnResult {
   const bin = opts?.bin ?? process.env.JOY_OPENCODE_BIN ?? "opencode";
   // Clean npm userconfig so runtime provider installs can't be broken by a
   // poisoned ~/.npmrc; created once in the joy state dir.
@@ -64,7 +64,11 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string }): Openc
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
-    env: { ...userShellEnv(), ...process.env, NPM_CONFIG_USERCONFIG: cleanNpmrc },
+    env: {
+      ...userShellEnv(), ...process.env, NPM_CONFIG_USERCONFIG: cleanNpmrc,
+      // joy-img save-path convention (tools inherit the server env).
+      ...(opts?.joySessionId ? { JOY_SESSION_ID: opts.joySessionId } : {}),
+    },
   });
   const port = new Promise<number>((resolve, reject) => {
     let buf = "";
