@@ -105,6 +105,7 @@ const WAIT_TIMEOUT_MS = 10 * 60_000;
 // v2 serve path, verified 2026-08-03). Persists in server-side context.
 
 export class OpencodeSession implements AgentSession {
+  readonly agentFlavor = "opencode" as const;
   readonly id: string;
   readonly cwd: string;
   readonly model?: string;

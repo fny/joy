@@ -89,7 +89,7 @@ const registry = new SessionRegistry({
   // commands (project ∪ machine), folding the project into machine knowledge.
   onRelayAttached: (session, rs) => {
     bindSessionOps(session, rs);
-    void registry.commands.onSessionAttached(session.cwd, rs);
+    void registry.commands.onSessionAttached(session.cwd, rs, session.agentFlavor);
   },
 });
 

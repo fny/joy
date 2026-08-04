@@ -14,6 +14,9 @@ import type { DeliverySource } from "./receipts";
 import type { SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
 
 export interface AgentSession {
+  /** Which harness runs this session — drives per-flavor projections
+   *  (e.g. the slash-command palette). */
+  readonly agentFlavor: "claude" | "codex" | "opencode";
   // ── identity / state (read by registry + operations) ──
   readonly id: string;
   readonly cwd: string;

@@ -60,6 +60,7 @@ interface PendingApproval {
 }
 
 export class CodexSession implements AgentSession {
+  readonly agentFlavor = "codex" as const;
   readonly id: string;
   readonly cwd: string;
   readonly model?: string;

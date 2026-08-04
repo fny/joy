@@ -39,11 +39,33 @@ function isDir(p: string): boolean {
   try { return statSync(p).isDirectory(); } catch { return false; }
 }
 
-/** A discovered slash command: its (possibly namespaced) name plus the
- *  `description:` from the source `.md` frontmatter, when present. */
+/** Which harness convention an entry came from + whether it's a command or a
+ *  skill — the projection filter's key. Each harness only LOADS its own
+ *  conventions (verified against vendor docs 2026-08-04), with two cross-reads:
+ *  .agents/skills is read by codex AND opencode, and opencode additionally
+ *  reads .claude SKILLS (not commands). */
+export type CmdTag =
+  | "claude:command" | "claude:skill"
+  | "codex:command" | "codex:skill"
+  | "opencode:command" | "opencode:skill"
+  | "agents:skill";
+
+export type AgentFlavor = "claude" | "codex" | "opencode";
+
+/** What each session flavor's palette should offer = what its harness loads. */
+const FLAVOR_TAGS: Record<AgentFlavor, ReadonlySet<CmdTag>> = {
+  claude: new Set<CmdTag>(["claude:command", "claude:skill"]),
+  codex: new Set<CmdTag>(["codex:command", "codex:skill", "agents:skill"]),
+  opencode: new Set<CmdTag>(["opencode:command", "opencode:skill", "claude:skill", "agents:skill"]),
+};
+
+/** A discovered slash command: its (possibly namespaced) name, the
+ *  `description:` from the source `.md` frontmatter when present, and the
+ *  convention tags it was found under (merged across duplicates). */
 export interface ScannedCommand {
   name: string;
   description?: string;
+  tags: CmdTag[];
 }
 
 /** Read a single-line field from a markdown file's YAML frontmatter, e.g.
@@ -68,16 +90,16 @@ function readFrontmatterField(path: string, field: string): string | undefined {
  * subdirectories namespaces them as `subdir:name`, matching Claude Code's
  * project-command namespacing.
  */
-export function scanCommandsDir(dir: string, opts?: { topLevelOnly?: boolean }): ScannedCommand[] {
+export function scanCommandsDir(dir: string, tag: CmdTag, opts?: { topLevelOnly?: boolean }): ScannedCommand[] {
   const out: ScannedCommand[] = [];
   for (const entry of safeReaddir(dir)) {
     const p = join(dir, entry);
     if (entry.endsWith(".md")) {
-      out.push({ name: entry.slice(0, -3), description: readFrontmatterField(p, "description") });
+      out.push({ name: entry.slice(0, -3), description: readFrontmatterField(p, "description"), tags: [tag] });
     } else if (!opts?.topLevelOnly && isDir(p)) {
       for (const sub of safeReaddir(p)) {
         if (sub.endsWith(".md")) {
-          out.push({ name: `${entry}:${sub.slice(0, -3)}`, description: readFrontmatterField(join(p, sub), "description") });
+          out.push({ name: `${entry}:${sub.slice(0, -3)}`, description: readFrontmatterField(join(p, sub), "description"), tags: [tag] });
         }
       }
     }
@@ -88,7 +110,7 @@ export function scanCommandsDir(dir: string, opts?: { topLevelOnly?: boolean }):
 /** Each subdir holding a SKILL.md is a skill; its name is the frontmatter
  *  `name:` (canonical), falling back to the directory name, plus the skill's
  *  `description:`. */
-export function scanSkillsDir(dir: string): ScannedCommand[] {
+export function scanSkillsDir(dir: string, tag: CmdTag): ScannedCommand[] {
   const out: ScannedCommand[] = [];
   for (const entry of safeReaddir(dir)) {
     const manifest = join(dir, entry, "SKILL.md");
@@ -96,6 +118,7 @@ export function scanSkillsDir(dir: string): ScannedCommand[] {
       out.push({
         name: readFrontmatterField(manifest, "name") ?? entry,
         description: readFrontmatterField(manifest, "description"),
+        tags: [tag],
       });
     }
   }
@@ -110,11 +133,11 @@ export function scanPluginCommands(pluginsDir: string): ScannedCommand[] {
   for (const mkt of safeReaddir(marketplaces)) {
     const pluginsRoot = join(marketplaces, mkt, "plugins");
     for (const plugin of safeReaddir(pluginsRoot)) {
-      for (const c of scanCommandsDir(join(pluginsRoot, plugin, "commands"))) {
-        out.push({ name: `${plugin}:${c.name}`, description: c.description });
+      for (const c of scanCommandsDir(join(pluginsRoot, plugin, "commands"), "claude:command")) {
+        out.push({ name: `${plugin}:${c.name}`, description: c.description, tags: c.tags });
       }
-      for (const s of scanSkillsDir(join(pluginsRoot, plugin, "skills"))) {
-        out.push({ name: `${plugin}:${s.name}`, description: s.description });
+      for (const s of scanSkillsDir(join(pluginsRoot, plugin, "skills"), "claude:skill")) {
+        out.push({ name: `${plugin}:${s.name}`, description: s.description, tags: s.tags });
       }
     }
   }
@@ -126,7 +149,9 @@ function dedupeSorted(cmds: ScannedCommand[]): ScannedCommand[] {
   const byName = new Map<string, ScannedCommand>();
   for (const c of cmds) {
     const prev = byName.get(c.name);
-    if (!prev || (!prev.description && c.description)) byName.set(c.name, c);
+    if (!prev) { byName.set(c.name, { ...c, tags: [...c.tags] }); continue; }
+    for (const t of c.tags) if (!prev.tags.includes(t)) prev.tags.push(t);
+    if (!prev.description && c.description) prev.description = c.description;
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -134,12 +159,12 @@ function dedupeSorted(cmds: ScannedCommand[]): ScannedCommand[] {
 /** Project-scoped commands + skills across every agent convention. */
 export function scanProject(cwd: string): ScannedCommand[] {
   return dedupeSorted([
-    ...scanCommandsDir(join(cwd, ".claude", "commands")),
-    ...scanSkillsDir(join(cwd, ".claude", "skills")),
-    ...scanSkillsDir(join(cwd, ".codex", "skills")),
-    ...scanCommandsDir(join(cwd, ".opencode", "commands")),
-    ...scanSkillsDir(join(cwd, ".opencode", "skills")),
-    ...scanSkillsDir(join(cwd, ".agents", "skills")),
+    ...scanCommandsDir(join(cwd, ".claude", "commands"), "claude:command"),
+    ...scanSkillsDir(join(cwd, ".claude", "skills"), "claude:skill"),
+    ...scanSkillsDir(join(cwd, ".codex", "skills"), "codex:skill"),
+    ...scanCommandsDir(join(cwd, ".opencode", "commands"), "opencode:command"),
+    ...scanSkillsDir(join(cwd, ".opencode", "skills"), "opencode:skill"),
+    ...scanSkillsDir(join(cwd, ".agents", "skills"), "agents:skill"),
   ]);
 }
 
@@ -149,14 +174,14 @@ export function scanProject(cwd: string): ScannedCommand[] {
  *  …) the user never invokes from chat ("I don't want any plugins"). */
 export function scanMachine(home: string): ScannedCommand[] {
   return dedupeSorted([
-    ...scanCommandsDir(join(home, ".claude", "commands")),
-    ...scanSkillsDir(join(home, ".claude", "skills")),
+    ...scanCommandsDir(join(home, ".claude", "commands"), "claude:command"),
+    ...scanSkillsDir(join(home, ".claude", "skills"), "claude:skill"),
     // codex custom prompts are top-level-only by codex's own scan rules.
-    ...scanCommandsDir(join(home, ".codex", "prompts"), { topLevelOnly: true }),
-    ...scanSkillsDir(join(home, ".codex", "skills")),
-    ...scanCommandsDir(join(home, ".config", "opencode", "commands")),
-    ...scanSkillsDir(join(home, ".config", "opencode", "skills")),
-    ...scanSkillsDir(join(home, ".agents", "skills")),
+    ...scanCommandsDir(join(home, ".codex", "prompts"), "codex:command", { topLevelOnly: true }),
+    ...scanSkillsDir(join(home, ".codex", "skills"), "codex:skill"),
+    ...scanCommandsDir(join(home, ".config", "opencode", "commands"), "opencode:command"),
+    ...scanSkillsDir(join(home, ".config", "opencode", "skills"), "opencode:skill"),
+    ...scanSkillsDir(join(home, ".agents", "skills"), "agents:skill"),
   ]);
 }
 
@@ -177,12 +202,12 @@ export class CommandRegistry {
   readonly #relay: RelayClient | null;
   readonly #base: Record<string, unknown>;
   readonly #home: string;
-  #machine = new Set<string>();
+  #machine = new Map<string, Set<CmdTag>>();
   // Plugin-only subset of #machine, exposed separately so the app can
   // include/exclude plugin commands (they share the `name:name` shape with
   // project-subfolder commands, so the app can't tell them apart by name).
   #plugins = new Set<string>();
-  #projects = new Map<string, Set<string>>();
+  #projects = new Map<string, Map<string, Set<CmdTag>>>();
   // name → frontmatter description, accumulated across machine + every scanned
   // project (union; never shrinks, stale entries are filtered out on push).
   #descriptions = new Map<string, string>();
@@ -205,26 +230,35 @@ export class CommandRegistry {
 
   rescanMachine(): void {
     const machine = scanMachine(this.#home);
-    this.#machine = new Set(machine.map((c) => c.name));
+    this.#machine = new Map(machine.map((c) => [c.name, new Set(c.tags)]));
     this.#plugins = new Set(); // plugin commands excluded from autocomplete entirely (see scanMachine)
     this.#mergeDescriptions(machine);
   }
 
-  setProject(cwd: string, names: string[]): void {
-    this.#projects.set(cwd, new Set(names));
+  setProject(cwd: string, cmds: ScannedCommand[]): void {
+    this.#projects.set(cwd, new Map(cmds.map((c) => [c.name, new Set(c.tags)])));
   }
 
-  /** The list for one session = machine ∪ that project. */
-  forProject(cwd: string): string[] {
-    const s = new Set(this.#machine);
-    for (const n of this.#projects.get(cwd) ?? []) s.add(n);
-    return [...s].sort();
+  /** The list for one session = machine ∪ that project, filtered to what the
+   *  session's HARNESS actually loads (a codex palette must not suggest claude
+   *  commands codex can't run). No flavor → unfiltered union (legacy/machine). */
+  forProject(cwd: string, flavor?: AgentFlavor): string[] {
+    const allow = flavor ? FLAVOR_TAGS[flavor] : null;
+    const out = new Set<string>();
+    const consider = (name: string, tags: Set<CmdTag>) => {
+      if (!allow) { out.add(name); return; }
+      for (const t of tags) if (allow.has(t)) { out.add(name); return; }
+    };
+    for (const [n, tags] of this.#machine) consider(n, tags);
+    for (const [n, tags] of this.#projects.get(cwd) ?? []) consider(n, tags);
+    return [...out].sort();
   }
 
-  /** Everything the daemon knows = machine ∪ all scanned projects. */
+  /** Everything the daemon knows = machine ∪ all scanned projects (unfiltered:
+   *  the machine page is an inventory, not an execution surface). */
   union(): string[] {
-    const s = new Set(this.#machine);
-    for (const set of this.#projects.values()) for (const n of set) s.add(n);
+    const s = new Set(this.#machine.keys());
+    for (const m of this.#projects.values()) for (const n of m.keys()) s.add(n);
     return [...s].sort();
   }
 
@@ -265,11 +299,11 @@ export class CommandRegistry {
 
   /** On relay attach (launch / recover / reconnect): scan this session's
    *  project, push its list, and fold the project into machine knowledge. */
-  async onSessionAttached(cwd: string, rs: RelaySession): Promise<void> {
+  async onSessionAttached(cwd: string, rs: RelaySession, flavor: AgentFlavor = "claude"): Promise<void> {
     const scanned = scanProject(cwd);
-    this.setProject(cwd, scanned.map((c) => c.name));
+    this.setProject(cwd, scanned);
     this.#mergeDescriptions(scanned);
-    try { await rs.updateSlashCommands(this.forProject(cwd)); } catch { /* best-effort */ }
+    try { await rs.updateSlashCommands(this.forProject(cwd, flavor)); } catch { /* best-effort */ }
     await this.pushMachineIfChanged();
   }
 
@@ -279,7 +313,7 @@ export class CommandRegistry {
     this.rescanMachine();
     for (const cwd of [...this.#projects.keys()]) {
       const scanned = scanProject(cwd);
-      this.setProject(cwd, scanned.map((c) => c.name));
+      this.setProject(cwd, scanned);
       this.#mergeDescriptions(scanned);
     }
     void this.pushMachineIfChanged();
