@@ -1114,3 +1114,78 @@ test("retryFromPane: variants and non-matches", () => {
   // A user merely TALKING about a 529 in chat text must not trigger the banner.
   expect(retryFromPane("I saw a 529 yesterday, attempt 1/10 of my diet")).toBeNull();
 });
+
+// ── numbered pickers WITHOUT the ▔ modal rule (resume-from-summary etc.) ────
+// Fixture is a live capture (2026-08-04). Detection deliberately keys on the
+// numbered rows + default ❯ selection, NOT the border style — borders have
+// changed across CLI versions.
+const RESUME_PICKER = [
+  "──────────────────────────────────────────────────────────────────────────────",
+  "  This session is 3d 9h old and 528.3k tokens.",
+  "",
+  "  Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.",
+  "",
+  "  ❯ 1. Resume from summary (recommended)",
+  "    2. Resume full session as-is",
+  "    3. Don't ask me again",
+].join("\n");
+
+test("dialogFromPane picker fallback: detects the resume-from-summary picker (─ rule, not ▔)", () => {
+  const d = dialogFromPane(RESUME_PICKER);
+  expect(d).not.toBeNull();
+  expect(d!.options).toEqual([
+    "1. Resume from summary (recommended)",
+    "2. Resume full session as-is",
+    "3. Don't ask me again",
+  ]);
+  expect(d!.title).toMatch(/Resuming the full session/);
+});
+
+test("dialogFromPane picker fallback: detects it with the selection on a different row and NO border at all", () => {
+  const noBorder = [
+    "  Pick a thing.",
+    "    1. First",
+    "  ❯ 2. Second",
+    "    3. Third",
+  ].join("\n");
+  const d = dialogFromPane(noBorder);
+  expect(d).not.toBeNull();
+  expect(d!.options).toHaveLength(3);
+  expect(d!.title).toBe("Pick a thing.");
+});
+
+test("dialogFromPane picker fallback: a QUOTED picker above a live ready prompt is NOT a dialog", () => {
+  const quoted = [
+    "  ❯ 1. Resume from summary (recommended)",
+    "    2. Resume full session as-is",
+    "─────────────────────────────",
+    "❯ ",
+    "─────────────────────────────",
+  ].join("\n");
+  expect(dialogFromPane(quoted)).toBeNull();
+});
+
+test("dialogFromPane picker fallback: a numbered list in scrollback with no ❯ selection is NOT a dialog", () => {
+  const list = [
+    "  Here are the steps:",
+    "  1. Install deps",
+    "  2. Run the build",
+    "  3. Ship it",
+  ].join("\n");
+  expect(dialogFromPane(list)).toBeNull();
+});
+
+test("dialogFromPane picker fallback: scrollback list + live picker: the ❯ run wins", () => {
+  const mixed = [
+    "  1. old scrollback item",
+    "  2. another",
+    "",
+    "  Choose:",
+    "  ❯ 1. Yes",
+    "    2. No",
+  ].join("\n");
+  const d = dialogFromPane(mixed);
+  expect(d).not.toBeNull();
+  expect(d!.options).toEqual(["1. Yes", "2. No"]);
+  expect(d!.title).toBe("Choose:");
+});
