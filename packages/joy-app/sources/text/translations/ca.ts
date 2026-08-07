@@ -706,6 +706,8 @@ export const ca: TranslationStructure = {
         binaryFile: 'Fitxer binari',
         cannotDisplayBinary: 'No es pot mostrar el contingut del fitxer binari',
         diff: 'Diferències',
+        source: 'Font',
+        rendered: 'Vista',
         file: 'Fitxer',
         fileEmpty: 'El fitxer està buit',
         noChanges: 'No hi ha canvis a mostrar',

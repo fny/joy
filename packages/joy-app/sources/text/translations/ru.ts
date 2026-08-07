@@ -722,6 +722,8 @@ export const ru: TranslationStructure = {
         binaryFile: 'Бинарный файл',
         cannotDisplayBinary: 'Невозможно отобразить содержимое бинарного файла',
         diff: 'Различия',
+        source: 'Исходник',
+        rendered: 'Просмотр',
         file: 'Файл',
         fileEmpty: 'Файл пустой',
         noChanges: 'Нет изменений для отображения',

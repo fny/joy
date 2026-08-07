@@ -755,6 +755,8 @@ export const en = {
         binaryFile: 'Binary File',
         cannotDisplayBinary: 'Cannot display binary file content',
         diff: 'Diff',
+        source: 'Source',
+        rendered: 'Rendered',
         file: 'File',
         fileEmpty: 'File is empty',
         noChanges: 'No changes to display',

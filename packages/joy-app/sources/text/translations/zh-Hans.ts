@@ -707,6 +707,8 @@ export const zhHans: TranslationStructure = {
         binaryFile: '二进制文件',
         cannotDisplayBinary: '无法显示二进制文件内容',
         diff: '差异',
+        source: '源码',
+        rendered: '渲染',
         file: '文件',
         fileEmpty: '文件为空',
         noChanges: '没有要显示的更改',

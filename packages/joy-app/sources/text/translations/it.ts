@@ -704,6 +704,8 @@ export const it: TranslationStructure = {
         binaryFile: 'File binario',
         cannotDisplayBinary: 'Impossibile mostrare il contenuto del file binario',
         diff: 'Diff',
+        source: 'Sorgente',
+        rendered: 'Anteprima',
         file: 'File',
         fileEmpty: 'File vuoto',
         noChanges: 'Nessuna modifica da mostrare',

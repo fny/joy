@@ -706,6 +706,8 @@ export const zhHant: TranslationStructure = {
         binaryFile: '二進位檔案',
         cannotDisplayBinary: '無法顯示二進位檔案內容',
         diff: '差異',
+        source: '源碼',
+        rendered: '渲染',
         file: '檔案',
         fileEmpty: '檔案為空',
         noChanges: '沒有要顯示的更改',

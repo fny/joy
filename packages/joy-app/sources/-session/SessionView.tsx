@@ -359,6 +359,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         <AllFilesDiffView
                             sessionId={sessionId}
                             scrollToFile={scrollToFile}
+                            onlyFile={scrollToFile}
                             onHeaderRightSlotChange={setHeaderRightSlot}
                         />
                     </View>
