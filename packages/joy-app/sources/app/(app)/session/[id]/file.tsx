@@ -18,6 +18,8 @@ import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { FileIcon } from '@/components/FileIcon';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
+import { FileRenderedView, fileRenderKind, isRasterImagePath } from '@/components/FileContentRender';
+import { downloadFile } from '@/utils/downloadFile';
 
 interface FileContent {
     content: string;
@@ -119,7 +121,10 @@ export default React.memo(function FileScreen() {
         return { content: cached.content ?? '', encoding: 'utf8', isBinary: cached.isBinary };
     });
     const [diffContent, setDiffContent] = React.useState<string | null>(() => cached?.diff ?? null);
-    const [displayMode, setDisplayMode] = React.useState<'file' | 'diff'>('diff');
+    const [displayMode, setDisplayMode] = React.useState<'file' | 'diff' | 'rendered'>('diff');
+    // Raster images arrive as base64 (never decoded to text) — rendered-only.
+    const [imageBase64, setImageBase64] = React.useState<string | null>(null);
+    const renderKind = fileRenderKind(filePath);
     const [fontSize, setFontSize] = useLocalSettingMutable('fileViewerFontSize');
     const [wrap, setWrap] = useLocalSettingMutable('fileViewerWrap');
     const bumpFont = (delta: number) => setFontSize(Math.max(9, Math.min(28, (fontSize ?? 14) + delta)));
@@ -239,6 +244,21 @@ export default React.memo(function FileScreen() {
                 setError(null);
 
                 if (isBinaryFile(filePath)) {
+                    // Raster images are binary but renderable: fetch base64
+                    // and show the image instead of the binary notice.
+                    if (isRasterImagePath(filePath)) {
+                        const imgResponse = await sessionReadFile(sessionId, filePath);
+                        if (!isCancelled) {
+                            if (imgResponse.success && imgResponse.content) {
+                                setImageBase64(imgResponse.content);
+                                setFileContent({ content: '', encoding: 'base64', isBinary: true });
+                            } else {
+                                setError(imgResponse.error || 'Failed to read file');
+                            }
+                            setIsLoading(false);
+                        }
+                        return;
+                    }
                     if (!isCancelled) {
                         setFileContent({ content: '', encoding: 'base64', isBinary: true });
                         storage.getState().applyFileCache(sessionId!, filePath, '', null, true);
@@ -322,16 +342,22 @@ export default React.memo(function FileScreen() {
         }
     }, [error]);
 
-    // Set default display mode based on diff availability
+    // Default display mode. Renderable text (md/html/csv/tsv) opens in SOURCE
+    // (rendering is the explicit opt-in); images open rendered (no text form);
+    // everything else keeps the diff-first behavior.
     React.useEffect(() => {
         if (requestedLine !== null && requestedLine > 0) {
+            setDisplayMode('file');
+        } else if (imageBase64) {
+            setDisplayMode('rendered');
+        } else if (renderKind) {
             setDisplayMode('file');
         } else if (diffContent) {
             setDisplayMode('diff');
         } else if (fileContent) {
             setDisplayMode('file');
         }
-    }, [diffContent, fileContent, requestedLine]);
+    }, [diffContent, fileContent, requestedLine, renderKind, imageBase64]);
 
     React.useEffect(() => {
         if (!fileContent?.content || displayMode !== 'file' || requestedLine === null || requestedLine <= 0) {
@@ -397,7 +423,7 @@ export default React.memo(function FileScreen() {
         );
     }
 
-    if (fileContent?.isBinary) {
+    if (fileContent?.isBinary && !imageBase64) {
         return (
             <View style={{
                 flex: 1,
@@ -480,10 +506,23 @@ export default React.memo(function FileScreen() {
                 >
                     <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={17} color={copied ? theme.colors.textLink : theme.colors.textSecondary} />
                 </Pressable>
+                <Pressable
+                    onPress={() => {
+                        void downloadFile(fileName, imageBase64 ? { base64: imageBase64 } : { utf8: fileContent?.content ?? '' })
+                            .catch(() => Modal.alert(t('common.error'), t('errors.operationFailed')));
+                    }}
+                    hitSlop={8}
+                    style={styles.ctrlBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel="Download file"
+                >
+                    <Ionicons name="download-outline" size={17} color={theme.colors.textSecondary} />
+                </Pressable>
             </View>
 
-            {/* Toggle buttons for File/Diff view */}
-            {diffContent && (
+            {/* Mode chips: Diff (when a diff exists) / Source / Rendered (when
+                the type is renderable). Images render-only, so no chips there. */}
+            {(diffContent || (renderKind && renderKind !== 'image')) && !imageBase64 && (
                 <View style={{
                     flexDirection: 'row',
                     paddingHorizontal: 16,
@@ -492,48 +531,52 @@ export default React.memo(function FileScreen() {
                     borderBottomColor: theme.colors.divider,
                     backgroundColor: theme.colors.surface
                 }}>
-                    <Pressable
-                        onPress={() => setDisplayMode('diff')}
-                        style={{
-                            paddingHorizontal: 16,
-                            paddingVertical: 8,
-                            borderRadius: 8,
-                            backgroundColor: displayMode === 'diff' ? theme.colors.textLink : theme.colors.input.background,
-                            marginRight: 8
-                        }}
-                    >
-                        <Text style={{
-                            fontSize: 14,
-                            fontWeight: '600',
-                            color: displayMode === 'diff' ? 'white' : theme.colors.textSecondary,
-                            ...Typography.default()
-                        }}>
-                            {t('files.diff')}
-                        </Text>
-                    </Pressable>
-
+                    {diffContent && (
+                        <Pressable
+                            onPress={() => setDisplayMode('diff')}
+                            style={{
+                                paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, marginRight: 8,
+                                backgroundColor: displayMode === 'diff' ? theme.colors.textLink : theme.colors.input.background,
+                            }}
+                        >
+                            <Text style={{ fontSize: 14, fontWeight: '600', color: displayMode === 'diff' ? 'white' : theme.colors.textSecondary, ...Typography.default() }}>
+                                {t('files.diff')}
+                            </Text>
+                        </Pressable>
+                    )}
                     <Pressable
                         onPress={() => setDisplayMode('file')}
                         style={{
-                            paddingHorizontal: 16,
-                            paddingVertical: 8,
-                            borderRadius: 8,
-                            backgroundColor: displayMode === 'file' ? theme.colors.textLink : theme.colors.input.background
+                            paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, marginRight: 8,
+                            backgroundColor: displayMode === 'file' ? theme.colors.textLink : theme.colors.input.background,
                         }}
                     >
-                        <Text style={{
-                            fontSize: 14,
-                            fontWeight: '600',
-                            color: displayMode === 'file' ? 'white' : theme.colors.textSecondary,
-                            ...Typography.default()
-                        }}>
-                            {t('files.file')}
+                        <Text style={{ fontSize: 14, fontWeight: '600', color: displayMode === 'file' ? 'white' : theme.colors.textSecondary, ...Typography.default() }}>
+                            {renderKind ? t('files.source') : t('files.file')}
                         </Text>
                     </Pressable>
+                    {renderKind && renderKind !== 'image' && (
+                        <Pressable
+                            onPress={() => setDisplayMode('rendered')}
+                            style={{
+                                paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
+                                backgroundColor: displayMode === 'rendered' ? theme.colors.textLink : theme.colors.input.background,
+                            }}
+                        >
+                            <Text style={{ fontSize: 14, fontWeight: '600', color: displayMode === 'rendered' ? 'white' : theme.colors.textSecondary, ...Typography.default() }}>
+                                {t('files.rendered')}
+                            </Text>
+                        </Pressable>
+                    )}
                 </View>
             )}
 
             {/* Content display */}
+            {displayMode === 'rendered' ? (
+                <View style={{ flex: 1 }}>
+                    <FileRenderedView filePath={filePath} content={fileContent?.content} base64={imageBase64} />
+                </View>
+            ) : (
             <ScrollView
                 ref={scrollViewRef}
                 style={{ flex: 1 }}
@@ -576,6 +619,7 @@ export default React.memo(function FileScreen() {
                     </Text>
                 ) : null}
             </ScrollView>
+            )}
         </View>
     );
 });

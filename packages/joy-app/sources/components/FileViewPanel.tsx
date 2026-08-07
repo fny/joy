@@ -10,6 +10,8 @@ import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
+import { FileRenderedView, fileRenderKind, isRasterImagePath } from '@/components/FileContentRender';
+import { downloadFile } from '@/utils/downloadFile';
 import { sessionReadFile, sessionWriteFile } from '@/sync/ops';
 import { Modal } from '@/modal';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -144,6 +146,11 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     const fileName = filePath.split('/').pop() || filePath;
     const language = getFileLanguage(filePath);
     const isMarkdown = language === 'markdown';
+    // Renderable = has a source ⇄ preview toggle (md keeps its dedicated
+    // preview; html/csv/tsv go through FileRenderedView). Source (edit) first.
+    const renderKind = fileRenderKind(filePath);
+    const isRenderable = renderKind !== null && renderKind !== 'image';
+    const [imageBase64, setImageBase64] = React.useState<string | null>(null);
 
     const hasChanges = fileState.kind === 'loaded' && editContent !== fileState.content;
 
@@ -154,7 +161,21 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         setExternalChange(null);
         setShowConflictDiff(false);
 
+        setImageBase64(null);
         if (isBinaryExtension(filePath)) {
+            if (isRasterImagePath(filePath)) {
+                (async () => {
+                    const res = await sessionReadFile(sessionId, filePath);
+                    if (cancelled) return;
+                    if (res.success && res.content) {
+                        setImageBase64(res.content);
+                        setFileState({ kind: 'binary' }); // not editable — rendered below
+                    } else {
+                        setFileState({ kind: 'error', message: res.error || t('files.failedToRead') });
+                    }
+                })();
+                return () => { cancelled = true; };
+            }
             setFileState({ kind: 'binary' });
             return;
         }
@@ -315,17 +336,22 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     React.useEffect(() => {
         onHeaderRightSlotChange(
             <FileHeaderRight
-                isMarkdown={isMarkdown}
+                showToggle={isMarkdown || isRenderable}
                 isLoaded={isLoaded}
                 displayMode={displayMode}
                 onDisplayModeChange={setDisplayMode}
                 hasChanges={hasChanges}
                 isSaving={isSaving}
                 onSave={handleSave}
+                onDownload={() => {
+                    void downloadFile(fileName, imageBase64 ? { base64: imageBase64 } : { utf8: editContent })
+                        .catch(() => Modal.alert(t('common.error'), t('files.failedToRead')));
+                }}
+                canDownload={isLoaded || !!imageBase64}
             />
         );
         return () => onHeaderRightSlotChange(null);
-    }, [isMarkdown, isLoaded, displayMode, hasChanges, isSaving, handleSave, onHeaderRightSlotChange]);
+    }, [isMarkdown, isRenderable, isLoaded, displayMode, hasChanges, isSaving, handleSave, onHeaderRightSlotChange, imageBase64, editContent, fileName]);
 
     return (
         <View style={styles.outer}>
@@ -397,6 +423,8 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                         {fileState.message}
                     </Text>
                 </View>
+            ) : imageBase64 ? (
+                <FileRenderedView filePath={filePath} base64={imageBase64} />
             ) : fileState.kind === 'binary' ? (
                 <View style={styles.centered}>
                     <Ionicons name="document-outline" size={32} color={theme.colors.textSecondary} />
@@ -404,6 +432,8 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                         {t('files.binaryFile')}
                     </Text>
                 </View>
+            ) : isRenderable && !isMarkdown && displayMode === 'preview' ? (
+                <FileRenderedView filePath={filePath} content={editContent} />
             ) : isMarkdown && displayMode === 'preview' ? (
                 <ScrollView
                     style={{ flex: 1 }}
@@ -429,26 +459,35 @@ export const FileViewPanel = React.memo(function FileViewPanel({
 
 /** Right-side header controls for the file-view overlay. */
 const FileHeaderRight = React.memo(function FileHeaderRight({
-    isMarkdown,
+    showToggle,
     isLoaded,
     displayMode,
     onDisplayModeChange,
     hasChanges,
     isSaving,
     onSave,
+    onDownload,
+    canDownload,
 }: {
-    isMarkdown: boolean;
+    showToggle: boolean;
     isLoaded: boolean;
     displayMode: 'edit' | 'preview';
     onDisplayModeChange: (mode: 'edit' | 'preview') => void;
     hasChanges: boolean;
     isSaving: boolean;
     onSave: () => void;
+    onDownload: () => void;
+    canDownload: boolean;
 }) {
     const { theme } = useUnistyles();
     return (
         <>
-            {isMarkdown && isLoaded && (
+            {canDownload && (
+                <Pressable onPress={onDownload} hitSlop={8} style={{ paddingHorizontal: 6, justifyContent: 'center' }} accessibilityRole="button" accessibilityLabel="Download file">
+                    <Ionicons name="download-outline" size={18} color={theme.colors.textSecondary} />
+                </Pressable>
+            )}
+            {showToggle && isLoaded && (
                 <View style={[styles.toggleRow, { backgroundColor: theme.colors.groupped.background, borderColor: theme.colors.divider }]}>
                     <Pressable
                         onPress={() => onDisplayModeChange('edit')}

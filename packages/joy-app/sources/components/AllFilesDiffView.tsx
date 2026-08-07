@@ -17,6 +17,8 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 
 interface AllFilesDiffViewProps {
+    /** Show ONLY this file's diff (one-at-a-time mode). Absent → all files. */
+    onlyFile?: string | null;
     sessionId: string;
     /** When set, auto-scroll to this file */
     scrollToFile?: string | null;
@@ -43,6 +45,7 @@ type FileDiffResult = {
 export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     sessionId,
     scrollToFile,
+    onlyFile,
     onHeaderRightSlotChange,
 }: AllFilesDiffViewProps) {
     const { theme } = useUnistyles();
@@ -59,10 +62,12 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         for (const f of all) {
             if (!seen.has(f.fullPath)) seen.set(f.fullPath, f);
         }
-        return Array.from(seen.values()).sort((a, b) =>
+        const sorted = Array.from(seen.values()).sort((a, b) =>
             a.fullPath.localeCompare(b.fullPath)
         );
-    }, [gitStatusFiles]);
+        // One-at-a-time: clicking a changed file shows just THAT file.
+        return onlyFile ? sorted.filter((f) => f.fullPath === onlyFile) : sorted;
+    }, [gitStatusFiles, onlyFile]);
 
     // Per-file diff cache keyed by fullPath. Reconciled incrementally as the
     // file set changes so the rendered ScrollView keeps its scroll position and

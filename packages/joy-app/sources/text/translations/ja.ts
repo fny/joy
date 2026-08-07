@@ -707,6 +707,8 @@ export const ja: TranslationStructure = {
         binaryFile: 'バイナリファイル',
         cannotDisplayBinary: 'バイナリファイルの内容を表示できません',
         diff: '差分',
+        source: 'ソース',
+        rendered: 'プレビュー',
         file: 'ファイル',
         fileEmpty: 'ファイルは空です',
         noChanges: '表示する変更はありません',
