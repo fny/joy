@@ -71,6 +71,18 @@ function formatBuildSubtitle(buildConfig: BuildConfig): string | undefined {
 // an id+timestamp = an OTA, stamped with when it was PUBLISHED.
 function otaDetail(): string {
     try {
+        // Web/desktop: expo-updates never runs (the desktop shell loads the
+        // hosted bundle directly), so Updates.* would always say "embedded".
+        // The export step stamps the bundle instead (EXPO_PUBLIC_BUILD_* are
+        // inlined at build time) — show that, like an OTA id on mobile.
+        if (Platform.OS === 'web') {
+            const sha = process.env.EXPO_PUBLIC_BUILD_SHA;
+            const when = process.env.EXPO_PUBLIC_BUILD_TIME
+                ? new Date(process.env.EXPO_PUBLIC_BUILD_TIME).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                : '';
+            if (sha) return `web ${sha}${when ? ` · ${when}` : ''}`;
+            return 'web bundle (unstamped build)';
+        }
         if (Updates.isEmbeddedLaunch || !Updates.updateId) return 'embedded bundle';
         const when = Updates.createdAt
             ? new Date(Updates.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
