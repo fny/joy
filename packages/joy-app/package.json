@@ -19,7 +19,7 @@
     "release:ota:release": "pnpm ota:production",
     "prebuild": "rm -rf android ios && expo prebuild",
     "ota": "APP_ENV=preview NODE_ENV=preview tsx sources/scripts/parseChangelog.ts && pnpm typecheck && eas update --branch preview && pnpm ota:desktop",
-    "ota:desktop": "APP_ENV=preview NODE_ENV=preview expo export --platform web --output-dir dist && eas deploy --prod",
+    "ota:desktop": "APP_ENV=preview NODE_ENV=preview EXPO_PUBLIC_BUILD_SHA=$(git rev-parse --short HEAD) EXPO_PUBLIC_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) expo export --platform web --output-dir dist && eas deploy --prod",
     "ota:production": "npx eas-cli@latest workflow:run ota.yaml",
     "typecheck": "tsc --noEmit",
     "postinstall": "patch-package && setup-skia-web public",
