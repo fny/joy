@@ -5,7 +5,7 @@
 //   - No agent picker (Claude only)
 //   - No worktree picker
 //   - Full claude CLI surface: permission mode, fallback model, continue,
-//     fork, chrome, plus a free-form extra-arguments string
+//     fork, plus a free-form extra-arguments string
 //   - Spawn goes through machineRPC('joy-create-session', ...) instead of
 //     machineSpawnNewSession; the joy-tmux daemon on the selected machine
 //     opens a new tmux window running the assembled claude command.
@@ -140,8 +140,6 @@ function NewJoyTmuxSessionScreen() {
     // Claude only accepts it alongside --continue/--resume, so the row is
     // disabled until continue is on.
     const [forkSession, setForkSession] = React.useState(false);
-    const [chrome, setChrome] = React.useState(false);
-    const [detached, setDetached] = React.useState(false);
     // --resume <id>: resume a specific Claude conversation by session id.
     // Takes precedence over `continue` (which resumes the most recent one).
     const [resumeId, setResumeId] = React.useState(params.resumeId ?? '');
@@ -402,8 +400,6 @@ function NewJoyTmuxSessionScreen() {
                 permissionMode?: string;
                 fallbackModel?: string;
                 forkSession?: boolean;
-                chrome?: boolean;
-                detached?: boolean;
                 extraArgs?: string;
             }>(selectedMachineId, 'joy-create-session', {
                 cwd,
@@ -420,16 +416,14 @@ function NewJoyTmuxSessionScreen() {
                 // resume-by-id and --continue (the daemon caps continue's replay
                 // at bind time), so send it whenever either path is active.
                 // Claude-only params are never sent for codex (their UI rows are
-                // hidden there too): continue/fork/fallback/chrome/detached/
-                // extraArgs/resume_limit_mb are claude CLI concepts.
+                // hidden there too): fork/fallback/resume_limit_mb are claude
+                // CLI concepts.
                 resume_limit_mb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
                 continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
                 permissionMode: selectedAgent !== 'opencode' ? currentMode.key : undefined,
                 fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
                 forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
-                chrome: (selectedAgent === 'claude' && chrome) || undefined,
-                detached: (selectedAgent === 'claude' && detached) || undefined,
                 extraArgs: selectedAgent !== 'opencode' ? (extraArgs.trim() || undefined) : undefined,
             }),
             new Promise<never>((_, reject) => setTimeout(
@@ -490,10 +484,10 @@ function NewJoyTmuxSessionScreen() {
             ].slice(0, 10));
 
             // Send the initial prompt if any. joy-tmux's onMessage handler types
-            // it into the tmux pane. Skip for a detached session — there's no
-            // Claude running to receive it (it would be dropped at the dead pane).
+            // it into the tmux pane (or delivers via the agent's API for
+            // codex/opencode).
             const trimmedPrompt = prompt.trim();
-            if (trimmedPrompt && !detached) {
+            if (trimmedPrompt) {
                 await sync.sendMessage(result.relaySessionId, trimmedPrompt, { source: 'new_session' });
             }
 
@@ -505,7 +499,7 @@ function NewJoyTmuxSessionScreen() {
         } finally {
             setIsSpawning(false);
         }
-    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, resumeId, resumeMb, chrome, detached, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
+    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, resumeId, resumeMb, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
 
     const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
 
@@ -520,10 +514,6 @@ function NewJoyTmuxSessionScreen() {
     }, [agentInputEnterToSend, canSend, handleCreate]);
 
     const composerInputRef = React.useRef<MultiTextInputHandle>(null);
-    React.useEffect(() => {
-        const timeout = setTimeout(() => composerInputRef.current?.focus(), 100);
-        return () => clearTimeout(timeout);
-    }, []);
 
     const machineName = selectedMachine ? getMachineName(selectedMachine) : 'Select machine';
     const displayPath = trimPathInput(pathInput)
@@ -787,42 +777,6 @@ function NewJoyTmuxSessionScreen() {
                                 </View>
                             ) : null}
 
-                            {/* Claude-only rows: chrome integration, detached (spawn
-                                without launching claude). */}
-                            {selectedAgent === 'claude' && (<>
-                            {/* Chrome integration */}
-                            <Pressable
-                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
-                                onPress={() => setChrome(v => !v)}
-                            >
-                                <Ionicons
-                                    name={chrome ? 'checkbox' : 'square-outline'}
-                                    size={15}
-                                    color={chrome ? theme.colors.button.primary.background : theme.colors.textSecondary}
-                                />
-                                <Text style={styles.configLabel} numberOfLines={1}>chrome</Text>
-                                <Text style={styles.configHint} numberOfLines={1}>
-                                    claude in chrome integration
-                                </Text>
-                            </Pressable>
-
-                            {/* Detached: create the session/window without launching claude */}
-                            <Pressable
-                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
-                                onPress={() => setDetached(v => !v)}
-                            >
-                                <Ionicons
-                                    name={detached ? 'checkbox' : 'square-outline'}
-                                    size={15}
-                                    color={detached ? theme.colors.button.primary.background : theme.colors.textSecondary}
-                                />
-                                <Text style={styles.configLabel} numberOfLines={1}>detached</Text>
-                                <Text style={styles.configHint} numberOfLines={1}>
-                                    {detached ? "create without launching claude" : "launch claude now"}
-                                </Text>
-                            </Pressable>
-
-                            </>)}
 
                             {/* Extra arguments — claude: CLI args appended verbatim;
                                 codex: -c config overrides (key=value …). opencode has
