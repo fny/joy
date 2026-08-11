@@ -1,6 +1,6 @@
 import { homedir } from "os";
 import { join } from "path";
-import { existsSync, mkdirSync, renameSync } from "fs";
+import { existsSync, mkdirSync, renameSync, symlinkSync, lstatSync } from "fs";
 
 /**
  * The Happy home directory — $HAPPY_HOME_DIR (with a leading ~ expanded) or
@@ -33,7 +33,8 @@ export function joyStateDir(): string {
   if (!stateMigrated) {
     stateMigrated = true;
     const legacy = join(happyHomeDir(), "joy-tmux-state");
-    if (!existsSync(dir) && existsSync(legacy)) {
+    const legacyExists = (() => { try { lstatSync(legacy); return true; } catch { return false; } })();
+    if (!existsSync(dir) && legacyExists) {
       try {
         mkdirSync(joyHomeDir(), { recursive: true });
         renameSync(legacy, dir);
@@ -43,6 +44,18 @@ export function joyStateDir(): string {
         return legacy;
       }
     }
+    // TRANSITION compat: sessions launched pre-migration have the legacy path
+    // BAKED IN at runtime — claude executes the hook forwarder
+    // (…/joy-tmux-state/joy-hook.mjs) by absolute path on every hook event,
+    // and their --settings file lives there too. A symlink at the old location
+    // keeps every baked path resolving until the fleet cycles.
+    try {
+      if (!(() => { try { lstatSync(legacy); return true; } catch { return false; } })()) {
+        mkdirSync(happyHomeDir(), { recursive: true });
+        symlinkSync(dir, legacy);
+        process.stderr.write(`[paths] compat symlink ${legacy} -> ${dir}\n`);
+      }
+    } catch { /* best-effort — new-path operation is unaffected */ }
   }
   return dir;
 }
