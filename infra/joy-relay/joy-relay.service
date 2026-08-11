@@ -1,0 +1,12 @@
+# systemd — /etc/systemd/system/joy-relay.service (bare on host: fast edit-restart)
+[Unit]
+Description=joy-relay (phase 0: passthrough to happy-server)
+After=network-online.target
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/joy-relay
+ExecStart=/usr/bin/node proxy.mjs
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
