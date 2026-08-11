@@ -7,13 +7,14 @@ const SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
 export const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
 
-/** The known relays, in preference order. joy.voltai.party is the PRIMARY
- *  joy relay (phase-0 strangler in front of happy-server); :1443 is the same
- *  box's happy-server directly (reference/debug). */
+/** The known relays, in preference order. joy.voltai.party:4997 is the
+ *  PRIMARY joy relay (phase-0 strangler in front of happy-server); :14997 is
+ *  the same box's happy-server directly (reference/debug). 80/443/1443 are
+ *  closed on the box — only 4997/14997 (and ssh) are exposed. */
 export const KNOWN_RELAYS = [
     { key: 'happy', name: 'Happy Cloud', url: DEFAULT_SERVER_URL },
-    { key: 'joy', name: 'Joy Relay', url: 'https://joy.voltai.party' },
-    { key: 'joy-legacy', name: 'Joy Relay (legacy direct)', url: 'https://joy.voltai.party:1443' },
+    { key: 'joy', name: 'Joy Relay', url: 'https://joy.voltai.party:4997' },
+    { key: 'joy-legacy', name: 'Joy Relay (legacy direct)', url: 'https://joy.voltai.party:14997' },
 ] as const;
 
 /** Stable per-relay identifier: host, or host_port for non-default ports —
