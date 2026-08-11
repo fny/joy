@@ -31,22 +31,37 @@ export function createNotify() {
       for (const fire of [...set]) fire();
     },
 
-    addSse(accountId, res) {
+    /** Register BEFORE computing the hello snapshot; pokes committed while
+     *  the snapshot is being built buffer until markReady() flushes them —
+     *  the client misses nothing (lost-wake safety for SSE). Returns null
+     *  when the account is at its connection cap. */
+    addSse(accountId, res, maxPerAccount = 8) {
       const set = sseClients.get(accountId) ?? new Set();
+      if (set.size >= maxPerAccount) return null;
       sseClients.set(accountId, set);
-      set.add(res);
+      const client = { res, ready: false, buf: [] };
+      set.add(client);
       res.on('close', () => {
-        set.delete(res);
+        set.delete(client);
         if (set.size === 0) sseClients.delete(accountId);
       });
+      return {
+        markReady() {
+          client.ready = true;
+          for (const frame of client.buf.splice(0)) {
+            try { res.write(frame); } catch { /* dead socket */ }
+          }
+        },
+      };
     },
 
     pokeAccount(accountId, sessionId, changed) {
       const set = sseClients.get(accountId);
       if (!set) return;
       const frame = `event: poke\ndata: ${JSON.stringify({ v: 1, sessionId, changed })}\n\n`;
-      for (const res of set) {
-        try { res.write(frame); } catch { /* dead socket; close handler cleans up */ }
+      for (const client of set) {
+        if (!client.ready) { client.buf.push(frame); continue; }
+        try { client.res.write(frame); } catch { /* dead socket; close handler cleans up */ }
       }
     },
   };

@@ -76,6 +76,10 @@ export function createRouter({ core, auth, notify, db }) {
       url.searchParams.get('limit')));
 
   route('GET', '/joy/v1/events/stream', { sse: true }, async (ctx, m, body, url, req, res) => {
+    // Register FIRST (buffering), then snapshot, then flush — a commit that
+    // lands between snapshot and registration cannot be lost.
+    const handle = notify.addSse(ctx.accountId, res);
+    if (!handle) throw new ApiError(429, 'too_many_streams');
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -86,7 +90,7 @@ export function createRouter({ core, auth, notify, db }) {
     res.write(`event: hello\ndata: ${JSON.stringify({
       v: 1, sessions: sessions.map((s) => ({ sessionId: s.sessionId, headSeq: s.headSeq, revision: s.revision })),
     })}\n\n`);
-    notify.addSse(ctx.accountId, res);
+    handle.markReady();
     const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 15_000);
     res.on('close', () => clearInterval(ping));
     return null; // handler owns the response
@@ -97,22 +101,28 @@ export function createRouter({ core, auth, notify, db }) {
   route('POST', '/joy/v1/daemons/([\\w.-]+)/leases', {}, async (ctx, m, body) =>
     core.acquireLease(ctx.accountId, m[1], body));
 
+  // Pre-resolution for claims only (the waiter needs daemon_id). All actual
+  // fencing happens INSIDE each core transaction via fencedLease — this
+  // lookup is advisory and includes the same expiry check for fast failure.
   const leaseCtx = async (leaseId, req) => {
     const token = req.headers['x-joy-lease-token'];
     if (!token) throw new ApiError(401, 'missing_lease_token');
     const tokenHash = hashToken(String(token));
     const epoch = req.headers['x-joy-lease-epoch'];
     const { rows } = await db.query(
-      `SELECT * FROM daemon_leases WHERE id = $1 AND released_at IS NULL AND token_hash = $2`, [leaseId, tokenHash]);
+      `SELECT *, (expires_at < now()) AS is_expired FROM daemon_leases
+       WHERE id = $1 AND released_at IS NULL AND token_hash = $2`, [leaseId, tokenHash]);
     const lease = rows[0];
     if (!lease) throw new ApiError(401, 'lease_unknown');
     if (epoch !== undefined && epoch !== null && String(lease.epoch) !== String(epoch)) throw new ApiError(412, 'lease_epoch_stale');
+    if (lease.is_expired) throw new ApiError(412, 'lease_expired');
     return { id: lease.id, daemon_id: lease.daemon_id, epoch: lease.epoch, token_hash: tokenHash, account_id: lease.account_id };
   };
 
   route('PUT', '/joy/v1/daemon-leases/([\\w-]+)', { auth: false }, async (ctx, m, body, url, req) => {
-    const lease = await leaseCtx(m[1], req);
-    return core.renewLease(lease.id, lease.token_hash);
+    const token = req.headers['x-joy-lease-token'];
+    if (!token) throw new ApiError(401, 'missing_lease_token');
+    return core.renewLease(m[1], hashToken(String(token)));
   });
 
   const claimHandler = (lane) => async (ctx, m, body, url, req) => {
@@ -130,11 +140,17 @@ export function createRouter({ core, auth, notify, db }) {
   route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/work', { auth: false }, claimHandler('work'));
   route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/control', { auth: false }, claimHandler('control'));
 
+  /** Daemon lifecycle writes: build the lease REFERENCE from headers only —
+   *  the core fences it inside the mutation's own transaction, so there is
+   *  no gap between check and write. Epoch is mandatory here. */
   const withLeaseHeaders = (fn) => async (ctx, m, body, url, req) => {
     const leaseId = req.headers['x-joy-lease-id'];
-    if (!leaseId) throw new ApiError(401, 'missing_lease_id');
-    const lease = await leaseCtx(String(leaseId), req);
-    return fn(lease, m, body);
+    const token = req.headers['x-joy-lease-token'];
+    const epoch = req.headers['x-joy-lease-epoch'];
+    if (!leaseId || !token) throw new ApiError(401, 'missing_lease_credentials');
+    if (epoch === undefined || epoch === null || epoch === '') throw new ApiError(401, 'missing_lease_epoch');
+    const leaseRef = { id: String(leaseId), token_hash: hashToken(String(token)), epoch: String(epoch) };
+    return fn(leaseRef, m, body);
   };
 
   route('POST', '/joy/v1/deliveries/([\\w-]+)/received', { auth: false },
@@ -174,9 +190,10 @@ export function createRouter({ core, auth, notify, db }) {
         const token = header.startsWith('Bearer ') ? header.slice(7) : null;
         ctx.accountId = await auth.verifyToken(token);
         if (!ctx.accountId) throw new ApiError(401, 'unauthorized');
-        // Actor identity: the device/daemon presenting the token. Header is
-        // advisory-but-stable (used for idempotency scoping), account-scoped.
-        ctx.actorId = String(req.headers['x-joy-actor'] ?? `account:${ctx.accountId}`);
+        // Actor identity is DERIVED from the presented token (stable per
+        // device/daemon credential), never from a caller-chosen header —
+        // idempotency scoping cannot be spoofed sideways.
+        ctx.actorId = `tok:${hashToken(token).slice(0, 32)}`;
       }
       const m = url.pathname.match(match.regex);
       const body = req.method === 'GET' ? {} : await readBody(req);

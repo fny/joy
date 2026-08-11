@@ -315,13 +315,14 @@ describe('cancellation', () => {
 });
 
 describe('fencing and recovery', () => {
-  it('a new lease fences out the old epoch; reconcile resolves the orphan', async () => {
+  it('a new lease fences out the old epoch; reconcile-running resumes the orphan', async () => {
     const daemon = makeDaemon('daemon-h');
     await daemon.acquire();
     const sessionId = await makeNativeSession(daemon);
     const t = (await call('POST', `/joy/v1/sessions/${sessionId}/turns`, { body: { clientIntentId: randomUUID(), ciphertext: 'X' } })).json;
     const [offer] = await daemon.claim('work');
     await daemon.received(offer.deliveryId);
+    await daemon.submitted(t.turnId);
     await daemon.start(t.turnId);
 
     const oldHeaders = daemon.headers();
@@ -334,10 +335,14 @@ describe('fencing and recovery', () => {
     });
     expect([401, 412]).toContain(stale.status);
 
-    // sweep orphans the running turn (old lease released by re-acquire)
+    // reconcile is refused until the sweep declares the turn orphaned
+    const early = await daemon.reconcile(t.turnId, { resolution: 'running' });
+    expect(early.status).toBe(409);
+
     await core.sweepExpiredLeases();
     const state = (await call('GET', `/joy/v1/sessions/${sessionId}/state`)).json;
     expect(state.recoveryRequired).toBe(true);
+    expect(state.execution.state).toBe('orphaned');
 
     // daemon found JSONL evidence → resumes ownership under the new epoch
     const rec = await daemon.reconcile(t.turnId, { resolution: 'running' });
@@ -345,10 +350,48 @@ describe('fencing and recovery', () => {
     const after = (await call('GET', `/joy/v1/sessions/${sessionId}/state`)).json;
     expect(after.recoveryRequired).toBe(false);
     expect(after.execution.state).toBe('running');
+  });
 
-    // …or evidence says it died: terminal interrupted
-    const rec2 = await daemon.reconcile(t.turnId, { resolution: 'terminal', terminalState: 'interrupted' });
-    expect(rec2.json.terminalState).toBe('interrupted');
+  it('reconcile-terminal on an orphan goes through shared terminalization and resolves pending cancels', async () => {
+    const daemon = makeDaemon('daemon-h2');
+    await daemon.acquire();
+    const sessionId = await makeNativeSession(daemon);
+    const t = (await call('POST', `/joy/v1/sessions/${sessionId}/turns`, { body: { clientIntentId: randomUUID(), ciphertext: 'X' } })).json;
+    const [offer] = await daemon.claim('work');
+    await daemon.received(offer.deliveryId);
+    await daemon.submitted(t.turnId);
+    await daemon.start(t.turnId);
+    // user mashes Stop while the daemon is dying
+    await call('POST', `/joy/v1/sessions/${sessionId}/turns/${t.turnId}/cancellations`, { body: { clientIntentId: randomUUID() } });
+    await daemon.acquire(); // restart
+    await core.sweepExpiredLeases();
+
+    const rec = await daemon.reconcile(t.turnId, { resolution: 'terminal', terminalState: 'interrupted' });
+    expect(rec.json.terminalState).toBe('interrupted');
+    // the pending cancel command was resolved by terminalization — control lane is empty
+    expect((await daemon.claim('control')).length).toBe(0);
+    const state = (await call('GET', `/joy/v1/sessions/${sessionId}/state`)).json;
+    expect(state.execution.state).toBe('idle');
+    expect(state.recoveryRequired).toBe(false);
+  });
+
+  it('crash AFTER submit (dispatching, never started) is swept to orphaned', async () => {
+    const daemon = makeDaemon('daemon-h3');
+    await daemon.acquire();
+    const sessionId = await makeNativeSession(daemon);
+    const t = (await call('POST', `/joy/v1/sessions/${sessionId}/turns`, { body: { clientIntentId: randomUUID(), ciphertext: 'X' } })).json;
+    const [offer] = await daemon.claim('work');
+    await daemon.received(offer.deliveryId);
+    await daemon.submitted(t.turnId);
+    await daemon.acquire(); // crash + restart before start
+    const swept = await core.sweepExpiredLeases();
+    expect(swept).toBeGreaterThan(0);
+    const state = (await call('GET', `/joy/v1/sessions/${sessionId}/state`)).json;
+    expect(state.recoveryRequired).toBe(true);
+    expect(state.execution.state).toBe('orphaned');
+    // ambiguous Enter-sent window with no evidence → daemon terminalizes as indeterminate-interrupted
+    const rec = await daemon.reconcile(t.turnId, { resolution: 'terminal', terminalState: 'interrupted' });
+    expect(rec.status).toBe(200);
   });
 
   it('daemon restart before submit re-offers the undelivered prompt under the new epoch', async () => {
@@ -362,6 +405,119 @@ describe('fencing and recovery', () => {
     await daemon.acquire();
     const offers = await daemon.claim('work');
     expect(offers.map((o) => o.turnId)).toEqual([t.turnId]);
+  });
+});
+
+describe('review regressions', () => {
+  it('repeated claims re-offer the SAME head delivery — never skip to the next prompt', async () => {
+    const daemon = makeDaemon('daemon-r1');
+    await daemon.acquire();
+    const sessionId = await makeNativeSession(daemon);
+    const t1 = (await call('POST', `/joy/v1/sessions/${sessionId}/turns`, { body: { clientIntentId: randomUUID(), ciphertext: '1' } })).json;
+    await call('POST', `/joy/v1/sessions/${sessionId}/turns`, { body: { clientIntentId: randomUUID(), ciphertext: '2' } });
+    const a = await daemon.claim('work');
+    const b = await daemon.claim('work'); // claim response "lost", daemon retries
+    expect(a.length).toBe(1);
+    expect(b.length).toBe(1);
+    expect(a[0].turnId).toBe(t1.turnId);
+    expect(b[0].turnId).toBe(t1.turnId);
+    expect(b[0].deliveryId).toBe(a[0].deliveryId);
+  });
+
+  it('start without a current-epoch delivery is refused', async () => {
+    const daemon = makeDaemon('daemon-r2');
+    await daemon.acquire();
+    const sessionId = await makeNativeSession(daemon);
+    const t = (await call('POST', `/joy/v1/sessions/${sessionId}/turns`, { body: { clientIntentId: randomUUID(), ciphertext: 'X' } })).json;
+    const early = await daemon.start(t.turnId);
+    expect(early.status).toBe(409);
+    expect(early.json.error).toBe('no_current_delivery');
+  });
+
+  it('an expired lease cannot bind or write, even with valid credentials', async () => {
+    const daemon = makeDaemon('daemon-r3');
+    await daemon.acquire();
+    const { json: created } = await call('POST', '/joy/v1/session-creations', {
+      body: { creationIntentId: randomUUID(), daemonId: 'daemon-r3', spawnSpec: 'spec' },
+    });
+    const offers = await daemon.claim('work');
+    const spawn = offers.find((o) => o.kind === 'spawn_session');
+    await db.query(`UPDATE daemon_leases SET expires_at = now() - interval '1 second' WHERE id = $1`, [daemon.leaseId]);
+    const bind = await daemon.bind(created.sessionId, {
+      spawnCommandId: spawn.commandId, localSessionId: 'exp00001', sessionKeyEnvelope: 'w',
+    });
+    expect(bind.status).toBe(412);
+  });
+
+  it('cross-account daemon targeting is rejected; unknown daemons cannot be targeted', async () => {
+    const daemon = makeDaemon('daemon-r4');
+    await daemon.acquire(); // owned by account-1
+    const cross = await call('POST', '/joy/v1/session-creations', {
+      token: 'other-token',
+      body: { creationIntentId: randomUUID(), daemonId: 'daemon-r4', spawnSpec: 's' },
+    });
+    expect(cross.status).toBe(403);
+    const unknown = await call('POST', '/joy/v1/session-creations', {
+      body: { creationIntentId: randomUUID(), daemonId: 'never-leased', spawnSpec: 's' },
+    });
+    expect(unknown.status).toBe(409);
+  });
+
+  it('creation-intent reuse with different content is a 409, not a silent replay', async () => {
+    const daemon = makeDaemon('daemon-r5');
+    await daemon.acquire();
+    const creationIntentId = randomUUID();
+    const first = await call('POST', '/joy/v1/session-creations', {
+      body: { mode: 'announce_existing', creationIntentId, daemonId: 'daemon-r5', localSessionId: 'aaa11111', sessionKeyEnvelope: 'k1' },
+    });
+    expect(first.status).toBe(200);
+    const changed = await call('POST', '/joy/v1/session-creations', {
+      body: { mode: 'announce_existing', creationIntentId, daemonId: 'daemon-r5', localSessionId: 'bbb22222', sessionKeyEnvelope: 'k2' },
+    });
+    expect(changed.status).toBe(409);
+  });
+
+  it('prompts are rejected while a spawned session is still provisioning', async () => {
+    const daemon = makeDaemon('daemon-r6');
+    await daemon.acquire();
+    const { json: created } = await call('POST', '/joy/v1/session-creations', {
+      body: { creationIntentId: randomUUID(), daemonId: 'daemon-r6', spawnSpec: 'spec' },
+    });
+    const r = await call('POST', `/joy/v1/sessions/${created.sessionId}/turns`, {
+      body: { clientIntentId: randomUUID(), ciphertext: 'early' },
+    });
+    expect(r.status).toBe(409);
+    expect(r.json.error).toBe('session_not_ready');
+  });
+
+  it('retrying a receipt fact with the same runtimeEventId replays instead of 500ing', async () => {
+    const daemon = makeDaemon('daemon-r7');
+    await daemon.acquire();
+    const sessionId = await makeNativeSession(daemon);
+    const t = (await call('POST', `/joy/v1/sessions/${sessionId}/turns`, { body: { clientIntentId: randomUUID(), ciphertext: 'X' } })).json;
+    const [offer] = await daemon.claim('work');
+    await daemon.received(offer.deliveryId);
+    await daemon.submitted(t.turnId);
+    await daemon.start(t.turnId);
+    const r1 = await daemon.fact(t.turnId, { type: 'receipt', transcriptUuid: 'tu-1', runtimeEventId: 'receipt-evt-1' });
+    expect(r1.status).toBe(200);
+    const r2 = await daemon.fact(t.turnId, { type: 'receipt', transcriptUuid: 'tu-1', runtimeEventId: 'receipt-evt-1' });
+    expect(r2.status).toBe(200);
+    expect(r2.json.replay).toBe(true);
+  });
+
+  it('bind requires the exact spawn command', async () => {
+    const daemon = makeDaemon('daemon-r8');
+    await daemon.acquire();
+    const { json: created } = await call('POST', '/joy/v1/session-creations', {
+      body: { creationIntentId: randomUUID(), daemonId: 'daemon-r8', spawnSpec: 'spec' },
+    });
+    const noCmd = await daemon.bind(created.sessionId, { localSessionId: 'x1', sessionKeyEnvelope: 'w' });
+    expect(noCmd.status).toBe(400);
+    const wrongCmd = await daemon.bind(created.sessionId, {
+      spawnCommandId: randomUUID(), localSessionId: 'x1', sessionKeyEnvelope: 'w',
+    });
+    expect(wrongCmd.status).toBe(404);
   });
 });
 
