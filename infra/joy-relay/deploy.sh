@@ -36,10 +36,20 @@ echo "== bootstrap =="
 $SSH "$HOST" 'bash ~/relay-src/infra/joy-relay/bootstrap.sh'
 
 echo "== verify =="
+# The happy-server container takes ~30s to boot after the restart — retry
+# rather than declaring a 502 a failure.
 for port in 4997 14997; do
-  if curl -fsS --max-time 10 "https://joy.voltai.party:$port/" | grep -q 'Welcome to Happy Server!'; then
+  ok=""
+  for _ in $(seq 12); do
+    if curl -fsS --max-time 10 "https://joy.voltai.party:$port/" 2>/dev/null | grep -q 'Welcome to Happy Server!'; then
+      ok=1; break
+    fi
+    sleep 5
+  done
+  if [[ -n "$ok" ]]; then
     echo "https://joy.voltai.party:$port OK"
   else
-    echo "https://joy.voltai.party:$port FAILED (security group not open yet?)" >&2
+    echo "https://joy.voltai.party:$port FAILED (container still down, or security group not open?)" >&2
+    exit 1
   fi
 done
