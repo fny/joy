@@ -9,7 +9,7 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
-import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir } from '../paths';
+import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir, joyRelayUrl, isDefaultRelay, DEFAULT_RELAY_URL } from '../paths';
 import { loadOutbound, saveOutbound, clearOutbound, type PersistedOutboundItem } from '../domain/outboundStore';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
@@ -154,22 +154,16 @@ function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint
 
 // ── Credentials ────────────────────────────────────────────────────────────────
 
-const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
+const DEFAULT_SERVER_URL = DEFAULT_RELAY_URL;
 
 export function loadCredentials(): Credentials | null {
-  // Relay selection: JOY_RELAY_URL / ~/.joy/relay.json {serverUrl} override
-  // the default. Credentials for the DEFAULT relay stay in ~/.happy (shared
-  // with happy-cli); any OTHER relay reads its own pairing from
+  // Relay selection is shared with path scoping (paths.joyRelayUrl):
+  // JOY_RELAY_URL (alias or URL) / ~/.joy/relay.json override the default.
+  // Credentials for the DEFAULT relay stay in ~/.happy (shared with
+  // happy-cli); any OTHER relay reads its own pairing from
   // ~/.joy/relays/<host[_port]>/ — the two ecosystems never mix credentials.
-  let relayUrl = process.env.JOY_RELAY_URL;
-  if (!relayUrl) {
-    try {
-      const rc = JSON.parse(readFileSync(join(joyHomeDir(), 'relay.json'), 'utf8')) as { serverUrl?: string };
-      if (rc.serverUrl) relayUrl = rc.serverUrl;
-    } catch { /* no override */ }
-  }
-  const credsHome = relayUrl && relayUrl !== DEFAULT_SERVER_URL ? joyRelayCredsDir(relayUrl) : happyHomeDir();
-  const happyHome = credsHome;
+  const relayUrl = isDefaultRelay() ? undefined : joyRelayUrl();
+  const happyHome = relayUrl ? joyRelayCredsDir(relayUrl) : happyHomeDir();
 
   const accessKeyPath = join(happyHome, 'access.key');
   if (!existsSync(accessKeyPath)) return null;

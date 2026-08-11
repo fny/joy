@@ -17,4 +17,8 @@ RUN pnpm install --no-frozen-lockfile
 WORKDIR /app/packages/happy-server
 ENV DATA_DIR=/data
 EXPOSE 3005
-CMD ["pnpm", "exec", "tsx", "sources/standalone.ts", "serve"]
+# migrate THEN serve: standalone's serve does NOT apply migrations (they're a
+# separate subcommand), so a fresh data volume otherwise runs schemaless and
+# every DB-touching route 500s. Migrations are tracked in _prisma_migrations —
+# rerunning on start is idempotent.
+CMD ["sh", "-c", "pnpm exec tsx sources/standalone.ts migrate && pnpm exec tsx sources/standalone.ts serve"]

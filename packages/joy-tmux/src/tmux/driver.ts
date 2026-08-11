@@ -9,7 +9,7 @@
 // never touch run("tmux") or spawn directly and never branch on which is active.
 //
 // See CONTROL-MODE-MIGRATION.md for the history.
-import { run } from "./shell";
+import { run, tmuxArgv } from "./shell";
 import { TmuxControlClient } from "./controlClient";
 import { tmuxCommand } from "./serialize";
 
@@ -103,7 +103,7 @@ export class TmuxDriver {
     if (opts?.color) args.push("-e");
     if (opts?.scrollbackLines && opts.scrollbackLines > 0) args.push("-S", `-${Math.floor(opts.scrollbackLines)}`);
     args.push("-t", target);
-    return run("tmux", ...args);
+    return run(...tmuxArgv(), ...args);
   }
 
   /**
@@ -113,7 +113,7 @@ export class TmuxDriver {
    * kill-session (destroys it), and recover()'s startup scan (runs before attach).
    */
   runSync(...args: string[]): TmuxResult {
-    return run("tmux", ...args);
+    return run(...tmuxArgv(), ...args);
   }
 
   // ── Control-mode NON-IDEMPOTENT writes (keystrokes, new-window) ──────────────
@@ -142,7 +142,7 @@ export class TmuxDriver {
       catch (e) { return { ok: false, out: "", error: String(e) }; } // un-encodable (newline/NUL)
       return this.#client.command(line); // verbatim result — NO spawn retry (non-idempotent)
     }
-    return run("tmux", ...args); // not connected → spawn (nothing went over control)
+    return run(...tmuxArgv(), ...args); // not connected → spawn (nothing went over control)
   }
 
   // ── Control-mode generic command (IDEMPOTENT: resize/display/list/kill/has/hook) ──
@@ -153,12 +153,12 @@ export class TmuxDriver {
   async command(args: string[]): Promise<TmuxResult> {
     if (this.#client?.connected) {
       let line: string;
-      try { line = tmuxCommand(args); } catch { return run("tmux", ...args); }
+      try { line = tmuxCommand(args); } catch { return run(...tmuxArgv(), ...args); }
       const r = await this.#client.command(line);
       if (r.ok) return r;
       // %error / disconnect → idempotent, fall through to a spawn retry
     }
-    return run("tmux", ...args);
+    return run(...tmuxArgv(), ...args);
   }
 
   // ── Control-mode reads (snapshot cache + fresh command), spawn fallback ──────
