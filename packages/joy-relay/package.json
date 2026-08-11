@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@electric-sql/pglite": "^0.2.12"
+    "@electric-sql/pglite": "0.3.15"
   },
   "devDependencies": {
     "vitest": "^3.0.0"

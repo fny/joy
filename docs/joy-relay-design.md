@@ -58,12 +58,18 @@ arbitrary tool side effects.
 
 ## 1. Architecture and invariants
 
-One Node 22 process under systemd on the relay box; PostgreSQL 16 from the
-existing quadlet (stable and dev use separate databases/schemas); SQL
-migrations + pg driver, no ORM; HTTP long-poll for daemon work, SSE for app
-pokes; an in-process periodic worker for lease expiry and deadlines. No
-Redis/Kafka/socket.io. The phase-0 passthrough (`proxy.mjs`) remains the
-legacy edge and is not evolved into the native protocol.
+One Node 22 process under systemd on the relay box; SQL migrations, no ORM;
+HTTP long-poll for daemon work, SSE for app pokes; an in-process periodic
+worker for lease expiry and deadlines. No Redis/Kafka/socket.io. The phase-0
+passthrough (`proxy.mjs`) remains the legacy edge and is not evolved into the
+native protocol.
+
+*Implementation note (phase 1, deliberate deviation):* the dev nucleus runs
+on **embedded PGlite** rather than the provisioned Postgres 16 quadlet — one
+process, one writer, transactions serialized by construction, dev == test
+storage. The correctness model leans on that serialization; a move to real
+Postgres requires adding `FOR UPDATE` row locks before multi-connection use.
+The quadlet stays reserved for that promotion.
 
 ```
 Incoming request

@@ -120,6 +120,14 @@ const MIGRATIONS = [
   CREATE UNIQUE INDEX session_events_runtime ON session_events (session_id, runtime_event_id)
     WHERE runtime_event_id IS NOT NULL;
   `,
+  // 002 — review fixes: at most ONE execution-bearing turn per session is a
+  // database invariant, not just coordinator discipline; session creation
+  // stores its full request hash for idempotency-mismatch detection.
+  `
+  CREATE UNIQUE INDEX turns_one_executing ON turns (session_id)
+    WHERE state IN ('dispatching','running','cancelling','orphaned');
+  ALTER TABLE native_sessions ADD COLUMN creation_request_hash TEXT;
+  `,
 ];
 
 export async function openDb(dataDir) {
