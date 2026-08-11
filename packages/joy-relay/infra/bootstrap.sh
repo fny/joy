@@ -4,10 +4,12 @@
 # repo build context rsynced to ~/relay-src, joy-relay package (including
 # these infra files, at ~/joy-relay/infra) rsynced to ~/joy-relay.
 #
-# Edge layout: 4997 = joy-relay (PRIMARY), 14997 = happy-server direct.
-# 80/443/1443 are DISABLED: ufw allows only 22/4997/14997; certbot renews
-# through a pre/post-hook punch-hole on :80 (the EC2 security group must keep
-# 22, 80, 4997, 14997 allowed — 80 stays ufw-closed outside renewals).
+# Edge layout: 4997 = Joy Relay (STABLE proxy), 14997 = Joy Relay Dev (dev
+# proxy, iterate freely), 24997 = Happy Joy (happy-server direct).
+# 80/443/1443 are DISABLED: ufw allows only 22 + the three relay ports;
+# certbot renews through a pre/post-hook punch-hole on :80 (the EC2 security
+# group must keep 22, 80, 4997, 14997, 24997 allowed — 80 stays ufw-closed
+# outside renewals).
 set -euo pipefail
 
 INFRA=~/joy-relay/infra
@@ -65,17 +67,20 @@ sudo mkdir -p /etc/containers/systemd
 sudo cp "$INFRA/happy-server.container" /etc/containers/systemd/
 sudo cp "$INFRA/postgres.container" /etc/containers/systemd/
 sudo cp "$INFRA/joy-relay.service" /etc/systemd/system/
+sudo cp "$INFRA/joy-relay-dev.service" /etc/systemd/system/
 sudo cp "$INFRA/Caddyfile" /etc/caddy/Caddyfile
 sudo systemctl daemon-reload
-sudo systemctl restart happy-server.service postgres.service joy-relay.service caddy
+sudo systemctl enable joy-relay-dev.service > /dev/null 2>&1 || true
+sudo systemctl restart happy-server.service postgres.service joy-relay.service joy-relay-dev.service caddy
 sleep 3
-sudo systemctl is-active happy-server joy-relay caddy postgres fail2ban | tr '\n' ' '; echo
+sudo systemctl is-active happy-server joy-relay joy-relay-dev caddy postgres fail2ban | tr '\n' ' '; echo
 
 echo "== firewall =="
 # 22 first — never lock ourselves out. 80/443/1443 are intentionally absent.
 sudo ufw allow OpenSSH > /dev/null
 sudo ufw allow 4997/tcp > /dev/null
 sudo ufw allow 14997/tcp > /dev/null
+sudo ufw allow 24997/tcp > /dev/null
 sudo ufw default deny incoming > /dev/null
 sudo ufw default allow outgoing > /dev/null
 sudo ufw --force enable > /dev/null

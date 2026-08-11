@@ -28,8 +28,9 @@ export const DEFAULT_RELAY_URL = "https://api.cluster-fluster.com";
  *  KNOWN_RELAYS (joy-app sources/sync/serverConfig.ts). */
 export const RELAY_ALIASES: Record<string, string> = {
   happy: DEFAULT_RELAY_URL,
+  "happy-joy": "https://joy.voltai.party:24997",
   joy: "https://joy.voltai.party:4997",
-  "joy-legacy": "https://joy.voltai.party:14997",
+  "joy-dev": "https://joy.voltai.party:14997",
 };
 
 export function resolveRelayAlias(nameOrUrl: string): string {

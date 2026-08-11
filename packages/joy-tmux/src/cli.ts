@@ -842,7 +842,7 @@ async function cmdKill(rest: string[]): Promise<number> {
 function help(): void {
   console.log(`${c.b("joy")} — joy-tmux daemon control
 
-${c.b("Usage:")} joy [--relay <happy|joy|joy-legacy|url>] <command>
+${c.b("Usage:")} joy [--relay <happy|happy-joy|joy|joy-dev|url>] <command>
 
   ${c.dim("--relay selects which relay's daemon the command addresses (default:")}
   ${c.dim("$JOY_RELAY_URL / ~/.joy/relay.json / Happy Cloud). Per-relay daemons run")}
