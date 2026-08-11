@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Idempotent bootstrap for the joy relay box (joy.voltai.party).
 # Run as ubuntu with sudo (deploy.sh does both the rsync and this). Assumes:
-# repo build context rsynced to ~/relay-src, joy-relay package rsynced to
-# ~/joy-relay, infra files in ~/relay-src/infra/joy-relay.
+# repo build context rsynced to ~/relay-src, joy-relay package (including
+# these infra files, at ~/joy-relay/infra) rsynced to ~/joy-relay.
 #
 # Edge layout: 4997 = joy-relay (PRIMARY), 14997 = happy-server direct.
 # 80/443/1443 are DISABLED: ufw allows only 22/4997/14997; certbot renews
@@ -10,7 +10,7 @@
 # 22, 80, 4997, 14997 allowed — 80 stays ufw-closed outside renewals).
 set -euo pipefail
 
-INFRA=~/relay-src/infra/joy-relay
+INFRA=~/joy-relay/infra
 
 echo "== packages =="
 sudo apt-get update -qq
@@ -58,7 +58,7 @@ sudo /etc/letsencrypt/renewal-hooks/deploy/caddy.sh
 
 echo "== happy-server image =="
 cd ~/relay-src
-sudo podman build -q -f infra/joy-relay/Containerfile.happy -t localhost/happy-server:latest .
+sudo podman build -q -f "$INFRA/Containerfile.happy" -t localhost/happy-server:latest .
 
 echo "== quadlets + units =="
 sudo mkdir -p /etc/containers/systemd
