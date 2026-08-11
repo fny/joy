@@ -1,14 +1,18 @@
 # systemd — /etc/systemd/system/joy-relay-dev.service. The DEV joy-relay: its
 # own checkout (~/joy-relay-dev) on its own port, so iterating on relay code
-# never touches the STABLE instance serving :4997.
+# never touches the STABLE instance serving :4997. Dev runs the phase-1
+# native+passthrough entrypoint (server.mjs); stable stays on proxy.mjs until
+# the native nucleus is promoted. Data lives outside the checkout so deploys
+# never wipe it.
 [Unit]
-Description=joy-relay DEV (iterate here; stable stays on 3105)
+Description=joy-relay DEV (native /joy/v1 nucleus + passthrough; stable stays on 3105)
 After=network-online.target
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/joy-relay-dev
 Environment=JOY_RELAY_PORT=3106
-ExecStart=/usr/bin/node proxy.mjs
+Environment=JOY_RELAY_DATA_DIR=/home/ubuntu/joy-relay-data/dev
+ExecStart=/usr/bin/node server.mjs
 Restart=always
 RestartSec=2
 [Install]

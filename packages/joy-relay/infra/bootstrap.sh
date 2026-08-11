@@ -62,6 +62,13 @@ echo "== happy-server image =="
 cd ~/relay-src
 sudo podman build -q -f "$INFRA/Containerfile.happy" -t localhost/happy-server:latest .
 
+echo "== joy-relay-dev deps + data dir =="
+# The dev instance runs the native nucleus (server.mjs) and needs its own
+# node_modules (pglite) and a data dir OUTSIDE the checkout (deploy rsyncs
+# with --delete; data must survive).
+(cd ~/joy-relay-dev && npm install --omit=dev --no-audit --no-fund --silent)
+mkdir -p ~/joy-relay-data/dev
+
 echo "== quadlets + units =="
 sudo mkdir -p /etc/containers/systemd
 sudo cp "$INFRA/happy-server.container" /etc/containers/systemd/

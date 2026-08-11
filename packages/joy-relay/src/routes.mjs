@@ -1,0 +1,202 @@
+// /joy/v1 router: thin HTTP shell over core.mjs. Hand-rolled matching and
+// validation (zero-dep bias) — every handler validates the fields it uses and
+// returns typed ApiErrors; anything unmatched falls through to the legacy
+// passthrough.
+import { ApiError, hashToken } from './core.mjs';
+
+const CAPABILITIES = {
+  relay: 'joy-relay',
+  protocol: { major: 1, minor: 0 },
+  features: ['sessions', 'turns', 'cancellations', 'claims', 'events', 'state', 'sse'],
+};
+
+function readBody(req, limit = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new ApiError(413, 'body_too_large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (chunks.length === 0) return resolve({});
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+      catch { reject(new ApiError(400, 'bad_json')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function need(body, ...fields) {
+  for (const f of fields) {
+    if (body[f] === undefined || body[f] === null || body[f] === '') throw new ApiError(400, `missing_${f}`);
+  }
+}
+
+const CLAIM_WAIT_MS = 25_000;
+
+export function createRouter({ core, auth, notify, db }) {
+  // route table: [method, regex, handler(ctx, match, body)]
+  const routes = [];
+  const route = (method, pattern, opts, handler) => {
+    routes.push({ method, regex: new RegExp(`^${pattern}$`), opts, handler });
+  };
+
+  // ── client surface ────────────────────────────────────────────────────────
+
+  route('GET', '/joy/v1/capabilities', { auth: false }, async () => CAPABILITIES);
+
+  route('GET', '/joy/v1/sessions', {}, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));
+
+  route('POST', '/joy/v1/session-creations', {}, async (ctx, m, body) => {
+    need(body, 'creationIntentId', 'daemonId');
+    if (body.mode === 'announce_existing') need(body, 'localSessionId', 'sessionKeyEnvelope');
+    return core.createSession(ctx.accountId, ctx.actorId, body);
+  });
+
+  route('POST', '/joy/v1/sessions/([\\w-]+)/turns', {}, async (ctx, m, body) => {
+    need(body, 'clientIntentId', 'ciphertext');
+    return core.acceptPrompt(ctx.accountId, ctx.actorId, m[1], body);
+  });
+
+  route('POST', '/joy/v1/sessions/([\\w-]+)/turns/([\\w-]+)/cancellations', {}, async (ctx, m, body) => {
+    need(body, 'clientIntentId');
+    return core.acceptCancellation(ctx.accountId, ctx.actorId, m[1], m[2], body);
+  });
+
+  route('GET', '/joy/v1/sessions/([\\w-]+)/state', {}, async (ctx, m) => core.sessionState(ctx.accountId, m[1]));
+
+  route('GET', '/joy/v1/sessions/([\\w-]+)/events', {}, async (ctx, m, body, url) =>
+    core.sessionEvents(ctx.accountId, m[1], url.searchParams.get('after_seq') ?? url.searchParams.get('afterSeq') ?? 0,
+      url.searchParams.get('limit')));
+
+  route('GET', '/joy/v1/events/stream', { sse: true }, async (ctx, m, body, url, req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    const sessions = await core.listSessions(ctx.accountId);
+    res.write(`event: hello\ndata: ${JSON.stringify({
+      v: 1, sessions: sessions.map((s) => ({ sessionId: s.sessionId, headSeq: s.headSeq, revision: s.revision })),
+    })}\n\n`);
+    notify.addSse(ctx.accountId, res);
+    const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 15_000);
+    res.on('close', () => clearInterval(ping));
+    return null; // handler owns the response
+  });
+
+  // ── daemon surface ────────────────────────────────────────────────────────
+
+  route('POST', '/joy/v1/daemons/([\\w.-]+)/leases', {}, async (ctx, m, body) =>
+    core.acquireLease(ctx.accountId, m[1], body));
+
+  const leaseCtx = async (leaseId, req) => {
+    const token = req.headers['x-joy-lease-token'];
+    if (!token) throw new ApiError(401, 'missing_lease_token');
+    const tokenHash = hashToken(String(token));
+    const epoch = req.headers['x-joy-lease-epoch'];
+    const { rows } = await db.query(
+      `SELECT * FROM daemon_leases WHERE id = $1 AND released_at IS NULL AND token_hash = $2`, [leaseId, tokenHash]);
+    const lease = rows[0];
+    if (!lease) throw new ApiError(401, 'lease_unknown');
+    if (epoch !== undefined && epoch !== null && String(lease.epoch) !== String(epoch)) throw new ApiError(412, 'lease_epoch_stale');
+    return { id: lease.id, daemon_id: lease.daemon_id, epoch: lease.epoch, token_hash: tokenHash, account_id: lease.account_id };
+  };
+
+  route('PUT', '/joy/v1/daemon-leases/([\\w-]+)', { auth: false }, async (ctx, m, body, url, req) => {
+    const lease = await leaseCtx(m[1], req);
+    return core.renewLease(lease.id, lease.token_hash);
+  });
+
+  const claimHandler = (lane) => async (ctx, m, body, url, req) => {
+    const lease = await leaseCtx(m[1], req);
+    const fn = lane === 'work' ? core.claimWork : core.claimControl;
+    // Register the waiter BEFORE the query so a command committed in the gap
+    // wakes us instead of being missed (lost-wake safety). If the first query
+    // already has offers the abandoned waiter resolves later harmlessly.
+    const waited = notify.waitForDaemon(lease.daemon_id, lane, Math.min(Number(body?.waitMs ?? CLAIM_WAIT_MS), 30_000));
+    const first = await fn(lease.id, lease.token_hash);
+    if (first.offers.length > 0 || body?.noWait) return first;
+    await waited;
+    return fn(lease.id, lease.token_hash);
+  };
+  route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/work', { auth: false }, claimHandler('work'));
+  route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/control', { auth: false }, claimHandler('control'));
+
+  const withLeaseHeaders = (fn) => async (ctx, m, body, url, req) => {
+    const leaseId = req.headers['x-joy-lease-id'];
+    if (!leaseId) throw new ApiError(401, 'missing_lease_id');
+    const lease = await leaseCtx(String(leaseId), req);
+    return fn(lease, m, body);
+  };
+
+  route('POST', '/joy/v1/deliveries/([\\w-]+)/received', { auth: false },
+    withLeaseHeaders((lease, m) => core.deliveryReceived(m[1], lease).then(() => ({ ok: true }))));
+  route('POST', '/joy/v1/sessions/([\\w-]+)/bind', { auth: false },
+    withLeaseHeaders((lease, m, body) => {
+      need(body, 'localSessionId', 'sessionKeyEnvelope');
+      return core.bindSession(m[1], lease, body).then(() => ({ ok: true }));
+    }));
+  route('POST', '/joy/v1/turns/([\\w-]+)/submitted', { auth: false },
+    withLeaseHeaders((lease, m) => core.turnSubmitted(m[1], lease).then(() => ({ ok: true }))));
+  route('POST', '/joy/v1/turns/([\\w-]+)/start', { auth: false },
+    withLeaseHeaders((lease, m, body) => core.turnStarted(m[1], lease, body ?? {})));
+  route('POST', '/joy/v1/turns/([\\w-]+)/facts', { auth: false },
+    withLeaseHeaders((lease, m, body) => {
+      need(body, 'type');
+      return core.turnFact(m[1], lease, body);
+    }));
+  route('POST', '/joy/v1/turns/([\\w-]+)/reconcile', { auth: false },
+    withLeaseHeaders((lease, m, body) => {
+      need(body, 'resolution');
+      return core.reconcileTurn(m[1], lease, body);
+    }));
+
+  // ── dispatch ──────────────────────────────────────────────────────────────
+
+  /** Returns true if the request was handled natively. */
+  async function handle(req, res) {
+    if (!req.url?.startsWith('/joy/v1')) return false;
+    const url = new URL(req.url, 'http://joy-relay');
+    const match = routes.find((r) => r.method === req.method && r.regex.test(url.pathname));
+    try {
+      if (!match) throw new ApiError(404, 'not_found');
+      const ctx = { accountId: null, actorId: null };
+      if (match.opts.auth !== false) {
+        const header = req.headers.authorization ?? '';
+        const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+        ctx.accountId = await auth.verifyToken(token);
+        if (!ctx.accountId) throw new ApiError(401, 'unauthorized');
+        // Actor identity: the device/daemon presenting the token. Header is
+        // advisory-but-stable (used for idempotency scoping), account-scoped.
+        ctx.actorId = String(req.headers['x-joy-actor'] ?? `account:${ctx.accountId}`);
+      }
+      const m = url.pathname.match(match.regex);
+      const body = req.method === 'GET' ? {} : await readBody(req);
+      const out = await match.handler(ctx, m, body, url, req, res);
+      if (out === null) return true; // handler owns the response (SSE)
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(out));
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 500;
+      const code = e instanceof ApiError ? e.code : 'internal_error';
+      if (status === 500) console.error('[joy-relay] internal error:', e);
+      if (!res.headersSent) {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: code }));
+      } else {
+        res.end();
+      }
+    }
+    return true;
+  }
+
+  return { handle };
+}
