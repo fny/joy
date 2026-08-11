@@ -4,12 +4,14 @@ import { Stack, useRouter } from 'expo-router';
 import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { ItemGroup } from '@/components/ItemGroup';
+import { Item } from '@/components/Item';
+import { Ionicons } from '@expo/vector-icons';
 import { ItemList } from '@/components/ItemList';
 import { RoundButton } from '@/components/RoundButton';
 import { Modal } from '@/modal';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
-import { getServerUrl, setServerUrl, validateServerUrl, getServerInfo } from '@/sync/serverConfig';
+import { getServerUrl, setServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS } from '@/sync/serverConfig';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -145,6 +147,21 @@ export default function ServerConfigScreen() {
         }
     };
 
+    const handleSelectRelay = async (url: string, name: string) => {
+        if (getServerUrl() === url) return;
+        const isValid = await validateServer(url);
+        if (!isValid) return;
+        const confirmed = await Modal.confirm(
+            t('server.changeServer'),
+            t('server.continueWithServer'),
+            { confirmText: t('common.continue'), destructive: true }
+        );
+        if (confirmed) {
+            setServerUrl(url === KNOWN_RELAYS[0].url ? null : url);
+            setInputUrl('');
+        }
+    };
+
     const handleReset = async () => {
         const confirmed = await Modal.confirm(
             t('server.resetToDefault'),
@@ -173,6 +190,19 @@ export default function ServerConfigScreen() {
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             >
                 <ItemList style={styles.itemListContainer}>
+                    <ItemGroup title={t('server.knownRelays')}>
+                        {KNOWN_RELAYS.map((r) => (
+                            <Item
+                                key={r.key}
+                                title={r.name}
+                                subtitle={r.url.replace('https://', '')}
+                                onPress={() => void handleSelectRelay(r.url, r.name)}
+                                rightElement={getServerUrl() === r.url ? (
+                                    <Ionicons name="checkmark-circle" size={22} color={theme.colors.textLink} />
+                                ) : undefined}
+                            />
+                        ))}
+                    </ItemGroup>
                     <ItemGroup footer={t('server.advancedFeatureFooter')}>
                         <View style={styles.contentContainer}>
                             <Text style={styles.labelText}>{t('server.customServerUrlLabel').toUpperCase()}</Text>

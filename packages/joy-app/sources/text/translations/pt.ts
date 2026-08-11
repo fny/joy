@@ -419,6 +419,7 @@ export const pt: TranslationStructure = {
     server: {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Configuração do servidor',
+        knownRelays: 'Relays conhecidos',
         enterServerUrl: 'Por favor, insira uma URL do servidor',
         notValidHappyServer: 'Não é um servidor Joy válido',
         changeServer: 'Alterar servidor',

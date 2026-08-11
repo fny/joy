@@ -420,6 +420,7 @@ export const es: TranslationStructure = {
     server: {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Configuración del servidor',
+        knownRelays: 'Relés conocidos',
         enterServerUrl: 'Ingresa una URL de servidor',
         notValidHappyServer: 'No es un servidor Joy válido',
         changeServer: 'Cambiar servidor',

@@ -421,6 +421,7 @@ export const ja: TranslationStructure = {
     server: {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'サーバー設定',
+        knownRelays: '既知のリレー',
         enterServerUrl: 'サーバーURLを入力してください',
         notValidHappyServer: '有効なJoy Serverではありません',
         changeServer: 'サーバーを変更',

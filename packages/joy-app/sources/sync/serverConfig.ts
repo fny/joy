@@ -7,6 +7,15 @@ const SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
 const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
 
+/** The known relays, in preference order. joy.voltai.party is the PRIMARY
+ *  joy relay (phase-0 strangler in front of happy-server); :1443 is the same
+ *  box's happy-server directly (reference/debug). */
+export const KNOWN_RELAYS = [
+    { key: 'happy', name: 'Happy Cloud', url: DEFAULT_SERVER_URL },
+    { key: 'joy', name: 'Joy Relay', url: 'https://joy.voltai.party' },
+    { key: 'joy-legacy', name: 'Joy Relay (legacy direct)', url: 'https://joy.voltai.party:1443' },
+] as const;
+
 export function getServerUrl(): string {
     return serverConfigStorage.getString(SERVER_KEY) ||
            (globalThis as any).__HAPPY_CONFIG__?.serverUrl ||

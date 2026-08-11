@@ -420,6 +420,7 @@ export const zhHant: TranslationStructure = {
     server: {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: '伺服器設定',
+        knownRelays: '已知中繼',
         enterServerUrl: '請輸入伺服器 URL',
         notValidHappyServer: '不是有效的 Joy 伺服器',
         changeServer: '更改伺服器',

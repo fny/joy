@@ -316,6 +316,7 @@ export const ru: TranslationStructure = {
     server: {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Настройка сервера',
+        knownRelays: 'Известные реле',
         enterServerUrl: 'Пожалуйста, введите URL сервера',
         notValidHappyServer: 'Это не валидный сервер Joy',
         changeServer: 'Изменить сервер',
