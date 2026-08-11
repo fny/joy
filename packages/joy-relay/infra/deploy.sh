@@ -20,9 +20,9 @@ TARGET="${1:-all}"
 
 if [[ "$TARGET" == "dev" ]]; then
   echo "== DEV relay only: rsync + restart joy-relay-dev (stable untouched) =="
-  rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=infra \
+  rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json --exclude=infra --exclude=data \
     "$ROOT/packages/joy-relay/" "$HOST":joy-relay-dev/
-  $SSH "$HOST" 'sudo systemctl restart joy-relay-dev.service && sleep 1 && sudo systemctl is-active joy-relay-dev'
+  $SSH "$HOST" 'cd ~/joy-relay-dev && npm install --omit=dev --no-audit --no-fund --silent && mkdir -p ~/joy-relay-data/dev && sudo systemctl restart joy-relay-dev.service && sleep 1 && sudo systemctl is-active joy-relay-dev'
   curl -fsS --max-time 10 "https://joy.voltai.party:14997/" | grep -q 'Welcome to Happy Server!' \
     && echo "https://joy.voltai.party:14997 OK" || { echo "14997 FAILED" >&2; exit 1; }
   exit 0
@@ -49,7 +49,7 @@ rsync -az --delete -e "$SSH" --exclude=node_modules \
   "$ROOT/packages/joy-relay/" "$HOST":joy-relay/
 # Dev gets the same code on a FULL deploy; day-to-day dev iteration goes
 # through `deploy.sh dev`, which touches only this copy.
-rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=infra \
+rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json --exclude=infra --exclude=data \
   "$ROOT/packages/joy-relay/" "$HOST":joy-relay-dev/
 
 echo "== bootstrap =="

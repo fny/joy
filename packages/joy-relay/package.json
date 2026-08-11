@@ -1,8 +1,18 @@
 {
   "name": "@fny/joy-relay",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "joy relay — phase 0: transparent passthrough to happy-server (strangler pattern)",
-  "scripts": { "start": "node proxy.mjs" }
+  "description": "joy relay — phase 1: native /joy/v1 nucleus (durable queue, turns, cancellation, leases, events) + legacy passthrough to happy-server (strangler pattern)",
+  "scripts": {
+    "start": "node proxy.mjs",
+    "start:native": "node server.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.2.12"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  }
 }
