@@ -1,7 +1,16 @@
-# joy.voltai.party edge: 443 = joy-relay (PRIMARY), 1443 = happy-server direct.
-joy.voltai.party {
+# joy.voltai.party edge: 4997 = joy-relay (PRIMARY), 14997 = happy-server
+# direct (reference/debug). 80/443/1443 are closed at the host firewall (ufw,
+# see bootstrap.sh); certs come from certbot, renewed standalone through a ufw
+# punch-hole on :80 — so caddy must never bind 80/443 itself (auto_https off,
+# file-based tls).
+{
+    auto_https off
+}
+joy.voltai.party:4997 {
+    tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem
     reverse_proxy 127.0.0.1:3105
 }
-joy.voltai.party:1443 {
+joy.voltai.party:14997 {
+    tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem
     reverse_proxy 127.0.0.1:3005
 }

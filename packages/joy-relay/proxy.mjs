@@ -1,5 +1,5 @@
 // joy-relay phase 0: transparent passthrough to happy-server.
-// The PRIMARY relay URL (joy.voltai.party:443 via caddy) terminates HERE, so
+// The PRIMARY relay URL (joy.voltai.party:4997 via caddy) terminates HERE, so
 // clients pair against the new relay's address from day one; the strangler
 // then takes over endpoints without anyone re-pointing. Zero dependencies —
 // plain node http + raw socket piping for WebSocket upgrades.

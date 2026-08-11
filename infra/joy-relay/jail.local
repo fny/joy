@@ -1,0 +1,10 @@
+# fail2ban — /etc/fail2ban/jail.local. Ubuntu 24.04 logs auth to journald
+# only, so the systemd backend is required (no /var/log/auth.log).
+[DEFAULT]
+backend = systemd
+bantime = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
