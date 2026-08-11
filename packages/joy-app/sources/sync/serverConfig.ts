@@ -5,7 +5,7 @@ const serverConfigStorage = new MMKV({ id: 'server-config' });
 
 const SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
-const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
+export const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
 
 /** The known relays, in preference order. joy.voltai.party is the PRIMARY
  *  joy relay (phase-0 strangler in front of happy-server); :1443 is the same
@@ -15,6 +15,39 @@ export const KNOWN_RELAYS = [
     { key: 'joy', name: 'Joy Relay', url: 'https://joy.voltai.party' },
     { key: 'joy-legacy', name: 'Joy Relay (legacy direct)', url: 'https://joy.voltai.party:1443' },
 ] as const;
+
+/** Stable per-relay identifier: host, or host_port for non-default ports —
+ *  mirrors the daemon's ~/.joy/relays/<host[_port]>/ naming so app and CLI
+ *  agree on what counts as "the same relay". */
+export function relayKeyForUrl(url: string): string {
+    try {
+        const u = new URL(url);
+        return u.port ? `${u.hostname}_${u.port}` : u.hostname;
+    } catch {
+        return url.replace(/[^a-zA-Z0-9._-]/g, '_');
+    }
+}
+
+/** MMKV store scoped to the active relay. The default relay keeps the legacy
+ *  default instance (existing installs keep their data); every other relay
+ *  gets its own store, so switching relays never bleeds one account's caches
+ *  (sessions, machines, drafts, push registration) into another. */
+export function relayScopedMMKV(): MMKV {
+    const url = getServerUrl();
+    if (url === DEFAULT_SERVER_URL) return new MMKV();
+    return new MMKV({ id: `relay.${relayKeyForUrl(url)}` });
+}
+
+/** Display name for a relay URL: the known-relay name, else the hostname. */
+export function relayNameForUrl(url: string): string {
+    const known = KNOWN_RELAYS.find(r => r.url === url);
+    if (known) return known.name;
+    try {
+        return new URL(url).hostname;
+    } catch {
+        return url;
+    }
+}
 
 export function getServerUrl(): string {
     return serverConfigStorage.getString(SERVER_KEY) ||
