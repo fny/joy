@@ -3,7 +3,7 @@
 # build context + joy-relay package + infra files, then run bootstrap.sh
 # remotely. Idempotent — safe to rerun any time.
 #
-#   infra/joy-relay/deploy.sh
+#   packages/joy-relay/infra/deploy.sh
 #
 # Env overrides: JOY_RELAY_HOST (default ubuntu@joy.voltai.party),
 # JOY_RELAY_SSH_KEY (default ~/.ssh/joy.voltai.party).
@@ -12,17 +12,19 @@ set -euo pipefail
 HOST="${JOY_RELAY_HOST:-ubuntu@joy.voltai.party}"
 KEY="${JOY_RELAY_SSH_KEY:-$HOME/.ssh/joy.voltai.party}"
 SSH="ssh -i $KEY"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 
 echo "== rsync build context -> $HOST:~/relay-src =="
 # The happy-server image build needs the REAL monorepo root: root
 # package.json + lockfile + .npmrc + patches + scripts (postinstall applies
 # patches and builds happy-wire) — see Containerfile.happy.
-rsync -az --delete -e "$SSH" \
+# --delete-excluded: relay-src is a strict mirror of the include list — stale
+# paths that fall out of it (e.g. the old /infra) must not linger in the box's
+# build context.
+rsync -az --delete --delete-excluded -e "$SSH" \
   --include='/package.json' --include='/pnpm-lock.yaml' \
   --include='/pnpm-workspace.yaml' --include='/.npmrc' \
   --include='/patches/***' --include='/scripts/***' \
-  --include='/infra/***' \
   --include='/packages/' --include='/packages/happy-server/***' \
   --include='/packages/happy-wire/***' \
   --exclude='node_modules' --exclude='*' \
@@ -33,7 +35,7 @@ rsync -az --delete -e "$SSH" --exclude=node_modules \
   "$ROOT/packages/joy-relay/" "$HOST":joy-relay/
 
 echo "== bootstrap =="
-$SSH "$HOST" 'bash ~/relay-src/infra/joy-relay/bootstrap.sh'
+$SSH "$HOST" 'bash ~/joy-relay/infra/bootstrap.sh'
 
 echo "== verify =="
 # The happy-server container takes ~30s to boot after the restart — retry
