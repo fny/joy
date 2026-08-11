@@ -421,6 +421,7 @@ export const zhHans: TranslationStructure = {
     server: {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: '服务器配置',
+        knownRelays: '已知中继',
         enterServerUrl: '请输入服务器 URL',
         notValidHappyServer: '不是有效的 Joy 服务器',
         changeServer: '更改服务器',
