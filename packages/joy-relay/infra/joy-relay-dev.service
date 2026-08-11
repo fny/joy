@@ -1,0 +1,15 @@
+# systemd — /etc/systemd/system/joy-relay-dev.service. The DEV joy-relay: its
+# own checkout (~/joy-relay-dev) on its own port, so iterating on relay code
+# never touches the STABLE instance serving :4997.
+[Unit]
+Description=joy-relay DEV (iterate here; stable stays on 3105)
+After=network-online.target
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/joy-relay-dev
+Environment=JOY_RELAY_PORT=3106
+ExecStart=/usr/bin/node proxy.mjs
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
