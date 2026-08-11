@@ -1,0 +1,8 @@
+{
+  "name": "@fny/joy-relay",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "joy relay — phase 0: transparent passthrough to happy-server (strangler pattern)",
+  "scripts": { "start": "node proxy.mjs" }
+}

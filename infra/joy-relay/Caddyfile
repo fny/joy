@@ -1,0 +1,7 @@
+# joy.voltai.party edge: 443 = joy-relay (PRIMARY), 1443 = happy-server direct.
+joy.voltai.party {
+    reverse_proxy 127.0.0.1:3105
+}
+joy.voltai.party:1443 {
+    reverse_proxy 127.0.0.1:3005
+}
