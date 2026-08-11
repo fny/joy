@@ -20,13 +20,16 @@ import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync } from "fs";
 import { initRelay } from "./relay/relay.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
-import { happyHomeDir, joyStateDir } from "./paths";
+import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay } from "./paths";
 import { SessionRegistry } from "./domain/registry";
 import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
 import { registerMachineOps } from "./transports/relay-machine";
 
-const PORT = parseInt(process.env.PORT ?? "4997");
+// Control-server port: the DEFAULT relay keeps the historical 4997; any other
+// relay's daemon binds a DYNAMIC port (0) so N per-relay daemons coexist —
+// the CLI discovers the real port from daemon.json, written on listen below.
+const PORT = parseInt(process.env.PORT ?? (isDefaultRelay() ? "4997" : "0"));
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
 const __dirname = moduleDir(import.meta.url);
 const PUBLIC_DIR = join(__dirname, "..", "public"); // public/ is at the package root, src/ is one level down
@@ -56,15 +59,21 @@ try {
   }
   throw e;
 }
-try {
-  mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(join(STATE_DIR, "daemon.json"), JSON.stringify({
-    token: SERVER_TOKEN, pid: process.pid, port: PORT,
-    startedAt: Date.now(), version: "joy-tmux/0.1.0",
-  }));
-} catch (e) {
-  process.stderr.write(`[server] failed to write daemon state: ${e}\n`);
+function writeDaemonState(port: number): void {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(join(STATE_DIR, "daemon.json"), JSON.stringify({
+      token: SERVER_TOKEN, pid: process.pid, port,
+      relay: joyRelayUrl(), relayKey: joyRelayKey(),
+      startedAt: Date.now(), version: "joy-tmux/0.1.0",
+    }));
+  } catch (e) {
+    process.stderr.write(`[server] failed to write daemon state: ${e}\n`);
+  }
 }
+// Written before listen so a racing CLI sees it; with a dynamic port (0) the
+// onListening rewrite below fills in the real one and the CLI polls until then.
+writeDaemonState(PORT);
 
 const relayClient = initRelay();
 
@@ -93,8 +102,13 @@ const registry = new SessionRegistry({
   },
 });
 
-startHttpServer({ registry, port: PORT, publicDir: PUBLIC_DIR, token: SERVER_TOKEN });
-process.stderr.write(`webchat server running on http://0.0.0.0:${PORT}\n`);
+startHttpServer({
+  registry, port: PORT, publicDir: PUBLIC_DIR, token: SERVER_TOKEN,
+  onListening: (port) => {
+    if (port !== PORT) writeDaemonState(port);
+    process.stderr.write(`webchat server running on http://127.0.0.1:${port} (relay ${joyRelayUrl()})\n`);
+  },
+});
 
 // Populate the machine-wide command set before recover() adopts sessions, so
 // the first per-session push already includes personal + plugin commands.

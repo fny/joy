@@ -58,8 +58,11 @@ export function startHttpServer(opts: {
   port: number;
   publicDir: string;
   token: string;
+  /** Fires with the BOUND port once listening — the daemon uses this to write
+   *  the real port into daemon.json when it asked for a dynamic one (port 0). */
+  onListening?: (port: number) => void;
 }): void {
-  const { registry, port, publicDir, token } = opts;
+  const { registry, port, publicDir, token, onListening } = opts;
 
   const routes: CompiledRoute[] = [];
   for (const op of machineOps) {
@@ -213,5 +216,8 @@ export function startHttpServer(opts: {
     }
     throw e;
   });
-  server.listen(port, "127.0.0.1");
+  server.listen(port, "127.0.0.1", () => {
+    const addr = server.address();
+    if (onListening && addr && typeof addr === "object") onListening(addr.port);
+  });
 }

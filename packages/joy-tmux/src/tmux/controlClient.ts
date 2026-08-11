@@ -15,7 +15,7 @@
 //
 // See CONTROL-MODE-MIGRATION.md.
 import { spawn, type ChildProcess } from "child_process";
-import { run } from "./shell";
+import { run, tmuxArgv } from "./shell";
 import { tmuxCommand } from "./serialize";
 import type { TmuxResult } from "./driver";
 
@@ -117,10 +117,11 @@ export class TmuxControlClient {
     // Filter the client-attached hook BEFORE we attach, so our own control attach
     // doesn't resize the window. Harmless if the session doesn't exist yet (the
     // attach below then fails → reconnect once the registry has created it).
-    run("tmux", "set-hook", "-t", this.#session, "client-attached", CLIENT_ATTACHED_HOOK);
+    run(...tmuxArgv(), "set-hook", "-t", this.#session, "client-attached", CLIENT_ATTACHED_HOOK);
     let proc: ChildProcess;
     try {
-      proc = spawn("tmux", ["-C", "attach-session", "-t", this.#session], { stdio: ["pipe", "pipe", "ignore"] });
+      const [cmd, ...socketArgs] = tmuxArgv();
+      proc = spawn(cmd, [...socketArgs, "-C", "attach-session", "-t", this.#session], { stdio: ["pipe", "pipe", "ignore"] });
     } catch {
       this.#scheduleReconnect();
       return;

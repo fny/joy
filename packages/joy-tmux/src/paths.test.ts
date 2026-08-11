@@ -23,6 +23,7 @@ beforeEach(() => {
 afterEach(() => {
     delete process.env.HAPPY_HOME_DIR;
     delete process.env.JOY_HOME_DIR;
+    delete process.env.JOY_RELAY_URL;
 });
 
 describe("state migration (transition safety)", () => {
@@ -64,5 +65,44 @@ describe("state migration (transition safety)", () => {
         const { joyRelayCredsDir } = await freshPaths();
         expect(joyRelayCredsDir("https://joy.voltai.party")).toBe(join(joy, "relays", "joy.voltai.party"));
         expect(joyRelayCredsDir("https://joy.voltai.party:1443")).toBe(join(joy, "relays", "joy.voltai.party_1443"));
+    });
+});
+
+describe("per-relay namespacing (concurrent daemons)", () => {
+    it("default relay: default selection, plain tmux server, ~/.joy/state", async () => {
+        const p = await freshPaths();
+        expect(p.joyRelayUrl()).toBe(p.DEFAULT_RELAY_URL);
+        expect(p.isDefaultRelay()).toBe(true);
+        expect(p.tmuxSocketArgs()).toEqual([]);
+        expect(p.joyStateDir()).toBe(join(joy, "state"));
+    });
+
+    it("JOY_RELAY_URL alias resolves and scopes state + tmux + creds together", async () => {
+        process.env.JOY_RELAY_URL = "joy";
+        const p = await freshPaths();
+        expect(p.joyRelayUrl()).toBe("https://joy.voltai.party:4997");
+        expect(p.isDefaultRelay()).toBe(false);
+        expect(p.joyRelayKey()).toBe("joy.voltai.party_4997");
+        expect(p.tmuxSocketArgs()).toEqual(["-L", "joy-joy.voltai.party_4997"]);
+        // state sits beside that relay's credentials — nothing shared with the
+        // default daemon's ~/.joy/state
+        expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_4997", "state"));
+        expect(p.joyRelayCredsDir()).toBe(join(joy, "relays", "joy.voltai.party_4997"));
+    });
+
+    it("~/.joy/relay.json selects the relay when the env var is absent", async () => {
+        mkdirSync(joy, { recursive: true });
+        writeFileSync(join(joy, "relay.json"), JSON.stringify({ serverUrl: "https://joy.voltai.party:14997" }));
+        const p = await freshPaths();
+        expect(p.joyRelayUrl()).toBe("https://joy.voltai.party:14997");
+        expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_14997", "state"));
+    });
+
+    it("an explicit default-relay env value stays default (no accidental namespacing)", async () => {
+        process.env.JOY_RELAY_URL = "happy";
+        const p = await freshPaths();
+        expect(p.isDefaultRelay()).toBe(true);
+        expect(p.tmuxSocketArgs()).toEqual([]);
+        expect(p.joyStateDir()).toBe(join(joy, "state"));
     });
 });

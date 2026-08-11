@@ -1,20 +1,38 @@
 #!/usr/bin/env -S node --import tsx
 // joy — CLI for the joy-tmux daemon. Mirrors happy-cli's surface (start/stop/
 // restart/status/list/doctor/install/auth/notify) but drives the joy-tmux
-// daemon over its localhost HTTP API. The daemon writes ~/.happy/joy-tmux-state/
-// daemon.json (token+pid+port) on startup, which is how this CLI finds and
-// authenticates to it.
+// daemon over its localhost HTTP API. The daemon writes daemon.json
+// (token+pid+port) into its relay-scoped state dir on startup, which is how
+// this CLI finds and authenticates to it — one daemon (and one state dir,
+// tmux server, service unit) per relay; --relay picks which one.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync } from "fs";
 import { join, dirname, resolve, basename, sep } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
-import { happyHomeDir, joyStateDir } from "./paths";
+import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
+import { tmuxArgv } from "./tmux/shell";
 
-const PORT = parseInt(process.env.PORT ?? "4997");
-const BASE = `http://127.0.0.1:${PORT}`;
-const HAPPY_HOME = happyHomeDir();
+// --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
+// invocation addresses. Consumed HERE, before any relay-scoped const below is
+// computed, by bridging to JOY_RELAY_URL — which paths.ts and any daemon we
+// spawn both read. One process, one relay.
+for (let i = process.argv.length - 1; i >= 2; i--) {
+  const a = process.argv[i];
+  if (a === "--relay" && process.argv[i + 1]) {
+    process.env.JOY_RELAY_URL = resolveRelayAlias(process.argv[i + 1]);
+    process.argv.splice(i, 2);
+  } else if (a.startsWith("--relay=")) {
+    process.env.JOY_RELAY_URL = resolveRelayAlias(a.slice("--relay=".length));
+    process.argv.splice(i, 1);
+  }
+}
+
+const DEFAULT_PORT = 4997;
+// Credentials home for the SELECTED relay: ~/.happy for the default (shared
+// with happy-cli), ~/.joy/relays/<key>/ otherwise.
+const CREDS_DIR = isDefaultRelay() ? happyHomeDir() : joyRelayCredsDir();
 const STATE_DIR = joyStateDir();
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
@@ -42,10 +60,26 @@ const ok = c.g("✓");
 const bad = c.r("✗");
 const warn = c.y("!");
 
-type DaemonState = { token: string; pid: number; port: number; startedAt: number; version: string };
+type DaemonState = { token: string; pid: number; port: number; relay?: string; startedAt: number; version: string };
 
 function readState(): DaemonState | null {
   try { return JSON.parse(readFileSync(STATE_FILE, "utf8")) as DaemonState; } catch { return null; }
+}
+
+/** The selected relay's daemon control port. daemon.json is authoritative
+ *  (non-default relays bind dynamically); $PORT then the fixed 4997 cover the
+ *  default relay. A non-default relay with no daemon.json has NO port — never
+ *  fall back to 4997 there, that's the DEFAULT daemon's port. */
+function daemonPort(): number | null {
+  const st = readState();
+  if (st?.port) return st.port;
+  if (process.env.PORT) return parseInt(process.env.PORT);
+  return isDefaultRelay() ? DEFAULT_PORT : null;
+}
+
+function base(): string | null {
+  const port = daemonPort();
+  return port ? `http://127.0.0.1:${port}` : null;
 }
 
 function authHeaders(): Record<string, string> {
@@ -56,7 +90,9 @@ function authHeaders(): Record<string, string> {
 }
 
 async function api(method: string, path: string, body?: unknown): Promise<Response> {
-  return fetch(BASE + path, {
+  const b = base();
+  if (!b) throw new Error("daemon not running (no daemon.json for this relay)");
+  return fetch(b + path, {
     method,
     headers: authHeaders(),
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -65,8 +101,10 @@ async function api(method: string, path: string, body?: unknown): Promise<Respon
 
 /** Returns the live status JSON if the daemon answers, else null. */
 async function probe(): Promise<any | null> {
+  const b = base();
+  if (!b) return null;
   try {
-    const r = await fetch(BASE + "/status", { headers: authHeaders() });
+    const r = await fetch(b + "/status", { headers: authHeaders() });
     if (r.ok) return await r.json();
   } catch { /* not running */ }
   return null;
@@ -93,7 +131,8 @@ async function cmdStatus(): Promise<number> {
   console.log(`${ok} joy-tmux daemon ${c.b("running")}`);
   console.log(`  version  ${s.version ?? "?"}`);
   console.log(`  pid      ${s.pid ?? "?"}`);
-  console.log(`  port     ${PORT}`);
+  console.log(`  port     ${daemonPort() ?? "?"}`);
+  console.log(`  relay    ${joyRelayUrl()}${isDefaultRelay() ? " (default)" : ""}`);
   if (s.uptimeMs != null) console.log(`  uptime   ${fmtUptime(s.uptimeMs)}`);
   if (s.sessions != null) console.log(`  sessions ${s.sessions} active`);
   if (s.claude) console.log(`  claude   ${s.claude.available ? (s.claude.version ?? "available") : c.r("not found")}`);
@@ -178,8 +217,9 @@ async function cmdDoctor(): Promise<number> {
   const claudePath = which("claude");
   line(!!claudePath, "claude", claudePath ?? "not found on PATH");
 
-  const accessKey = join(HAPPY_HOME, "access.key");
-  line(existsSync(accessKey), "auth", existsSync(accessKey) ? accessKey : "no ~/.happy/access.key — run `joy auth`");
+  line(true, "relay", `${joyRelayUrl()}${isDefaultRelay() ? " (default)" : ""}`);
+  const accessKey = join(CREDS_DIR, "access.key");
+  line(existsSync(accessKey), "auth", existsSync(accessKey) ? accessKey : `no ${accessKey} — run \`joy auth\``);
 
   line(existsSync(SERVER_TS), "daemon src", SERVER_TS);
 
@@ -192,22 +232,28 @@ async function cmdDoctor(): Promise<number> {
 }
 
 function cmdAuth(): number {
-  const accessKey = join(HAPPY_HOME, "access.key");
+  const accessKey = join(CREDS_DIR, "access.key");
   if (!existsSync(accessKey)) {
-    console.log(`${bad} not authenticated`);
-    console.log(`  joy-tmux shares the Joy app's credentials (${c.dim(accessKey)}).`);
-    console.log(`  Run ${c.b("happy auth login")} (or set up the Joy app) to create them.`);
+    console.log(`${bad} not authenticated (relay ${joyRelayUrl()})`);
+    if (isDefaultRelay()) {
+      console.log(`  joy-tmux shares the Joy app's credentials (${c.dim(accessKey)}).`);
+      console.log(`  Run ${c.b("happy auth login")} (or set up the Joy app) to create them.`);
+    } else {
+      console.log(`  This relay needs its own pairing in ${c.dim(CREDS_DIR)}`);
+      console.log(`  (access.key + settings.json, same shapes as ~/.happy's).`);
+    }
     return 1;
   }
   let machineId = "?", server = "?";
   try {
-    const s = JSON.parse(readFileSync(join(HAPPY_HOME, "settings.json"), "utf8")) as any;
+    const s = JSON.parse(readFileSync(join(CREDS_DIR, "settings.json"), "utf8")) as any;
     machineId = s.machineId ?? "?";
     server = s.serverUrl ?? "(default)";
   } catch { /* settings optional */ }
   console.log(`${ok} authenticated`);
   console.log(`  credentials ${accessKey}`);
   console.log(`  machineId   ${machineId}`);
+  console.log(`  relay       ${joyRelayUrl()}${isDefaultRelay() ? " (default)" : ""}`);
   console.log(`  server      ${server}`);
   return 0;
 }
@@ -230,9 +276,14 @@ async function cmdNotify(args: string[]): Promise<number> {
 
 // ── install (systemd on Linux, launchd on macOS) ────────────────────────────
 
-function systemdUnitPath(): string { return join(homedir(), ".config", "systemd", "user", "joy-tmux.service"); }
+// One service PER RELAY: the default keeps the historical names, a non-default
+// relay's unit gets the relay key appended — so per-relay daemons install,
+// start, and uninstall independently.
+function serviceName(): string { return isDefaultRelay() ? "joy-tmux" : `joy-tmux-${joyRelayKey()}`; }
+function systemdUnitPath(): string { return join(homedir(), ".config", "systemd", "user", `${serviceName()}.service`); }
 const LAUNCHD_LABEL = "vip.voltai.joy-tmux";
-function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`); }
+function launchdLabel(): string { return isDefaultRelay() ? LAUNCHD_LABEL : `${LAUNCHD_LABEL}.${joyRelayKey()}`; }
+function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`); }
 // Earlier builds shipped this label; removeService() tears it down too so a
 // re-install migrates cleanly instead of leaving two launchd agents running.
 const LEGACY_LAUNCHD_LABELS = ["party.voltai.joy-tmux"];
@@ -244,13 +295,14 @@ const LEGACY_LAUNCHD_LABELS = ["party.voltai.joy-tmux"];
 function removeService(): void {
   const plat = osPlatform();
   if (plat === "linux") {
-    spawnSync("systemctl", ["--user", "disable", "--now", "joy-tmux.service"], { stdio: "ignore" });
+    spawnSync("systemctl", ["--user", "disable", "--now", `${serviceName()}.service`], { stdio: "ignore" });
     try { rmSync(systemdUnitPath()); } catch {}
     spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
   } else if (plat === "darwin") {
-    // Current label + any legacy labels (migration), so re-install never leaves
-    // a stale agent loaded alongside the new one.
-    for (const label of [LAUNCHD_LABEL, ...LEGACY_LAUNCHD_LABELS]) {
+    // Current label + any legacy labels (migration; default relay only —
+    // per-relay agents never shipped under the legacy names), so re-install
+    // never leaves a stale agent loaded alongside the new one.
+    for (const label of [launchdLabel(), ...(isDefaultRelay() ? LEGACY_LAUNCHD_LABELS : [])]) {
       const path = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
       spawnSync("launchctl", ["unload", path], { stdio: "ignore" });
       try { rmSync(path); } catch {}
@@ -261,9 +313,12 @@ function removeService(): void {
 function cmdInstall(): number {
   const plat = osPlatform();
   removeService(); // idempotent: start from a clean slate so the new config takes effect
+  // Bake the relay into the unit so the service supervises the daemon for
+  // exactly the relay it was installed for.
+  const relayEnvSystemd = isDefaultRelay() ? "" : `Environment=JOY_RELAY_URL=${joyRelayUrl()}\n`;
   if (plat === "linux") {
     const unit = `[Unit]
-Description=joy-tmux daemon
+Description=joy-tmux daemon (relay ${joyRelayUrl()})
 After=network-online.target
 
 [Service]
@@ -271,6 +326,7 @@ Type=simple
 ExecStart=${NODE} --import tsx ${SERVER_TS}
 WorkingDirectory=${PKG_DIR}
 Environment=PATH=${process.env.PATH ?? ""}
+${relayEnvSystemd}
 # Restart=always, NOT on-failure: the daemon self-restarts (joy-restart-daemon
 # RPC + the update flow) by exiting 0 after spawning a detached replacement.
 # Under systemd the default KillMode=control-group reaps that replacement when
@@ -288,10 +344,10 @@ WantedBy=default.target
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
     spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
-    const r = spawnSync("systemctl", ["--user", "enable", "--now", "joy-tmux.service"], { stdio: "inherit" });
+    const r = spawnSync("systemctl", ["--user", "enable", "--now", `${serviceName()}.service`], { stdio: "inherit" });
     if (r.status !== 0) { console.log(`${bad} systemctl enable failed (is lingering enabled? \`loginctl enable-linger $USER\`)`); return 1; }
     console.log(`${ok} installed systemd user service → ${path}`);
-    console.log(`  ${c.dim("logs: journalctl --user -u joy-tmux -f")}`);
+    console.log(`  ${c.dim(`logs: journalctl --user -u ${serviceName()} -f`)}`);
     return 0;
   }
   if (plat === "darwin") {
@@ -299,12 +355,12 @@ WantedBy=default.target
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>Label</key><string>${launchdLabel()}</string>
   <key>ProgramArguments</key>
   <array><string>${NODE}</string><string>--import</string><string>tsx</string><string>${SERVER_TS}</string></array>
   <key>WorkingDirectory</key><string>${PKG_DIR}</string>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${process.env.PATH ?? ""}</string></dict>
+  <dict><key>PATH</key><string>${process.env.PATH ?? ""}</string>${isDefaultRelay() ? "" : `<key>JOY_RELAY_URL</key><string>${joyRelayUrl()}</string>`}</dict>
   <key>RunAtLoad</key><true/>
   <!-- KeepAlive=true (restart on ANY exit, incl. clean exit 0) is load-bearing:
        the daemon self-restarts by exiting 0 (see scheduleDaemonRestart). Do not
@@ -347,7 +403,7 @@ function cmdUninstall(): number {
     return 1;
   }
   removeService();
-  console.log(`${ok} uninstalled joy-tmux service`);
+  console.log(`${ok} uninstalled ${serviceName()} service`);
   return 0;
 }
 
@@ -404,12 +460,20 @@ async function cmdJump(rest: string[]): Promise<number> {
 
   const win = String(matches[0].tmux_window);   // e.g. "joy:j-9214e0a2"
   const tmuxSession = win.split(":")[0];
+  const [tmuxBin, ...sock] = tmuxArgv();        // per-relay tmux server
   // select-window both validates the window still exists and makes it active.
-  const sel = spawnSync("tmux", ["select-window", "-t", win], { stdio: "ignore" });
+  const sel = spawnSync(tmuxBin, [...sock, "select-window", "-t", win], { stdio: "ignore" });
   if (sel.status !== 0) { console.log(`${bad} tmux window ${win} not found (session ended?)`); return 1; }
+  // switch-client only works within ONE tmux server: from inside the default
+  // server you can't switch to a namespaced relay's server (and attaching
+  // nested fails on $TMUX) — detach first.
+  if (process.env.TMUX && sock.length > 0) {
+    console.log(`${bad} you're inside another tmux server — detach (C-b d), then: joy --relay ${joyRelayKey()} jump`);
+    return 1;
+  }
   const sub = process.env.TMUX
-    ? spawnSync("tmux", ["switch-client", "-t", win], { stdio: "inherit" })      // already in tmux
-    : spawnSync("tmux", ["attach-session", "-t", tmuxSession], { stdio: "inherit" });
+    ? spawnSync(tmuxBin, [...sock, "switch-client", "-t", win], { stdio: "inherit" })      // already in tmux
+    : spawnSync(tmuxBin, [...sock, "attach-session", "-t", tmuxSession], { stdio: "inherit" });
   return sub.status === 0 ? 0 : 1;
 }
 
@@ -470,7 +534,7 @@ function sseWaitForStop(rec: any, timeoutMs: number, controller: AbortController
     const timer = setTimeout(() => { controller.abort(); resolveWait(false); }, timeoutMs);
     (async () => {
       try {
-        const res = await fetch(BASE + "/events", { headers: authHeaders(), signal: controller.signal });
+        const res = await fetch(base() + "/events", { headers: authHeaders(), signal: controller.signal });
         if (!res.ok || !res.body) { clearTimeout(timer); markReady(); resolveWait(false); return; }
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -778,7 +842,11 @@ async function cmdKill(rest: string[]): Promise<number> {
 function help(): void {
   console.log(`${c.b("joy")} — joy-tmux daemon control
 
-${c.b("Usage:")} joy <command>
+${c.b("Usage:")} joy [--relay <happy|joy|joy-legacy|url>] <command>
+
+  ${c.dim("--relay selects which relay's daemon the command addresses (default:")}
+  ${c.dim("$JOY_RELAY_URL / ~/.joy/relay.json / Happy Cloud). Per-relay daemons run")}
+  ${c.dim("side by side — own state, own tmux server, own service unit.")}
 
   ${c.b("start")}        Start the daemon (detached)
   ${c.b("stop")}         Stop the daemon (tmux sessions stay alive)
