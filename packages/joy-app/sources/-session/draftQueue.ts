@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { MMKV } from 'react-native-mmkv';
+import { relayScopedMMKV } from '@/sync/serverConfig';
 
 // On-device draft queue. Drafts are messages the user has composed but not yet
 // sent — they live ONLY in the app (never propagated to joy-tmux) until the user
@@ -49,7 +49,7 @@ interface DraftQueueState {
     revertRelease: (sessionId: string, id: string, error: string) => void;
 }
 
-const mmkv = new MMKV();
+const mmkv = relayScopedMMKV();
 const STORAGE_KEY = 'draft-queue';
 
 function load(): Record<string, QueuedDraft[]> {

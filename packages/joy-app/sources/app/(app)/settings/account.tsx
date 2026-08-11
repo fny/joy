@@ -17,6 +17,9 @@ import { sync } from '@/sync/sync';
 import { useUnistyles } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
 import { useConnectAccount } from '@/hooks/useConnectAccount';
+import { TokenStorage } from '@/auth/tokenStorage';
+import { getServerUrl, relayNameForUrl, KNOWN_RELAYS } from '@/sync/serverConfig';
+import { switchRelayAndReload } from '@/sync/relaySwitch';
 import { getDisplayName } from '@/sync/profile';
 import { Image } from 'expo-image';
 import { useHappyAction } from '@/hooks/useHappyAction';
@@ -115,6 +118,43 @@ export default React.memo(() => {
     const [requestingPushPermission, setRequestingPushPermission] = useState(false);
     const [refreshingPushToken, setRefreshingPushToken] = useState(false);
     const [deletingPushToken, setDeletingPushToken] = useState<string | null>(null);
+
+    // One account per relay: the known relays, plus the active server when it's
+    // a custom one, each checked for stored credentials.
+    const activeServerUrl = getServerUrl();
+    const relayRows = useMemo(() => {
+        const rows: { key: string; name: string; url: string }[] = KNOWN_RELAYS.map(r => ({ ...r }));
+        if (!rows.some(r => r.url === activeServerUrl)) {
+            rows.unshift({ key: 'custom', name: relayNameForUrl(activeServerUrl), url: activeServerUrl });
+        }
+        return rows;
+    }, [activeServerUrl]);
+    const [relayAccounts, setRelayAccounts] = useState<Record<string, boolean> | null>(null);
+    const [switchingRelay, setSwitchingRelay] = useState<string | null>(null);
+
+    const loadRelayAccounts = useCallback(async () => {
+        const entries = await Promise.all(relayRows.map(async (r) =>
+            [r.url, !!(await TokenStorage.getCredentials(r.url))] as const
+        ));
+        setRelayAccounts(Object.fromEntries(entries));
+    }, [relayRows]);
+
+    useEffect(() => {
+        void loadRelayAccounts();
+    }, [loadRelayAccounts]);
+
+    const handleSwitchRelay = async (url: string, name: string, hasAccount: boolean) => {
+        const confirmed = await Modal.confirm(
+            t('server.changeServer'),
+            hasAccount
+                ? `Switch to ${name}? The app will restart using the account paired with this relay.`
+                : `Switch to ${name}? No account is paired with this relay yet — the app will restart on its connect screen.`,
+            { confirmText: t('common.continue'), destructive: true }
+        );
+        if (!confirmed) return;
+        setSwitchingRelay(url);
+        await switchRelayAndReload(url);
+    };
 
     // Get the current secret key
     const currentSecret = auth.credentials?.secret || '';
@@ -339,6 +379,33 @@ export default React.memo(() => {
                             showChevron={false}
                         />
                     )}
+                </ItemGroup>
+
+                {/* Relay Accounts */}
+                <ItemGroup
+                    title="Relays"
+                    footer="Each relay keeps its own paired account. Tap a relay to switch — the app restarts and loads that relay's account."
+                >
+                    {relayRows.map((r) => {
+                        const isActive = r.url === activeServerUrl;
+                        const hasAccount = relayAccounts?.[r.url] ?? false;
+                        const accountLabel = relayAccounts === null ? '' : hasAccount ? ' · account paired' : ' · no account';
+                        return (
+                            <Item
+                                key={r.key}
+                                title={r.name}
+                                detail={isActive ? 'Active' : undefined}
+                                subtitle={`${r.url.replace('https://', '')}${accountLabel}`}
+                                icon={<Ionicons name="git-network-outline" size={29} color={isActive ? theme.colors.accents.green : theme.colors.textSecondary} />}
+                                rightElement={isActive ? (
+                                    <Ionicons name="checkmark-circle" size={22} color={theme.colors.textLink} />
+                                ) : undefined}
+                                onPress={isActive ? undefined : () => void handleSwitchRelay(r.url, r.name, hasAccount)}
+                                loading={switchingRelay === r.url}
+                                showChevron={false}
+                            />
+                        );
+                    })}
                 </ItemGroup>
 
                 {/* Profile Section */}

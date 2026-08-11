@@ -1,12 +1,12 @@
-import { MMKV } from 'react-native-mmkv';
 import { Settings, settingsDefaults, settingsParse, settingsToSyncPayload, SettingsSchema } from './settings';
+import { relayScopedMMKV } from './serverConfig';
 import { LocalSettings, localSettingsDefaults, localSettingsParse } from './localSettings';
 import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { Machine } from './storageTypes';
 
-const mmkv = new MMKV();
+const mmkv = relayScopedMMKV();
 const CACHED_MACHINES_KEY = 'cached-machines-v1';
 const MAX_CACHED_MACHINES = 50;
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';

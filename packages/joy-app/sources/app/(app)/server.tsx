@@ -11,7 +11,8 @@ import { RoundButton } from '@/components/RoundButton';
 import { Modal } from '@/modal';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
-import { getServerUrl, setServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS } from '@/sync/serverConfig';
+import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS } from '@/sync/serverConfig';
+import { switchRelayAndReload } from '@/sync/relaySwitch';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -143,7 +144,7 @@ export default function ServerConfigScreen() {
         );
 
         if (confirmed) {
-            setServerUrl(inputUrl);
+            await switchRelayAndReload(inputUrl);
         }
     };
 
@@ -157,8 +158,8 @@ export default function ServerConfigScreen() {
             { confirmText: t('common.continue'), destructive: true }
         );
         if (confirmed) {
-            setServerUrl(url === KNOWN_RELAYS[0].url ? null : url);
             setInputUrl('');
+            await switchRelayAndReload(url);
         }
     };
 
@@ -170,8 +171,8 @@ export default function ServerConfigScreen() {
         );
 
         if (confirmed) {
-            setServerUrl(null);
             setInputUrl('');
+            await switchRelayAndReload(null);
         }
     };
 

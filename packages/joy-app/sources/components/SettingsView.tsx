@@ -21,6 +21,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { useProfile } from '@/sync/storage';
 import { getDisplayName, getAvatarUrl, getBio } from '@/sync/profile';
+import { getServerUrl, relayNameForUrl } from '@/sync/serverConfig';
 import { Avatar } from '@/components/Avatar';
 import { t } from '@/text';
 
@@ -232,6 +233,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     subtitle={joyMachines.length > 0 ? `${joyMachines.length} connected` : 'None connected'}
                     icon={<Ionicons name="hardware-chip-outline" size={29} color={theme.colors.status.connected} />}
                     onPress={() => router.push('/settings/machines' as any)}
+                />
+                <Item
+                    title="Relays"
+                    subtitle={relayNameForUrl(getServerUrl())}
+                    icon={<Ionicons name="git-network-outline" size={29} color={theme.colors.accents.indigo} />}
+                    onPress={() => router.push('/server')}
                 />
                 <Item
                     title={t('settings.appearance')}
