@@ -1,6 +1,7 @@
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { joyStateDir } from "../paths";
 
 // Mirrors joy-app's sources/sync/prompt/systemPrompt.ts. The happy app injects
 // this per-message via the SDK so Claude emits <options>…</options> blocks that
@@ -38,7 +39,7 @@ export const OPTIONS_SYSTEM_PROMPT = [
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.
-export function optionsPromptArg(baseDir = join(homedir(), ".happy", "joy-tmux-state")): string {
+export function optionsPromptArg(baseDir = joyStateDir()): string {
   const path = join(baseDir, "options-system-prompt.txt");
   try {
     mkdirSync(baseDir, { recursive: true });

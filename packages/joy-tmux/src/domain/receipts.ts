@@ -6,6 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { joyStateDir } from "../paths";
 
 export type DeliverySource = "relay" | "web" | "rpc";
 
@@ -51,7 +52,7 @@ export interface DeliveryState {
 }
 
 export function defaultStateDir(): string {
-  return join(homedir(), ".happy", "joy-tmux-state");
+  return joyStateDir();
 }
 
 export function receiptPath(relaySessionId: string, baseDir = defaultStateDir()): string {
