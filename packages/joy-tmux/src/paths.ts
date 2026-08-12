@@ -14,10 +14,19 @@ export function happyHomeDir(): string {
 }
 
 /** The Joy home — $JOY_HOME_DIR or ~/.joy. Daemon state, per-session dirs,
- *  and credentials for any NON-default relay all live here. */
+ *  and credentials for any NON-default relay all live here.
+ *
+ *  ISOLATION RULE: an overridden HAPPY_HOME_DIR (tests, e2e harnesses) means
+ *  an isolated universe — joy state follows it unless JOY_HOME_DIR says
+ *  otherwise. Without this, an "isolated" daemon reads the real ~/.joy/state
+ *  (observed live 2026-08-12: the e2e daemon hit the PROD singleton lock and
+ *  the compat symlink pointed the test home at prod state). */
 export function joyHomeDir(): string {
   const env = process.env.JOY_HOME_DIR;
-  return env ? env.replace(/^~/, homedir()) : join(homedir(), ".joy");
+  if (env) return env.replace(/^~/, homedir());
+  const happyEnv = process.env.HAPPY_HOME_DIR;
+  if (happyEnv) return happyEnv.replace(/^~/, homedir());
+  return join(homedir(), ".joy");
 }
 
 /** The ORIGINAL relay. Lives here (not relay.ts) so path scoping, credential

@@ -106,3 +106,12 @@ describe("per-relay namespacing (concurrent daemons)", () => {
         expect(p.joyStateDir()).toBe(join(joy, "state"));
     });
 });
+
+describe("isolation: HAPPY_HOME_DIR override", () => {
+    it("joy home follows an overridden happy home when JOY_HOME_DIR is unset", async () => {
+        delete process.env.JOY_HOME_DIR;
+        const { joyHomeDir, joyStateDir } = await freshPaths();
+        expect(joyHomeDir()).toBe(happy);
+        expect(joyStateDir()).toBe(join(happy, "state"));
+    });
+});

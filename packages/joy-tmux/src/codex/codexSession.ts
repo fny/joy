@@ -50,6 +50,10 @@ export interface CodexInit {
   /** Resume an existing thread (recovery). */
   codexThreadId?: string;
   developerInstructions?: string;
+  /** True when this session's relay card is NEW but the thread has history
+   *  (restart / resume-by-id / continue) — reconcile then replays user rows
+   *  too, since no prior card carries them. */
+  freshCard?: boolean;
   /** `-c key=value` config overrides for the app-server spawn (user extraArgs). */
   config?: Record<string, string>;
 }
@@ -113,6 +117,7 @@ export class CodexSession implements AgentSession {
   // /title lock (parity with claude/opencode): a user-set title beats agent
   // <joy-title> emissions. Loaded from the window record.
   #titleLocked = false;
+  #freshCard = false;
   // Durable inbound spool (finding #3): app messages persisted before delivery.
   // Loaded in the constructor BEFORE the relay starts pulling (finding #3 race).
   #inbound: CodexInboundItem[] = [];
@@ -141,6 +146,7 @@ export class CodexSession implements AgentSession {
     this.#deps = deps;
     this.#resumeThreadId = init.codexThreadId;
     this.#developerInstructions = init.developerInstructions;
+    this.#freshCard = init.freshCard === true;
     this.#titleLocked = loadWindowRecord(this.id)?.titleLockedByUser === true;
     this.#config = init.config;
     this.#socketPath = join(joyStateDir(), `codex-${init.id}.sock`);
@@ -599,7 +605,11 @@ export class CodexSession implements AgentSession {
    *  at the relay append layer, so only output missed during downtime lands. */
   async #reconcileHistory(client: CodexAppServerClient): Promise<void> {
     if (!this.#threadId) return;
-    const res = await client.threadRead(this.#threadId);
+    await this.#reconcileHistoryInner(client);
+  }
+
+  async #reconcileHistoryInner(client: CodexAppServerClient): Promise<void> {
+    const res = await client.threadRead(this.#threadId!);
     const thread = ((res.thread ?? res) as Record<string, unknown>);
     const turns = Array.isArray(thread.turns) ? thread.turns as Record<string, unknown>[] : [];
 
@@ -625,8 +635,25 @@ export class CodexSession implements AgentSession {
         process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay\n`);
         continue;
       }
-      this.#applyEffects(this.#norm.handle({ method: "turn/started", params: { turn: { id: tid } } }));
       const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
+      // FRESH CARD (restart / resume-by-id / continue): the new relay session
+      // has no prior rows, so replay the user prompts too — BEFORE the turn
+      // bracket, matching live ordering (user row, then turn-start; the app's
+      // positional grouper mis-brackets a user message inside the turn — the
+      // e2e's codex CH7 "reverse order", root-caused 2026-08-12).
+      if (this.#freshCard) {
+        let idx = 0;
+        for (const item of items) {
+          if (String((item as { type?: unknown }).type ?? "") !== "userMessage") continue;
+          const content = (item as { content?: Array<{ type?: string; text?: string }> }).content;
+          const text = Array.isArray(content)
+            ? content.filter((c) => c?.type === "text").map((c) => c?.text ?? "").join("\n").trim()
+            : String((item as { text?: unknown }).text ?? "").trim();
+          if (text) this.#relay?.send(encodeUserMessage(text), `turn:${tid}:user:${idx}`);
+          idx++;
+        }
+      }
+      this.#applyEffects(this.#norm.handle({ method: "turn/started", params: { turn: { id: tid } } }));
       for (const item of items) {
         // Feed item/started for EVERY item (incl. userMessage) so canonical
         // ordinals allocate identically to the live path AND user-message
