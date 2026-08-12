@@ -209,6 +209,10 @@ export class CodexNormalizer {
       case "userMessage": {
         // The echo of a dispatched message — confirms delivery by clientId,
         // does NOT re-emit as a wire record (the app already has the row).
+        // (Fresh-card replay emits user rows from the SESSION, BEFORE the
+        // turn bracket — see #reconcileHistoryInner — because live ordering
+        // is user-row-then-turn-start and the app's positional grouper
+        // mis-brackets a user message that lands inside the turn.)
         const clientId = str(item.clientId) || str(item.clientUserMessageId);
         return clientId ? [{ kind: "confirmDispatch", clientId }] : [];
       }

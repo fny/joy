@@ -874,7 +874,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 <JoyQueueStrip queue={joyQueue} sessionId={sessionId} />
             </CenteredInputWidth>
         )}
-        {isJoyTmux && (
+        {isJoyTmux && !isDisconnected && (
             <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                 <PendingQueueStrip sessionId={sessionId} />
             </CenteredInputWidth>

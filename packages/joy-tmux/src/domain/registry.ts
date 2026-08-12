@@ -623,6 +623,9 @@ export class SessionRegistry {
       startedAt: Date.now(),
       // resume_id (a codex thread id) → thread/resume instead of thread/start.
       codexThreadId: resumeThread,
+      // Resuming a thread into a NEWLY-created relay card: history replay must
+      // include user rows (no prior card carries them).
+      freshCard: !!resumeThread,
       config: codexConfig,
       // The joy tag vocabulary (options/img/file/notify/title) — codex's
       // system-prompt channel. Resumed threads keep their original
