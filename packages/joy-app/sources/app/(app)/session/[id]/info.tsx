@@ -19,7 +19,7 @@ import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import { CodeView } from '@/components/CodeView';
-import { Session } from '@/sync/storageTypes';
+import { Session, isJoyServerSource } from '@/sync/storageTypes';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { copySessionMetadataToClipboard, copySessionMetadataAndLogsToClipboard } from '@/utils/copySessionMetadataToClipboard';
@@ -658,7 +658,7 @@ export default React.memo(() => {
 
     // joy-tmux sessions get their own info page built around the daemon's
     // live record; happy sessions keep the stock upstream page above.
-    if (session.metadata?.joy__source === 'joy-tmux') {
+    if (isJoyServerSource(session.metadata?.joy__source)) {
         return <JoySessionInfo session={session} />;
     }
 

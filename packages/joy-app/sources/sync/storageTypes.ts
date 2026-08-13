@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+/** True when a session was created by the joy machine daemon (joy-server).
+ *  Accepts the historical 'joy-tmux' value too — sessions created before the
+ *  2026-08 rename carry it in their server-side metadata forever. */
+export function isJoyServerSource(source: string | null | undefined): boolean {
+    return source === 'joy-server' || source === 'joy-tmux';
+}
+
 //
 // Agent states
 //
@@ -60,8 +67,9 @@ export const MetadataSchema = z.object({
      */
     parentSessionId: z.string().optional(),
     forkedFromMessageId: z.string().optional(),
-    joy__source: z.string().optional(), // e.g. 'joy-tmux'
-    joy__sessionId: z.string().optional(), // tmux session ID on the joy-tmux server
+    // 'joy-server' — see isJoyServerSource() for the historical value
+    joy__source: z.string().optional(),
+    joy__sessionId: z.string().optional(), // tmux session ID on the joy-server daemon
     joy__state: z.enum(['running', 'detached', 'archived']).optional(), // joy lifecycle: detached = Claude died (red status)
     // joy: a 500-error auto-retry is in progress (daemon re-sending a failed
     // turn on a backoff schedule). Drives the "retrying" status. null/absent = none.

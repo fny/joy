@@ -1,5 +1,5 @@
 // Info page for joy-tmux sessions — replaces the stock happy info page for
-// sessions with metadata.joy__source === 'joy-tmux' (the route file branches
+// sessions with isJoyServerSource(metadata.joy__source) (the route file branches
 // here). Built around what a joy session actually is: a tmux window driven
 // by the joy-tmux daemon, with a live record fetched over joy-get-session.
 // Happy-cli concerns (CLI version warnings, sandbox, worktrees, resume/fork)
@@ -22,7 +22,7 @@ import { useHappyAction } from '@/hooks/useHappyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
 import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
-import { Session } from '@/sync/storageTypes';
+import { Session, isJoyServerSource } from '@/sync/storageTypes';
 import { HappyError } from '@/utils/errors';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';

@@ -1,4 +1,5 @@
 import { storage, isFresh } from '@/sync/storage';
+import { isJoyServerSource } from '@/sync/storageTypes';
 import { useDraftQueueStore, draftReason } from './draftQueue';
 import type { SendMessageResult } from '@/sync/sync';
 import { randomUUID } from 'expo-crypto';
@@ -57,7 +58,7 @@ export function initDraftQueueRelease(send: SendFn): void {
         for (const [sessionId, queue] of Object.entries(drafts)) {
             if (!queue || queue.length === 0) continue;
             const session = state.sessions[sessionId];
-            if (!session || session.metadata?.joy__source !== 'joy-tmux') continue;
+            if (!session || !isJoyServerSource(session.metadata?.joy__source)) continue;
 
             // Auto-release only 'busy' QUEUE ITEMS (a message held because a turn
             // is processing ahead), never deliberate drafts. Pick the first such

@@ -16,6 +16,7 @@ import { useMachine, storage } from '@/sync/storage';
 import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatOSPlatform } from '@/utils/sessionUtils';
 import { apiSocket } from '@/sync/apiSocket';
+import { isJoyServerSource } from '@/sync/storageTypes';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 import { useHappyAction } from '@/hooks/useHappyAction';
@@ -144,7 +145,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         // Best-effort: end live sessions so the daemon doesn't re-create records.
         await joyKillAllSessions(machineId).catch(() => { });
         const targets = Object.values(storage.getState().sessions).filter(
-            (s) => s.metadata?.joy__source === 'joy-tmux' && s.metadata?.machineId === machineId,
+            (s) => isJoyServerSource(s.metadata?.joy__source) && s.metadata?.machineId === machineId,
         );
         let deleted = 0;
         for (const s of targets) {
