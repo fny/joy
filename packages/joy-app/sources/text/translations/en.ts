@@ -439,6 +439,17 @@ export const en: TranslationStructure = {
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Server Configuration',
         knownRelays: 'Known relays',
+        relayLogin: 'Log in to relay',
+        relayLoginMessage: 'No account is saved for this relay on this device. Use your current secret key here, enter a different one, or log in later.',
+        relayUseCurrentKey: 'Use my current key',
+        relayEnterKey: 'Enter secret key',
+        relayLoginLater: 'Log in later',
+        relayLoginFailed: 'Could not log in to this relay. Check the key and try again.',
+        relayApplyKeyAll: 'Use this key on all relays',
+        relayApplyKeyAllMessage: 'Log in to every known relay with the current account key? This replaces any other account saved for those relays on this device.',
+        relayApplyKeyAllFooter: 'Makes your current secret key the single login for every known relay — one code to back up. Accounts are created automatically on relays where none exist yet.',
+        relayApplyKeyAllSuccess: 'All relays now use this key.',
+        relayApplyKeyAllPartial: 'Could not set up:',
         enterServerUrl: 'Please enter a server URL',
         notValidHappyServer: 'Not a valid Joy Server',
         changeServer: 'Change Server',
@@ -451,7 +462,7 @@ export const en: TranslationStructure = {
         failedToConnectToServer: 'Failed to connect to server',
         currentlyUsingCustomServer: 'Currently using custom server',
         customServerUrlLabel: 'Custom Server URL',
-        advancedFeatureFooter: "This is an advanced feature. Only change the server if you know what you're doing. You will need to log out and log in again after changing servers."
+        advancedFeatureFooter: "This is an advanced feature. Only change the server if you know what you're doing. Each server keeps its own account — picking one without a saved account will offer to log in first."
     },
 
     sessionInfo: {

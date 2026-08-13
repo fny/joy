@@ -12,7 +12,11 @@ import { Modal } from '@/modal';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS } from '@/sync/serverConfig';
-import { switchRelayAndReload } from '@/sync/relaySwitch';
+import { switchRelayAndReload, loginToRelay } from '@/sync/relaySwitch';
+import { TokenStorage } from '@/auth/tokenStorage';
+import { normalizeSecretKey } from '@/auth/secretKeyBackup';
+import { useAuth } from '@/auth/AuthContext';
+import type { AlertButton } from '@/modal';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 const stylesheet = StyleSheet.create((theme) => ({
@@ -82,10 +86,12 @@ export default function ServerConfigScreen() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
     const router = useRouter();
+    const auth = useAuth();
     const serverInfo = getServerInfo();
     const [inputUrl, setInputUrl] = useState(serverInfo.isCustom ? getServerUrl() : '');
     const [error, setError] = useState<string | null>(null);
     const [isValidating, setIsValidating] = useState(false);
+    const [applyingKey, setApplyingKey] = useState(false);
 
     const validateServer = async (url: string): Promise<boolean> => {
         try {
@@ -148,19 +154,99 @@ export default function ServerConfigScreen() {
         }
     };
 
+    // One key everywhere: log into every known relay with the CURRENT
+    // account's secret. Relays auto-create the account on first contact, so
+    // afterwards this one code restores every relay and switching never asks
+    // for a key. Replaces any other account previously saved for a relay on
+    // this device (deliberate — the point is converging on a single key).
+    const handleApplyKeyToAll = async () => {
+        const secret = auth.credentials?.secret;
+        if (!secret) return;
+        const confirmed = await Modal.confirm(
+            t('server.relayApplyKeyAll'),
+            t('server.relayApplyKeyAllMessage'),
+            { confirmText: t('common.continue') }
+        );
+        if (!confirmed) return;
+        setApplyingKey(true);
+        const failed: string[] = [];
+        try {
+            for (const relay of KNOWN_RELAYS) {
+                if (relay.url === getServerUrl()) continue; // the key's own account
+                try {
+                    await loginToRelay(relay.url, secret);
+                } catch (err) {
+                    console.error(`Apply key failed for ${relay.name}:`, err);
+                    failed.push(relay.name);
+                }
+            }
+        } finally {
+            setApplyingKey(false);
+        }
+        if (failed.length === 0) {
+            Modal.alert(t('server.relayApplyKeyAll'), t('server.relayApplyKeyAllSuccess'));
+        } else {
+            Modal.alert(t('common.error'), `${t('server.relayApplyKeyAllPartial')} ${failed.join(', ')}`);
+        }
+    };
+
+    // How to log into a relay that has no saved account on this device.
+    // Kept to three buttons per dialog (Android's native Alert caps at 3):
+    // when a current key exists it takes the "log in later" slot — a
+    // logged-out switch is still reachable via the custom-URL Save flow.
+    const askLoginChoice = (hasCurrentKey: boolean): Promise<'current' | 'enter' | 'later' | null> =>
+        new Promise((resolve) => {
+            const buttons: AlertButton[] = [
+                { text: t('common.cancel'), style: 'cancel', onPress: () => resolve(null) },
+                hasCurrentKey
+                    ? { text: t('server.relayUseCurrentKey'), onPress: () => resolve('current') }
+                    : { text: t('server.relayLoginLater'), onPress: () => resolve('later') },
+                { text: t('server.relayEnterKey'), onPress: () => resolve('enter') },
+            ];
+            Modal.alert(t('server.relayLogin'), t('server.relayLoginMessage'), buttons);
+        });
+
     const handleSelectRelay = async (url: string, name: string) => {
         if (getServerUrl() === url) return;
         const isValid = await validateServer(url);
         if (!isValid) return;
-        const confirmed = await Modal.confirm(
-            t('server.changeServer'),
-            t('server.continueWithServer'),
-            { confirmText: t('common.continue'), destructive: true }
-        );
-        if (confirmed) {
-            setInputUrl('');
-            await switchRelayAndReload(url);
+
+        // Already have an account on that relay: plain switch, boots logged in.
+        const existing = await TokenStorage.getCredentials(url);
+        if (existing) {
+            const confirmed = await Modal.confirm(
+                t('server.changeServer'),
+                t('server.continueWithServer'),
+                { confirmText: t('common.continue'), destructive: true }
+            );
+            if (confirmed) {
+                setInputUrl('');
+                await switchRelayAndReload(url);
+            }
+            return;
         }
+
+        const choice = await askLoginChoice(!!auth.credentials);
+        if (!choice) return;
+        try {
+            if (choice === 'current' && auth.credentials) {
+                await loginToRelay(url, auth.credentials.secret);
+            } else if (choice === 'enter') {
+                const entered = await Modal.prompt(
+                    t('server.relayEnterKey'),
+                    undefined,
+                    { placeholder: 'XXXXX-XXXXX-XXXXX...' }
+                );
+                if (!entered?.trim()) return;
+                await loginToRelay(url, normalizeSecretKey(entered));
+            }
+        } catch (error) {
+            console.error('Relay login error:', error);
+            Modal.alert(t('common.error'), t('server.relayLoginFailed'));
+            return;
+        }
+        setInputUrl('');
+        await switchRelayAndReload(url);
     };
 
     const handleReset = async () => {
@@ -204,6 +290,18 @@ export default function ServerConfigScreen() {
                             />
                         ))}
                     </ItemGroup>
+                    {!!auth.credentials && (
+                        <ItemGroup footer={t('server.relayApplyKeyAllFooter')}>
+                            <Item
+                                title={t('server.relayApplyKeyAll')}
+                                icon={<Ionicons name="key-outline" size={24} color={theme.colors.textLink} />}
+                                onPress={() => void handleApplyKeyToAll()}
+                                loading={applyingKey}
+                                disabled={applyingKey}
+                                showChevron={false}
+                            />
+                        </ItemGroup>
+                    )}
                     <ItemGroup footer={t('server.advancedFeatureFooter')}>
                         <View style={styles.contentContainer}>
                             <Text style={styles.labelText}>{t('server.customServerUrlLabel').toUpperCase()}</Text>
