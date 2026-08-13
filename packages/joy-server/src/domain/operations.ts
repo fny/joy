@@ -1,0 +1,901 @@
+// The operation catalog: every operation joy-server exposes, defined exactly
+// once with its routing metadata for both transports. Transports derive their
+// wiring from this table, so the HTTP debug surface and the relay RPC surface
+// can never drift apart — adding an op here makes it reachable everywhere.
+//
+//   machine scope → ctx is the SessionRegistry (registered once per daemon,
+//                   RPC name prefixed joy-*)
+//   session scope → ctx is a resolved Session (registered per relay session
+//                   by Session.attachRelay via bindSessionOps)
+//
+// Handlers return the RPC-shaped result (the frozen app contract). HTTP
+// routes reuse the same result; the few legacy HTTP divergences (create's
+// unwrapped 201, kill's 404) are expressed via the optional httpShape.
+
+import type { Session } from "../claude/session";
+import type { AgentSession } from "./agentSession";
+import type { SessionRegistry } from "./registry";
+import type { RelaySession } from "../relay/relay.ts";
+import {
+  handleBash,
+  handleReadFile,
+  handleWriteFile,
+  handleListDirectory,
+  handleGetDirectoryTree,
+  handleRipgrep,
+  handleDifftastic,
+} from "./fileOps";
+import { computeUsage, periodToRange } from "../claude/usage";
+import { cwdToTranscriptDir } from "../claude/transcript";
+import { joySessionDir } from "../paths";
+import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync } from "fs";
+import { readFile } from "fs/promises";
+import { basename, join } from "path";
+import { hostname, platform, release, arch } from "os";
+import { spawn, execFile } from "child_process";
+
+/** Clone `gitUrl` into `target` for a git-URL session spawn. Reuses an
+ *  existing clone (target/.git present) so re-spawning the same URL lands in
+ *  the same working copy; refuses a non-empty non-repo target; cleans up a
+ *  partial clone on failure. Full clone (agents want history), generous
+ *  timeout — the app extends its RPC race accordingly. */
+function cloneForSpawn(gitUrl: string, target: string): Promise<{ ok: true } | { error: string }> {
+  return new Promise((resolve) => {
+    try {
+      if (existsSync(target)) {
+        if (existsSync(join(target, ".git"))) return resolve({ ok: true }); // existing clone — reuse
+        if (readdirSync(target).length > 0) return resolve({ error: `directory ${target} exists and is not a git repo` });
+      }
+      execFile("git", ["clone", gitUrl, target], { timeout: 220_000 }, (err, _stdout, stderr) => {
+        if (!err) return resolve({ ok: true });
+        // Don't leave a partial clone behind — it would block the retry.
+        try { if (existsSync(target)) rmSync(target, { recursive: true, force: true }); } catch { /* best effort */ }
+        const detail = (stderr || String(err)).trim().split("\n").slice(-3).join(" ");
+        resolve({ error: `git clone failed: ${detail.slice(0, 300)}` });
+      });
+    } catch (e) {
+      resolve({ error: `git clone failed: ${e}` });
+    }
+  });
+}
+
+export type HttpMethod = "GET" | "POST" | "DELETE";
+
+/**
+ * Re-exec the daemon: spawn a detached replacement that waits for this process
+ * to release port 4997, then exit. There's no supervisor, so the daemon restarts
+ * itself. Claude runs under tmux (not as our child), so live sessions survive and
+ * are re-adopted by the new daemon's recover().
+ */
+function scheduleDaemonRestart(): void {
+  setTimeout(() => {
+    try {
+      // Reconstruct however this process was launched (node + any loader flags
+      // like `--import tsx` + the script path) so the replacement runs the same way.
+      const argv = [process.execPath, ...process.execArgv, ...process.argv.slice(1)];
+      const cmd = argv.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+      spawn("sh", ["-c", `sleep 1; exec ${cmd}`], {
+        detached: true,
+        stdio: "ignore",
+        cwd: process.cwd(),
+      }).unref();
+    } catch { /* fall through to exit */ }
+    process.exit(0);
+  }, 300);
+}
+
+export interface OpMeta {
+  /** Which transport invoked the op — send() maps this to the chat-log source. */
+  via: "http" | "rpc";
+}
+
+/** Per-message text cap so a few huge turns can't bloat the RPC envelope. */
+const LOG_MESSAGE_CHARS = 4000;
+
+// Memoized app-server catalog fetch — only used when codex's on-disk
+// models_cache.json is absent (see the codexModels op).
+let codexModelsMemo: Promise<import("../codex/appServerClient").CodexModel[]> | null = null;
+
+/** Flatten a transcript entry's content into plain text (string or text blocks). */
+function transcriptEntryText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .filter((b): b is { type: string; text: string } =>
+        !!b && typeof b === "object" && (b as { type?: unknown }).type === "text" && typeof (b as { text?: unknown }).text === "string")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+  }
+  return "";
+}
+
+/**
+ * Read the last `limit` real back-and-forth messages (user prompts + assistant
+ * replies) from a Claude transcript JSONL — skipping meta, tool-result, and CLI
+ * wrapper lines. Newest last. Each message text is capped at LOG_MESSAGE_CHARS.
+ */
+function parseLogLine(line: string): { role: "user" | "assistant"; text: string; ts: number | null } | null {
+  if (!line.trim()) return null;
+  let o: Record<string, unknown>;
+  try { o = JSON.parse(line); } catch { return null; }
+  if (o.isMeta) return null;
+  const role = o.type === "user" ? "user" : o.type === "assistant" ? "assistant" : null;
+  if (!role) return null;
+  let text = transcriptEntryText((o.message as { content?: unknown } | undefined)?.content);
+  if (!text) return null;
+  // A user line starting with "<" is a tool_result / command wrapper, not a real prompt.
+  if (role === "user" && text.startsWith("<")) return null;
+  if (text.length > LOG_MESSAGE_CHARS) text = text.slice(0, LOG_MESSAGE_CHARS) + "…";
+  const tsRaw = typeof o.timestamp === "string" ? Date.parse(o.timestamp) : NaN;
+  return { role, text, ts: Number.isNaN(tsRaw) ? null : tsRaw };
+}
+
+function readLastLogMessages(file: string, limit: number): Array<{ role: "user" | "assistant"; text: string; ts: number | null }> {
+  // Read the file BACKWARDS in chunks — callers want the last handful of
+  // messages (projects-page excerpts use limit=1), and transcripts run to many
+  // MB; parsing the whole file per call stalled the daemon event loop.
+  const CHUNK = 256 * 1024;
+  try {
+    const size = statSync(file).size;
+    const fd = openSync(file, "r");
+    try {
+      let start = size;
+      let blockText = "";
+      for (;;) {
+        const readStart = Math.max(0, start - CHUNK);
+        if (readStart < start) {
+          const buf = Buffer.alloc(start - readStart);
+          readSync(fd, buf, 0, buf.length, readStart);
+          blockText = buf.toString("utf-8") + blockText;
+          start = readStart;
+        }
+        let lines = blockText.split("\n");
+        // Unless we're at the file start, the first line is (possibly) a partial
+        // — skip it this round; the next chunk prepend completes it.
+        if (start > 0) lines = lines.slice(1);
+        const collected: Array<{ role: "user" | "assistant"; text: string; ts: number | null }> = [];
+        for (let i = lines.length - 1; i >= 0 && collected.length < limit; i--) {
+          const m = parseLogLine(lines[i]);
+          if (m) collected.push(m);
+        }
+        if (collected.length >= limit || start === 0) return collected.reverse();
+      }
+    } finally { closeSync(fd); }
+  } catch { return []; }
+}
+
+export interface MachineOp {
+  name: string;
+  scope: "machine";
+  rpcName: string;
+  http: { method: HttpMethod; path: string };
+  handler: (registry: SessionRegistry, params: Record<string, unknown>, meta: OpMeta) => Promise<unknown> | unknown;
+  /** Optional HTTP-specific status/body mapping for legacy contract divergences. */
+  httpShape?: (result: unknown) => { status: number; body: unknown };
+}
+
+export interface SessionOp {
+  name: string;
+  scope: "session";
+  rpcName: string;
+  /** null → no dedicated HTTP route (killSession is covered by DELETE /sessions/:id). */
+  http: { method: HttpMethod; path: string } | null;
+  handler: (session: AgentSession, params: Record<string, unknown>) => Promise<unknown> | unknown;
+}
+
+export type Op = MachineOp | SessionOp;
+
+// ── Machine-scoped operations ───────────────────────────────────────────────
+
+export const machineOps: MachineOp[] = [
+  {
+    name: "list",
+    scope: "machine",
+    rpcName: "joy-list-sessions",
+    http: { method: "GET", path: "/sessions" },
+    handler: (registry) => registry.list().map(s => s.toJSON()),
+  },
+  {
+    name: "codexModels",
+    scope: "machine",
+    rpcName: "joy-codex-models",
+    http: { method: "GET", path: "/codex/models" },
+    // The codex model catalog for the app's picker. FAST PATH: codex's own
+    // on-disk cache ($CODEX_HOME/models_cache.json — codex refreshes it on
+    // every run), served instantly with no process spawn. Fallback (fresh
+    // machine where codex never ran): the old short-lived app-server fetch,
+    // memoized for the daemon's lifetime. Best-effort: [] if codex is absent.
+    handler: async () => {
+      try {
+        const { loadCodexModelsCacheFile, fetchCodexModels } = await import("../codex/appServerClient");
+        const cached = loadCodexModelsCacheFile();
+        if (cached) return { ok: true, models: cached.filter((m) => !m.hidden) };
+        if (!codexModelsMemo) codexModelsMemo = fetchCodexModels().catch((e) => { codexModelsMemo = null; throw e; });
+        return { ok: true, models: await codexModelsMemo };
+      } catch (e) {
+        return { ok: false, models: [], error: String(e) };
+      }
+    },
+  },
+  {
+    name: "opencodeModels",
+    scope: "machine",
+    rpcName: "joy-opencode-models",
+    http: { method: "GET", path: "/opencode/models" },
+    // Static curated allowlist (v1) — no server spawn, instant.
+    handler: async () => {
+      const { OPENCODE_MODELS } = await import("../opencode/models");
+      return { ok: true, models: OPENCODE_MODELS };
+    },
+  },
+  {
+    name: "opencodeSessions",
+    scope: "machine",
+    rpcName: "joy-opencode-sessions",
+    http: { method: "GET", path: "/opencode/sessions" },
+    // Past-sessions picker: opencode sessions recorded for a directory,
+    // newest first. Spawns a short-lived server (see listOpencodeSessionsForCwd).
+    handler: async (_registry, params) => {
+      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      if (!cwd) return { ok: false, error: "cwd required", sessions: [] };
+      try {
+        const { listOpencodeSessionsForCwd } = await import("../opencode/opencodeClient");
+        const { expandHome } = await import("./registry");
+        return { ok: true, sessions: await listOpencodeSessionsForCwd(expandHome(cwd)) };
+      } catch (e) {
+        return { ok: false, error: String(e), sessions: [] };
+      }
+    },
+  },
+  {
+    name: "opencodeSetModel",
+    scope: "machine",
+    rpcName: "joy-opencode-set-model",
+    http: { method: "POST", path: "/sessions/:id/opencode/model" },
+    // Mid-session model switch, allowlist-validated (same policy as create).
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { ok: false, error: "session_not_found" };
+      const { OPENCODE_MODELS } = await import("../opencode/models");
+      const { OpencodeSession } = await import("../opencode/opencodeSession");
+      if (!(session instanceof OpencodeSession)) return { ok: false, error: "not an opencode session" };
+      const m = OPENCODE_MODELS.find((x) => x.id === params.model);
+      if (!m) return { ok: false, error: "unknown model" };
+      return await session.setModel(m.id, m.providerID);
+    },
+  },
+  {
+    name: "refreshCommands",
+    scope: "machine",
+    rpcName: "joy-refresh-commands",
+    http: { method: "POST", path: "/commands/refresh" },
+    // Machine-page refresh: re-scan personal + plugins + every known project
+    // (prunes removed ones), push the union to machine metadata, and return it.
+    handler: (registry) => registry.commands.refresh(),
+  },
+  {
+    name: "get",
+    scope: "machine",
+    rpcName: "joy-get-session",
+    http: { method: "GET", path: "/sessions/:id" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      return session ? session.toJSON() : { error: "session_not_found" };
+    },
+    httpShape: (result) =>
+      (result as { error?: string }).error
+        ? { status: 404, body: result }
+        : { status: 200, body: result },
+  },
+  {
+    name: "create",
+    scope: "machine",
+    rpcName: "joy-create-session",
+    http: { method: "POST", path: "/sessions" },
+    // Throws DirectoryCreationApprovalRequired when cwd is missing and
+    // createDir isn't set — each transport maps the sentinel to its contract
+    // (RPC: requestToApproveDirectoryCreation, HTTP: 422).
+    handler: async (registry, params) => {
+      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      if (!cwd) return { error: "cwd required" };
+      // git-URL spawn: clone (or reuse) into cwd first, then launch inside it.
+      const gitUrl = typeof params.gitUrl === "string" ? params.gitUrl.trim() : "";
+      if (gitUrl) {
+        if (!/^(https?:\/\/|git@|ssh:\/\/)\S+$/.test(gitUrl)) return { error: "invalid git url" };
+        const cloned = await cloneForSpawn(gitUrl, cwd);
+        if ("error" in cloned) return cloned;
+      }
+      const session = await registry.create({
+        cwd,
+        agent: params.agent === "codex" || params.agent === "opencode" ? params.agent : undefined,
+        createDir: params.createDir === true,
+        model: typeof params.model === "string" ? params.model : undefined,
+        effort: typeof params.effort === "string" ? params.effort : undefined,
+        yolo: typeof params.yolo === "boolean" ? params.yolo : undefined,
+        continue: params.continue === true,
+        resume_id: typeof params.resume_id === "string" ? params.resume_id : undefined,
+        resumeLimitMb: typeof params.resume_limit_mb === "number" ? params.resume_limit_mb : undefined,
+        permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
+        fallbackModel: typeof params.fallbackModel === "string" ? params.fallbackModel : undefined,
+        forkSession: params.forkSession === true,
+        chrome: params.chrome === true,
+        detached: params.detached === true,
+        extraArgs: typeof params.extraArgs === "string" ? params.extraArgs : undefined,
+      });
+      return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };
+    },
+    // Legacy HTTP contract: 201 with the unwrapped SessionRecord.
+    httpShape: (result) => {
+      const r = result as { ok?: boolean; session?: unknown; error?: string };
+      if (r.ok) return { status: 201, body: r.session };
+      if (r.error === "cwd required") return { status: 400, body: { error: "cwd required" } };
+      return { status: 500, body: result };
+    },
+  },
+  {
+    name: "restart",
+    scope: "machine",
+    rpcName: "joy-restart-session",
+    http: { method: "POST", path: "/sessions/:id/restart" },
+    // Kills the window and starts a fresh claude in the same cwd resuming
+    // the same conversation (--resume, or --continue when the claude session
+    // id was never learned). Returns the NEW session — the app should
+    // navigate to the returned relaySessionId.
+    handler: async (registry, params) => {
+      const id = String(params.id ?? "");
+      // The id flows into file paths (window-<id>.json), the tmux window name
+      // (j-<id>), and the readFile extra root (~/.joy/sessions/<id>) — enforce
+      // the same 8-hex shape recover() requires so `../`-style ids can't
+      // relocate any of those (defense-in-depth; the surface is token-authed).
+      if (!/^[0-9a-f]{8}$/.test(id)) return { error: "invalid session id" };
+      const session = await registry.restart({
+        id,
+        cwd: typeof params.cwd === "string" ? params.cwd : undefined,
+      });
+      return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };
+    },
+  },
+  {
+    name: "kill",
+    scope: "machine",
+    rpcName: "joy-kill-session",
+    http: { method: "DELETE", path: "/sessions/:id" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      return { ok: session ? session.end("killed") || session.status === "ended" : false };
+    },
+    httpShape: (result) => {
+      const ok = (result as { ok: boolean }).ok;
+      return { status: ok ? 200 : 404, body: result };
+    },
+  },
+  {
+    name: "killAll",
+    scope: "machine",
+    rpcName: "joy-kill-all-sessions",
+    http: { method: "POST", path: "/sessions/kill-all" },
+    // Kill every session's tmux window (active AND detached) and archive them.
+    handler: (registry) => ({ ok: true, killed: registry.killAll() }),
+  },
+  {
+    name: "restartDaemon",
+    scope: "machine",
+    rpcName: "joy-restart-daemon",
+    http: { method: "POST", path: "/daemon/restart" },
+    // Re-exec the daemon. Running Claude sessions live in tmux and survive;
+    // recover() re-adopts them. Responds first, then restarts shortly after.
+    handler: () => { scheduleDaemonRestart(); return { ok: true }; },
+  },
+  {
+    name: "notify",
+    scope: "machine",
+    rpcName: "joy-notify",
+    http: { method: "POST", path: "/notify" },
+    // Push a notification to the user's devices, via the daemon's authed relay.
+    handler: async (registry, params) => {
+      const title = typeof params.title === "string" && params.title.trim() ? params.title.trim() : "Joy";
+      const body = typeof params.body === "string" ? params.body : "";
+      if (!registry.relayClient) return { ok: false, error: "relay disabled" };
+      try {
+        const { sent } = await registry.relayClient.sendPush(title, body);
+        return { ok: true, sent };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    },
+  },
+  {
+    name: "send",
+    scope: "machine",
+    rpcName: "joy-send",
+    http: { method: "POST", path: "/send" },
+    handler: (registry, params, meta) => {
+      const text = typeof params.text === "string" ? params.text : "";
+      if (!text.trim()) return { error: "empty" };
+      const session = params.session_id ? registry.get(String(params.session_id)) : undefined;
+      if (!session) return { error: "session_not_found" };
+      // exclusive: the scripting contract (joy CLI / other programs). Refuse
+      // instead of queueing when ANY work is in flight — a script must never
+      // silently line up behind a turn it doesn't know about — and only drive
+      // sessions in a mode that can't park on a permission dialog mid-turn
+      // (bypassPermissions or read-only plan), so a wait can't hang forever.
+      if (params.exclusive === true) {
+        if (session.busy()) return { error: "busy" };
+        const mode = session.detectPermissionMode();
+        if (mode !== "bypassPermissions" && mode !== "plan") {
+          return { error: "mode_not_scriptable", mode: mode ?? "unknown" };
+        }
+      }
+      const trimmed = text.trim();
+      const source = meta.via === "http" ? "web" as const : "rpc" as const;
+      const chat_id = registry.nextChatId();
+      registry.addChatMessage({ role: "user", content: trimmed, source, chat_id, session_id: session.claudeSessionId });
+      // Route through the verified dispatch queue (not sendText directly) so a
+      // /send while Claude is busy is serialized behind the turn and only typed
+      // into an empty, ready box — same robustness as relay app-sends. visible:
+      // true — unlike a relay app-send, a /send has NO chat bubble until dispatch
+      // mirrors it, so showing it as a queued chip is real "not sent yet" state,
+      // not a duplicate. mirrorToRelay so it reaches the app's history on dispatch.
+      session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true });
+      return { ok: true, chat_id };
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "empty") return { status: 400, body: result };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error === "busy") return { status: 409, body: result };
+      if (r.error === "mode_not_scriptable") return { status: 409, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  // ── Message queue ───────────────────────────────────────────────────────────
+  // Messages line up while Claude is busy and stay editable until the daemon
+  // dispatches one (see Session queue). All target a session by session_id.
+  {
+    name: "queueList",
+    scope: "machine",
+    rpcName: "joy-queue-list",
+    http: { method: "GET", path: "/sessions/:id/queue" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      return { ok: true, ...session.queueState() };
+    },
+    httpShape: (result) =>
+      (result as { error?: string }).error ? { status: 404, body: result } : { status: 200, body: result },
+  },
+  {
+    name: "queueAdd",
+    scope: "machine",
+    rpcName: "joy-queue-add",
+    http: { method: "POST", path: "/sessions/:id/queue" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const text = typeof params.text === "string" ? params.text.trim() : "";
+      if (!text) return { error: "empty" };
+      const msg = session.enqueue(text);
+      return { ok: true, id: msg.id, ...session.queueState() };
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "empty") return { status: 400, body: result };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
+    // NOTE: registered BEFORE queueEdit on purpose — the HTTP router matches
+    // routes in registration order, and queueEdit's POST /sessions/:id/queue/:qid
+    // would otherwise capture the static /queue/resume path as qid="resume"
+    // (resume-over-HTTP returned queueEdit's {error:"empty"}; RPC was unaffected).
+    name: "queueResume",
+    scope: "machine",
+    rpcName: "joy-queue-resume",
+    http: { method: "POST", path: "/sessions/:id/queue/resume" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      session.resumeQueue();
+      return { ok: true, ...session.queueState() };
+    },
+  },
+  {
+    name: "queueEdit",
+    scope: "machine",
+    rpcName: "joy-queue-edit",
+    http: { method: "POST", path: "/sessions/:id/queue/:qid" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const text = typeof params.text === "string" ? params.text.trim() : "";
+      if (!text) return { error: "empty" };
+      const ok = session.editQueued(String(params.qid ?? params.queue_id ?? ""), text);
+      return { ok, ...session.queueState() };
+    },
+  },
+  {
+    name: "queueCancel",
+    scope: "machine",
+    rpcName: "joy-queue-cancel",
+    http: { method: "DELETE", path: "/sessions/:id/queue/:qid" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const ok = session.cancelQueued(String(params.qid ?? params.queue_id ?? ""));
+      return { ok, ...session.queueState() };
+    },
+  },
+  {
+    name: "queueReorder",
+    scope: "machine",
+    rpcName: "joy-queue-reorder",
+    http: { method: "POST", path: "/sessions/:id/queue/:qid/move" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const ok = session.reorderQueued(String(params.qid ?? params.queue_id ?? ""), Number(params.toIndex ?? params.to ?? 0));
+      return { ok, ...session.queueState() };
+    },
+  },
+  {
+    name: "sendKeys",
+    scope: "machine",
+    rpcName: "joy-send-keys",
+    http: { method: "POST", path: "/sessions/:id/keys" },
+    // Raw keyboard intervention: bracketed key tokens (git commit<Enter><C-c>;
+    // see keyTokens.ts for the dialect table). Unlike send, nothing is
+    // buffered, mirrored to the relay, or recorded — it's a direct wire to
+    // the pane for trust prompts, TUI menus, or unsticking claude.
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const script = typeof params.script === "string" ? params.script : "";
+      if (!script) return { error: "empty" };
+      // literal: send the string verbatim (no bracketed-token parsing).
+      return session.sendRawKeys(script, { literal: params.literal === true });
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error === "empty") return { status: 400, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
+    name: "setMode",
+    scope: "machine",
+    rpcName: "joy-set-mode",
+    http: { method: "POST", path: "/sessions/:id/mode" },
+    // Absolute permission-mode set: detects the current mode from the pane
+    // footer, walks Shift+Tab to the target, verifies the footer afterwards.
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const mode = typeof params.mode === "string" ? params.mode : "";
+      if (!mode) return { error: "mode required" };
+      return session.setPermissionMode(mode);
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
+    name: "pane",
+    scope: "machine",
+    rpcName: "joy-pane",
+    http: { method: "GET", path: "/sessions/:id/pane" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      // color=true → capture with ANSI escape sequences (HTTP: ?color=1).
+      return session.pane(params.color === true || params.color === "1" || params.color === "true");
+    },
+    httpShape: (result) =>
+      (result as { error?: string }).error
+        ? { status: 404, body: result }
+        : { status: 200, body: result },
+  },
+  {
+    name: "resize",
+    scope: "machine",
+    rpcName: "joy-resize",
+    http: { method: "POST", path: "/sessions/:id/resize" },
+    // Set the pane's column/row size. The viewing client calls this on
+    // connect and when its width changes — last connector drives the width.
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const cols = Number(params.cols);
+      const rows = Number(params.rows);
+      if (!Number.isFinite(cols) || !Number.isFinite(rows)) return { error: "cols and rows required" };
+      return session.resize(cols, rows);
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error) return { status: 400, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
+    name: "transcript",
+    scope: "machine",
+    rpcName: "joy-transcript",
+    http: { method: "GET", path: "/sessions/:id/transcript" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      return session.transcript();
+    },
+    httpShape: (result) =>
+      (result as { error?: string }).error
+        ? { status: 404, body: result }
+        : { status: 200, body: result },
+  },
+  {
+    name: "status",
+    scope: "machine",
+    rpcName: "joy-status",
+    http: { method: "GET", path: "/status" },
+    handler: (registry) => ({
+      ok: true,
+      messages: registry.chatHistory().length,
+      sessions: registry.size,
+      clients: registry.sseClientCount,
+      version: "joy-server/0.1.0",
+      uptimeMs: Date.now() - registry.startedAt,
+      claude: registry.claudeInfo(),
+      pid: process.pid,
+      os: { platform: platform(), release: release(), arch: arch(), hostname: hostname() },
+    }),
+  },
+  {
+    name: "sessionLog",
+    scope: "machine",
+    rpcName: "joy-session-log",
+    http: { method: "GET", path: "/sessions/:id/log" },
+    // Ship the session's transcript JSONL so the app can offer it as a
+    // download. Base64 inside the encrypted RPC envelope — capped so a
+    // monster transcript doesn't wedge the socket.
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const path = session.transcriptPath;
+      if (!path || !existsSync(path)) return { error: "no transcript on disk yet" };
+      const size = statSync(path).size;
+      const MAX = 25 * 1024 * 1024;
+      if (size > MAX) {
+        return { error: `transcript is ${Math.round(size / 1048576)}MB (cap 25MB) — copy it from ${path}` };
+      }
+      const contentBase64 = (await readFile(path)).toString("base64");
+      return { ok: true, filename: basename(path), size, contentBase64 };
+    },
+  },
+  {
+    name: "usage",
+    scope: "machine",
+    rpcName: "joy-usage",
+    http: { method: "GET", path: "/usage" },
+    // Usage report computed by usage.ts straight from the transcript JSONL:
+    // cost/tokens, daily, per-project/model/tool/MCP.
+    // period: today | week | 30days (default) | 90days | 6months.
+    handler: async (_registry, params) => {
+      const period = typeof params.period === "string" ? params.period : "30days";
+      const range = periodToRange(period);
+      const { sessions: _sessions, ...data } = await computeUsage({ fromDay: range.fromDay, toDay: range.toDay });
+      return { ok: true, period: range.label, ...data };
+    },
+  },
+  {
+    name: "sessionUsage",
+    scope: "machine",
+    rpcName: "joy-session-usage",
+    http: { method: "GET", path: "/usage/sessions" },
+    // Per-session cost rows from usage.ts (keyed by claude session id, with
+    // subagent burn rolled into the parent and a per-model breakdown).
+    // period like joy-usage plus "all"; claudeSessionId returns just that
+    // conversation's row.
+    handler: async (_registry, params) => {
+      const period = typeof params.period === "string" ? params.period : "30days";
+      const range = periodToRange(period);
+      const { sessions } = await computeUsage({ fromDay: range.fromDay, toDay: range.toDay });
+      const claudeSessionId = typeof params.claudeSessionId === "string" ? params.claudeSessionId : undefined;
+      if (claudeSessionId) {
+        return { ok: true, entry: sessions.find((s) => s.id === claudeSessionId) ?? null };
+      }
+      return { ok: true, sessions: sessions.slice(0, 20) };
+    },
+  },
+  {
+    name: "listLogs",
+    scope: "machine",
+    rpcName: "joy-list-logs",
+    http: { method: "GET", path: "/logs" },
+    // List every Claude transcript JSONL for a project directory (one per
+    // conversation Claude has had in that cwd), newest first. `directory` is the
+    // absolute cwd; we map it to ~/.claude/projects/<encoded>/ ourselves. Just
+    // stats (id + size + mtime) — no file reads, so it stays fast.
+    handler: (_registry, params) => {
+      const directory = String(params.directory ?? "");
+      if (!directory) return { ok: false, error: "directory required", directory: "", logs: [] };
+      const dir = cwdToTranscriptDir(directory);
+      const logs: Array<{ sessionId: string; sizeBytes: number; mtimeMs: number }> = [];
+      try {
+        for (const f of readdirSync(dir)) {
+          if (!f.endsWith(".jsonl")) continue;
+          try {
+            const st = statSync(join(dir, f));
+            logs.push({ sessionId: f.slice(0, -".jsonl".length), sizeBytes: st.size, mtimeMs: st.mtimeMs });
+          } catch { /* vanished mid-scan */ }
+        }
+      } catch { /* no transcript dir for this cwd yet → empty */ }
+      logs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      return { ok: true, directory, logs };
+    },
+  },
+  {
+    name: "readLog",
+    scope: "machine",
+    rpcName: "joy-read-log",
+    http: { method: "GET", path: "/logs/messages" },
+    // Last N back-and-forth messages (user + assistant) from one transcript, for
+    // a quick preview without shipping the whole file (see joy-session-log for the
+    // full download). `sessionId` is the bare .jsonl basename under the project's
+    // transcript dir — validated against path traversal.
+    handler: (_registry, params) => {
+      const directory = String(params.directory ?? "");
+      const sessionId = String(params.sessionId ?? "");
+      const limit = Math.max(1, Math.min(100, Math.floor(Number(params.limit)) || 10));
+      if (!directory || !sessionId) return { ok: false, error: "directory and sessionId required", messages: [] };
+      if (sessionId.includes("/") || sessionId.includes("\\") || sessionId.includes("..")) {
+        return { ok: false, error: "invalid sessionId", messages: [] };
+      }
+      const file = join(cwdToTranscriptDir(directory), `${sessionId}.jsonl`);
+      if (!existsSync(file)) return { ok: false, error: "log not found", messages: [] };
+      return { ok: true, sessionId, messages: readLastLogMessages(file, limit) };
+    },
+  },
+];
+
+// ── Session-scoped operations ───────────────────────────────────────────────
+// Registered on each session's RelaySession under the bare rpcName (the relay
+// prefixes them with the relay session id). HTTP paths nest under the session.
+
+export const sessionOps: SessionOp[] = [
+  {
+    name: "abort",
+    scope: "session",
+    rpcName: "abort",
+    http: { method: "POST", path: "/sessions/:id/abort" },
+    handler: (session) => session.abort(),
+  },
+  {
+    // Generic Claude Code hook ingest (SessionStart/UserPromptSubmit/Stop/
+    // Notification/PreCompact) — hit by the generated joy-hook.mjs forwarder
+    // (hooks.ts). Best-effort on the sender side; unknown events return
+    // ok:false.
+    name: "hookEvent",
+    scope: "session",
+    rpcName: "joy-hook",
+    http: { method: "POST", path: "/sessions/:id/hook" },
+    handler: (session, params) => session.onHookEvent(params as Record<string, unknown>),
+  },
+  {
+    // Hit by the LEGACY PreCompact hook script (precompact-hook.mjs): sessions
+    // launched before the generic /hook forwarder snapshot their hook config
+    // at claude startup and keep posting here until they restart. Keep until
+    // the fleet has cycled. trigger = "manual" | "auto".
+    name: "compacting",
+    scope: "session",
+    rpcName: "compacting",
+    http: { method: "POST", path: "/sessions/:id/compacting" },
+    handler: (session, params) => {
+      session.markCompacting(typeof params.trigger === "string" ? params.trigger : "auto");
+      return { ok: true };
+    },
+  },
+  {
+    name: "killSession",
+    scope: "session",
+    rpcName: "killSession",
+    http: null, // covered by DELETE /sessions/:id
+    handler: async (session) => {
+      // Idempotent: the op is bound to an existing session, so killing one
+      // that already ended still reports success (matches the app's
+      // archive flow, which treats success=false as "CLI unreachable" and
+      // falls back to a server-side archive).
+      session.end("killed");
+      // Await the (retrying) archive POST and report its real result: a genuine
+      // failure now surfaces success:false so the app runs its fallback archive
+      // instead of leaving the killed session in the active list.
+      const archived = await session.awaitArchive();
+      return archived
+        ? { success: true, message: "killed" }
+        : { success: false, error: "archive failed" };
+    },
+  },
+  {
+    name: "bash",
+    scope: "session",
+    rpcName: "bash",
+    http: { method: "POST", path: "/sessions/:id/bash" },
+    handler: (session, params) => handleBash(session.cwd, params as unknown as Parameters<typeof handleBash>[1]),
+  },
+  {
+    name: "readFile",
+    scope: "session",
+    rpcName: "readFile",
+    http: { method: "POST", path: "/sessions/:id/readFile" },
+    // Second allowed root: the session's own ~/.joy/sessions/<id>/ so the app
+    // can fetch joy-img media the agent saved there — scoped per session.
+    handler: (session, params) => {
+      const p = params as unknown as Parameters<typeof handleReadFile>[1];
+      // Remap a joy-media path that names the WRONG session id onto THIS
+      // session's media dir (2026-07-13). The agent hand-constructs the
+      // <joy-img src> absolute path and can put the wrong session id in it
+      // (e.g. a claude conversation UUID instead of $JOY_SESSION_ID) while
+      // saving the bytes to the correct dir — the image then 404s in the app.
+      // The basename + media/ namespace are preserved and the result is still
+      // jailed to this session's dir, so this can't reach another session.
+      const m = typeof p?.path === "string" ? /[/\\]\.joy[/\\]sessions[/\\][^/\\]+[/\\]media[/\\](.+)$/.exec(p.path) : null;
+      if (m) {
+        const remapped = join(joySessionDir(session.id), "media", m[1]);
+        if (remapped !== p.path && existsSync(remapped)) {
+          return handleReadFile(session.cwd, { ...p, path: remapped }, [joySessionDir(session.id)]);
+        }
+      }
+      return handleReadFile(session.cwd, p, [joySessionDir(session.id)]);
+    },
+  },
+  {
+    name: "writeFile",
+    scope: "session",
+    rpcName: "writeFile",
+    http: { method: "POST", path: "/sessions/:id/writeFile" },
+    handler: (session, params) => handleWriteFile(session.cwd, params as unknown as Parameters<typeof handleWriteFile>[1]),
+  },
+  {
+    name: "listDirectory",
+    scope: "session",
+    rpcName: "listDirectory",
+    http: { method: "POST", path: "/sessions/:id/listDirectory" },
+    handler: (session, params) => handleListDirectory(session.cwd, params as unknown as Parameters<typeof handleListDirectory>[1]),
+  },
+  {
+    name: "getDirectoryTree",
+    scope: "session",
+    rpcName: "getDirectoryTree",
+    http: { method: "POST", path: "/sessions/:id/getDirectoryTree" },
+    handler: (session, params) => handleGetDirectoryTree(session.cwd, params as unknown as Parameters<typeof handleGetDirectoryTree>[1]),
+  },
+  {
+    name: "ripgrep",
+    scope: "session",
+    rpcName: "ripgrep",
+    http: { method: "POST", path: "/sessions/:id/ripgrep" },
+    handler: (session, params) => handleRipgrep(session.cwd, params as unknown as Parameters<typeof handleRipgrep>[1]),
+  },
+  {
+    name: "difftastic",
+    scope: "session",
+    rpcName: "difftastic",
+    http: { method: "POST", path: "/sessions/:id/difftastic" },
+    handler: (session, params) => handleDifftastic(session.cwd, params as unknown as Parameters<typeof handleDifftastic>[1]),
+  },
+];
+
+/**
+ * Register every session-scoped op on a freshly-attached relay session,
+ * binding `session` as the handler ctx. Wired into the registry as the
+ * onRelayAttached hook (server.ts), so launch/recover/reconnect all get the
+ * identical op surface.
+ */
+export function bindSessionOps(session: AgentSession, rs: RelaySession): void {
+  for (const op of sessionOps) {
+    rs.registerRpc(op.rpcName, async (params) => op.handler(session, (params ?? {}) as Record<string, unknown>));
+  }
+}

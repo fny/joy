@@ -17,17 +17,17 @@ The two packages that make up joy are:
 
 - **[joy-app](packages/joy-app)** - the client. Mobile (iOS/Android via Expo), web, and
   macOS desktop (Tauri). This is the real app you interact with.
-- **[joy-cli](packages/joy-cli)** - the daemon + `joy` CLI. Runs Claude Code sessions
+- **[joy-server](packages/joy-server)** - the daemon + `joy` CLI. Runs Claude Code sessions
   inside tmux, drives them over tmux control mode, tails their transcripts, and bridges
   everything to the relay. This replaces the happy-cli wrapper.
 
 The `happy-*` packages in this repo are a pristine mirror of upstream
 [slopus/happy](https://github.com/slopus/happy), kept around for reference and for porting
-upstream changes — joy's own code lives only in `joy-app` and `joy-cli`.
+upstream changes — joy's own code lives only in `joy-app` and `joy-server`.
 
 ## How does it work?
 
-The `joy-cli` daemon launches `claude` inside a tmux window and manages it for you —
+The `joy-server` daemon launches `claude` inside a tmux window and manages it for you —
 scraping the pane, queuing input, and streaming the transcript to the relay. The app
 connects to the same relay and shows your sessions live; anything you send from the app is
 typed into the real Claude session, and anything you type directly is mirrored back to the
@@ -51,14 +51,14 @@ Prerequisites: **Node 20+**, **[pnpm](https://pnpm.io) 10+**, and **tmux** (for 
 pnpm install
 ```
 
-### Run the daemon (joy-cli)
+### Run the daemon (joy-server)
 
 The daemon reads your Happy/joy account credential from `~/.happy/access.key`
 (set `HAPPY_HOME_DIR` to point elsewhere). Provision it once with the upstream happy CLI
 login flow if you don't have one yet.
 
 ```bash
-cd packages/joy-cli
+cd packages/joy-server
 
 pnpm typecheck && pnpm test   # verify the build
 pnpm start                    # run the daemon (tsx src/server.ts)
@@ -67,7 +67,7 @@ pnpm start                    # run the daemon (tsx src/server.ts)
 Or install the published CLI globally and run `joy`:
 
 ```bash
-pnpm install -g @fny/joy-cli
+pnpm install -g @fny/joy-server
 joy
 ```
 

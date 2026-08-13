@@ -6,7 +6,7 @@ import { machineResumeSession, sessionArchive, sessionDelete, sessionKill, forkA
 import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
 import { storage, useLocalSetting, useMachine, useSetting } from '@/sync/storage';
 import { apiSocket } from '@/sync/apiSocket';
-import { Machine, Session } from '@/sync/storageTypes';
+import { Machine, Session, isJoyServerSource } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { resolveMessageModeMeta } from '@/sync/messageMeta';
 import { t } from '@/text';
@@ -118,7 +118,7 @@ export function useSessionQuickActions(
     // joy-tmux sessions get their own restart flow (below) instead of the
     // happy-cli resume/fork paths, which spawn through the happy daemon and
     // don't exist for joy sessions.
-    const isJoy = session.metadata?.joy__source === 'joy-tmux';
+    const isJoy = isJoyServerSource(session.metadata?.joy__source);
     const joySessionId = session.metadata?.joy__sessionId;
 
     const resumeAvailability = React.useMemo(

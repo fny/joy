@@ -27,7 +27,7 @@ client-supplied `msg_` id is our idempotency key) → SSE
 Killed the server mid-session; restart listed the session and served both
 messages intact — resume is a GET, not a protocol dance.
 
-## Adapter shape (`packages/joy-cli/src/opencode/`)
+## Adapter shape (`packages/joy-server/src/opencode/`)
 
 `OpencodeSession implements AgentSession`, sibling of `CodexSession`:
 
