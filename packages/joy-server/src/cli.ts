@@ -12,6 +12,8 @@ import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
 import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
+import { parseBackupCode, pairWithRelay } from "./relay/pairing";
+import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
 
 // --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
@@ -256,6 +258,51 @@ function cmdAuth(): number {
   console.log(`  relay       ${joyRelayUrl()}${isDefaultRelay() ? " (default)" : ""}`);
   console.log(`  server      ${server}`);
   return 0;
+}
+
+// `joy auth <relay...>` — pair this machine with relays using the account's
+// backup code (Settings → Account → Backup in the app). Both sides of the QR
+// flow run locally, so no browser approval; the relay auto-creates the account
+// on first contact, which is what lets ONE code cover every relay. The secret
+// is parsed, used, and dropped — never written to disk.
+async function cmdAuthPair(relayArgs: string[]): Promise<number> {
+  const targets: { name: string; url: string }[] = [];
+  for (const arg of relayArgs) {
+    const url = resolveRelayAlias(arg);
+    if (!/^https?:\/\//.test(url)) { console.log(`${bad} unknown relay: ${arg}`); return 2; }
+    if (url === resolveRelayAlias("happy")) {
+      console.log(`${bad} ${arg}: the default relay's credentials live in ~/.happy (shared with the Joy app) — not managed here`);
+      return 2;
+    }
+    targets.push({ name: arg, url });
+  }
+
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const entered = await rl.question("Backup code (XXXXX-XXXXX-…): ");
+  rl.close();
+  let secret: Uint8Array;
+  try {
+    secret = parseBackupCode(entered);
+  } catch (e) {
+    console.log(`${bad} ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+
+  let failures = 0;
+  for (const t of targets) {
+    try {
+      const machineId = await pairWithRelay(t.url, secret, joyRelayCredsDir(t.url));
+      console.log(`${ok} paired with ${t.name} (${t.url}) — machineId ${machineId}`);
+    } catch (e) {
+      failures++;
+      console.log(`${bad} ${t.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  secret.fill(0);
+  if (failures === 0) {
+    console.log(c.dim(`start a daemon per relay: joy --relay <name> install`));
+  }
+  return failures === 0 ? 0 : 1;
 }
 
 async function cmdNotify(args: string[]): Promise<number> {
@@ -893,6 +940,9 @@ ${c.b("Usage:")} joy [--relay <happy|happy-joy|joy|joy-dev|url>] <command>
                (exit 5). Exit codes: 0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 mode.
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
   ${c.b("auth")}         Show authentication status (shared with the Joy app)
+               joy auth <relay...>: pair this machine with relays using your
+               account backup code (one code works on every relay) — e.g.
+               ${c.dim("joy auth joy joy-dev happy-joy")}
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
   ${c.b("update")}       Update @fny/joy-server from the repo's release branch, then reinstall + restart
   ${c.b("install")}      Install autostart service (systemd on Linux, launchd on macOS)
@@ -918,7 +968,7 @@ async function main(): Promise<void> {
     case "stop": code = await cmdStop(); break;
     case "restart": code = await cmdRestart(); break;
     case "doctor": code = await cmdDoctor(); break;
-    case "auth": code = cmdAuth(); break;
+    case "auth": code = rest.length > 0 ? await cmdAuthPair(rest) : cmdAuth(); break;
     case "notify": code = await cmdNotify(rest); break;
     case "update": code = cmdUpdate(); break;
     case "install": code = cmdInstall(); break;
