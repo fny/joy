@@ -9,7 +9,7 @@ function useDeepEqual<T>(selector: (state: StorageState) => T): (state: StorageS
         return equal(prev.current, next) ? prev.current! : (prev.current = next);
     };
 }
-import { Session, Machine, GitStatus, isJoyServerSource } from "./storageTypes";
+import { Session, Machine, GitStatus, isJoyDaemonSource } from "./storageTypes";
 import type { GitStatusFiles } from "./gitStatusFiles";
 import type { ProjectFilesList } from "./projectFiles";
 import { createReducer, reducer, reconcileSentSeqs, ReducerState } from "./reducer/reducer";
@@ -113,7 +113,7 @@ export interface SessionRowData {
     retryAttempt: number | null;
     retryTotal: number | null;
     hasUnread: boolean;
-    isJoyServer: boolean;
+    isJoyDaemon: boolean;
     joySessionId: string | null;
 }
 
@@ -180,7 +180,7 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         retryAttempt: session.metadata?.joy__retry?.attempt ?? null,
         retryTotal: session.metadata?.joy__retry?.total ?? null,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
-        isJoyServer: isJoyServerSource(session.metadata?.joy__source),
+        isJoyDaemon: isJoyDaemonSource(session.metadata?.joy__source),
         joySessionId: session.metadata?.joy__sessionId ?? null,
     };
 }
@@ -1612,7 +1612,7 @@ export function useJoyMachineIds(): string[] {
     return storage(useShallow((state) => {
         const ids = new Set<string>();
         for (const s of Object.values(state.sessions)) {
-            if (isJoyServerSource(s.metadata?.joy__source) && s.metadata?.machineId) {
+            if (isJoyDaemonSource(s.metadata?.joy__source) && s.metadata?.machineId) {
                 ids.add(s.metadata.machineId);
             }
         }

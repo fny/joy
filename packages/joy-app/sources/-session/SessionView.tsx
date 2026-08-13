@@ -24,7 +24,7 @@ import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
 import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
-import { Session, isJoyServerSource } from '@/sync/storageTypes';
+import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
 import { getVoiceMessageCount, getVoiceOnboardingPromptLoadCount } from '@/sync/persistence';
@@ -243,7 +243,7 @@ export const SessionView = React.memo((props: { id: string }) => {
     const joyTerminalSlot = React.useMemo(() => {
         const joyId = session?.metadata?.joy__sessionId;
         const joyMachine = session?.metadata?.machineId;
-        if (!isJoyServerSource(session?.metadata?.joy__source) || !joyId || !joyMachine) return null;
+        if (!isJoyDaemonSource(session?.metadata?.joy__source) || !joyId || !joyMachine) return null;
         return (
             <Pressable
                 onPress={() => router.push(`/joy/pane/${encodeURIComponent(joyMachine)}/${encodeURIComponent(joyId)}`)}
@@ -499,12 +499,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isCliOutdated = cliVersion && !isVersionSupported(cliVersion, MINIMUM_CLI_VERSION);
     const isAcknowledged = machineId && acknowledgedCliVersions[machineId] === cliVersion;
     const shouldShowCliWarning = isCliOutdated && !isAcknowledged;
-    const isJoyServer = isJoyServerSource(session.metadata?.joy__source);
+    const isJoyDaemon = isJoyDaemonSource(session.metadata?.joy__source);
     // joy sessions carry no `flavor` in metadata (just joy__source); they're
     // always Claude, so coerce it so model/effort lookups resolve.
     // joy-tmux sessions carry their agent in metadata.flavor ('codex'); absent
     // → claude (legacy joy-tmux sessions and the claude path send no flavor).
-    const flavor = isJoyServer ? (session.metadata?.flavor ?? 'claude') : session.metadata?.flavor;
+    const flavor = isJoyDaemon ? (session.metadata?.flavor ?? 'claude') : session.metadata?.flavor;
     const joySessionId = session.metadata?.joy__sessionId;
     // Opencode: the daemon's curated allowlist backs the model picker so the
     // chip can CYCLE (codex stays a 1-entry display: its catalog is per-model
@@ -520,7 +520,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [flavor, machineId]);
 
     const availableModels = React.useMemo(() => {
-        if (!isJoyServer) return getAvailableModels(flavor, session.metadata, t);
+        if (!isJoyDaemon) return getAvailableModels(flavor, session.metadata, t);
         // Codex models are dynamic slugs (gpt-5.6-sol…), not the claude family
         // catalog — resolving currentModelCode against JOY_CLAUDE_MODELS never
         // matched, so codex sessions showed NO model label (bug 2026-07-31).
@@ -533,20 +533,20 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             return code ? [{ key: code, name: code, description: null }] : [];
         }
         return JOY_CLAUDE_MODELS;
-    }, [isJoyServer, flavor, session.metadata, ocModels]);
+    }, [isJoyDaemon, flavor, session.metadata, ocModels]);
     const availableModes = React.useMemo(() => {
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
         // cycling matches). happy's list has dontAsk (unreachable) and lacks
         // auto. CODEX joy sessions use codex's OWN modes — the claude modes
         // (esp. `auto`) silently escalate to full access on codex (finding #1).
-        const modes = isJoyServer
+        const modes = isJoyDaemon
             ? (flavor === 'codex' ? JOY_CODEX_PERMISSION_MODES
                 : flavor === 'opencode' ? [] // v1: opencode has no permission surface
                 : JOY_CLAUDE_PERMISSION_MODES)
             : getAvailablePermissionModes(flavor, session.metadata, t);
         return modes;
-    }, [isJoyServer, flavor, session.metadata]);
+    }, [isJoyDaemon, flavor, session.metadata]);
     const agentDefaultOverrides = useSetting('agentDefaultOverrides');
     const effectiveAgentDefaults = React.useMemo(() => (
         resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
@@ -640,7 +640,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     // Function to update permission mode
     const updatePermissionMode = React.useCallback((mode: PermissionMode) => {
-        if (isJoyServer && machineId && joySessionId) {
+        if (isJoyDaemon && machineId && joySessionId) {
             // Absolute set, server-side: joy-tmux reads the CURRENT mode off
             // the pane footer, walks Shift+Tab the right number of steps in
             // the real cycle (bypass → auto → default → acceptEdits → plan),
@@ -649,32 +649,32 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 .catch(() => { /* best-effort; stored state still updates */ });
         }
         storage.getState().updateSessionPermissionMode(sessionId, mode.key);
-    }, [sessionId, isJoyServer, machineId, joySessionId]);
+    }, [sessionId, isJoyDaemon, machineId, joySessionId]);
 
     const updateModelMode = React.useCallback((mode: ModelMode) => {
-        if (isJoyServer && flavor === 'opencode') {
+        if (isJoyDaemon && flavor === 'opencode') {
             // No pane: the daemon switches the opencode session server-side.
             if (machineId && joySessionId) {
                 void apiSocket.machineRPC(machineId, 'joy-opencode-set-model', { id: joySessionId, model: mode.key })
                     .catch(() => { /* best-effort; stored state still updates */ });
             }
-        } else if (isJoyServer) {
+        } else if (isJoyDaemon) {
             // /model <key> switches the interactive session directly; keys in
             // JOY_CLAUDE_MODELS are valid /model arguments.
             sendJoyKeys(`/model ${mode.key}<Enter>`);
         }
         storage.getState().updateSessionModelMode(sessionId, mode.key);
-    }, [sessionId, isJoyServer, flavor, machineId, joySessionId, sendJoyKeys]);
+    }, [sessionId, isJoyDaemon, flavor, machineId, joySessionId, sendJoyKeys]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
-        if (isJoyServer) {
+        if (isJoyDaemon) {
             // /effort <level> sets the interactive session's reasoning effort,
             // exactly like /model sets the model. Levels low/medium/high/xhigh/
             // max are all valid /effort arguments and take effect immediately.
             sendJoyKeys(`/effort ${level.key}<Enter>`);
         }
         storage.getState().updateSessionEffortLevel(sessionId, level.key);
-    }, [sessionId, isJoyServer, sendJoyKeys]);
+    }, [sessionId, isJoyDaemon, sendJoyKeys]);
 
     // Memoize header-dependent styles to prevent re-renders
     const headerDependentStyles = React.useMemo(() => ({
@@ -727,7 +727,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // plus joy's daemon-intercepted commands, which exist for mid-turn use.
         const cmdMatch = /^\/([a-z-]+)/i.exec(liveMessage.trim());
         const isImmediateCommand = cmdMatch != null && IMMEDIATE_COMMANDS.has(cmdMatch[1].toLowerCase());
-        if (isJoyServer && busy && !isImmediateCommand && !hasImages) {
+        if (isJoyDaemon && busy && !isImmediateCommand && !hasImages) {
             composerHandleRef.current?.clearMessage();
             // A message held because a turn is processing ahead is a QUEUE ITEM
             // ('busy'), not a draft — released by draftQueueRelease when the turn
@@ -738,7 +738,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         composerHandleRef.current?.clearMessage();
         if (expImageUpload) clearImages();
         sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
-    }, [sessionId, isJoyServer, expImageUpload, selectedImages, clearImages]);
+    }, [sessionId, isJoyDaemon, expImageUpload, selectedImages, clearImages]);
 
     // Stash the current input as an on-device draft (queued at the bottom of the
     // chat) and clear the box so the user can compose the next one. Drafts are
@@ -869,12 +869,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const composer = (
         <>
-        {isJoyServer && (
+        {isJoyDaemon && (
             <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                 <JoyQueueStrip queue={joyQueue} sessionId={sessionId} />
             </CenteredInputWidth>
         )}
-        {isJoyServer && !isDisconnected && (
+        {isJoyDaemon && !isDisconnected && (
             <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
                 <PendingQueueStrip sessionId={sessionId} />
             </CenteredInputWidth>

@@ -16,7 +16,7 @@ import { useAllMachines, storage } from '@/sync/storage';
 import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatLastSeen } from '@/utils/sessionUtils';
 import type { Machine } from '@/sync/storageTypes';
-import { isJoyServerSource } from '@/sync/storageTypes';
+import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { Modal } from '@/modal';
 import { joyKillAllSessions, sessionKill, sessionDelete, machineDelete } from '@/sync/ops';
 
@@ -43,7 +43,7 @@ export default React.memo(function CleanupScreen() {
         const map = new Map<string, Map<string, string[]>>();
         for (const s of sessions) {
             const mid = s.metadata?.machineId;
-            if (!mid || !isJoyServerSource(s.metadata?.joy__source)) continue;
+            if (!mid || !isJoyDaemonSource(s.metadata?.joy__source)) continue;
             const folder = s.metadata?.path || '(unknown)';
             if (!map.has(mid)) map.set(mid, new Map());
             const folders = map.get(mid)!;
@@ -57,7 +57,7 @@ export default React.memo(function CleanupScreen() {
         const map = new Map<string, string[]>();
         for (const s of sessions) {
             const mid = s.metadata?.machineId;
-            if (!mid || !isJoyServerSource(s.metadata?.joy__source)) continue;
+            if (!mid || !isJoyDaemonSource(s.metadata?.joy__source)) continue;
             if (s.metadata?.joy__state !== 'detached') continue;
             map.set(mid, [...(map.get(mid) ?? []), s.id]);
         }
@@ -98,7 +98,7 @@ export default React.memo(function CleanupScreen() {
             if (!ok) return;
             if (online) await joyKillAllSessions(machineId).catch(() => { });
             const ids = Object.values(storage.getState().sessions)
-                .filter((s) => isJoyServerSource(s.metadata?.joy__source) && s.metadata?.machineId === machineId)
+                .filter((s) => isJoyDaemonSource(s.metadata?.joy__source) && s.metadata?.machineId === machineId)
                 .map((s) => s.id);
             const n = await deleteSessionRecords(ids);
             Modal.alert('Purged', `Removed ${n} session record${n === 1 ? '' : 's'}.`, [{ text: 'OK' }]);

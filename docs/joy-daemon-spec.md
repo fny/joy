@@ -23,7 +23,7 @@ One joy-daemon per machine/account, enforced as a singleton (§13 lease/epoch, e
 3. **Session lifecycle.** Create, run, stop, and crash‑recover sessions per §18. One agent process per session (joy-agent), spawned and supervised by the daemon.
 4. **The single‑writer lease (§13)** for each session, and the **machine‑level daemon singleton** election (§4.4).
 5. **The legacy‑wire compatibility facade (§20).** The daemon continues to emit the existing legacy envelopes unchanged so an unmodified relay server and stock/old `happy-app` keep working; the new event‑log protocol is purely additive. This facade is a first‑class, conformance‑tested interface (§4.5), not best‑effort.
-6. **The local control interface for joy-server** (§4.2): list/start/stop sessions, attach input, report status. This is control, not session fan‑out.
+6. **The local control interface for joy-daemon** (§4.2): list/start/stop sessions, attach input, report status. This is control, not session fan‑out.
 7. **The §24 best‑effort RPC tier** (file/shell/machine‑control), with the bounded timeout/idempotency/retry rules defined there.
 
 ---
@@ -32,7 +32,7 @@ One joy-daemon per machine/account, enforced as a singleton (§13 lease/epoch, e
 
 - **No fan‑out / no serving apps.** Apps (phone/web) read the durable log from the **relay server directly**; they never connect to joy-daemon. The daemon neither sees nor serves app readers. "Multiple clients viewing a session" lives entirely at the relay/log layer.
 - **No agent backend logic.** It does not run the model/tool loop, parse SDK/ACP streams, or implement the cancel ladder. That is joy-agent (§4.3). The daemon issues lifecycle/cancel *intents* to joy-agent and persists the resulting events.
-- **No UI, auth/pairing/QR, sandbox runtime, interactive local‑terminal mode, config/CLI parsing.** Those are joy-server or out of the three‑package scope entirely.
+- **No UI, auth/pairing/QR, sandbox runtime, interactive local‑terminal mode, config/CLI parsing.** Those are joy-daemon or out of the three‑package scope entirely.
 - **No multiple agents per session.** Structurally impossible by §1.
 
 ---
@@ -42,14 +42,14 @@ One joy-daemon per machine/account, enforced as a singleton (§13 lease/epoch, e
 ### 4.1 joy-daemon ↔ relay server
 The protocol of `comm-layer-spec.md`. Server untouched. The daemon is one relay client per machine, multiplexing all hosted sessions over it. Catch‑up, ordering, idempotency, and retention guarantees are exactly §10/§11/§19.
 
-### 4.2 joy-daemon ↔ joy-server (local control channel)
+### 4.2 joy-daemon ↔ joy-daemon (local control channel)
 A local IPC channel (OS‑appropriate: unix domain socket / named pipe). Surface: `daemon.status`, `session.list`, `session.start(spec)`, `session.stop(id)`, `session.attachInput(id, event)` (append a `user-message`/`steer`/`cancel`/`interrupt`/`permission-response`/`mode-change`), `session.tail(id)` (read‑only projection/event stream **for that one cli**, sourced from the daemon's already‑folded state — this is a control convenience, **not** session fan‑out; it is the same single agent's data, just surfaced to the operator). Protocol‑version handshake required (§4.4).
 
 ### 4.3 joy-daemon ↔ joy-agent (per‑session agent channel, 1:1)
 Exactly one joy-agent process per session. Channel carries: **down** — input events the agent must act on (`user-message`, `steer`, `cancel`, `interrupt`, `mode-change`) in `seq` order; **up** — agent facts (`turn-*`, `tool-*`, `bg-*`, `permission-request`, partial deltas, `agent-metadata`). joy-agent is stateless with respect to the durable log; the daemon owns persistence, ordering, dedupe, lease, and recovery. The daemon translates between agent facts and log events and enforces §17 (turn boundary = runtime state signal) and §14 (cancel ladder is *executed in* joy-agent but *sequenced and recorded by* the daemon).
 
 ### 4.4 Daemon singleton (machine scope)
-joy-server launches a daemon if none is up. Concurrent launches and version skew are resolved with the **same lease/epoch mechanism as §13**, applied at machine scope, plus a pidfile/socket and a protocol‑version field: a newer cli that finds an older daemon **MUST** be able to deterministically request its replacement; only the highest‑epoch daemon serves. Exactly one daemon acts.
+joy-daemon launches a daemon if none is up. Concurrent launches and version skew are resolved with the **same lease/epoch mechanism as §13**, applied at machine scope, plus a pidfile/socket and a protocol‑version field: a newer cli that finds an older daemon **MUST** be able to deterministically request its replacement; only the highest‑epoch daemon serves. Exactly one daemon acts.
 
 ### 4.5 Conformance obligation
 The daemon's fold **MUST** be the shared pure `fold` (§22) used identically by the app consumer; both run the golden corpus in CI and **MUST** produce identical projections. The legacy facade **MUST** pass a "stock server + stock/old app" conformance suite — this is the contract that protects correctness once the core stops tracking upstream.
@@ -64,7 +64,7 @@ I1 durability, I2 cancel parity, I3 no‑lying‑status (the daemon supplies the
 
 ## 6. Internal structure (informative, not normative)
 
-`protocol/` — envelope (frozen v1), event catalog (§9), pure fold + Projection (§11/§17), constants (§23). Pure, shared with the app consumer. `relay/` — relay client (server‑untouched transport), idempotent persisted outbox (§10), cursor + snapshot catch‑up (§11). `lease.ts` — per‑session + machine‑scope epochs (§13/§4.4). `agentHost.ts` — spawn/supervise one joy-agent per session; crash → §18 recovery. `control/` — the joy-server local channel (§4.2). `legacy/` — the §20 dual‑emission facade. `daemon.ts` — wiring.
+`protocol/` — envelope (frozen v1), event catalog (§9), pure fold + Projection (§11/§17), constants (§23). Pure, shared with the app consumer. `relay/` — relay client (server‑untouched transport), idempotent persisted outbox (§10), cursor + snapshot catch‑up (§11). `lease.ts` — per‑session + machine‑scope epochs (§13/§4.4). `agentHost.ts` — spawn/supervise one joy-agent per session; crash → §18 recovery. `control/` — the joy-daemon local channel (§4.2). `legacy/` — the §20 dual‑emission facade. `daemon.ts` — wiring.
 
 ---
 
