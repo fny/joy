@@ -7,7 +7,7 @@ of hacks the current ecosystem works around client-side.
 
 ## System today
 
-- **joy-app** (React Native/web client) and **joy-server** (machine daemon
+- **joy-app** (React Native/web client) and **joy-daemon** (machine daemon
   driving Claude Code sessions inside tmux) talk through a relay.
 - Relay today = upstream-pristine **happy-server** (Fastify + Prisma +
   socket.io, per-session `sessionMessage` rows with a server-assigned
@@ -21,7 +21,7 @@ of hacks the current ecosystem works around client-side.
   happy-server :24997. Clients already pair against joy-relay's address, so
   the strangler can take over endpoints without anyone re-pointing. A
   reserved postgres quadlet exists for joy-relay's own phase-1 database.
-- Multiple relays now coexist: per-relay app accounts and per-relay joy-server
+- Multiple relays now coexist: per-relay app accounts and per-relay joy-daemon
   daemons (own state dir, tmux server, service unit) are shipped. "Joy Relay"
   (:4997) is the stable one; :14997 is where dev relay code iterates.
 

@@ -6,7 +6,7 @@ contortions of `resilient-queue-design.md` (kept as the problem-statement
 record; its §2 root causes and §12 open problems are all resolved here).
 Problem statement: `joy-relay-design-brief.md`. Design developed in a
 three-round consultation with GPT (codex, xhigh), grounded in the actual
-joy-server/happy-server/joy-app code.
+joy-daemon/happy-server/joy-app code.
 
 ## Executive summary
 
@@ -24,7 +24,7 @@ joy-server/happy-server/joy-app code.
 5. Each daemon holds a fenced lease (epoch) and parks two account-level
    long-polls: an urgent control lane (cancel/steer/permission decisions) and
    a multiplexed work lane (prompts).
-6. joy-server reports staged → submitted → started → receipted evidence using
+6. joy-daemon reports staged → submitted → started → receipted evidence using
    its real seams (dispatch gate, `UserPromptSubmit` hook, JSONL transcript
    receipts), and recovers after crashes from transcript offsets without
    unsafe retyping.
@@ -48,7 +48,7 @@ is instead:
 - **Exactly-once server acceptance** by idempotency key (`clientIntentId`).
 - **At-least-once delivery** to a durable daemon inbox.
 - **At-most-once automatic runtime start** (server-side CAS on `turn.start`).
-- **Recovery when the runtime can prove the execution** (for joy-server: the
+- **Recovery when the runtime can prove the execution** (for joy-daemon: the
   JSONL transcript — see §3), which in practice makes most crash windows
   auto-recoverable.
 - **Otherwise `indeterminate` / `orphaned`, surfaced — never silent replay.**
@@ -102,7 +102,7 @@ Invariants:
 
 | Table | Purpose |
 |---|---|
-| `native_sessions` | id (relay-minted UUID), account, owner daemon, `localSessionId` (joy-server 8-hex, unique per daemon), creation intent identity, state `provisioning→starting→active/detached/failed/archived`, `next_seq`, revision, active turn, recovery flag, wrapped session key envelope |
+| `native_sessions` | id (relay-minted UUID), account, owner daemon, `localSessionId` (joy-daemon 8-hex, unique per daemon), creation intent identity, state `provisioning→starting→active/detached/failed/archived`, `next_seq`, revision, active turn, recovery flag, wrapped session key envelope |
 | `daemon_leases` | daemon id, epoch, hashed token, renewed/expiry, capabilities |
 | `commands` | id, session, seq, producer, `client_intent_id`, request hash, kind (`prompt\|cancel\|spawn_session`), target turn, barrier seq, ciphertext, delivery/application state |
 | `turns` | server-minted id, prompt command, request seq, `queued\|dispatching\|running\|cancelling\|orphaned\|terminal`, lease epoch, run token, cancel seq, transcript UUID, terminal reason |
@@ -120,7 +120,7 @@ NOT the operational database.
 
 ## 3. Delivery on the real runtime (tmux TUI, not the SDK)
 
-joy-server types into Claude Code's TUI and reads back via pane parsing +
+joy-daemon types into Claude Code's TUI and reads back via pane parsing +
 hooks + the JSONL transcript. The delivery phases map to the existing seams
 (`#drainOnce` idle+empty-box gate, `#typeIntoTmux`, 350 ms paste-settle,
 `#armSubmit`, `UserPromptSubmit` hook, JSONL user-entry matching,
@@ -379,7 +379,7 @@ primary failure we're fixing.
 1. Router prefix, Postgres migration runner, token verification,
    capabilities endpoint.
 2. Six tables, leases, two claim lanes, fake-daemon integration tests.
-3. joy-server native prompt receipt/dispatch/transcript reconciliation.
+3. joy-daemon native prompt receipt/dispatch/transcript reconciliation.
 4. Durable cancellation, barrier drain, Escape confirmation, forced kill.
 5. Native events/state/SSE.
 6. App feature flag + dual read/send path.
