@@ -107,7 +107,7 @@ Guards the "blank/partial chat until you send the first message" regression and 
 Same full-history-on-open guarantee as Test 12, but via the **non-kill restart** paths (the process was alive and re-adopted, or the daemon recovered it) rather than a hard Kill.
 
 - **Archive → restart (sidebar, Test 8 style):** with a multi-turn session, sidebar secondary-click → Archive (confirm the tmux window closed), then restart it from the archive area. On landing, assert the **full transcript is visible immediately** — same first/last/count/no-gap checks as Test 12, and again **without sending a message to wake it**.
-- **Daemon-recover variant:** with the same session live, restart `joy-tmux` so `recover()` re-adopts it, then open the session in the app. The full prior history must still render on open (the daemon must bind the existing transcript and the app must backfill server history) — no empty-until-first-message state.
+- **Daemon-recover variant:** with the same session live, restart `joy-cli` so `recover()` re-adopts it, then open the session in the app. The full prior history must still render on open (the daemon must bind the existing transcript and the app must backfill server history) — no empty-until-first-message state.
 - In each variant, after confirming the restored history, send one new message and confirm it appends after it, in order.
 - **Validate session artifacts** against the prior Claude session id.
 
@@ -119,9 +119,9 @@ Same full-history-on-open guarantee as Test 12, but via the **non-kill restart**
 
 ## Test 15: Daemon restart during work
 
-- With a turn (and a background task) active, restart `joy-tmux`.
+- With a turn (and a background task) active, restart `joy-cli`.
 - `recover()` re-adopts the session; status is correct, no messages are lost, and the background count does not get stuck.
-- **Background-count orphan check (the `0/1`-stuck regression):** launch a background task so the session shows "N/M completed", then restart `joy-tmux` **while it is still running** (so the launch was counted by the old process but the completion lands on the new one). After recovery, let the task finish and confirm the "N/M completed" indicator **clears** — it must not stay stuck at the pre-restart count (e.g. `0/1`). The rebuilt in-memory task set is empty after recovery, so the orphaned completion has nothing to decrement; recovery must reconcile `joy__tasks` (re-derive from the transcript or clear it on attach) rather than leave the server's stale count.
+- **Background-count orphan check (the `0/1`-stuck regression):** launch a background task so the session shows "N/M completed", then restart `joy-cli` **while it is still running** (so the launch was counted by the old process but the completion lands on the new one). After recovery, let the task finish and confirm the "N/M completed" indicator **clears** — it must not stay stuck at the pre-restart count (e.g. `0/1`). The rebuilt in-memory task set is empty after recovery, so the orphaned completion has nothing to decrement; recovery must reconcile `joy__tasks` (re-derive from the transcript or clear it on attach) rather than leave the server's stale count.
 - **Validate artifacts.**
 
 ## Test 15b: Dotted project directory (transcript-encoding regression)

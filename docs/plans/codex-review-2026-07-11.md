@@ -1,6 +1,6 @@
 # Codex joint review — 2026-07-11 (agreed findings + designs)
 
-Interactive review of joy-app + joy-tmux with codex (gpt-5.5 xhigh), server
+Interactive review of joy-app + joy-cli with codex (gpt-5.5 xhigh), server
 (happy-*) treated as fixed contract. All 8 findings debated one at a time;
 everything below is AGREED design, not open questions.
 

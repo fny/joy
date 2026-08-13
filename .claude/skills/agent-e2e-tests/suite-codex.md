@@ -37,7 +37,7 @@ non-yolo approvals.
   first?" answers correctly).
 
 ## CX5: Orphan rejoin on daemon restart
-- With the session idle, restart joy-tmux. Daemon log must show
+- With the session idle, restart joy-cli. Daemon log must show
   `rejoined orphan app-server thread=<id>` (NOT a fresh spawn), the app-server PID is
   unchanged, and a follow-up message round-trips with **no duplicated history** in the
   app (turn-level checkpoint working).

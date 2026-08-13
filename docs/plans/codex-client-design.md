@@ -1,6 +1,6 @@
-# Codex as a second agent in joy-tmux — design v2 (2026-07-17)
+# Codex as a second agent in joy-cli — design v2 (2026-07-17)
 
-Inputs: the claude-coupling map of joy-tmux, happy-cli's production codex path,
+Inputs: the claude-coupling map of joy-cli, happy-cli's production codex path,
 a live spike against codex 0.144.1 proving the **app-server + `--remote` TUI
 hybrid**, and a design review by codex gpt-5.6-sol that generated the
 app-server schemas from the exact 0.144.1 binary and read the tagged Rust
