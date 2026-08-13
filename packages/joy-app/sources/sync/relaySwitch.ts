@@ -1,6 +1,29 @@
 import { Platform } from 'react-native';
 import * as Updates from 'expo-updates';
 import { setServerUrl, DEFAULT_SERVER_URL } from './serverConfig';
+import { authGetToken } from '@/auth/authGetToken';
+import { TokenStorage } from '@/auth/tokenStorage';
+import { decodeBase64 } from '@/encryption/base64';
+
+/** Log into a relay with a secret key and persist the credentials under that
+ *  relay's own storage key, so a switch to it boots straight into a logged-in
+ *  state. The relay auto-creates the account on first contact, so any valid
+ *  32-byte key works — including the key of the currently active account.
+ *  Does not touch the active relay's session. */
+export async function loginToRelay(url: string, secretB64url: string): Promise<void> {
+    const secret = decodeBase64(secretB64url, 'base64url');
+    if (secret.length !== 32) {
+        throw new Error('Invalid secret key');
+    }
+    const token = await authGetToken(secret, url);
+    if (!token) {
+        throw new Error('Failed to authenticate with relay');
+    }
+    const saved = await TokenStorage.setCredentials({ token, secret: secretB64url }, url);
+    if (!saved) {
+        throw new Error('Failed to save credentials');
+    }
+}
 
 /** Switch the active relay and reload the app. apiSocket binds endpoint and
  *  token once at syncInit, so a relay change only takes effect through a full
