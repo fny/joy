@@ -305,13 +305,6 @@ class Sync {
     }
 
     async create(credentials: AuthCredentials, encryption: Encryption) {
-        // App-side queue release valve: sends the head queued draft when a
-        // session's turn completes. Lazy import — the module reads storage +
-        // sync only at runtime, avoiding a static cycle.
-        void import('@/-session/draftQueueRelease').then(({ initDraftQueueRelease }) => {
-            initDraftQueueRelease((sessionId, text, localId) =>
-                this.sendMessage(sessionId, text, { source: 'chat', localId }));
-        });
         this.credentials = credentials;
         this.encryption = encryption;
         this.anonID = encryption.anonID;
@@ -339,6 +332,18 @@ class Sync {
     }
 
     async #init() {
+
+        // App-side queue release valve: sends the head queued draft when a
+        // session's turn completes. MUST be wired here (shared by create AND
+        // restore) — it used to live only in create(), which runs solely on a
+        // fresh login, so every normal boot with stored credentials (i.e. any
+        // reload, including every relay switch) came up with NO release valve
+        // and queued messages sat forever. Lazy import — the module reads
+        // storage + sync only at runtime, avoiding a static cycle.
+        void import('@/-session/draftQueueRelease').then(({ initDraftQueueRelease }) => {
+            initDraftQueueRelease((sessionId, text, localId) =>
+                this.sendMessage(sessionId, text, { source: 'chat', localId }));
+        });
 
         // Subscribe to updates
         this.subscribeToUpdates();
