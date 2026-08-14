@@ -19,6 +19,9 @@ beforeEach(() => {
     joy = join(root, "joy");
     process.env.HAPPY_HOME_DIR = happy;
     process.env.JOY_HOME_DIR = joy;
+    // The host shell may export a relay selection (per-relay daemon work);
+    // these tests assume the DEFAULT relay unless a test sets one itself.
+    delete process.env.JOY_RELAY_URL;
 });
 afterEach(() => {
     delete process.env.HAPPY_HOME_DIR;

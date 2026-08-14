@@ -689,12 +689,14 @@ async function cmdNew(rest: string[]): Promise<number> {
   const model = takeFlag(rest, "--model");
   const effort = takeFlag(rest, "--effort");
   const resumeId = takeFlag(rest, "--resume");
+  const agent = takeFlag(rest, "--agent");
   const msg = takeFlag(rest, "-m") ?? takeFlag(rest, "--message");
   const dir = rest[0];
-  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--model m] [--read-only] [--continue|--resume id] [--json]"); return 2; }
+  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi] [--model m] [--read-only] [--continue|--resume id] [--json]"); return 2; }
   const cwd = resolve(expandTilde(dir));
   const r = await api("POST", "/sessions", {
     cwd, createDir: true, model, effort,
+    agent: agent || undefined,
     permissionMode: readOnly ? "plan" : "bypassPermissions",
     continue: cont || undefined,
     resume_id: resumeId || undefined,

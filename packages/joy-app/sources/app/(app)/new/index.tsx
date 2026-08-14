@@ -66,6 +66,8 @@ const agentIcons = {
     openclaw: require('@/assets/images/icon-openclaw.png'),
     gemini: require('@/assets/images/icon-gemini.png'),
     opencode: require('@/assets/images/icon-opencode.png'),
+    // pi has no bundled icon yet — reuse the opencode mark (both are open-model harnesses)
+    pi: require('@/assets/images/icon-opencode.png'),
 };
 
 type AgentKey = NewSessionAgentType;

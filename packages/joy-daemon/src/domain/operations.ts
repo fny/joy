@@ -308,7 +308,7 @@ export const machineOps: MachineOp[] = [
       }
       const session = await registry.create({
         cwd,
-        agent: params.agent === "codex" || params.agent === "opencode" ? params.agent : undefined,
+        agent: params.agent === "codex" || params.agent === "opencode" || params.agent === "pi" ? params.agent : undefined,
         createDir: params.createDir === true,
         model: typeof params.model === "string" ? params.model : undefined,
         effort: typeof params.effort === "string" ? params.effort : undefined,

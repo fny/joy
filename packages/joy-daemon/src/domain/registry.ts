@@ -17,6 +17,8 @@ import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
+import { PiSession } from "../pi/piSession";
+import { PI_MODELS, defaultPiModel } from "../pi/models";
 import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
@@ -28,7 +30,7 @@ export interface CreateSessionOpts {
   cwd: string;
   /** Agent type. Absent/'claude' → the claude CLI path; 'codex' → the codex
    *  app-server adapter (CodexSession). */
-  agent?: "claude" | "codex" | "opencode";
+  agent?: "claude" | "codex" | "opencode" | "pi";
   /** Reuse a specific joy session id (and thus the same relay tag/card) instead
    *  of minting a fresh one — used when restarting a daemon-forgotten session so
    *  it reattaches to its existing app card rather than spawning a duplicate. */
@@ -305,6 +307,9 @@ export class SessionRegistry {
     if (opts.agent === "opencode") {
       return await this.#createOpencodeSession(opts, id, cwd);
     }
+    if (opts.agent === "pi") {
+      return await this.#createPiSession(opts, id, cwd);
+    }
 
     // Validate user-supplied fields to prevent shell injection via send-keys
     const SAFE_ID = /^[a-zA-Z0-9:._/-]{1,128}$/;
@@ -575,6 +580,33 @@ export class SessionRegistry {
         session.attachRelay(rs);
       } catch (e) {
         process.stderr.write(`[relay] failed to create opencode session for ${id}: ${e}\n`);
+      }
+    }
+    session.beginWatching();
+    return session;
+  }
+
+  /** pi session creation: NO tmux window — a headless `pi --mode rpc` process
+   *  + relay only (bare v1: no resume/recovery; relay history is the durable
+   *  record). Model policy mirrors opencode: curated fireworks list. */
+  async #createPiSession(opts: CreateSessionOpts, id: string, cwd: string): Promise<AgentSession> {
+    if (!existsSync(cwd)) {
+      if (opts.createDir) mkdirSync(cwd, { recursive: true });
+      else throw new DirectoryCreationApprovalRequired(cwd);
+    }
+    const requested = PI_MODELS.find((m) => m.spec === opts.model) ?? defaultPiModel();
+    const session = new PiSession({
+      id, cwd, model: requested.spec, status: "starting", startedAt: Date.now(),
+    }, this.#sessionDeps());
+    this.#sessions.set(id, session);
+    saveWindowRecord(id, { launchCwd: cwd, agent: "pi" });
+    this.broadcast("session_update", session.toJSON());
+    if (this.relayClient) {
+      try {
+        const rs = await createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "pi" });
+        session.attachRelay(rs);
+      } catch (e) {
+        process.stderr.write(`[relay] failed to create pi session for ${id}: ${e}\n`);
       }
     }
     session.beginWatching();

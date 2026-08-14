@@ -16,7 +16,7 @@ import type { SessionStatus, SessionRecord, QueuedMessage, QueueState } from "..
 export interface AgentSession {
   /** Which harness runs this session — drives per-flavor projections
    *  (e.g. the slash-command palette). */
-  readonly agentFlavor: "claude" | "codex" | "opencode";
+  readonly agentFlavor: "claude" | "codex" | "opencode" | "pi";
   // ── identity / state (read by registry + operations) ──
   readonly id: string;
   readonly cwd: string;
