@@ -1,4 +1,4 @@
-# omp (oh-my-pi) adapter — spike findings + design
+# pi-family (omp / pi) adapter — spike findings + design
 
 2026-08-14. Probed omp v17.3.2 live on faraz-vip (Bun ≥1.3.14 required — 1.3.11
 fails to PARSE the dist bundle; `bun upgrade` fixed it). Model: Fireworks Kimi
@@ -86,6 +86,36 @@ mid-turn → retry → final answer honoring both messages.
    Node — omp is just a spawned binary, but boxes need bun installed + fresh.
 6. FIREWORKS_API_KEY must be in the daemon environment (systemd unit env or
    sourced file) — currently only in ~/.fny/secrets/env.sh on faraz-vip.
+
+## Vanilla pi comparison (probed 2026-08-14, @earendil-works/pi-coding-agent 0.84.1)
+
+Same protocol family — the adapter can target BOTH behind one flag. Deltas:
+
+- **Runtime: Node ≥22.19** (no Bun!) — pi is the fleet-friendly one; omp needs
+  Bun ≥1.3.14 kept fresh on every box.
+- **Steer semantics differ** (both verified live, same scenario):
+  - omp: INTERRUPT-flavored — skips the in-flight tool with a synthetic
+    "retry me" result, new turn immediately.
+  - pi: QUEUE-flavored — the in-flight tool RUNS to completion, turn finishes
+    ("DONE"), then the steer delivers as its own turn (model ran `date +%Y`
+    and answered). Matches pi rpc.md.
+  - pi also emits `queue_update {steering:[…],followUp:[…]}` — live queue
+    contents as events → the app's queue strip could render the HARNESS queue
+    natively. omp did not emit this in the probe.
+- pi's `get_state` is compact (~1KB model info vs omp's ~59KB dump); pi
+  resolved `fireworks/kimi-k3` to `accounts/fireworks/routers/kimi-k3-fast`
+  (router/fast variant, $4.5/$22.5 per M) — pin exact ids in the adapter, the
+  fuzzy match picks variants.
+- No `available_commands_update` / `extension_ui_request` seen from pi in the
+  probe — omp extras (richer, but more surface).
+- Fireworks/Kimi K3 works on both out of the box with FIREWORKS_API_KEY.
+- pi one-shot: `pi --model fireworks/kimi-k3 -p …` — worked identically.
+
+Recommendation: build the adapter against the SHARED protocol subset
+(prompt/steer/abort/get_state + message/turn/tool events), pick the binary per
+config. pi first on the fleet (Node runtime, simpler events, queue_update is a
+gift for the queue UI); omp opt-in where its tool harness (LSP, hashline)
+earns its Bun dependency.
 
 ## Probe artifacts
 
