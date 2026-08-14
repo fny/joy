@@ -123,7 +123,7 @@ function NewJoyTmuxSessionScreen() {
     // repo's machine + path when this page is the default New session).
     const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string }>();
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
-    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode'>('claude');
+    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode' | 'pi'>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
@@ -407,7 +407,7 @@ function NewJoyTmuxSessionScreen() {
                 gitUrl: gitClone?.url,
                 // Codex sends its own model/effort from the model/list catalog;
                 // claude sends its keys.
-                model: selectedAgent === 'codex' ? codexModel?.model : selectedAgent === 'opencode' ? ocModel?.id : currentModel?.key,
+                model: selectedAgent === 'codex' ? codexModel?.model : selectedAgent === 'opencode' ? ocModel?.id : selectedAgent === 'pi' ? undefined : currentModel?.key,
                 effort: selectedAgent === 'codex' ? codexEffort : selectedAgent === 'claude' && currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
                 // resume a specific conversation by id; it takes precedence over
                 // `continue` (most-recent), so don't send both.
@@ -421,10 +421,10 @@ function NewJoyTmuxSessionScreen() {
                 resume_limit_mb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
                 continue: (continueLast && !resumeId.trim()) || undefined,
                 createDir: createDir || undefined,
-                permissionMode: selectedAgent !== 'opencode' ? currentMode.key : undefined,
+                permissionMode: selectedAgent !== 'opencode' && selectedAgent !== 'pi' ? currentMode.key : undefined,
                 fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
                 forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
-                extraArgs: selectedAgent !== 'opencode' ? (extraArgs.trim() || undefined) : undefined,
+                extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' ? (extraArgs.trim() || undefined) : undefined,
             }),
             new Promise<never>((_, reject) => setTimeout(
                 () => reject(new Error(gitClone
@@ -572,8 +572,8 @@ function NewJoyTmuxSessionScreen() {
                             {/* Agent badge (tap to toggle claude ↔ codex) + model + effort */}
                             <View style={styles.configRow}>
                                 <Ionicons name="terminal-outline" size={15} color={theme.colors.textSecondary} />
-                                <Pressable onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : selectedAgent === 'opencode' ? 'opencode' : 'claude code'}</Text>
+                                <Pressable onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : a === 'opencode' ? 'pi' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : selectedAgent === 'opencode' ? 'opencode' : selectedAgent === 'pi' ? 'pi' : 'claude code'}</Text>
                                 </Pressable>
                                 {selectedAgent === 'codex' && codexModel && (
                                     <>
@@ -626,7 +626,7 @@ function NewJoyTmuxSessionScreen() {
                                 claude's Shift+Tab. yolo (bypassPermissions) is the default.
                                 Hidden for opencode: v1 has no permission surface (approvals
                                 land as chat prompts). */}
-                            {selectedAgent !== 'opencode' && (
+                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && (
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={cycleMode}
@@ -781,7 +781,7 @@ function NewJoyTmuxSessionScreen() {
                             {/* Extra arguments — claude: CLI args appended verbatim;
                                 codex: -c config overrides (key=value …). opencode has
                                 no extra-args surface. */}
-                            {selectedAgent !== 'opencode' && (
+                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && (
                             <View style={styles.configRow}>
                                 <Ionicons name="options-outline" size={15} color={theme.colors.textSecondary} />
                                 <TextInput

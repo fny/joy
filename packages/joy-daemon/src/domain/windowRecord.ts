@@ -36,7 +36,7 @@ export interface WindowRecord {
   pendingAttachments?: { ref: string; name?: string }[];
   /** Agent type — the discriminator recovery uses to reconstruct the right
    *  session class (claude Session vs CodexSession). Absent = claude (legacy). */
-  agent?: "claude" | "codex" | "opencode";
+  agent?: "claude" | "codex" | "opencode" | "pi";
   /** Codex app-server thread id, for thread/resume on recovery. */
   codexThreadId?: string;
   /** Codex app-server unix socket path (per session). */
@@ -53,6 +53,7 @@ export interface WindowRecord {
   /** Reconcile checkpoint: last fully-delivered opencode message id. */
   opencodeDeliveredThrough?: string;
   opencodeSettings?: { model?: string; providerID?: string };
+  piSettings?: { model?: string };
   updatedAt: number;
 }
 
@@ -98,7 +99,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string } },
+  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -119,6 +120,7 @@ export function saveWindowRecord(
       opencodeServerPid: patch.opencodeServerPid ?? prev?.opencodeServerPid,
       opencodeDeliveredThrough: patch.opencodeDeliveredThrough ?? prev?.opencodeDeliveredThrough,
       opencodeSettings: patch.opencodeSettings ?? prev?.opencodeSettings,
+      piSettings: patch.piSettings ?? prev?.piSettings,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet

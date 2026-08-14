@@ -542,7 +542,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // (esp. `auto`) silently escalate to full access on codex (finding #1).
         const modes = isJoyDaemon
             ? (flavor === 'codex' ? JOY_CODEX_PERMISSION_MODES
-                : flavor === 'opencode' ? [] // v1: opencode has no permission surface
+                : flavor === 'opencode' || flavor === 'pi' ? [] // v1: opencode/pi have no permission surface
                 : JOY_CLAUDE_PERMISSION_MODES)
             : getAvailablePermissionModes(flavor, session.metadata, t);
         return modes;
