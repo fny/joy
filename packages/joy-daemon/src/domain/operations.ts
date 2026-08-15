@@ -299,6 +299,18 @@ export const machineOps: MachineOp[] = [
     handler: async (registry, params) => {
       const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
       if (!cwd) return { error: "cwd required" };
+      // Reject unknown agents LOUDLY instead of falling through to claude.
+      // The historical fall-through is how a stale daemon turned "pi" requests
+      // into surprise claude sessions (2026-08-15): a newer app sent a flavor
+      // this daemon had never heard of and got the default branch. Same
+      // philosophy as DirectoryCreationApprovalRequired — never silently
+      // substitute; surface it and let the client decide. The app shows this
+      // string in its error alert as-is.
+      const KNOWN_AGENTS = ["claude", "codex", "opencode", "pi"] as const;
+      const agentRaw = typeof params.agent === "string" && params.agent.trim() ? params.agent.trim() : undefined;
+      if (agentRaw && !(KNOWN_AGENTS as readonly string[]).includes(agentRaw)) {
+        return { error: `unknown agent "${agentRaw}" — this joy-daemon doesn't support it yet (run \`joy update\` on this machine?)` };
+      }
       // git-URL spawn: clone (or reuse) into cwd first, then launch inside it.
       const gitUrl = typeof params.gitUrl === "string" ? params.gitUrl.trim() : "";
       if (gitUrl) {
@@ -308,7 +320,7 @@ export const machineOps: MachineOp[] = [
       }
       const session = await registry.create({
         cwd,
-        agent: params.agent === "codex" || params.agent === "opencode" || params.agent === "pi" ? params.agent : undefined,
+        agent: agentRaw === "codex" || agentRaw === "opencode" || agentRaw === "pi" ? agentRaw : undefined,
         createDir: params.createDir === true,
         model: typeof params.model === "string" ? params.model : undefined,
         effort: typeof params.effort === "string" ? params.effort : undefined,
