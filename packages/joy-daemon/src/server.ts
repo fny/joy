@@ -17,10 +17,29 @@
 import { moduleDir } from "./esm";
 import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, writeFileSync, readFileSync } from "fs";
 import { initRelay } from "./relay/relay.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
-import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay } from "./paths";
+import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyHomeDir } from "./paths";
+
+// ~/.joy/env: optional KEY=value lines loaded into the daemon's environment at
+// boot (never overriding real env). This is how provider API keys (e.g.
+// FIREWORKS_API_KEY for the pi flavor) reach spawned agent processes on every
+// platform — one file instead of per-platform systemd drop-ins / launchd
+// plist edits. Lines starting with # are comments; `export ` prefixes are
+// tolerated so a shell-style file works as-is.
+try {
+  const envFile = readFileSync(join(joyHomeDir(), "env"), "utf8");
+  for (const raw of envFile.split("\n")) {
+    const line = raw.trim().replace(/^export\s+/, "");
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+    if (key && !(key in process.env)) process.env[key] = value;
+  }
+} catch { /* no ~/.joy/env — fine */ }
 import { SessionRegistry } from "./domain/registry";
 import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
