@@ -12,6 +12,7 @@ Joy now runs on its own infrastructure, speaks four agent flavors, and the file 
 - **File browser + attachments always on.** No more experiment toggles — the full UI is there on every account and relay.
 - **Fewer duplicate machines.** Each computer registers once per universe, not once per relay door.
 - Renamed the machine-side daemon to joy-daemon, with clean automatic service migration on update.
+- **Stop button in the composer.** While the agent is working, the send button becomes a square stop button — tap to interrupt; start typing to queue a follow-up instead. The save-draft button moves to where stop used to be.
 - **New avatars.** Sessions and machines now use hashicon identicons — distinctive geometric marks derived from each id.
 - **Desktop: text selection works again.** Code blocks and chat text can be selected and copied in the desktop app (the native-feel styling was suppressing it).
 
