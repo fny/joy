@@ -141,6 +141,20 @@ function decryptBlob(bundle: Uint8Array, key: Uint8Array): Uint8Array | null {
   return plain ? new Uint8Array(plain) : null;
 }
 
+/**
+ * Encrypt a blob for attachment upload: [24-byte nonce][secretbox ct+tag].
+ * Mirror of decryptBlob / the app's encryption/blob.ts. Concatenation via
+ * set() — spreading multi-MB arrays overflows the stack.
+ */
+function encryptBlob(data: Uint8Array, key: Uint8Array): Uint8Array {
+  const nonce = randomBytesU8(tweetnacl.secretbox.nonceLength);
+  const ct = tweetnacl.secretbox(data, nonce, key);
+  const out = new Uint8Array(nonce.length + ct.length);
+  out.set(nonce, 0);
+  out.set(ct, nonce.length);
+  return out;
+}
+
 function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint8Array): Uint8Array {
   const ephemeral = tweetnacl.box.keyPair();
   const nonce = randomBytesU8(tweetnacl.box.nonceLength);
@@ -528,6 +542,65 @@ export class RelayClient {
    * "Happy Blobs" usage and a variant-specific path. Returns null on any
    * failure (network, auth, decryption).
    */
+  /**
+   * Encrypt + upload a blob as a session attachment; the inverse of
+   * downloadAndDecryptAttachment, and the DATA PLANE for RPC responses too
+   * big for socket.io's ~1MB message cap (big readFile results ride this,
+   * with only the ref returned over the RPC). Handles both storage modes the
+   * server offers: local (PUT back to the server, bearer auth) and S3
+   * (presigned POST policy with form fields). Returns the ref, or null on
+   * any failure. Server caps attachments at 10MB.
+   */
+  async encryptAndUploadAttachment(
+    relaySessionId: string,
+    bytes: Uint8Array,
+    sessionKey: Uint8Array,
+    variant: EncryptionVariant,
+    filename: string,
+  ): Promise<string | null> {
+    try {
+      const path = variant === 'dataKey' ? ['session'] : ['master'];
+      const blobKey = deriveKey(sessionKey, 'Happy Blobs', path);
+      const encrypted = encryptBlob(bytes, blobKey);
+
+      const reqRes = await fetch(this.url(`/v1/sessions/${relaySessionId}/attachments/request-upload`), {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify({ filename, size: encrypted.length }),
+      });
+      if (!reqRes.ok) {
+        log(`attachment request-upload failed: HTTP ${reqRes.status}`);
+        return null;
+      }
+      const req = await reqRes.json() as { ref?: string; uploadUrl?: string; method?: 'PUT' | 'POST'; formFields?: Record<string, string> };
+      if (!req.ref || !req.uploadUrl) return null;
+
+      if (req.method === 'POST') {
+        // S3 presigned POST: policy fields first, then the file part.
+        const form = new FormData();
+        for (const [k, v] of Object.entries(req.formFields ?? {})) form.append(k, v);
+        form.append("file", new Blob([encrypted.buffer as ArrayBuffer]), filename);
+        const up = await fetch(req.uploadUrl, { method: 'POST', body: form });
+        if (!up.ok) { log(`attachment S3 POST failed: HTTP ${up.status}`); return null; }
+      } else {
+        const isServerUrl = req.uploadUrl.startsWith(this.creds.serverUrl);
+        const up = await fetch(req.uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            ...(isServerUrl ? { Authorization: `Bearer ${this.creds.token}` } : {}),
+          },
+          body: encrypted,
+        });
+        if (!up.ok) { log(`attachment PUT failed: HTTP ${up.status}`); return null; }
+      }
+      return req.ref;
+    } catch (e) {
+      log(`encryptAndUploadAttachment failed: ${e}`);
+      return null;
+    }
+  }
+
   async downloadAndDecryptAttachment(
     relaySessionId: string,
     ref: string,
@@ -972,6 +1045,13 @@ export class RelaySession {
   /** Exposed so handlers (e.g. attachment download) can derive blob keys. */
   get encryptionMaterial(): { sessionKey: Uint8Array; variant: EncryptionVariant } {
     return { sessionKey: this.sessionKey, variant: this.variant };
+  }
+
+  /** Upload bytes as this session's encrypted attachment blob — the data
+   *  plane for RPC responses too big for socket.io's message cap (the RPC
+   *  then carries only the ref). Returns the ref, or null on failure. */
+  uploadFileBlob(bytes: Uint8Array, filename: string): Promise<string | null> {
+    return this.client.encryptAndUploadAttachment(this.relaySessionId, bytes, this.sessionKey, this.variant, filename);
   }
 
   constructor(opts: {

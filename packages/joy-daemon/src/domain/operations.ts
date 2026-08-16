@@ -181,7 +181,11 @@ export interface SessionOp {
   rpcName: string;
   /** null → no dedicated HTTP route (killSession is covered by DELETE /sessions/:id). */
   http: { method: HttpMethod; path: string } | null;
-  handler: (session: AgentSession, params: Record<string, unknown>) => Promise<unknown> | unknown;
+  /** rs is present on the RELAY transport only (bindSessionOps) — handlers
+   *  needing the data plane (blob upload for oversized responses) use it and
+   *  must fall back gracefully when absent (local HTTP transport, no message
+   *  size cap → inline is always fine there). */
+  handler: (session: AgentSession, params: Record<string, unknown>, rs?: RelaySession) => Promise<unknown> | unknown;
 }
 
 export type Op = MachineOp | SessionOp;
@@ -844,7 +848,7 @@ export const sessionOps: SessionOp[] = [
     http: { method: "POST", path: "/sessions/:id/readFile" },
     // Second allowed root: the session's own ~/.joy/sessions/<id>/ so the app
     // can fetch joy-img media the agent saved there — scoped per session.
-    handler: (session, params) => {
+    handler: async (session, params, rs) => {
       const p = params as unknown as Parameters<typeof handleReadFile>[1];
       // Remap a joy-media path that names the WRONG session id onto THIS
       // session's media dir (2026-07-13). The agent hand-constructs the
@@ -854,13 +858,30 @@ export const sessionOps: SessionOp[] = [
       // The basename + media/ namespace are preserved and the result is still
       // jailed to this session's dir, so this can't reach another session.
       const m = typeof p?.path === "string" ? /[/\\]\.joy[/\\]sessions[/\\][^/\\]+[/\\]media[/\\](.+)$/.exec(p.path) : null;
+      let effective = p;
       if (m) {
         const remapped = join(joySessionDir(session.id), "media", m[1]);
-        if (remapped !== p.path && existsSync(remapped)) {
-          return handleReadFile(session.cwd, { ...p, path: remapped }, [joySessionDir(session.id)]);
+        if (remapped !== p.path && existsSync(remapped)) effective = { ...p, path: remapped };
+      }
+      const res = await handleReadFile(session.cwd, effective, [joySessionDir(session.id)]);
+      // Oversized responses can't ride the RPC ack: socket.io drops messages
+      // over ~1MB, and base64 + E2E wrapping means ~400KB of raw file is the
+      // safe inline ceiling. Above it, ship the bytes as an encrypted
+      // attachment blob (server cap 10MB) and return only the ref — the app
+      // downloads + decrypts via the normal attachment path. rs missing =
+      // local HTTP transport, which has no message cap; stay inline there.
+      const INLINE_MAX_BYTES = 400 * 1024;
+      if (res.success && res.content && rs) {
+        const raw = Buffer.from(res.content, "base64");
+        if (raw.length > INLINE_MAX_BYTES) {
+          const name = typeof effective?.path === "string" ? effective.path.split(/[/\\]/).pop() || "file" : "file";
+          const ref = await rs.uploadFileBlob(new Uint8Array(raw), name);
+          if (ref) return { success: true, blobRef: ref, size: raw.length };
+          // Upload failed — return the inline payload anyway; the relay leg
+          // may drop it, but a maybe is better than a certain failure.
         }
       }
-      return handleReadFile(session.cwd, p, [joySessionDir(session.id)]);
+      return res;
     },
   },
   {
@@ -908,6 +929,6 @@ export const sessionOps: SessionOp[] = [
  */
 export function bindSessionOps(session: AgentSession, rs: RelaySession): void {
   for (const op of sessionOps) {
-    rs.registerRpc(op.rpcName, async (params) => op.handler(session, (params ?? {}) as Record<string, unknown>));
+    rs.registerRpc(op.rpcName, async (params) => op.handler(session, (params ?? {}) as Record<string, unknown>, rs));
   }
 }
