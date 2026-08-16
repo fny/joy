@@ -1,3 +1,18 @@
+# Aug 16 — Your own relays, new agents, big files
+
+Joy now runs on its own infrastructure, speaks four agent flavors, and the file viewer handles real files.
+
+- **Self-hosted relays.** Switch between Happy Cloud and the new joy relays right from Server Configuration — with three doors into the joy universe (stable, dev, and direct) for testing relay changes against live data.
+- **One key everywhere.** Your original secret key now works on every relay: "Use this key on all relays" sets up each one in a tap, and `joy auth <relay>` pairs any machine from the same backup code — no more per-relay accounts.
+- **New agent: opencode.** Full-featured sessions on open models (Kimi K3 on Fireworks by default) — steering, queueing, model switching, past-session resume, auto-titles.
+- **New agent: pi.** A fourth flavor with native mid-turn steering and harness-owned queueing, also running Kimi K3.
+- **Big files in the file viewer.** Files up to 10MB now load (was ~700KB) — bytes ship as encrypted blobs instead of squeezing through the realtime channel.
+- **File viewer overhaul.** One file at a time, downloads, image rendering, and source/rendered modes for CSV, TSV, Markdown, and fully-working self-contained HTML.
+- **Queued messages actually send.** Messages queued while the agent was busy could sit forever after an app reload — the release valve now arms on every boot.
+- **File browser + attachments always on.** No more experiment toggles — the full UI is there on every account and relay.
+- **Fewer duplicate machines.** Each computer registers once per universe, not once per relay door.
+- Renamed the machine-side daemon to joy-daemon, with clean automatic service migration on update.
+
 # Jul 3 — Consistent status, working scrubber, /title
 
 Small polish across the chat and machine views, plus fewer false "failed to send" alarms.

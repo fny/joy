@@ -317,16 +317,6 @@ export const SettingsView = React.memo(function SettingsView() {
                     detail="fny/joy"
                     onPress={handleGitHub}
                 />
-                <Item
-                    title={t('settings.privacyPolicy')}
-                    icon={<Ionicons name="shield-checkmark-outline" size={29} color={theme.colors.accents.blue} />}
-                    onPress={() => openExternalUrl('https://happy.engineering/privacy/')}
-                />
-                <Item
-                    title={t('settings.termsOfService')}
-                    icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accents.blue} />}
-                    onPress={() => openExternalUrl('https://github.com/slopus/happy/blob/main/TERMS.md')}
-                />
                 {Platform.OS === 'ios' && (
                     <Item
                         title={t('settings.eula')}
