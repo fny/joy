@@ -45,6 +45,7 @@ import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
 import { registerMachineOps } from "./transports/relay-machine";
 import { computeUsage, periodToRange } from "./claude/usage";
+import { startResourceAlerts } from "./domain/resourceAlerts";
 
 // Control-server port: the DEFAULT relay keeps the historical 4997; any other
 // relay's daemon binds a DYNAMIC port (0) so N per-relay daemons coexist —
@@ -152,6 +153,10 @@ if (relayClient) {
   }, 5 * 60 * 1000).unref();
 
   relayClient.onReconnect = () => registry.onRelayReconnect();
+
+  // Push alerts when the box or an account quota crosses 90% (see
+  // resourceAlerts.ts for the hysteresis + 4h cooldown semantics).
+  startResourceAlerts(relayClient);
 }
 
 // Usage cache warmer: parse-ahead so joy-usage answers instantly. Once shortly
