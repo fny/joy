@@ -430,6 +430,7 @@ export const it: TranslationStructure = {
         relayAccessKeyLabel: 'Chiave di accesso del relay',
         relayAccessKeyFooter: 'Chiave perimetrale per questo relay (gate joy-relay). Inviata con ogni richiesta; lascia vuoto per relay aperti come Happy Cloud. Si riconnette dopo il salvataggio.',
         relayAccessKeySaved: 'Chiave del relay salvata',
+        relayCopyDerivedKey: 'Copia la chiave derivata del relay',
         relayApplyKeyAllMessage: 'Accedere a tutti i relay noti con la chiave dell\'account attuale? Questo sostituisce qualsiasi altro account salvato per quei relay su questo dispositivo.',
         relayApplyKeyAllFooter: 'La tua chiave segreta attuale diventa l\'unico accesso per tutti i relay noti: un solo codice da conservare. Gli account vengono creati automaticamente dove non esistono ancora.',
         relayApplyKeyAllSuccess: 'Tutti i relay ora usano questa chiave.',

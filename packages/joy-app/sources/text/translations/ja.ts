@@ -433,6 +433,7 @@ export const ja: TranslationStructure = {
         relayAccessKeyLabel: 'リレーアクセスキー',
         relayAccessKeyFooter: 'このリレーの境界キー（joy-relay ゲート）。全リクエストに付与されます。Happy Cloud など公開リレーでは空のままに。保存後に再接続します。',
         relayAccessKeySaved: 'リレーキーを保存しました',
+        relayCopyDerivedKey: '導出リレーキーをコピー',
         relayApplyKeyAllMessage: '現在のアカウントキーですべての既知のリレーにログインしますか？このデバイスに保存されている他のリレーアカウントは置き換えられます。',
         relayApplyKeyAllFooter: '現在のシークレットキーがすべての既知のリレーの共通ログインになります — バックアップするコードは1つだけ。アカウントがないリレーでは自動的に作成されます。',
         relayApplyKeyAllSuccess: 'すべてのリレーがこのキーを使うようになりました。',

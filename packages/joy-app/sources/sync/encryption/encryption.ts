@@ -8,6 +8,7 @@ import { encodeBase64, decodeBase64 } from "@/encryption/base64";
 import sodium from '@/encryption/libsodium.lib';
 import { decryptBox, encryptBox } from "@/encryption/libsodium";
 import { randomUUID } from 'expo-crypto';
+import { setDerivedRelayPerimeterKey } from '@/sync/serverConfig';
 
 export class Encryption {
 
@@ -24,6 +25,12 @@ export class Encryption {
 
         // Derive master blob key for legacy sessions (those with no per-session dataKey)
         const masterBlobKey = await deriveKey(masterSecret, 'Happy Blobs', ['master']);
+
+        // Relay perimeter key (joy-relay gate): derived from the SAME account
+        // secret every device already holds, so nothing new is distributed —
+        // the daemon derives the identical value at `joy auth` pairing, and
+        // the relay box stores only this derived hex, never the secret.
+        setDerivedRelayPerimeterKey(encodeHex(await deriveKey(masterSecret, 'Joy Relay', ['perimeter'])).toLowerCase());
 
         // Create encryption
         return new Encryption(anonID, masterSecret, contentKeyPair, masterBlobKey);

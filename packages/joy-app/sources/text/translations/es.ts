@@ -432,6 +432,7 @@ export const es: TranslationStructure = {
         relayAccessKeyLabel: 'Clave de acceso del relay',
         relayAccessKeyFooter: 'Clave perimetral para este relay (puerta joy-relay). Se envía con cada petición; déjala vacía para relays abiertos como Happy Cloud. Se reconecta al guardar.',
         relayAccessKeySaved: 'Clave del relay guardada',
+        relayCopyDerivedKey: 'Copiar la clave derivada del relay',
         relayApplyKeyAllMessage: '¿Iniciar sesión en todos los relés conocidos con la clave de la cuenta actual? Esto reemplaza cualquier otra cuenta guardada para esos relés en este dispositivo.',
         relayApplyKeyAllFooter: 'Convierte tu clave secreta actual en el único acceso para todos los relés conocidos: un solo código que respaldar. Las cuentas se crean automáticamente donde aún no existen.',
         relayApplyKeyAllSuccess: 'Todos los relés usan ahora esta clave.',

@@ -449,6 +449,7 @@ export const pl: TranslationStructure = {
         relayAccessKeyLabel: 'Klucz dostępu do relay',
         relayAccessKeyFooter: 'Klucz obwodowy dla tego relay (brama joy-relay). Wysyłany z każdym żądaniem; zostaw puste dla otwartych relay jak Happy Cloud. Ponowne połączenie po zapisaniu.',
         relayAccessKeySaved: 'Zapisano klucz relay',
+        relayCopyDerivedKey: 'Kopiuj wyprowadzony klucz relay',
         relayApplyKeyAllMessage: 'Zalogować się na wszystkie znane serwery obecnym kluczem konta? Zastąpi to inne konta zapisane dla tych serwerów na tym urządzeniu.',
         relayApplyKeyAllFooter: 'Obecny tajny klucz stanie się jedynym loginem dla wszystkich znanych serwerów — jeden kod do zapisania. Konta są tworzone automatycznie tam, gdzie jeszcze nie istnieją.',
         relayApplyKeyAllSuccess: 'Wszystkie serwery używają teraz tego klucza.',

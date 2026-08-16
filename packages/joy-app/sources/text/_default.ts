@@ -481,6 +481,7 @@ export const en = {
         relayAccessKeyLabel: 'Relay access key',
         relayAccessKeyFooter: 'Perimeter key for this relay (joy-relay gate). Sent with every request; leave empty for open relays like Happy Cloud. Reconnects after saving.',
         relayAccessKeySaved: 'Relay key saved',
+        relayCopyDerivedKey: 'Copy derived relay key',
         relayApplyKeyAllMessage: 'Log in to every known relay with the current account key? This replaces any other account saved for those relays on this device.',
         relayApplyKeyAllFooter: 'Makes your current secret key the single login for every known relay — one code to back up. Accounts are created automatically on relays where none exist yet.',
         relayApplyKeyAllSuccess: 'All relays now use this key.',

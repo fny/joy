@@ -433,6 +433,7 @@ export const zhHans: TranslationStructure = {
         relayAccessKeyLabel: '中继访问密钥',
         relayAccessKeyFooter: '此中继的边界密钥（joy-relay 网关）。每个请求都会附带；开放中继（如 Happy Cloud）请留空。保存后会重新连接。',
         relayAccessKeySaved: '已保存中继密钥',
+        relayCopyDerivedKey: '复制派生的中继密钥',
         relayApplyKeyAllMessage: '使用当前账户密钥登录所有已知中继？这将替换此设备上为这些中继保存的其他账户。',
         relayApplyKeyAllFooter: '将当前密钥设为所有已知中继的统一登录方式——只需备份一个代码。尚无账户的中继会自动创建账户。',
         relayApplyKeyAllSuccess: '所有中继现在都使用此密钥。',

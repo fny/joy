@@ -52,14 +52,21 @@ export function resolveRelayAlias(nameOrUrl: string): string {
 // ~/.joy/relay.json {serverUrl} → the default relay.
 let cachedRelayUrl: string | null = null;
 
-/** Shared relay perimeter key (joy-relay's gate). Sourced from
- *  JOY_RELAY_ACCESS_KEY — reaches the daemon via ~/.joy/env (loaded at boot)
- *  or the service environment. Null → don't send the header (open relays,
- *  Happy Cloud). Read lazily, NOT cached: the env loader may run after
- *  module import. */
+/** Relay perimeter key (joy-relay's gate). Priority: JOY_RELAY_ACCESS_KEY
+ *  env (via ~/.joy/env or the service env) as an explicit override, then
+ *  perimeter.key beside the relay creds — written by `joy auth` pairing,
+ *  derived from the account secret (same tree as the app, so every client
+ *  presents the identical value with zero distribution). Null → send nothing
+ *  (open relays, Happy Cloud). Read lazily, NOT cached: the env loader may
+ *  run after module import. */
 export function joyRelayAccessKey(): string | null {
   const k = process.env.JOY_RELAY_ACCESS_KEY;
-  return k && k.trim() ? k.trim() : null;
+  if (k && k.trim()) return k.trim();
+  try {
+    const v = readFileSync(join(joyRelayCredsDir(), "perimeter.key"), "utf8").trim();
+    if (v) return v;
+  } catch { /* not paired against a gated relay */ }
+  return null;
 }
 
 export function joyRelayUrl(): string {
