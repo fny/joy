@@ -247,6 +247,14 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     } | null;
                     if (!ds) return null;
                     const memUsed = ds.memTotal != null && ds.memFree != null ? ds.memTotal - ds.memFree : null;
+                    // Disk as a used-% like RAM; ≥90% on either is the "your
+                    // queueing/stray-text weirdness may be resource pressure"
+                    // threshold — flag it loudly.
+                    const diskPct = ds.diskTotal && ds.diskFree != null
+                        ? Math.max(0, Math.min(100, Math.round((1 - ds.diskFree / ds.diskTotal) * 100)))
+                        : null;
+                    const ramHot = ds.ram != null && ds.ram >= 90;
+                    const diskHot = diskPct != null && diskPct >= 90;
                     return (
                         <ItemGroup title={t('machine.system')} footer={t('machine.systemFooter')}>
                             <Item
@@ -257,16 +265,19 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                                 showChevron={false}
                             />
                             <Item
-                                title="Memory"
-                                detail={ds.memTotal != null && memUsed != null ? `${gb(memUsed)} / ${gb(ds.memTotal)}` : (ds.ram != null ? `${ds.ram}%` : '—')}
-                                subtitle={ds.ram != null ? t('machine.memoryUsedPercent', { percent: ds.ram }) : undefined}
-                                icon={<Ionicons name="hardware-chip-outline" size={29} color="#34C759" />}
+                                title={ramHot ? 'Memory ⚠' : 'Memory'}
+                                detail={ds.ram != null ? `${ds.ram}%` : '—'}
+                                detailStyle={ramHot ? { color: '#FF3B30', fontWeight: '600' } : undefined}
+                                subtitle={ds.memTotal != null && memUsed != null ? `${gb(memUsed)} / ${gb(ds.memTotal)}` : undefined}
+                                icon={<Ionicons name="hardware-chip-outline" size={29} color={ramHot ? '#FF3B30' : '#34C759'} />}
                                 showChevron={false}
                             />
                             <Item
-                                title="Disk"
-                                detail={ds.diskTotal ? t('machine.diskFree', { free: gb(ds.diskFree ?? 0), total: gb(ds.diskTotal) }) : '—'}
-                                icon={<Ionicons name="save-outline" size={29} color="#5856D6" />}
+                                title={diskHot ? 'Disk ⚠' : 'Disk'}
+                                detail={diskPct != null ? `${diskPct}%` : '—'}
+                                detailStyle={diskHot ? { color: '#FF3B30', fontWeight: '600' } : undefined}
+                                subtitle={ds.diskTotal ? t('machine.diskFree', { free: gb(ds.diskFree ?? 0), total: gb(ds.diskTotal) }) : undefined}
+                                icon={<Ionicons name="save-outline" size={29} color={diskHot ? '#FF3B30' : '#5856D6'} />}
                                 showChevron={false}
                             />
                         </ItemGroup>

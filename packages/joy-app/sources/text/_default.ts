@@ -1013,6 +1013,8 @@ export const en = {
         loadAverage: ({ load }: { load: string }) => `load ${load}`,
         memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% used`,
         diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} free`,
+        ramHot: ({ percent }: { percent: number }) => `RAM ${percent}% on this machine`,
+        diskHot: ({ percent }: { percent: number }) => `Disk ${percent}% full on this machine`,
     },
 
     message: {

@@ -18,6 +18,7 @@ import { EmptyMessages } from '@/components/EmptyMessages';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
+import { MachineResourceBanner } from '@/components/MachineResourceBanner';
 import { useImagePicker } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
@@ -324,6 +325,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                     {!isTablet && realtimeStatus !== 'disconnected' && (
                         <VoiceAssistantStatusBar variant="full" />
                     )}
+                    <MachineResourceBanner machineId={session?.metadata?.machineId} />
                 </View>
             )}
 

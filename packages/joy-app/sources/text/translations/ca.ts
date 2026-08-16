@@ -963,6 +963,8 @@ export const ca: TranslationStructure = {
         loadAverage: ({ load }: { load: string }) => `càrrega ${load}`,
         memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% en ús`,
         diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} lliures`,
+        ramHot: ({ percent }: { percent: number }) => `RAM al ${percent}% en aquesta màquina`,
+        diskHot: ({ percent }: { percent: number }) => `Disc ple al ${percent}% en aquesta màquina`,
     },
 
     message: {
