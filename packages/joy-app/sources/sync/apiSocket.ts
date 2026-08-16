@@ -2,6 +2,7 @@ import { io, Socket } from 'socket.io-client';
 import { AppState, Platform } from 'react-native';
 import Constants from 'expo-constants';
 import { TokenStorage } from '@/auth/tokenStorage';
+import { getRelayAccessKey } from '@/sync/serverConfig';
 import { Encryption } from './encryption/encryption';
 import { storage } from './storage';
 
@@ -85,8 +86,12 @@ class ApiSocket {
 
         this.updateStatus('connecting');
 
+        const relayKey = getRelayAccessKey(this.config.endpoint);
         this.socket = io(this.config.endpoint, {
             path: '/v1/updates',
+            // joy-relay perimeter key: query param because browser WebSockets
+            // can't carry custom headers (see serverConfig.ts).
+            ...(relayKey ? { query: { joyRelayKey: relayKey } } : {}),
             auth: {
                 token: this.config.token,
                 clientType: 'user-scoped' as const,

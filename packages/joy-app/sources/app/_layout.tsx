@@ -17,6 +17,7 @@ import sodium from '@/encryption/libsodium.lib';
 import { View, Platform, AppState } from 'react-native';
 import { ModalProvider } from '@/modal';
 import { AppLockGate } from '@/components/AppLockGate';
+import { installRelayKeyFetchInterceptor } from '@/sync/serverConfig';
 import { syncRestore } from '@/sync/sync';
 import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
@@ -252,6 +253,9 @@ export default function RootLayout() {
     React.useEffect(() => {
         (async () => {
             try {
+                // Before ANY relay traffic: fetches to the relay origin gain
+                // the perimeter key header when one is configured.
+                installRelayKeyFetchInterceptor();
                 await loadFonts();
                 await sodium.ready;
 

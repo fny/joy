@@ -10,6 +10,7 @@ import { createHmac, createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import tweetnacl from "tweetnacl";
+import { joyRelayAccessKey } from "../paths";
 
 // App's backup format (secretKeyBackup.ts): RFC 4648 base32, dash-grouped,
 // with the same typo forgiveness (0→O, 1→I, 8→B, 9→G, junk stripped).
@@ -89,6 +90,8 @@ function decryptBox(bundle: Uint8Array, recipientSecret: Uint8Array): Uint8Array
 
 async function post(relayUrl: string, path: string, body: unknown, token?: string): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "X-Happy-Client": "cli/joy-auth" };
+  const relayKey = joyRelayAccessKey();
+  if (relayKey) headers["X-Joy-Relay-Key"] = relayKey;
   if (token) headers.Authorization = `Bearer ${token}`;
   const r = await fetch(relayUrl + path, { method: "POST", headers, body: JSON.stringify(body) });
   if (!r.ok) throw new Error(`${path} -> HTTP ${r.status}: ${await r.text()}`);

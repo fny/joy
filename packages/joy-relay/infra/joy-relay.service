@@ -5,6 +5,9 @@ After=network-online.target
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/joy-relay
+# Perimeter key (gate.mjs): create this file with JOY_RELAY_ACCESS_KEY=…
+# to enforce the relay key; absent file = open (unset key = open gate).
+EnvironmentFile=-/home/ubuntu/joy-relay.env
 ExecStart=/usr/bin/node proxy.mjs
 Restart=always
 RestartSec=2

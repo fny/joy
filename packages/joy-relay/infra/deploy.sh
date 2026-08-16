@@ -23,9 +23,11 @@ if [[ "$TARGET" == "dev" ]]; then
   rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json --exclude=infra --exclude=data \
     "$ROOT/packages/joy-relay/" "$HOST":joy-relay-dev/
   $SSH "$HOST" 'cd ~/joy-relay-dev && npm install --omit=dev --no-audit --no-fund --silent && mkdir -p ~/joy-relay-data/dev && sudo systemctl restart joy-relay-dev.service && sleep 1 && sudo systemctl is-active joy-relay-dev'
-  curl -fsS --max-time 10 "https://joy.voltai.party:14997/" | grep -q 'Welcome to Happy Server!' \
+  RELAY_KEY="$($SSH "$HOST" 'grep -s "^JOY_RELAY_ACCESS_KEY=" ~/joy-relay.env | cut -d= -f2-' || true)"
+  KEY_HDR=(); [[ -n "$RELAY_KEY" ]] && KEY_HDR=(-H "x-joy-relay-key: $RELAY_KEY")
+  curl -fsS --max-time 10 "${KEY_HDR[@]}" "https://joy.voltai.party:14997/" | grep -q 'Welcome to Happy Server!' \
     && echo "https://joy.voltai.party:14997 passthrough OK" || { echo "14997 passthrough FAILED" >&2; exit 1; }
-  curl -fsS --max-time 10 "https://joy.voltai.party:14997/joy/v1/capabilities" | grep -q '"joy-relay"' \
+  curl -fsS --max-time 10 "${KEY_HDR[@]}" "https://joy.voltai.party:14997/joy/v1/capabilities" | grep -q '"joy-relay"' \
     && echo "https://joy.voltai.party:14997 native OK" || { echo "14997 native FAILED" >&2; exit 1; }
   exit 0
 fi
@@ -60,10 +62,15 @@ $SSH "$HOST" 'bash ~/joy-relay/infra/bootstrap.sh'
 echo "== verify =="
 # The happy-server container takes ~30s to boot after the restart — retry
 # rather than declaring a 502 a failure.
+# Gated ports need the perimeter key for the health probe once it's set on
+# the box (joy-relay.env). :24997 is the direct happy-server door — ungated.
+RELAY_KEY="$($SSH "$HOST" 'grep -s "^JOY_RELAY_ACCESS_KEY=" ~/joy-relay.env | cut -d= -f2-' || true)"
 for port in 4997 14997 24997; do
   ok=""
+  KEY_HDR=()
+  if [[ -n "$RELAY_KEY" && "$port" != "24997" ]]; then KEY_HDR=(-H "x-joy-relay-key: $RELAY_KEY"); fi
   for _ in $(seq 12); do
-    if curl -fsS --max-time 10 "https://joy.voltai.party:$port/" 2>/dev/null | grep -q 'Welcome to Happy Server!'; then
+    if curl -fsS --max-time 10 "${KEY_HDR[@]}" "https://joy.voltai.party:$port/" 2>/dev/null | grep -q 'Welcome to Happy Server!'; then
       ok=1; break
     fi
     sleep 5

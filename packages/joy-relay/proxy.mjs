@@ -5,12 +5,15 @@
 // plain node http + raw socket piping for WebSocket upgrades.
 import * as http from 'node:http';
 import * as net from 'node:net';
+import { createGate } from './src/gate.mjs';
 
 const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
 const TARGET_HOST = process.env.JOY_RELAY_UPSTREAM_HOST ?? '127.0.0.1';
 const TARGET_PORT = Number(process.env.JOY_RELAY_UPSTREAM_PORT ?? 3005);
+const gate = createGate();
 
 const server = http.createServer((req, res) => {
+  if (!gate.allows(req)) return gate.rejectHttp(res);
   const up = http.request(
     { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: req.headers },
     (upRes) => {
@@ -28,6 +31,7 @@ const server = http.createServer((req, res) => {
 // WebSocket (socket.io) passthrough: replay the upgrade request bytes at the
 // upstream and splice the sockets.
 server.on('upgrade', (req, socket, head) => {
+  if (!gate.allows(req)) return gate.rejectUpgrade(socket);
   const up = net.connect(TARGET_PORT, TARGET_HOST, () => {
     let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
     for (let i = 0; i < req.rawHeaders.length; i += 2) raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;

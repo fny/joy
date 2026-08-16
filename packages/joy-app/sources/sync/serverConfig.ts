@@ -65,6 +65,55 @@ export function setServerUrl(url: string | null): void {
     }
 }
 
+// ── relay perimeter key ──────────────────────────────────────────────────────
+// joy-relay's gate requires a shared key on EVERY request before anything
+// reaches happy-server (accounts can't even be created without it). Stored
+// per relay (keyed by relayKeyForUrl) in the same logout-surviving MMKV.
+// Sent as the X-Joy-Relay-Key header on all fetches to the relay origin (via
+// installRelayKeyFetchInterceptor below) and as ?joyRelayKey= on the
+// socket.io handshake (browsers can't set custom WebSocket headers).
+
+const RELAY_ACCESS_KEY_PREFIX = 'relay-access-key:';
+
+export function getRelayAccessKey(url: string = getServerUrl()): string | null {
+    return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || null;
+}
+
+export function setRelayAccessKey(key: string | null, url: string = getServerUrl()): void {
+    const storageKey = RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url);
+    if (key && key.trim()) {
+        serverConfigStorage.set(storageKey, key.trim());
+    } else {
+        serverConfigStorage.delete(storageKey);
+    }
+}
+
+let fetchInterceptorInstalled = false;
+/** Wrap global fetch ONCE: any request to the active relay origin gains the
+ *  X-Joy-Relay-Key header (when a key is configured). One interception point
+ *  instead of touching every api* module; S3/presigned/external URLs are
+ *  untouched because they don't share the relay origin. */
+export function installRelayKeyFetchInterceptor(): void {
+    if (fetchInterceptorInstalled) return;
+    fetchInterceptorInstalled = true;
+    const original = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        try {
+            const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const server = getServerUrl();
+            if (url.startsWith(server)) {
+                const key = getRelayAccessKey(server);
+                if (key) {
+                    const headers = new Headers(init?.headers ?? (typeof input === 'object' && 'headers' in input ? (input as Request).headers : undefined));
+                    if (!headers.has('X-Joy-Relay-Key')) headers.set('X-Joy-Relay-Key', key);
+                    return original(input, { ...init, headers });
+                }
+            }
+        } catch { /* fall through to untouched fetch */ }
+        return original(input, init);
+    }) as typeof fetch;
+}
+
 export function getLogServerUrl(): string | null {
     return serverConfigStorage.getString(LOG_SERVER_KEY) ||
            process.env.EXPO_PUBLIC_LOG_SERVER_URL ||
