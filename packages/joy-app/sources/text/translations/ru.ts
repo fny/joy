@@ -633,6 +633,7 @@ export const ru: TranslationStructure = {
         input: 'Входные данные',
         output: 'Результат',
         openFile: 'Открыть файл',
+        diff: 'Изменения',
     },
 
     toolGroup: {
@@ -970,6 +971,7 @@ export const ru: TranslationStructure = {
 
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Переключено в режим ${mode}`,
+        compactionSummary: 'Сводка компактификации',
         unknownEvent: 'Неизвестное событие',
         usageLimitUntil: ({ time }: { time: string }) => `Лимит использования достигнут до ${time}`,
         unknownTime: 'неизвестное время',

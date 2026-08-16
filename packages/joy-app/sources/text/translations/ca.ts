@@ -617,6 +617,7 @@ export const ca: TranslationStructure = {
         input: 'Entrada',
         output: 'Sortida',
         openFile: 'Obre el fitxer',
+        diff: 'Diferències',
     },
 
     toolGroup: {
@@ -966,6 +967,7 @@ export const ca: TranslationStructure = {
 
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `S'ha canviat al mode ${mode}`,
+        compactionSummary: 'Resum de compactació',
         unknownEvent: 'Esdeveniment desconegut',
         usageLimitUntil: ({ time }: { time: string }) => `Límit d'ús assolit fins a ${time}`,
         unknownTime: 'temps desconegut',

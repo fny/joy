@@ -15,6 +15,8 @@ interface ChatHeaderViewProps {
     extraPathSegment?: string;
     /** Optional content rendered at the right edge of the header (used by file-view / diff overlays). */
     rightSlot?: React.ReactNode;
+    /** Optional content rendered at the left edge, after the back button (e.g. collapse-all-tools toggle). */
+    leftSlot?: React.ReactNode;
     /** Small inline badge rendered after the title (e.g. '>_' for joy-tmux sessions). */
     badge?: string;
     onTitlePress?: () => void;
@@ -29,6 +31,7 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
     folderName,
     extraPathSegment,
     rightSlot,
+    leftSlot,
     badge,
     onTitlePress,
     onBackPress,
@@ -54,6 +57,11 @@ export const ChatHeaderView: React.FC<ChatHeaderViewProps> = ({
                             />
                         </Pressable>
                     )}
+                    {leftSlot ? (
+                        <View style={styles.leftSlot}>
+                            {leftSlot}
+                        </View>
+                    ) : null}
                     <Pressable
                         style={styles.titleContainer}
                         onPress={onTitlePress}
@@ -170,6 +178,12 @@ const styles = StyleSheet.create({
         minWidth: 0,
         fontSize: 13,
         flexShrink: 1,
+    },
+    leftSlot: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        marginRight: 8,
+        flexShrink: 0,
     },
     rightSlot: {
         flexDirection: 'row',

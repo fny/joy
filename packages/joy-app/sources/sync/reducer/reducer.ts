@@ -129,6 +129,7 @@ type ReducerMessage = {
     tool: ToolCall | null;
     meta?: MessageMeta;
     claudeUuid?: string;
+    isCompactSummary?: boolean;
 }
 
 type StoredPermission = {
@@ -756,6 +757,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 event: null,
                 meta: msg.meta,
                 claudeUuid: msg.claudeUuid,
+                ...(msg.content.isCompactSummary ? { isCompactSummary: true } : {}),
             });
 
             // Track both localId and messageId
@@ -1277,6 +1279,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             text: reducerMsg.text,
             ...(reducerMsg.meta?.displayText && { displayText: reducerMsg.meta.displayText }),
             ...(reducerMsg.claudeUuid && { claudeUuid: reducerMsg.claudeUuid }),
+            ...(reducerMsg.isCompactSummary && { isCompactSummary: true }),
             meta: reducerMsg.meta
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.text !== null) {

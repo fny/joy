@@ -615,6 +615,7 @@ export const it: TranslationStructure = {
         input: 'Input',
         output: 'Output',
         openFile: 'Apri file',
+        diff: 'Differenze',
     },
 
     toolGroup: {
@@ -964,6 +965,7 @@ export const it: TranslationStructure = {
 
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Passato alla modalità ${mode}`,
+        compactionSummary: 'Riepilogo compattazione',
         unknownEvent: 'Evento sconosciuto',
         usageLimitUntil: ({ time }: { time: string }) => `Limite di utilizzo raggiunto fino a ${time}`,
         unknownTime: 'ora sconosciuta',

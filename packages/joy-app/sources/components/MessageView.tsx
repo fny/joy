@@ -130,6 +130,11 @@ function UserTextBlock(props: {
   // Harness-injected pseudo-XML blocks (task notifications, system reminders,
   // unknown tags) — render as cards/chips or strip, so raw XML never shows.
   const rawText = props.message.displayText || props.message.text;
+  // Post-compaction summary: a wall of machine-generated context, not a user
+  // message — render as a collapsed toggle row (like tool calls), not a bubble.
+  if (props.message.isCompactSummary) {
+    return <CompactSummaryBlock text={rawText} />;
+  }
   const harness = parseHarnessBlock(rawText);
   if (harness.kind === 'task-notification') {
     return <TaskNotificationCard status={harness.status} summary={harness.summary} />;
@@ -377,6 +382,28 @@ function AgentTextBlock(props: {
   );
 }
 
+// Collapsed-by-default row for the post-compaction summary. The text is huge
+// and machine-authored; nobody wants it open in the scrollback, but it must
+// stay reachable (it explains what the agent still "knows").
+function CompactSummaryBlock(props: { text: string }) {
+  const { theme } = useUnistyles();
+  const [expanded, setExpanded] = React.useState(false);
+  return (
+    <View style={styles.compactSummaryContainer}>
+      <Pressable onPress={() => setExpanded(v => !v)} style={styles.compactSummaryHeader} hitSlop={4}>
+        <Ionicons name="archive-outline" size={16} color={theme.colors.textSecondary} />
+        <Text style={styles.compactSummaryTitle}>{t('message.compactionSummary')}</Text>
+        <Ionicons name={expanded ? 'chevron-down' : 'chevron-forward'} size={14} color={theme.colors.textSecondary} />
+      </Pressable>
+      {expanded && (
+        <Text style={styles.compactSummaryText} selectable>
+          {props.text}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function AgentEventBlock(props: {
   event: AgentEvent;
   metadata: Metadata | null;
@@ -618,6 +645,35 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: 8,
     maxWidth: '100%',
     overflow: 'hidden',
+  },
+  compactSummaryContainer: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.divider,
+    backgroundColor: theme.colors.surface,
+    overflow: 'hidden',
+  },
+  compactSummaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  compactSummaryTitle: {
+    flex: 1,
+    color: theme.colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  compactSummaryText: {
+    color: theme.colors.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
+    paddingHorizontal: 12,
+    paddingBottom: 12,
   },
   debugText: {
     color: theme.colors.agentEventText,
