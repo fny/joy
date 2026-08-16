@@ -144,16 +144,31 @@ export function startHttpServer(opts: {
     }
 
     // OpenAPI dump of the operation catalog — keyed even though it's a GET
-    // (the API surface itself is not public information). Accepts the header
-    // or a bearer for curl convenience.
-    if (method === "GET" && url.pathname === "/openapi.json") {
+    // (the API surface itself is not public information). Accepts the header,
+    // a bearer, or ?token= (browser URLs can't set headers; localhost-only +
+    // per-instance token makes the query form acceptable here).
+    const openApiAuthed = () => {
       const bearer = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-      if (req.headers["x-joy-token"] !== token && bearer !== token) {
-        return json({ error: "unauthorized" }, 401);
-      }
+      return req.headers["x-joy-token"] === token || bearer === token || url.searchParams.get("token") === token;
+    };
+    if (method === "GET" && url.pathname === "/openapi.json") {
+      if (!openApiAuthed()) return json({ error: "unauthorized" }, 401);
       const addr = server.address();
       const boundPort = addr && typeof addr === "object" ? addr.port : port;
       return json(buildOpenApiSpec({ port: boundPort, version: daemonVersion() }));
+    }
+    // Browsable API docs: /docs?token=… renders the spec with Redoc (CDN
+    // script — the page runs in the user's browser, which can reach the CDN).
+    if (method === "GET" && url.pathname === "/docs") {
+      if (!openApiAuthed()) return json({ error: "unauthorized" }, 401);
+      const specUrl = `/openapi.json?token=${encodeURIComponent(url.searchParams.get("token") ?? "")}`;
+      const page = `<!doctype html><html><head><title>joy-daemon API</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{margin:0}</style></head><body>
+<redoc spec-url="${specUrl}"></redoc>
+<script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+</body></html>`;
+      return send(200, { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" }, page);
     }
 
     // ── Debug-page extras (not operations) ──────────────────────────────
