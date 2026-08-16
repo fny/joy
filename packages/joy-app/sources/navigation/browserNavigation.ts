@@ -84,6 +84,13 @@ export function applyRouteHistoryPathname(
     };
 }
 
+/** The session CHAT screen itself — Esc-back is suppressed there (it aborts
+ *  the turn or does nothing). Subpages (/session/:id/file, /info, …) keep
+ *  Esc-back: leaving them returns to the chat, which is what you want. */
+export function isSessionChatPath(pathname: string): boolean {
+    return /^\/session\/[^/]+\/?$/.test(pathname);
+}
+
 export function getKeyboardNavigationDirection(event: KeyboardNavigationEvent): BrowserNavigationDirection | null {
     if (event.defaultPrevented) return null;
     if (event.key !== 'Escape') return null;
