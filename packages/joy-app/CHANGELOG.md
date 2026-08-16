@@ -14,6 +14,7 @@ A quality-of-life sweep: collapse the chat clutter, see your actual Anthropic/Op
 - **Session list by agent.** Settings → Sessions labels and sorts sessions by agent flavor, with a better icon.
 - **Leaner relay picker.** The dev and direct doors are gone — Happy Cloud and Joy Relay only.
 - **Esc stays in the chat.** Pressing Escape in a session aborts the running turn (or does nothing) instead of navigating you out mid-conversation. Subpages and the mouse back-button still go back.
+- **App Lock.** Optional Face ID / device-PIN lock (Settings): the app locks on launch and whenever it returns from the background. Turning it off requires authenticating too.
 
 # Aug 16 — Your own relays, new agents, big files
 

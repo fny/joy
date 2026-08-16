@@ -140,6 +140,8 @@ export const en = {
         exchangingTokens: 'Exchanging tokens...',
         usage: 'Usage',
         usageSubtitle: 'View your API usage and costs',
+        appLock: 'App Lock',
+        appLockSubtitle: 'Require Face ID or device PIN to open the app',
         sessions: 'Sessions',
         sessionsSubtitle: 'Manage tmux-based sessions',
         debug: 'Debug',
@@ -659,6 +661,13 @@ export const en = {
 
     zen: {
         toggle: 'Zen mode',
+    },
+
+    appLock: {
+        prompt: 'Unlock joy',
+        unlock: 'Unlock',
+        noAuthTitle: 'No device security',
+        noAuth: 'Set up Face ID or a device passcode first — the lock uses them.',
     },
 
     toolView: {

@@ -121,6 +121,8 @@ export const ru: TranslationStructure = {
         exchangingTokens: 'Обмен токенов...',
         usage: 'Использование',
         usageSubtitle: 'Просмотр использования API и затрат',
+        appLock: 'Блокировка приложения',
+        appLockSubtitle: 'Требовать Face ID или PIN устройства для входа',
         sessions: 'Sessions',
         sessionsSubtitle: 'Управление сессиями на основе tmux',
         debug: 'Отладка',
@@ -626,6 +628,13 @@ export const ru: TranslationStructure = {
 
     zen: {
         toggle: 'Дзен-режим',
+    },
+
+    appLock: {
+        prompt: 'Разблокировать joy',
+        unlock: 'Разблокировать',
+        noAuthTitle: 'Нет защиты устройства',
+        noAuth: 'Сначала настройте Face ID или код устройства — блокировка использует их.',
     },
 
     toolView: {
