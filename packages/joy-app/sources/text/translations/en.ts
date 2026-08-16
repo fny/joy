@@ -161,7 +161,7 @@ export const en: TranslationStructure = {
         sessionsSubtitle: 'Manage tmux-based sessions',
         debug: 'Debug',
         joyHttp: 'Joy HTTP',
-        joyHttpSubtitle: 'Direct HTTP access to joy-tmux server',
+        joyHttpSubtitle: 'Direct HTTP access to the joy-daemon',
         // Dynamic settings messages
         accountConnected: ({ service }: { service: string }) => `${service} account connected`,
         machineStatus: ({ name, status }: { name: string; status: 'online' | 'offline' }) =>
@@ -1095,11 +1095,11 @@ export const en: TranslationStructure = {
         statusOffline: 'offline',
         showOfflineMachines: ({ count }: { count: number }) => `Show ${count} offline ${count === 1 ? 'machine' : 'machines'}`,
         hideOfflineMachines: 'Hide offline machines',
-        machineFooter: 'Machine running joy-tmux',
+        machineFooter: 'Machine running joy-daemon',
         noMachine: 'No machines connected',
         selectMachine: 'Select Machine',
         serverUrl: 'Server URL',
-        serverUrlFooter: 'URL of the joy-tmux server running on your machine',
+        serverUrlFooter: 'URL of the joy-daemon running on your machine',
         sessions: 'Sessions',
         noSessions: 'No active sessions',
         loading: 'Loading...',

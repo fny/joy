@@ -173,18 +173,6 @@ export default React.memo(function VoiceSettingsScreen() {
                 </ItemGroup>
             ) : null}
 
-            {/* Support / Upgrade */}
-            {!hasPro && (
-                <ItemGroup>
-                    <Item
-                        title={t('settingsVoice.supportTitle')}
-                        subtitle={t('settingsVoice.supportSubtitle')}
-                        icon={<Ionicons name="heart-outline" size={29} color="#FF2D55" />}
-                        onPress={handleSupportUs}
-                    />
-                </ItemGroup>
-            )}
-
             {devModeEnabled && (
                 <ItemGroup
                     title="Developer"

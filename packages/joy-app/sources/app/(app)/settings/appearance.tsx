@@ -292,18 +292,6 @@ export default function AppearanceSettingsScreen() {
                     }
                 />
                 <Item
-                    title={t('settingsAppearance.avatarStyle')}
-                    subtitle={t('settingsAppearance.avatarStyleDescription')}
-                    icon={<Ionicons name="person-circle-outline" size={29} color={theme.colors.accents.indigo} />}
-                    detail={displayStyle === 'pixelated' ? t('settingsAppearance.avatarOptions.pixelated') : displayStyle === 'brutalist' ? t('settingsAppearance.avatarOptions.brutalist') : t('settingsAppearance.avatarOptions.gradient')}
-                    onPress={() => {
-                        const currentIndex = displayStyle === 'pixelated' ? 0 : displayStyle === 'gradient' ? 1 : 2;
-                        const nextIndex = (currentIndex + 1) % 3;
-                        const nextStyle = nextIndex === 0 ? 'pixelated' : nextIndex === 1 ? 'gradient' : 'brutalist';
-                        setAvatarStyle(nextStyle);
-                    }}
-                />
-                <Item
                     title={t('settingsAppearance.showFlavorIcons')}
                     subtitle={t('settingsAppearance.showFlavorIconsDescription')}
                     icon={<Ionicons name="apps-outline" size={29} color={theme.colors.accents.indigo} />}
