@@ -941,7 +941,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
             onAbort={isDisconnected ? undefined : handleAbort}
-            showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
+            showAbortButton={sessionStatus.state === 'thinking'}
             onFileViewerPress={!isTablet ? handleFileViewerPress : undefined}
             selectedImages={selectedImages}
             onPickImages={handleAttach}
