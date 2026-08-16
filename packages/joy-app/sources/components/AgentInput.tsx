@@ -582,6 +582,11 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         && !props.isSendDisabled
         && (isSendBlocked ? (hasText || hasImages) : (hasText || hasImages || !!props.onMicPress));
 
+    // ABORT takes over the send slot while a turn is processing and the box is
+    // empty; any typed text flips it back to send so mid-turn queueing/steering
+    // stays one tap. Escape still aborts on web regardless.
+    const abortMode = !!(props.showAbortButton && props.onAbort && !hasText && !hasImages && !props.isSending && !isSendBlocked);
+
     // Check if this is a Codex, Gemini, or OpenClaw session
     // Use metadata.flavor for existing sessions, agentType prop for new sessions
     const isCodex = props.metadata?.flavor === 'codex' || props.agentType === 'codex';
@@ -1349,48 +1354,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </Pressable>
                                 )}
 
-                                {/* Abort button */}
-                                {props.onAbort && (
-                                    <Shaker ref={shakerRef}>
-                                        <Pressable
-                                            style={(p) => ({
-                                                flexDirection: 'row',
-                                                alignItems: 'center',
-                                                borderRadius: Platform.select({ default: 16, android: 20 }),
-                                                paddingHorizontal: 8,
-                                                paddingVertical: 6,
-                                                justifyContent: 'center',
-                                                height: 32,
-                                                opacity: p.pressed ? 0.7 : 1,
-                                            })}
-                                            hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
-                                            onPress={handleAbortPress}
-                                            disabled={isAborting}
-                                            accessibilityRole="button"
-                                            accessibilityLabel={t('common.stop')}
-                                            testID="composer-abort-button"
-                                        >
-                                            {isAborting ? (
-                                                <ActivityIndicator
-                                                    size="small"
-                                                    color={theme.colors.button.secondary.tint}
-                                                />
-                                            ) : (
-                                                <Octicons
-                                                    name={"stop"}
-                                                    size={16}
-                                                    color={theme.colors.button.secondary.tint}
-                                                />
-                                            )}
-                                        </Pressable>
-                                    </Shaker>
-                                )}
-
-                                {/* Git Status Badge */}
-                                <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
-                                </View>}
-
-                                {/* Stash current input as an on-device draft */}
+                                {/* Stash current input as an on-device draft — lives in the
+                                    old abort slot; abort itself now takes over the SEND button
+                                    (square icon) while a turn is processing. */}
                                 {props.onSaveDraft && hasText && (
                                     <Pressable
                                         onPress={props.onSaveDraft}
@@ -1398,28 +1364,38 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         accessibilityRole="button"
                                         accessibilityLabel="Save draft"
                                         style={(p) => ({
-                                            width: 32,
-                                            height: 32,
+                                            flexDirection: 'row',
                                             alignItems: 'center',
+                                            borderRadius: Platform.select({ default: 16, android: 20 }),
+                                            paddingHorizontal: 8,
+                                            paddingVertical: 6,
                                             justifyContent: 'center',
-                                            marginRight: 6,
+                                            height: 32,
                                             opacity: p.pressed ? 0.7 : 1,
                                         })}
                                     >
                                         <Ionicons
                                             name="create-outline"
-                                            size={20}
+                                            size={18}
                                             color={theme.colors.button.secondary.tint}
                                         />
                                     </Pressable>
                                 )}
 
-                                {/* Send/Voice button - aligned with first row */}
+                                {/* Git Status Badge */}
+                                <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
+                                </View>}
+
+                                {/* Send/Voice button - aligned with first row. While a turn is
+                                    processing and the box is empty it becomes the ABORT button
+                                    (square icon, ChatGPT-style); typing text flips it back to
+                                    send so mid-turn queueing stays one tap. */}
+                                <Shaker ref={shakerRef}>
                                 <View
                                     style={[
                                         styles.sendButton,
                                         isSendBlocked ? styles.sendButtonLocked :
-                                        (hasText || props.isSending || (props.onMicPress && !props.isMicActive))
+                                        (abortMode || hasText || props.isSending || (props.onMicPress && !props.isMicActive))
                                             ? styles.sendButtonActive
                                             : styles.sendButtonInactive
                                     ]}
@@ -1433,10 +1409,25 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             opacity: p.pressed ? 0.7 : 1,
                                         })}
                                         hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
-                                        onPress={handleSendPress}
-                                        disabled={!canPressSendButton}
+                                        onPress={abortMode ? handleAbortPress : handleSendPress}
+                                        disabled={abortMode ? isAborting : !canPressSendButton}
+                                        accessibilityLabel={abortMode ? t('common.stop') : undefined}
+                                        testID={abortMode ? 'composer-abort-button' : undefined}
                                     >
-                                        {props.isSending ? (
+                                        {abortMode ? (
+                                            isAborting ? (
+                                                <ActivityIndicator
+                                                    size="small"
+                                                    color={theme.colors.button.primary.tint}
+                                                />
+                                            ) : (
+                                                <Ionicons
+                                                    name="stop"
+                                                    size={16}
+                                                    color={theme.colors.button.primary.tint}
+                                                />
+                                            )
+                                        ) : props.isSending ? (
                                             <ActivityIndicator
                                                 size="small"
                                                 color={theme.colors.button.primary.tint}
@@ -1479,6 +1470,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         )}
                                     </Pressable>
                                 </View>
+                                </Shaker>
                             </View>
                         </View>
                     </View>
