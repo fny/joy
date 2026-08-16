@@ -16,6 +16,7 @@ import { SidebarNavigator } from '@/components/SidebarNavigator';
 import sodium from '@/encryption/libsodium.lib';
 import { View, Platform, AppState } from 'react-native';
 import { ModalProvider } from '@/modal';
+import { AppLockGate } from '@/components/AppLockGate';
 import { syncRestore } from '@/sync/sync';
 import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
@@ -418,6 +419,7 @@ export default function RootLayout() {
                                     </RealtimeProvider>
                                 </CommandPaletteProvider>
                             </ModalProvider>
+                            <AppLockGate />
                         </ThemeProvider>
                     </AuthProvider>
                 </GestureHandlerRootView>

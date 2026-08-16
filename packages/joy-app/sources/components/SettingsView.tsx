@@ -12,6 +12,8 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useConnectTerminal } from '@/hooks/useConnectTerminal';
 import { useLocalSettingMutable } from '@/sync/storage';
+import * as LocalAuthentication from 'expo-local-authentication';
+import { Switch } from '@/components/Switch';
 import { Modal } from '@/modal';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { useMultiClick } from '@/hooks/useMultiClick';
@@ -120,6 +122,25 @@ export const SettingsView = React.memo(function SettingsView() {
     ].filter(Boolean).join(' / ');
     const versionSubtitle = formatBuildSubtitle(getBuildConfig());
     const [devModeEnabled, setDevModeEnabled] = useLocalSettingMutable('devModeEnabled');
+    // App lock toggle: verify the device HAS security, then require a
+    // successful auth to flip in EITHER direction (no silent disable).
+    const [appLock, setAppLock] = useLocalSettingMutable('appLock');
+    const toggleAppLock = React.useCallback(async (next: boolean) => {
+        try {
+            const level = await LocalAuthentication.getEnrolledLevelAsync();
+            if (level === LocalAuthentication.SecurityLevel.NONE) {
+                Modal.alert(t('appLock.noAuthTitle'), t('appLock.noAuth'));
+                return;
+            }
+            const res = await LocalAuthentication.authenticateAsync({
+                promptMessage: t('appLock.prompt'),
+                disableDeviceFallback: false,
+            });
+            if (res.success) setAppLock(next);
+        } catch {
+            Modal.alert(t('appLock.noAuthTitle'), t('appLock.noAuth'));
+        }
+    }, [setAppLock]);
     const { machines: joyMachines } = useJoyMachines();
     const profile = useProfile();
     const displayName = getDisplayName(profile);
@@ -269,6 +290,15 @@ export const SettingsView = React.memo(function SettingsView() {
                     icon={<Ionicons name="hourglass-outline" size={29} color={theme.colors.accents.orange} />}
                     onPress={() => router.push('/settings/limits' as any)}
                 />
+                {Platform.OS !== 'web' && (
+                    <Item
+                        title={t('settings.appLock')}
+                        subtitle={t('settings.appLockSubtitle')}
+                        icon={<Ionicons name="lock-closed-outline" size={29} color={theme.colors.accents.green ?? '#34C759'} />}
+                        rightElement={<Switch value={appLock} onValueChange={(v) => void toggleAppLock(v)} />}
+                        showChevron={false}
+                    />
+                )}
             </ItemGroup>
 
             {/* Developer — always shown (joy build keeps dev tools in prod) */}

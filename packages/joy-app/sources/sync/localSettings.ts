@@ -27,6 +27,7 @@ export const LocalSettingsSchema = z.object({
     chatFontScale: z.number().describe('Chat message text scale multiplier (1 = 100%), clamped to [0.8, 1.4]'),
     // CLI version acknowledgments - keyed by machineId
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
+    appLock: z.boolean().describe('Require Face ID / device PIN to open the app (native only; device-local)'),
 });
 
 //
@@ -63,6 +64,7 @@ export const localSettingsDefaults: LocalSettings = {
     verboseLogging: false,
     zenMode: false,
     acknowledgedCliVersions: {},
+    appLock: false,
 };
 Object.freeze(localSettingsDefaults);
 

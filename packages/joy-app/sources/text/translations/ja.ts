@@ -143,6 +143,8 @@ export const ja: TranslationStructure = {
         exchangingTokens: 'トークンを交換中...',
         usage: '使用状況',
         usageSubtitle: 'API使用量とコストを確認',
+        appLock: 'アプリロック',
+        appLockSubtitle: 'アプリを開くのに Face ID または端末のパスコードを要求',
         sessions: 'Sessions',
         sessionsSubtitle: 'tmuxベースのセッションを管理',
         debug: 'デバッグ',
@@ -611,6 +613,13 @@ export const ja: TranslationStructure = {
 
     zen: {
         toggle: 'Zenモード',
+    },
+
+    appLock: {
+        prompt: 'joy のロック解除',
+        unlock: 'ロック解除',
+        noAuthTitle: '端末のセキュリティ未設定',
+        noAuth: '先に Face ID または端末のパスコードを設定してください — ロックはそれらを使用します。',
     },
 
     toolView: {

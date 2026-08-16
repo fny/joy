@@ -142,6 +142,8 @@ export const zhHant: TranslationStructure = {
         exchangingTokens: '正在交換權杖...',
         usage: '使用情況',
         usageSubtitle: '查看 API 使用情況和費用',
+        appLock: '應用程式鎖定',
+        appLockSubtitle: '開啟應用程式需要 Face ID 或裝置密碼',
         sessions: 'Sessions',
         sessionsSubtitle: '管理 tmux 工作階段',
         debug: '偵錯',
@@ -610,6 +612,13 @@ export const zhHant: TranslationStructure = {
 
     zen: {
         toggle: '禪模式',
+    },
+
+    appLock: {
+        prompt: '解鎖 joy',
+        unlock: '解鎖',
+        noAuthTitle: '裝置未設定安全性',
+        noAuth: '請先設定 Face ID 或裝置密碼 — 鎖定功能需要使用它們。',
     },
 
     toolView: {

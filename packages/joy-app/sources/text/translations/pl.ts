@@ -158,6 +158,8 @@ export const pl: TranslationStructure = {
         exchangingTokens: 'Wymiana tokenów...',
         usage: 'Użycie',
         usageSubtitle: 'Zobacz użycie API i koszty',
+        appLock: 'Blokada aplikacji',
+        appLockSubtitle: 'Wymagaj Face ID lub PIN-u urządzenia do otwarcia aplikacji',
         sessions: 'Sessions',
         sessionsSubtitle: 'Zarządzaj sesjami opartymi na tmux',
         debug: 'Debug',
@@ -626,6 +628,13 @@ export const pl: TranslationStructure = {
 
     zen: {
         toggle: 'Tryb zen',
+    },
+
+    appLock: {
+        prompt: 'Odblokuj joy',
+        unlock: 'Odblokuj',
+        noAuthTitle: 'Brak zabezpieczeń urządzenia',
+        noAuth: 'Najpierw skonfiguruj Face ID lub kod urządzenia — blokada z nich korzysta.',
     },
 
     toolView: {

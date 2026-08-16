@@ -143,6 +143,8 @@ export const zhHans: TranslationStructure = {
         exchangingTokens: '正在交换令牌...',
         usage: '使用情况',
         usageSubtitle: '查看 API 使用情况和费用',
+        appLock: '应用锁定',
+        appLockSubtitle: '打开应用需要 Face ID 或设备密码',
         sessions: 'Sessions',
         sessionsSubtitle: '管理基于 tmux 的会话',
         debug: '调试',
@@ -611,6 +613,13 @@ export const zhHans: TranslationStructure = {
 
     zen: {
         toggle: '禅模式',
+    },
+
+    appLock: {
+        prompt: '解锁 joy',
+        unlock: '解锁',
+        noAuthTitle: '设备未设置安全性',
+        noAuth: '请先设置 Face ID 或设备密码 — 锁定功能需要使用它们。',
     },
 
     toolView: {

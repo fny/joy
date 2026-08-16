@@ -141,6 +141,8 @@ export const ca: TranslationStructure = {
         exchangingTokens: 'Intercanviant tokens...',
         usage: 'Ús',
         usageSubtitle: "Veure l'ús de l'API i costos",
+        appLock: "Bloqueig de l'app",
+        appLockSubtitle: "Requereix Face ID o el PIN del dispositiu per obrir l'app",
         sessions: 'Sessions',
         sessionsSubtitle: 'Gestiona les sessions basades en tmux',
         debug: 'Depuració',
@@ -610,6 +612,13 @@ export const ca: TranslationStructure = {
 
     zen: {
         toggle: 'Mode zen',
+    },
+
+    appLock: {
+        prompt: 'Desbloqueja joy',
+        unlock: 'Desbloqueja',
+        noAuthTitle: 'Sense seguretat al dispositiu',
+        noAuth: 'Configura primer Face ID o un codi del dispositiu — el bloqueig els utilitza.',
     },
 
     toolView: {
