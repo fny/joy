@@ -14,9 +14,10 @@
 //     point releases inherit their family's pricing).
 
 import { readFile } from "fs/promises";
-import { readdirSync, statSync, existsSync } from "fs";
+import { readdirSync, statSync, existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { joyStateDir } from "../paths";
 
 /** USD per 1M tokens. */
 export interface Rates {
@@ -187,6 +188,69 @@ async function parseFile(path: string, sessionId: string): Promise<FileAgg> {
 // are append-only, so this makes every query after the first one cheap.
 const fileCache = new Map<string, FileAgg>();
 
+// ── disk persistence ─────────────────────────────────────────────────────────
+// The in-memory cache dies with the daemon, so the first usage query after a
+// restart used to re-parse EVERY transcript (seconds of wall time on months of
+// history — the reason a native binary was considered; the persistent cache
+// makes it moot). The cache round-trips to ~/.joy/usage-cache.json: loaded
+// lazily on the first computeUsage, saved whenever a compute actually parsed
+// files. A background refresh (see server.ts) recomputes every 2h so the cache
+// is warm before anyone asks.
+const CACHE_FORMAT = 1;
+
+type FileAggJson = Omit<FileAgg, "perDayModel" | "perDayTurns" | "tools" | "mcp"> & {
+  perDayModel: Array<[string, Tok]>;
+  perDayTurns: Array<[string, number]>;
+  tools: Array<[string, number]>;
+  mcp: Array<[string, number]>;
+};
+
+function usageCachePath(): string {
+  return join(joyStateDir(), "usage-cache.json");
+}
+
+let diskCacheLoaded = false;
+function loadDiskCacheOnce(): void {
+  if (diskCacheLoaded) return;
+  diskCacheLoaded = true;
+  try {
+    const raw = JSON.parse(readFileSync(usageCachePath(), "utf-8")) as { format?: number; files?: Record<string, FileAggJson> };
+    if (raw.format !== CACHE_FORMAT || !raw.files) return;
+    for (const [path, j] of Object.entries(raw.files)) {
+      fileCache.set(path, {
+        ...j,
+        perDayModel: new Map(j.perDayModel),
+        perDayTurns: new Map(j.perDayTurns),
+        tools: new Map(j.tools),
+        mcp: new Map(j.mcp),
+      });
+    }
+  } catch { /* no cache yet, or unreadable — cold parse repopulates it */ }
+}
+
+function saveDiskCache(): void {
+  try {
+    const files: Record<string, FileAggJson> = {};
+    for (const [path, agg] of fileCache) {
+      files[path] = {
+        ...agg,
+        perDayModel: [...agg.perDayModel],
+        perDayTurns: [...agg.perDayTurns],
+        tools: [...agg.tools],
+        mcp: [...agg.mcp],
+      };
+    }
+    mkdirSync(joyStateDir(), { recursive: true });
+    // Atomic-ish: write a sibling then rename, so a crash mid-write never
+    // leaves a truncated cache that poisons the next boot.
+    const tmp = usageCachePath() + ".tmp";
+    writeFileSync(tmp, JSON.stringify({ format: CACHE_FORMAT, files }));
+    renameSync(tmp, usageCachePath());
+  } catch (e) {
+    process.stderr.write(`[usage] cache save failed: ${e}\n`);
+  }
+}
+
 function listTranscripts(root: string): Array<{ path: string; sessionId: string }> {
   const out: Array<{ path: string; sessionId: string }> = [];
   if (!existsSync(root)) return out;
@@ -245,6 +309,8 @@ export interface UsageReport {
 
 export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
   const root = q.root ?? join(homedir(), ".claude", "projects");
+  // Tests pass their own root — keep their runs off the real disk cache.
+  if (!q.root) loadDiskCacheOnce();
 
   const files = listTranscripts(root);
   // Evict cache entries whose files vanished (deleted/rotated transcripts) so
@@ -254,6 +320,7 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
     if (!live.has(path)) fileCache.delete(path);
   }
   const aggs: FileAgg[] = [];
+  let parsed = 0;
   for (const { path, sessionId } of files) {
     let st;
     try {
@@ -269,7 +336,11 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
     const agg = await parseFile(path, sessionId);
     fileCache.set(path, agg);
     aggs.push(agg);
+    parsed++;
   }
+  // Persist only when something actually re-parsed (real runs, not tests) —
+  // an all-cache-hits query costs a stat sweep, no rewrite.
+  if (parsed > 0 && !q.root) saveDiskCache();
 
   const total = zeroTok();
   const daily = new Map<string, { cost: number; calls: number }>();

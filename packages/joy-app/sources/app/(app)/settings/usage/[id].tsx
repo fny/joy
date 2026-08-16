@@ -689,9 +689,12 @@ const styles = StyleSheet.create((theme) => ({
         borderWidth: StyleSheet.hairlineWidth,
         borderColor: theme.colors.divider,
     },
+    // textLink, NOT button.primary.background — that token is #000000 in BOTH
+    // themes, so the active pill was invisible on dark (same trap as the
+    // fork-checkbox glyph).
     chipActive: {
-        backgroundColor: theme.colors.button.primary.background,
-        borderColor: theme.colors.button.primary.background,
+        backgroundColor: theme.colors.textLink,
+        borderColor: theme.colors.textLink,
     },
     chipText: {
         fontSize: 13,
@@ -699,7 +702,7 @@ const styles = StyleSheet.create((theme) => ({
         ...Typography.default('semiBold'),
     },
     chipTextActive: {
-        color: theme.colors.button.primary.tint,
+        color: '#FFFFFF',
     },
     card: {
         backgroundColor: theme.colors.surface,
