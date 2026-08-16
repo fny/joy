@@ -513,6 +513,9 @@ export type NormalizedMessage = ({
     content: {
         type: 'text';
         text: string;
+        /** True for the synthetic post-compaction summary message — rendered
+         *  as a collapsed block, not a normal user bubble. */
+        isCompactSummary?: boolean;
     }
 } | {
     role: 'agent'
@@ -783,9 +786,14 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                 return null;
             }
 
-            // Skip compact summary messages
+            // Compact summaries flow through as a collapsible user-text block
+            // (flagged below). Any OTHER compact-summary shape stays dropped —
+            // the summary is always a user message with string content.
             if (raw.content.data.isCompactSummary) {
-                return null;
+                const d = raw.content.data;
+                if (!(d.type === 'user' && d.message && typeof d.message.content === 'string')) {
+                    return null;
+                }
             }
 
             // Handle Result messages (e.g. slash command errors like "Unknown skill: mcp")
@@ -885,7 +893,8 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                         isSidechain: false,
                         content: {
                             type: 'text',
-                            text: raw.content.data.message.content
+                            text: raw.content.data.message.content,
+                            ...(raw.content.data.isCompactSummary ? { isCompactSummary: true } : {}),
                         },
                         claudeUuid: raw.content.data.uuid,
                     };

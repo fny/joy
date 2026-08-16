@@ -17,6 +17,7 @@ import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
+import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
 import { useImagePicker } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
@@ -241,6 +242,26 @@ export const SessionView = React.memo((props: { id: string }) => {
 
     // joy-tmux sessions: header shortcut to the interactive tmux pane
     // (/joy/pane) for raw intervention — trust prompts, TUI menus, etc.
+    // Top-left collapse/expand-all-tool-calls toggle (task: reduce scrollback
+    // noise in one tap). State lives in the useToolsCollapsed store; every
+    // ToolView subscribes.
+    const toolsCollapsed = useToolsCollapsed((s) => s.collapsed);
+    const collapseAllSlot = React.useMemo(() => (
+        <Pressable
+            onPress={() => useToolsCollapsed.getState().toggle()}
+            hitSlop={10}
+            style={{ paddingHorizontal: 4 }}
+            accessibilityRole="button"
+            accessibilityLabel={toolsCollapsed ? 'Expand all tool calls' : 'Collapse all tool calls'}
+        >
+            <Ionicons
+                name={toolsCollapsed ? 'chevron-expand-outline' : 'chevron-collapse-outline'}
+                size={19}
+                color={theme.colors.header.tint}
+            />
+        </Pressable>
+    ), [toolsCollapsed, theme]);
+
     const joyTerminalSlot = React.useMemo(() => {
         const joyId = session?.metadata?.joy__sessionId;
         const joyMachine = session?.metadata?.machineId;
@@ -295,6 +316,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         badge={headerProps.badge}
                         extraPathSegment={fileViewPath ?? undefined}
                         rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : joyTerminalSlot}
+                        leftSlot={collapseAllSlot}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
                         onBackPress={() => router.back()}
                     />

@@ -633,6 +633,7 @@ export const pl: TranslationStructure = {
         input: 'Wejście',
         output: 'Wyjście',
         openFile: 'Otwórz plik',
+        diff: 'Różnice',
     },
 
     toolGroup: {
@@ -982,6 +983,7 @@ export const pl: TranslationStructure = {
 
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Przełączono na tryb ${mode}`,
+        compactionSummary: 'Podsumowanie kompaktowania',
         unknownEvent: 'Nieznane zdarzenie',
         usageLimitUntil: ({ time }: { time: string }) => `Osiągnięto limit użycia do ${time}`,
         unknownTime: 'nieznany czas',

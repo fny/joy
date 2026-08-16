@@ -9,6 +9,7 @@ import { ToolSectionView } from './ToolSectionView';
 import { useElapsedTime } from '@/hooks/useElapsedTime';
 import { ToolError } from './ToolError';
 import { knownTools } from '@/components/tools/knownTools';
+import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
 import { Metadata } from '@/sync/storageTypes';
 import { useRouter } from 'expo-router';
 import { PermissionFooter } from './PermissionFooter';
@@ -30,6 +31,15 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     const { tool, onPress, sessionId, messageId } = props;
     const router = useRouter();
     const { theme } = useUnistyles();
+
+    // Global collapse-all (session header button) + per-card override. The
+    // override resets whenever the global toggles (nonce bump) so the button
+    // always wins the next round.
+    const globalCollapsed = useToolsCollapsed((s) => s.collapsed);
+    const collapseNonce = useToolsCollapsed((s) => s.nonce);
+    const [collapseOverride, setCollapseOverride] = React.useState<boolean | null>(null);
+    React.useEffect(() => { setCollapseOverride(null); }, [collapseNonce]);
+    const isCollapsed = collapseOverride ?? globalCollapsed;
 
     // For file-editing tools, navigate to file route instead of message detail
     const fileEditTools = ['Edit', 'MultiEdit', 'Write'];
@@ -227,16 +237,31 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
         );
     };
 
+    // Per-card collapse chevron — only where there's content to hide.
+    const collapseChevron = (!minimal && !isCompactTerminalTool) ? (
+        <TouchableOpacity
+            onPress={() => setCollapseOverride(!isCollapsed)}
+            hitSlop={10}
+            activeOpacity={0.6}
+            accessibilityRole="button"
+            accessibilityLabel={isCollapsed ? 'Expand tool output' : 'Collapse tool output'}
+        >
+            <Ionicons name={isCollapsed ? 'chevron-forward' : 'chevron-down'} size={14} color={theme.colors.textSecondary} />
+        </TouchableOpacity>
+    ) : null;
+
     return (
         <View style={isCompactTerminalTool ? styles.compactContainer : isInlineCodexPatch ? styles.inlineContainer : styles.container}>
             {renderCardHeader ? (
                 isPressable ? (
                     <TouchableOpacity style={isCompactTerminalTool ? styles.compactHeader : styles.header} onPress={handlePress} activeOpacity={0.8}>
                         {renderHeaderContent()}
+                        {collapseChevron}
                     </TouchableOpacity>
                 ) : (
                     <View style={isCompactTerminalTool ? styles.compactHeader : styles.header}>
                         {renderHeaderContent()}
+                        {collapseChevron}
                     </View>
                 )
             ) : null}
@@ -244,7 +269,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
             {/* Content area - either custom children or tool-specific view */}
             {(() => {
                 // Check if minimal first - minimal tools don't show content
-                if (minimal || isCompactTerminalTool) {
+                if (minimal || isCompactTerminalTool || isCollapsed) {
                     return null;
                 }
 

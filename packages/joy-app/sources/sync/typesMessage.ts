@@ -43,6 +43,8 @@ export type UserTextMessage = {
      * older messages and non-Claude agents may not have one.
      */
     claudeUuid?: string;
+    /** Post-compaction summary — rendered as a collapsed block, not a bubble. */
+    isCompactSummary?: boolean;
 }
 
 export type ModeSwitchMessage = {

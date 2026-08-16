@@ -1,7 +1,10 @@
 import * as React from 'react';
-import { View } from 'react-native';
+import { View, Text, Pressable } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useUnistyles } from 'react-native-unistyles';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { useSetting } from '@/sync/storage';
+import { t } from '@/text';
 
 interface ToolDiffViewProps {
     /** Pre-built unified-diff patch string. Preferred when available. */
@@ -18,6 +21,22 @@ interface ToolDiffViewProps {
     showPlusMinusSymbols?: boolean;
 }
 
+/** +N −M counts for the collapse toggle — from the patch when present,
+ *  otherwise a cheap line-count delta of the old/new pair. */
+function diffCounts(patch?: string, oldText?: string, newText?: string): { added: number; removed: number } {
+    if (patch) {
+        let added = 0, removed = 0;
+        for (const line of patch.split('\n')) {
+            if (line.startsWith('+') && !line.startsWith('+++')) added++;
+            else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+        }
+        return { added, removed };
+    }
+    const oldLines = oldText ? oldText.split('\n').length : 0;
+    const newLines = newText ? newText.split('\n').length : 0;
+    return { added: Math.max(0, newLines - oldLines) || newLines, removed: Math.max(0, oldLines - newLines) };
+}
+
 export const ToolDiffView = React.memo<ToolDiffViewProps>(({
     patch,
     oldText,
@@ -26,10 +45,15 @@ export const ToolDiffView = React.memo<ToolDiffViewProps>(({
     style,
     showLineNumbers,
 }) => {
+    const { theme } = useUnistyles();
     const wrapLines = useSetting('wrapLinesInDiffs');
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
+    // Expanded by default — the collapse is for taming long scrollback, so it's
+    // per-diff local state (mirrors CodexPatchView's per-file chevron).
+    const [expanded, setExpanded] = React.useState(true);
 
     const effectiveFileName = fileName ?? 'file.txt';
+    const counts = React.useMemo(() => diffCounts(patch, oldText, newText), [patch, oldText, newText]);
 
     // Chat tool diffs are always inline unified — the split view lives on the
     // dedicated InlineFileDiff pane (controlled via the diffStyle setting).
@@ -40,21 +64,33 @@ export const ToolDiffView = React.memo<ToolDiffViewProps>(({
         diffStyle: 'unified' as const,
     };
 
-    if (patch) {
-        return (
-            <View style={[{ flex: 1 }, style]}>
-                <PierreDiffView patch={patch} {...common} />
-            </View>
-        );
-    }
-
     return (
         <View style={[{ flex: 1 }, style]}>
-            <PierreDiffView
-                oldFile={{ name: effectiveFileName, contents: oldText ?? '' }}
-                newFile={{ name: effectiveFileName, contents: newText ?? '' }}
-                {...common}
-            />
+            <Pressable
+                onPress={() => setExpanded(v => !v)}
+                hitSlop={6}
+                accessibilityRole="button"
+                accessibilityLabel={expanded ? 'Collapse diff' : 'Expand diff'}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 4 }}
+            >
+                <Ionicons name={expanded ? 'chevron-down' : 'chevron-forward'} size={13} color={theme.colors.textSecondary} />
+                <Text style={{ fontSize: 12, color: theme.colors.textSecondary }}>
+                    {t('toolView.diff')}
+                    {'  '}
+                    <Text style={{ color: '#34C759' }}>+{counts.added}</Text>
+                    {' '}
+                    <Text style={{ color: '#FF3B30' }}>−{counts.removed}</Text>
+                </Text>
+            </Pressable>
+            {expanded && (patch ? (
+                <PierreDiffView patch={patch} {...common} />
+            ) : (
+                <PierreDiffView
+                    oldFile={{ name: effectiveFileName, contents: oldText ?? '' }}
+                    newFile={{ name: effectiveFileName, contents: newText ?? '' }}
+                    {...common}
+                />
+            ))}
         </View>
     );
 });

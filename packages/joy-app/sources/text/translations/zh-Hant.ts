@@ -617,6 +617,7 @@ export const zhHant: TranslationStructure = {
         input: '輸入',
         output: '輸出',
         openFile: '開啟檔案',
+        diff: '差異',
     },
 
     toolGroup: {
@@ -966,6 +967,7 @@ export const zhHant: TranslationStructure = {
 
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `已切換到 ${mode} 模式`,
+        compactionSummary: '壓縮摘要',
         unknownEvent: '未知事件',
         usageLimitUntil: ({ time }: { time: string }) => `使用限制到 ${time}`,
         unknownTime: '未知時間',
