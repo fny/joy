@@ -74,3 +74,27 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
     },
   };
 }
+
+const REDOC_PAGE = `<!doctype html><html><head><title>joy relay API</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{margin:0}</style></head><body>
+<redoc spec-url="/openapi.json"></redoc>
+<script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+</body></html>`;
+
+/** Handle /docs and /openapi.json; returns true when the request was ours.
+ *  Runs AFTER the gate (callers check the gate first), so a flipped relay
+ *  keys these like everything else. */
+export function handleDocs(req, res, { version, routeTable = null }) {
+  const path = (req.url ?? '').split('?')[0];
+  if (req.method !== 'GET' || (path !== '/docs' && path !== '/openapi.json')) return false;
+  const host = `https://${req.headers.host ?? 'joy.voltai.party:4997'}`;
+  if (path === '/openapi.json') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(buildRelaySpec({ version, host, routeTable })));
+  } else {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(REDOC_PAGE);
+  }
+  return true;
+}
