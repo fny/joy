@@ -14,7 +14,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import {
   createRelaySession, encodeUserMessage, encodeTurnEnd,
@@ -114,9 +114,24 @@ export class PiSession implements AgentSession {
     try {
       const args = ["--mode", "rpc", "--no-session"];
       if (this.model) args.push("--model", this.model);
+      // Provider keys: merge ~/.joy/env fresh at SPAWN time (not just daemon
+      // boot) so a key added after the daemon started still reaches pi —
+      // "pi had trouble using the fireworks api key" was this ordering.
+      const env = { ...process.env };
+      try {
+        for (const raw of readFileSync(join(homedir(), ".joy", "env"), "utf8").split("\n")) {
+          const line = raw.trim().replace(/^export\s+/, "");
+          if (!line || line.startsWith("#")) continue;
+          const eq = line.indexOf("=");
+          if (eq <= 0) continue;
+          const k = line.slice(0, eq).trim();
+          const v = line.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+          if (k && v) env[k] = v;
+        }
+      } catch { /* no ~/.joy/env — spawn with daemon env */ }
       const proc = spawn(piBinary(), args, {
         cwd: this.cwd,
-        env: process.env,
+        env,
         stdio: ["pipe", "pipe", "pipe"],
       });
       this.#proc = proc;
