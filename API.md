@@ -34,6 +34,15 @@ Every operation exists in up to three forms, generated from one table:
 | Session RPC | relay socket (`sessionRPC`) | bare name (happy-compatible) |
 | HTTP | local daemon server | method + path below |
 
+## Machine-readable spec
+
+`GET /openapi.json` on the daemon's local HTTP server dumps OpenAPI 3.1
+generated from the op catalog at request time (`transports/openapi.ts`) —
+**requires the instance token** (X-Joy-Token header or Bearer) even though it
+is a GET. Each route carries `x-rpc-name`; RPC-only ops appear under
+`x-rpc-only`. Op `summary` is set everywhere; `params`/`result` JSON-Schema
+annotations are incremental (permissive objects where absent).
+
 ## Machine-scope operations
 
 | rpcName | HTTP | What |
