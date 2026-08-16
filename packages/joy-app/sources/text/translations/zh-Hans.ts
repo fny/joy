@@ -133,7 +133,6 @@ export const zhHans: TranslationStructure = {
         reportIssue: '报告问题',
         privacyPolicy: '隐私政策',
         termsOfService: '服务条款',
-        eula: '最终用户许可协议',
         supportUs: '支持我们',
         supportUsSubtitlePro: '感谢您的支持！',
         supportUsSubtitle: '支持项目开发',

@@ -133,7 +133,6 @@ export const ja: TranslationStructure = {
         reportIssue: '問題を報告',
         privacyPolicy: 'プライバシーポリシー',
         termsOfService: '利用規約',
-        eula: 'EULA',
         supportUs: '開発を支援',
         supportUsSubtitlePro: 'ご支援ありがとうございます！',
         supportUsSubtitle: 'プロジェクト開発を支援',

@@ -1,7 +1,7 @@
 {
   "name": "@fny/joy-daemon",
   "version": "1.11.3",
-  "description": "joy-daemon daemon + CLI \u2014 run Claude Code sessions in tmux, bridged to the joy/Happy relay.",
+  "description": "joy-daemon daemon + CLI — run Claude Code sessions in tmux, bridged to the joy/Happy relay.",
   "type": "module",
   "bin": {
     "joy": "./bin/joy.mjs"
@@ -31,6 +31,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "smol-toml": "^1.8.0",
     "socket.io-client": "^4.8.0",
     "tsx": "^4.20.6",
     "tweetnacl": "^1.0.3",

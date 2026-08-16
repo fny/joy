@@ -111,7 +111,6 @@ export const ru: TranslationStructure = {
         reportIssue: 'Сообщить о проблеме',
         privacyPolicy: 'Политика конфиденциальности',
         termsOfService: 'Условия использования',
-        eula: 'EULA',
         supportUs: 'Поддержите нас',
         supportUsSubtitlePro: 'Спасибо за вашу поддержку!',
         supportUsSubtitle: 'Поддержать разработку проекта',
