@@ -95,7 +95,10 @@ export const settingsDefaults: Settings = {
     showLineNumbersInToolViews: false,
     wrapLinesInDiffs: true,
     diffStyle: 'unified',
-    experiments: false,
+    // Default-ON in joy: these gate daily-driver UI (file browser,
+    // attachments). A fresh account/universe must start with the full app —
+    // 'features vanished on a new relay' (2026-08-16) was these defaulting off.
+    experiments: true,
     notificationsDesktop: true,
     notificationsMobile: true,
     alwaysShowContextSize: false,
@@ -107,7 +110,7 @@ export const settingsDefaults: Settings = {
     expResumeSession: false,
     fileDiffsSidebar: false,
     groupToolCalls: false,
-    expImageUpload: false,
+    expImageUpload: true,
     reviewPromptAnswered: false,
     reviewPromptLikedApp: null,
     voiceAssistantLanguage: null,
