@@ -680,7 +680,7 @@ function NewJoyTmuxSessionScreen() {
                                 <Ionicons
                                     name={continueLast ? 'checkbox' : 'square-outline'}
                                     size={15}
-                                    color={continueLast ? theme.colors.button.primary.background : theme.colors.textSecondary}
+                                    color={continueLast ? theme.colors.textLink : theme.colors.textSecondary}
                                 />
                                 <Text style={styles.configLabel} numberOfLines={1}>continue</Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
@@ -699,7 +699,7 @@ function NewJoyTmuxSessionScreen() {
                                 <Ionicons
                                     name={continueLast && forkSession ? 'checkbox' : 'square-outline'}
                                     size={15}
-                                    color={continueLast && forkSession ? theme.colors.button.primary.background : theme.colors.textSecondary}
+                                    color={continueLast && forkSession ? theme.colors.textLink : theme.colors.textSecondary}
                                 />
                                 <Text style={styles.configLabel} numberOfLines={1}>fork</Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
