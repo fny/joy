@@ -44,6 +44,7 @@ import { SessionRegistry } from "./domain/registry";
 import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
 import { registerMachineOps } from "./transports/relay-machine";
+import { computeUsage, periodToRange } from "./claude/usage";
 
 // Control-server port: the DEFAULT relay keeps the historical 4997; any other
 // relay's daemon binds a DYNAMIC port (0) so N per-relay daemons coexist —
@@ -151,4 +152,20 @@ if (relayClient) {
   }, 5 * 60 * 1000).unref();
 
   relayClient.onReconnect = () => registry.onRelayReconnect();
+}
+
+// Usage cache warmer: parse-ahead so joy-usage answers instantly. Once shortly
+// after boot (folds any transcripts written while the daemon was down into the
+// persisted cache), then every 2h in the background. The compute itself is
+// incremental — cached files cost a stat each — so the periodic pass is cheap
+// unless sessions were busy, which is exactly when pre-parsing pays off.
+{
+  const warm = () => {
+    const { fromDay, toDay } = periodToRange("all");
+    void computeUsage({ fromDay, toDay }).catch((e) => {
+      process.stderr.write(`[usage] background warm failed: ${e}\n`);
+    });
+  };
+  setTimeout(warm, 15_000).unref();
+  setInterval(warm, 2 * 60 * 60 * 1000).unref();
 }

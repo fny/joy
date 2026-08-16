@@ -26,6 +26,7 @@ import {
   handleDifftastic,
 } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
+import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { cwdToTranscriptDir } from "../claude/transcript";
 import { joySessionDir } from "../paths";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync } from "fs";
@@ -704,6 +705,23 @@ export const machineOps: MachineOp[] = [
       const range = periodToRange(period);
       const { sessions: _sessions, ...data } = await computeUsage({ fromDay: range.fromDay, toDay: range.toDay });
       return { ok: true, period: range.label, ...data };
+    },
+  },
+  {
+    name: "limits",
+    scope: "machine",
+    rpcName: "joy-limits",
+    http: { method: "GET", path: "/limits" },
+    // Account quota windows, server truth (limits.ts): claude via the machine's
+    // own OAuth token against api/oauth/usage; codex from the newest rollout's
+    // token_count.rate_limits. Two independent best-effort halves — one agent
+    // missing on the box shouldn't blank the other's numbers.
+    handler: async () => {
+      const [claude, codex] = await Promise.all([
+        fetchClaudeLimits().catch((e) => ({ ok: false as const, error: String(e) })),
+        Promise.resolve().then(() => readCodexLimits()).catch((e) => ({ ok: false as const, error: String(e) })),
+      ]);
+      return { ok: true, claude, codex };
     },
   },
   {

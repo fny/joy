@@ -257,6 +257,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     icon={<Ionicons name="analytics-outline" size={29} color={theme.colors.accents.blue} />}
                     onPress={() => router.push('/settings/usage')}
                 />
+                <Item
+                    title="Limits"
+                    subtitle="Live account quota windows for Claude and Codex"
+                    icon={<Ionicons name="hourglass-outline" size={29} color={theme.colors.accents.orange} />}
+                    onPress={() => router.push('/settings/limits' as any)}
+                />
             </ItemGroup>
 
             {/* Developer — always shown (joy build keeps dev tools in prod) */}
