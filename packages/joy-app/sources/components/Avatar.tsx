@@ -1,9 +1,7 @@
 import * as React from "react";
 import { View } from "react-native";
 import { Image } from "expo-image";
-import { AvatarSkia } from "./AvatarSkia";
-import { AvatarGradient } from "./AvatarGradient";
-import { AvatarBrutalist } from "./AvatarBrutalist";
+import { AvatarHashicon } from "./AvatarHashicon";
 import { useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -47,7 +45,6 @@ const styles = StyleSheet.create((theme) => ({
 
 export const Avatar = React.memo((props: AvatarProps) => {
     const { flavor, size = 48, imageUrl, thumbhash, ...avatarProps } = props;
-    const avatarStyle = useSetting('avatarStyle');
     const showFlavorIcons = useSetting('showFlavorIcons');
     const { theme } = useUnistyles();
 
@@ -100,16 +97,9 @@ export const Avatar = React.memo((props: AvatarProps) => {
         return imageElement;
     }
 
-    // Original generated avatar logic
-    // Determine which avatar variant to render
-    let AvatarComponent: React.ComponentType<any>;
-    if (avatarStyle === 'pixelated') {
-        AvatarComponent = AvatarSkia;
-    } else if (avatarStyle === 'brutalist') {
-        AvatarComponent = AvatarBrutalist;
-    } else {
-        AvatarComponent = AvatarGradient;
-    }
+    // Generated identicon: hashicon (emeraldpay), same footprint as the old
+    // variants (size x size, keyed by id). The avatarStyle setting is retired.
+    const AvatarComponent: React.ComponentType<any> = AvatarHashicon;
 
     // Determine flavor icon for generated avatars
     const effectiveFlavor = flavor || 'claude';
