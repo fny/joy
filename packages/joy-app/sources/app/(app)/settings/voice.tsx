@@ -31,7 +31,6 @@ export default React.memo(function VoiceSettingsScreen() {
     const [voiceCustomAgentId, setVoiceCustomAgentId] = useSettingMutable('voiceCustomAgentId');
     const [voiceBypassToken, setVoiceBypassToken] = useSettingMutable('voiceBypassToken');
     const [voiceUpsellOverride, setVoiceUpsellOverride] = useLocalSettingMutable('voiceUpsellOverride');
-    const experiments = useSetting('experiments');
     const devModeEnabled = __DEV__ || useLocalSetting('devModeEnabled');
 
     const hasPro = useEntitlement('pro');
@@ -121,9 +120,8 @@ export default React.memo(function VoiceSettingsScreen() {
             `voice-upsell: ${upsellVariant}`,
             `source: ${voiceExperimentStatus.upsellVariantSource}`,
             `gate: ${gatingMode}`,
-            `experiments setting: ${experiments ? 'on' : 'off'}`,
         ].join('\n');
-    }, [experiments, voiceExperimentStatus]);
+    }, [voiceExperimentStatus]);
 
     const developerOverrideLabel = React.useMemo(() => {
         if (!voiceUpsellOverride) {
