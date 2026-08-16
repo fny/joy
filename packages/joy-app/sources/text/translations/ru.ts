@@ -967,6 +967,8 @@ export const ru: TranslationStructure = {
         loadAverage: ({ load }: { load: string }) => `нагрузка ${load}`,
         memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% занято`,
         diskFree: ({ free, total }: { free: string; total: string }) => `${free} / ${total} свободно`,
+        ramHot: ({ percent }: { percent: number }) => `ОЗУ ${percent}% на этой машине`,
+        diskHot: ({ percent }: { percent: number }) => `Диск заполнен на ${percent}% на этой машине`,
     },
 
     message: {

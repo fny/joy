@@ -964,6 +964,8 @@ export const ja: TranslationStructure = {
         loadAverage: ({ load }: { load: string }) => `負荷 ${load}`,
         memoryUsedPercent: ({ percent }: { percent: number }) => `${percent}% 使用中`,
         diskFree: ({ free, total }: { free: string; total: string }) => `空き ${free} / ${total}`,
+        ramHot: ({ percent }: { percent: number }) => `このマシンのRAM使用率 ${percent}%`,
+        diskHot: ({ percent }: { percent: number }) => `このマシンのディスク使用率 ${percent}%`,
     },
 
     message: {

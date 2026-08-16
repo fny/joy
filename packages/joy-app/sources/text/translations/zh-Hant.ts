@@ -963,6 +963,8 @@ export const zhHant: TranslationStructure = {
         loadAverage: ({ load }: { load: string }) => `負載 ${load}`,
         memoryUsedPercent: ({ percent }: { percent: number }) => `已用 ${percent}%`,
         diskFree: ({ free, total }: { free: string; total: string }) => `可用 ${free} / ${total}`,
+        ramHot: ({ percent }: { percent: number }) => `此機器記憶體已用 ${percent}%`,
+        diskHot: ({ percent }: { percent: number }) => `此機器磁碟已用 ${percent}%`,
     },
 
     message: {
