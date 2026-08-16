@@ -580,6 +580,7 @@ export class OpencodeSession implements AgentSession {
   toJSON(): SessionRecord {
     return {
       id: this.id,
+      agent: this.agentFlavor,
       current_model: this.currentModel,
       pid: this.pid,
       tmux_window: this.tmuxWindow,

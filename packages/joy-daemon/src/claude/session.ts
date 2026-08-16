@@ -96,6 +96,8 @@ export function stripAnsi(s: string): string {
 /** Wire shape — frozen. The app and the debug page consume this JSON. */
 export interface SessionRecord {
   id: string;
+  /** Which harness runs this session (claude|codex|opencode|pi). */
+  agent?: string;
   claude_session_id?: string;
   current_model?: string;
   pid?: number;
@@ -731,6 +733,7 @@ export class Session {
   toJSON(): SessionRecord {
     return {
       id: this.id,
+      agent: "claude",
       claude_session_id: this.claudeSessionId,
       pid: this.pid,
       tmux_window: this.tmuxWindow,

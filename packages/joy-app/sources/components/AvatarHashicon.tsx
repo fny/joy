@@ -30,6 +30,22 @@ function processParam(param: { min: number; max: number }, value: number): numbe
     return param.min + (value % (param.max - param.min));
 }
 
+// Brand-constrained hues: the joy logotype palette (JoyLogotype.tsx). Derived
+// hues snap to the NEAREST of these so identicons read as part of the same
+// family as the logo; saturation/lightness/alpha stay hash-derived so icons
+// remain distinctive.
+const BRAND_HUES = [330, 32, 54, 162, 197, 267, 0, 172];
+function snapHue(h: number): number {
+    const norm = ((h % 360) + 360) % 360;
+    let best = BRAND_HUES[0];
+    let bestD = 361;
+    for (const b of BRAND_HUES) {
+        const d = Math.min(Math.abs(norm - b), 360 - Math.abs(norm - b));
+        if (d < bestD) { bestD = d; best = b; }
+    }
+    return best;
+}
+
 interface Props {
     id: string;
     size?: number;
@@ -53,7 +69,7 @@ export const AvatarHashicon = React.memo((props: Props) => {
             light: { top: number; right: number; left: number; enabled: boolean };
         };
         const h = hashValues(props.id);
-        const hue = processParam(p.hue, h[0]);
+        const hue = snapHue(processParam(p.hue, h[0]));
         const saturation = props.monochrome ? 0 : processParam(p.saturation, h[1]);
         const lightness = processParam(p.lightness, h[2]);
         const shift = processParam(p.shift, h[3]);
@@ -76,7 +92,7 @@ export const AvatarHashicon = React.memo((props: Props) => {
             out.push({ points, fill: `hsla(${hue + variation}, ${saturation}%, ${lightness + light}%, 1)` });
             if (figure[i] > 0) {
                 const alpha = figure[i] * figureAlpha / 10;
-                out.push({ points, fill: `hsla(${hue + shift + variation}, ${saturation}%, ${lightness + light}%, ${alpha})` });
+                out.push({ points, fill: `hsla(${snapHue(hue + shift + variation)}, ${saturation}%, ${lightness + light}%, ${alpha})` });
             }
         });
         return out;
