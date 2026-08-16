@@ -92,6 +92,8 @@ interface AgentInputProps {
     onPickImages?: () => void;
     /** Open the full-screen drawing pad (sketch attachment). */
     onDraw?: () => void;
+    /** Estimated cumulative session cost in USD (shown in the info line). */
+    costUsd?: number | null;
     onRemoveImage?: (id: string) => void;
     onAddImages?: (images: AttachmentPreview[]) => void;
     /** Stash the current input as an on-device draft (queued at the bottom of the chat). */
@@ -335,6 +337,7 @@ type StatusRowProps = {
     modelLabel: string | null;
     agentLabel: string | null;
     effortLabel: string | null;
+    costUsd?: number | null;
     zenMode?: boolean;
 };
 
@@ -456,6 +459,12 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                 if (p.agentLabel) segments.push(<Text key="agent" style={dim}>{p.agentLabel}</Text>);
                 if (p.modelLabel) { if (segments.length) pushDot(); segments.push(<Text key="model" style={dim}>{p.modelLabel}</Text>); }
                 if (p.effortLabel) { if (segments.length) pushDot(); segments.push(<Text key="effort" style={dim}>{p.effortLabel}</Text>); }
+                if (p.costUsd != null && p.costUsd > 0) {
+                    if (segments.length) pushDot();
+                    // Cents precision under $10, whole-dollar-ish above.
+                    const cost = p.costUsd < 10 ? p.costUsd.toFixed(2) : p.costUsd.toFixed(p.costUsd < 100 ? 1 : 0);
+                    segments.push(<Text key="cost" style={dim}>{`$${cost}`}</Text>);
+                }
                 if (showPermission) { if (segments.length) pushDot(); segments.push(<Text key="perm" style={{ fontSize: 11, color: permColor, ...Typography.default() }}>{p.permissionLabel}</Text>); }
                 return (
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -1217,6 +1226,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     modelLabel={modelLabel}
                     agentLabel={props.metadata?.flavor ?? props.agentType ?? 'claude'}
                     effortLabel={props.effortLevel?.name ?? null}
+                    costUsd={props.costUsd}
                     zenMode={props.zenMode}
                 />
 

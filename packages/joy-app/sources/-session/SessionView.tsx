@@ -655,6 +655,29 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         ]);
     }, [pickImages, pickFromLibrary, pasteImage]);
 
+    // Estimated session cost for the composer info line: the daemon's
+    // joy-session-usage rolls subagent burn into the parent and prices with
+    // the real cache-tier table, so ask it rather than re-deriving app-side.
+    // Cheap (persistent parse cache daemon-side) but still only every 5 min.
+    const [sessionCostUsd, setSessionCostUsd] = React.useState<number | null>(null);
+    const costMachineId = session?.metadata?.machineId;
+    const costClaudeId = session?.metadata?.claudeSessionId;
+    React.useEffect(() => {
+        if (!costMachineId || !costClaudeId || !isJoyDaemonSource(session?.metadata?.joy__source)) return;
+        let cancelled = false;
+        const fetchCost = async () => {
+            try {
+                const r = await apiSocket.machineRPC<{ ok?: boolean; entry?: { cost?: number } | null }, { period: string; claudeSessionId: string }>(
+                    costMachineId, 'joy-session-usage', { period: 'all', claudeSessionId: costClaudeId },
+                );
+                if (!cancelled && r?.ok && r.entry?.cost != null) setSessionCostUsd(r.entry.cost);
+            } catch { /* info line just omits the segment */ }
+        };
+        void fetchCost();
+        const timer = setInterval(() => void fetchCost(), 5 * 60 * 1000);
+        return () => { cancelled = true; clearInterval(timer); };
+    }, [costMachineId, costClaudeId, session?.metadata?.joy__source]);
+
     // Drawing pad: opens the full-screen sketch route; the pad deposits its
     // captured PNG in useDrawingResult and this effect folds it into the
     // composer's attachments when we regain focus.
@@ -984,6 +1007,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             selectedImages={selectedImages}
             onPickImages={handleAttach}
             onDraw={handleDraw}
+            costUsd={sessionCostUsd}
             onRemoveImage={removeImage}
             onAddImages={addImages}
             autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}
