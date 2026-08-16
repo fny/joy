@@ -182,18 +182,16 @@ describe('settings', () => {
                 wrapLinesInDiffs: true,
                 diffStyle: 'unified',
                 inferenceOpenAIKey: null,
-                experiments: false,
+                hideInactiveSessions: false,
                 notificationsDesktop: true,
                 notificationsMobile: true,
                 alwaysShowContextSize: false,
                 agentInputEnterToSend: true,
                 avatarStyle: 'brutalist',
                 showFlavorIcons: false,
-                hideInactiveSessions: false,
                 expResumeSession: false,
                 fileDiffsSidebar: false,
                 groupToolCalls: false,
-                expImageUpload: false,
                 joy__chatHistoryLimit: null,
                 joy__doubleTapEnabled: false,
                 joy__newSessionDefault: false,
@@ -331,31 +329,31 @@ describe('settings', () => {
             };
 
             const pendingChanges: Partial<Settings> = {
-                experiments: true,
+                hideInactiveSessions: true,
             };
 
             const parsedServerSettings = settingsParse(serverSettings);
-            expect(parsedServerSettings.experiments).toBe(false);
+            expect(parsedServerSettings.hideInactiveSessions).toBe(false);
 
             const mergedSettings = applySettings(parsedServerSettings, pendingChanges);
-            expect(mergedSettings.experiments).toBe(true);
+            expect(mergedSettings.hideInactiveSessions).toBe(true);
             expect(mergedSettings.viewInline).toBe(true);
         });
 
         it('should handle multiple pending changes during version-mismatch', () => {
             const serverSettings = settingsParse({
                 viewInline: false,
-                experiments: false
+                hideInactiveSessions: false
             });
 
             const pendingChanges: Partial<Settings> = {
-                experiments: true,
+                hideInactiveSessions: true,
                 alwaysShowContextSize: true,
             };
 
             const merged = applySettings(serverSettings, pendingChanges);
 
-            expect(merged.experiments).toBe(true);
+            expect(merged.hideInactiveSessions).toBe(true);
             expect(merged.alwaysShowContextSize).toBe(true);
             expect(merged.viewInline).toBe(false);
         });
@@ -364,11 +362,11 @@ describe('settings', () => {
             const serverSettings = settingsParse({});
 
             const pendingChanges: Partial<Settings> = {
-                experiments: true
+                hideInactiveSessions: true
             };
 
             const merged = applySettings(serverSettings, pendingChanges);
-            expect(merged.experiments).toBe(true);
+            expect(merged.hideInactiveSessions).toBe(true);
             expect(merged.viewInline).toBe(false);
         });
 
@@ -379,11 +377,11 @@ describe('settings', () => {
             });
 
             const pendingChanges: Partial<Settings> = {
-                experiments: true
+                hideInactiveSessions: true
             };
 
             const merged = applySettings(serverSettings, pendingChanges);
-            expect(merged.experiments).toBe(true);
+            expect(merged.hideInactiveSessions).toBe(true);
         });
 
         it('should handle server settings with extra fields + pending changes', () => {
@@ -394,12 +392,12 @@ describe('settings', () => {
             });
 
             const pendingChanges: Partial<Settings> = {
-                experiments: true
+                hideInactiveSessions: true
             };
 
             const merged = applySettings(serverSettings, pendingChanges);
 
-            expect(merged.experiments).toBe(true);
+            expect(merged.hideInactiveSessions).toBe(true);
             expect(merged.viewInline).toBe(true);
             expect((merged as any).futureFeature).toBe('some value');
             expect((merged as any).anotherNewField).toBe(123);
@@ -407,7 +405,7 @@ describe('settings', () => {
 
         it('should handle empty pending (no local changes)', () => {
             const serverSettings = settingsParse({
-                experiments: true,
+                hideInactiveSessions: true,
                 viewInline: true
             });
 
@@ -420,7 +418,7 @@ describe('settings', () => {
         it('should handle delta overriding multiple server fields', () => {
             const serverSettings = settingsParse({
                 viewInline: false,
-                experiments: false,
+                hideInactiveSessions: false,
                 alwaysShowContextSize: false
             });
 
@@ -433,7 +431,7 @@ describe('settings', () => {
 
             expect(merged.viewInline).toBe(true);
             expect(merged.alwaysShowContextSize).toBe(true);
-            expect(merged.experiments).toBe(false);
+            expect(merged.hideInactiveSessions).toBe(false);
         });
 
         it('should preserve complex nested structures during merge', () => {
@@ -445,7 +443,7 @@ describe('settings', () => {
             });
 
             const pendingChanges: Partial<Settings> = {
-                experiments: true,
+                hideInactiveSessions: true,
                 dismissedCLIWarnings: {
                     perMachine: { 'machine-2': { claude: true } },
                     global: {}
@@ -454,7 +452,7 @@ describe('settings', () => {
 
             const merged = applySettings(serverSettings, pendingChanges);
 
-            expect(merged.experiments).toBe(true);
+            expect(merged.hideInactiveSessions).toBe(true);
             expect(merged.dismissedCLIWarnings).toEqual(pendingChanges.dismissedCLIWarnings);
         });
     });

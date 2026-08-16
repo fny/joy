@@ -587,14 +587,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const joyQueue = useJoyQueue(machineId, joySessionId, session.metadata?.joy__queue);
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
-    const experiments = useSetting('experiments');
     const expResumeSession = useSetting('expResumeSession');
     const { canResume, resumeSession, resumingSession } = useSessionQuickActions(session);
     const isDisconnected = !sessionStatus.isConnected;
     const resumeCommandBlock = getResumeCommandBlock(session);
 
-    // Image attachment state (expImageUpload feature flag)
-    const expImageUpload = useSetting('expImageUpload');
+    // Image attachment state
     const { selectedImages, pickImages, pickFromLibrary, pasteImage, removeImage, clearImages, addImages } = useImagePicker();
 
     // Attach menu (native): the Files picker can't browse Photos and RN text
@@ -690,9 +688,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // need to re-create on every keystroke.
     const handleSend = React.useCallback(() => {
         const liveMessage = composerHandleRef.current?.getMessage() ?? '';
-        const hasImages = expImageUpload && selectedImages.length > 0;
+        const hasImages = selectedImages.length > 0;
         if (!liveMessage.trim() && !hasImages) return;
-        const attachments = expImageUpload ? selectedImages : undefined;
+        const attachments = selectedImages;
 
         // THE queue is APP-SIDE (draft queue): a plain-text message sent while
         // the agent is busy is HELD here — editable/deletable until its turn —
@@ -736,9 +734,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             return;
         }
         composerHandleRef.current?.clearMessage();
-        if (expImageUpload) clearImages();
+        clearImages();
         sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
-    }, [sessionId, isJoyDaemon, expImageUpload, selectedImages, clearImages]);
+    }, [sessionId, isJoyDaemon, selectedImages, clearImages]);
 
     // Stash the current input as an on-device draft (queued at the bottom of the
     // chat) and clear the box so the user can compose the next one. Drafts are
@@ -904,11 +902,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             isMicActive={isDisconnected ? false : micButtonState.isMicActive}
             onAbort={isDisconnected ? undefined : handleAbort}
             showAbortButton={sessionStatus.state === 'thinking' || sessionStatus.state === 'waiting'}
-            onFileViewerPress={experiments && !isTablet ? handleFileViewerPress : undefined}
-            selectedImages={expImageUpload ? selectedImages : undefined}
-            onPickImages={expImageUpload ? handleAttach : undefined}
-            onRemoveImage={expImageUpload ? removeImage : undefined}
-            onAddImages={expImageUpload ? addImages : undefined}
+            onFileViewerPress={!isTablet ? handleFileViewerPress : undefined}
+            selectedImages={selectedImages}
+            onPickImages={handleAttach}
+            onRemoveImage={removeImage}
+            onAddImages={addImages}
             autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}
             autocompleteSuggestions={handleAutocompleteSuggestions}
             usageData={usageData}
