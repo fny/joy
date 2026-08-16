@@ -5,6 +5,7 @@ import {
     createRouteHistory,
     getKeyboardNavigationDirection,
     getMouseNavigationDirection,
+    isSessionChatPath,
 } from './browserNavigation';
 
 describe('browser navigation shortcuts', () => {
@@ -91,4 +92,13 @@ describe('browser navigation shortcuts', () => {
             shiftKey: false,
         })).toBeNull();
     });
+});
+
+test('isSessionChatPath matches only the chat screen, not subpages', () => {
+    expect(isSessionChatPath('/session/abc123')).toBe(true);
+    expect(isSessionChatPath('/session/abc123/')).toBe(true);
+    expect(isSessionChatPath('/session/abc123/file')).toBe(false);
+    expect(isSessionChatPath('/session/abc123/info')).toBe(false);
+    expect(isSessionChatPath('/session')).toBe(false);
+    expect(isSessionChatPath('/settings/usage')).toBe(false);
 });

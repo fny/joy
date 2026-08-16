@@ -20,6 +20,7 @@ import { useDraft } from '@/hooks/useDraft';
 import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
 import { MachineResourceBanner } from '@/components/MachineResourceBanner';
 import { useDrawingResult } from '@/hooks/useDrawingResult';
+import { useEscapeAbort } from '@/hooks/useEscapeAbort';
 import { useImagePicker } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
@@ -834,6 +835,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         storage.getState().resetSessionAgentOverrides(sessionId);
         sessionAbort(sessionId);
     }, [sessionId]);
+
+    // Esc contract on this screen (web/desktop): abort when a turn is running,
+    // otherwise nothing — never navigate away. The browser-navigation Esc
+    // handler consults this registration instead of route-back (useEscapeAbort).
+    const escAbortable = sessionStatus.state === 'thinking';
+    React.useEffect(() => {
+        useEscapeAbort.getState().setHandler(escAbortable ? handleAbort : null);
+        return () => useEscapeAbort.getState().setHandler(null);
+    }, [escAbortable, handleAbort]);
 
     const handleFileViewerPress = React.useCallback(() => {
         router.push(`/session/${sessionId}/files`);

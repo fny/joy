@@ -6,7 +6,9 @@ import {
     getNavigatorCanGoBack,
     getKeyboardNavigationDirection,
     getMouseNavigationDirection,
+    isSessionChatPath,
 } from '@/navigation/browserNavigation';
+import { useEscapeAbort } from '@/hooks/useEscapeAbort';
 import { useBrowserNavigationStore } from '@/navigation/browserNavigationStore';
 import { storage } from '@/sync/storage';
 import { useGlobalSearchParams, usePathname, useRouter } from 'expo-router';
@@ -63,10 +65,17 @@ export function useBrowserNavigationShortcuts() {
         syncRoutePathname(routeKey);
     }, [routeKey, syncRoutePathname]);
 
-    const runBack = React.useCallback((options: { exitZen: boolean }) => {
+    const runBack = React.useCallback((options: { exitZen: boolean; allowRouteBack?: boolean }) => {
         if (dismissTopModal()) return true;
         if (options.exitZen && exitZenMode()) return true;
         if (useOverlayNav.getState().back()) return true;
+        // Esc on the session chat screen: abort the running turn if there is
+        // one, otherwise swallow the key — never navigate away from a chat.
+        // (Mouse back-button passes allowRouteBack !== false and still leaves.)
+        if (options.allowRouteBack === false) {
+            useEscapeAbort.getState().handler?.();
+            return true;
+        }
         return runRouteBack(router);
     }, [dismissTopModal, router]);
 
@@ -79,7 +88,8 @@ export function useBrowserNavigationShortcuts() {
             if (getKeyboardNavigationDirection(event) !== 'back') {
                 return;
             }
-            if (runBack({ exitZen: true })) {
+            const allowRouteBack = !isSessionChatPath(window.location.pathname);
+            if (runBack({ exitZen: true, allowRouteBack })) {
                 event.preventDefault();
                 event.stopPropagation();
             }
