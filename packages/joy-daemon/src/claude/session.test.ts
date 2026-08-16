@@ -1189,3 +1189,7 @@ test("dialogFromPane picker fallback: scrollback list + live picker: the ❯ run
   expect(d!.options).toEqual(["1. Yes", "2. No"]);
   expect(d!.title).toBe("Choose:");
 });
+
+test("parseJoyCommand: /joy-prompt is joy-owned (hyphenated name parses)", () => {
+  expect(parseJoyCommand("/joy-prompt")).toEqual({ name: "joy-prompt", args: "" });
+});

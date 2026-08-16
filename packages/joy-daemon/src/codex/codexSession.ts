@@ -29,6 +29,7 @@ import {
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
 import type { DeliverySource } from "../domain/receipts";
 import type { AgentSession } from "../domain/agentSession";
+import { codexJoyInstructions, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
 import { CodexNormalizer, type CodexNotification } from "./normalize";
 import { buildCodexAttachCommand } from "./attach";
@@ -360,6 +361,21 @@ export class CodexSession implements AgentSession {
     throw new Error(`could not connect to app-server: ${lastErr}`);
   }
 
+  /** /joy-prompt — re-deliver the CURRENT joy instructions in-band (the
+   *  thread's developerInstructions are frozen at start, and attention decays
+   *  in long sessions regardless). Also refreshes the stored
+   *  developerInstructions so a thread restart launches with the latest
+   *  wording. The reinjection body is delivered as its own unmirrored message;
+   *  only the /joy-prompt row (when mirror) appears in chat. */
+  #handleJoyPrompt(text: string, mirror: boolean, seq?: number): boolean {
+    if (!/^\/joy-prompt(?:\s|$)/.test(text.trim())) return false;
+    this.#developerInstructions = codexJoyInstructions();
+    this.#persistWindowRecord();
+    if (mirror && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? Date.now()}`);
+    this.enqueue(joyPromptReinjection(codexJoyInstructions()), { mirrorToRelay: false });
+    return true;
+  }
+
   #persistWindowRecord(): void {
     saveWindowRecord(this.id, {
       launchCwd: this.cwd, agent: "codex",
@@ -384,6 +400,9 @@ export class CodexSession implements AgentSession {
     // seq after a crash-before-cursor-persist. A seq already spooled is a no-op
     // (idempotent) — do NOT throw, so the cursor advances past it.
     if (this.#inbound.some((i) => i.seq === seq)) { this.#pumpDispatch(); return; }
+    // App already shows the /joy-prompt row — no mirror. A crash-redelivery of
+    // this seq worst-cases a duplicate reinjection, which is benign.
+    if (this.#handleJoyPrompt(text, false, seq)) return;
     // Deterministic clientId per seq so a redelivery reuses the SAME id (no
     // second turn). Persist BEFORE anything else and THROW on failure so the
     // relay's confirmed cursor does not advance past an unpersisted message.
@@ -700,6 +719,9 @@ export class CodexSession implements AgentSession {
       if (t) { this.summary = t; void this.#relay?.updateSummary(t); }
       this.#deps.broadcast("session_update", this.toJSON());
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? Date.now()}`);
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+    }
+    if (this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq)) {
       return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
     }
     if (seq != null && this.#inbound.some((i) => i.seq === seq)) { this.#pumpDispatch(); return { id: String(seq), text, createdAt: Date.now() }; }

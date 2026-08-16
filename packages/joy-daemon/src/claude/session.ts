@@ -40,6 +40,8 @@ import {
   type DeliverySource,
 } from "../domain/receipts";
 import { writeAttachmentToCwd } from "../domain/attachments";
+import { joyPromptReinjection } from "../domain/agentTagsPrompt";
+import { OPTIONS_SYSTEM_PROMPT } from "./optionsPrompt";
 import { saveWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import { saveQueue, loadQueue, clearQueue } from "../domain/queueStore";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, tailJsonl, type TranscriptTailer } from "./transcript";
@@ -150,7 +152,7 @@ export interface SendOptions {
 }
 
 /** Slash commands joy handles itself, before the text reaches Claude (today: `/title`). */
-const JOY_COMMANDS = new Set(["steer", "btw", "title", "login-code"]);
+const JOY_COMMANDS = new Set(["steer", "btw", "title", "login-code", "joy-prompt"]);
 
 /**
  * Parse a joy-owned slash command the daemon intercepts BEFORE the text reaches Claude:
@@ -1158,6 +1160,14 @@ export class Session {
         this.#setTitle(cmd.args, { byUser: true });
       } else if (cmd.name === "login-code" && cmd.args.trim()) {
         void this.#submitLoginCode(cmd.args);
+      } else if (cmd.name === "joy-prompt") {
+        // Re-deliver the CURRENT instruction block in-band (system-prompt
+        // attention decays in long sessions). Invisible + unmirrored: the
+        // user's /joy-prompt row is the chat record; the ~6KB body would
+        // just be a wall of text there.
+        this.enqueue(joyPromptReinjection(OPTIONS_SYSTEM_PROMPT), {
+          source: opts?.source ?? "rpc", mirrorToRelay: false, visible: false,
+        });
       }
       return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
     }
@@ -2020,6 +2030,10 @@ export class Session {
         this.#setTitle(cmd.args, { byUser: true });
       } else if (cmd.name === "login-code" && cmd.args.trim()) {
         await this.#submitLoginCode(cmd.args);
+      } else if (cmd.name === "joy-prompt") {
+        this.enqueue(joyPromptReinjection(OPTIONS_SYSTEM_PROMPT), {
+          source: "relay", mirrorToRelay: false, visible: false,
+        });
       }
       if (drained.length > 0) saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
       return;

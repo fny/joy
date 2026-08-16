@@ -826,7 +826,11 @@ export class SessionRegistry {
           model: s.model,
           effort: s.effort,
           permissionMode: s.permissionMode ?? "default",
-          developerInstructions: s.developerInstructions,
+          // Always the CURRENT wording, not the snapshot saved at first spawn —
+          // a daemon update between runs would otherwise resume threads with
+          // stale joy instructions (claude gets the same for free: its
+          // --append-system-prompt file is rewritten at every spawn).
+          developerInstructions: codexJoyInstructions(),
           config: s.config,
           status: "active",
           startedAt: Date.now(),
@@ -953,7 +957,9 @@ export class SessionRegistry {
         id: rec.id, tmuxWindow, cwd: rec.launchCwd,
         model: s.model, effort: s.effort,
         permissionMode: s.permissionMode ?? "default",
-        developerInstructions: s.developerInstructions,
+        // Current wording, not the first-spawn snapshot (see the restore path
+        // above for why).
+        developerInstructions: codexJoyInstructions(),
         config: s.config,
         status: "active", startedAt: Date.now(),
         codexThreadId: rec.codexThreadId,
