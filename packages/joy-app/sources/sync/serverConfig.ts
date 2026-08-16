@@ -75,8 +75,19 @@ export function setServerUrl(url: string | null): void {
 
 const RELAY_ACCESS_KEY_PREFIX = 'relay-access-key:';
 
+// Derived-from-account-secret perimeter key (see encryption.ts) — set once
+// after login. The manual per-relay value, when present, OVERRIDES it (for
+// relays gated on something other than this account's derivation).
+let derivedPerimeterKey: string | null = null;
+export function setDerivedRelayPerimeterKey(key: string | null): void {
+    derivedPerimeterKey = key;
+}
+export function getDerivedRelayPerimeterKey(): string | null {
+    return derivedPerimeterKey;
+}
+
 export function getRelayAccessKey(url: string = getServerUrl()): string | null {
-    return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || null;
+    return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || derivedPerimeterKey;
 }
 
 export function setRelayAccessKey(key: string | null, url: string = getServerUrl()): void {

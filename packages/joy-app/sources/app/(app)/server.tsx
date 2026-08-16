@@ -11,7 +11,8 @@ import { RoundButton } from '@/components/RoundButton';
 import { Modal } from '@/modal';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
-import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey } from '@/sync/serverConfig';
+import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey, getDerivedRelayPerimeterKey } from '@/sync/serverConfig';
+import * as Clipboard from 'expo-clipboard';
 import { apiSocket } from '@/sync/apiSocket';
 import { switchRelayAndReload, loginToRelay } from '@/sync/relaySwitch';
 import { TokenStorage } from '@/auth/tokenStorage';
@@ -93,6 +94,15 @@ export default function ServerConfigScreen() {
     // Perimeter key for the ACTIVE relay (joy-relay gate). Saved per relay;
     // socket reconnect picks it up (the fetch interceptor reads it live).
     const [relayKeyInput, setRelayKeyInput] = useState(getRelayAccessKey() ?? '');
+    // The derived key is what a gated relay box must carry in joy-relay.env —
+    // every logged-in client presents it automatically; this copy exists to
+    // provision the BOX (and any pre-derivation daemon via ~/.joy/env).
+    const handleCopyDerivedKey = React.useCallback(async () => {
+        const k = getDerivedRelayPerimeterKey();
+        if (!k) return;
+        await Clipboard.setStringAsync(k);
+        Modal.alert(t('server.relayCopyDerivedKey'), k.slice(0, 12) + '…', [{ text: t('common.ok') }]);
+    }, []);
     const handleSaveRelayKey = React.useCallback(() => {
         setRelayAccessKey(relayKeyInput.trim() || null);
         Modal.alert(t('server.relayAccessKeySaved'), undefined, [{ text: t('common.ok') }]);
@@ -334,6 +344,16 @@ export default function ServerConfigScreen() {
                                         onPress={handleSaveRelayKey}
                                     />
                                 </View>
+                                {getDerivedRelayPerimeterKey() && (
+                                    <View style={styles.buttonWrapper}>
+                                        <RoundButton
+                                            title={t('server.relayCopyDerivedKey')}
+                                            size="normal"
+                                            display="inverted"
+                                            onPress={handleCopyDerivedKey}
+                                        />
+                                    </View>
+                                )}
                             </View>
                         </View>
                     </ItemGroup>

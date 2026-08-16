@@ -432,6 +432,7 @@ export const ca: TranslationStructure = {
         relayAccessKeyLabel: 'Clau d\'accés del relay',
         relayAccessKeyFooter: 'Clau perimetral per a aquest relay (porta joy-relay). S\'envia amb cada petició; deixa-ho buit per a relays oberts com Happy Cloud. Es reconnecta en desar.',
         relayAccessKeySaved: 'Clau del relay desada',
+        relayCopyDerivedKey: 'Copia la clau derivada del relay',
         relayApplyKeyAllMessage: 'Vols iniciar sessió a tots els relés coneguts amb la clau del compte actual? Això substitueix qualsevol altre compte desat per a aquests relés en aquest dispositiu.',
         relayApplyKeyAllFooter: 'La teva clau secreta actual esdevé l\'únic accés per a tots els relés coneguts: un sol codi per desar. Els comptes es creen automàticament on encara no existeixen.',
         relayApplyKeyAllSuccess: 'Tots els relés fan servir ara aquesta clau.',

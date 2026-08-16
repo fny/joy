@@ -12,7 +12,7 @@ import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
 import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
-import { parseBackupCode, pairWithRelay } from "./relay/pairing";
+import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay/pairing";
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
 
@@ -298,8 +298,12 @@ async function cmdAuthPair(relayArgs: string[]): Promise<number> {
       console.log(`${bad} ${t.name}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+  // Perimeter key derived from the same secret (written per relay as
+  // perimeter.key): the value a GATED relay must carry in ~/joy-relay.env.
+  const perimeter = deriveRelayPerimeterKey(secret);
   secret.fill(0);
   if (failures === 0) {
+    console.log(c.dim(`relay perimeter key (JOY_RELAY_ACCESS_KEY on a gated relay box): ${perimeter}`));
     console.log(c.dim(`start a daemon per relay: joy --relay <name> install`));
   }
   return failures === 0 ? 0 : 1;

@@ -58,6 +58,17 @@ function hmac512(key: Uint8Array, data: Uint8Array): Uint8Array {
 }
 
 // The app's HMAC-SHA512 key tree ("Happy EnCoder" usage, ["content"] path).
+/** Relay perimeter key, hex — the SAME key tree as the app's
+ *  deriveKey(masterSecret, 'Joy Relay', ['perimeter']) (see encryption.ts),
+ *  so every client of the account derives the identical value and the relay
+ *  box stores only this hex, never the secret. */
+export function deriveRelayPerimeterKey(master: Uint8Array): string {
+  let I = hmac512(new TextEncoder().encode("Joy Relay Master Seed"), master);
+  let chain = I.slice(32);
+  I = hmac512(chain, new Uint8Array([0x00, ...new TextEncoder().encode("perimeter")]));
+  return Buffer.from(I.slice(0, 32)).toString("hex");
+}
+
 function deriveContentSeed(master: Uint8Array): Uint8Array {
   let I = hmac512(new TextEncoder().encode("Happy EnCoder Master Seed"), master);
   let key = I.slice(0, 32);
@@ -129,10 +140,13 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
 
   // 4. write creds (back up whatever was there)
   mkdirSync(credsDir, { recursive: true });
-  for (const f of ["access.key", "settings.json", "account.secret"]) {
+  for (const f of ["access.key", "settings.json", "account.secret", "perimeter.key"]) {
     const p = join(credsDir, f);
     if (existsSync(p)) renameSync(p, p + ".replaced");
   }
+  // Captured at pairing because dataKey-mode creds never retain the secret —
+  // this is the daemon's only chance to derive the perimeter key.
+  writeFileSync(join(credsDir, "perimeter.key"), deriveRelayPerimeterKey(accountSecret) + "\n", { mode: 0o600 });
   writeFileSync(join(credsDir, "access.key"), JSON.stringify({
     token: resp.token,
     encryption: { publicKey: b64(decrypted.slice(1, 33)), machineKey: b64(new Uint8Array(randomBytes(32))) },
