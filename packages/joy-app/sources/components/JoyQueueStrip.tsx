@@ -5,6 +5,7 @@
 // composer by its CenteredInputWidth wrapper in SessionView.
 import * as React from 'react';
 import { View, Text, Pressable } from 'react-native';
+import { sync } from '@/sync/sync';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
@@ -31,11 +32,23 @@ const QueuedRow = React.memo(function QueuedRow(props: {
     text: string;
     onEdit: () => void;
     onDelete: () => void;
+    onSteer?: () => void;
 }) {
     const { theme } = useUnistyles();
     return (
         <View style={styles.row}>
             <Text style={styles.text} numberOfLines={1}>{props.text}</Text>
+            {props.onSteer && (
+                <Pressable
+                    onPress={props.onSteer}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Steer now"
+                    style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
+                >
+                    <Ionicons name="flash-outline" size={17} color={theme.colors.text} />
+                </Pressable>
+            )}
             <Pressable
                 onPress={props.onEdit}
                 hitSlop={8}
@@ -100,13 +113,19 @@ export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; s
         useDraftQueueStore.getState().add(sessionId, text);
     };
 
+    const [collapsed, setCollapsed] = React.useState(false);
     return (
         <View style={styles.wrap}>
             {total > 0 && (
-                <View style={styles.header}>
-                    <Ionicons name="time-outline" size={13} color={styles.headerText.color as string} />
-                    <Text style={styles.headerText}>{t('joyQueue.header', { count: total })}</Text>
-                </View>
+                <Pressable
+                    style={styles.header}
+                    onPress={() => setCollapsed((c) => !c)}
+                    accessibilityRole="button"
+                    accessibilityLabel={collapsed ? 'Expand queue' : 'Collapse queue'}
+                >
+                    <Ionicons name={collapsed ? 'chevron-forward' : 'chevron-down'} size={12} color={styles.headerText.color as string} />
+                    <Text style={styles.headerText}>{`QUEUED · ${total}`}</Text>
+                </Pressable>
             )}
 
             {queue.paused && (
@@ -116,21 +135,23 @@ export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; s
                 </Pressable>
             )}
 
-            {hidden.map((item) => (
+            {!collapsed && hidden.map((item) => (
                 <QueuedRow
                     key={item.id}
                     text={item.text}
                     onEdit={() => editHidden(item.id, item.text)}
                     onDelete={() => { void queue.cancel(item.id); }}
+                    onSteer={() => { void queue.cancel(item.id); void sync.sendMessage(sessionId, `/steer ${item.text}`, { source: 'chat' }); }}
                 />
             ))}
 
-            {visible.map((m) => (
+            {!collapsed && visible.map((m) => (
                 <QueuedRow
                     key={m.id}
                     text={m.text}
                     onEdit={() => { void editVisible(m.id, m.text); }}
                     onDelete={() => { void queue.cancel(m.id); }}
+                    onSteer={() => { void queue.cancel(m.id); void sync.sendMessage(sessionId, `/steer ${m.text}`, { source: 'chat' }); }}
                 />
             ))}
 

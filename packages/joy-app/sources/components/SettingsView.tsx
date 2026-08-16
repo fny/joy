@@ -206,7 +206,7 @@ export const SettingsView = React.memo(function SettingsView() {
                 <Item
                     title={t('settings.sessions')}
                     subtitle={t('settings.sessionsSubtitle')}
-                    icon={<Ionicons name="terminal-outline" size={29} color={theme.colors.accents.blue} />}
+                    icon={<Ionicons name="albums-outline" size={29} color={theme.colors.accents.blue} />}
                     onPress={() => router.push('/settings/joy-sessions')}
                 />
                 <Item

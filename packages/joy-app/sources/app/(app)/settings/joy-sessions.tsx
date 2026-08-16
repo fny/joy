@@ -209,11 +209,11 @@ export default React.memo(function JoySessionsScreen() {
                             showChevron={false}
                         />
                     ) : (
-                        activeSessions.map(session => (
+                        [...activeSessions].sort((a, b) => ((a as any).agent ?? 'claude').localeCompare((b as any).agent ?? 'claude')).map(session => (
                             <Item
                                 key={session.id}
                                 title={session.cwd.split('/').pop() ?? session.cwd}
-                                subtitle={`${statusLabel(session.status)} · ${session.cwd}`}
+                                subtitle={`${(session as any).agent ?? 'claude'} · ${statusLabel(session.status)} · ${session.cwd}`}
                                 onPress={session.relay_session_id ? () => router.push(`/session/${encodeURIComponent(session.relay_session_id!)}`) : undefined}
                                 showChevron={!!session.relay_session_id}
                                 rightElement={

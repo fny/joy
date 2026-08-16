@@ -331,16 +331,18 @@ type StatusRowProps = {
     isSandboxedYoloMode: boolean;
     permissionLabel: string | null;
     modelLabel: string | null;
+    agentLabel: string | null;
+    effortLabel: string | null;
     zenMode?: boolean;
 };
 
 const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRowProps) {
     const { theme } = useUnistyles();
-    const showPermissionBadge = !!p.displayPermissionMode
+    const showPermission = !!p.displayPermissionMode
         && p.permissionModeKey !== 'default'
-        && !p.zenMode
         && !!p.permissionLabel;
-    if (!p.connectionStatus && !p.contextWarning && !showPermissionBadge) {
+    const showInfoLine = !p.zenMode && !!(p.agentLabel || p.modelLabel || p.effortLabel || showPermission);
+    if (!p.connectionStatus && !p.contextWarning && !showInfoLine) {
         return null;
     }
     return (
@@ -436,7 +438,7 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                     </Text>
                 )}
             </View>
-            {showPermissionBadge && (() => {
+            {showInfoLine && (() => {
                 const permColor = p.isSandboxedYoloMode ? '#4169E1' :
                     p.permissionModeKey === 'acceptEdits' ? theme.colors.permission.acceptEdits :
                         p.permissionModeKey === 'bypassPermissions' ? theme.colors.permission.bypass :
@@ -445,28 +447,17 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                                     p.permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
                                         p.permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
                                             theme.colors.textSecondary;
-                const permIcon: 'play-forward' | 'pause' =
-                    p.permissionModeKey === 'plan' || p.permissionModeKey === 'read-only'
-                        ? 'pause' : 'play-forward';
+                // agent · model · reasoning · permission — only segments that exist.
+                const dim = { fontSize: 11, color: theme.colors.textSecondary, ...Typography.default() } as const;
+                const segments: React.ReactNode[] = [];
+                const pushDot = () => segments.push(<Text key={`d${segments.length}`} style={dim}>{' · '}</Text>);
+                if (p.agentLabel) segments.push(<Text key="agent" style={dim}>{p.agentLabel}</Text>);
+                if (p.modelLabel) { if (segments.length) pushDot(); segments.push(<Text key="model" style={dim}>{p.modelLabel}</Text>); }
+                if (p.effortLabel) { if (segments.length) pushDot(); segments.push(<Text key="effort" style={dim}>{p.effortLabel}</Text>); }
+                if (showPermission) { if (segments.length) pushDot(); segments.push(<Text key="perm" style={{ fontSize: 11, color: permColor, ...Typography.default() }}>{p.permissionLabel}</Text>); }
                 return (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        {!!p.modelLabel && (
-                            <Text style={{
-                                fontSize: 11,
-                                color: theme.colors.textSecondary,
-                                ...Typography.default()
-                            }}>
-                                {p.modelLabel}
-                            </Text>
-                        )}
-                        <Ionicons name={permIcon} size={11} color={permColor} />
-                        <Text style={{
-                            fontSize: 11,
-                            color: permColor,
-                            ...Typography.default()
-                        }}>
-                            {p.permissionLabel}
-                        </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        {segments}
                     </View>
                 );
             })()}
@@ -1222,6 +1213,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     isSandboxedYoloMode={isSandboxedYoloMode}
                     permissionLabel={displayPermissionMode ? withSandboxSuffix(displayPermissionMode.name, permissionModeKey) : null}
                     modelLabel={modelLabel}
+                    agentLabel={props.metadata?.flavor ?? props.agentType ?? 'claude'}
+                    effortLabel={props.effortLevel?.name ?? null}
                     zenMode={props.zenMode}
                 />
 
