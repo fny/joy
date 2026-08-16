@@ -335,7 +335,10 @@ export class SessionRegistry {
     // id while live, so a second `claude --resume <id>` would collide/fork. Report
     // it clearly instead. (restart() force-kills the old session before reaching
     // here, so it won't trip this.)
-    if (opts.resume_id) {
+    // EXCEPTION: forkSession — `--resume <id> --fork-session` reads the live
+    // transcript once and continues under a NEW id, so there is no lock
+    // collision. This is the "fork a running session" button in the app.
+    if (opts.resume_id && !opts.forkSession) {
       for (const s of this.#sessions.values()) {
         if ((s.status === "active" || s.status === "starting") && s.claudeSessionId === opts.resume_id) {
           throw new Error(`Session "${opts.resume_id}" is already running in ${s.cwd} (window ${s.id})`);
@@ -358,6 +361,9 @@ export class SessionRegistry {
     // session's id, which the hook POSTs to /sessions/:id/compacting.
     envParts.push(`JOY_DAEMON_FILE='${daemonFilePath()}'`);
     envParts.push(`JOY_SESSION_ID='${id}'`);
+    // Claude Code's harness-side Tasks feature conflicts with joy's own
+    // task/queue surfaces — keep it off in every joy-spawned claude.
+    envParts.push(`CLAUDE_CODE_ENABLE_TASKS=0`);
     // joy-managed Claude settings, merged on top of the user's own: adds the
     // PreCompact hook that drives the app's "compacting" status. "" = generation
     // failed → skip the flag rather than pass claude a broken --settings path.

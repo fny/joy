@@ -300,6 +300,23 @@ function NewJoyTmuxSessionScreen() {
             .catch(() => { setOcPast([]); })
             .finally(() => setOcPastLoading(false));
     }, [ocPastOpen, selectedMachineId, pathInput, selectedMachine?.metadata?.homeDir]);
+    // Claude: past conversations in this directory — the transcript JSONLs the
+    // daemon can resume (joy-list-logs is stat-only, so this is instant).
+    const [ccPastOpen, setCcPastOpen] = React.useState(false);
+    const [ccPastLoading, setCcPastLoading] = React.useState(false);
+    const [ccPast, setCcPast] = React.useState<{ sessionId: string; sizeBytes: number; mtimeMs: number }[]>([]);
+    const toggleCcPast = React.useCallback(() => {
+        if (ccPastOpen) { setCcPastOpen(false); return; }
+        setCcPastOpen(true);
+        if (!selectedMachineId) return;
+        setCcPastLoading(true);
+        const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
+        apiSocket.machineRPC<{ ok?: boolean; logs?: typeof ccPast }, {}>(selectedMachineId, 'joy-list-logs', { directory: cwd })
+            .then((res) => { setCcPast((res.logs ?? []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs)); })
+            .catch(() => { setCcPast([]); })
+            .finally(() => setCcPastLoading(false));
+    }, [ccPastOpen, selectedMachineId, pathInput, selectedMachine?.metadata?.homeDir]);
+
     const ocAge = (ts: number): string => {
         const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
         if (m < 60) return `${m}m ago`;
@@ -724,6 +741,38 @@ function NewJoyTmuxSessionScreen() {
                                     autoComplete="off"
                                 />
                             </View>
+
+                            {/* Claude: past conversations in this directory — tap one to
+                                fill the resume field. */}
+                            {selectedAgent === 'claude' && (<>
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={toggleCcPast}
+                            >
+                                <Ionicons name={ccPastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
+                                <Text style={styles.configLabel} numberOfLines={1}>past sessions</Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
+                                    {ccPastLoading ? 'loading…' : ccPastOpen && !ccPast.length ? 'none in this directory' : 'resume an earlier conversation'}
+                                </Text>
+                            </Pressable>
+                            {ccPastOpen && !ccPastLoading && ccPast.slice(0, 8).map((ps) => (
+                                <Pressable
+                                    key={ps.sessionId}
+                                    style={(p) => [styles.configRow, { paddingLeft: 34 }, p.pressed && styles.configRowPressed]}
+                                    onPress={() => { setResumeId(ps.sessionId); setCcPastOpen(false); }}
+                                >
+                                    <Ionicons
+                                        name={resumeId === ps.sessionId ? 'radio-button-on' : 'radio-button-off'}
+                                        size={13}
+                                        color={resumeId === ps.sessionId ? theme.colors.textLink : theme.colors.textSecondary}
+                                    />
+                                    <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
+                                        {ps.sessionId.slice(0, 18)}…
+                                    </Text>
+                                    <Text style={styles.configHint} numberOfLines={1}>{ocAge(ps.mtimeMs)} · {Math.max(1, Math.round(ps.sizeBytes / 1024))}KB</Text>
+                                </Pressable>
+                            ))}
+                            </>)}
 
                             {/* Opencode: past sessions in this directory — tap one to
                                 fill the resume field. */}
