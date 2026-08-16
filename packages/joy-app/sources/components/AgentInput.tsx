@@ -250,7 +250,7 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
     actionButtonsLeft: {
         flexDirection: 'row',
-        gap: 8,
+        gap: 2,
         flex: 1,
         overflow: 'hidden',
     },
@@ -258,7 +258,7 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         flexDirection: 'row',
         alignItems: 'center',
         borderRadius: Platform.select({ default: 16, android: 20 }),
-        paddingHorizontal: 8,
+        paddingHorizontal: 6,
         paddingVertical: 6,
         justifyContent: 'center',
         height: 32,
