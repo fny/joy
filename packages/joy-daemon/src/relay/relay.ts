@@ -9,7 +9,7 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
-import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir, joyRelayUrl, isDefaultRelay, DEFAULT_RELAY_URL } from '../paths';
+import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey, isDefaultRelay, DEFAULT_RELAY_URL } from '../paths';
 import { loadOutbound, saveOutbound, clearOutbound, type PersistedOutboundItem } from '../domain/outboundStore';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
@@ -443,9 +443,13 @@ export class RelayClient {
 
   connect(): void {
     if (this.socket) return;
+    const relayKey = joyRelayAccessKey();
     this.socket = io(this.creds.serverUrl, {
       path: '/v1/updates',
       transports: ['websocket'],
+      // Perimeter key for joy-relay's gate: header works from node; the query
+      // fallback keeps parity with the browser client (no WS headers there).
+      ...(relayKey ? { extraHeaders: { 'X-Joy-Relay-Key': relayKey }, query: { joyRelayKey: relayKey } } : {}),
       auth: { token: this.creds.token, clientType: 'machine-scoped', machineId: this.creds.machineId },
       reconnection: true,
       reconnectionDelay: 1_000,
@@ -530,7 +534,10 @@ export class RelayClient {
   }
 
   private headers(): Record<string, string> {
-    return { Authorization: `Bearer ${this.creds.token}`, 'Content-Type': 'application/json' };
+    const h: Record<string, string> = { Authorization: `Bearer ${this.creds.token}`, 'Content-Type': 'application/json' };
+    const relayKey = joyRelayAccessKey();
+    if (relayKey) h['X-Joy-Relay-Key'] = relayKey;
+    return h;
   }
 
   /**
@@ -584,11 +591,13 @@ export class RelayClient {
         if (!up.ok) { log(`attachment S3 POST failed: HTTP ${up.status}`); return null; }
       } else {
         const isServerUrl = req.uploadUrl.startsWith(this.creds.serverUrl);
+        const relayKey = joyRelayAccessKey();
         const up = await fetch(req.uploadUrl, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/octet-stream',
             ...(isServerUrl ? { Authorization: `Bearer ${this.creds.token}` } : {}),
+            ...(isServerUrl && relayKey ? { 'X-Joy-Relay-Key': relayKey } : {}),
           },
           body: encrypted,
         });
@@ -622,8 +631,11 @@ export class RelayClient {
       // Step 2: fetch the encrypted bytes. Only send bearer when the URL
       // points back at our server — S3 presigned URLs reject extra headers.
       const isServerUrl = reqData.downloadUrl.startsWith(this.creds.serverUrl);
+      const dlKey = joyRelayAccessKey();
       const dlRes = await fetch(reqData.downloadUrl, {
-        headers: isServerUrl ? { Authorization: `Bearer ${this.creds.token}` } : {},
+        headers: isServerUrl
+          ? { Authorization: `Bearer ${this.creds.token}`, ...(dlKey ? { 'X-Joy-Relay-Key': dlKey } : {}) }
+          : {},
       });
       if (!dlRes.ok) return null;
       const encrypted = new Uint8Array(await dlRes.arrayBuffer());

@@ -52,6 +52,16 @@ export function resolveRelayAlias(nameOrUrl: string): string {
 // ~/.joy/relay.json {serverUrl} → the default relay.
 let cachedRelayUrl: string | null = null;
 
+/** Shared relay perimeter key (joy-relay's gate). Sourced from
+ *  JOY_RELAY_ACCESS_KEY — reaches the daemon via ~/.joy/env (loaded at boot)
+ *  or the service environment. Null → don't send the header (open relays,
+ *  Happy Cloud). Read lazily, NOT cached: the env loader may run after
+ *  module import. */
+export function joyRelayAccessKey(): string | null {
+  const k = process.env.JOY_RELAY_ACCESS_KEY;
+  return k && k.trim() ? k.trim() : null;
+}
+
 export function joyRelayUrl(): string {
   if (cachedRelayUrl) return cachedRelayUrl;
   let url = process.env.JOY_RELAY_URL ? resolveRelayAlias(process.env.JOY_RELAY_URL) : undefined;

@@ -11,7 +11,8 @@ import { RoundButton } from '@/components/RoundButton';
 import { Modal } from '@/modal';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
-import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS } from '@/sync/serverConfig';
+import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey } from '@/sync/serverConfig';
+import { apiSocket } from '@/sync/apiSocket';
 import { switchRelayAndReload, loginToRelay } from '@/sync/relaySwitch';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { normalizeSecretKey } from '@/auth/secretKeyBackup';
@@ -89,6 +90,16 @@ export default function ServerConfigScreen() {
     const auth = useAuth();
     const serverInfo = getServerInfo();
     const [inputUrl, setInputUrl] = useState(serverInfo.isCustom ? getServerUrl() : '');
+    // Perimeter key for the ACTIVE relay (joy-relay gate). Saved per relay;
+    // socket reconnect picks it up (the fetch interceptor reads it live).
+    const [relayKeyInput, setRelayKeyInput] = useState(getRelayAccessKey() ?? '');
+    const handleSaveRelayKey = React.useCallback(() => {
+        setRelayAccessKey(relayKeyInput.trim() || null);
+        Modal.alert(t('server.relayAccessKeySaved'), undefined, [{ text: t('common.ok') }]);
+        // Bounce the socket so the handshake carries (or drops) the key now.
+        apiSocket.disconnect();
+        apiSocket.connect();
+    }, [relayKeyInput]);
     const [error, setError] = useState<string | null>(null);
     const [isValidating, setIsValidating] = useState(false);
     const [applyingKey, setApplyingKey] = useState(false);
@@ -302,6 +313,30 @@ export default function ServerConfigScreen() {
                             />
                         </ItemGroup>
                     )}
+                    <ItemGroup footer={t('server.relayAccessKeyFooter')}>
+                        <View style={styles.contentContainer}>
+                            <Text style={styles.labelText}>{t('server.relayAccessKeyLabel').toUpperCase()}</Text>
+                            <TextInput
+                                style={styles.textInput}
+                                value={relayKeyInput}
+                                onChangeText={setRelayKeyInput}
+                                placeholder="—"
+                                placeholderTextColor={theme.colors.input.placeholder}
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                                secureTextEntry
+                            />
+                            <View style={styles.buttonRow}>
+                                <View style={styles.buttonWrapper}>
+                                    <RoundButton
+                                        title={t('common.save')}
+                                        size="normal"
+                                        onPress={handleSaveRelayKey}
+                                    />
+                                </View>
+                            </View>
+                        </View>
+                    </ItemGroup>
                     <ItemGroup footer={t('server.advancedFeatureFooter')}>
                         <View style={styles.contentContainer}>
                             <Text style={styles.labelText}>{t('server.customServerUrlLabel').toUpperCase()}</Text>

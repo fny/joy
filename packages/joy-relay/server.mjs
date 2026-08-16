@@ -12,6 +12,7 @@ import { createCore } from './src/core.mjs';
 import { createNotify } from './src/notify.mjs';
 import { createAuth } from './src/auth.mjs';
 import { createRouter } from './src/routes.mjs';
+import { createGate } from './src/gate.mjs';
 
 const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
 const TARGET_HOST = process.env.JOY_RELAY_UPSTREAM_HOST ?? '127.0.0.1';
@@ -28,7 +29,10 @@ const router = createRouter({ core, auth, notify, db });
 // Lease-expiry sweep: orphans running turns whose daemon lease lapsed.
 setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-relay] sweep failed:', e)); }, 5_000).unref();
 
+const gate = createGate();
+
 const server = http.createServer(async (req, res) => {
+  if (!gate.allows(req)) return gate.rejectHttp(res);
   if (await router.handle(req, res)) return;
   const up = http.request(
     { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: req.headers },
@@ -47,6 +51,7 @@ const server = http.createServer(async (req, res) => {
 // WebSocket (socket.io) passthrough, unchanged from phase 0 — the native
 // protocol uses SSE + long-poll only.
 server.on('upgrade', (req, socket, head) => {
+  if (!gate.allows(req)) return gate.rejectUpgrade(socket);
   const up = net.connect(TARGET_PORT, TARGET_HOST, () => {
     let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
     for (let i = 0; i < req.rawHeaders.length; i += 2) raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
