@@ -11,6 +11,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
+import { buildOpenApiSpec } from "./openapi";
 
 interface CompiledRoute {
   method: HttpMethod;
@@ -36,6 +37,18 @@ function compilePath(path: string): { regex: RegExp; paramNames: string[] } {
 
 // Collect a request body and parse it as JSON. Empty / non-JSON bodies resolve
 // to undefined (matches the Bun version's swallow-on-parse-error behavior).
+let versionMemo: string | null = null;
+function daemonVersion(): string {
+  if (!versionMemo) {
+    try {
+      versionMemo = String(JSON.parse(readFileSync(join(import.meta.dirname, "../../package.json"), "utf-8")).version ?? "0.0.0");
+    } catch {
+      versionMemo = "0.0.0";
+    }
+  }
+  return versionMemo;
+}
+
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
   // 10MB cap: unbounded accumulation into a string let any local process OOM
   // the daemon (which holds live sessions) with one giant POST body.
@@ -128,6 +141,19 @@ export function startHttpServer(opts: {
     // Token check on all mutating routes
     if (method === "POST" || method === "DELETE") {
       if (req.headers["x-joy-token"] !== token) return json({ error: "unauthorized" }, 401);
+    }
+
+    // OpenAPI dump of the operation catalog — keyed even though it's a GET
+    // (the API surface itself is not public information). Accepts the header
+    // or a bearer for curl convenience.
+    if (method === "GET" && url.pathname === "/openapi.json") {
+      const bearer = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      if (req.headers["x-joy-token"] !== token && bearer !== token) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      const addr = server.address();
+      const boundPort = addr && typeof addr === "object" ? addr.port : port;
+      return json(buildOpenApiSpec({ port: boundPort, version: daemonVersion() }));
     }
 
     // ── Debug-page extras (not operations) ──────────────────────────────

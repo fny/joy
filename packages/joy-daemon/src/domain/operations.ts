@@ -167,11 +167,23 @@ function readLastLogMessages(file: string, limit: number): Array<{ role: "user" 
   } catch { return []; }
 }
 
+/** JSON-Schema fragment used for OpenAPI emission (transports/openapi.ts).
+ *  Plain objects rather than zod: handlers don't validate through zod today,
+ *  so a literal schema keeps the table dependency-free and directly dumpable.
+ *  Optional and incremental — un-annotated ops emit permissive object schemas. */
+export type OpSchema = Record<string, unknown>;
+
 export interface MachineOp {
   name: string;
   scope: "machine";
   rpcName: string;
   http: { method: HttpMethod; path: string };
+  /** One-line human description — surfaces in /openapi.json. */
+  summary?: string;
+  /** Request params (query/body + path merged, JSON Schema `object`). */
+  params?: OpSchema;
+  /** Success response shape (JSON Schema). */
+  result?: OpSchema;
   handler: (registry: SessionRegistry, params: Record<string, unknown>, meta: OpMeta) => Promise<unknown> | unknown;
   /** Optional HTTP-specific status/body mapping for legacy contract divergences. */
   httpShape?: (result: unknown) => { status: number; body: unknown };
@@ -183,6 +195,9 @@ export interface SessionOp {
   rpcName: string;
   /** null → no dedicated HTTP route (killSession is covered by DELETE /sessions/:id). */
   http: { method: HttpMethod; path: string } | null;
+  summary?: string;
+  params?: OpSchema;
+  result?: OpSchema;
   /** rs is present on the RELAY transport only (bindSessionOps) — handlers
    *  needing the data plane (blob upload for oversized responses) use it and
    *  must fall back gracefully when absent (local HTTP transport, no message
@@ -199,6 +214,7 @@ export const machineOps: MachineOp[] = [
     name: "list",
     scope: "machine",
     rpcName: "joy-list-sessions",
+    summary: "List all sessions on this machine (includes agent flavor per record)",
     http: { method: "GET", path: "/sessions" },
     handler: (registry) => registry.list().map(s => s.toJSON()),
   },
@@ -206,6 +222,7 @@ export const machineOps: MachineOp[] = [
     name: "codexModels",
     scope: "machine",
     rpcName: "joy-codex-models",
+    summary: "Curated codex model list",
     http: { method: "GET", path: "/codex/models" },
     // The codex model catalog for the app's picker. FAST PATH: codex's own
     // on-disk cache ($CODEX_HOME/models_cache.json — codex refreshes it on
@@ -228,6 +245,7 @@ export const machineOps: MachineOp[] = [
     name: "opencodeModels",
     scope: "machine",
     rpcName: "joy-opencode-models",
+    summary: "Curated opencode model list",
     http: { method: "GET", path: "/opencode/models" },
     // Static curated allowlist (v1) — no server spawn, instant.
     handler: async () => {
@@ -239,6 +257,7 @@ export const machineOps: MachineOp[] = [
     name: "opencodeSessions",
     scope: "machine",
     rpcName: "joy-opencode-sessions",
+    summary: "List resumable opencode server sessions",
     http: { method: "GET", path: "/opencode/sessions" },
     // Past-sessions picker: opencode sessions recorded for a directory,
     // newest first. Spawns a short-lived server (see listOpencodeSessionsForCwd).
@@ -258,6 +277,7 @@ export const machineOps: MachineOp[] = [
     name: "opencodeSetModel",
     scope: "machine",
     rpcName: "joy-opencode-set-model",
+    summary: "Switch a live opencode session's model",
     http: { method: "POST", path: "/sessions/:id/opencode/model" },
     // Mid-session model switch, allowlist-validated (same policy as create).
     handler: async (registry, params) => {
@@ -275,6 +295,7 @@ export const machineOps: MachineOp[] = [
     name: "refreshCommands",
     scope: "machine",
     rpcName: "joy-refresh-commands",
+    summary: "Re-scan slash commands on this machine",
     http: { method: "POST", path: "/commands/refresh" },
     // Machine-page refresh: re-scan personal + plugins + every known project
     // (prunes removed ones), push the union to machine metadata, and return it.
@@ -284,6 +305,7 @@ export const machineOps: MachineOp[] = [
     name: "get",
     scope: "machine",
     rpcName: "joy-get-session",
+    summary: "Fetch one session record",
     http: { method: "GET", path: "/sessions/:id" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
@@ -298,7 +320,29 @@ export const machineOps: MachineOp[] = [
     name: "create",
     scope: "machine",
     rpcName: "joy-create-session",
+    summary: "Spawn an agent session (claude|codex|opencode|pi) in a directory",
     http: { method: "POST", path: "/sessions" },
+    params: {
+      type: "object",
+      required: ["cwd"],
+      properties: {
+        cwd: { type: "string", description: "Working directory (created only with createDir)" },
+        agent: { type: "string", enum: ["claude", "codex", "opencode", "pi"], default: "claude" },
+        createDir: { type: "boolean" },
+        gitUrl: { type: "string", description: "Clone (or reuse) into cwd before launching" },
+        model: { type: "string" },
+        fallbackModel: { type: "string" },
+        effort: { type: "string" },
+        permissionMode: { type: "string" },
+        yolo: { type: "boolean", default: true },
+        continue: { type: "boolean" },
+        resume_id: { type: "string", description: "Claude session id to --resume" },
+        resume_limit_mb: { type: "number" },
+        forkSession: { type: "boolean", description: "With resume_id: --fork-session (new id, shared history)" },
+        extraArgs: { type: "string" },
+      },
+    },
+    result: { type: "object", properties: { session: { type: "object", description: "SessionRecord" }, error: { type: "string" } } },
     // Throws DirectoryCreationApprovalRequired when cwd is missing and
     // createDir isn't set — each transport maps the sentinel to its contract
     // (RPC: requestToApproveDirectoryCreation, HTTP: 422).
@@ -355,6 +399,7 @@ export const machineOps: MachineOp[] = [
     name: "restart",
     scope: "machine",
     rpcName: "joy-restart-session",
+    summary: "Relaunch a session in place",
     http: { method: "POST", path: "/sessions/:id/restart" },
     // Kills the window and starts a fresh claude in the same cwd resuming
     // the same conversation (--resume, or --continue when the claude session
@@ -378,6 +423,7 @@ export const machineOps: MachineOp[] = [
     name: "kill",
     scope: "machine",
     rpcName: "joy-kill-session",
+    summary: "Kill one session",
     http: { method: "DELETE", path: "/sessions/:id" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
@@ -392,6 +438,7 @@ export const machineOps: MachineOp[] = [
     name: "killAll",
     scope: "machine",
     rpcName: "joy-kill-all-sessions",
+    summary: "Kill every session on this machine",
     http: { method: "POST", path: "/sessions/kill-all" },
     // Kill every session's tmux window (active AND detached) and archive them.
     handler: (registry) => ({ ok: true, killed: registry.killAll() }),
@@ -400,6 +447,7 @@ export const machineOps: MachineOp[] = [
     name: "restartDaemon",
     scope: "machine",
     rpcName: "joy-restart-daemon",
+    summary: "Exec-restart the daemon (tmux sessions survive)",
     http: { method: "POST", path: "/daemon/restart" },
     // Re-exec the daemon. Running Claude sessions live in tmux and survive;
     // recover() re-adopts them. Responds first, then restarts shortly after.
@@ -409,6 +457,7 @@ export const machineOps: MachineOp[] = [
     name: "notify",
     scope: "machine",
     rpcName: "joy-notify",
+    summary: "Send a push notification to all devices",
     http: { method: "POST", path: "/notify" },
     // Push a notification to the user's devices, via the daemon's authed relay.
     handler: async (registry, params) => {
@@ -427,6 +476,16 @@ export const machineOps: MachineOp[] = [
     name: "send",
     scope: "machine",
     rpcName: "joy-send",
+    summary: "Deliver text to a session (queue-routed)",
+    params: {
+      type: "object",
+      required: ["id", "text"],
+      properties: {
+        id: { type: "string", description: "joy session id" },
+        text: { type: "string", description: "Message text; /steer, /title, /joy-prompt etc. are intercepted daemon-side" },
+      },
+    },
+    result: { type: "object", properties: { ok: { type: "boolean" }, queued: { type: "object" }, error: { type: "string" } } },
     http: { method: "POST", path: "/send" },
     handler: (registry, params, meta) => {
       const text = typeof params.text === "string" ? params.text : "";
@@ -474,6 +533,7 @@ export const machineOps: MachineOp[] = [
     name: "queueList",
     scope: "machine",
     rpcName: "joy-queue-list",
+    summary: "List a session's dispatch queue",
     http: { method: "GET", path: "/sessions/:id/queue" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -487,6 +547,7 @@ export const machineOps: MachineOp[] = [
     name: "queueAdd",
     scope: "machine",
     rpcName: "joy-queue-add",
+    summary: "Append a message to the dispatch queue",
     http: { method: "POST", path: "/sessions/:id/queue" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -511,6 +572,7 @@ export const machineOps: MachineOp[] = [
     name: "queueResume",
     scope: "machine",
     rpcName: "joy-queue-resume",
+    summary: "Resume a paused queue",
     http: { method: "POST", path: "/sessions/:id/queue/resume" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -523,6 +585,7 @@ export const machineOps: MachineOp[] = [
     name: "queueEdit",
     scope: "machine",
     rpcName: "joy-queue-edit",
+    summary: "Edit a queued message's text",
     http: { method: "POST", path: "/sessions/:id/queue/:qid" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -537,6 +600,7 @@ export const machineOps: MachineOp[] = [
     name: "queueCancel",
     scope: "machine",
     rpcName: "joy-queue-cancel",
+    summary: "Cancel a queued message",
     http: { method: "DELETE", path: "/sessions/:id/queue/:qid" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -549,6 +613,7 @@ export const machineOps: MachineOp[] = [
     name: "queueReorder",
     scope: "machine",
     rpcName: "joy-queue-reorder",
+    summary: "Move a queued message within the queue",
     http: { method: "POST", path: "/sessions/:id/queue/:qid/move" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -561,6 +626,7 @@ export const machineOps: MachineOp[] = [
     name: "sendKeys",
     scope: "machine",
     rpcName: "joy-send-keys",
+    summary: "Type raw key tokens into the tmux pane (manual intervention)",
     http: { method: "POST", path: "/sessions/:id/keys" },
     // Raw keyboard intervention: bracketed key tokens (git commit<Enter><C-c>;
     // see keyTokens.ts for the dialect table). Unlike send, nothing is
@@ -585,6 +651,7 @@ export const machineOps: MachineOp[] = [
     name: "setMode",
     scope: "machine",
     rpcName: "joy-set-mode",
+    summary: "Switch permission mode / model / effort",
     http: { method: "POST", path: "/sessions/:id/mode" },
     // Absolute permission-mode set: detects the current mode from the pane
     // footer, walks Shift+Tab to the target, verifies the footer afterwards.
@@ -605,6 +672,7 @@ export const machineOps: MachineOp[] = [
     name: "pane",
     scope: "machine",
     rpcName: "joy-pane",
+    summary: "Capture the tmux pane (ANSI text)",
     http: { method: "GET", path: "/sessions/:id/pane" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
@@ -621,6 +689,7 @@ export const machineOps: MachineOp[] = [
     name: "resize",
     scope: "machine",
     rpcName: "joy-resize",
+    summary: "Resize the tmux window (cols/rows)",
     http: { method: "POST", path: "/sessions/:id/resize" },
     // Set the pane's column/row size. The viewing client calls this on
     // connect and when its width changes — last connector drives the width.
@@ -643,6 +712,7 @@ export const machineOps: MachineOp[] = [
     name: "transcript",
     scope: "machine",
     rpcName: "joy-transcript",
+    summary: "Parsed transcript slice for a session",
     http: { method: "GET", path: "/sessions/:id/transcript" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
@@ -658,6 +728,7 @@ export const machineOps: MachineOp[] = [
     name: "status",
     scope: "machine",
     rpcName: "joy-status",
+    summary: "Daemon + sessions snapshot",
     http: { method: "GET", path: "/status" },
     handler: (registry) => ({
       ok: true,
@@ -675,6 +746,7 @@ export const machineOps: MachineOp[] = [
     name: "sessionLog",
     scope: "machine",
     rpcName: "joy-session-log",
+    summary: "Raw session log tail",
     http: { method: "GET", path: "/sessions/:id/log" },
     // Ship the session's transcript JSONL so the app can offer it as a
     // download. Base64 inside the encrypted RPC envelope — capped so a
@@ -697,6 +769,13 @@ export const machineOps: MachineOp[] = [
     name: "usage",
     scope: "machine",
     rpcName: "joy-usage",
+    summary: "Cost/token report from local transcripts (cached, background-warmed)",
+    params: {
+      type: "object",
+      properties: {
+        period: { type: "string", enum: ["today", "week", "30days", "90days", "6months", "all"], default: "30days" },
+      },
+    },
     http: { method: "GET", path: "/usage" },
     // Usage report computed by usage.ts straight from the transcript JSONL:
     // cost/tokens, daily, per-project/model/tool/MCP.
@@ -712,6 +791,21 @@ export const machineOps: MachineOp[] = [
     name: "limits",
     scope: "machine",
     rpcName: "joy-limits",
+    summary: "Server-truth account quota windows for claude (OAuth usage API) and codex (rollout rate_limits)",
+    result: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        claude: {
+          type: "object",
+          description: "ok:true with limits {five_hour, seven_day, …} of {utilization: 0-100, resets_at: ISO} — or ok:false with error",
+        },
+        codex: {
+          type: "object",
+          description: "ok:true with limits {primary, secondary} of {used_percent, window_minutes, resets_at|resets_in_seconds} — or ok:false with error",
+        },
+      },
+    },
     http: { method: "GET", path: "/limits" },
     // Account quota windows, server truth (limits.ts): claude via the machine's
     // own OAuth token against api/oauth/usage; codex from the newest rollout's
@@ -729,6 +823,7 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigRead",
     scope: "machine",
     rpcName: "joy-agent-config-read",
+    summary: "Read an agent's config file (raw + parsed)",
     http: { method: "GET", path: "/agent-config/:agent" },
     // Raw + parsed view of the agent's own config file (claude settings.json,
     // codex config.toml, opencode opencode.json, pi settings.json).
@@ -738,6 +833,7 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigSet",
     scope: "machine",
     rpcName: "joy-agent-config-set",
+    summary: "Merge JSON-path assignment lines into an agent's config (backup kept)",
     http: { method: "POST", path: "/agent-config/:agent/set" },
     // Merge JSON-path assignment lines (`examples[0].title = "hi"`; value null
     // deletes) into the existing config — other keys untouched, previous file
@@ -752,6 +848,7 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigWrite",
     scope: "machine",
     rpcName: "joy-agent-config-write",
+    summary: "Replace an agent's config file (must parse)",
     http: { method: "POST", path: "/agent-config/:agent" },
     // Full raw replacement — refused unless it parses as the file's format.
     handler: async (_registry, params) => writeAgentConfigRaw(String(params.agent ?? ""), String(params.raw ?? "")),
@@ -760,6 +857,7 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigSchema",
     scope: "machine",
     rpcName: "joy-agent-config-schema",
+    summary: "Published JSON Schema for an agent's config (fetched + cached)",
     http: { method: "GET", path: "/agent-config/:agent/schema" },
     // Published JSON Schema (claude via schemastore, opencode via its own
     // $schema URL), fetched by the daemon and disk-cached for offline reuse.
@@ -769,6 +867,7 @@ export const machineOps: MachineOp[] = [
     name: "sessionUsage",
     scope: "machine",
     rpcName: "joy-session-usage",
+    summary: "Per-session cost rows (subagent burn rolled into parent)",
     http: { method: "GET", path: "/usage/sessions" },
     // Per-session cost rows from usage.ts (keyed by claude session id, with
     // subagent burn rolled into the parent and a per-model breakdown).
@@ -789,6 +888,7 @@ export const machineOps: MachineOp[] = [
     name: "listLogs",
     scope: "machine",
     rpcName: "joy-list-logs",
+    summary: "List past-session transcripts for a directory",
     http: { method: "GET", path: "/logs" },
     // List every Claude transcript JSONL for a project directory (one per
     // conversation Claude has had in that cwd), newest first. `directory` is the
@@ -816,6 +916,7 @@ export const machineOps: MachineOp[] = [
     name: "readLog",
     scope: "machine",
     rpcName: "joy-read-log",
+    summary: "Read a past-session transcript's messages",
     http: { method: "GET", path: "/logs/messages" },
     // Last N back-and-forth messages (user + assistant) from one transcript, for
     // a quick preview without shipping the whole file (see joy-session-log for the
@@ -845,6 +946,7 @@ export const sessionOps: SessionOp[] = [
     name: "abort",
     scope: "session",
     rpcName: "abort",
+    summary: "Abort the running turn (Escape; does not clear the input box)",
     http: { method: "POST", path: "/sessions/:id/abort" },
     handler: (session) => session.abort(),
   },
@@ -856,6 +958,7 @@ export const sessionOps: SessionOp[] = [
     name: "hookEvent",
     scope: "session",
     rpcName: "joy-hook",
+    summary: "Claude hook event ingress (PreCompact etc.)",
     http: { method: "POST", path: "/sessions/:id/hook" },
     handler: (session, params) => session.onHookEvent(params as Record<string, unknown>),
   },
@@ -867,6 +970,7 @@ export const sessionOps: SessionOp[] = [
     name: "compacting",
     scope: "session",
     rpcName: "compacting",
+    summary: "Mark the session as compacting (hook-driven)",
     http: { method: "POST", path: "/sessions/:id/compacting" },
     handler: (session, params) => {
       session.markCompacting(typeof params.trigger === "string" ? params.trigger : "auto");
@@ -877,6 +981,7 @@ export const sessionOps: SessionOp[] = [
     name: "killSession",
     scope: "session",
     rpcName: "killSession",
+    summary: "Session-scope kill (RPC only; HTTP uses DELETE /sessions/:id)",
     http: null, // covered by DELETE /sessions/:id
     handler: async (session) => {
       // Idempotent: the op is bound to an existing session, so killing one
@@ -897,6 +1002,7 @@ export const sessionOps: SessionOp[] = [
     name: "bash",
     scope: "session",
     rpcName: "bash",
+    summary: "Run a shell command in the session cwd",
     http: { method: "POST", path: "/sessions/:id/bash" },
     handler: (session, params) => handleBash(session.cwd, params as unknown as Parameters<typeof handleBash>[1]),
   },
@@ -904,6 +1010,7 @@ export const sessionOps: SessionOp[] = [
     name: "readFile",
     scope: "session",
     rpcName: "readFile",
+    summary: "Read a file (≤400KB inline base64; larger spills to an encrypted blob)",
     http: { method: "POST", path: "/sessions/:id/readFile" },
     // Second allowed root: the session's own ~/.joy/sessions/<id>/ so the app
     // can fetch joy-img media the agent saved there — scoped per session.
@@ -947,6 +1054,7 @@ export const sessionOps: SessionOp[] = [
     name: "writeFile",
     scope: "session",
     rpcName: "writeFile",
+    summary: "Write a file in the session cwd",
     http: { method: "POST", path: "/sessions/:id/writeFile" },
     handler: (session, params) => handleWriteFile(session.cwd, params as unknown as Parameters<typeof handleWriteFile>[1]),
   },
@@ -954,6 +1062,7 @@ export const sessionOps: SessionOp[] = [
     name: "listDirectory",
     scope: "session",
     rpcName: "listDirectory",
+    summary: "List a directory",
     http: { method: "POST", path: "/sessions/:id/listDirectory" },
     handler: (session, params) => handleListDirectory(session.cwd, params as unknown as Parameters<typeof handleListDirectory>[1]),
   },
@@ -961,6 +1070,7 @@ export const sessionOps: SessionOp[] = [
     name: "getDirectoryTree",
     scope: "session",
     rpcName: "getDirectoryTree",
+    summary: "Directory tree for the file browser",
     http: { method: "POST", path: "/sessions/:id/getDirectoryTree" },
     handler: (session, params) => handleGetDirectoryTree(session.cwd, params as unknown as Parameters<typeof handleGetDirectoryTree>[1]),
   },
@@ -968,6 +1078,7 @@ export const sessionOps: SessionOp[] = [
     name: "ripgrep",
     scope: "session",
     rpcName: "ripgrep",
+    summary: "Search files with ripgrep",
     http: { method: "POST", path: "/sessions/:id/ripgrep" },
     handler: (session, params) => handleRipgrep(session.cwd, params as unknown as Parameters<typeof handleRipgrep>[1]),
   },
@@ -975,6 +1086,7 @@ export const sessionOps: SessionOp[] = [
     name: "difftastic",
     scope: "session",
     rpcName: "difftastic",
+    summary: "Structural diff via difftastic",
     http: { method: "POST", path: "/sessions/:id/difftastic" },
     handler: (session, params) => handleDifftastic(session.cwd, params as unknown as Parameters<typeof handleDifftastic>[1]),
   },
