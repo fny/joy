@@ -44,38 +44,38 @@ export function createRouter({ core, auth, notify, db }) {
   // route table: [method, regex, handler(ctx, match, body)]
   const routes = [];
   const route = (method, pattern, opts, handler) => {
-    routes.push({ method, regex: new RegExp(`^${pattern}$`), opts, handler });
+    routes.push({ method, pattern, regex: new RegExp(`^${pattern}$`), opts, handler });
   };
 
   // ── client surface ────────────────────────────────────────────────────────
 
-  route('GET', '/joy/v1/capabilities', { auth: false }, async () => CAPABILITIES);
+  route('GET', '/joy/v1/capabilities', { summary: 'Nucleus capabilities/version (no auth)', auth: false }, async () => CAPABILITIES);
 
-  route('GET', '/joy/v1/sessions', {}, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));
+  route('GET', '/joy/v1/sessions', { summary: 'List durable sessions',}, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));
 
-  route('POST', '/joy/v1/session-creations', {}, async (ctx, m, body) => {
+  route('POST', '/joy/v1/session-creations', { summary: 'Create a durable session (idempotent per actor)',}, async (ctx, m, body) => {
     need(body, 'creationIntentId', 'daemonId');
     if (body.mode === 'announce_existing') need(body, 'localSessionId', 'sessionKeyEnvelope');
     return core.createSession(ctx.accountId, ctx.actorId, body);
   });
 
-  route('POST', '/joy/v1/sessions/([\\w-]+)/turns', {}, async (ctx, m, body) => {
+  route('POST', '/joy/v1/sessions/([\\w-]+)/turns', { summary: 'Submit a turn to the durable queue', params: ['sessionId'],}, async (ctx, m, body) => {
     need(body, 'clientIntentId', 'ciphertext');
     return core.acceptPrompt(ctx.accountId, ctx.actorId, m[1], body);
   });
 
-  route('POST', '/joy/v1/sessions/([\\w-]+)/turns/([\\w-]+)/cancellations', {}, async (ctx, m, body) => {
+  route('POST', '/joy/v1/sessions/([\\w-]+)/turns/([\\w-]+)/cancellations', { summary: 'Cancel a queued/running turn', params: ['sessionId', 'turnId'],}, async (ctx, m, body) => {
     need(body, 'clientIntentId');
     return core.acceptCancellation(ctx.accountId, ctx.actorId, m[1], m[2], body);
   });
 
-  route('GET', '/joy/v1/sessions/([\\w-]+)/state', {}, async (ctx, m) => core.sessionState(ctx.accountId, m[1]));
+  route('GET', '/joy/v1/sessions/([\\w-]+)/state', { summary: 'Session state snapshot', params: ['sessionId'],}, async (ctx, m) => core.sessionState(ctx.accountId, m[1]));
 
-  route('GET', '/joy/v1/sessions/([\\w-]+)/events', {}, async (ctx, m, body, url) =>
+  route('GET', '/joy/v1/sessions/([\\w-]+)/events', { summary: 'Session event log slice', params: ['sessionId'],}, async (ctx, m, body, url) =>
     core.sessionEvents(ctx.accountId, m[1], url.searchParams.get('after_seq') ?? url.searchParams.get('afterSeq') ?? 0,
       url.searchParams.get('limit')));
 
-  route('GET', '/joy/v1/events/stream', { sse: true }, async (ctx, m, body, url, req, res) => {
+  route('GET', '/joy/v1/events/stream', { summary: 'SSE event stream', sse: true }, async (ctx, m, body, url, req, res) => {
     // Register FIRST (buffering), then snapshot, then flush — a commit that
     // lands between snapshot and registration cannot be lost.
     const handle = notify.addSse(ctx.accountId, res);
@@ -98,7 +98,7 @@ export function createRouter({ core, auth, notify, db }) {
 
   // ── daemon surface ────────────────────────────────────────────────────────
 
-  route('POST', '/joy/v1/daemons/([\\w.-]+)/leases', {}, async (ctx, m, body) =>
+  route('POST', '/joy/v1/daemons/([\\w.-]+)/leases', { summary: 'Acquire a daemon lease', params: ['machineId'],}, async (ctx, m, body) =>
     core.acquireLease(ctx.accountId, m[1], body));
 
   // Pre-resolution for claims only (the waiter needs daemon_id). All actual
@@ -119,7 +119,7 @@ export function createRouter({ core, auth, notify, db }) {
     return { id: lease.id, daemon_id: lease.daemon_id, epoch: lease.epoch, token_hash: tokenHash, account_id: lease.account_id };
   };
 
-  route('PUT', '/joy/v1/daemon-leases/([\\w-]+)', { auth: false }, async (ctx, m, body, url, req) => {
+  route('PUT', '/joy/v1/daemon-leases/([\\w-]+)', { summary: 'Heartbeat/renew a lease (lease-token auth)', params: ['leaseId'], auth: false }, async (ctx, m, body, url, req) => {
     const token = req.headers['x-joy-lease-token'];
     if (!token) throw new ApiError(401, 'missing_lease_token');
     return core.renewLease(m[1], hashToken(String(token)));
@@ -137,8 +137,8 @@ export function createRouter({ core, auth, notify, db }) {
     await waited;
     return fn(lease.id, lease.token_hash);
   };
-  route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/work', { auth: false }, claimHandler('work'));
-  route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/control', { auth: false }, claimHandler('control'));
+  route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/work', { summary: 'Long-poll claim work under a lease', params: ['leaseId'], auth: false }, claimHandler('work'));
+  route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/control', { summary: 'Long-poll claim control messages under a lease', params: ['leaseId'], auth: false }, claimHandler('control'));
 
   /** Daemon lifecycle writes: build the lease REFERENCE from headers only —
    *  the core fences it inside the mutation's own transaction, so there is
@@ -153,23 +153,23 @@ export function createRouter({ core, auth, notify, db }) {
     return fn(leaseRef, m, body);
   };
 
-  route('POST', '/joy/v1/deliveries/([\\w-]+)/received', { auth: false },
+  route('POST', '/joy/v1/deliveries/([\\w-]+)/received', { summary: 'Ack a delivery', params: ['deliveryId'], auth: false },
     withLeaseHeaders((lease, m) => core.deliveryReceived(m[1], lease).then(() => ({ ok: true }))));
-  route('POST', '/joy/v1/sessions/([\\w-]+)/bind', { auth: false },
+  route('POST', '/joy/v1/sessions/([\\w-]+)/bind', { summary: 'Bind a daemon to a session', params: ['sessionId'], auth: false },
     withLeaseHeaders((lease, m, body) => {
       need(body, 'localSessionId', 'sessionKeyEnvelope');
       return core.bindSession(m[1], lease, body).then(() => ({ ok: true }));
     }));
-  route('POST', '/joy/v1/turns/([\\w-]+)/submitted', { auth: false },
+  route('POST', '/joy/v1/turns/([\\w-]+)/submitted', { summary: 'Mark a turn submitted to the agent', params: ['turnId'], auth: false },
     withLeaseHeaders((lease, m) => core.turnSubmitted(m[1], lease).then(() => ({ ok: true }))));
-  route('POST', '/joy/v1/turns/([\\w-]+)/start', { auth: false },
+  route('POST', '/joy/v1/turns/([\\w-]+)/start', { summary: 'Mark a turn started', params: ['turnId'], auth: false },
     withLeaseHeaders((lease, m, body) => core.turnStarted(m[1], lease, body ?? {})));
-  route('POST', '/joy/v1/turns/([\\w-]+)/facts', { auth: false },
+  route('POST', '/joy/v1/turns/([\\w-]+)/facts', { summary: 'Append turn facts (progress/results)', params: ['turnId'], auth: false },
     withLeaseHeaders((lease, m, body) => {
       need(body, 'type');
       return core.turnFact(m[1], lease, body);
     }));
-  route('POST', '/joy/v1/turns/([\\w-]+)/reconcile', { auth: false },
+  route('POST', '/joy/v1/turns/([\\w-]+)/reconcile', { summary: 'Reconcile turn state after a daemon restart', params: ['turnId'], auth: false },
     withLeaseHeaders((lease, m, body) => {
       need(body, 'resolution');
       return core.reconcileTurn(m[1], lease, body);
@@ -215,5 +215,11 @@ export function createRouter({ core, auth, notify, db }) {
     return true;
   }
 
-  return { handle };
+  /** Docs view of the table (docs.mjs): pattern + names, no handlers. */
+  const routeTable = () => routes.map((r) => ({
+    method: r.method, pattern: r.pattern,
+    params: r.opts.params ?? [], summary: r.opts.summary ?? r.pattern,
+    auth: r.opts.auth !== false, sse: r.opts.sse === true,
+  }));
+  return { handle, routeTable };
 }
