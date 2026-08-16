@@ -130,7 +130,6 @@ export const en = {
         reportIssue: 'Report an Issue',
         privacyPolicy: 'Privacy Policy',
         termsOfService: 'Terms of Service',
-        eula: 'EULA',
         supportUs: 'Support us',
         supportUsSubtitlePro: 'Thank you for your support!',
         supportUsSubtitle: 'Support project development',

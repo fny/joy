@@ -7,16 +7,14 @@ const SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
 export const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
 
-/** The known relays, in preference order. The joy.voltai.party ports are
- *  three doors into the same happy-server universe: :4997 is the STABLE
- *  joy-relay proxy (keep it boring), :14997 a dev joy-relay instance that
- *  restarts freely, :24997 the box's happy-server directly. 80/443/1443 are
- *  closed on the box — only these ports (and ssh) are exposed. */
+/** The known relays, in preference order. joy.voltai.party's :14997 (dev
+ *  joy-relay) and :24997 (direct happy-server) doors still exist on the box
+ *  but were dropped from the picker 2026-08-16 — they're the same universe as
+ *  :4997 and only ever caused machine-list confusion. A custom URL can still
+ *  reach them. */
 export const KNOWN_RELAYS = [
     { key: 'happy', name: 'Happy Cloud', url: DEFAULT_SERVER_URL },
-    { key: 'happy-joy', name: 'Happy Joy', url: 'https://joy.voltai.party:24997' },
     { key: 'joy', name: 'Joy Relay', url: 'https://joy.voltai.party:4997' },
-    { key: 'joy-dev', name: 'Joy Relay Dev', url: 'https://joy.voltai.party:14997' },
 ] as const;
 
 /** Stable per-relay identifier: host, or host_port for non-default ports —

@@ -131,7 +131,6 @@ export const ca: TranslationStructure = {
         reportIssue: 'Informa d\'un problema',
         privacyPolicy: 'Política de privadesa',
         termsOfService: 'Condicions del servei',
-        eula: 'EULA',
         supportUs: 'Dona\'ns suport',
         supportUsSubtitlePro: 'Gràcies pel teu suport!',
         supportUsSubtitle: 'Dona suport al desenvolupament del projecte',

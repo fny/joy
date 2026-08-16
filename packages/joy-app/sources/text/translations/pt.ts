@@ -131,7 +131,6 @@ export const pt: TranslationStructure = {
         reportIssue: 'Relatar um problema',
         privacyPolicy: 'Política de privacidade',
         termsOfService: 'Termos de serviço',
-        eula: 'EULA',
         supportUs: 'Nos apoie',
         supportUsSubtitlePro: 'Obrigado pelo seu apoio!',
         supportUsSubtitle: 'Apoie o desenvolvimento do projeto',

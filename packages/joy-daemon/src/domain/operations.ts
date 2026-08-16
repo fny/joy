@@ -27,6 +27,7 @@ import {
 } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
+import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir } from "../claude/transcript";
 import { joySessionDir } from "../paths";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync } from "fs";
@@ -723,6 +724,46 @@ export const machineOps: MachineOp[] = [
       ]);
       return { ok: true, claude, codex };
     },
+  },
+  {
+    name: "agentConfigRead",
+    scope: "machine",
+    rpcName: "joy-agent-config-read",
+    http: { method: "GET", path: "/agent-config/:agent" },
+    // Raw + parsed view of the agent's own config file (claude settings.json,
+    // codex config.toml, opencode opencode.json, pi settings.json).
+    handler: async (_registry, params) => readAgentConfig(String(params.agent ?? "")),
+  },
+  {
+    name: "agentConfigSet",
+    scope: "machine",
+    rpcName: "joy-agent-config-set",
+    http: { method: "POST", path: "/agent-config/:agent/set" },
+    // Merge JSON-path assignment lines (`examples[0].title = "hi"`; value null
+    // deletes) into the existing config — other keys untouched, previous file
+    // kept as <name>.joy-bak.
+    handler: async (_registry, params) => {
+      const lines = Array.isArray(params.lines) ? params.lines.map(String) : [];
+      if (lines.length === 0) return { ok: false, error: "no assignment lines" };
+      return applyAgentConfigAssignments(String(params.agent ?? ""), lines);
+    },
+  },
+  {
+    name: "agentConfigWrite",
+    scope: "machine",
+    rpcName: "joy-agent-config-write",
+    http: { method: "POST", path: "/agent-config/:agent" },
+    // Full raw replacement — refused unless it parses as the file's format.
+    handler: async (_registry, params) => writeAgentConfigRaw(String(params.agent ?? ""), String(params.raw ?? "")),
+  },
+  {
+    name: "agentConfigSchema",
+    scope: "machine",
+    rpcName: "joy-agent-config-schema",
+    http: { method: "GET", path: "/agent-config/:agent/schema" },
+    // Published JSON Schema (claude via schemastore, opencode via its own
+    // $schema URL), fetched by the daemon and disk-cached for offline reuse.
+    handler: async (_registry, params) => fetchAgentSchema(String(params.agent ?? "")),
   },
   {
     name: "sessionUsage",

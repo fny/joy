@@ -132,7 +132,6 @@ export const zhHant: TranslationStructure = {
         reportIssue: '回報問題',
         privacyPolicy: '隱私權政策',
         termsOfService: '服務條款',
-        eula: '終端使用者授權協議',
         supportUs: '支援我們',
         supportUsSubtitlePro: '感謝您的支援！',
         supportUsSubtitle: '支援專案開發',
