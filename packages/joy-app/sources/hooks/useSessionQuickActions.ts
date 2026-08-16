@@ -133,6 +133,14 @@ export function useSessionQuickActions(
     // duplicate) ride a single switch on settings/features.
     const claudeFlavor = !session.metadata?.flavor || session.metadata.flavor === 'claude';
     const claudeSessionId = session.metadata?.claudeSessionId;
+    // Joy-native fork: any joy claude session with a known conversation id on
+    // an online machine. No experiment gate — it's a core action.
+    const canForkJoy = Boolean(
+        isJoy
+        && (!session.metadata?.flavor || session.metadata.flavor === 'claude')
+        && session.metadata?.claudeSessionId
+        && machineId && machine && isMachineOnline(machine),
+    );
     const canFork = Boolean(
         expResumeSession
         && !isJoy
@@ -252,11 +260,34 @@ export function useSessionQuickActions(
     // Fork the session (no truncation) — copies the on-disk Claude JSONL
     // and spawns a fresh Happy session on the same machine. Works for
     // both active and inactive sessions; the source row stays untouched.
+    //
+    // Joy sessions use a different mechanism: the daemon's create op with
+    // resume_id + forkSession, which launches `claude --resume <id>
+    // --fork-session` — the conversation continues under a NEW session id,
+    // no JSONL copy needed (works on LIVE sessions too; the daemon's
+    // resume-collision guard exempts forks).
     const [forking, performFork] = useHappyAction(async () => {
+        const directory = session.metadata?.path;
+        if (isJoy) {
+            if (!canForkJoy || !machineId || !directory || !claudeSessionId) {
+                throw new HappyError(t('session.forkErrorMissingMetadata'), false);
+            }
+            type JoyCreateResult = { relaySessionId?: string; error?: string };
+            const result = await apiSocket.machineRPC<JoyCreateResult, Record<string, unknown>>(
+                machineId,
+                'joy-create-session',
+                { cwd: directory, resume_id: claudeSessionId, forkSession: true },
+            );
+            if (result.error || !result.relaySessionId) {
+                throw new HappyError(result.error ?? t('session.forkErrorGeneric'), false);
+            }
+            try { await sync.refreshSessions(); } catch { /* broadcast will hydrate */ }
+            navigateToSession(result.relaySessionId);
+            return;
+        }
         if (!canFork) {
             throw new HappyError(t('session.forkErrorMissingMetadata'), false);
         }
-        const directory = session.metadata?.path;
         if (!machineId || !directory || !claudeSessionId) {
             throw new HappyError(t('session.forkErrorMissingMetadata'), false);
         }
@@ -321,8 +352,10 @@ export function useSessionQuickActions(
             items.push({ id: 'resume', icon: 'play-circle-outline', label: t('sessionInfo.resumeSession'), onPress: resumeSession });
         }
 
-        if (canFork) {
+        if (canFork || canForkJoy) {
             items.push({ id: 'fork', icon: 'git-branch-outline', label: t('session.forkAction'), onPress: forkSession });
+        }
+        if (canFork) {
             items.push({ id: 'duplicate', icon: 'time-outline', label: t('session.duplicateAction'), onPress: openDuplicateSheet });
         }
 

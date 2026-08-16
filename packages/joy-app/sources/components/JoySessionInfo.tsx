@@ -260,7 +260,7 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                 )}
                 {session.metadata?.path && (
                     <Item
-                        title="Projects"
+                        title="Sessions"
                         subtitle="This project's session history & logs"
                         icon={<Ionicons name="folder-outline" size={29} color="#007AFF" />}
                         onPress={() => router.push(`/session/${session.id}/projects`)}
