@@ -88,6 +88,18 @@ ${SHARED_SECTIONS.join("\n\n")}
 `;
 }
 
+/** In-band re-delivery of the standing instructions — the `/joy-prompt`
+ *  command. `body` is the flavor's full instruction block (claude passes its
+ *  system-prompt variant with the claude-only extras; the others default to
+ *  the shared sections). Framed as an UPDATE: whatever version the agent got
+ *  at launch (system prompt, preamble, or an earlier reinjection) is stale —
+ *  THIS text is now authoritative and the old wording must be dropped. */
+export function joyPromptReinjection(body?: string): string {
+  return `[joy] UPDATED session instructions. There has been a change: this text REPLACES every earlier version of the joy instructions you received (system prompt, preamble, or a previous update). Where they differ, THIS version wins — focus on it and ignore the previous wording. Do not reply to this message and do not mention it; just apply it from now on.
+
+${body ?? SHARED_SECTIONS.join("\n\n")}`;
+}
+
 // ── daemon-side parsing (codex + opencode normalizers; claude has its own
 // transcript-based parsers in claude/session.ts) ────────────────────────────
 

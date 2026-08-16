@@ -30,7 +30,7 @@ import type { DeliverySource } from "../domain/receipts";
 import type { AgentSession } from "../domain/agentSession";
 import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid, killOpencodeServerPid } from "./opencodeClient";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
-import { opencodeJoyPreamble } from "../domain/agentTagsPrompt";
+import { opencodeJoyPreamble, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "../codex/codexInboundStore";
 
 export interface OpencodeInit {
@@ -273,6 +273,9 @@ export class OpencodeSession implements AgentSession {
   async #onRelayMessage(text: string, seq: number): Promise<void> {
     if (this.status === "ended") return;
     if (this.#inbound.some((i) => i.seq === seq)) { void this.#drainInbound(); return; }
+    // App already shows the /joy-prompt row — no mirror. A crash-redelivery of
+    // this seq worst-cases a duplicate reinjection, which is benign.
+    if (this.#handleJoyPrompt(text, false, seq)) return;
     // msg_ prefix is REQUIRED by the prompt schema; deterministic per relay seq
     // so a cursor redelivery reuses the same id (idempotent server-side).
     const item: CodexInboundItem = { clientId: `msg_joy${this.id}s${seq}`, text, state: "queued", at: Date.now(), seq };
@@ -282,6 +285,20 @@ export class OpencodeSession implements AgentSession {
       throw new Error("opencode inbound persist failed");
     }
     await this.#drainInbound();
+  }
+
+  /** /joy-prompt — re-deliver the CURRENT joy instructions in-band. Opencode's
+   *  preamble rides the FIRST prompt only, so after enough turns (or a
+   *  compaction) it genuinely scrolls out of context; this refreshes it. The
+   *  body goes out as its own unmirrored message — only the /joy-prompt row
+   *  (when mirror) appears in chat. Clears #needsPreamble: the reinjection IS
+   *  the (newer) preamble. */
+  #handleJoyPrompt(text: string, mirror: boolean, seq?: number): boolean {
+    if (!/^\/joy-prompt(?:\s|$)/.test(text.trim())) return false;
+    this.#needsPreamble = false;
+    if (mirror && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
+    this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
+    return true;
   }
 
   async #drainInbound(): Promise<void> {
@@ -489,6 +506,9 @@ export class OpencodeSession implements AgentSession {
       }
       this.#deps.broadcast("session_update", this.toJSON());
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+    }
+    if (this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq)) {
       return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
     }
     if (seq != null && this.#inbound.some((i) => i.seq === seq)) { void this.#drainInbound(); return { id: String(seq), text, createdAt: Date.now() }; }

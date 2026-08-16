@@ -26,6 +26,7 @@ import type { DeliverySource } from "../domain/receipts";
 import type { SessionStatus, SessionRecord, QueuedMessage, QueueState, SessionDeps } from "../claude/session";
 import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import { titleFromPrompt } from "../opencode/opencodeSession";
+import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 
 export interface PiInit {
   id: string;
@@ -280,6 +281,16 @@ export class PiSession implements AgentSession {
       }
       this.#deps.broadcast("session_update", this.toJSON());
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `pi:in:${this.id}:${opts?.seq ?? at}`);
+      return { id: String(opts?.seq ?? at), text, createdAt: at };
+    }
+    // /joy-prompt — deliver the CURRENT joy instructions in-band. Pi has no
+    // launch-time preamble (bare v1), so this is how a pi session learns the
+    // tag vocabulary at all. Body goes out unmirrored; only the /joy-prompt
+    // row (when mirror) appears in chat. Relay sends route through enqueue
+    // (rs.onMessage), so this one interception covers both paths.
+    if (/^\/joy-prompt(?:\s|$)/.test(text.trim())) {
+      if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `pi:in:${this.id}:${opts?.seq ?? at}`);
+      this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
       return { id: String(opts?.seq ?? at), text, createdAt: at };
     }
     // Mirror the user row FIRST (positional turn pairing needs user-before-

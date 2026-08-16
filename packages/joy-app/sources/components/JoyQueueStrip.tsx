@@ -46,7 +46,7 @@ const QueuedRow = React.memo(function QueuedRow(props: {
                     accessibilityLabel="Steer now"
                     style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
                 >
-                    <Ionicons name="flash-outline" size={17} color={theme.colors.text} />
+                    <Ionicons name="arrow-up-circle-outline" size={17} color={theme.colors.text} />
                 </Pressable>
             )}
             <Pressable
