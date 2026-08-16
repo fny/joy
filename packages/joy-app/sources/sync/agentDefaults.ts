@@ -1,6 +1,6 @@
 import * as z from 'zod';
 
-export const agentKeys = ['claude', 'codex', 'gemini', 'openclaw', 'opencode'] as const;
+export const agentKeys = ['claude', 'codex', 'gemini', 'openclaw', 'opencode', 'pi'] as const;
 export type AgentKey = typeof agentKeys[number];
 
 export const AgentDefaultOverrideSchema = z.object({
@@ -15,6 +15,7 @@ export const AgentDefaultOverridesSchema = z.object({
     gemini: AgentDefaultOverrideSchema.optional(),
     openclaw: AgentDefaultOverrideSchema.optional(),
     opencode: AgentDefaultOverrideSchema.optional(),
+    pi: AgentDefaultOverrideSchema.optional(),
 }).passthrough().default({});
 
 export type AgentDefaultOverride = z.infer<typeof AgentDefaultOverrideSchema>;
@@ -32,17 +33,19 @@ const codeAgentDefaults: Record<AgentKey, AgentDefaultConfig> = {
     // `yolo` and maps it to the Claude SDK's bypass mode. effortLevel is null
     // so nothing is pinned — this mirrors running `claude --model opus` alone
     // and letting the CLI pick the effort.
-    claude: { permissionMode: 'bypassPermissions', modelMode: 'opus', effortLevel: null },
-    codex: { permissionMode: 'yolo', modelMode: 'gpt-5.5', effortLevel: 'medium' },
+    claude: { permissionMode: 'bypassPermissions', modelMode: 'fable', effortLevel: null },
+    codex: { permissionMode: 'yolo', modelMode: 'gpt-5.6-sol', effortLevel: 'medium' },
     gemini: { permissionMode: 'default', modelMode: 'gemini-2.5-pro', effortLevel: null },
     openclaw: { permissionMode: 'default', modelMode: 'default', effortLevel: null },
     // opencode v1 has no permission-mode surface; model default mirrors the
     // daemon's curated allowlist (joy-opencode-models).
     opencode: { permissionMode: 'default', modelMode: 'accounts/fireworks/models/kimi-k3', effortLevel: null },
+    // pi (bare v1): daemon default is fireworks kimi-k3; no permission surface.
+    pi: { permissionMode: 'default', modelMode: 'default', effortLevel: null },
 };
 
 export function normalizeAgentKey(flavor: string | null | undefined): AgentKey {
-    if (flavor === 'codex' || flavor === 'gemini' || flavor === 'openclaw' || flavor === 'opencode') {
+    if (flavor === 'codex' || flavor === 'gemini' || flavor === 'openclaw' || flavor === 'opencode' || flavor === 'pi') {
         return flavor;
     }
     return 'claude';

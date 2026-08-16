@@ -697,11 +697,11 @@ function NewSessionScreen() {
     }, [worktreeItems, worktreeKey]);
 
     // Filter available agents based on CLI availability from machine metadata
-    const availableAgents = React.useMemo(() => {
-        const availability = selectedMachine?.metadata?.cliAvailability;
-        if (!availability) return ALL_AGENTS;
-        return ALL_AGENTS.filter(a => availability[a.key]);
-    }, [selectedMachine]);
+    // Show every agent regardless of the machine's reported cliAvailability —
+    // the detection lies on joy machines (claude showed unavailable on boxes
+    // that obviously run it). Spawn errors surface loudly if a CLI is truly
+    // absent, which beats silently hiding working agents.
+    const availableAgents = ALL_AGENTS;
 
     // If current agent not available on this machine, switch to first available
     React.useEffect(() => {
