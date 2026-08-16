@@ -24,6 +24,31 @@ import { useIsTablet } from '@/utils/responsive';
 import { useRootGutter } from '@/hooks/useRootGutter';
 
 const POLL_MS = 1500;
+
+// Simple mode: strip the claude TUI's status chrome from the capture — the
+// permission/shortcut hint line, git-branch/subagent/artifact widgets — i.e.
+// everything BELOW the input box's bottom border, plus the box borders
+// themselves (the ❯ prompt line stays so typed text is visible). Fails OPEN:
+// if the capture doesn't end in the prompt-box shape (a TUI dialog, a menu, a
+// crashed claude), nothing is stripped — those are exactly the moments this
+// screen exists for.
+function simplifyPane(text: string): string {
+    const lines = text.split('\n');
+    let prompt = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (/^\s*[❯>]($|\s)/.test(lines[i])) { prompt = i; break; }
+    }
+    if (prompt < 0) return text;
+    const isDivider = (l: string) => /─{3,}/.test(l) && /^[\s─]*\S{0,12}[\s─]*$/.test(l.replace(/─+/g, '─'));
+    let end = lines.length;
+    for (let i = prompt + 1; i < lines.length; i++) {
+        if (isDivider(lines[i])) { end = i; break; }
+    }
+    if (end === lines.length) return text; // no bottom border → not the idle box shape
+    const kept = lines.slice(0, end).filter((l, i) => !(i === prompt - 1 && isDivider(l)));
+    while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
+    return kept.join('\n');
+}
 // Pane font metrics — char width ≈ 0.6em for the mono fonts below; used to
 // map the rendered pixel width to terminal columns for adaptive sizing.
 const PANE_LINE_HEIGHT = 15; // must match styles.paneText.lineHeight
@@ -50,6 +75,9 @@ export default React.memo(function JoyPaneScreen() {
     // Raw OFF (default) = text mode: input is typed verbatim and submitted with a
     // real Enter. Raw ON = key-token mode: parse <Enter>, <C-c>… and send as keys.
     const [rawMode, setRawMode] = React.useState(false);
+    // Simple ON by default: the status chrome matters only when intervening,
+    // and the toggle is one tap away.
+    const [simpleMode, setSimpleMode] = React.useState(true);
     const scrollRef = React.useRef<ScrollView>(null);
     const mountedRef = React.useRef(true);
 
@@ -199,7 +227,7 @@ export default React.memo(function JoyPaneScreen() {
                 onLayout={(e) => drivePaneSize(e.nativeEvent.layout.width, e.nativeEvent.layout.height)}
                 onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
             >
-                <AnsiText text={pane || '…'} style={styles.paneText} />
+                <AnsiText text={(simpleMode ? simplifyPane(pane) : pane) || '…'} style={styles.paneText} />
             </ScrollView>
 
             {/* Quick keys — horizontally scrollable */}
@@ -207,6 +235,18 @@ export default React.memo(function JoyPaneScreen() {
 
             {/* Raw input */}
             <View style={styles.inputRow}>
+                <Pressable
+                    onPress={() => setSimpleMode(v => !v)}
+                    style={(p) => [styles.modeToggle, !simpleMode && styles.modeToggleActive, p.pressed && styles.quickKeyPressed]}
+                    hitSlop={6}
+                    accessibilityRole="switch"
+                    accessibilityState={{ checked: !simpleMode }}
+                    accessibilityLabel="Show full terminal chrome"
+                >
+                    <Text style={[styles.modeToggleText, !simpleMode && styles.modeToggleTextActive]}>
+                        Full
+                    </Text>
+                </Pressable>
                 <Pressable
                     onPress={() => setRawMode(v => !v)}
                     style={(p) => [styles.modeToggle, rawMode && styles.modeToggleActive, p.pressed && styles.quickKeyPressed]}
