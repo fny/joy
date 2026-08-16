@@ -81,7 +81,14 @@ function rowContainsMessage(row: DisplayItem, messageId: string): boolean {
 // reference — FlashList/RN forbid changing it between renders.
 const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 0 } as const;
 
-export const ChatList = React.memo((props: { session: Session }) => {
+/** Imperative surface for in-session search: scroll the chat to the row that
+ *  contains a given message id. Returns false when that message isn't in the
+ *  currently loaded/grouped window (older history not paged in yet). */
+export interface ChatListHandle {
+    scrollToMessageId: (messageId: string) => boolean;
+}
+
+export const ChatList = React.forwardRef<ChatListHandle, { session: Session }>((props, ref) => {
     const { messages, hasMoreOlder, isLoadingOlder } = useSessionMessages(props.session.id);
     const joy__chatHistoryLimit = useSetting('joy__chatHistoryLimit');
     // Memoized: an un-memoized slice() minted a fresh array identity on EVERY
@@ -97,6 +104,7 @@ export const ChatList = React.memo((props: { session: Session }) => {
     const capActive = joy__chatHistoryLimit != null && messages.length >= joy__chatHistoryLimit;
     return (
         <ChatListInternal
+            ref={ref}
             metadata={props.session.metadata}
             sessionId={props.session.id}
             messages={visibleMessages}
@@ -131,13 +139,13 @@ const ListFooter = React.memo((props: { sessionId: string }) => {
     )
 });
 
-const ChatListInternal = React.memo((props: {
+const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     metadata: Metadata | null,
     sessionId: string,
     messages: Message[],
     hasMoreOlder: boolean,
     isLoadingOlder: boolean,
-}) => {
+}>((props, ref) => {
     const { theme } = useUnistyles();
     const flatListRef = React.useRef<FlashListRef<DisplayItem>>(null);
     const [showScrollButton, setShowScrollButton] = React.useState(false);
@@ -203,6 +211,19 @@ const ChatListInternal = React.memo((props: {
     // indexing the wrong array anchors to the mirrored end of the conversation.
     const orderedItemsRef = React.useRef(orderedItems);
     orderedItemsRef.current = orderedItems;
+
+    // In-session search (Cmd/Ctrl+F): scroll to the row holding a message id.
+    // viewPosition 0.3 places the match comfortably below the header rather
+    // than flush against it. Returns false if the id isn't in the grouped
+    // window so the caller can surface "not in loaded history".
+    React.useImperativeHandle(ref, () => ({
+        scrollToMessageId: (messageId: string) => {
+            const index = orderedItemsRef.current.findIndex((i) => rowContainsMessage(i, messageId));
+            if (index < 0) return false;
+            flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 });
+            return true;
+        },
+    }), []);
     // Whether the user is pinned within LIVE_THRESHOLD of the end. Starts true:
     // a blur before the first scroll event must not manufacture a 'reading'
     // snapshot out of default-initialized refs.
@@ -767,7 +788,7 @@ const ChatListInternal = React.memo((props: {
             )}
         </View>
     )
-});
+}));
 
 function isCollapsibleDisplayItem(item: DisplayItem): item is ToolGroupItem | Extract<DisplayItem, { type: 'agent-work-group' }> {
     return item.type === 'tool-group' || item.type === 'agent-work-group';

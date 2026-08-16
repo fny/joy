@@ -11,7 +11,8 @@ import {
 } from '@/components/modelModeOptions';
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
-import { ChatList } from '@/components/ChatList';
+import { ChatList, type ChatListHandle } from '@/components/ChatList';
+import { SessionSearchBar } from './SessionSearchBar';
 import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
@@ -491,7 +492,27 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     useSessionMessageBackstop(sessionId, session.thinking === true, lastUserSentAt);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
     const zenMode = useLocalSetting('zenMode');
+    const headerHeight = useHeaderHeight();
     const sessionInputHorizontalPadding = Platform.OS === 'web' || isRunningOnMac() || isTablet ? 12 : 8;
+
+    // In-session search: Cmd/Ctrl+F opens the search bar (web/desktop). We take
+    // over the browser's native find — a chat is virtualized, so the browser's
+    // find can't reach rows that aren't mounted; ours searches the loaded model
+    // and scrolls to matches. Esc closes it (handled inside the bar too).
+    const chatListRef = React.useRef<ChatListHandle>(null);
+    const [searchOpen, setSearchOpen] = React.useState(false);
+    React.useEffect(() => {
+        if (Platform.OS !== 'web') return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
+                e.preventDefault();
+                e.stopPropagation();
+                setSearchOpen(true);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
 
     // Check if CLI version is outdated and not already acknowledged
     const cliVersion = session.metadata?.version;
@@ -850,9 +871,28 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             <GoalBar sessionId={sessionId} />
             <Deferred>
                 {messages.length > 0 && (
-                    <ChatList session={session} />
+                    <ChatList ref={chatListRef} session={session} />
                 )}
             </Deferred>
+            {searchOpen && messages.length > 0 && (
+                <View
+                    pointerEvents="box-none"
+                    style={{
+                        position: 'absolute',
+                        top: safeArea.top + headerHeight + 8,
+                        left: 12,
+                        right: 12,
+                        alignItems: 'flex-end',
+                        zIndex: 20,
+                    }}
+                >
+                    <SessionSearchBar
+                        sessionId={sessionId}
+                        onScrollToMessage={(id) => chatListRef.current?.scrollToMessageId(id) ?? false}
+                        onClose={() => setSearchOpen(false)}
+                    />
+                </View>
+            )}
         </>
     );
     const placeholder = messages.length === 0 ? (
