@@ -189,26 +189,7 @@ export const SettingsView = React.memo(function SettingsView() {
                     <Item
                         title={t('settings.scanQrCodeToAuthenticate')}
                         icon={<Ionicons name="qr-code-outline" size={29} color={theme.colors.accents.blue} />}
-                        onPress={connectTerminal}
-                        loading={isLoading}
-                        showChevron={false}
-                    />
-                    <Item
-                        title={t('connect.enterUrlManually')}
-                        icon={<Ionicons name="link-outline" size={29} color={theme.colors.accents.blue} />}
-                        onPress={async () => {
-                            const url = await Modal.prompt(
-                                t('modals.authenticateTerminal'),
-                                t('modals.pasteUrlFromTerminal'),
-                                {
-                                    placeholder: 'happy://terminal?...',
-                                    confirmText: t('common.authenticate')
-                                }
-                            );
-                            if (url?.trim()) {
-                                connectWithUrl(url.trim());
-                            }
-                        }}
+                        onPress={() => router.push('/settings/account')}
                         showChevron={false}
                     />
                 </ItemGroup>
@@ -317,13 +298,6 @@ export const SettingsView = React.memo(function SettingsView() {
                     detail="fny/joy"
                     onPress={handleGitHub}
                 />
-                {Platform.OS === 'ios' && (
-                    <Item
-                        title={t('settings.eula')}
-                        icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accents.blue} />}
-                        onPress={() => openExternalUrl('https://www.apple.com/legal/internet-services/itunes/dev/stdeula/')}
-                    />
-                )}
                 <Item
                     title={t('settingsMods.jsUpdate')}
                     subtitle={t('settingsMods.jsUpdateDescription')}

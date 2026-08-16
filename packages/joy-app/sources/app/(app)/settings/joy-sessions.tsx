@@ -153,7 +153,7 @@ export default React.memo(function JoySessionsScreen() {
                 ) : probing ? (
                     <Item title={t('settingsSessions.loading')} showChevron={false} rightElement={<ActivityIndicator />} />
                 ) : visibleMachines.length === 0 ? (
-                    <Item title="No machines running joy-tmux" showChevron={false} />
+                    <Item title="No machines running joy-daemon" showChevron={false} />
                 ) : (
                     <>
                         {visibleMachines.map(machine => {
@@ -184,7 +184,7 @@ export default React.memo(function JoySessionsScreen() {
                         })}
                         {withoutJoyCount > 0 && (
                             <Item
-                                title={`${withoutJoyCount} machine${withoutJoyCount === 1 ? '' : 's'} without joy-tmux hidden`}
+                                title={`${withoutJoyCount} machine${withoutJoyCount === 1 ? '' : 's'} without joy-daemon hidden`}
                                 showChevron={false}
                             />
                         )}
