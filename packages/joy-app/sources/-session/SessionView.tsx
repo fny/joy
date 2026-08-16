@@ -19,6 +19,7 @@ import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
 import { MachineResourceBanner } from '@/components/MachineResourceBanner';
+import { useDrawingResult } from '@/hooks/useDrawingResult';
 import { useImagePicker } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
@@ -654,6 +655,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         ]);
     }, [pickImages, pickFromLibrary, pasteImage]);
 
+    // Drawing pad: opens the full-screen sketch route; the pad deposits its
+    // captured PNG in useDrawingResult and this effect folds it into the
+    // composer's attachments when we regain focus.
+    const handleDraw = React.useCallback(() => {
+        router.push(`/session/${sessionId}/draw`);
+    }, [router, sessionId]);
+    const drawnImage = useDrawingResult((s) => s.sessionId === sessionId ? s.image : null);
+    React.useEffect(() => {
+        if (!drawnImage) return;
+        addImages([drawnImage]);
+        useDrawingResult.getState().consume();
+    }, [drawnImage, addImages]);
+
     // ChatComposer owns the message state + useDraft subscription. We only
     // hold an imperative handle so handleSend can read the live text and
     // clear it without subscribing to it (which would re-render the whole
@@ -969,6 +983,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onFileViewerPress={!isTablet ? handleFileViewerPress : undefined}
             selectedImages={selectedImages}
             onPickImages={handleAttach}
+            onDraw={handleDraw}
             onRemoveImage={removeImage}
             onAddImages={addImages}
             autocompletePrefixes={AGENT_INPUT_AUTOCOMPLETE_PREFIXES}
