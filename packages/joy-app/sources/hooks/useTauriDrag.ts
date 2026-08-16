@@ -15,6 +15,14 @@ const DESKTOP_CSS = `
         user-select: text;
         -webkit-user-select: text;
     }
+    /* Content surfaces opt back in via data-joy-selectable (markdown bodies,
+       code blocks, file viewer). Needed because WKWebView resolves the
+       -webkit- prefixed property, which react-native-web's selectable prop
+       never sets — so without this, body's none wins over every Text. */
+    [data-joy-selectable], [data-joy-selectable] * {
+        user-select: text;
+        -webkit-user-select: text;
+    }
     img {
         -webkit-user-drag: none;
         user-drag: none;

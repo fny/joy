@@ -59,7 +59,7 @@ export const MarkdownView = React.memo((props: {
     }, [props.markdown, router]);
     const renderContent = () => {
         return (
-            <View style={{ width: '100%' }}>
+            <View style={{ width: '100%' }} {...(Platform.OS === 'web' ? ({ dataSet: { joySelectable: 'true' } } as any) : {})}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
                         return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;

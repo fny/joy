@@ -12,7 +12,7 @@ export const CodeView = React.memo<CodeViewProps>(({
     language
 }) => {
     return (
-        <View style={styles.codeBlock}>
+        <View style={styles.codeBlock} {...(Platform.OS === 'web' ? ({ dataSet: { joySelectable: 'true' } } as any) : {})}>
             <Text style={styles.codeText}>{code}</Text>
         </View>
     );
