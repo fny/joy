@@ -4,6 +4,9 @@
  */
 
 import { apiSocket } from './apiSocket';
+import { downloadEncryptedAttachment } from './apiAttachments';
+import { decryptBlob } from '@/encryption/blob';
+import { encodeBase64 } from '@/encryption/base64';
 import { sync } from './sync';
 import type { MachineMetadata } from './storageTypes';
 
@@ -49,6 +52,11 @@ interface SessionReadFileResponse {
     success: boolean;
     content?: string; // base64 encoded
     error?: string;
+    // Big files (> ~400KB raw) can't ride the socket.io RPC ack (~1MB message
+    // cap). The daemon ships them as an encrypted session-attachment blob and
+    // returns only the ref; sessionReadFile resolves it transparently.
+    blobRef?: string;
+    size?: number;
 }
 
 // Write file operation types
@@ -598,6 +606,20 @@ export async function sessionReadFile(sessionId: string, path: string): Promise<
             'readFile',
             request
         );
+        if (response.success && response.blobRef) {
+            // Data-plane path: bytes came as an encrypted attachment blob.
+            const credentials = sync.getCredentials();
+            const blobKey = sync.encryption.getSessionBlobKey(sessionId);
+            if (!credentials || !blobKey) {
+                return { success: false, error: 'Cannot decrypt file blob (no session blob key)' };
+            }
+            const encrypted = await downloadEncryptedAttachment(credentials, sessionId, response.blobRef);
+            const decrypted = decryptBlob(encrypted, blobKey);
+            if (!decrypted) {
+                return { success: false, error: 'Failed to decrypt file blob' };
+            }
+            return { success: true, content: encodeBase64(decrypted) };
+        }
         return response;
     } catch (error) {
         return {
