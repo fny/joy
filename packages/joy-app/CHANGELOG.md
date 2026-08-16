@@ -1,3 +1,19 @@
+# Aug 16 (2) — Less noise, real limits, a sketch pad
+
+A quality-of-life sweep: collapse the chat clutter, see your actual Anthropic/OpenAI quota, draw on your screen, and edit any agent's config from your phone.
+
+- **Collapse everything.** A new top-left button in each session collapses/expands every tool call at once; each tool card and each code diff also gets its own chevron. Compaction summaries now appear as a collapsed card instead of vanishing (or walling the chat).
+- **Live account limits.** Settings → Limits shows your real Claude 5-hour/weekly utilization and reset times (read via each machine's own Claude Code login — no credentials to enter) plus Codex's rate windows. The daemon also pushes an alert when any quota, RAM, or disk crosses 90%.
+- **Drawing attachments.** The brush button opens a full-screen sketch pad — five pens, white/black paper, adjustable thickness, smooth finger strokes — and drops the PNG straight into the composer.
+- **Agent config editor.** Settings → Agent Config edits each agent's real config file (claude settings.json, codex config.toml, opencode, pi) on any machine: walk the published schema or use raw mode with JSON-path lines like `examples[0].title = "hi"`. Every write keeps a backup.
+- **/joy-prompt.** Re-injects the latest joy instructions into a long-lived session (any agent) — the fix for stale titles and forgotten option pickers; it's also how pi learns the vocabulary.
+- **Resource pressure, visible.** Machine view shows Memory and Disk as used-% (red at 90%+), and a red banner appears under a session's header when its machine runs hot.
+- **Usage, faster + honest pills.** Usage reports answer instantly after daemon restarts (persistent cache, background-refreshed every 2h) and the period pills finally show which one is active in dark mode.
+- **Queue steer arrow.** Each queued message has an arrow that sends it immediately (mid-turn) instead of waiting its turn.
+- **Simpler terminal view.** The claude status chrome (permission hints, widgets) is filtered out by default — tap Full to see everything.
+- **Session list by agent.** Settings → Sessions labels and sorts sessions by agent flavor, with a better icon.
+- **Leaner relay picker.** The dev and direct doors are gone — Happy Cloud and Joy Relay only.
+
 # Aug 16 — Your own relays, new agents, big files
 
 Joy now runs on its own infrastructure, speaks four agent flavors, and the file viewer handles real files.
