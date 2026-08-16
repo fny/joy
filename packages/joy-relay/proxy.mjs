@@ -6,6 +6,7 @@
 import * as http from 'node:http';
 import * as net from 'node:net';
 import { createGate } from './src/gate.mjs';
+import { handleDocs } from './src/docs.mjs';
 
 const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
 const TARGET_HOST = process.env.JOY_RELAY_UPSTREAM_HOST ?? '127.0.0.1';
@@ -14,6 +15,7 @@ const gate = createGate();
 
 const server = http.createServer((req, res) => {
   if (!gate.allows(req)) return gate.rejectHttp(res);
+  if (handleDocs(req, res, { version: '0.1.0' })) return;
   const up = http.request(
     { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: req.headers },
     (upRes) => {
