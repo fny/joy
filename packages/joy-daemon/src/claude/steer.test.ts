@@ -62,6 +62,48 @@ test("steer: unclearable dirty box degrades to queue + input_dirty warning (the 
   expect(state.typed.join("")).not.toContain("do the thing"); // never typed over residue
 }, 25000);
 
+// The pause used to be a LATCH: once input_dirty was set, nothing re-evaluated
+// it, so a session whose box went clean moments later (buffered C-u presses
+// landing late — the timing illusion in docs/pane-input-clearing.md) stayed
+// blocked with a perfectly empty box until a human tapped resume. Found live on
+// boite 2026-08-17.
+test("input_dirty self-heals once the box goes clean, and the parked message delivers", async () => {
+  state.pane = DIRTY_PANE; state.keys = []; state.typed = [];
+  const s = steerSession();
+  s.enqueue("/steer do the thing");
+  await vi.waitFor(() => { expect(s.queueState().paused).toBe(true); }, { timeout: 20000, interval: 200 });
+  expect(s.queueState().pauseReason).toBe("input_dirty");
+
+  // The clear we gave up on lands late and empties the box.
+  state.pane = READY_PANE;
+
+  await vi.waitFor(() => { expect(s.queueState().paused).toBe(false); }, { timeout: 20000, interval: 250 });
+  expect(s.queueState().pauseReason).toBeUndefined();
+  // Self-healing is only worth anything if the parked message then goes out.
+  await vi.waitFor(() => {
+    expect(state.typed.join("")).toContain("do the thing");
+  }, { timeout: 20000, interval: 250 });
+}, 60000);
+
+// The dispatch_* pauses must NOT self-heal: a failed/timed-out dispatch may have
+// half-landed, so re-sending is a human's call, not a probe's. A clean box is
+// exactly the state that would tempt a naive "box looks fine, carry on".
+test("a dispatch_failed pause does NOT self-heal, clean box or not", async () => {
+  state.pane = READY_PANE; state.keys = []; state.typed = [];
+  const s = steerSession();
+  const { tmux } = await import("../tmux/driver");
+  const literal = vi.mocked(tmux.literal);
+  literal.mockImplementationOnce(async () => ({ ok: false, out: "" }) as any); // typing fails → dispatch_failed
+  s.enqueue("this send will fail to type");
+  await vi.waitFor(() => {
+    expect(s.queueState().pauseReason).toBe("dispatch_failed");
+  }, { timeout: 20000, interval: 200 });
+
+  await settle(8000); // well past the dense self-heal cadence
+  expect(s.queueState().paused).toBe(true);
+  expect(s.queueState().pauseReason).toBe("dispatch_failed");
+}, 40000);
+
 test("steer: dirty box that C-u CAN clear steers normally (no warning)", async () => {
   state.pane = DIRTY_PANE; state.keys = []; state.typed = [];
   const s = steerSession();
