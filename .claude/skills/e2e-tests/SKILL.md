@@ -1,5 +1,5 @@
 ---
-name: agent-e2e-tests
+name: e2e-tests
 description: Run the joy end-to-end suite as an agent — drive joy-app in a browser against a freshly-built joy-daemon, asserting session artifacts (Claude log, happy-server seq, tmux window, UI) stay consistent and in order.
 ---
 
