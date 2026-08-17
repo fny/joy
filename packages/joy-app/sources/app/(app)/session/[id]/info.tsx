@@ -389,6 +389,28 @@ function SessionInfoContent({ session }: { session: Session }) {
                             loading={forking}
                         />
                     )}
+                    {/* Joy fork: opens the New Session page prefilled (machine +
+                        directory + this conversation, fork pre-checked) so
+                        model/effort/prompt can be adjusted before launching. */}
+                    {isJoyDaemonSource(session.metadata?.joy__source)
+                        && (!session.metadata?.flavor || session.metadata.flavor === 'claude')
+                        && session.metadata?.claudeSessionId
+                        && session.metadata?.machineId && (
+                        <Item
+                            title={t('session.forkAction')}
+                            subtitle={t('session.forkSubtitle')}
+                            icon={<Ionicons name="git-branch-outline" size={29} color="#007AFF" />}
+                            onPress={() => router.push({
+                                pathname: '/joy/new',
+                                params: {
+                                    machineId: session.metadata!.machineId!,
+                                    path: session.metadata?.path ?? '~/',
+                                    resumeId: session.metadata!.claudeSessionId!,
+                                    mode: 'fork',
+                                },
+                            } as never)}
+                        />
+                    )}
                     {canFork && (
                         <Item
                             title={t('session.duplicateAction')}
