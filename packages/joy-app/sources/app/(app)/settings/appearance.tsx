@@ -59,6 +59,7 @@ export default function AppearanceSettingsScreen() {
     const [showFlavorIcons, setShowFlavorIcons] = useSettingMutable('showFlavorIcons');
     const [themePreference, setThemePreference] = useLocalSettingMutable('themePreference');
     const [avatarVariant, setAvatarVariant] = useLocalSettingMutable('avatarVariant');
+    const [sessionAvatarSize, setSessionAvatarSize] = useLocalSettingMutable('sessionAvatarSize');
     const [preferredLanguage] = useSettingMutable('preferredLanguage');
     const [chatFontScaleRaw, setChatFontScale] = useLocalSettingMutable('chatFontScale');
     const chatFontScale = clampChatFontScale(chatFontScaleRaw);
@@ -111,6 +112,35 @@ export default function AppearanceSettingsScreen() {
                         onPress={() => setAvatarVariant(key)}
                     />
                 ))}
+                <Item
+                    title="Size"
+                    subtitle="Session-list identicon size"
+                    icon={<View style={{ width: 29, alignItems: 'center' }}>
+                        {avatarVariant === 'squares' ? <AvatarSquares id="preview-joy" size={Math.min(29, sessionAvatarSize)} />
+                            : avatarVariant === 'circles' ? <AvatarCircles id="preview-joy" size={Math.min(29, sessionAvatarSize)} />
+                                : <AvatarHashicon id="preview-joy" size={Math.min(29, sessionAvatarSize)} />}
+                    </View>}
+                    rightElement={(
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                            <Pressable
+                                hitSlop={8}
+                                onPress={() => setSessionAvatarSize(Math.max(16, sessionAvatarSize - 4))}
+                                disabled={sessionAvatarSize <= 16}
+                            >
+                                <Ionicons name="remove-circle-outline" size={22} color={sessionAvatarSize <= 16 ? theme.colors.textSecondary : theme.colors.textLink} />
+                            </Pressable>
+                            <Text style={{ color: theme.colors.text, fontVariant: ['tabular-nums'], minWidth: 30, textAlign: 'center' }}>{sessionAvatarSize}px</Text>
+                            <Pressable
+                                hitSlop={8}
+                                onPress={() => setSessionAvatarSize(Math.min(48, sessionAvatarSize + 4))}
+                                disabled={sessionAvatarSize >= 48}
+                            >
+                                <Ionicons name="add-circle-outline" size={22} color={sessionAvatarSize >= 48 ? theme.colors.textSecondary : theme.colors.textLink} />
+                            </Pressable>
+                        </View>
+                    )}
+                    showChevron={false}
+                />
             </ItemGroup>
 
             {/* Theme Settings */}

@@ -9,7 +9,7 @@ import { type SessionState, formatPathRelativeToHome, vibingMessages, formatLast
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { useAllMachines, useSessionGitStatus } from '@/sync/storage';
+import { useAllMachines, useSessionGitStatus, useLocalSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
@@ -93,6 +93,8 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
     }, [session.machineId, session.homeDir, repoPath, isWorktree, sessionPath, draft, router, newSessionRoute]);
 
     const [isHovered, setIsHovered] = React.useState(false);
+    // Identicon size — Appearance → Identicons (clamped there; default 24).
+    const avatarSize = useLocalSetting('sessionAvatarSize');
 
     return (
         <View
@@ -104,7 +106,7 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
         >
             {/* Avatar — vertically centered */}
             <View style={styles.sectionHeaderAvatar}>
-                <Avatar id={session.avatarId} size={24} flavor={null} />
+                <Avatar id={session.avatarId} size={avatarSize} flavor={null} />
             </View>
 
             {/* Path + branch */}
@@ -461,14 +463,20 @@ const stylesheet = StyleSheet.create((theme) => ({
     sectionHeader: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
+        // Left edge matches the session TITLE text below: row padding (14) +
+        // leading-indicator slot (16) + its gap (8) = 38.
+        paddingLeft: 38,
+        paddingRight: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
     },
     sectionHeaderSingleLine: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
+        // Left edge matches the session TITLE text below: row padding (14) +
+        // leading-indicator slot (16) + its gap (8) = 38.
+        paddingLeft: 38,
+        paddingRight: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
     },

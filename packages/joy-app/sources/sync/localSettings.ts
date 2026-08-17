@@ -29,6 +29,7 @@ export const LocalSettingsSchema = z.object({
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
     appLock: z.boolean().describe('Require Face ID / device PIN to open the app (native only; device-local)'),
     avatarVariant: z.enum(['hashicon', 'squares', 'circles']).describe('Identicon style: hashicon (joy palette), square confetti grid, or circular confetti grid'),
+    sessionAvatarSize: z.number().describe('Session-list identicon size in px, clamped to [16, 48]'),
 });
 
 //
@@ -67,6 +68,7 @@ export const localSettingsDefaults: LocalSettings = {
     acknowledgedCliVersions: {},
     appLock: false,
     avatarVariant: 'hashicon',
+    sessionAvatarSize: 24,
 };
 Object.freeze(localSettingsDefaults);
 
