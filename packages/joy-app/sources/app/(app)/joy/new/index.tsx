@@ -121,7 +121,7 @@ function NewJoyTmuxSessionScreen() {
 
     // Optional prefill (e.g. the per-repo "+" in the session list passes the
     // repo's machine + path when this page is the default New session).
-    const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string }>();
+    const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string; mode?: string }>();
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
     const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode' | 'pi'>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
@@ -135,11 +135,15 @@ function NewJoyTmuxSessionScreen() {
     const [fallbackIndex, setFallbackIndex] = React.useState(0);
     // When true, joy-tmux launches `claude --continue …`, resuming the most
     // recent Claude conversation in this cwd instead of starting fresh.
-    const [continueLast, setContinueLast] = React.useState(false);
+    // Prefilled ON when arriving with a resumeId (fork/continue deep links):
+    // resumeId takes precedence at dispatch, but the checked row makes the
+    // resume mode VISIBLE instead of implied.
+    const [continueLast, setContinueLast] = React.useState(!!params.resumeId);
     // --fork-session: resume the conversation but mint a new session id.
     // Claude only accepts it alongside --continue/--resume, so the row is
-    // disabled until continue is on.
-    const [forkSession, setForkSession] = React.useState(false);
+    // disabled until continue is on. mode=fork deep link (session info's Fork
+    // action) arrives pre-checked.
+    const [forkSession, setForkSession] = React.useState(params.mode === 'fork');
     // --resume <id>: resume a specific Claude conversation by session id.
     // Takes precedence over `continue` (which resumes the most recent one).
     const [resumeId, setResumeId] = React.useState(params.resumeId ?? '');
@@ -759,7 +763,7 @@ function NewJoyTmuxSessionScreen() {
                                 <Pressable
                                     key={ps.sessionId}
                                     style={(p) => [styles.configRow, { paddingLeft: 34 }, p.pressed && styles.configRowPressed]}
-                                    onPress={() => { setResumeId(ps.sessionId); setCcPastOpen(false); }}
+                                    onPress={() => { setResumeId(ps.sessionId); setContinueLast(true); setCcPastOpen(false); }}
                                 >
                                     <Ionicons
                                         name={resumeId === ps.sessionId ? 'radio-button-on' : 'radio-button-off'}
@@ -791,7 +795,7 @@ function NewJoyTmuxSessionScreen() {
                                 <Pressable
                                     key={ps.id}
                                     style={(p) => [styles.configRow, { paddingLeft: 34 }, p.pressed && styles.configRowPressed]}
-                                    onPress={() => { setResumeId(ps.id); setOcPastOpen(false); }}
+                                    onPress={() => { setResumeId(ps.id); setContinueLast(true); setOcPastOpen(false); }}
                                 >
                                     <Ionicons
                                         name={resumeId === ps.id ? 'radio-button-on' : 'radio-button-off'}
