@@ -104,8 +104,12 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
             // @ts-ignore - Web only events
             onMouseLeave={() => setIsHovered(false)}
         >
-            {/* Avatar — vertically centered */}
-            <View style={styles.sectionHeaderAvatar}>
+            {/* Avatar — flush with the card edge; the slot is sized so the
+                text after it starts at the session TITLE x (card 16 + row
+                padding 14 + indicator slot 16 + gap 8 = 54 → 38 past the
+                card edge). Oversized identicons widen the slot instead of
+                overlapping the text. */}
+            <View style={[styles.sectionHeaderAvatar, { width: Math.max(38, avatarSize + 8) }]}>
                 <Avatar id={session.avatarId} size={avatarSize} flavor={null} />
             </View>
 
@@ -481,7 +485,8 @@ const stylesheet = StyleSheet.create((theme) => ({
         alignItems: 'center',
     },
     sectionHeaderAvatar: {
-        marginRight: 8,
+        alignItems: 'flex-start',
+        justifyContent: 'center',
     },
     sectionHeaderContent: {
         flex: 1,
