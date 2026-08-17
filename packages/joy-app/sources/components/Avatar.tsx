@@ -1,7 +1,7 @@
 import * as React from "react";
 import { View } from "react-native";
 import { Image } from "expo-image";
-import { AvatarHashicon } from "./AvatarHashicon";
+import { AvatarIdenticon } from "./AvatarHashicon";
 import { useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -97,9 +97,9 @@ export const Avatar = React.memo((props: AvatarProps) => {
         return imageElement;
     }
 
-    // Generated identicon: hashicon (emeraldpay), same footprint as the old
-    // variants (size x size, keyed by id). The avatarStyle setting is retired.
-    const AvatarComponent: React.ComponentType<any> = AvatarHashicon;
+    // Generated identicon — variant per Appearance → Identicons (hashicon in
+    // joy-palette colors, or the square/circular confetti grids).
+    const AvatarComponent: React.ComponentType<any> = AvatarIdenticon;
 
     // Determine flavor icon for generated avatars
     const effectiveFlavor = flavor || 'claude';

@@ -8,6 +8,7 @@ import { useRouter } from 'expo-router';
 import * as Localization from 'expo-localization';
 import { useUnistyles, UnistylesRuntime, StyleSheet } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
+import { AvatarHashicon, AvatarSquares, AvatarCircles } from '@/components/AvatarHashicon';
 import { Appearance, Platform, Pressable, Text, View } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
@@ -57,6 +58,7 @@ export default function AppearanceSettingsScreen() {
     const [avatarStyle, setAvatarStyle] = useSettingMutable('avatarStyle');
     const [showFlavorIcons, setShowFlavorIcons] = useSettingMutable('showFlavorIcons');
     const [themePreference, setThemePreference] = useLocalSettingMutable('themePreference');
+    const [avatarVariant, setAvatarVariant] = useLocalSettingMutable('avatarVariant');
     const [preferredLanguage] = useSettingMutable('preferredLanguage');
     const [chatFontScaleRaw, setChatFontScale] = useLocalSettingMutable('chatFontScale');
     const chatFontScale = clampChatFontScale(chatFontScaleRaw);
@@ -81,6 +83,35 @@ export default function AppearanceSettingsScreen() {
     };
     return (
         <ItemList style={{ paddingTop: 0 }}>
+
+            {/* Identicon style — three variants, all drawn from the joy
+                logotype palette (+darken/lighten): the hashicon mark, a square
+                confetti grid, and a circular confetti grid. Live previews. */}
+            <ItemGroup title="Identicons" footer="Style for generated avatars (sessions, machines). Colors come from the joy logo palette.">
+                {([
+                    { key: 'hashicon' as const, name: 'Hashicon', Comp: AvatarHashicon },
+                    { key: 'squares' as const, name: 'Squares', Comp: AvatarSquares },
+                    { key: 'circles' as const, name: 'Circles', Comp: AvatarCircles },
+                ]).map(({ key, name, Comp }) => (
+                    <Item
+                        key={key}
+                        title={name}
+                        icon={<Comp id="preview-joy" size={29} />}
+                        rightElement={(
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                <Comp id="sample-a" size={24} />
+                                <Comp id="sample-b" size={24} />
+                                <Comp id="sample-c" size={24} />
+                                {avatarVariant === key && (
+                                    <Ionicons name="checkmark" size={18} color={theme.colors.textLink} style={{ marginLeft: 4 }} />
+                                )}
+                            </View>
+                        )}
+                        showChevron={false}
+                        onPress={() => setAvatarVariant(key)}
+                    />
+                ))}
+            </ItemGroup>
 
             {/* Theme Settings */}
             <ItemGroup title={t('settingsAppearance.theme')} footer={t('settingsAppearance.themeDescription')}>
