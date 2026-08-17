@@ -1,3 +1,14 @@
+# Aug 17 — Queue crash fixed, ordering, desktop drawing
+
+Fixes for yesterday's batch: the big one is a crash that could take down the whole session screen the moment a message actually queued.
+
+- **Session screen no longer crashes on queueing.** When a message entered the daemon queue (the QUEUED strip appearing), a React hooks bug could crash the entire conversation view to the error screen. Fixed.
+- **Queued messages land in order.** A message released after a turn now waits for the turn's final answer to arrive before sending, so it appears *after* the response it queued behind — not spliced into the middle of it.
+- **Drawing works on desktop.** The sketch pad now uses a real canvas on web/desktop — mouse strokes draw properly and save reliably. (It was effectively dead there before.)
+- **Identicon alignment, actually fixed.** Session-list identicons now line up exactly with the session title edge.
+- **Quieter paperclip.** The attach button no longer lights up when attachments are present — the thumbnails already tell you.
+- **Draft pencils.** Sessions with saved drafts show the same plain pencil in the session list as the composer's draft button.
+
 # Aug 16 (2) — Less noise, real limits, a sketch pad
 
 A quality-of-life sweep: collapse the chat clutter, see your actual Anthropic/OpenAI quota, draw on your screen, and edit any agent's config from your phone.
