@@ -34,7 +34,7 @@ const gate = createGate();
 
 const server = http.createServer(async (req, res) => {
   if (!gate.allows(req)) return gate.rejectHttp(res);
-  if (handleDocs(req, res, { version: '0.1.0', routeTable: router.routeTable() })) return;
+  if (handleDocs(req, res, { version: '0.1.0', routeTable: { routes: router.routeTable(), served: true } })) return;
   if (await router.handle(req, res)) return;
   const up = http.request(
     { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: req.headers },

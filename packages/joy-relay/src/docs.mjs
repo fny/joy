@@ -1,26 +1,13 @@
-// Browsable relay API docs: GET /openapi.json + GET /docs (Redoc) served by
-// BOTH entrypoints (stable proxy + dev native). happy-server has no docs
-// surface and the daemons' /docs are localhost-only, so this is the one
-// reachable-from-anywhere view of what joy.voltai.party actually speaks:
-// the happy-server passthrough surface (curated overview — happy-server is a
-// pristine mirror we don't instrument) plus the native /joy/v1 nucleus.
+// Browsable JOY relay API docs: GET /openapi.json + GET /docs (Redoc) on both
+// entrypoints. Documents the /joy/v1 surface ONLY, generated from the live
+// route table (routes.mjs routeTable()) so it cannot drift from dispatch.
+// Everything outside /joy/v1 is upstream passthrough and deliberately absent.
 // The perimeter gate wraps these like everything else once it's flipped.
 
 const P = { type: 'object', additionalProperties: true };
 
-function op(summary, opts = {}) {
-  return {
-    summary,
-    tags: opts.tags ?? ['happy-server passthrough'],
-    ...(opts.passthrough === false ? {} : { 'x-passthrough': 'happy-server' }),
-    ...(opts.params ? { requestBody: { content: { 'application/json': { schema: opts.params } } } } : {}),
-    responses: { 200: { description: 'Success', content: { 'application/json': { schema: opts.result ?? P } } } },
-  };
-}
-
 /** /joy/v1 paths generated from the router's own table (routes.mjs
- *  routeTable()) — the docs cannot drift from dispatch. Absent table (the
- *  stable proxy runs no nucleus) → no native section is advertised. */
+ *  routeTable()) — the docs cannot drift from dispatch. */
 function nativePaths(routeTable) {
   const paths = {};
   for (const r of routeTable) {
@@ -45,11 +32,10 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
       title: 'joy relay API',
       version,
       description:
-        'What this host speaks: happy-server endpoints proxied byte-for-byte (curated overview — payloads are E2E-encrypted, the relay never reads them) plus the native /joy/v1 nucleus. Bearer tokens are issued by /v1/auth; when the perimeter gate is enabled every request additionally needs x-joy-relay-key (or ?joyRelayKey=). Machine-level operations (sessions, queue, pane, usage, limits, agent config…) live on each machine\'s joy-daemon — see its local /docs — and ride this relay as encrypted socket RPCs, not HTTP paths.',
+        'The joy relay API: durable sessions, turns, leases, deliveries, and events under /joy/v1. When the perimeter gate is enabled, every request additionally needs x-joy-relay-key (or ?joyRelayKey=). Machine-level operations (queue, pane, usage, limits, agent config…) live on each machine\'s joy-daemon — see its local /docs. Everything outside /joy/v1 is proxied untouched to the upstream store and is not part of this API.',
     },
     servers: [{ url: host }],
-    'x-passthrough-note': 'The happy-server section is a CURATED OVERVIEW — upstream is a pristine mirror that publishes no spec, so it cannot be generated. /joy/v1 is generated from the live route table.'
-      + (routeTable ? '' : ' This instance runs NO native nucleus (stable passthrough) — /joy/v1 is served by the dev relay (:14997).'),
+    ...(routeTable?.served === false ? { 'x-note': 'On this instance /joy/v1 requests are currently served by the dev relay (:14997); the API below is identical.' } : {}),
     components: {
       securitySchemes: {
         bearer: { type: 'http', scheme: 'bearer', description: 'Account/machine token from /v1/auth' },
@@ -57,21 +43,7 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
       },
     },
     security: [{ bearer: [] }],
-    paths: {
-      // ── happy-server passthrough (overview) ─────────────────────────────
-      '/v1/auth': { post: op('Login or auto-create an account (challenge signed with the account key). No bearer needed.', {}) },
-      '/v1/auth/request': { post: op('Terminal/device pairing: request approval for a fresh keypair') },
-      '/v1/auth/response': { post: op('Approve a pairing request (encrypted key bundle)') },
-      '/v1/sessions': { get: op('List account sessions (encrypted metadata rows)') },
-      '/v3/sessions/{id}/messages': { get: op('Read session messages after a seq (encrypted rows, seq-ordered)') },
-      '/v1/machines': { get: op('List registered machines (+ encrypted daemonState heartbeat)') },
-      '/v1/push-tokens': { get: op('Registered Expo push tokens for the account') },
-      '/v1/sessions/{id}/attachments/request-upload': { post: op('Attachment blob upload handshake → PUT/S3 target (10MB cap)') },
-      '/v1/sessions/{id}/attachments/request-download': { post: op('Attachment blob download handshake → downloadUrl') },
-      '/v1/updates': { get: op('socket.io endpoint: realtime rows + RPC forwarding (≈1MB message cap). Upgrade requests carry ?joyRelayKey= when gated.') },
-      // ── native nucleus: generated from the live route table ─────────────
-      ...(routeTable ? nativePaths(routeTable) : {}),
-    },
+    paths: nativePaths(routeTable?.routes ?? []),
   };
 }
 
@@ -79,13 +51,13 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
 const redocPage = (docsToken) => `<!doctype html><html><head><title>joy relay API</title>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>body{margin:0}</style></head><body>
-<redoc spec-url="/openapi.json?docsToken=${encodeURIComponent(docsToken)}"></redoc>
+<redoc spec-url="/openapi.json?token=${encodeURIComponent(docsToken)}"></redoc>
 <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
 </body></html>`;
 
 // Docs gate: a deliberately-simple token so the API surface isn't browsable
 // by anyone who finds the port (deterrent, not cryptography — the perimeter
-// gate is the real lock once flipped). ?docsToken=… on the URL; override via
+// gate is the real lock once flipped). ?token=… on the URL; override via
 // JOY_RELAY_DOCS_TOKEN in the service env.
 const DOCS_TOKEN = process.env.JOY_RELAY_DOCS_TOKEN || 'farazyashar';
 
@@ -96,10 +68,10 @@ export function handleDocs(req, res, { version, routeTable = null }) {
   const url = req.url ?? '';
   const path = url.split('?')[0];
   if (req.method !== 'GET' || (path !== '/docs' && path !== '/openapi.json')) return false;
-  const q = url.match(/[?&]docsToken=([^&]+)/);
+  const q = url.match(/[?&]token=([^&]+)/);
   if (!q || decodeURIComponent(q[1]) !== DOCS_TOKEN) {
     res.writeHead(401, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: 'docs token required (?docsToken=…)' }));
+    res.end(JSON.stringify({ error: 'docs token required (?token=…)' }));
     return true;
   }
   const host = `https://${req.headers.host ?? 'joy.voltai.party:4997'}`;
