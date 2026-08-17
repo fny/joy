@@ -130,5 +130,5 @@ ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
   modified.
 - Everything user-visible is E2E-encrypted through the relay.
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
-  changes; e2e suite (`.claude/skills/agent-e2e-tests`) covers the tmux
+  changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.
