@@ -1,11 +1,11 @@
 ---
 name: agent-e2e-tests
-description: Run the joy end-to-end suite as an agent — drive joy-app in a browser against a freshly-built joy-cli, asserting session artifacts (Claude log, happy-server seq, tmux window, UI) stay consistent and in order.
+description: Run the joy end-to-end suite as an agent — drive joy-app in a browser against a freshly-built joy-daemon, asserting session artifacts (Claude log, happy-server seq, tmux window, UI) stay consistent and in order.
 ---
 
-In `packages/joy-app` and `packages/joy-cli` you'll find a React Native application and a tmux controller respectively. These both communicate via `packages/happy-server`, which must **never be modified**.
+In `packages/joy-app` and `packages/joy-daemon` you'll find a React Native application and a tmux controller respectively. These both communicate via `packages/happy-server`, which must **never be modified**.
 
-You will test these by launching `joy-app` as a web app via `/chrome-cli`, creating a new account + session, and running `joy-cli` attached to an **isolated** home/tmux/port set (below). Run the whole flow end to end.
+You will test these by launching `joy-app` as a web app via `/chrome-cli`, creating a new account + session, and running `joy-daemon` attached to an **isolated** home/tmux/port set (below). Run the whole flow end to end.
 
 If anything breaks: make a note, attempt to fix it with a focused commit, and continue the suite. If state is ever contaminated, purge whatever data was created and continue from that point rather than rerunning the whole suite.
 
@@ -17,7 +17,7 @@ Run against a **throwaway account** on the test server `https://api.cluster-flus
 - **Reuse a saved account:** if you already have the account's restore secret key, log in with Login → "Restore with Secret Key Instead" → paste key (on success the app `router.back()`s to the QR page, which LOOKS like a failure — check `/` for the session list). **Do NOT paste any restore key into this file** — it's committable; keep account secrets outside the repo (e.g. a local scratch note).
 
 **Daemon credentials MUST be a dataKey account.** A legacy-credential account makes *every* machineRPC silently return `null` — `joy-create-session` fails with `Cannot use 'in' operator … in null`, and the same symptom appears if a machine's stored key drifts from the server's machine record (a machineKey mismatch after a re-auth). A fresh "Create Account" is dataKey; verify via the RPC health check (Setup step 5), don't assume. Standard daemon start once creds exist under `~/.joy-test`:
-  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux HAPPY_HOME_DIR=$HOME/.joy-test PORT=4999 TMUX_SESSION=joy-test pnpm -C packages/joy-cli start`
+  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux HAPPY_HOME_DIR=$HOME/.joy-test PORT=4999 TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`
 
 **Mint fresh daemon creds non-interactively (~1 min):** run `HAPPY_HOME_DIR=$HOME/.joy-test HAPPY_SERVER_URL=https://api.cluster-fluster.com npx tsx joytest-auth.ts` from `packages/happy-cli`; it prints `APPROVE_KEY=<key>`; in a browser already logged into the target account open `http://localhost:8082/terminal/connect#key=<key>` and click "Accept Connection"; the script writes a fresh dataKey `access.key` + `settings.json` (with a new machineId) into `$HAPPY_HOME_DIR` and exits `WROTE_DATAKEY`. Then verify RPC health (Setup step 5) before testing.
 
@@ -82,7 +82,7 @@ There are usually OTHER joy daemons running on this machine. Do not clobber them
 
 ### tmux: use a DEDICATED SERVER SOCKET (critical)
 
-**You (the agent) run inside tmux session `0` on the default server** (`/tmp/tmux-1000/default`), alongside the user's other sessions (`joy-e2e`, `codex-e2e`). joy-cli always shells out to bare `tmux` (default socket) — so if you run the daemon as-is, its windows, `client-attached` resize hooks, and session churn land on the **same server you're running in** and disrupt the user.
+**You (the agent) run inside tmux session `0` on the default server** (`/tmp/tmux-1000/default`), alongside the user's other sessions (`joy-e2e`, `codex-e2e`). joy-daemon always shells out to bare `tmux` (default socket) — so if you run the daemon as-is, its windows, `client-attached` resize hooks, and session churn land on the **same server you're running in** and disrupt the user.
 
 Run the daemon — and every tmux command you issue for the test — on a **private tmux server** so it is physically incapable of touching the user's sessions:
 
@@ -99,10 +99,10 @@ If a previous run left state, kill/remove it first (see Setup).
 
 ## Setup (run once, fail-fast — do not start tests until all pass)
 
-1. **Build gate.** `pnpm install`, then `pnpm -C packages/joy-cli typecheck && pnpm -C packages/joy-cli test` and `pnpm -C packages/joy-app typecheck`. tsx ships TS errors as *runtime* crashes, so never e2e-test code that doesn't typecheck.
+1. **Build gate.** `pnpm install`, then `pnpm -C packages/joy-daemon typecheck && pnpm -C packages/joy-daemon test` and `pnpm -C packages/joy-app typecheck`. tsx ships TS errors as *runtime* crashes, so never e2e-test code that doesn't typecheck.
 2. **Purge stale state.** Kill any `joy-test` tmux session, any process on `:4999` and `:8082`; `rm -rf $HOME/.joy-test $HOME/joy-test`.
 3. **Fresh bundle.** Start Metro with `--clear` on `:8082`. **Verify the served bundle is fresh** (Metro's file-watcher can silently serve a frozen bundle, and the browser caches modules) — grep the served bundle for a known-current string and hard-reload chrome (clear its cache) before trusting the UI.
-4. **Start the daemon from latest source:** `PORT=4999 HAPPY_HOME_DIR=$HOME/.joy-test TMUX_SESSION=joy-test pnpm -C packages/joy-cli start`. Confirm the process start-time is *after* HEAD's commit (a long-lived tsx daemon does NOT hot-reload).
+4. **Start the daemon from latest source:** `PORT=4999 HAPPY_HOME_DIR=$HOME/.joy-test TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`. Confirm the process start-time is *after* HEAD's commit (a long-lived tsx daemon does NOT hot-reload).
 5. **RPC health check (critical).** Once an account + session exist, make one `machineRPC` call (e.g. list sessions) and assert it returns **non-null**. A legacy-credential account makes *every* RPC silently return `null` — abort the suite with a clear message if so. A fresh "Create Account" should be a **dataKey** account; verify, don't assume.
 
 ## Definitions — "session artifacts" and how to validate them
@@ -113,7 +113,7 @@ The same messages, in the same order, must appear in all four artifacts:
 |---|---|
 | Claude session log | `~/.claude/projects/<cwd-with-/-as->/<claude-session-id>.jsonl` |
 | happy-server sequence | `GET <serverUrl>/v1/sessions/<relay-id>/messages` (Authorization: Bearer `<token from access.key>`) |
-| `joy-cli` tmux window | `tmux capture-pane -t joy-test:<window> -p` |
+| `joy-daemon` tmux window | `tmux capture-pane -t joy-test:<window> -p` |
 | UI | `/chrome-cli` snapshot / eval against the session view |
 
 For **every** "validate artifacts" step assert:
