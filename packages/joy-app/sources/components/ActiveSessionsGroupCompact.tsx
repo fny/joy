@@ -463,14 +463,20 @@ const stylesheet = StyleSheet.create((theme) => ({
     sectionHeader: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
+        // Identicon sits flush with the projectCard's left edge (its
+        // marginHorizontal: 16 below).
+        paddingLeft: 16,
+        paddingRight: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
     },
     sectionHeaderSingleLine: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
+        // Identicon sits flush with the projectCard's left edge (its
+        // marginHorizontal: 16 below).
+        paddingLeft: 16,
+        paddingRight: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
     },
