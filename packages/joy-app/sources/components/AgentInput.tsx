@@ -1378,7 +1378,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         })}
                                     >
                                         <Ionicons
-                                            name="create-outline"
+                                            name="pencil"
                                             size={18}
                                             color={theme.colors.button.secondary.tint}
                                         />
