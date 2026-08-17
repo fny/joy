@@ -71,6 +71,14 @@ const ENTER_SUBMIT_DELAY_MS = 350;
 // dedup. The delay lets the kill-line be processed first. (Used by /steer.)
 const CLEAR_SETTLE_MS = 120;
 
+// Cadence of the input_dirty self-heal probe (#recheckDirtyPause): a handful of
+// dense checks catch the common case (buffered clear keys landing just after we
+// declared the box unclearable), then it settles into a slow heartbeat so a
+// long-paused session costs next to nothing.
+const DIRTY_RECHECK_MS = 5000;
+const DIRTY_RECHECK_SLOW_MS = 30000;
+const DIRTY_RECHECK_DENSE_TRIES = 6;
+
 // Echo-confirmation window for a dispatched message: if no turn starts within
 // this, the send is treated as failed (requeue + pause). Bumped from 20s — a
 // large context makes turn-start slower, and 20s false-failed genuine sends.
@@ -688,6 +696,9 @@ export class Session {
   // a wedged/odd state. Cleared by resume. #pauseReason says why (for the app).
   #queuePaused = false;
   #pauseReason: QueuePauseReason | undefined;
+  // Self-heal probe for an input_dirty pause (see #recheckDirtyPause).
+  #dirtyRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+  #dirtyRecheckAttempts = 0;
 
   constructor(init: SessionInit, deps: SessionDeps) {
     this.id = init.id;
@@ -983,6 +994,7 @@ export class Session {
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
+    this.#clearDirtyRecheck();
     this.#clearCompacting(); // every end path — a kill mid-compaction leaked the 10-min backstop timer
     // Clear the dialog banner on BOTH end paths while the relay is still
     // attached: #pollThinking stops at status==='ended', so a teardown racing
@@ -1343,6 +1355,7 @@ export class Session {
     this.#queuePaused = false;
     this.#pauseReason = undefined;
     this.#clearAttempts = 0;
+    this.#clearDirtyRecheck(); // the human beat the self-heal probe to it
     this.#broadcastQueue();
     if (wasDirty) {
       void this.#clearInputIfDirty(true).then(() => this.#maybeDrainQueue());
@@ -1357,6 +1370,75 @@ export class Session {
     this.#pauseReason = reason;
     this.#clearAttempts = 0;
     this.#broadcastQueue();
+    // input_dirty is the one pause whose blocking condition is externally
+    // VERIFIABLE (the box is empty or it isn't), so it self-heals; the
+    // dispatch_* pauses mean a message may have half-landed and only a human
+    // can judge whether re-sending is safe.
+    this.#clearDirtyRecheck();
+    if (reason === "input_dirty") { this.#dirtyRecheckAttempts = 0; this.#armDirtyRecheck(); }
+  }
+
+  #armDirtyRecheck(): void {
+    if (this.#dirtyRecheckTimer) clearTimeout(this.#dirtyRecheckTimer);
+    // Dense probes first (the common case is buffered C-u presses landing a
+    // beat after we gave up), then a slow heartbeat so an abandoned paused
+    // session costs ~nothing while still healing whenever the box comes good.
+    const delay = this.#dirtyRecheckAttempts < DIRTY_RECHECK_DENSE_TRIES
+      ? DIRTY_RECHECK_MS
+      : DIRTY_RECHECK_SLOW_MS;
+    this.#dirtyRecheckTimer = setTimeout(() => {
+      this.#dirtyRecheckTimer = null;
+      void this.#recheckDirtyPause();
+    }, delay);
+  }
+
+  #clearDirtyRecheck(): void {
+    if (this.#dirtyRecheckTimer) { clearTimeout(this.#dirtyRecheckTimer); this.#dirtyRecheckTimer = null; }
+    this.#dirtyRecheckAttempts = 0;
+  }
+
+  /** True while an input_dirty self-heal probe should still run — the pause we
+   *  armed for must still be the one in effect (not resumed, not re-paused for
+   *  another reason, session alive). */
+  #dirtyRecheckWanted(): boolean {
+    return this.status !== "ended" && this.#queuePaused && this.#pauseReason === "input_dirty";
+  }
+
+  /**
+   * Lift an input_dirty pause once the input box is provably clean again.
+   *
+   * WHY (live forensics, boite 2026-08-17): #queuePaused is a LATCH — nothing
+   * re-evaluated it. But "unclearable" is frequently a timing illusion: a busy
+   * claude processes buffered C-u presses LATE (docs/pane-input-clearing.md),
+   * so the presses that "failed" land moments later and empty the box. The
+   * session then sat paused forever with a perfectly clean box, and even the
+   * banner's tap-to-resume was needed to notice. This is the missing patience:
+   * the same verification, repeated, allowed only ever to RELAX the block.
+   *
+   * Strictly empty ("") heals — a null box (no live input box: dialog, menu,
+   * not ready) is "unknown", not "clean", exactly as the dispatch gate treats
+   * it, and human-typed text keeps the pause so we never silently discard a
+   * draft. A false heal is cheap: #drainOnce independently re-verifies an
+   * empty box on a fresh capture before it types anything.
+   */
+  async #recheckDirtyPause(): Promise<void> {
+    if (!this.#dirtyRecheckWanted()) return;
+    this.#dirtyRecheckAttempts += 1;
+    const pane = await tmux.captureFresh(this.tmuxWindow);
+    // Re-check after the await: a resume, an end, or a different pause may have
+    // landed while the capture was in flight.
+    if (!this.#dirtyRecheckWanted()) return;
+    if (pane.ok && paneInputText(pane.out) === "") {
+      process.stderr.write(`[queue] input box clean again for ${this.id} — resuming\n`);
+      this.#queuePaused = false;
+      this.#pauseReason = undefined;
+      this.#clearAttempts = 0;
+      this.#clearDirtyRecheck();
+      this.#broadcastQueue();
+      this.#maybeDrainQueue();
+      return;
+    }
+    this.#armDirtyRecheck();
   }
 
   clearQueue(): void {

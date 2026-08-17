@@ -19,6 +19,9 @@
    buffered keys *late*; a single quick re-capture misreads "busy" as "broken".
    The drain requires two full failed clear episodes, spaced 750ms, before it
    pauses.
+5. **An `input_dirty` pause is provisional, not a latch.** It self-heals the
+   moment the box reads verifiably empty again (`#recheckDirtyPause`). The
+   `dispatch_*` pauses do NOT — see below.
 
 ## Why C-u and not C-c (the 2026-07-02 forensics)
 
@@ -68,6 +71,38 @@ press: a 3-line box takes exactly 6 presses (measured). The press budget is
 `min(40, 2 × rendered-box-lines + 4)` via `paneInputLineSpan`. A flat budget of
 6 (the original implementation) silently left residue on any box taller than 3
 lines — and then reported success, letting a steer type into it.
+
+## Why the input_dirty pause self-heals (the 2026-08-17 forensics)
+
+Reported as "why is this session stuck?" — a boite session sat with `QUEUED · 1`
+and the *"input box has stray text — tap to clear and resume"* banner while the
+live pane showed a **completely empty box**.
+
+The daemon log had the whole story: a queued message arrived, the drain gate
+paused with `input box dirty + unclearable`, the user resumed and tapped the
+steer arrow, and `#steer`'s own clear then failed and re-paused — silently, since
+that path pauses without logging. By the time anyone looked, the box was clean.
+
+That is the **timing illusion** documented above, one layer up: the C-u presses
+the clear loop gave up on were merely *buffered*, and landed a beat later. The
+box healed; `#queuePaused` did not, because nothing ever re-evaluated it. Both
+the drain gate and `resumeQueue` only run when something *else* pokes them, so
+the session stayed blocked indefinitely on a condition that no longer existed.
+
+`#recheckDirtyPause` closes that hole — the same verification the gate uses,
+repeated on a timer (dense at first, then a slow heartbeat), permitted only ever
+to **relax** the block:
+
+- Only `input_dirty` self-heals. Its blocking condition is externally
+  verifiable. `dispatch_timeout` / `dispatch_mismatch` / `dispatch_failed` mean a
+  message may have *half*-landed, so re-sending is a human's judgment call and
+  those stay latched (there is a test pinning this).
+- Only a **strictly empty** box (`""`) heals it. A `null` box (dialog, menu, not
+  ready) is "unknown", not "clean" — the same convention `#drainOnce` uses — and
+  human-typed text keeps the pause, so a draft is never silently discarded.
+- A false heal is cheap: `#drainOnce` independently re-verifies an empty box on a
+  fresh capture before it types anything, and will simply re-clear/re-pause. The
+  probe can only ever hand control back to the real gate.
 
 ## Why abort() does not clear the box
 
