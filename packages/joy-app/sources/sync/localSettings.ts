@@ -28,8 +28,11 @@ export const LocalSettingsSchema = z.object({
     // CLI version acknowledgments - keyed by machineId
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
     appLock: z.boolean().describe('Require Face ID / device PIN to open the app (native only; device-local)'),
-    avatarVariant: z.enum(['hashicon', 'squares', 'circles']).describe('Identicon style: hashicon (joy palette), square confetti grid, or circular confetti grid'),
-    sessionAvatarSize: z.number().describe('Session-list identicon size in px, clamped to [16, 48]'),
+    // .catch: localSettingsParse fails WHOLE-OBJECT, so a value retired from
+    // this enum (the old 'hashicon') would silently reset every local setting —
+    // theme, font scale, the lot. Coerce the unknown one instead.
+    avatarVariant: z.enum(['circles', 'squares']).catch('circles').describe('Identicon style: circular (default) or square confetti grid'),
+    sessionAvatarSize: z.number().describe('Session-list identicon size in px, clamped to [8, 24]'),
 });
 
 //
@@ -67,8 +70,8 @@ export const localSettingsDefaults: LocalSettings = {
     zenMode: false,
     acknowledgedCliVersions: {},
     appLock: false,
-    avatarVariant: 'hashicon',
-    sessionAvatarSize: 24,
+    avatarVariant: 'circles',
+    sessionAvatarSize: 16,
 };
 Object.freeze(localSettingsDefaults);
 

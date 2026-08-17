@@ -8,7 +8,8 @@ import { useRouter } from 'expo-router';
 import * as Localization from 'expo-localization';
 import { useUnistyles, UnistylesRuntime, StyleSheet } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
-import { AvatarHashicon, AvatarSquares, AvatarCircles } from '@/components/AvatarHashicon';
+import { AvatarSquares, AvatarCircles } from '@/components/AvatarIdenticon';
+import { clampSessionAvatarSize, AVATAR_SIZE_MIN, AVATAR_SIZE_MAX, AVATAR_SIZE_STEP } from '@/hooks/useSessionAvatarSize';
 import { Appearance, Platform, Pressable, Text, View } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
@@ -59,7 +60,8 @@ export default function AppearanceSettingsScreen() {
     const [showFlavorIcons, setShowFlavorIcons] = useSettingMutable('showFlavorIcons');
     const [themePreference, setThemePreference] = useLocalSettingMutable('themePreference');
     const [avatarVariant, setAvatarVariant] = useLocalSettingMutable('avatarVariant');
-    const [sessionAvatarSize, setSessionAvatarSize] = useLocalSettingMutable('sessionAvatarSize');
+    const [sessionAvatarSizeRaw, setSessionAvatarSize] = useLocalSettingMutable('sessionAvatarSize');
+    const avatarSizePx = clampSessionAvatarSize(sessionAvatarSizeRaw);
     const [preferredLanguage] = useSettingMutable('preferredLanguage');
     const [chatFontScaleRaw, setChatFontScale] = useLocalSettingMutable('chatFontScale');
     const chatFontScale = clampChatFontScale(chatFontScaleRaw);
@@ -85,14 +87,12 @@ export default function AppearanceSettingsScreen() {
     return (
         <ItemList style={{ paddingTop: 0 }}>
 
-            {/* Identicon style — three variants, all drawn from the joy
-                logotype palette (+darken/lighten): the hashicon mark, a square
-                confetti grid, and a circular confetti grid. Live previews. */}
+            {/* Identicon style — the same joy-palette confetti grid clipped two
+                ways: circles (default) and squares. Live previews. */}
             <ItemGroup title="Identicons" footer="Style for generated avatars (sessions, machines). Colors come from the joy logo palette.">
                 {([
-                    { key: 'hashicon' as const, name: 'Hashicon', Comp: AvatarHashicon },
-                    { key: 'squares' as const, name: 'Squares', Comp: AvatarSquares },
                     { key: 'circles' as const, name: 'Circles', Comp: AvatarCircles },
+                    { key: 'squares' as const, name: 'Squares', Comp: AvatarSquares },
                 ]).map(({ key, name, Comp }) => (
                     <Item
                         key={key}
@@ -116,26 +116,26 @@ export default function AppearanceSettingsScreen() {
                     title="Size"
                     subtitle="Session-list identicon size"
                     icon={<View style={{ width: 29, alignItems: 'center' }}>
-                        {avatarVariant === 'squares' ? <AvatarSquares id="preview-joy" size={Math.min(29, sessionAvatarSize)} />
-                            : avatarVariant === 'circles' ? <AvatarCircles id="preview-joy" size={Math.min(29, sessionAvatarSize)} />
-                                : <AvatarHashicon id="preview-joy" size={Math.min(29, sessionAvatarSize)} />}
+                        {avatarVariant === 'squares'
+                            ? <AvatarSquares id="preview-joy" size={avatarSizePx} />
+                            : <AvatarCircles id="preview-joy" size={avatarSizePx} />}
                     </View>}
                     rightElement={(
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                             <Pressable
                                 hitSlop={8}
-                                onPress={() => setSessionAvatarSize(Math.max(16, sessionAvatarSize - 4))}
-                                disabled={sessionAvatarSize <= 16}
+                                onPress={() => setSessionAvatarSize(Math.max(AVATAR_SIZE_MIN, avatarSizePx - AVATAR_SIZE_STEP))}
+                                disabled={avatarSizePx <= AVATAR_SIZE_MIN}
                             >
-                                <Ionicons name="remove-circle-outline" size={22} color={sessionAvatarSize <= 16 ? theme.colors.textSecondary : theme.colors.textLink} />
+                                <Ionicons name="remove-circle-outline" size={22} color={avatarSizePx <= AVATAR_SIZE_MIN ? theme.colors.textSecondary : theme.colors.textLink} />
                             </Pressable>
-                            <Text style={{ color: theme.colors.text, fontVariant: ['tabular-nums'], minWidth: 30, textAlign: 'center' }}>{sessionAvatarSize}px</Text>
+                            <Text style={{ color: theme.colors.text, fontVariant: ['tabular-nums'], minWidth: 30, textAlign: 'center' }}>{avatarSizePx}px</Text>
                             <Pressable
                                 hitSlop={8}
-                                onPress={() => setSessionAvatarSize(Math.min(48, sessionAvatarSize + 4))}
-                                disabled={sessionAvatarSize >= 48}
+                                onPress={() => setSessionAvatarSize(Math.min(AVATAR_SIZE_MAX, avatarSizePx + AVATAR_SIZE_STEP))}
+                                disabled={avatarSizePx >= AVATAR_SIZE_MAX}
                             >
-                                <Ionicons name="add-circle-outline" size={22} color={sessionAvatarSize >= 48 ? theme.colors.textSecondary : theme.colors.textLink} />
+                                <Ionicons name="add-circle-outline" size={22} color={avatarSizePx >= AVATAR_SIZE_MAX ? theme.colors.textSecondary : theme.colors.textLink} />
                             </Pressable>
                         </View>
                     )}

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { View } from "react-native";
 import { Image } from "expo-image";
-import { AvatarIdenticon } from "./AvatarHashicon";
+import { AvatarIdenticon } from "./AvatarIdenticon";
 import { useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
