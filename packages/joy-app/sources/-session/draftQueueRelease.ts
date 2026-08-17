@@ -26,6 +26,10 @@ type SendFn = (sessionId: string, text: string, localId: string) => Promise<Send
 
 const inFlightUntil = new Map<string, number>();
 const RELEASE_BACKSTOP_MS = 15_000;
+// How long after thinking→false a release waits for the turn's trailing
+// message rows to reach the server (ordering; see the settle comment below).
+const RELEASE_SETTLE_MS = 2_000;
+const lastBusyAt = new Map<string, number>();
 // Lease horizon for a 'releasing' draft: past this, a retry (same
 // releaseLocalId — idempotent) is allowed. Covers app reloads mid-send.
 const RELEASE_LEASE_MS = 30_000;
@@ -77,8 +81,16 @@ export function initDraftQueueRelease(send: SendFn): void {
                 && isFresh(session);
             if (busy && draftAge(head, now) < MAX_HOLD_MS) {
                 inFlightUntil.delete(sessionId); // turn running — prior release landed
+                lastBusyAt.set(sessionId, now);
                 continue;
             }
+            // Settle window: thinking flips false slightly BEFORE the daemon
+            // finishes forwarding the turn's trailing rows, so an instant
+            // release wins the seq race and the released message renders
+            // MID-turn (above the answer it queued behind). Give the tail a
+            // moment to land; the sweep re-runs this pass.
+            const busyAgo = now - (lastBusyAt.get(sessionId) ?? 0);
+            if (busyAgo < RELEASE_SETTLE_MS && draftAge(head, now) < MAX_HOLD_MS) continue;
             const until = inFlightUntil.get(sessionId);
             if (until !== undefined && now < until) continue;
             // Two-phase (codex finding 3): the draft is never removed before
