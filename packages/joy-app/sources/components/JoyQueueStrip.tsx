@@ -86,6 +86,12 @@ export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; s
         queue.paused,
     ).length > 0 ? hiddenCountRaw : 0;
 
+    // Hook must precede the empty-queue early return: returning null before a
+    // useState means the first queued item ADDS a hook next render — React
+    // throws "Rendered more hooks than during the previous render" and the
+    // whole session view falls to the error boundary.
+    const [collapsed, setCollapsed] = React.useState(false);
+
     const visible = queue.queue;
     const total = visible.length + hidden.length + hiddenCountOnly;
     if (total === 0 && !queue.paused) return null;
@@ -113,7 +119,6 @@ export const JoyQueueStrip = React.memo(({ queue, sessionId }: { queue: Queue; s
         useDraftQueueStore.getState().add(sessionId, text);
     };
 
-    const [collapsed, setCollapsed] = React.useState(false);
     return (
         <View style={styles.wrap}>
             {total > 0 && (
