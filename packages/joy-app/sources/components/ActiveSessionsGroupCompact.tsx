@@ -463,24 +463,14 @@ const stylesheet = StyleSheet.create((theme) => ({
     sectionHeader: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        // Left edge matches the session TITLE text below. The header sits
-        // OUTSIDE the projectCard, so its offset must include the card's
-        // 16px margin: 16 (card) + 14 (row padding) + 16 (indicator slot) +
-        // 8 (gap) = 54.
-        paddingLeft: 54,
-        paddingRight: Platform.select({ ios: 32, default: 24 }),
+        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
     },
     sectionHeaderSingleLine: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        // Left edge matches the session TITLE text below. The header sits
-        // OUTSIDE the projectCard, so its offset must include the card's
-        // 16px margin: 16 (card) + 14 (row padding) + 16 (indicator slot) +
-        // 8 (gap) = 54.
-        paddingLeft: 54,
-        paddingRight: Platform.select({ ios: 32, default: 24 }),
+        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
     },
