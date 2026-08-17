@@ -1099,6 +1099,7 @@ export const pl: TranslationStructure = {
         photoLibrary: 'Biblioteka zdjęć',
         chooseFile: 'Wybierz plik',
         pasteImage: 'Wklej obraz',
+        draw: 'Rysuj',
         pasteNoImageTitle: 'Brak obrazu',
         pasteNoImageMessage: 'Schowek nie zawiera obrazu.',
         permissionTitle: 'Dostęp do biblioteki zdjęć',

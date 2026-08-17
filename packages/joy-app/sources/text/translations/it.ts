@@ -1068,6 +1068,7 @@ export const it: TranslationStructure = {
         photoLibrary: 'Libreria foto',
         chooseFile: 'Scegli file',
         pasteImage: 'Incolla immagine',
+        draw: 'Disegna',
         pasteNoImageTitle: 'Nessuna immagine',
         pasteNoImageMessage: 'Gli appunti non contengono immagini.',
         permissionTitle: 'Accesso alla libreria foto',

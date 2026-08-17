@@ -1068,6 +1068,7 @@ export const pt: TranslationStructure = {
         photoLibrary: 'Fototeca',
         chooseFile: 'Escolher arquivo',
         pasteImage: 'Colar imagem',
+        draw: 'Desenhar',
         pasteNoImageTitle: 'Sem imagem',
         pasteNoImageMessage: 'A área de transferência não contém uma imagem.',
         permissionTitle: 'Acesso à biblioteca de fotos',

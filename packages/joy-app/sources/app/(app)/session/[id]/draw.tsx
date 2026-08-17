@@ -6,12 +6,16 @@
 // attachment pipeline (previews, thumbhash, upload sizing) is raster-only, so
 // shipping SVG through it would be fragile — per spec, PNG it is.
 import * as React from 'react';
-import { View, Text, Pressable, PanResponder, Platform } from 'react-native';
+import { View, Text, Pressable, PanResponder, Platform, Image } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
+import * as Clipboard from 'expo-clipboard';
+import * as ImagePicker from 'expo-image-picker';
 import { StyleSheet } from 'react-native-unistyles';
+import { Modal } from '@/modal';
+import { t } from '@/text';
 import { useDrawingResult } from '@/hooks/useDrawingResult';
 
 const PEN_COLORS = ['#000000', '#FF3B30', '#007AFF', '#FFCC00', '#FFFFFF'] as const;
@@ -52,6 +56,9 @@ export default React.memo(function DrawScreen() {
     const [penColor, setPenColor] = React.useState<string>('#000000');
     const [thickness, setThickness] = React.useState<number>(DEFAULT_THICKNESS);
     const [darkPaper, setDarkPaper] = React.useState(false);
+    // Annotation background: pasted or picked image rendered UNDER the ink and
+    // captured with it — "paste a screenshot, draw on top" is the core flow.
+    const [bgImage, setBgImage] = React.useState<string | null>(null);
     const [saving, setSaving] = React.useState(false);
     const shotRef = React.useRef<ViewShot>(null);
     const sizeRef = React.useRef({ width: 0, height: 0 });
@@ -119,6 +126,32 @@ export default React.memo(function DrawScreen() {
         }
     }, [saving, sessionId]);
 
+    const pickBackground = React.useCallback(() => {
+        const paste = async () => {
+            try {
+                const img = await Clipboard.getImageAsync({ format: 'png' });
+                if (img?.data) setBgImage(img.data);
+                else Modal.alert(t('imageUpload.pasteNoImageTitle'), t('imageUpload.pasteNoImageMessage'), [{ text: t('common.ok') }]);
+            } catch (e) {
+                Modal.alert(t('common.error'), String(e), [{ text: t('common.ok') }]);
+            }
+        };
+        const library = async () => {
+            try {
+                const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 1 });
+                if (!res.canceled && res.assets[0]?.uri) setBgImage(res.assets[0].uri);
+            } catch (e) {
+                Modal.alert(t('common.error'), String(e), [{ text: t('common.ok') }]);
+            }
+        };
+        Modal.alert(t('imageUpload.attachTitle'), undefined, [
+            { text: t('imageUpload.pasteImage'), onPress: () => { void paste(); } },
+            ...(Platform.OS !== 'web' ? [{ text: t('imageUpload.photoLibrary'), onPress: () => { void library(); } }] : []),
+            ...(bgImage ? [{ text: t('common.delete'), style: 'destructive' as const, onPress: () => setBgImage(null) }] : []),
+            { text: t('common.cancel'), style: 'cancel' as const },
+        ]);
+    }, [bgImage]);
+
     const paper = darkPaper ? '#000000' : '#FFFFFF';
     const chromeOnPaper = darkPaper ? '#FFFFFF' : '#000000';
     const all = current ? [...strokes, current] : strokes;
@@ -136,6 +169,12 @@ export default React.memo(function DrawScreen() {
                     onLayout={(e) => { sizeRef.current = { width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height }; }}
                     {...responder.panHandlers}
                 >
+                    {bgImage && (
+                        <Image
+                            source={{ uri: bgImage }}
+                            style={[StyleSheet.absoluteFill as any, { resizeMode: 'contain' }]}
+                        />
+                    )}
                     <Svg style={StyleSheet.absoluteFill as any} pointerEvents="none">
                         {all.map((s, i) => (
                             <Path
@@ -158,6 +197,9 @@ export default React.memo(function DrawScreen() {
                     <Ionicons name="close" size={20} color={chromeOnPaper} />
                 </Pressable>
                 <View style={styles.topRight}>
+                    <Pressable onPress={pickBackground} hitSlop={10} style={styles.roundBtn}>
+                        <Ionicons name="image-outline" size={19} color={bgImage ? '#34C759' : chromeOnPaper} />
+                    </Pressable>
                     <Pressable onPress={() => setStrokes(prev => prev.slice(0, -1))} hitSlop={10} style={styles.roundBtn} disabled={strokes.length === 0}>
                         <Ionicons name="arrow-undo-outline" size={19} color={strokes.length ? chromeOnPaper : '#88888880'} />
                     </Pressable>
@@ -167,7 +209,7 @@ export default React.memo(function DrawScreen() {
                     <Pressable onPress={() => setDarkPaper(v => !v)} hitSlop={10} style={styles.roundBtn}>
                         <Ionicons name={darkPaper ? 'sunny-outline' : 'moon-outline'} size={19} color={chromeOnPaper} />
                     </Pressable>
-                    <Pressable onPress={() => void save()} hitSlop={10} style={[styles.roundBtn, styles.saveBtn]} disabled={saving || all.length === 0}>
+                    <Pressable onPress={() => void save()} hitSlop={10} style={[styles.roundBtn, styles.saveBtn]} disabled={saving || (all.length === 0 && !bgImage)}>
                         <Ionicons name="checkmark" size={20} color="#FFFFFF" />
                     </Pressable>
                 </View>

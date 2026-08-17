@@ -1069,6 +1069,7 @@ export const ca: TranslationStructure = {
         photoLibrary: 'Fototeca',
         chooseFile: 'Tria un fitxer',
         pasteImage: 'Enganxa una imatge',
+        draw: 'Dibuixa',
         pasteNoImageTitle: 'Cap imatge',
         pasteNoImageMessage: 'El porta-retalls no conté cap imatge.',
         permissionTitle: 'Accés a la biblioteca de fotos',

@@ -1071,6 +1071,7 @@ export const ja: TranslationStructure = {
         photoLibrary: 'フォトライブラリ',
         chooseFile: 'ファイルを選択',
         pasteImage: '画像をペースト',
+        draw: '描く',
         pasteNoImageTitle: '画像がありません',
         pasteNoImageMessage: 'クリップボードに画像がありません。',
         permissionTitle: 'フォトライブラリへのアクセス',

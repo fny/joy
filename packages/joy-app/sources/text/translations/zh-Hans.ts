@@ -1070,6 +1070,7 @@ export const zhHans: TranslationStructure = {
         photoLibrary: '照片图库',
         chooseFile: '选择文件',
         pasteImage: '粘贴图片',
+        draw: '绘图',
         pasteNoImageTitle: '没有图片',
         pasteNoImageMessage: '剪贴板中没有图片。',
         permissionTitle: '访问照片库',
