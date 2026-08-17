@@ -7,19 +7,40 @@
 const P = { type: 'object', additionalProperties: true };
 
 /** /joy/v1 paths generated from the router's own table (routes.mjs
- *  routeTable()) — the docs cannot drift from dispatch. */
+ *  routeTable() incl. per-route doc blocks) — docs cannot drift from
+ *  dispatch, and every operation renders full request/response fields. */
 function nativePaths(routeTable) {
   const paths = {};
   for (const r of routeTable) {
     let i = 0;
     const path = r.pattern.replace(/\([^)]*\)/g, () => `{${r.params[i++] ?? `p${i}`}}`);
+    const doc = r.doc ?? {};
+    const parameters = [
+      ...(r.params ?? []).map((name) => ({ name, in: 'path', required: true, schema: { type: 'string' } })),
+      ...Object.entries(doc.query ?? {}).map(([name, schema]) => ({ name, in: 'query', required: false, schema })),
+      ...(doc.headers ?? []).map((h) => {
+        const [name, ...rest] = h.split(' ');
+        return { name, in: 'header', required: !rest.join(' ').includes('optional'), description: rest.join(' ').replace(/[()]/g, ''), schema: { type: 'string' } };
+      }),
+    ];
+    const responses = {
+      200: { description: 'Success', content: doc.result?.type === 'string'
+        ? { 'text/event-stream': { schema: { type: 'string', description: doc.result.description } } }
+        : { 'application/json': { schema: doc.result ?? P } } },
+      ...Object.fromEntries(Object.entries(doc.errors ?? {}).map(([code, what]) => [
+        code, { description: what, content: { 'application/json': { schema: { type: 'object', properties: { error: { type: 'string', example: String(what).split(' ')[0] } } } } } },
+      ])),
+    };
+    if (r.auth) responses[401] = { description: 'Missing or invalid bearer token' };
     (paths[path] ??= {})[r.method.toLowerCase()] = {
       summary: r.summary,
-      tags: ['joy/v1 (native)'],
+      ...(doc.description ? { description: doc.description } : {}),
+      tags: [doc.tag ?? 'joy/v1'],
       ...(r.auth ? {} : { security: [] }),
       ...(r.sse ? { 'x-sse': true } : {}),
-      parameters: (r.params ?? []).map((name) => ({ name, in: 'path', required: true, schema: { type: 'string' } })),
-      responses: { 200: { description: 'Success', content: { 'application/json': { schema: P } } } },
+      parameters,
+      ...(doc.body && r.method !== 'GET' ? { requestBody: { required: true, content: { 'application/json': { schema: doc.body } } } } : {}),
+      responses,
     };
   }
   return paths;
@@ -31,8 +52,21 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
     info: {
       title: 'joy relay API',
       version,
-      description:
-        'The joy relay API: durable sessions, turns, leases, deliveries, and events under /joy/v1. When the perimeter gate is enabled, every request additionally needs x-joy-relay-key (or ?joyRelayKey=). Machine-level operations (queue, pane, usage, limits, agent config…) live on each machine\'s joy-daemon — see its local /docs. Everything outside /joy/v1 is proxied untouched to the upstream store and is not part of this API.',
+      description: [
+        'The joy relay\'s durable session protocol. Everything a client or daemon needs to run agent conversations that survive disconnects, daemon restarts, and relay failover — without either side trusting the other\'s liveness.',
+        '',
+        '## The model',
+        '- **Sessions** are relay-owned records with an append-only, seq-ordered event log. All content is E2E ciphertext; the relay stores and forwards, never reads.',
+        '- **Turns** are durable prompts: queued at the relay, claimed by the owning daemon, executed strictly in order, closed with a terminal fact. Every client write is idempotent via clientIntentId + request hash — retries replay, altered retries are rejected.',
+        '- **Leases** give one daemon process exclusive control of a machine identity. Epochs fence out crashed predecessors; orphaned turns are resolved explicitly via reconcile.',
+        '',
+        '## Auth',
+        '- Client surface: `Authorization: Bearer <account token>`.',
+        '- Daemon surface: the lease token (`x-joy-lease-token`, plus `x-joy-lease-id` / `x-joy-lease-epoch` on lifecycle writes) — never the bearer.',
+        '- When the perimeter gate is enabled, EVERY request additionally carries `x-joy-relay-key` (or `?joyRelayKey=`), derived from the account secret.',
+        '',
+        'Machine-level operations (queue, pane, usage, limits, agent config…) are the joy-daemon\'s API — see its local /docs on each machine. Paths outside /joy/v1 are proxied untouched to the upstream store and are not part of this API.',
+      ].join('\n'),
     },
     servers: [{ url: host }],
     ...(routeTable?.served === false ? { 'x-note': 'On this instance /joy/v1 requests are currently served by the dev relay (:14997); the API below is identical.' } : {}),
@@ -43,6 +77,17 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
       },
     },
     security: [{ bearer: [] }],
+    tags: [
+      { name: 'Meta', description: 'Protocol discovery.' },
+      { name: 'Sessions', description: 'Durable sessions: the relay-owned record of each agent conversation. Clients create, list, snapshot, and page the append-only event log; the SSE stream pushes change pokes. Content is E2E ciphertext throughout.' },
+      { name: 'Turns', description: 'The durable prompt queue. A turn is one prompt\'s lifecycle: queued → dispatching → running → terminal (completed | failed | cancelled | interrupted). Cancel-before-start is airtight; cancel-while-running rides the control lane.' },
+      { name: 'Daemon leases', description: 'How a machine\'s daemon takes exclusive, crash-safe control: epoch-fenced leases (TTL 20s, renew constantly) and two long-poll claim lanes — WORK (spawns + head prompts) and CONTROL (cancels, never stuck behind work).' },
+      { name: 'Daemon lifecycle', description: 'Fenced write-backs from the executing daemon: ack deliveries, bind spawned sessions, flip turns through submitted/started, stream facts (receipt / output / terminal), and reconcile orphans after a restart. All fenced by the x-joy-lease-* header triplet inside each transaction.' },
+    ],
+    'x-tagGroups': [
+      { name: 'Client surface', tags: ['Meta', 'Sessions', 'Turns'] },
+      { name: 'Daemon surface', tags: ['Daemon leases', 'Daemon lifecycle'] },
+    ],
     paths: nativePaths(routeTable?.routes ?? []),
   };
 }
