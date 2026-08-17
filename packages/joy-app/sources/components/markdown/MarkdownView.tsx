@@ -338,7 +338,15 @@ function RenderSpans(props: RenderSpanProps) {
                         selectable={props.selectable}
                         accessibilityRole={isExternalLink ? 'link' : undefined}
                         style={[props.baseStyle, isExternalLink && style.link, spanStyles]}
-                        {...(isExternalLink && Platform.OS === 'web' ? { onClick: () => props.onLinkPress(span.url!) } as any : {})}
+                        {...(isExternalLink && Platform.OS === 'web' ? {
+                            // Real anchor (href) so the browser/webview has a
+                            // native path even if the synthetic click dies —
+                            // preventDefault stops the webview navigating the
+                            // app window itself; onLinkPress opens externally.
+                            href: span.url,
+                            hrefAttrs: { target: '_blank', rel: 'noopener noreferrer' },
+                            onClick: (e: { preventDefault?: () => void }) => { e?.preventDefault?.(); props.onLinkPress(span.url!); },
+                        } as any : {})}
                         onPress={isExternalLink && Platform.OS !== 'web'
                             ? () => props.onLinkPress(span.url!)
                             : undefined}
