@@ -51,7 +51,7 @@ agent on the new-session page via the agent toggle). Where an artifact is agent-
 - Send one new message; it appends after history, in order.
 
 ## CH8: Daemon restart mid-session
-- Restart joy-cli while the session is idle. It must rebind (claude: transcript
+- Restart joy-daemon while the session is idle. It must rebind (claude: transcript
   re-bound; codex: orphan app-server rejoined — check the daemon log). A follow-up
   message round-trips; no duplicate replay of old messages in the app.
 
