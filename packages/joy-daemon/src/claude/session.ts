@@ -541,6 +541,8 @@ export class Session {
   // debounces detection: a URL must persist across two polls before we push it.
   #login: JoyLoginInfo | null = null;
   #loginUrlPending: string | null = null;
+  /** Latch for the auto-Enter on "Login successful. Press Enter to continue". */
+  #loginContinuePressed = false;
   // Interactive CLI dialog (model picker / switch confirm / effort slider…)
   // currently occupying the pane — surfaced as joy__dialog ("answer this in
   // the terminal"). Same two-poll debounce contract as #login.
@@ -2978,6 +2980,17 @@ export class Session {
    *  (guards against a transient link in normal output), and it's cleared as
    *  soon as the prompt is gone. */
   #reconcileLogin(paneText: string): void {
+    // Auto-continue the post-login success screen: one Enter, no decision to
+    // make. Latched until the screen is gone so a slow redraw can't double-
+    // press into the restored conversation.
+    if (loginContinueFromPane(paneText)) {
+      if (!this.#loginContinuePressed) {
+        this.#loginContinuePressed = true;
+        void tmux.key(this.tmuxWindow, "Enter").catch(() => { /* pane gone */ });
+      }
+    } else {
+      this.#loginContinuePressed = false;
+    }
     const login = loginFromPane(paneText);
     if (!login) {
       this.#loginUrlPending = null;
@@ -3585,6 +3598,14 @@ export class Session {
  */
 const URL_CHARS = /^[A-Za-z0-9%:/?=&+._~#@!$',;()*-]+$/;
 export interface PaneLogin { url: string; error?: string }
+/** The post-login "Login successful. Press Enter to continue…" screen — a
+ *  keypress with no decision attached. Detected so the daemon can press it
+ *  (auto-continue) instead of stranding a freshly-authed session on a human
+ *  Enter (boite voltagen, 2026-08-17). */
+export function loginContinueFromPane(text: string): boolean {
+  return /login successful[\s\S]{0,120}press\s+.{0,20}enter.{0,20}\s+to\s+continue/i.test(text);
+}
+
 export function loginFromPane(text: string): PaneLogin | null {
   const AUTH = /(oauth|authorize|code_challenge|\/device|\/login)/i;
   // Only CLAUDE login URLs qualify. The pane shows conversation output too, and

@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -1192,4 +1192,11 @@ test("dialogFromPane picker fallback: scrollback list + live picker: the ❯ run
 
 test("parseJoyCommand: /joy-prompt is joy-owned (hyphenated name parses)", () => {
   expect(parseJoyCommand("/joy-prompt")).toEqual({ name: "joy-prompt", args: "" });
+});
+
+test("loginContinueFromPane: matches the post-login continue screen only", () => {
+  expect(loginContinueFromPane("Logged in as faraz.yashar@gmail.com\nLogin successful. Press Enter to continue…")).toBe(true);
+  expect(loginContinueFromPane("Login successful.\n   Press  Enter  to continue")).toBe(true);
+  expect(loginContinueFromPane("❯ discussing login successful flows in the app")).toBe(false);
+  expect(loginContinueFromPane("Press Enter to continue")).toBe(false);
 });
