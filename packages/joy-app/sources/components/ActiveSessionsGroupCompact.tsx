@@ -9,7 +9,8 @@ import { type SessionState, formatPathRelativeToHome, vibingMessages, formatLast
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { useAllMachines, useSessionGitStatus, useLocalSetting } from '@/sync/storage';
+import { useAllMachines, useSessionGitStatus } from '@/sync/storage';
+import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
@@ -106,8 +107,8 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
     }, [session.machineId, session.homeDir, repoPath, isWorktree, sessionPath, draft, router, newSessionRoute]);
 
     const [isHovered, setIsHovered] = React.useState(false);
-    // Identicon size — Appearance → Identicons (clamped there; default 24).
-    const avatarSize = useLocalSetting('sessionAvatarSize');
+    // Identicon size — Appearance → Identicons (clamped on read; default 16).
+    const avatarSize = useSessionAvatarSize();
     // The identicon sits on the same column as the session rows' status icon:
     // card margin 16 + row padding 14 + half the 16px indicator slot = 38, so
     // both marks share a center line down the list. Text still starts at the
