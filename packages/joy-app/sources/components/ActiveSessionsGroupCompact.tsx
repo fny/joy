@@ -480,13 +480,16 @@ const stylesheet = StyleSheet.create((theme) => ({
         justifyContent: 'center',
         minWidth: 0,
     },
+    // Folder name beside the identicon: same color as connected session
+    // titles (theme.colors.text, not the dim section-title grey) and bold, so
+    // the project reads as the row's anchor.
     sectionHeaderPath: {
-        ...Typography.default('regular'),
-        color: theme.colors.groupped.sectionTitle,
+        ...Typography.default('semiBold'),
+        color: theme.colors.text,
         fontSize: Platform.select({ ios: 13, default: 14 }),
         lineHeight: Platform.select({ ios: 18, default: 20 }),
         letterSpacing: Platform.select({ ios: -0.08, default: 0.1 }),
-        fontWeight: Platform.select({ ios: 'normal', default: '500' }),
+        fontWeight: '700',
         flexShrink: 1,
     },
     branchRow: {
