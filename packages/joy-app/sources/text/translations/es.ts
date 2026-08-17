@@ -1070,6 +1070,7 @@ export const es: TranslationStructure = {
         photoLibrary: 'Fototeca',
         chooseFile: 'Elegir archivo',
         pasteImage: 'Pegar imagen',
+        draw: 'Dibujar',
         pasteNoImageTitle: 'Sin imagen',
         pasteNoImageMessage: 'El portapapeles no contiene ninguna imagen.',
         permissionTitle: 'Acceso a la biblioteca de fotos',

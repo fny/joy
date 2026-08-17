@@ -4,7 +4,7 @@ A quality-of-life sweep: collapse the chat clutter, see your actual Anthropic/Op
 
 - **Collapse everything.** A new top-left button in each session collapses/expands every tool call at once; each tool card and each code diff also gets its own chevron. Compaction summaries now appear as a collapsed card instead of vanishing (or walling the chat).
 - **Live account limits.** Settings → Limits shows your real Claude 5-hour/weekly utilization and reset times (read via each machine's own Claude Code login — no credentials to enter) plus Codex's rate windows. The daemon also pushes an alert when any quota, RAM, or disk crosses 90%.
-- **Drawing attachments.** The brush button opens a full-screen sketch pad — five pens, white/black paper, adjustable thickness, smooth finger strokes — and drops the PNG straight into the composer.
+- **Drawing attachments.** The attach menu gains Draw: a full-screen sketch pad — five pens, white/black paper, adjustable thickness, smooth finger strokes — and you can paste or pick an image to annotate on top of. The PNG drops straight into the composer.
 - **Agent config editor.** Settings → Agent Config edits each agent's real config file (claude settings.json, codex config.toml, opencode, pi) on any machine: walk the published schema or use raw mode with JSON-path lines like `examples[0].title = "hi"`. Every write keeps a backup.
 - **/joy-prompt.** Re-injects the latest joy instructions into a long-lived session (any agent) — the fix for stale titles and forgotten option pickers; it's also how pi learns the vocabulary.
 - **Resource pressure, visible.** Machine view shows Memory and Disk as used-% (red at 90%+), and a red banner appears under a session's header when its machine runs hot.

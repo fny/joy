@@ -1069,6 +1069,7 @@ export const zhHant: TranslationStructure = {
         photoLibrary: '照片圖庫',
         chooseFile: '選擇檔案',
         pasteImage: '貼上圖片',
+        draw: '繪圖',
         pasteNoImageTitle: '沒有圖片',
         pasteNoImageMessage: '剪貼簿中沒有圖片。',
         permissionTitle: '存取照片圖庫',

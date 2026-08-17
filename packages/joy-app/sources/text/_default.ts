@@ -300,6 +300,7 @@ export const en = {
         photoLibrary: 'Photo Library',
         chooseFile: 'Choose File',
         pasteImage: 'Paste Image',
+        draw: 'Draw',
         pasteNoImageTitle: 'No Image',
         pasteNoImageMessage: 'The clipboard does not contain an image.',
         permissionTitle: 'Photo Library Access',

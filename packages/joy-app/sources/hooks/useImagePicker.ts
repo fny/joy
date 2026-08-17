@@ -221,16 +221,21 @@ export function useImagePicker(): UseImagePickerResult {
             return;
         }
 
-        const base64 = data.includes(',') ? data.slice(data.indexOf(',') + 1) : data;
-        const uri = `${cacheDirectory}pasted_${Date.now()}.jpg`;
-        await writeAsStringAsync(uri, base64, { encoding: EncodingType.Base64 });
-        const p = await buildPreview({
-            uri,
-            name: `pasted_${Date.now()}.jpg`,
-            size: Math.floor(base64.length * 0.75),
-            mimeType: 'image/jpeg',
-        });
-        if (p) append([p]);
+        try {
+            const base64 = data.includes(',') ? data.slice(data.indexOf(',') + 1) : data;
+            const uri = `${cacheDirectory}pasted_${Date.now()}.jpg`;
+            await writeAsStringAsync(uri, base64, { encoding: EncodingType.Base64 });
+            const p = await buildPreview({
+                uri,
+                name: `pasted_${Date.now()}.jpg`,
+                size: Math.floor(base64.length * 0.75),
+                mimeType: 'image/jpeg',
+            });
+            if (p) append([p]);
+        } catch (e) {
+            // A silent failure here read as "paste is broken" with no clue why.
+            Modal.alert(t('common.error'), String(e), [{ text: t('common.ok') }]);
+        }
     }, [remainingOrAlert, append]);
 
     const removeImage = useCallback((id: string) => {

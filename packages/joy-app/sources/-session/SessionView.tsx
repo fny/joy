@@ -318,8 +318,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         isConnected={headerProps.isConnected}
                         badge={headerProps.badge}
                         extraPathSegment={fileViewPath ?? undefined}
-                        rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : joyTerminalSlot}
-                        leftSlot={collapseAllSlot}
+                        rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : <>{collapseAllSlot}{joyTerminalSlot}</>}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
                         onBackPress={() => router.back()}
                     />
@@ -647,14 +646,25 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // entries. Web keeps the direct file picker — its file input covers
     // everything and paste is intercepted at the document level.
     const handleAttach = React.useCallback(() => {
-        if (Platform.OS === 'web') { void pickImages(); return; }
+        // Draw lives INSIDE the attach sheet (it produces an attachment) —
+        // one entry point for everything that ends up as an image.
+        const draw = { text: t('imageUpload.draw'), onPress: () => { router.push(`/session/${sessionId}/draw`); } };
+        if (Platform.OS === 'web') {
+            Modal.alert(t('imageUpload.attachTitle'), undefined, [
+                { text: t('imageUpload.chooseFile'), onPress: () => { void pickImages(); } },
+                draw,
+                { text: t('common.cancel'), style: 'cancel' },
+            ]);
+            return;
+        }
         Modal.alert(t('imageUpload.attachTitle'), undefined, [
             { text: t('imageUpload.photoLibrary'), onPress: () => { void pickFromLibrary(); } },
             { text: t('imageUpload.chooseFile'), onPress: () => { void pickImages(); } },
             { text: t('imageUpload.pasteImage'), onPress: () => { void pasteImage(); } },
+            draw,
             { text: t('common.cancel'), style: 'cancel' },
         ]);
-    }, [pickImages, pickFromLibrary, pasteImage]);
+    }, [pickImages, pickFromLibrary, pasteImage, router, sessionId]);
 
     // Estimated session cost for the composer info line: the daemon's
     // joy-session-usage rolls subagent burn into the parent and prices with
@@ -681,10 +691,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     // Drawing pad: opens the full-screen sketch route; the pad deposits its
     // captured PNG in useDrawingResult and this effect folds it into the
-    // composer's attachments when we regain focus.
-    const handleDraw = React.useCallback(() => {
-        router.push(`/session/${sessionId}/draw`);
-    }, [router, sessionId]);
+    // composer's attachments when we regain focus. (The Draw entry itself
+    // lives in the attach sheet — handleAttach.)
     const drawnImage = useDrawingResult((s) => s.sessionId === sessionId ? s.image : null);
     React.useEffect(() => {
         if (!drawnImage) return;
@@ -1016,7 +1024,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onFileViewerPress={!isTablet ? handleFileViewerPress : undefined}
             selectedImages={selectedImages}
             onPickImages={handleAttach}
-            onDraw={handleDraw}
             costUsd={sessionCostUsd}
             onRemoveImage={removeImage}
             onAddImages={addImages}

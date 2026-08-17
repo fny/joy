@@ -90,8 +90,6 @@ interface AgentInputProps {
     /** Image attachments waiting to be sent (expImageUpload feature). */
     selectedImages?: AttachmentPreview[];
     onPickImages?: () => void;
-    /** Open the full-screen drawing pad (sketch attachment). */
-    onDraw?: () => void;
     /** Estimated cumulative session cost in USD (shown in the info line). */
     costUsd?: number | null;
     onRemoveImage?: (id: string) => void;
@@ -1295,30 +1293,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                             color={(props.selectedImages?.length ?? 0) > 0
                                                 ? theme.colors.radio.active
                                                 : theme.colors.button.secondary.tint}
-                                        />
-                                    </Pressable>
-                                )}
-
-                                {/* Drawing pad — sketch becomes a PNG attachment */}
-                                {props.onDraw && (
-                                    <Pressable
-                                        onPress={props.onDraw}
-                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
-                                        style={(p) => ({
-                                            flexDirection: 'row',
-                                            alignItems: 'center',
-                                            borderRadius: Platform.select({ default: 16, android: 20 }),
-                                            paddingHorizontal: 8,
-                                            paddingVertical: 6,
-                                            justifyContent: 'center',
-                                            height: 32,
-                                            opacity: p.pressed ? 0.7 : 1,
-                                        })}
-                                    >
-                                        <Ionicons
-                                            name="brush-outline"
-                                            size={17}
-                                            color={theme.colors.button.secondary.tint}
                                         />
                                     </Pressable>
                                 )}

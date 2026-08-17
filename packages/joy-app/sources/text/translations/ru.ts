@@ -1098,6 +1098,7 @@ export const ru: TranslationStructure = {
         photoLibrary: 'Фототека',
         chooseFile: 'Выбрать файл',
         pasteImage: 'Вставить изображение',
+        draw: 'Рисовать',
         pasteNoImageTitle: 'Нет изображения',
         pasteNoImageMessage: 'В буфере обмена нет изображения.',
         permissionTitle: 'Доступ к библиотеке фото',
