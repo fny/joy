@@ -458,7 +458,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                 {session.hasDraft && (
                     <View style={styles.draftIconContainer}>
                         <Ionicons
-                            name="create-outline"
+                            name="pencil"
                             size={12}
                             style={styles.draftIconOverlay}
                         />
