@@ -30,6 +30,19 @@ interface ActiveSessionsGroupProps {
     selectedSessionId?: string;
 }
 
+// Column geometry shared by the section header and the session rows beneath it.
+// The header sits OUTSIDE projectCard, so its offsets must include that card's
+// margin. Derived from: projectCard.marginHorizontal (16) + sessionRow
+// .paddingHorizontal (14) + leadingIndicatorSlot (width 16, marginRight 8).
+const CARD_MARGIN = 16;
+const ROW_PADDING = 14;
+const INDICATOR_SLOT = 16;
+const INDICATOR_GAP = 8;
+/** Center of the status-icon column — the header identicon sits on this line. */
+const INDICATOR_CENTER_X = CARD_MARGIN + ROW_PADDING + INDICATOR_SLOT / 2;
+/** Left edge of the session TITLE text — the header folder name starts here. */
+const TITLE_X = CARD_MARGIN + ROW_PADDING + INDICATOR_SLOT + INDICATOR_GAP;
+
 /**
  * Hook to get git display info for a section header:
  * branch name, line changes, and worktree status.
@@ -95,21 +108,27 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
     const [isHovered, setIsHovered] = React.useState(false);
     // Identicon size — Appearance → Identicons (clamped there; default 24).
     const avatarSize = useLocalSetting('sessionAvatarSize');
+    // The identicon sits on the same column as the session rows' status icon:
+    // card margin 16 + row padding 14 + half the 16px indicator slot = 38, so
+    // both marks share a center line down the list. Text still starts at the
+    // session TITLE x (that slot's full 16 + the 8px gap = 54). An oversized
+    // identicon widens its slot rather than overlapping the folder name.
+    const avatarLeft = Math.max(0, INDICATOR_CENTER_X - avatarSize / 2);
+    const avatarSlotWidth = Math.max(avatarSize, TITLE_X - avatarLeft);
 
     return (
         <View
-            style={hasBranch ? styles.sectionHeader : styles.sectionHeaderSingleLine}
+            style={[
+                hasBranch ? styles.sectionHeader : styles.sectionHeaderSingleLine,
+                { paddingLeft: avatarLeft },
+            ]}
             // @ts-ignore - Web only events
             onMouseEnter={() => setIsHovered(true)}
             // @ts-ignore - Web only events
             onMouseLeave={() => setIsHovered(false)}
         >
-            {/* Avatar — flush with the card edge; the slot is sized so the
-                text after it starts at the session TITLE x (card 16 + row
-                padding 14 + indicator slot 16 + gap 8 = 54 → 38 past the
-                card edge). Oversized identicons widen the slot instead of
-                overlapping the text. */}
-            <View style={[styles.sectionHeaderAvatar, { width: Math.max(38, avatarSize + 8) }]}>
+            {/* Avatar — centered on the session rows' status-icon column */}
+            <View style={[styles.sectionHeaderAvatar, { width: avatarSlotWidth }]}>
                 <Avatar id={session.avatarId} size={avatarSize} flavor={null} />
             </View>
 
@@ -467,9 +486,8 @@ const stylesheet = StyleSheet.create((theme) => ({
     sectionHeader: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        // Identicon sits flush with the projectCard's left edge (its
-        // marginHorizontal: 16 below).
-        paddingLeft: 16,
+        // paddingLeft is set inline (it tracks the identicon size so the mark
+        // stays centered on the rows' status-icon column — see SectionHeader).
         paddingRight: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
@@ -477,9 +495,8 @@ const stylesheet = StyleSheet.create((theme) => ({
     sectionHeaderSingleLine: {
         paddingTop: 12,
         paddingBottom: Platform.select({ ios: 6, default: 8 }),
-        // Identicon sits flush with the projectCard's left edge (its
-        // marginHorizontal: 16 below).
-        paddingLeft: 16,
+        // paddingLeft is set inline (it tracks the identicon size so the mark
+        // stays centered on the rows' status-icon column — see SectionHeader).
         paddingRight: Platform.select({ ios: 32, default: 24 }),
         flexDirection: 'row',
         alignItems: 'center',
