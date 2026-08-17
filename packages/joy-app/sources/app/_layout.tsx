@@ -340,7 +340,22 @@ export default function RootLayout() {
                 }
             })();
             console.log(`[PUSH ROUTING] Navigating to session: ${sessionId}`);
-            navigateToSession(router, sessionId);
+            // Cold start: the tap can arrive before the root navigator mounts,
+            // and expo-router throws (or silently drops) navigation attempted
+            // too early. Retry briefly instead of losing the tap.
+            let attempts = 0;
+            const tryNavigate = () => {
+                try {
+                    navigateToSession(router, sessionId);
+                } catch (e) {
+                    if (++attempts < 10) {
+                        setTimeout(tryNavigate, 500);
+                    } else {
+                        console.log('[PUSH ROUTING] Giving up after retries:', e);
+                    }
+                }
+            };
+            tryNavigate();
         } finally {
             try {
                 await Notifications.clearLastNotificationResponseAsync();

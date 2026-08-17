@@ -15,6 +15,8 @@ A quality-of-life sweep: collapse the chat clutter, see your actual Anthropic/Op
 - **Leaner relay picker.** The dev and direct doors are gone — Happy Cloud and Joy Relay only.
 - **Esc stays in the chat.** Pressing Escape in a session aborts the running turn (or does nothing) instead of navigating you out mid-conversation. Subpages and the mouse back-button still go back.
 - **Relay access key.** Your relay can now require a perimeter key on every connection — strangers can't even create accounts on it. Set the key in Server Configuration; Happy Cloud and open relays need nothing.
+- **Notification taps open the session.** Tapping a notification now lands you in the right conversation — on mobile (including cold start, which used to drop the tap) and on desktop (web notifications navigate on click; the Mac app jumps to the session when you activate it from a banner).
+- **Desktop links fixed.** Links in chat are real links again — click to open in your browser; right-click/copy/cmd-click behave like a browser.
 - **App Lock.** Optional Face ID / device-PIN lock (Settings): the app locks on launch and whenever it returns from the background. Turning it off requires authenticating too.
 
 # Aug 16 — Your own relays, new agents, big files

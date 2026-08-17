@@ -2833,7 +2833,7 @@ class Sync {
             // Desktop notification — only if enabled and the window isn't focused
             // (same "active client" suppression idea as the mobile push).
             if (storage.getState().settings.notificationsDesktop && !isWindowFocused()) {
-                void showDesktopNotification(updateData.title, updateData.body);
+                void showDesktopNotification(updateData.title, updateData.body, { sessionId: updateData.sessionId });
             }
         }
 
