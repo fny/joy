@@ -365,7 +365,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         } else if (session.state === 'waiting' && session.hasDraft) {
             indicator = (
                 <Ionicons
-                    name="create-outline"
+                    name="pencil"
                     size={14}
                     color={theme.colors.textSecondary}
                 />
