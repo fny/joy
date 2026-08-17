@@ -14,7 +14,7 @@ A quality-of-life sweep: collapse the chat clutter, see your actual Anthropic/Op
 - **Session list by agent.** Settings → Sessions labels and sorts sessions by agent flavor, with a better icon.
 - **Leaner relay picker.** The dev and direct doors are gone — Happy Cloud and Joy Relay only.
 - **Esc stays in the chat.** Pressing Escape in a session aborts the running turn (or does nothing) instead of navigating you out mid-conversation. Subpages and the mouse back-button still go back.
-- **Identicon styles.** Appearance → Identicons: pick between the hashicon mark, a square confetti grid, or a circular one — all drawn strictly from the joy logo palette, with live previews.
+- **Identicon styles.** Appearance → Identicons: pick between the hashicon mark, a square confetti grid, or a circular one — all drawn strictly from the joy logo palette, with live previews. Folder names in the session list are now bold in the standard text color.
 - **Relay access key.** Your relay can now require a perimeter key on every connection — strangers can't even create accounts on it. Set the key in Server Configuration; Happy Cloud and open relays need nothing.
 - **Notification taps open the session.** Tapping a notification now lands you in the right conversation — on mobile (including cold start, which used to drop the tap) and on desktop (web notifications navigate on click; the Mac app jumps to the session when you activate it from a banner).
 - **Desktop links fixed.** Links in chat are real links again — click to open in your browser; right-click/copy/cmd-click behave like a browser.
