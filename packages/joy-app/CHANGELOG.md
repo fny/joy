@@ -1,3 +1,10 @@
+# Aug 18 — Identicons, tidied
+
+- **Identicons: circles and squares.** The hashicon style is retired; identicons are now the joy-palette confetti grid clipped two ways — Circles (the new default) or Squares. Pick in Appearance → Identicons.
+- **Smaller by default, finer control.** Identicon size now defaults to 16px and ranges 8–24 in 2px steps (it was 24px, 16–48 in 4s). If you had it set larger, it pins to the new maximum.
+- **Session list lines up.** The project identicon now sits on the same column as the status dots in the rows below it, and the folder name starts exactly where the session titles do.
+- **Icon browser (Developer).** Settings → Developer → Icons lists every icon in every family the app ships — search by name, tap one to copy its name.
+
 # Aug 17 — Queue crash fixed, ordering, desktop drawing
 
 Fixes for yesterday's batch: the big one is a crash that could take down the whole session screen the moment a message actually queued.
