@@ -292,6 +292,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="dev/icons"
+                options={{
+                    headerTitle: 'Icons',
+                }}
+            />
+            <Stack.Screen
                 name="dev/colors"
                 options={{
                     headerTitle: 'Colors',
