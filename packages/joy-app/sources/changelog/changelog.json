@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Aug 18 — Identicons, tidied",
+      "summary": "",
+      "markdown": "- **Identicons: circles and squares.** The hashicon style is retired; identicons are now the joy-palette confetti grid clipped two ways — Circles (the new default) or Squares. Pick in Appearance → Identicons.\n- **Smaller by default, finer control.** Identicon size now defaults to 16px and ranges 8–24 in 2px steps (it was 24px, 16–48 in 4s). If you had it set larger, it pins to the new maximum.\n- **Session list lines up.** The project identicon now sits on the same column as the status dots in the rows below it, and the folder name starts exactly where the session titles do.\n- **Icon browser (Developer).** Settings → Developer → Icons lists every icon in every family the app ships — search by name, tap one to copy its name."
+    },
+    {
       "title": "Aug 17 — Queue crash fixed, ordering, desktop drawing",
       "summary": "Fixes for yesterday's batch: the big one is a crash that could take down the whole session screen the moment a message actually queued.",
       "markdown": "- **Session screen no longer crashes on queueing.** When a message entered the daemon queue (the QUEUED strip appearing), a React hooks bug could crash the entire conversation view to the error screen. Fixed.\n- **Queued messages land in order.** A message released after a turn now waits for the turn's final answer to arrive before sending, so it appears *after* the response it queued behind — not spliced into the middle of it.\n- **Drawing works on desktop.** The sketch pad now uses a real canvas on web/desktop — mouse strokes draw properly and save reliably. (It was effectively dead there before.)\n- **Identicon alignment, actually fixed.** Session-list identicons now line up exactly with the session title edge.\n- **Quieter paperclip.** The attach button no longer lights up when attachments are present — the thumbnails already tell you.\n- **Draft pencils.** Sessions with saved drafts show the same plain pencil in the session list as the composer's draft button."
@@ -76,5 +81,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Aug 17 — Queue crash fixed, ordering, desktop drawing"
+  "latestTitle": "Aug 18 — Identicons, tidied"
 }
