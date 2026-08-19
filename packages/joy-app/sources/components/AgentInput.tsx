@@ -252,7 +252,7 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
     actionButtonsLeft: {
         flexDirection: 'row',
-        gap: 2,
+        gap: 1,
         flex: 1,
         overflow: 'hidden',
     },
@@ -1275,12 +1275,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {props.onPickImages && (
                                     <Pressable
                                         onPress={props.onPickImages}
-                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
                                         style={(p) => ({
                                             flexDirection: 'row',
                                             alignItems: 'center',
                                             borderRadius: Platform.select({ default: 16, android: 20 }),
-                                            paddingHorizontal: 8,
+                                            paddingHorizontal: 4,
                                             paddingVertical: 6,
                                             justifyContent: 'center',
                                             height: 32,
@@ -1299,12 +1299,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {props.onPermissionModeChange && (
                                     <Pressable
                                         onPress={handleSettingsPress}
-                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
                                         style={(p) => ({
                                             flexDirection: 'row',
                                             alignItems: 'center',
                                             borderRadius: Platform.select({ default: 16, android: 20 }),
-                                            paddingHorizontal: 8,
+                                            paddingHorizontal: 4,
                                             paddingVertical: 6,
                                             justifyContent: 'center',
                                             height: 32,
@@ -1361,14 +1361,14 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {props.onSaveDraft && hasText && (
                                     <Pressable
                                         onPress={props.onSaveDraft}
-                                        hitSlop={{ top: 5, bottom: 10, left: 0, right: 0 }}
+                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
                                         accessibilityRole="button"
                                         accessibilityLabel="Save draft"
                                         style={(p) => ({
                                             flexDirection: 'row',
                                             alignItems: 'center',
                                             borderRadius: Platform.select({ default: 16, android: 20 }),
-                                            paddingHorizontal: 8,
+                                            paddingHorizontal: 4,
                                             paddingVertical: 6,
                                             justifyContent: 'center',
                                             height: 32,
@@ -1376,7 +1376,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         })}
                                     >
                                         <Ionicons
-                                            name="pencil"
+                                            name="save-outline"
                                             size={18}
                                             color={theme.colors.button.secondary.tint}
                                         />
