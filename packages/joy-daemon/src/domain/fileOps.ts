@@ -13,7 +13,7 @@ import { createHash } from "crypto";
 import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
 import { promisify } from "util";
 import { existsSync } from "fs";
-import { readFile, writeFile, readdir, stat } from "fs/promises";
+import { readFile, writeFile, readdir, stat, unlink } from "fs/promises";
 import { join, resolve, sep } from "path";
 import { homedir, platform } from "os";
 
@@ -34,6 +34,9 @@ export interface ReadFileResponse { success: boolean; content?: string; error?: 
 
 export interface WriteFileRequest { path: string; content: string; expectedHash?: string | null; }
 export interface WriteFileResponse { success: boolean; hash?: string; error?: string; }
+
+export interface DeleteFileRequest { path: string; }
+export interface DeleteFileResponse { success: boolean; error?: string; }
 
 export interface ListDirectoryRequest { path: string; }
 export interface DirectoryEntry { name: string; type: "file" | "directory" | "other"; size?: number; modified?: number; }
@@ -169,6 +172,32 @@ export async function handleWriteFile(workingDirectory: string, data: WriteFileR
     return { success: true, hash };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to write file" };
+  }
+}
+
+/**
+ * Delete a single FILE inside the session cwd. Same jail as every other file op
+ * (validatePath — no traversal, no extra roots: unlike readFile there is no
+ * reason to reach the session media dir).
+ *
+ * Deliberately refuses directories: rmdir/recursive removal is a categorically
+ * bigger blast radius than "delete the file I am looking at", which is the only
+ * thing the app exposes. A missing file reports failure rather than succeeding
+ * silently, so the UI can tell "already gone" from "deleted".
+ */
+export async function handleDeleteFile(workingDirectory: string, data: DeleteFileRequest): Promise<DeleteFileResponse> {
+  const validation = validatePath(data.path, workingDirectory);
+  if (!validation.valid) return { success: false, error: validation.error };
+  const targetPath = validation.resolvedPath!;
+  try {
+    const info = await stat(targetPath);
+    if (info.isDirectory()) return { success: false, error: "Path is a directory; only files can be deleted" };
+    await unlink(targetPath);
+    return { success: true };
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") return { success: false, error: "File does not exist" };
+    return { success: false, error: error instanceof Error ? error.message : "Failed to delete file" };
   }
 }
 

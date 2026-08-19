@@ -5,7 +5,7 @@ import { isDemoSession } from '@/sync/demoSession';
 import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
-import { sessionReadFile, sessionBash } from '@/sync/ops';
+import { sessionReadFile, sessionBash, sessionDeleteFile } from '@/sync/ops';
 import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
 import { isBinaryPath } from '@/utils/binaryFile';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -158,6 +158,35 @@ export default React.memo(function FileScreen() {
     }, [router]);
     const [isLoading, setIsLoading] = React.useState(!cached);
     const [error, setError] = React.useState<string | null>(null);
+    const [deleting, setDeleting] = React.useState(false);
+
+    // Delete the file on the machine. Irreversible (the daemon unlinks it — no
+    // trash), so it always confirms first and names the file in the prompt.
+    // On success we leave the viewer: the screen it returns to re-lists the
+    // directory, and staying would show contents of something that's gone.
+    const handleDelete = React.useCallback(async () => {
+        if (deleting) return;
+        // Local derivation: the shared `fileName` const is declared further
+        // down the component, past this callback.
+        const name = filePath.split('/').pop() || filePath;
+        const confirmed = await Modal.confirm(
+            'Delete file?',
+            `${name} will be permanently deleted from this machine. This cannot be undone.`,
+            { confirmText: 'Delete', destructive: true },
+        );
+        if (!confirmed) return;
+        setDeleting(true);
+        try {
+            const res = await sessionDeleteFile(sessionId, filePath);
+            if (!res.success) {
+                Modal.alert(t('common.error'), res.error || t('errors.operationFailed'));
+                return;
+            }
+            router.back();
+        } finally {
+            setDeleting(false);
+        }
+    }, [deleting, filePath, sessionId, router]);
     const scrollViewRef = React.useRef<ScrollView | null>(null);
 
     // Determine file language from extension
@@ -517,6 +546,20 @@ export default React.memo(function FileScreen() {
                     accessibilityLabel="Download file"
                 >
                     <Ionicons name="download-outline" size={17} color={theme.colors.textSecondary} />
+                </Pressable>
+                <Pressable
+                    onPress={() => { void handleDelete(); }}
+                    disabled={deleting}
+                    hitSlop={8}
+                    style={styles.ctrlBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel="Delete file"
+                >
+                    <Ionicons
+                        name="trash-outline"
+                        size={17}
+                        color={deleting ? theme.colors.textSecondary : theme.colors.status.error}
+                    />
                 </Pressable>
             </View>
 

@@ -72,6 +72,16 @@ interface SessionWriteFileResponse {
     error?: string;
 }
 
+// Delete file operation types
+interface SessionDeleteFileRequest {
+    path: string;
+}
+
+interface SessionDeleteFileResponse {
+    success: boolean;
+    error?: string;
+}
+
 // List directory operation types
 interface SessionListDirectoryRequest {
     path: string;
@@ -646,6 +656,27 @@ export async function sessionWriteFile(
             request
         );
         return response;
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        };
+    }
+}
+
+/**
+ * Delete a file in the session cwd. Destructive and irreversible — the daemon
+ * unlinks it (no trash), so callers must confirm first. Daemon-side guards:
+ * jailed to the session cwd and files only (never directories).
+ */
+export async function sessionDeleteFile(sessionId: string, path: string): Promise<SessionDeleteFileResponse> {
+    try {
+        const request: SessionDeleteFileRequest = { path };
+        return await apiSocket.sessionRPC<SessionDeleteFileResponse, SessionDeleteFileRequest>(
+            sessionId,
+            'deleteFile',
+            request
+        );
     } catch (error) {
         return {
             success: false,
