@@ -6,7 +6,7 @@
 import * as React from 'react';
 import { View, Text, Pressable } from 'react-native';
 import { sync } from '@/sync/sync';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';

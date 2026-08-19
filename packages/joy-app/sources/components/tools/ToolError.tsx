@@ -1,6 +1,6 @@
 import { Text, View } from "react-native";
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { parseToolUseError } from '@/utils/toolErrorParser';
 
 export function ToolError(props: { message: string }) {

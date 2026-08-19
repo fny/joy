@@ -11,7 +11,7 @@
 import * as React from 'react';
 import { View, Text, TextInput, ScrollView, ActivityIndicator, Pressable, Platform } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';

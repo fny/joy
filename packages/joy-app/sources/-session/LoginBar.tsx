@@ -2,7 +2,7 @@ import * as React from 'react';
 import { View, Pressable, TextInput, Linking, Platform } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Text } from '@/components/StyledText';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSession } from '@/sync/storage';
 import { sync } from '@/sync/sync';

@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { View, Pressable } from 'react-native';
 import { Text } from '@/components/StyledText';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 

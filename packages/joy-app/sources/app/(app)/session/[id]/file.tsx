@@ -8,7 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { sessionReadFile, sessionBash } from '@/sync/ops';
 import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
 import { isBinaryPath } from '@/utils/binaryFile';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Clipboard from 'expo-clipboard';
 import { storeTempText } from '@/sync/persistence';
 import { useRouter } from 'expo-router';

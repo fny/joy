@@ -6,7 +6,7 @@ import { ToolSectionView } from '../ToolSectionView';
 import { sessionAllow } from '@/sync/ops';
 import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { t } from '@/text';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 
 interface QuestionOption {
     label: string;

@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { View, Text, Pressable, Platform, AppState } from 'react-native';
 import * as LocalAuthentication from 'expo-local-authentication';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSetting } from '@/sync/storage';
 import { JoyLogoType } from '@/components/JoyLogotype';

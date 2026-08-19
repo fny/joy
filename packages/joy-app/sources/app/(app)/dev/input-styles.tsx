@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { View, Text, ScrollView, Pressable, TextInput, Platform } from 'react-native';
-import { Ionicons, MaterialIcons, FontAwesome5, Feather } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import Octicons from '@expo/vector-icons/Octicons';
 import { Typography } from '@/constants/Typography';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -37,13 +38,13 @@ export default function InputStylesDemo() {
                             <Ionicons name="happy-outline" size={18} color="#666" />
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 2 }}>
-                            <MaterialIcons name="format-bold" size={18} color="#666" />
+                            <Octicons name="bold" size={18} color="#666" />
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 2 }}>
-                            <MaterialIcons name="format-italic" size={18} color="#666" />
+                            <Octicons name="italic" size={18} color="#666" />
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 2 }}>
-                            <MaterialIcons name="link" size={18} color="#666" />
+                            <Octicons name="link" size={18} color="#666" />
                         </Pressable>
                         <View style={{ flex: 1 }} />
                         <Pressable style={{ padding: 6 }}>
@@ -182,7 +183,7 @@ export default function InputStylesDemo() {
                                 editable={false}
                             />
                             <Pressable style={{ marginLeft: 12 }}>
-                                <MaterialIcons name="gif" size={24} color="#b9bbbe" />
+                                <Octicons name="file-media" size={24} color="#b9bbbe" />
                             </Pressable>
                             <Pressable style={{ marginLeft: 12 }}>
                                 <Ionicons name="happy" size={24} color="#b9bbbe" />
@@ -196,10 +197,10 @@ export default function InputStylesDemo() {
                         paddingBottom: 12,
                     }}>
                         <Pressable style={{ padding: 4, marginRight: 8 }}>
-                            <Feather name="gift" size={18} color="#b9bbbe" />
+                            <Octicons name="gift" size={18} color="#b9bbbe" />
                         </Pressable>
                         <Pressable style={{ padding: 4, marginRight: 8 }}>
-                            <MaterialIcons name="sticky-note-2" size={18} color="#b9bbbe" />
+                            <Octicons name="note" size={18} color="#b9bbbe" />
                         </Pressable>
                         <Pressable style={{ padding: 4 }}>
                             <Ionicons name="game-controller" size={18} color="#b9bbbe" />
@@ -344,7 +345,7 @@ export default function InputStylesDemo() {
                             <Ionicons name="happy-outline" size={20} color="#8e8e8e" />
                         </Pressable>
                         <Pressable style={{ padding: 4, marginRight: 12 }}>
-                            <MaterialIcons name="sticky-note-2" size={20} color="#8e8e8e" />
+                            <Octicons name="note" size={20} color="#8e8e8e" />
                         </Pressable>
                         <Pressable style={{ padding: 4, marginRight: 12 }}>
                             <Ionicons name="location" size={20} color="#8e8e8e" />
@@ -402,7 +403,7 @@ export default function InputStylesDemo() {
                             <Ionicons name="at" size={18} color="#6a737d" />
                         </Pressable>
                         <Pressable style={{ marginRight: 16 }}>
-                            <MaterialIcons name="tag" size={18} color="#6a737d" />
+                            <Octicons name="tag" size={18} color="#6a737d" />
                         </Pressable>
                         <Pressable style={{ marginRight: 16 }}>
                             <Ionicons name="code-slash" size={18} color="#6a737d" />
@@ -494,22 +495,22 @@ export default function InputStylesDemo() {
                                 borderBottomColor: '#e1e4e8',
                             }}>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="format-bold" size={18} color="#586069" />
+                                    <Octicons name="bold" size={18} color="#586069" />
                                 </Pressable>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="format-italic" size={18} color="#586069" />
+                                    <Octicons name="italic" size={18} color="#586069" />
                                 </Pressable>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="code" size={18} color="#586069" />
+                                    <Octicons name="code" size={18} color="#586069" />
                                 </Pressable>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="link" size={18} color="#586069" />
+                                    <Octicons name="link" size={18} color="#586069" />
                                 </Pressable>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="format-list-bulleted" size={18} color="#586069" />
+                                    <Octicons name="list-unordered" size={18} color="#586069" />
                                 </Pressable>
                                 <Pressable>
-                                    <MaterialIcons name="format-list-numbered" size={18} color="#586069" />
+                                    <Octicons name="list-ordered" size={18} color="#586069" />
                                 </Pressable>
                             </View>
                             <TextInput
@@ -618,7 +619,7 @@ export default function InputStylesDemo() {
                             <Ionicons name="images" size={22} color="#8e8e93" />
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 4 }}>
-                            <MaterialIcons name="sticky-note-2" size={22} color="#8e8e93" />
+                            <Octicons name="note" size={22} color="#8e8e93" />
                         </Pressable>
                         <Pressable style={{ padding: 6 }}>
                             <Ionicons name="musical-notes" size={22} color="#8e8e93" />
@@ -657,7 +658,7 @@ export default function InputStylesDemo() {
                                     editable={false}
                                 />
                                 <Pressable style={{ marginLeft: 8 }}>
-                                    <MaterialIcons name="send" size={24} color="#1976d2" />
+                                    <Octicons name="paper-airplane" size={24} color="#1976d2" />
                                 </Pressable>
                             </View>
                         </View>
@@ -1077,7 +1078,7 @@ export default function InputStylesDemo() {
                                         <Ionicons name="image-outline" size={20} color="#1d9bf0" />
                                     </Pressable>
                                     <Pressable style={{ marginRight: 16 }}>
-                                        <MaterialIcons name="gif" size={20} color="#1d9bf0" />
+                                        <Octicons name="file-media" size={20} color="#1d9bf0" />
                                     </Pressable>
                                     <Pressable style={{ marginRight: 16 }}>
                                         <Ionicons name="stats-chart" size={20} color="#1d9bf0" />
@@ -1388,19 +1389,19 @@ export default function InputStylesDemo() {
                             paddingVertical: 4,
                         }}>
                             <Pressable style={{ padding: 8 }}>
-                                <MaterialIcons name="format-bold" size={18} color="#818384" />
+                                <Octicons name="bold" size={18} color="#818384" />
                             </Pressable>
                             <Pressable style={{ padding: 8 }}>
-                                <MaterialIcons name="format-italic" size={18} color="#818384" />
+                                <Octicons name="italic" size={18} color="#818384" />
                             </Pressable>
                             <Pressable style={{ padding: 8 }}>
-                                <MaterialIcons name="link" size={18} color="#818384" />
+                                <Octicons name="link" size={18} color="#818384" />
                             </Pressable>
                             <Pressable style={{ padding: 8 }}>
-                                <MaterialIcons name="strikethrough-s" size={18} color="#818384" />
+                                <Octicons name="strikethrough" size={18} color="#818384" />
                             </Pressable>
                             <Pressable style={{ padding: 8 }}>
-                                <MaterialIcons name="code" size={18} color="#818384" />
+                                <Octicons name="code" size={18} color="#818384" />
                             </Pressable>
                             <View style={{ flex: 1 }} />
                             <Pressable style={{
@@ -1535,7 +1536,7 @@ export default function InputStylesDemo() {
                             <Text style={{ fontSize: 11, color: '#576b95', marginTop: 2 }}>Location</Text>
                         </Pressable>
                         <Pressable style={{ alignItems: 'center' }}>
-                            <MaterialIcons name="attach-money" size={24} color="#576b95" />
+                            <Ionicons name="cash-outline" size={24} color="#576b95" />
                             <Text style={{ fontSize: 11, color: '#576b95', marginTop: 2 }}>Transfer</Text>
                         </Pressable>
                     </View>
@@ -1578,16 +1579,16 @@ export default function InputStylesDemo() {
                             <Text style={{ color: '#7f6df2', fontSize: 16 }}>[[</Text>
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 8 }}>
-                            <MaterialIcons name="tag" size={18} color="#7f6df2" />
+                            <Octicons name="tag" size={18} color="#7f6df2" />
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 8 }}>
-                            <MaterialIcons name="format-bold" size={18} color="#666" />
+                            <Octicons name="bold" size={18} color="#666" />
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 8 }}>
-                            <MaterialIcons name="format-italic" size={18} color="#666" />
+                            <Octicons name="italic" size={18} color="#666" />
                         </Pressable>
                         <Pressable style={{ padding: 6, marginRight: 8 }}>
-                            <MaterialIcons name="code" size={18} color="#666" />
+                            <Octicons name="code" size={18} color="#666" />
                         </Pressable>
                         <View style={{ flex: 1 }} />
                         <Pressable style={{
@@ -1652,7 +1653,7 @@ export default function InputStylesDemo() {
                             alignItems: 'center',
                             justifyContent: 'center',
                         }}>
-                            <MaterialIcons name="more-horiz" size={24} color="#fff" />
+                            <Octicons name="kebab-horizontal" size={24} color="#fff" />
                         </Pressable>
                     </View>
                     <View style={{
@@ -1719,20 +1720,20 @@ export default function InputStylesDemo() {
                                 paddingVertical: 8,
                             }}>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="format-bold" size={20} color="#605e5c" />
+                                    <Octicons name="bold" size={20} color="#605e5c" />
                                 </Pressable>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="format-italic" size={20} color="#605e5c" />
+                                    <Octicons name="italic" size={20} color="#605e5c" />
                                 </Pressable>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="format-underlined" size={20} color="#605e5c" />
+                                    <Ionicons name="text-outline" size={20} color="#605e5c" />
                                 </Pressable>
                                 <Pressable style={{ marginRight: 16 }}>
-                                    <MaterialIcons name="format-color-text" size={20} color="#605e5c" />
+                                    <Octicons name="typography" size={20} color="#605e5c" />
                                 </Pressable>
                                 <View style={{ flex: 1 }} />
                                 <Pressable>
-                                    <MaterialIcons name="more-horiz" size={20} color="#605e5c" />
+                                    <Octicons name="kebab-horizontal" size={20} color="#605e5c" />
                                 </Pressable>
                             </View>
                             <TextInput
@@ -1762,7 +1763,7 @@ export default function InputStylesDemo() {
                                         <Ionicons name="happy-outline" size={20} color="#605e5c" />
                                     </Pressable>
                                     <Pressable>
-                                        <MaterialIcons name="gif" size={20} color="#605e5c" />
+                                        <Octicons name="file-media" size={20} color="#605e5c" />
                                     </Pressable>
                                 </View>
                                 <Pressable style={{

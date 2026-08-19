@@ -12,7 +12,8 @@ import {
     LayoutAnimation,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { Ionicons, Octicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import Octicons from '@expo/vector-icons/Octicons';
 import { Typography } from '@/constants/Typography';
 import { layout } from '@/components/layout';
 import { MultiTextInput, MULTI_TEXT_INPUT_LINE_HEIGHT } from '@/components/MultiTextInput';
@@ -523,7 +524,7 @@ function SessionComposerDemo() {
                                         style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                         onPress={() => togglePicker('worktree')}
                                     >
-                                        <MaterialCommunityIcons name="tree" size={15} color={theme.colors.textSecondary} />
+                                        <Octicons name="file-submodule" size={15} color={theme.colors.textSecondary} />
                                         <Text style={styles.configLabel} numberOfLines={1}>
                                             {worktreeLabel}
                                         </Text>

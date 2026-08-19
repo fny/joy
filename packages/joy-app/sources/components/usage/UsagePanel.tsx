@@ -8,7 +8,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { UsageChart } from './UsageChart';
 import { UsageBar } from './UsageBar';
 import { getUsageForPeriod, calculateTotals, UsageDataPoint } from '@/sync/apiUsage';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { HappyError } from '@/utils/errors';
 import { t } from '@/text';
 

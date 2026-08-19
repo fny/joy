@@ -2,7 +2,7 @@ import * as React from 'react';
 import { View, Pressable, ActivityIndicator, Platform } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Clipboard from 'expo-clipboard';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Modal } from '@/modal';

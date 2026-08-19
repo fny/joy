@@ -2,7 +2,7 @@ import * as React from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { router, useLocalSearchParams } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Clipboard from 'expo-clipboard';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';

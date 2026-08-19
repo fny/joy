@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { View, Text, ScrollView, Pressable, Platform, TextInput, ActivityIndicator } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
-import { Octicons } from '@expo/vector-icons';
+import Octicons from '@expo/vector-icons/Octicons';
 import { useRouter } from 'expo-router';
 import Animated, {
     useAnimatedStyle,

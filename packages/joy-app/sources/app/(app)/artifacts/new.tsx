@@ -8,7 +8,7 @@ import { layout } from '@/components/layout';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 
 const stylesheet = StyleSheet.create((theme) => ({

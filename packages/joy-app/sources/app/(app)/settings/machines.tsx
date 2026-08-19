@@ -2,7 +2,7 @@
 // Extracted from the inline list that used to live on the main settings page;
 // the main page now links here with a single "Machines" button.
 import * as React from 'react';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { Item } from '@/components/Item';

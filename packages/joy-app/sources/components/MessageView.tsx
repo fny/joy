@@ -19,7 +19,7 @@ import { layout } from "./layout";
 import { parseLocalCommandMessage } from './parseLocalCommandMessage';
 import { parseHarnessBlock } from './parseHarnessBlock';
 import { stripAnsi } from '@/utils/ansi';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useUnistyles } from 'react-native-unistyles';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
 
