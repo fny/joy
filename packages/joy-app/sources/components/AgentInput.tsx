@@ -1270,31 +1270,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {props.zenMode && <View style={{ flex: 1 }} />}
                                 {!props.zenMode && <View style={styles.actionButtonsLeft}>
 
-                                {/* Image picker / attach button (expImageUpload) — kept leftmost so
-                                    it isn't clipped by the group's overflow:hidden on narrow screens */}
-                                {props.onPickImages && (
-                                    <Pressable
-                                        onPress={props.onPickImages}
-                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
-                                        style={(p) => ({
-                                            flexDirection: 'row',
-                                            alignItems: 'center',
-                                            borderRadius: Platform.select({ default: 16, android: 20 }),
-                                            paddingHorizontal: 4,
-                                            paddingVertical: 6,
-                                            justifyContent: 'center',
-                                            height: 32,
-                                            opacity: p.pressed ? 0.7 : 1,
-                                        })}
-                                    >
-                                        <Ionicons
-                                            name="attach-outline"
-                                            size={18}
-                                            color={theme.colors.button.secondary.tint}
-                                        />
-                                    </Pressable>
-                                )}
-
                                 {/* Settings button */}
                                 {props.onPermissionModeChange && (
                                     <Pressable
@@ -1314,6 +1289,32 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         <Octicons
                                             name={'gear'}
                                             size={16}
+                                            color={theme.colors.button.secondary.tint}
+                                        />
+                                    </Pressable>
+                                )}
+
+                                {/* Image picker / attach button. NOTE: this group is
+                                    overflow:hidden, so on very narrow screens the tail of
+                                    the row clips first — order here is deliberate. */}
+                                {props.onPickImages && (
+                                    <Pressable
+                                        onPress={props.onPickImages}
+                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
+                                        style={(p) => ({
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            borderRadius: Platform.select({ default: 16, android: 20 }),
+                                            paddingHorizontal: 4,
+                                            paddingVertical: 6,
+                                            justifyContent: 'center',
+                                            height: 32,
+                                            opacity: p.pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        <Ionicons
+                                            name="attach-outline"
+                                            size={18}
                                             color={theme.colors.button.secondary.tint}
                                         />
                                     </Pressable>
