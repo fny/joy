@@ -244,6 +244,12 @@ export default function DevScreen() {
                     onPress={() => router.push('/dev/icons' as any)}
                 />
                 <Item
+                    title="Kitchen Sink"
+                    subtitle="Every color token on the real components; FAB previews Light Owl"
+                    icon={<Ionicons name="color-filter-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/kitchen' as any)}
+                />
+                <Item
                     title="Message Demos"
                     subtitle="Various message types and components"
                     icon={<Ionicons name="chatbubbles-outline" size={28} color="#007AFF" />}

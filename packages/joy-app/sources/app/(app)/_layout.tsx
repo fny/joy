@@ -298,6 +298,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="kitchen"
+                options={{
+                    headerTitle: 'Kitchen Sink',
+                }}
+            />
+            <Stack.Screen
                 name="dev/colors"
                 options={{
                     headerTitle: 'Colors',
