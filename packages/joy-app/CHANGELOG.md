@@ -1,3 +1,10 @@
+# Aug 19 — Lighter app, file delete, relay passwords
+
+- **~3.5 MB smaller.** The app was shipping all 19 icon fonts — including families it has never drawn a single glyph from. It now bundles only the two it actually uses (Ionicons and Octicons); everything that referenced the others was moved onto equivalents.
+- **Delete a file from the file viewer.** A trash button sits next to Download. It confirms first, naming the file, and there is no undo — the daemon unlinks it. Directories are refused, and it only reaches inside the session's own folder. *Needs the machine's daemon updated to work.*
+- **Relay passwords, per relay.** Settings → Account: each relay row has a lock you can tap to set that relay's password. This matters before switching to a gated relay — it refuses the connection without the key, so it has to be set in advance.
+- **Composer tidy-up.** The draft button is now a save icon (it saves a draft), settings sits before the paperclip, and the icon row's spacing is halved without shrinking the tap targets.
+
 # Aug 18 — Identicons, tidied
 
 - **Identicons: circles and squares.** The hashicon style is retired; identicons are now the joy-palette confetti grid clipped two ways — Circles (the new default) or Squares. Pick in Appearance → Identicons.
