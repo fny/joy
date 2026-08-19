@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { View, Text, StyleSheet, Platform, Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Typography } from '@/constants/Typography';
 import { useHeaderHeight, useIsTablet } from '@/utils/responsive';

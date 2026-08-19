@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { View, Text, FlatList, Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { log, MAX_APP_LOG_ENTRIES } from '@/log';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';

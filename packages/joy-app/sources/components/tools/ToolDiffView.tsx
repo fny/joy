@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { View, Text, Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useUnistyles } from 'react-native-unistyles';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { useSetting } from '@/sync/storage';

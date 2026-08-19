@@ -8,7 +8,7 @@ import { useRealtimeStatus } from '@/sync/storage';
 import { MainView } from './MainView';
 import { StyleSheet } from 'react-native-unistyles';
 import { t } from '@/text';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Typography } from '@/constants/Typography';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 

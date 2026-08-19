@@ -3,7 +3,7 @@ import { ActivityIndicator, View, Pressable } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { t } from '@/text';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Clipboard from 'expo-clipboard';
 import { ItemList } from '@/components/ItemList';
 import { Modal } from '@/modal';

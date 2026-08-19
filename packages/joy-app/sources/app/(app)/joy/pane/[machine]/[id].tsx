@@ -12,7 +12,7 @@
 import * as React from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator, Platform } from 'react-native';
 import { useLocalSearchParams, useFocusEffect, router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';

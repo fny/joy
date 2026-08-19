@@ -8,22 +8,21 @@
 import * as React from 'react';
 import { View, Text, Pressable, TextInput, ScrollView, Platform } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
-import { Ionicons, Octicons, MaterialCommunityIcons, MaterialIcons, Feather, FontAwesome } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import Octicons from '@expo/vector-icons/Octicons';
 import * as Clipboard from 'expo-clipboard';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 
 type IconSet = React.ComponentType<{ name: any; size: number; color: string }> & { glyphMap: Record<string, unknown> };
 
-// Ordered by how much this app actually uses them: Ionicons is the house style,
-// Octicons carries the tool views, the rest are incidental.
+// The app ships exactly two icon fonts: Ionicons is the house style, Octicons
+// carries the git/tool surfaces. Do NOT add families here casually — referencing
+// a set is what pulls its .ttf into the bundle, which is why MaterialIcons,
+// MaterialCommunityIcons, Feather and FontAwesome were removed (2026-08-19).
 const FAMILIES: { key: string; label: string; Set: IconSet }[] = [
     { key: 'ionicons', label: 'Ionicons', Set: Ionicons as unknown as IconSet },
     { key: 'octicons', label: 'Octicons', Set: Octicons as unknown as IconSet },
-    { key: 'material-community', label: 'Material Community', Set: MaterialCommunityIcons as unknown as IconSet },
-    { key: 'material', label: 'Material', Set: MaterialIcons as unknown as IconSet },
-    { key: 'feather', label: 'Feather', Set: Feather as unknown as IconSet },
-    { key: 'fontawesome', label: 'FontAwesome', Set: FontAwesome as unknown as IconSet },
 ];
 
 const COLUMNS = 3;

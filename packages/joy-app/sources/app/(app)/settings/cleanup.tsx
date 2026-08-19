@@ -7,7 +7,7 @@
 // Personal-build dev surface — plain strings, no i18n (matches the /joy pages).
 import * as React from 'react';
 import { Pressable } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useShallow } from 'zustand/react/shallow';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';

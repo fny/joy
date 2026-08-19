@@ -14,7 +14,7 @@ import { Metadata, Session } from '@/sync/storageTypes';
 import { ChatFooter } from './ChatFooter';
 import { Message } from '@/sync/typesMessage';
 import { DisplayItem, ToolGroupItem, useGroupedMessages } from '@/hooks/useGroupedMessages';
-import { Octicons } from '@expo/vector-icons';
+import Octicons from '@expo/vector-icons/Octicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Modal } from '@/modal';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';

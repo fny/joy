@@ -9,7 +9,7 @@ import {
     Platform,
     ActivityIndicator
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Typography } from '@/constants/Typography';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';

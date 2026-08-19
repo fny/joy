@@ -7,7 +7,7 @@ import { ItemList } from '@/components/ItemList';
 import { storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { Typography } from '@/constants/Typography';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Modal } from '@/modal';
 
 export default function PurchasesDevScreen() {

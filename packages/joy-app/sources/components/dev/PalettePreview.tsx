@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { View, Text, ScrollView } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 
 // A scrollable, chat-window mockup used on the palette settings page. It renders
 // purely from the LIVE theme tokens (which the palette page re-skins in place),

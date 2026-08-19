@@ -2,7 +2,7 @@ import * as React from 'react';
 import { View, TextInput, Text, TouchableOpacity } from 'react-native';
 import { RoundButton } from './RoundButton';
 import { useConnectTerminal } from '@/hooks/useConnectTerminal';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { t } from '@/text';
 
 export const ConnectButton = React.memo(() => {

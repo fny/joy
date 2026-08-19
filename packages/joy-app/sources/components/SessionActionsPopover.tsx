@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Pressable, Modal as RNModal, Platform, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Typography } from '@/constants/Typography';
 import { useSessionQuickActions, SessionActionItem } from '@/hooks/useSessionQuickActions';
 import { useSession } from '@/sync/storage';

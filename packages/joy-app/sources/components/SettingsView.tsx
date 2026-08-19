@@ -3,7 +3,7 @@ import { openExternalUrl } from '@/utils/openExternalUrl';
 import * as React from 'react';
 import { Text } from '@/components/StyledText';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import * as Clipboard from 'expo-clipboard';

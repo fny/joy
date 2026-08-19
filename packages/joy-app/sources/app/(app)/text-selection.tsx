@@ -8,7 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 
 export default function TextSelectionScreen() {
     const router = useRouter();

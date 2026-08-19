@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { View, Text, Pressable, ActivityIndicator, Platform } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Ionicons, Octicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import Octicons from '@expo/vector-icons/Octicons';
 import {
     AgentWorkGroupItem,
     ToolGroupItem,

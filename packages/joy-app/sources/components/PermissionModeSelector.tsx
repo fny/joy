@@ -1,6 +1,6 @@
 import React from 'react';
 import { Pressable, Platform, View } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { hapticsLight } from './haptics';
 import { hackMode, hackModes } from '@/sync/modeHacks';
 import type {

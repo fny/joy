@@ -6,7 +6,7 @@
 import * as React from 'react';
 import { ScrollView, View, Pressable, Text } from 'react-native';
 import { Image } from 'expo-image';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { AttachmentPreview } from '@/sync/attachmentTypes';
 import { thumbhashToDataUri } from '@/utils/thumbhash';

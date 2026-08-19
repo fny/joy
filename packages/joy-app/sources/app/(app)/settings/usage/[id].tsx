@@ -7,7 +7,7 @@
 // Personal-build dev page — plain strings, no i18n (matches the /joy pages).
 import * as React from 'react';
 import { View, Text, ActivityIndicator, Pressable, ScrollView } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { layout } from '@/components/layout';

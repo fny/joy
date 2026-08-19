@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { View, TextInput, FlatList } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useRouter } from 'expo-router';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
