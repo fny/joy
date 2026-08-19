@@ -107,8 +107,9 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 
 Session Files view: git **Changes** (staged/unstaged/untracked groups, line
 counts) and searchable **All Files** tree; file page renders source/diff/
-rendered modes (Markdown, HTML, CSV/TSV, images), zoom/wrap, download; desktop
-adds a CodeMirror editor with hash-guarded saves and conflict diff. Daemon FS
+rendered modes (Markdown, HTML, CSV/TSV, images), zoom/wrap, download, delete
+(confirmed, irreversible); desktop adds a CodeMirror editor with hash-guarded
+saves and conflict diff. Daemon FS
 ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
 
 ## Account, voice, extras

@@ -16,15 +16,7 @@ import type { Session } from "../claude/session";
 import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
 import type { RelaySession } from "../relay/relay.ts";
-import {
-  handleBash,
-  handleReadFile,
-  handleWriteFile,
-  handleListDirectory,
-  handleGetDirectoryTree,
-  handleRipgrep,
-  handleDifftastic,
-} from "./fileOps";
+import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
@@ -1057,6 +1049,14 @@ export const sessionOps: SessionOp[] = [
     summary: "Write a file in the session cwd",
     http: { method: "POST", path: "/sessions/:id/writeFile" },
     handler: (session, params) => handleWriteFile(session.cwd, params as unknown as Parameters<typeof handleWriteFile>[1]),
+  },
+  {
+    name: "deleteFile",
+    scope: "session",
+    rpcName: "deleteFile",
+    summary: "Delete a file in the session cwd",
+    http: { method: "POST", path: "/sessions/:id/deleteFile" },
+    handler: (session, params) => handleDeleteFile(session.cwd, params as unknown as Parameters<typeof handleDeleteFile>[1]),
   },
   {
     name: "listDirectory",

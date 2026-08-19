@@ -85,6 +85,7 @@ annotations are incremental (permissive objects where absent).
 | `bash` | POST /sessions/:id/bash | Run a command in cwd |
 | `readFile` | POST /sessions/:id/readFile | ≤400KB inline base64; larger spills to an encrypted blob (`blobRef`) the app downloads/decrypts |
 | `writeFile` | POST /sessions/:id/writeFile | Write file |
+| `deleteFile` | POST /sessions/:id/deleteFile | Unlink one file (no trash). Files only — directories refused |
 | `listDirectory` / `getDirectoryTree` | POST /sessions/:id/… | FS browsing |
 | `ripgrep` / `difftastic` | POST /sessions/:id/… | Search / diff helpers |
 | `joy-hook` | POST /sessions/:id/hook | Claude hook events (PreCompact → "compacting" status) |
