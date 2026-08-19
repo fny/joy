@@ -87,7 +87,15 @@ export function getDerivedRelayPerimeterKey(): string | null {
 }
 
 export function getRelayAccessKey(url: string = getServerUrl()): string | null {
-    return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || derivedPerimeterKey;
+    return getStoredRelayAccessKey(url) || derivedPerimeterKey;
+}
+
+/** The MANUALLY set key for a relay, with no fall back to the derived one.
+ *  UI that reports whether a password is configured must use this — every
+ *  logged-in client has a derived key, so getRelayAccessKey() would answer
+ *  "yes" for every relay and the answer would be meaningless. */
+export function getStoredRelayAccessKey(url: string = getServerUrl()): string | null {
+    return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || null;
 }
 
 export function setRelayAccessKey(key: string | null, url: string = getServerUrl()): void {
