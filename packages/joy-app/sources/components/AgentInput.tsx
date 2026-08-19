@@ -1357,6 +1357,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </Pressable>
                                 )}
 
+                                {/* Git Status Badge */}
+                                <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
+
                                 {/* Stash current input as an on-device draft — lives in the
                                     old abort slot; abort itself now takes over the SEND button
                                     (square icon) while a turn is processing. */}
@@ -1384,9 +1387,6 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         />
                                     </Pressable>
                                 )}
-
-                                {/* Git Status Badge */}
-                                <GitStatusButton sessionId={props.sessionId} onPress={props.onFileViewerPress} />
                                 </View>}
 
                                 {/* Send/Voice button - aligned with first row. While a turn is

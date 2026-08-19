@@ -18,6 +18,7 @@ import { EmptyMessages } from '@/components/EmptyMessages';
 import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
+import { useSessionSearch } from '@/hooks/useSessionSearch';
 import { MachineResourceBanner } from '@/components/MachineResourceBanner';
 import { useDrawingResult } from '@/hooks/useDrawingResult';
 import { useEscapeAbort } from '@/hooks/useEscapeAbort';
@@ -265,6 +266,20 @@ export const SessionView = React.memo((props: { id: string }) => {
         </Pressable>
     ), [toolsCollapsed, theme]);
 
+    // Search shortcut — the same switch Cmd/Ctrl+F flips (useSessionSearch), so
+    // the bar has one owner and two doors. Sits left of collapse/expand.
+    const searchSlot = React.useMemo(() => (
+        <Pressable
+            onPress={() => useSessionSearch.getState().setOpen(true)}
+            hitSlop={10}
+            style={{ paddingHorizontal: 4 }}
+            accessibilityRole="button"
+            accessibilityLabel="Search this conversation"
+        >
+            <Ionicons name="search-outline" size={19} color={theme.colors.header.tint} />
+        </Pressable>
+    ), [theme]);
+
     const joyTerminalSlot = React.useMemo(() => {
         const joyId = session?.metadata?.joy__sessionId;
         const joyMachine = session?.metadata?.machineId;
@@ -318,7 +333,7 @@ export const SessionView = React.memo((props: { id: string }) => {
                         isConnected={headerProps.isConnected}
                         badge={headerProps.badge}
                         extraPathSegment={fileViewPath ?? undefined}
-                        rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : <>{collapseAllSlot}{joyTerminalSlot}</>}
+                        rightSlot={(diffViewOpen || !!fileViewPath) ? headerRightSlot : <>{searchSlot}{collapseAllSlot}{joyTerminalSlot}</>}
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
                         onBackPress={() => router.back()}
                     />
@@ -525,7 +540,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // find can't reach rows that aren't mounted; ours searches the loaded model
     // and scrolls to matches. Esc closes it (handled inside the bar too).
     const chatListRef = React.useRef<ChatListHandle>(null);
-    const [searchOpen, setSearchOpen] = React.useState(false);
+    const searchOpen = useSessionSearch((s) => s.open);
+    const setSearchOpen = useSessionSearch((s) => s.setOpen);
     React.useEffect(() => {
         if (Platform.OS !== 'web') return;
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -537,7 +553,12 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, []);
+    }, [setSearchOpen]);
+
+    // The open flag is global now (the header button lives in the outer
+    // component), so it has to be cleared on the way out — otherwise searching
+    // one session leaves the bar open in the next one you visit.
+    React.useEffect(() => () => useSessionSearch.getState().setOpen(false), []);
 
     // Check if CLI version is outdated and not already acknowledged
     const cliVersion = session.metadata?.version;
