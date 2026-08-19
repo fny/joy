@@ -99,7 +99,13 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 - One backup code pairs everything: app relay picker (Happy Cloud + Joy
   Relay), `joy auth <relay...>` CLI self-pairing, per-relay MMKV scoping so
   accounts never bleed. joy-dev/happy-joy doors removed from the picker.
-- Hashicon avatars snapped to the joy logotype palette.
+- Relay perimeter password: settable per relay from Settings → Account (lock
+  on each relay row) as well as Server Configuration. Stored per relay and
+  sent as `X-Joy-Relay-Key`; a logged-in client also derives one from the
+  account secret, so the manual value is an override for relays gated on
+  something else. Setting it per relay matters because a gated relay refuses
+  the connection — the key must be in place BEFORE switching to it.
+- Identicons drawn from the joy logotype palette (circles / squares).
 - Deploys: app via EAS OTA (desktop + mobile ALWAYS together); daemon via git
   release branch (`git push main:release` + `joy update` on each box).
 
