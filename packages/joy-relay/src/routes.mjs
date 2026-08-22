@@ -10,6 +10,22 @@ const CAPABILITIES = {
   features: ['sessions', 'turns', 'cancellations', 'claims', 'events', 'state', 'sse'],
 };
 
+/** Raw byte body for tunnel routes — sealed payloads are NOT json and can
+ *  exceed the json cap. Cap is the tunnel's own (sealed request <= 32MB). */
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new ApiError(413, 'body_too_large')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 function readBody(req, limit = 512 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -202,7 +218,7 @@ const DOC_reconcile = {
 
 
 
-export function createRouter({ core, auth, notify, db }) {
+export function createRouter({ core, auth, notify, db, tunnel }) {
   // route table: [method, regex, handler(ctx, match, body)]
   const routes = [];
   const route = (method, pattern, opts, handler) => {
@@ -337,6 +353,42 @@ export function createRouter({ core, auth, notify, db }) {
       return core.reconcileTurn(m[1], lease, body);
     }));
 
+  // ── daemon tunnel (E2E; relay stays blind — see tunnel.mjs) ───────────────
+  if (tunnel) {
+    const TUNNEL_REQUEST_MAX = 32 * 1024 * 1024;
+
+    route('POST', '/joy/v1/daemons/([\\w.-]+)/http',
+      { summary: 'Tunnel a sealed HTTP exchange to a daemon', params: ['daemonId'], raw: true },
+      async (ctx, m, body, url, req, res) => {
+        // Ownership FIRST, before reading the body — an unauthorized caller
+        // learns nothing about attachment state and costs no buffering.
+        await core.assertDaemonOwned(m[1], ctx.accountId);
+        const payload = await readRawBody(req, TUNNEL_REQUEST_MAX);
+        tunnel.clientRequest(m[1], payload, res);
+        return null; // tunnel owns res for the life of the exchange
+      });
+
+    route('POST', '/joy/v1/daemon-leases/([\\w-]+)/claims/tunnel',
+      { summary: 'Long-poll claim tunnel requests under a lease', params: ['leaseId'], auth: false },
+      async (ctx, m, body, url, req) => {
+        const lease = await leaseCtx(m[1], req);
+        return tunnel.claim(lease.daemon_id, Number(body?.waitMs ?? 25_000));
+      });
+
+    route('POST', '/joy/v1/tunnel/([\\w-]+)/frames',
+      { summary: 'Daemon posts sealed response frames', params: ['requestId'], auth: false, raw: true },
+      async (ctx, m, body, url, req) => {
+        // m[1] is the REQUEST id; the lease identifies itself by header
+        // (same token scheme as claims, id moved out of the path).
+        const leaseId = String(req.headers['x-joy-lease-id'] ?? '');
+        if (!leaseId) throw new ApiError(401, 'missing_lease_id');
+        const lease = await leaseCtx(leaseId, req);
+        const chunk = await readRawBody(req, TUNNEL_REQUEST_MAX);
+        const done = url.searchParams.get('done') === '1';
+        return tunnel.daemonFrames(m[1], lease.daemon_id, chunk, done);
+      });
+  }
+
   // ── dispatch ──────────────────────────────────────────────────────────────
 
   /** Returns true if the request was handled natively. */
@@ -358,7 +410,7 @@ export function createRouter({ core, auth, notify, db }) {
         ctx.actorId = `tok:${hashToken(token).slice(0, 32)}`;
       }
       const m = url.pathname.match(match.regex);
-      const body = req.method === 'GET' ? {} : await readBody(req);
+      const body = req.method === 'GET' || match.opts.raw ? {} : await readBody(req);
       const out = await match.handler(ctx, m, body, url, req, res);
       if (out === null) return true; // handler owns the response (SSE)
       res.writeHead(200, { 'content-type': 'application/json' });

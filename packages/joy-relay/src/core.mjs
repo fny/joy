@@ -122,6 +122,12 @@ export function createCore(db, notify) {
     if (latest.account_id !== accountId) throw new ApiError(403, 'daemon_owned_by_other_account');
   }
 
+  /** Tunnel route ownership gate — same lease-history rule as
+   *  requireOwnedDaemon, callable outside a core transaction. */
+  async function assertDaemonOwned(daemonId, accountId) {
+    await db.tx(async (t) => requireOwnedDaemon(t, daemonId, accountId));
+  }
+
   // ── Sessions ──────────────────────────────────────────────────────────────
 
   /** Both creation modes (§9): app spawn (provisioning + spawn command) and
@@ -758,6 +764,6 @@ export function createCore(db, notify) {
     acquireLease, renewLease, claimWork, claimControl, deliveryReceived,
     turnSubmitted, turnStarted, turnFact, reconcileTurn,
     listSessions, sessionState, sessionEvents, sweepExpiredLeases,
-    fencedLease, hashToken,
+    fencedLease, hashToken, assertDaemonOwned,
   };
 }

@@ -13,6 +13,7 @@ import { createNotify } from './src/notify.mjs';
 import { createAuth } from './src/auth.mjs';
 import { createRouter } from './src/routes.mjs';
 import { createGate } from './src/gate.mjs';
+import { createTunnel } from './src/tunnel.mjs';
 import { handleDocs } from './src/docs.mjs';
 
 const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
@@ -25,7 +26,8 @@ const db = await openDb(DATA_DIR);
 const notify = createNotify();
 const core = createCore(db, notify);
 const auth = createAuth({ upstreamHost: TARGET_HOST, upstreamPort: TARGET_PORT });
-const router = createRouter({ core, auth, notify, db });
+const tunnel = createTunnel({ notify });
+const router = createRouter({ core, auth, notify, db, tunnel });
 
 // Lease-expiry sweep: orphans running turns whose daemon lease lapsed.
 setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-relay] sweep failed:', e)); }, 5_000).unref();
