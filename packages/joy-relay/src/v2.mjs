@@ -433,6 +433,19 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments }) 
   // ── dispatch ──────────────────────────────────────────────────────────────
   async function handle(req, res) {
     if (!req.url?.startsWith('/joy/v2')) return false;
+    // Browser clients (the app's web build) hit v2 cross-origin. Auth is a
+    // bearer header (no cookies), content is sealed — a permissive ACAO is
+    // safe and required. Wrapping writeHead covers every response path
+    // (JSON, SSE, attachments, tunnel, errors) in one place.
+    const cors = {
+      'access-control-allow-origin': req.headers.origin ?? '*',
+      'access-control-allow-headers': 'authorization, content-type, x-session, x-cipher-hash, x-joy-relay-key, x-happy-client',
+      'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+      'access-control-max-age': '86400',
+    };
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return true; }
+    const origWriteHead = res.writeHead.bind(res);
+    res.writeHead = (status, headers) => origWriteHead(status, { ...cors, ...(headers ?? {}) });
     const url = new URL(req.url, 'http://joy-relay');
     const path = url.pathname.slice('/joy/v2'.length) || '/';
     const match = routes.find((r) => r.method === req.method && r.regex.test(path));
