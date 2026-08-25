@@ -89,7 +89,22 @@ There are usually OTHER joy daemons running on this machine. Do not clobber them
 - `TMUX_SESSION=joy-test`
 - daemon `PORT=4999`, shut down any existing `joy-*` tmux sessions and processes, leave vanilla `joy` alone
 - Metro on a DEDICATED **`:8082`** — never the user's dev server on `:8081`; kill any process already holding `:8082`
-- chrome via `/chrome-cli` with a **dedicated `--user-data-dir`**, headless
+- chrome via `/chrome-cli` with a **dedicated `--user-data-dir`**, headless.
+  **Chrome gotchas on this box (cost hours — do not rediscover):**
+  (1) **`env -u DISPLAY` is MANDATORY.** The shell exports a dead SSH-forwarded
+  X display (`DISPLAY=localhost:10.0`); every chromium — even `--headless` —
+  connects to it at startup and hangs FOREVER with zero output (binds the CDP
+  port but never answers HTTP/WS). (2) Snap chromium can't read profiles under
+  `/tmp` or hidden `~/.*` dirs (snap confinement) — prefer the playwright
+  build at `~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` with a
+  VISIBLE profile dir like `~/joy-e2e-chrome`. Known-good launch:
+  `env -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS <chrome> --headless=new
+  --no-sandbox --disable-gpu --disable-dev-shm-usage
+  --remote-debugging-port=9222 --user-data-dir=$HOME/joy-e2e-chrome`.
+  (3) Never `pkill -f <pattern>` where the pattern also appears in your own
+  compound command — it kills your shell; free ports with `fuser -k
+  <port>/tcp` instead. (4) chrome-cli `eval` chokes on multi-statement
+  scripts — wrap them in an IIFE.
 
 ### tmux: use a DEDICATED SERVER SOCKET (critical)
 
