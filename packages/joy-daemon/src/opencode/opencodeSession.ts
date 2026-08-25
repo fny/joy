@@ -436,7 +436,10 @@ export class OpencodeSession implements AgentSession {
           const core = `${mid}:${pidPart}`;
           if (pt === "text") {
             const text = String(p.text ?? "").trim();
-            if (text) this.#relay?.send(encodeTextEvent(text, { turn }), `oc:${sid}:${core}:text`);
+            if (text) {
+              this.#relay?.send(encodeTextEvent(text, { turn }), `oc:${sid}:${core}:text`);
+              this.#mirrorChat(`oc:${sid}:${core}:text`, text);
+            }
           } else if (pt === "tool" || pt === "tool-call" || pt === "toolCall") {
             this.#relay?.send(encodeToolCallStart({ call: core, name: "OpencodeTool", input: p.input ?? null, turn }), `oc:${sid}:${core}:tool-start`);
             this.#relay?.send(encodeToolCallEnd(core, { turn }), `oc:${sid}:${core}:tool-end`);
@@ -552,6 +555,16 @@ export class OpencodeSession implements AgentSession {
   async sendRawKeys(): Promise<{ ok: boolean; segments: number; error?: string }> { return { ok: false, segments: 0, error: "no pane for opencode sessions" }; }
   detectPermissionMode(): string | null { return null; }
   async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "not supported for opencode (v1)" }; }
+  // Chat-log mirror (once per part id — reconcile re-walks in-flight
+  // assistant messages until they complete, and the relay-side localId dedupe
+  // does not cover the daemon chat log).
+  #chatSeen = new Set<string>();
+  #mirrorChat(localId: string, text: string): void {
+    if (this.#chatSeen.has(localId)) return;
+    this.#chatSeen.add(localId);
+    this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: this.id });
+  }
+
   transcript(): { lines: unknown[] } { return { lines: [] }; }
   onHookEvent(): { ok: boolean } { return { ok: true }; }
   markCompacting(): void { /* server-side */ }

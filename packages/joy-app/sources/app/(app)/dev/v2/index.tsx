@@ -32,8 +32,12 @@ export default React.memo(function V2ModeScreen() {
     const createSession = async () => {
         const machineId = await Modal.prompt('Create v2 session', 'Machine id (must have held a lease under this account)');
         if (!machineId) return;
+        const cwd = await Modal.prompt('Working directory', 'Absolute path on the machine (the daemon spawns the agent here)');
+        if (!cwd) return;
+        const agent = await Modal.prompt('Agent', 'claude | codex | opencode | pi', { defaultValue: 'claude' });
+        if (!agent) return;
         try {
-            const r = await v2.createSession(machineId.trim());
+            const r = await v2.createSession(machineId.trim(), { cwd: cwd.trim(), agent: agent.trim() });
             Modal.alert('Created', `session ${r.sessionId} (${r.state ?? 'queued for spawn'})`);
             void refresh();
         } catch (e) {

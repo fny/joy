@@ -204,7 +204,12 @@ export class PiSession implements AgentSession {
           for (const part of msg?.content ?? []) {
             if (String(part.type ?? "") === "text") {
               const text = String(part.text ?? "").trim();
-              if (text) this.#relay?.send(encodeTextEvent(text, { turn }), `${turn}:text:${randomUUID().slice(0, 8)}`);
+              if (text) {
+                this.#relay?.send(encodeTextEvent(text, { turn }), `${turn}:text:${randomUUID().slice(0, 8)}`);
+                // Live turn_end only (no replay path) — mirror directly into
+                // the daemon chat log for the debug page + v2 nucleus lane.
+                this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: this.id });
+              }
             }
           }
           const u = msg?.usage;

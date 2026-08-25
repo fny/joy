@@ -597,10 +597,25 @@ export class CodexSession implements AgentSession {
     this.#applyEffects(this.#norm.handle(n));
   }
 
+  // Assistant text mirrored into the daemon chat log exactly once per localId
+  // (the same ids the relay dedupes on) — feeds the debug page AND the v2
+  // nucleus lane's turn observation, which were both blind to codex output.
+  #chatSeen = new Set<string>();
+  #mirrorChat(localId: string, text: string): void {
+    if (this.#chatSeen.has(localId)) return;
+    this.#chatSeen.add(localId);
+    this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: this.id });
+  }
+
   #applyEffects(effects: ReturnType<CodexNormalizer["handle"]>): void {
     for (const eff of effects) {
       switch (eff.kind) {
-        case "wire": this.#relay?.send(eff.record, eff.localId); break;
+        case "wire": {
+          this.#relay?.send(eff.record, eff.localId);
+          const data = (eff.record as { content?: { data?: { ev?: { t?: string; text?: string } } } }).content?.data;
+          if (data?.ev?.t === "text" && data.ev.text) this.#mirrorChat(eff.localId ?? String(Math.random()), data.ev.text);
+          break;
+        }
         case "thinking": this.#thinking = eff.value; this.#relay?.setThinking(eff.value); break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "model": this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); break;

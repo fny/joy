@@ -135,8 +135,13 @@ export interface V2Event {
 export const v2 = {
     listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
     sessionState: (id: string): Promise<V2SessionState> => v2fetch('GET', `/sessions/${id}`),
-    createSession: (machineId: string, mode: 'spawn' | 'announce_existing' = 'spawn') =>
-        v2fetch('POST', '/sessions', { mode, daemonId: machineId, creationIntentId: randomUUID() }),
+    createSession: (machineId: string, spec?: { cwd: string; agent?: string; model?: string }) =>
+        v2fetch('POST', '/sessions', {
+            mode: 'spawn', daemonId: machineId, creationIntentId: randomUUID(),
+            // The daemon's nucleus lane decodes this envelope to launch the
+            // real agent session (same plaintext seam as message content).
+            ...(spec ? { spawnSpec: JSON.stringify({ v: 1, t: 'spawn', ...spec }) } : {}),
+        }),
     deleteSession: (id: string) => v2fetch('DELETE', `/sessions/${id}`),
 
     listMessages: (id: string, status?: string): Promise<{ messages: V2Message[] }> =>
