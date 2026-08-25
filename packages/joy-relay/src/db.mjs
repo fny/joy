@@ -128,6 +128,23 @@ const MIGRATIONS = [
     WHERE state IN ('dispatching','running','cancelling','orphaned');
   ALTER TABLE native_sessions ADD COLUMN creation_request_hash TEXT;
   `,
+  // 003 — v2 attachments: device-born content that must propagate across
+  // devices with the machine dead. Ciphertext only; dedupe per (session,hash);
+  // cascade on session purge; unreferenced rows swept after a TTL.
+  `
+  CREATE TABLE attachments (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES native_sessions(id),
+    account_id TEXT NOT NULL,
+    cipher_hash TEXT NOT NULL,
+    size INT NOT NULL,
+    body BYTEA NOT NULL,
+    referenced_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (session_id, cipher_hash)
+  );
+  CREATE INDEX attachments_by_session ON attachments (session_id);
+  `,
 ];
 
 export async function openDb(dataDir) {

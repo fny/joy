@@ -14,6 +14,8 @@ import { createAuth } from './src/auth.mjs';
 import { createRouter } from './src/routes.mjs';
 import { createGate } from './src/gate.mjs';
 import { createTunnel } from './src/tunnel.mjs';
+import { createV2Router } from './src/v2.mjs';
+import { createAttachments } from './src/attachments.mjs';
 import { handleDocs } from './src/docs.mjs';
 
 const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
@@ -28,6 +30,8 @@ const core = createCore(db, notify);
 const auth = createAuth({ upstreamHost: TARGET_HOST, upstreamPort: TARGET_PORT });
 const tunnel = createTunnel({ notify });
 const router = createRouter({ core, auth, notify, db, tunnel });
+const attachments = createAttachments(db);
+const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments });
 
 // Lease-expiry sweep: orphans running turns whose daemon lease lapsed.
 setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-relay] sweep failed:', e)); }, 5_000).unref();
@@ -37,6 +41,7 @@ const gate = createGate();
 const server = http.createServer(async (req, res) => {
   if (!gate.allows(req)) return gate.rejectHttp(res);
   if (handleDocs(req, res, { version: '0.1.0', routeTable: { routes: router.routeTable(), served: true } })) return;
+  if (await v2.handle(req, res)) return;
   if (await router.handle(req, res)) return;
   const up = http.request(
     { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: req.headers },
