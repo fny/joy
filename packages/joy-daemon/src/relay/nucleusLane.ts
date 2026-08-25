@@ -232,33 +232,44 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
 
       session.enqueue(text, { source: "rpc", visible: false });
 
-      // Dispatch confirmation: our item leaving the queue while the session
-      // is busy is the daemon-side "the agent has the prompt" signal.
+      const failTurn = async (reason: string) => {
+        await api("POST", `/daemon/turns/${turnId}/facts`, {
+          type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
+          meta: { reason },
+        }, true);
+        log(`turn ${turnId.slice(0, 8)}: ${reason} → failed`);
+      };
+      // Peek (without consuming) for assistant output past the watermark —
+      // the cross-adapter "the agent is actually doing something" signal.
+      const activitySince = () => registry.chatHistory().some((m) =>
+        Number(m.id) > watermark && (m as { session_id?: string }).session_id === session.id && m.role === "assistant");
+
+      // Phase A — the prompt leaves the LOCAL queue. Cross-adapter contract
+      // (verified against all four implementations): pendingCount is the only
+      // queue signal every adapter fills — claude counts all undelivered
+      // (incl. hidden + in-flight), codex/opencode count queued inbound, pi
+      // counts harness-queued. claude's busy() is true from enqueue onward
+      // (queue length), so busy() short-circuits A there and phases B/C carry
+      // the real waiting; the paused check therefore ALSO lives in B/C.
       const dispatchDeadline = Date.now() + DISPATCH_TIMEOUT_MS;
       for (;;) {
-        if (Date.now() > dispatchDeadline) {
-          await api("POST", `/daemon/turns/${turnId}/facts`, {
-            type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
-            meta: { reason: "dispatch_timeout" },
-          }, true);
-          log(`turn ${turnId.slice(0, 8)}: dispatch timeout → failed`);
-          return;
-        }
-        // We enqueue with visible:false, so our item shows in `hidden`, never
-        // in `queue`/`inFlight` (those are visible-only). Once it leaves
-        // hidden, the dispatcher owns it (typed into the agent) — that is the
-        // daemon-side "submitted to the agent" boundary.
-        const qs = session.queueState() as { queue: Array<{ text: string }>; hidden: Array<{ text: string }>; paused: boolean };
-        const stillQueued = qs.queue.some((q) => q.text === text) || qs.hidden.some((q) => q.text === text);
-        if (!stillQueued) break;
-        if (qs.paused) {
-          await api("POST", `/daemon/turns/${turnId}/facts`, {
-            type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
-            meta: { reason: "queue_paused" },
-          }, true);
-          log(`turn ${turnId.slice(0, 8)}: local queue paused → failed`);
-          return;
-        }
+        const qs = session.queueState() as { pendingCount: number; paused: boolean };
+        if (qs.paused) return failTurn("queue_paused");
+        if (qs.pendingCount === 0 || session.busy()) break;
+        if (Date.now() > dispatchDeadline) return failTurn("dispatch_timeout");
+        await sleep(POLL_MS);
+      }
+
+      // Phase B — evidence the turn is RUNNING before we tell the relay so.
+      // codex/opencode/pi flip busy() (= thinking) asynchronously after the
+      // harness accepts the submit; without this gate a turn read "completed"
+      // in one debounce window before the agent ever started (the exact
+      // false-instant-complete the review caught).
+      const startDeadline = Date.now() + 180_000;
+      for (;;) {
+        if (session.busy() || activitySince()) break;
+        if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
+        if (Date.now() > startDeadline) return failTurn("no_agent_activity");
         await sleep(POLL_MS);
       }
       await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, true);
@@ -280,6 +291,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             type: "output", ciphertext: encodeContent(m.content), runtimeEventId: `chat:${m.id}`,
           }, true);
         }
+        if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
         if (session.busy()) idlePolls = 0;
         else if (++idlePolls >= IDLE_DEBOUNCE_POLLS) break;
         if (Date.now() > capDeadline) {
