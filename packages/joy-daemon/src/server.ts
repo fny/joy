@@ -18,7 +18,8 @@ import { moduleDir } from "./esm";
 import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync, readFileSync } from "fs";
-import { initRelay } from "./relay/relay.ts";
+import { initRelay, loadCredentials } from "./relay/relay.ts";
+import { startNucleusLane } from "./relay/nucleusLane.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
 import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyHomeDir } from "./paths";
 
@@ -135,6 +136,25 @@ startHttpServer({
 // the first per-session push already includes personal + plugin commands.
 registry.commands.rescanMachine();
 registry.recover();
+
+// v2 nucleus lane: dual-stack ADDITIVE transport beside the happy socket —
+// claims the relay's durable v2 queue for this machine. Same credentials and
+// machine identity as the happy path. Fail-soft: against a relay without
+// /joy/v2 it idles and retries; JOY_V2_LANE=0 disables it outright.
+if (process.env.JOY_V2_LANE !== "0") {
+  const creds = loadCredentials();
+  if (creds) {
+    startNucleusLane({
+      registry,
+      relayUrl: joyRelayUrl(),
+      token: creds.token,
+      machineId: creds.machineId,
+      log: (line) => process.stderr.write(line + "\n"),
+    });
+  } else {
+    process.stderr.write("[v2-lane] no credentials (access.key) — lane not started\n");
+  }
+}
 
 if (relayClient) {
   // Upsert machine metadata (homeDir for the picker + the discovered slash
