@@ -273,6 +273,19 @@ export default function RootLayout() {
             />
 
             <Stack.Screen
+                name="dev/v2/index"
+                options={{
+                    headerTitle: 'Relay v2 Mode',
+                }}
+            />
+            <Stack.Screen
+                name="dev/v2/[id]"
+                options={{
+                    headerTitle: 'v2 Session',
+                }}
+            />
+
+            <Stack.Screen
                 name="dev/session-state"
                 options={{
                     headerTitle: 'Session State',
