@@ -391,8 +391,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  of a cancel we already handled — the caller uses that to back off. */
   async function handleCancel(offer: ControlOffer, leaseRef: Lease): Promise<boolean> {
     if (handledCancels.has(offer.targetTurnId)) return false;
-    handledCancels.add(offer.targetTurnId);
+    // Mark handled only AFTER the receipt ack lands — a transient /received
+    // failure must leave the offer eligible for the relay's re-offer, not
+    // suppressed until turn cleanup. (Offers arrive sequentially per claim,
+    // so the check-then-mark gap cannot double-fire within one loop.)
     await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
+    handledCancels.add(offer.targetTurnId);
     cancelRequested.add(offer.targetTurnId);
     const session = localSession(offer.sessionId);
     if (session) {
