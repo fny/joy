@@ -68,7 +68,7 @@ if (!step(!!boundState, `daemon spawned + bound real ${AGENT} session`, boundSta
 // durable v2 output events.
 const prompt = `Reply with exactly this text and nothing else: ${MARKER}`;
 const m = await api('POST', `/sessions/${sid}/messages`, { ciphertext: enc(prompt), clientIntentId: randomUUID() });
-step(m.status === 202, 'prompt accepted 202');
+if (!step(m.status === 202, 'prompt accepted 202', `status ${m.status}`)) { console.log(`FAIL ${AGENT} (send rejected)`); process.exit(1); }
 
 const answered = await until(async () => {
   const ev = (await api('GET', `/sessions/${sid}/events?after=0&limit=500`)).json?.messages ?? [];
@@ -76,6 +76,14 @@ const answered = await until(async () => {
   return hit ?? null;
 }, 240_000, 3000);
 step(!!answered, `real ${AGENT} answered with the marker via v2 output events`, answered ? `event #${answered.seq}` : 'no marker within 240s');
+
+// Exactly-once: after the turn settles, the marker must appear in EXACTLY
+// one non-queued event (a find() would pass duplicates silently).
+if (answered) {
+  const evAll = (await api('GET', `/sessions/${sid}/events?after=0&limit=500`)).json?.messages ?? [];
+  const hits = evAll.filter((e) => e.kind !== 'turn.queued' && dec(e.content?.ciphertext ?? null)?.includes(MARKER));
+  step(hits.length === 1, 'marker appears exactly once in the durable log', `count ${hits.length}`);
+}
 
 // 4. The turn must terminalize and the message read delivered.
 const done = await until(async () => {
@@ -85,11 +93,13 @@ const done = await until(async () => {
 }, 120_000, 2000);
 step(!!done, 'turn terminal + message delivered', done ? done.terminalState : 'not terminal in 120s');
 
-// 5. Cleanup (unless --keep): purge the v2 session server-side. The local
-// agent window is left for the runbook's artifact checks / teardown.
-if (!has('keep')) {
+// 5. Evidence is KEPT by default (the runbook cross-checks artifacts after
+// each run and purges in teardown). --purge removes the session now.
+if (has('purge')) {
   const del = await api('DELETE', `/sessions/${sid}`);
   step(del.status === 200, 'v2 session purged');
+} else {
+  console.log(`  · [${AGENT}] session kept for artifact checks: ${sid}`);
 }
 
 console.log(failures === 0 ? `PASS ${AGENT}` : `FAIL ${AGENT} (${failures})`);

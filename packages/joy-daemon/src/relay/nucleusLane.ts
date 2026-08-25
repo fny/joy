@@ -22,9 +22,11 @@
 // happy transport is never affected.
 
 import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import type { SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
-import { joyRelayAccessKey } from "../paths";
+import { joyRelayAccessKey, joyStateDir } from "../paths";
 
 const RENEW_MS = 8_000;           // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
@@ -80,6 +82,23 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const log = (line: string) => opts.log?.(`[v2-lane] ${line}`);
   let stopped = false;
   let lease: Lease | null = null;
+  // Chat-log ids are an in-memory counter reset on every boot — a bare
+  // chat:<id> runtimeEventId from THIS boot could replay-collide with one
+  // from the last boot and get silently dropped by the relay. Scope them.
+  const bootNonce = randomUUID().slice(0, 8);
+  // spawnCommandId → localSessionId, persisted across the create→bind gap so
+  // a crash between the two never spawns a SECOND real agent for the same
+  // command (the re-offer finds the intent record and only re-binds).
+  const spawnIntentPath = join(joyStateDir(), "v2-spawns.json");
+  const readSpawnIntents = (): Record<string, string> => {
+    try { return JSON.parse(readFileSync(spawnIntentPath, "utf8")); } catch { return {}; }
+  };
+  const writeSpawnIntent = (commandId: string, localId: string): void => {
+    const m = readSpawnIntents();
+    m[commandId] = localId;
+    mkdirSync(joyStateDir(), { recursive: true });
+    writeFileSync(spawnIntentPath, JSON.stringify(m, null, 2));
+  };
   // v2 sessionId → local session id, rebuilt from the relay on start and
   // extended by every bind we perform.
   const bound = new Map<string, string>();
@@ -87,6 +106,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // window) and turnIds a control-lane cancel has targeted.
   const inFlight = new Set<string>();
   const cancelRequested = new Set<string>();
+  // Executing turns: what cancel/cleanup needs to stop LOCAL work too —
+  // terminalizing the relay alone leaves a queued prompt to fire later.
+  const activeTurns = new Map<string, { localId: string; queuedId: string | null }>();
   // Turns we can't run (no local session / undecodable) — logged once, not
   // per re-offer, so a stranded turn doesn't spam the journal every claim.
   const notedSkips = new Set<string>();
@@ -98,13 +120,18 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     return h;
   };
 
-  async function api(method: string, path: string, body?: unknown, useLease = false): Promise<any> {
+  /** asLease: the lease GENERATION captured when the offer was claimed —
+   *  lifecycle writes must never silently switch to a newer lease (or to
+   *  bearer auth) mid-turn; a stale generation gets the relay's 412 and the
+   *  turn resolves through orphaning, deterministically. */
+  async function api(method: string, path: string, body?: unknown, asLease?: Lease | null): Promise<any> {
+    if (asLease === null) throw new Error("lease_lost");
     const res = await fetch(`${relayUrl}/joy/v2${path}`, {
       method,
       headers: {
         ...baseHeaders(),
-        ...(useLease && lease
-          ? { "x-joy-lease-id": lease.leaseId, "x-joy-lease-token": lease.leaseToken, "x-joy-lease-epoch": lease.epoch }
+        ...(asLease
+          ? { "x-joy-lease-id": asLease.leaseId, "x-joy-lease-token": asLease.leaseToken, "x-joy-lease-epoch": asLease.epoch }
           : { Authorization: `Bearer ${token}` }),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
@@ -158,8 +185,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     return registry.get(localId) ?? null;
   }
 
-  async function handleSpawn(offer: WorkOffer): Promise<void> {
-    await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, true);
+  async function handleSpawn(offer: WorkOffer, leaseRef: Lease): Promise<void> {
+    await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
     const spec = decodeSpawnSpec(offer.ciphertext);
     if (!spec?.cwd) {
       // Undecodable/incomplete spec: leave the command for a human — binding
@@ -168,17 +195,26 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       return;
     }
     try {
-      const session = await registry.create({
-        cwd: spec.cwd,
-        agent: (spec.agent as AgentSession["agentFlavor"]) ?? "claude",
-        model: spec.model,
-        yolo: spec.yolo ?? true,
-      });
+      // Idempotency across the create→bind gap: a prior attempt that crashed
+      // after create left an intent record — re-bind that session instead of
+      // spawning a second real agent for the same command.
+      const prior = readSpawnIntents()[offer.commandId];
+      let session = prior ? registry.get(prior) : undefined;
+      if (session && session.status === "ended") session = undefined;
+      if (!session) {
+        session = await registry.create({
+          cwd: spec.cwd,
+          agent: (spec.agent as AgentSession["agentFlavor"]) ?? "claude",
+          model: spec.model,
+          yolo: spec.yolo ?? true,
+        });
+        writeSpawnIntent(offer.commandId, session.id);
+      }
       await api("POST", `/daemon/sessions/${offer.sessionId}/bind`, {
         spawnCommandId: offer.commandId,
         localSessionId: session.id,
         sessionKeyEnvelope: "v2:plaintext",
-      }, true);
+      }, leaseRef);
       bound.set(offer.sessionId, session.id);
       log(`spawned ${spec.agent ?? "claude"} in ${spec.cwd} → local ${session.id} (v2 ${offer.sessionId.slice(0, 8)})`);
     } catch (e) {
@@ -189,12 +225,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
   }
 
-  async function runTurn(offer: WorkOffer): Promise<void> {
+  async function runTurn(offer: WorkOffer, leaseRef: Lease): Promise<void> {
     const turnId = offer.turnId!;
     if (inFlight.has(turnId)) return;
     inFlight.add(turnId);
     try {
-      await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, true);
+      await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
       let session = localSession(offer.sessionId);
       if (!session) {
         // The binding map may be stale (daemon restarted since bind) —
@@ -220,7 +256,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }
         return;
       }
-      await api("POST", `/daemon/turns/${turnId}/submitted`, {}, true);
+      await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
       if (offer.attachments?.length) {
         log(`turn ${turnId.slice(0, 8)}: ${offer.attachments.length} attachment(s) cited (machine-side materialization TODO)`);
       }
@@ -230,19 +266,32 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const history = registry.chatHistory();
       let watermark = history.length ? Number(history[history.length - 1].id) : -1;
 
-      session.enqueue(text, { source: "rpc", visible: false });
+      const queued = session.enqueue(text, { source: "rpc", visible: false });
+      activeTurns.set(turnId, { localId: session.id, queuedId: queued?.id ?? null });
 
-      const failTurn = async (reason: string) => {
+      /** Terminalize the relay AND stop the local work — a failed turn whose
+       *  prompt stays queued locally would execute later anyway (and again
+       *  on a human retry). cancelQueued is claude-precise; the other
+       *  adapters stub it (their inbound can't be plucked), so abort() is
+       *  the fallback hammer when the turn already started. */
+      const failTurn = async (reason: string, { abortLocal = false } = {}) => {
+        try { if (queued?.id) session!.cancelQueued(queued.id); } catch { /* stub adapters */ }
+        if (abortLocal) { try { await session!.abort(); } catch { /* pane teardown */ } }
         await api("POST", `/daemon/turns/${turnId}/facts`, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason },
-        }, true);
+        }, leaseRef);
         log(`turn ${turnId.slice(0, 8)}: ${reason} → failed`);
       };
+      // Chat rows carry session_id = the LOCAL id for codex/opencode/pi but
+      // the CLAUDE TRANSCRIPT UUID for claude (and that uuid can change on
+      // resume) — match either, reading claudeSessionId live each time.
+      const isOurs = (m: { session_id?: string }) =>
+        m.session_id === session!.id || (!!session!.claudeSessionId && m.session_id === session!.claudeSessionId);
       // Peek (without consuming) for assistant output past the watermark —
       // the cross-adapter "the agent is actually doing something" signal.
       const activitySince = () => registry.chatHistory().some((m) =>
-        Number(m.id) > watermark && (m as { session_id?: string }).session_id === session.id && m.role === "assistant");
+        Number(m.id) > watermark && isOurs(m as { session_id?: string }) && m.role === "assistant");
 
       // Phase A — the prompt leaves the LOCAL queue. Cross-adapter contract
       // (verified against all four implementations): pendingCount is the only
@@ -272,7 +321,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (Date.now() > startDeadline) return failTurn("no_agent_activity");
         await sleep(POLL_MS);
       }
-      await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, true);
+      await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
 
       // Observe: forward each new assistant chat message as a durable output
       // fact (runtimeEventId = chat id → replay-idempotent), until the session
@@ -285,21 +334,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           const id = Number(m.id);
           if (id <= watermark) continue;
           watermark = id;
-          if ((m as { session_id?: string }).session_id !== session.id) continue;
+          if (!isOurs(m as { session_id?: string })) continue;
           if (m.role !== "assistant" || !m.content) continue;
           await api("POST", `/daemon/turns/${turnId}/facts`, {
-            type: "output", ciphertext: encodeContent(m.content), runtimeEventId: `chat:${m.id}`,
-          }, true);
+            type: "output", ciphertext: encodeContent(m.content), runtimeEventId: `chat:${bootNonce}:${m.id}`,
+          }, leaseRef);
         }
         if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
         if (session.busy()) idlePolls = 0;
         else if (++idlePolls >= IDLE_DEBOUNCE_POLLS) break;
         if (Date.now() > capDeadline) {
+          // Stop the REAL agent too — reporting interrupted while the agent
+          // keeps burning would be a lie with a bill attached.
+          try { await session.abort(); } catch { /* pane teardown */ }
           await api("POST", `/daemon/turns/${turnId}/facts`, {
             type: "terminal", terminalState: "interrupted", runtimeEventId: randomUUID(),
             meta: { reason: "turn_cap" },
-          }, true);
-          log(`turn ${turnId.slice(0, 8)}: 30min cap → interrupted`);
+          }, leaseRef);
+          log(`turn ${turnId.slice(0, 8)}: 30min cap → interrupted (agent aborted)`);
           return;
         }
         await sleep(POLL_MS);
@@ -308,7 +360,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const terminalState = cancelRequested.has(turnId) ? "cancelled" : "completed";
       await api("POST", `/daemon/turns/${turnId}/facts`, {
         type: "terminal", terminalState, runtimeEventId: randomUUID(),
-      }, true);
+      }, leaseRef);
       log(`turn ${turnId.slice(0, 8)} ${terminalState}`);
     } catch (e) {
       log(`turn ${turnId.slice(0, 8)} error: ${String(e)}`);
@@ -319,21 +371,27 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         await api("POST", `/daemon/turns/${turnId}/facts`, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason: "lane_error", detail: String(e).slice(0, 300) },
-        }, true);
+        }, leaseRef);
       } catch { /* covered by lease-expiry orphaning */ }
     } finally {
       inFlight.delete(turnId);
       cancelRequested.delete(turnId);
+      activeTurns.delete(turnId);
     }
   }
 
-  async function handleCancel(offer: ControlOffer): Promise<void> {
-    await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, true);
+  async function handleCancel(offer: ControlOffer, leaseRef: Lease): Promise<void> {
+    await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
     cancelRequested.add(offer.targetTurnId);
     const session = localSession(offer.sessionId);
     if (session) {
+      // Pluck the still-queued prompt FIRST (claude-precise; stubbed
+      // elsewhere) so an early cancel can't leave it to fire later, then
+      // abort whatever is actually running.
+      const ctx = activeTurns.get(offer.targetTurnId);
+      if (ctx?.queuedId) { try { session.cancelQueued(ctx.queuedId); } catch { /* stub adapters */ } }
       try { await session.abort(); } catch { /* pane may be mid-teardown */ }
-      log(`cancel ${offer.targetTurnId.slice(0, 8)}: abort sent`);
+      log(`cancel ${offer.targetTurnId.slice(0, 8)}: queued plucked + abort sent`);
     }
     // The running turn loop observes busy() falling and terminalizes with
     // 'cancelled' (cancelRequested). A cancel for a turn we are NOT running
@@ -370,15 +428,25 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           await refreshBindings();
           announced = false;
         }
+        const leaseRef = lease!;
         const offers = await claim(lane);
         for (const offer of offers) {
           if (stopped) break;
-          if (lane === "control") void handleCancel(offer);
-          else if (offer.kind === "spawn_session") await handleSpawn(offer);
-          else if (offer.kind === "prompt") void runTurn(offer);
+          if (lane === "control") void handleCancel(offer, leaseRef);
+          else if (offer.kind === "spawn_session") await handleSpawn(offer, leaseRef);
+          else if (offer.kind === "prompt") void runTurn(offer, leaseRef);
         }
       } catch (e) {
-        if (isLeaseDeath(e)) { lease = null; continue; }
+        if (isLeaseDeath(e)) {
+          // Superseded (another daemon generation holds this machineId) or
+          // expired. Back off with jitter before re-acquiring so two daemons
+          // misconfigured onto one machineId thrash slowly and VISIBLY
+          // instead of supersession ping-pong at claim speed.
+          lease = null;
+          log(`${lane} lane: lease lost (${String((e as Error).message ?? e)}) — re-acquiring after backoff`);
+          await sleep(10_000 + Math.floor(Math.random() * 10_000));
+          continue;
+        }
         if (!announced) {
           log(`${lane} lane idle (${String((e as Error).message ?? e)}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
           announced = true;

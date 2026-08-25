@@ -380,7 +380,14 @@ export class OpencodeSession implements AgentSession {
   #applyEffects(effects: OpencodeEffect[]): void {
     for (const eff of effects) {
       switch (eff.kind) {
-        case "wire": this.#relay?.send(eff.record, eff.localId); break;
+        case "wire": {
+          this.#relay?.send(eff.record, eff.localId);
+          // Live text mirrors into the daemon chat log too (the reconcile
+          // path shares #chatSeen, so replay never duplicates a live row).
+          const data = (eff.record as { content?: { data?: { ev?: { t?: string; text?: string } } } }).content?.data;
+          if (data?.ev?.t === "text" && data.ev.text && eff.localId) this.#mirrorChat(eff.localId, data.ev.text);
+          break;
+        }
         case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
         case "confirmPrompt": this.#removeInbound(eff.messageID); this.#armTurnDeadline(eff.messageID); break;
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
