@@ -271,6 +271,26 @@ describe('v2 retry (orphaned only)', () => {
   });
 });
 
+describe('v2 attachment reference reaches the daemon', () => {
+  const bytes = Buffer.from('device-born-bytes-for-offer');
+  it('work-lane offer carries cited attachment ids + sizes', async () => {
+    const d = makeDaemon('mach-att-offer');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    await d.bind(sessionId, { localSessionId: 'w1', sessionKeyEnvelope: 'wrapped-key' });
+    const up = await call('POST', '/joy/v2/attachments', { raw: bytes, headers: { 'x-session': sessionId } });
+    const attachmentId = up.json.attachmentId;
+    const posted = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, {
+      body: { ciphertext: 'see attached', attachments: [attachmentId] },
+    });
+    expect(posted.status).toBe(202);
+    const offers = await d.claim('work');
+    const offer = offers.find((o) => o.sessionId === sessionId && o.kind === 'prompt');
+    expect(offer).toBeTruthy();
+    expect(offer.attachments).toEqual([{ id: attachmentId, size: bytes.length }]);
+  });
+});
+
 describe('v2 attachments (device-born, sealed)', () => {
   const bytes = Buffer.from('sealed-attachment-bytes-v2');
   const hash = createHash('sha256').update(bytes).digest('hex');

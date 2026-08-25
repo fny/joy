@@ -23,8 +23,15 @@ export function getV2BaseUrl(): string {
     return v2Config.getString(V2_URL_KEY) || getServerUrl();
 }
 export function setV2BaseUrl(url: string | null): void {
-    if (url && url.trim()) v2Config.set(V2_URL_KEY, url.trim());
-    else v2Config.delete(V2_URL_KEY);
+    if (!url || !url.trim()) { v2Config.delete(V2_URL_KEY); return; }
+    // Reject non-http(s) and strip a trailing slash — `${base}/joy/v2` with a
+    // trailing slash becomes `//joy/v2`, which misses the v2 dispatcher and
+    // gets proxied upstream. A malformed value clears the override.
+    try {
+        const u = new URL(url.trim());
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') { v2Config.delete(V2_URL_KEY); return; }
+        v2Config.set(V2_URL_KEY, url.trim().replace(/\/+$/, ''));
+    } catch { v2Config.delete(V2_URL_KEY); }
 }
 export function isV2UrlOverridden(): boolean {
     return !!v2Config.getString(V2_URL_KEY);
@@ -200,22 +207,34 @@ export function connectV2Stream(handlers: V2StreamHandlers): () => void {
             }
             const decoder = new TextDecoder();
             let buf = '';
+            // Frames end on a blank line; normalize CRLF so \r\n\r\n splits too.
+            const frameEnd = () => {
+                const lf = buf.indexOf('\n\n');
+                return lf; // CRLF already normalized to LF below
+            };
             while (!stopped) {
                 const { value, done } = await reader.read();
                 if (done) break;
-                buf += decoder.decode(value, { stream: true });
+                buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
                 let idx: number;
-                while ((idx = buf.indexOf('\n\n')) >= 0) {
+                while ((idx = frameEnd()) >= 0) {
                     const frame = buf.slice(0, idx);
                     buf = buf.slice(idx + 2);
-                    if (frame.startsWith(':')) continue; // ping
                     let event = 'message';
-                    let data = '';
+                    const dataLines: string[] = [];
                     for (const line of frame.split('\n')) {
-                        if (line.startsWith('event: ')) event = line.slice(7);
-                        else if (line.startsWith('data: ')) data = line.slice(6);
+                        if (line === '' || line.startsWith(':')) continue; // blank / comment
+                        const colon = line.indexOf(':');
+                        const field = colon === -1 ? line : line.slice(0, colon);
+                        // Per the SSE grammar a single leading space after the
+                        // colon is stripped; `data:x` (no space) is also valid.
+                        let val = colon === -1 ? '' : line.slice(colon + 1);
+                        if (val.startsWith(' ')) val = val.slice(1);
+                        if (field === 'event') event = val;
+                        else if (field === 'data') dataLines.push(val); // multiple → joined
                     }
-                    if (!data) continue;
+                    if (dataLines.length === 0) continue;
+                    const data = dataLines.join('\n');
                     try {
                         const d = JSON.parse(data);
                         if (event === 'hello') handlers.onHello?.(d.sessions ?? []);

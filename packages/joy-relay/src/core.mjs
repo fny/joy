@@ -460,10 +460,15 @@ export function createCore(db, notify) {
           [s.id]);
         if (!head) continue;
         const deliveryId = await offerCommand(t, lease, head);
+        // Carry the cited attachment ids so the daemon can fetch device-born
+        // content — without this the reference is invisible past the relay.
+        const { rows: atts } = await t.query(
+          `SELECT id, size FROM attachments WHERE referenced_by = $1 ORDER BY created_at`, [head.id]);
         offers.push({
           deliveryId, commandId: head.id, sessionId: s.id, kind: 'prompt',
           seq: String(head.seq), turnId: head.head_turn_id, ciphertext: head.ciphertext,
           clientIntentId: head.client_intent_id, requestHash: head.request_hash,
+          attachments: atts.map((a) => ({ id: a.id, size: a.size })),
         });
       }
       return { epoch: String(lease.epoch), offers };

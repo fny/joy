@@ -41,6 +41,13 @@ setInterval(() => { attachments.sweepOrphans().catch((e) => console.error('[joy-
 const gate = createGate();
 
 const server = http.createServer(async (req, res) => {
+  // CORS preflight carries no bearer, no gate key, no body, and reveals only
+  // static CORS policy — answer OPTIONS /joy/v2 BEFORE the perimeter gate
+  // (browsers cannot attach the gate key to a preflight). The actual request
+  // that follows still carries the key and is still gated below.
+  if (req.method === 'OPTIONS' && req.url?.startsWith('/joy/v2')) {
+    if (await v2.handle(req, res)) return;
+  }
   if (!gate.allows(req)) return gate.rejectHttp(res);
   if (handleDocs(req, res, { version: '0.1.0', routeTable: { routes: router.routeTable(), served: true } })) return;
   if (await v2.handle(req, res)) return;
