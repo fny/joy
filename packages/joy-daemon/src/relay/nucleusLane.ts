@@ -109,6 +109,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // Executing turns: what cancel/cleanup needs to stop LOCAL work too —
   // terminalizing the relay alone leaves a queued prompt to fire later.
   const activeTurns = new Map<string, { localId: string; queuedId: string | null }>();
+  // Cancels already acted on, keyed by target turn. The relay re-offers an
+  // outstanding cancel command every control claim until the turn
+  // terminalizes — without this dedup the SAME abort fired dozens of times
+  // (observed: 61×, including once after terminalization) and the control
+  // loop hot-spun on the standing offer.
+  const handledCancels = new Set<string>();
   // Turns we can't run (no local session / undecodable) — logged once, not
   // per re-offer, so a stranded turn doesn't spam the journal every claim.
   const notedSkips = new Set<string>();
@@ -377,10 +383,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       inFlight.delete(turnId);
       cancelRequested.delete(turnId);
       activeTurns.delete(turnId);
+      handledCancels.delete(turnId);
     }
   }
 
-  async function handleCancel(offer: ControlOffer, leaseRef: Lease): Promise<void> {
+  /** Returns true when this offer was NEW (acted on), false for a re-offer
+   *  of a cancel we already handled — the caller uses that to back off. */
+  async function handleCancel(offer: ControlOffer, leaseRef: Lease): Promise<boolean> {
+    if (handledCancels.has(offer.targetTurnId)) return false;
+    handledCancels.add(offer.targetTurnId);
     await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
     cancelRequested.add(offer.targetTurnId);
     const session = localSession(offer.sessionId);
@@ -397,6 +408,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // 'cancelled' (cancelRequested). A cancel for a turn we are NOT running
     // (daemon restarted mid-turn) is acked and resolves when the turn is
     // reconciled or retried.
+    return true;
   }
 
   const isLeaseDeath = (e: unknown) =>
@@ -430,12 +442,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }
         const leaseRef = lease!;
         const offers = await claim(lane);
+        let anyNew = offers.length === 0; // empty = the long-poll waited; no spin
         for (const offer of offers) {
           if (stopped) break;
-          if (lane === "control") void handleCancel(offer, leaseRef);
-          else if (offer.kind === "spawn_session") await handleSpawn(offer, leaseRef);
-          else if (offer.kind === "prompt") void runTurn(offer, leaseRef);
+          if (lane === "control") {
+            if (await handleCancel(offer, leaseRef)) anyNew = true;
+          } else if (offer.kind === "spawn_session") { await handleSpawn(offer, leaseRef); anyNew = true; }
+          else if (offer.kind === "prompt") { void runTurn(offer, leaseRef); anyNew = true; }
         }
+        // A standing offer we already handled returns INSTANTLY from claim —
+        // without this pause the loop hot-polls until the turn terminalizes.
+        if (!anyNew) await sleep(2_000);
       } catch (e) {
         if (isLeaseDeath(e)) {
           // Superseded (another daemon generation holds this machineId) or
