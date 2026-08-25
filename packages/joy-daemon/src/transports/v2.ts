@@ -48,16 +48,21 @@ function git(cwd: string, args: string[]): Promise<{ code: number; stdout: strin
   });
 }
 
-/** Parse `git status --porcelain=v2 --branch` into a typed shape. */
+/** Parse `git status --porcelain=v2 --branch -z` (NUL-separated) into a
+ *  typed shape. -z means paths arrive raw — no C-quoting to undo — and a
+ *  rename's original path is the FOLLOWING record. Unmerged (`u`) records
+ *  surface as conflicted entries; a conflict-only tree is NOT clean. */
 export function parsePorcelainV2(out: string): {
   branch: string | null; oid: string | null; upstream: string | null;
   ahead: number; behind: number; clean: boolean;
-  entries: Array<{ path: string; staged: string; unstaged: string; untracked?: boolean; renamedFrom?: string }>;
+  entries: Array<{ path: string; staged: string; unstaged: string; untracked?: boolean; conflicted?: boolean; renamedFrom?: string }>;
 } {
   let branch: string | null = null, oid: string | null = null, upstream: string | null = null;
   let ahead = 0, behind = 0;
-  const entries: Array<{ path: string; staged: string; unstaged: string; untracked?: boolean; renamedFrom?: string }> = [];
-  for (const line of out.split("\n")) {
+  const entries: Array<{ path: string; staged: string; unstaged: string; untracked?: boolean; conflicted?: boolean; renamedFrom?: string }> = [];
+  const records = out.split("\0");
+  for (let i = 0; i < records.length; i++) {
+    const line = records[i];
     if (!line) continue;
     if (line.startsWith("# branch.head ")) branch = line.slice(14).trim() || null;
     else if (line.startsWith("# branch.oid ")) oid = line.slice(13).trim() || null;
@@ -71,12 +76,16 @@ export function parsePorcelainV2(out: string): {
       const xy = parts[1] ?? "..";
       entries.push({ path: parts.slice(8).join(" "), staged: xy[0] === "." ? "" : xy[0], unstaged: xy[1] === "." ? "" : xy[1] });
     } else if (line.startsWith("2 ")) {
-      // 2 XY sub mH mI mW hH hI Xscore path<TAB>origPath
+      // 2 XY sub mH mI mW hH hI Xscore path NUL origPath
       const parts = line.split(" ");
       const xy = parts[1] ?? "..";
-      const tail = parts.slice(9).join(" ");
-      const [path, orig] = tail.split("\t");
-      entries.push({ path, staged: xy[0] === "." ? "" : xy[0], unstaged: xy[1] === "." ? "" : xy[1], renamedFrom: orig });
+      const orig = records[++i]; // -z: original path is the next record
+      entries.push({ path: parts.slice(9).join(" "), staged: xy[0] === "." ? "" : xy[0], unstaged: xy[1] === "." ? "" : xy[1], renamedFrom: orig });
+    } else if (line.startsWith("u ")) {
+      // u XY sub m1 m2 m3 mW h1 h2 h3 path
+      const parts = line.split(" ");
+      const xy = parts[1] ?? "..";
+      entries.push({ path: parts.slice(10).join(" "), staged: xy[0] === "." ? "" : xy[0], unstaged: xy[1] === "." ? "" : xy[1], conflicted: true });
     } else if (line.startsWith("? ")) {
       entries.push({ path: line.slice(2), staged: "", unstaged: "", untracked: true });
     }
@@ -84,7 +93,8 @@ export function parsePorcelainV2(out: string): {
   return { branch, oid, upstream, ahead, behind, clean: entries.length === 0, entries };
 }
 
-function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+type BodyResult = { ok: true; body: Record<string, unknown> } | { ok: false; status: number; error: string };
+function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
   const MAX_BODY = 10 * 1024 * 1024;
   return new Promise(resolve => {
     let data = "";
@@ -92,16 +102,18 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
     req.on("data", chunk => {
       if (overflow) return;
       data += chunk;
-      if (data.length > MAX_BODY) { overflow = true; data = ""; req.destroy(); resolve({}); }
+      if (data.length > MAX_BODY) { overflow = true; data = ""; req.destroy(); resolve({ ok: false, status: 413, error: "body_too_large" }); }
     });
     req.on("end", () => {
       if (overflow) return;
+      if (data === "") return resolve({ ok: true, body: {} });
       try {
         const parsed = JSON.parse(data);
-        resolve(parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {});
-      } catch { resolve({}); }
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return resolve({ ok: true, body: parsed as Record<string, unknown> });
+        resolve({ ok: false, status: 400, error: "bad_json" });
+      } catch { resolve({ ok: false, status: 400, error: "bad_json" }); }
     });
-    req.on("error", () => resolve({}));
+    req.on("error", () => resolve({ ok: false, status: 400, error: "bad_body" }));
   });
 }
 
@@ -389,7 +401,9 @@ route("GET", "/v2/sessions/:id/files/diff", withSession(async (ctx, session) => 
 
 // ── session git (NEW: porcelain parsed daemon-side) ─────────────────────────
 route("GET", "/v2/sessions/:id/git/status", withSession(async (_ctx, session) => {
-  const r = await git(session.cwd, ["status", "--porcelain=v2", "--branch"]);
+  // "--" "." scopes to the session cwd even when it is a subdirectory of a
+  // larger repository (git otherwise reports the whole worktree).
+  const r = await git(session.cwd, ["status", "--porcelain=v2", "--branch", "-z", "--", "."]);
   if (r.code !== 0) return ok({ ok: false, error: r.stderr.trim() || "git failed" });
   return ok({ ok: true, ...parsePorcelainV2(r.stdout) });
 }));
@@ -413,6 +427,8 @@ route("GET", "/v2/sessions/:id/git/diff", withSession(async (ctx, session) => {
     const j = jailed(session, p);
     if (!j.ok) return ok({ ok: false, error: j.error }, 400);
     args.push("--", j.path);
+  } else {
+    args.push("--", "."); // scope to the session cwd, not the whole worktree
   }
   const r = await git(session.cwd, args);
   if (r.code !== 0) return ok({ ok: false, error: r.stderr.trim() || "git failed" });
@@ -444,8 +460,12 @@ export async function handleV2(ctx: Ctx): Promise<boolean> {
     if (!m) continue;
     const params: Record<string, string> = {};
     r.names.forEach((n, i) => { params[n] = decodeURIComponent(m[i + 1]); });
-    const body = ctx.method === "POST" || ctx.method === "PUT" || ctx.method === "PATCH"
-      ? await readJsonBody(ctx.req) : {};
+    let body: Record<string, unknown> = {};
+    if (ctx.method === "POST" || ctx.method === "PUT" || ctx.method === "PATCH") {
+      const parsed = await readJsonBody(ctx.req);
+      if (!parsed.ok) { json({ error: parsed.error }, parsed.status); return true; }
+      body = parsed.body;
+    }
     try {
       const out = await r.handler(ctx, params, body);
       if (out === null) return true; // SSE — handler owns the response

@@ -41,7 +41,7 @@ async function one(t, sql, params) {
 }
 
 /** Allocate the next seq for a session and bump revision. Caller is in tx. */
-async function nextSeq(t, sessionId) {
+export async function nextSeq(t, sessionId) {
   const row = await one(
     t,
     `UPDATE native_sessions SET next_seq = next_seq + 1, revision = revision + 1, updated_at = now()
@@ -51,7 +51,7 @@ async function nextSeq(t, sessionId) {
   return { seq: String(row.seq), revision: String(row.revision) };
 }
 
-async function appendEvent(t, sessionId, seq, fields) {
+export async function appendEvent(t, sessionId, seq, fields) {
   const eventId = fields.eventId ?? randomUUID();
   await t.query(
     `INSERT INTO session_events (session_id, seq, event_id, kind, command_id, turn_id,

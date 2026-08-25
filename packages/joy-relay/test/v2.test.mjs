@@ -117,12 +117,13 @@ describe('v2 sessions + messages lifecycle', () => {
     let msg = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${messageId}`);
     expect(msg.json.status).toBe('queued');
 
-    // Claim + ack: command delivered, turn still queued → message still queued.
+    // Claim + ack: the daemon now HOLDS the payload — the message must stop
+    // reading as queued (editable) the moment the ack lands.
     const offers = await d.claim('work');
     const offer = offers.find((o) => o.sessionId === sessionId);
     await d.received(offer.deliveryId);
     msg = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${messageId}`);
-    expect(msg.json.status).toBe('queued');
+    expect(msg.json.status).toBe('delivering');
 
     // Submitted → dispatching → "delivering".
     await d.submitted(turnId);
@@ -167,9 +168,21 @@ describe('v2 sessions + messages lifecycle', () => {
     const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'first' } })).json;
     const m2 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'second' } })).json;
 
+    const evBefore = (await call('GET', `/joy/v2/sessions/${sessionId}/events`)).json.messages.length;
     const edited = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`, { body: { ciphertext: 'first-edited' } });
     expect(edited.status).toBe(200);
     expect(edited.json.ciphertext).toBe('first-edited');
+    // The edit is durable: a replaying device must see it, not the original.
+    const evAfter = (await call('GET', `/joy/v2/sessions/${sessionId}/events`)).json.messages;
+    expect(evAfter.length).toBe(evBefore + 1);
+    expect(evAfter.at(-1).kind).toBe('message.edited');
+    expect(evAfter.at(-1).content.ciphertext).toBe('first-edited');
+
+    // position must be a non-negative integer index — nothing else moves rows.
+    for (const bad of ['zzz', -1, 1.5]) {
+      const r = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`, { body: { position: bad } });
+      expect(r.status).toBe(400);
+    }
 
     // Move the second message to the head.
     const moved = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m2.messageId}`, { body: { position: 0 } });
@@ -244,6 +257,11 @@ describe('v2 retry (orphaned only)', () => {
     expect(retried.json.messageId).toBe(m1.messageId);
     const again = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`);
     expect(again.json.status).toBe('queued');
+
+    // Lost-ack: retrying an already-requeued message replays 202, never 409.
+    const replay = await call('POST', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}/retry`);
+    expect(replay.status).toBe(202);
+    expect(replay.json.replay).toBe(true);
 
     await d.acquire(); // new lease, new epoch
     const offers = await d.claim('work');
@@ -414,5 +432,107 @@ describe('v2 does not disturb v1', () => {
     const sessionId = await makeSession(d);
     const v1 = await call('GET', '/joy/v1/sessions');
     expect(v1.json.sessions.some((s) => s.sessionId === sessionId)).toBe(true);
+  });
+});
+
+describe('review fixes: regression coverage', () => {
+  it('retry refuses an orphan with a pending cancellation', async () => {
+    const d = makeDaemon('mach-rx-cxl');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'x' } })).json;
+    await deliverHead(d, sessionId);
+    // Cancellation lands while running, then the daemon dies → orphaned WITH
+    // cancel_requested still set.
+    const cxl = await call('POST', `/joy/v2/sessions/${sessionId}/turns/${m1.turnId}/cancellations`, { body: {} });
+    expect(cxl.json.disposition).toBe('cancellation_requested');
+    await db.query(`UPDATE daemon_leases SET expires_at = now() - interval '1 minute' WHERE id = $1`, [d.leaseId]);
+    await core.sweepExpiredLeases();
+    const r = await call('POST', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}/retry`);
+    expect(r.status).toBe(409);
+    expect(r.json.error).toBe('cancellation_pending');
+  });
+
+  it('cancellation precondition catches a DISPATCHING turn (active_turn_id still null)', async () => {
+    const d = makeDaemon('mach-disp');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'x' } })).json;
+    const offers = await d.claim('work');
+    const offer = offers.find((o) => o.sessionId === sessionId);
+    await d.received(offer.deliveryId);
+    await d.submitted(m1.turnId); // dispatching — /start never happened
+    const wrong = await call('POST', `/joy/v2/sessions/${sessionId}/turns/${randomUUID()}/cancellations`, { body: {} });
+    expect(wrong.status).toBe(409);
+    expect(wrong.json.activeTurnId).toBe(m1.turnId);
+  });
+
+  it('ephemeral fence: foreign daemon lease is refused; inactive turn is refused', async () => {
+    const dA = makeDaemon('mach-eph-a');
+    await dA.acquire();
+    const sessionId = await makeSession(dA);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'x' } })).json;
+
+    // Another machine's perfectly valid lease must NOT be able to emit into
+    // this session's stream by guessing the turn id.
+    const dB = makeDaemon('mach-eph-b');
+    await dB.acquire();
+    const foreign = await call('POST', `/joy/v2/daemon/turns/${m1.turnId}/facts`, {
+      body: { type: 'output', ephemeral: true, ciphertext: 'injected' }, headers: dB.headers(),
+    });
+    expect(foreign.status).toBe(403);
+
+    // The owner daemon on a turn that is not executing yet: refused too.
+    const early = await call('POST', `/joy/v2/daemon/turns/${m1.turnId}/facts`, {
+      body: { type: 'output', ephemeral: true, ciphertext: 'too-soon' }, headers: dA.headers(),
+    });
+    expect(early.status).toBe(409);
+
+    // Expired (but unreleased) lease: refused even with the right epoch.
+    await deliverHead(dA, sessionId);
+    await db.query(`UPDATE daemon_leases SET expires_at = now() - interval '1 minute' WHERE id = $1`, [dA.leaseId]);
+    const expired = await call('POST', `/joy/v2/daemon/turns/${m1.turnId}/facts`, {
+      body: { type: 'output', ephemeral: true, ciphertext: 'zombie' }, headers: dA.headers(),
+    });
+    expect(expired.status).toBe(412);
+  });
+
+  it('status filter applies before the page limit', async () => {
+    const d = makeDaemon('mach-filter');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'a' } })).json;
+    await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'b' } });
+    await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'c' } });
+    // Complete the first message so the seq-ordered prefix is non-queued.
+    await deliverHead(d, sessionId);
+    await d.fact(m1.turnId, { type: 'terminal', terminalState: 'completed', runtimeEventId: randomUUID() });
+    const r = await call('GET', `/joy/v2/sessions/${sessionId}/messages?status=queued&limit=2`);
+    // Old behavior: LIMIT 2 fetched [delivered, queued] then filtered → 1.
+    expect(r.json.messages.length).toBe(2);
+    expect(r.json.messages.every((x) => x.status === 'queued')).toBe(true);
+  });
+
+  it('attachment sweep spares intent-marked rows and eats aged orphans', async () => {
+    const d = makeDaemon('mach-sweep');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const { createAttachments } = await import('../src/attachments.mjs');
+    const att = createAttachments(db);
+    const up = async (s) => (await call('POST', '/joy/v2/attachments', {
+      raw: Buffer.from(s), headers: { 'x-session': sessionId },
+    })).json.attachmentId;
+    const orphan = await up('never-referenced');
+    const cited = await up('cited-in-a-message');
+    const ok = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, {
+      body: { ciphertext: 'msg', attachments: [cited] },
+    });
+    expect(ok.status).toBe(202);
+    // Age everything past the TTL; the referenced row must survive the sweep.
+    await db.query(`UPDATE attachments SET created_at = now() - interval '2 days'`);
+    const swept = await att.sweepOrphans();
+    expect(swept).toBe(1);
+    expect((await call('GET', `/joy/v2/attachments/${orphan}`)).status).toBe(404);
+    expect((await call('GET', `/joy/v2/attachments/${cited}`)).status).toBe(200);
   });
 });

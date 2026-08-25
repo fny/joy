@@ -38,6 +38,9 @@ export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse
   const wire = sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {} }, opts.body ?? new Uint8Array(0));
 
   const entry = opts.entryBase ?? "/joy/v1/daemons";
+  // entryBase is a PATH, never an authority: raw concatenation would let
+  // "@evil.example/x" rehost the URL and leak the account bearer there.
+  if (!/^\/[A-Za-z0-9/._-]*$/.test(entry)) throw new Error(`invalid entryBase: ${entry}`);
   const r = await fetch(`${opts.relayUrl}${entry}/${encodeURIComponent(opts.machineId)}/http`, {
     method: "POST",
     headers: { authorization: `Bearer ${opts.accountToken}`, "content-type": "application/octet-stream" },
