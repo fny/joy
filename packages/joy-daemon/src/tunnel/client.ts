@@ -16,6 +16,9 @@ export interface TunnelFetchOpts {
   headers?: Record<string, string>;
   body?: Uint8Array;
   onChunk?: (chunk: Uint8Array) => void; // streaming consumers (SSE, large files)
+  /** Relay entry route. Default: the v1 path; pass "/joy/v2/machines" for the
+   *  v2 entry — the tunnel protocol behind either entry is identical. */
+  entryBase?: string;
 }
 
 export interface TunnelResponse { status: number; headers: Record<string, string>; body: Uint8Array }
@@ -34,7 +37,8 @@ export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse
   const key = deriveTunnelKey(opts.masterSecret, opts.machineId);
   const wire = sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {} }, opts.body ?? new Uint8Array(0));
 
-  const r = await fetch(`${opts.relayUrl}/joy/v1/daemons/${encodeURIComponent(opts.machineId)}/http`, {
+  const entry = opts.entryBase ?? "/joy/v1/daemons";
+  const r = await fetch(`${opts.relayUrl}${entry}/${encodeURIComponent(opts.machineId)}/http`, {
     method: "POST",
     headers: { authorization: `Bearer ${opts.accountToken}`, "content-type": "application/octet-stream" },
     body: wire as any,
