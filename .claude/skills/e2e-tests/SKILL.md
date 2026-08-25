@@ -3,23 +3,34 @@ name: e2e-tests
 description: Run the joy end-to-end suite as an agent — drive joy-app in a browser against a freshly-built joy-daemon, asserting session artifacts (Claude log, happy-server seq, tmux window, UI) stay consistent and in order.
 ---
 
-In `packages/joy-app` and `packages/joy-daemon` you'll find a React Native application and a tmux controller respectively. These both communicate via `packages/happy-server`, which must **never be modified**.
+In `packages/joy-app` and `packages/joy-daemon` you'll find a React Native application and a tmux controller respectively. They communicate through `packages/joy-relay`, which serves the native `/joy/v1` + `/joy/v2` surfaces itself and proxies everything else to `packages/happy-server` — which must **never be modified**.
 
-You will test these by launching `joy-app` as a web app via `/chrome-cli`, creating a new account + session, and running `joy-daemon` attached to an **isolated** home/tmux/port set (below). Run the whole flow end to end.
+You will test the EXACT prod topology, entirely on this box: `stack.sh` boots a local happy-server (standalone PGlite mode) plus a local joy-relay in front of it, the app runs as a web build via `/chrome-cli` pointed at the relay, and a dedicated joy-daemon process is pinned to the relay's test port. No request leaves the machine; accounts are throwaway by construction (they live in the stack's own PGlite and die with `stack.sh reset`). Run the whole flow end to end.
 
 If anything breaks: make a note, attempt to fix it with a focused commit, and continue the suite. If state is ever contaminated, purge whatever data was created and continue from that point rather than rerunning the whole suite.
 
+## The prod-mirror stack
+
+```bash
+.claude/skills/e2e-tests/stack.sh start   # happy-server :3005 (pglite) + joy-relay :3105
+.claude/skills/e2e-tests/stack.sh status  # both pids
+.claude/skills/e2e-tests/stack.sh stop
+.claude/skills/e2e-tests/stack.sh reset   # stop + WIPE all server/relay state (accounts, sessions, v2 store)
+```
+
+State and logs live under `~/.joy-e2e/` (`happy-data/`, `relay-data/`, `logs/`). The relay URL for EVERYTHING — app server URL, daemon `JOY_RELAY_URL`, happy-cli `HAPPY_SERVER_URL`, curl checks — is **`http://127.0.0.1:3105`**. Never point any harness piece at a remote server; the deployed relays and Happy Cloud are out of bounds for tests.
+
 ## Test account (create fresh, or reuse a saved one)
 
-Run against a **throwaway account** on the test server `https://api.cluster-fluster.com` (NOT prod) — never point the harness at prod. Get an account one of two ways:
+Run against a **throwaway account on the local stack** — created through the app's normal "Create Account" flow, stored in the stack's own PGlite. Get an account one of two ways:
 
-- **Create fresh (default):** follow Test 0 (Create Account) in the browser. Use this whenever you don't have a saved account key on hand.
+- **Create fresh (default):** follow Test 0 (Create Account) in the browser. After a `stack.sh reset` this is the ONLY way — the old account is gone with the database.
 - **Reuse a saved account:** if you already have the account's restore secret key, log in with Login → "Restore with Secret Key Instead" → paste key (on success the app `router.back()`s to the QR page, which LOOKS like a failure — check `/` for the session list). **Do NOT paste any restore key into this file** — it's committable; keep account secrets outside the repo (e.g. a local scratch note).
 
 **Daemon credentials MUST be a dataKey account.** A legacy-credential account makes *every* machineRPC silently return `null` — `joy-create-session` fails with `Cannot use 'in' operator … in null`, and the same symptom appears if a machine's stored key drifts from the server's machine record (a machineKey mismatch after a re-auth). A fresh "Create Account" is dataKey; verify via the RPC health check (Setup step 5), don't assume. Standard daemon start once creds exist under `~/.joy-test`:
-  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux HAPPY_HOME_DIR=$HOME/.joy-test PORT=4999 TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`
+  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux HAPPY_HOME_DIR=$HOME/.joy-test JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`
 
-**Mint fresh daemon creds non-interactively (~1 min):** run `HAPPY_HOME_DIR=$HOME/.joy-test HAPPY_SERVER_URL=https://api.cluster-fluster.com npx tsx joytest-auth.ts` from `packages/happy-cli`; it prints `APPROVE_KEY=<key>`; in a browser already logged into the target account open `http://localhost:8082/terminal/connect#key=<key>` and click "Accept Connection"; the script writes a fresh dataKey `access.key` + `settings.json` (with a new machineId) into `$HAPPY_HOME_DIR` and exits `WROTE_DATAKEY`. Then verify RPC health (Setup step 5) before testing.
+**Mint fresh daemon creds non-interactively (~1 min):** run `HAPPY_HOME_DIR=$HOME/.joy-test HAPPY_SERVER_URL=http://127.0.0.1:3105 npx tsx joytest-auth.ts` from `packages/happy-cli`; it prints `APPROVE_KEY=<key>`; in a browser already logged into the target account open `http://localhost:8082/terminal/connect#key=<key>` and click "Accept Connection"; the script writes a fresh dataKey `access.key` + `settings.json` (with a new machineId) into `$HAPPY_HOME_DIR` and exits `WROTE_DATAKEY`. Then verify RPC health (Setup step 5) before testing.
 
 `joytest-auth.ts` is an UNTRACKED file — recreate it at `packages/happy-cli/joytest-auth.ts` from this source if it's gone (it's the non-interactive daemon-auth helper: replicates happy-cli's `waitForAuthentication` without the Ink TUI):
 
@@ -100,9 +111,10 @@ If a previous run left state, kill/remove it first (see Setup).
 ## Setup (run once, fail-fast — do not start tests until all pass)
 
 1. **Build gate.** `pnpm install`, then `pnpm -C packages/joy-daemon typecheck && pnpm -C packages/joy-daemon test` and `pnpm -C packages/joy-app typecheck`. tsx ships TS errors as *runtime* crashes, so never e2e-test code that doesn't typecheck.
+1a. **Stack up.** `stack.sh start` and wait for "stack healthy". `stack.sh reset` first when you want a pristine database. Sanity: `curl -s http://127.0.0.1:3105/joy/v1/capabilities` (native) and a junk `POST /v1/auth/request` through the relay must answer with a real happy-server response (proxy path).
 2. **Purge stale state.** Kill any `joy-test` tmux session, any process on `:4999` and `:8082`; `rm -rf $HOME/.joy-test $HOME/joy-test`.
-3. **Fresh bundle.** Start Metro with `--clear` on `:8082`. **Verify the served bundle is fresh** (Metro's file-watcher can silently serve a frozen bundle, and the browser caches modules) — grep the served bundle for a known-current string and hard-reload chrome (clear its cache) before trusting the UI.
-4. **Start the daemon from latest source:** `PORT=4999 HAPPY_HOME_DIR=$HOME/.joy-test TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`. Confirm the process start-time is *after* HEAD's commit (a long-lived tsx daemon does NOT hot-reload).
+3. **Fresh bundle.** Start Metro with `--clear` on `:8082`, with `EXPO_PUBLIC_HAPPY_SERVER_URL=http://127.0.0.1:3105` so the app targets the local relay (or set the custom server URL in the app UI). **Verify the served bundle is fresh** (Metro's file-watcher can silently serve a frozen bundle, and the browser caches modules) — grep the served bundle for a known-current string and hard-reload chrome (clear its cache) before trusting the UI.
+4. **Start the daemon from latest source** (pinned to the test relay): `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 HAPPY_HOME_DIR=$HOME/.joy-test TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`. Confirm the process start-time is *after* HEAD's commit (a long-lived tsx daemon does NOT hot-reload).
 5. **RPC health check (critical).** Once an account + session exist, make one `machineRPC` call (e.g. list sessions) and assert it returns **non-null**. A legacy-credential account makes *every* RPC silently return `null` — abort the suite with a clear message if so. A fresh "Create Account" should be a **dataKey** account; verify, don't assume.
 
 ## Definitions — "session artifacts" and how to validate them
@@ -148,9 +160,10 @@ The tests are split into three suite files in this directory:
 | **Chat** (agent-agnostic) | `suite-chat.md` | The shared pipeline: create/send/receive, ordering, exactly-once, queueing, abort, restart-history, terminal view, multi-client. **Run once with AGENT=claude and once with AGENT=codex.** |
 | **Claude** | `suite-claude.md` | claude-only: background tasks/agents (teal N/M), joy-bg long-running, permission prompts, slash commands, continue/fork/resume-by-id, transcript-binding recovery (dotted dirs, blind recover, two-sessions-one-dir), final integration. |
 | **Codex** | `suite-codex.md` | codex-only: new-session codex options, model identity, attach TUI, thread resume, orphan rejoin, non-yolo approvals, settings persistence. |
+| **v2** | `suite-v2.md` | the native /joy/v2 durable plane through the app's dev "Relay v2 Mode": queueing, delivery states, ephemeral streaming, retry, cancellation, attachments. Daemon side driven by the scripted actor until the real daemon grows a nucleus lane. |
 
 **Run order:** Setup + Test 0 (below) → chat suite (AGENT=claude) → claude suite →
-chat suite (AGENT=codex) → codex suite → Teardown.
+chat suite (AGENT=codex) → codex suite → v2 suite → Teardown.
 
 ## Test 0: Create a new account
 
@@ -166,4 +179,5 @@ chat suite (AGENT=codex) → codex suite → Teardown.
 - Archive/kill any sessions created; confirm their tmux windows are gone.
 - Stop the test daemon (`:4999`); kill the `joy-test` tmux session.
 - `rm -rf $HOME/.joy-test $HOME/joy-test` and the chrome `--user-data-dir`.
-- Leave prod (`:4997`/`~/.happy`) and the harness (`:4998`/`~/.happy-e2e`) untouched.
+- `stack.sh stop` (or `stack.sh reset` to also wipe accounts/sessions for the next run).
+- Leave the LIVE daemon on this box and the deployed relays untouched.
