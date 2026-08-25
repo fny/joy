@@ -12,6 +12,7 @@ import { join } from "path";
 import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import { buildOpenApiSpec } from "./openapi";
+import { handleV2 } from "./v2";
 
 interface CompiledRoute {
   method: HttpMethod;
@@ -99,7 +100,7 @@ export function startHttpServer(opts: {
     const origin = (req.headers.origin as string | undefined) ?? "";
 
     const corsHeaders: Record<string, string> = {
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, X-Joy-Token",
     };
     // Only echo back known origins; unknown origins get no ACAO header (blocks reads)
@@ -138,9 +139,14 @@ export function startHttpServer(opts: {
       return json({ error: "forbidden host" }, 403);
     }
 
-    // Token check on all mutating routes
-    if (method === "POST" || method === "DELETE") {
+    // Token check on all mutating routes (PUT/PATCH exist on the v2 surface only)
+    if (method === "POST" || method === "DELETE" || method === "PUT" || method === "PATCH") {
       if (req.headers["x-joy-token"] !== token) return json({ error: "unauthorized" }, 401);
+    }
+
+    // v2 machine-plane surface — additive, dispatched before the v1 catalog.
+    if (url.pathname === "/v2" || url.pathname.startsWith("/v2/")) {
+      if (await handleV2({ registry, method, url, req, res, corsHeaders })) return;
     }
 
     // OpenAPI dump of the operation catalog — keyed even though it's a GET
