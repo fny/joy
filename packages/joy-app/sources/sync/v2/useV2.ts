@@ -56,36 +56,70 @@ export function useV2Session(sessionId: string): V2SessionLive {
     const [error, setError] = React.useState<string | null>(null);
     const cursor = React.useRef('0');
     const known = React.useRef(new Set<string>());
+    // Serialize pulls: an in-flight guard so overlapping timer/poke/refresh
+    // calls can't interleave and let an older response clobber newer state or
+    // walk the cursor backwards. A pull requested while one runs re-runs once.
+    const pulling = React.useRef(false);
+    const pending = React.useRef(false);
+    // Turns that reached a durable terminal — a late ephemeral frame for one
+    // must NOT resurrect its streaming bubble (poll-clears / SSE-arrives race).
+    const settled = React.useRef(new Set<string>());
+
+    // Reset ALL cursored state when the session id changes — otherwise a reused
+    // component instance shows session A's events and asks B for events after
+    // A's cursor, skipping B's history (per-session sequence spaces).
+    React.useEffect(() => {
+        cursor.current = '0';
+        known.current = new Set();
+        settled.current = new Set();
+        setState(null); setMessages([]); setEvents([]); setStreaming({}); setError(null);
+    }, [sessionId]);
+
+    const pullOnce = React.useCallback(async () => {
+        const [s, m] = await Promise.all([v2.sessionState(sessionId), v2.listMessages(sessionId)]);
+        setState(s);
+        setMessages(m.messages);
+        for (;;) {
+            const page = await v2.listEvents(sessionId, cursor.current);
+            const fresh = page.messages.filter(e => !known.current.has(e.id));
+            const lastSeq = page.messages[page.messages.length - 1]?.seq;
+            // Cursor only ever moves FORWARD (a late duplicate page must not
+            // rewind it and re-stream settled turns).
+            if (lastSeq && Number(lastSeq) > Number(cursor.current)) cursor.current = lastSeq;
+            if (fresh.length > 0) {
+                for (const e of fresh) known.current.add(e.id);
+                setEvents(prev => [...prev, ...fresh]);
+                // ANY durable block for a turn (output OR a terminal event,
+                // which may carry no content) ends its streaming text.
+                setStreaming(prev => {
+                    const next = { ...prev };
+                    for (const e of fresh) {
+                        if (!e.turnId) continue;
+                        if (e.kind === 'turn.terminal') settled.current.add(e.turnId);
+                        if (e.content || e.kind === 'turn.terminal') delete next[e.turnId];
+                    }
+                    return next;
+                });
+            }
+            if (!page.hasMore) break;
+        }
+        setError(null);
+    }, [sessionId]);
 
     const pull = React.useCallback(async () => {
+        if (pulling.current) { pending.current = true; return; }
+        pulling.current = true;
         try {
-            const [s, m] = await Promise.all([v2.sessionState(sessionId), v2.listMessages(sessionId)]);
-            setState(s);
-            setMessages(m.messages);
-            // Cursored event pull; loop while the log is ahead of us.
-            for (;;) {
-                const page = await v2.listEvents(sessionId, cursor.current);
-                const fresh = page.messages.filter(e => !known.current.has(e.id));
-                if (fresh.length > 0) {
-                    for (const e of fresh) known.current.add(e.id);
-                    cursor.current = page.messages[page.messages.length - 1]?.seq ?? cursor.current;
-                    setEvents(prev => [...prev, ...fresh]);
-                    // A durable output/terminal block supersedes the streaming text.
-                    setStreaming(prev => {
-                        const next = { ...prev };
-                        for (const e of fresh) if (e.turnId && e.content) delete next[e.turnId];
-                        return next;
-                    });
-                } else if (page.messages.length > 0) {
-                    cursor.current = page.messages[page.messages.length - 1].seq;
-                }
-                if (!page.hasMore) break;
-            }
-            setError(null);
+            do {
+                pending.current = false;
+                await pullOnce();
+            } while (pending.current);
         } catch (e) {
             setError(String(e));
+        } finally {
+            pulling.current = false;
         }
-    }, [sessionId]);
+    }, [pullOnce]);
 
     React.useEffect(() => {
         let alive = true;
@@ -95,6 +129,7 @@ export function useV2Session(sessionId: string): V2SessionLive {
             onPoke: (sid) => { if (alive && sid === sessionId) void pull(); },
             onEphemeral: (sid, turnId, text) => {
                 if (!alive || sid !== sessionId || text === null) return;
+                if (settled.current.has(turnId)) return; // turn already ended — ignore
                 setStreaming(prev => ({ ...prev, [turnId]: (prev[turnId] ?? '') + text }));
             },
             onHello: () => { if (alive) setSseLive(true); },

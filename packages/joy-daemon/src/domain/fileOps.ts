@@ -12,8 +12,8 @@ import { moduleDir } from "../esm";
 import { createHash } from "crypto";
 import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
 import { promisify } from "util";
-import { existsSync, realpathSync } from "fs";
-import { readFile, writeFile, readdir, stat, unlink } from "fs/promises";
+import { existsSync, realpathSync, lstatSync } from "fs";
+import { readFile, writeFile, readdir, stat, lstat, unlink } from "fs/promises";
 import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, platform } from "os";
 
@@ -53,13 +53,19 @@ export interface DifftasticRequest { args: string[]; cwd?: string; }
 export interface DifftasticResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
 
 /** Resolve symlinks in `p` even when a suffix of it does not exist yet:
- *  realpath the deepest EXISTING ancestor (which also resolves a final-
- *  component symlink when the whole path exists) and re-append the
- *  untraversed remainder. Null only if realpath itself fails. */
+ *  realpath the deepest ancestor that EXISTS AS A LINK-OR-FILE-OR-DIR
+ *  (lstat, not existsSync — a dangling symlink "exists" as a link and must
+ *  NOT be treated as an unborn plain suffix, or an escaping link whose target
+ *  does not exist yet slips the jail on write). realpathSync then canonicalizes
+ *  that ancestor, chasing a final-component link when it resolves and throwing
+ *  (→ null → denied) on a dangling one. Remaining unborn components re-append. */
+function lexists(p: string): boolean {
+  try { lstatSync(p); return true; } catch { return false; }
+}
 function realResolve(p: string): string | null {
   let base = p;
   const tail: string[] = [];
-  while (!existsSync(base)) {
+  while (!lexists(base)) {
     const parent = dirname(base);
     if (parent === base) break; // filesystem root
     tail.unshift(basename(base));
@@ -83,7 +89,7 @@ function realResolve(p: string): string | null {
 // downstream operations cannot re-traverse a link the check already chased.
 // (Validation-to-use raciness — a dir swapped for a symlink after the check —
 // is not closed here; that needs O_NOFOLLOW-style opens.)
-export function validatePath(targetPath: string, workingDirectory: string, extraRoots: string[] = []): { valid: boolean; resolvedPath?: string; error?: string } {
+export function validatePath(targetPath: string, workingDirectory: string, extraRoots: string[] = []): { valid: boolean; resolvedPath?: string; lexicalPath?: string; error?: string } {
   // Expand a leading ~/ — resolve() doesn't, and the joy-img contract points at
   // files under the caller's home (the per-session media dir).
   const expanded = targetPath === "~" || targetPath.startsWith("~/")
@@ -106,7 +112,7 @@ export function validatePath(targetPath: string, workingDirectory: string, extra
   // readFile op passes the session's own ~/.joy/sessions/<id> dir so the app
   // can fetch joy-img media — each session reaches ONLY its own folder).
   if (!within(workingDirectory) && !extraRoots.some(within)) return denied;
-  return { valid: true, resolvedPath: realTarget };
+  return { valid: true, resolvedPath: realTarget, lexicalPath: resolvedTarget };
 }
 
 export async function handleBash(workingDirectory: string, data: BashRequest): Promise<BashResponse> {
@@ -219,9 +225,11 @@ export async function handleWriteFile(workingDirectory: string, data: WriteFileR
 export async function handleDeleteFile(workingDirectory: string, data: DeleteFileRequest): Promise<DeleteFileResponse> {
   const validation = validatePath(data.path, workingDirectory);
   if (!validation.valid) return { success: false, error: validation.error };
-  const targetPath = validation.resolvedPath!;
+  // Unlink the path the user NAMED (the link), never the canonical target —
+  // validatePath already proved the real target is inside the jail.
+  const targetPath = validation.lexicalPath ?? validation.resolvedPath!;
   try {
-    const info = await stat(targetPath);
+    const info = await lstat(targetPath);
     if (info.isDirectory()) return { success: false, error: "Path is a directory; only files can be deleted" };
     await unlink(targetPath);
     return { success: true };

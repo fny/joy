@@ -78,3 +78,11 @@ test("validatePath: extra root reached through an escaping symlink is denied", (
   // an extra root exists.
   expect(validatePath("link/secret.txt", jailDir, [join(jailDir, "real")]).valid).toBe(false);
 });
+
+test("validatePath: a DANGLING symlink out of the jail is denied (write escape)", () => {
+  // link → /outside/newfile that does not exist yet: must not pass as an
+  // unborn plain suffix (the pre-fix realResolve bug).
+  symlinkSync(join(outsideDir, "newfile.txt"), join(jailDir, "danglingOut"));
+  expect(validatePath("danglingOut", jailDir).valid).toBe(false);
+  expect(validatePath("danglingOut/child.txt", jailDir).valid).toBe(false);
+});

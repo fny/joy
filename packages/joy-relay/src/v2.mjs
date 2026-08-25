@@ -396,23 +396,30 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments }) 
       // session, and the turn is actually executing — otherwise any valid
       // lease could emit ciphertext into another account's stream.
       if (body.type === 'output' && body.ephemeral === true) {
-        const { rows: [l] } = await db.query(
-          `SELECT *, (expires_at < now()) AS is_expired FROM daemon_leases
-           WHERE id = $1 AND released_at IS NULL AND token_hash = $2`, [lease.id, lease.token_hash]);
-        if (!l) throw new ApiError(401, 'lease_unknown');
-        if (l.is_expired) throw new ApiError(412, 'lease_expired');
-        if (String(l.epoch) !== String(lease.epoch)) throw new ApiError(412, 'lease_epoch_stale');
-        const { rows: [row] } = await db.query(
-          `SELECT s.account_id, s.owner_daemon_id, s.id AS session_id, tu.state AS turn_state
-           FROM turns tu JOIN native_sessions s ON s.id = tu.session_id WHERE tu.id = $1`, [m[1]]);
-        if (!row) throw new ApiError(404, 'turn_not_found');
-        if (row.owner_daemon_id !== l.daemon_id || row.account_id !== l.account_id) {
-          throw new ApiError(403, 'not_owner_daemon');
-        }
-        if (!['dispatching', 'running', 'cancelling'].includes(row.turn_state)) {
-          throw new ApiError(409, 'turn_not_active');
-        }
-        notify.emitEphemeral(row.account_id, row.session_id, m[1], body.ciphertext);
+        // Read lease AND turn in ONE transaction so a replacement actor that
+        // bumps the epoch mid-check cannot slip a stale frame past the fence
+        // (validation-to-use race). The emit runs only after the snapshot
+        // agrees on epoch, ownership, and an executing turn.
+        const target = await db.tx(async (t) => {
+          const { rows: [l] } = await t.query(
+            `SELECT *, (expires_at < now()) AS is_expired FROM daemon_leases
+             WHERE id = $1 AND released_at IS NULL AND token_hash = $2`, [lease.id, lease.token_hash]);
+          if (!l) throw new ApiError(401, 'lease_unknown');
+          if (l.is_expired) throw new ApiError(412, 'lease_expired');
+          if (String(l.epoch) !== String(lease.epoch)) throw new ApiError(412, 'lease_epoch_stale');
+          const { rows: [row] } = await t.query(
+            `SELECT s.account_id, s.owner_daemon_id, s.id AS session_id, tu.state AS turn_state
+             FROM turns tu JOIN native_sessions s ON s.id = tu.session_id WHERE tu.id = $1`, [m[1]]);
+          if (!row) throw new ApiError(404, 'turn_not_found');
+          if (row.owner_daemon_id !== l.daemon_id || row.account_id !== l.account_id) {
+            throw new ApiError(403, 'not_owner_daemon');
+          }
+          if (!['dispatching', 'running', 'cancelling'].includes(row.turn_state)) {
+            throw new ApiError(409, 'turn_not_active');
+          }
+          return row;
+        });
+        notify.emitEphemeral(target.account_id, target.session_id, m[1], body.ciphertext);
         return { ok: true, ephemeral: true };
       }
       return core.turnFact(m[1], lease, body);

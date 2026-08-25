@@ -70,6 +70,18 @@ async function runTurn(offer) {
   }
 
   const prompt = decode(offer.ciphertext);
+  // Prove attachment REFERENCES reach the machine plane: fetch each cited id
+  // with the account token and note how many bytes arrived.
+  let attMarker = '';
+  if (Array.isArray(offer.attachments) && offer.attachments.length > 0) {
+    let bytes = 0;
+    for (const a of offer.attachments) {
+      const r = await fetch(`${RELAY}/joy/v2/attachments/${a.id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      if (r.ok) bytes += Buffer.from(await r.arrayBuffer()).length;
+    }
+    attMarker = ` [att:${offer.attachments.length}/${bytes}b]`;
+    log(`fetched ${offer.attachments.length} attachment(s), ${bytes}b`);
+  }
   if (MODE === 'slow') {
     // Hold the turn, watching the control lane for a cancellation.
     const deadline = Date.now() + 45_000;
@@ -92,7 +104,7 @@ async function runTurn(offer) {
     await api('POST', `/daemon/turns/${offer.turnId}/facts`, { ...H, body: { type: 'output', ephemeral: true, ciphertext: encode(piece) } });
     await sleep(400);
   }
-  await api('POST', `/daemon/turns/${offer.turnId}/facts`, { ...H, body: { type: 'output', ciphertext: encode(`echo: ${prompt}`), runtimeEventId: randomUUID() } });
+  await api('POST', `/daemon/turns/${offer.turnId}/facts`, { ...H, body: { type: 'output', ciphertext: encode(`echo: ${prompt}${attMarker}`), runtimeEventId: randomUUID() } });
   await api('POST', `/daemon/turns/${offer.turnId}/facts`, { ...H, body: { type: 'terminal', terminalState: 'completed', runtimeEventId: randomUUID() } });
   log(`turn ${offer.turnId.slice(0, 8)} completed`);
 }

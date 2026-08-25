@@ -114,6 +114,13 @@ const up2 = await fetch(`${RELAY}/joy/v2/attachments`, { method: 'POST', headers
 ok(up2.status === 200 && (await up2.json()).attachmentId === att.attachmentId, 'identical re-upload deduped to same id');
 const m5 = await api('POST', `/sessions/${sid}/messages`, { ciphertext: enc('with file'), clientIntentId: randomUUID(), attachments: [att.attachmentId] });
 ok(m5.status === 202, 'message citing attachment accepted');
+// The REFERENCE must reach the machine plane: the actor fetches the bytes and
+// folds a marker into its durable echo.
+const attEcho = await until(async () => {
+  const ev = (await api('GET', `/sessions/${sid}/events?after=0&limit=200`)).json?.messages ?? [];
+  return ev.some(e => e.content?.ciphertext?.includes(`[att:1/${bytes.length}b]`)) ? true : null;
+});
+ok(!!attEcho, 'attachment reference delivered to the daemon (actor fetched the bytes)');
 const got = await fetch(`${RELAY}/joy/v2/attachments/${att.attachmentId}`, { headers: { Authorization: `Bearer ${token}` } });
 ok((await got.text()) === bytes.toString() && got.headers.get('cache-control')?.includes('immutable'), 'attachment bytes + immutable caching');
 

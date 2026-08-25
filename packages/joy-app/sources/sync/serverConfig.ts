@@ -107,6 +107,12 @@ export function setRelayAccessKey(key: string | null, url: string = getServerUrl
     }
 }
 
+/** True only when both URLs share scheme+host+port. Prefix matching would
+ *  leak the perimeter key to a look-alike origin (relay.example vs
+ *  relay.example.evil.test). */
+function sameOrigin(a: string, b: string): boolean {
+    try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
+}
 let fetchInterceptorInstalled = false;
 /** Wrap global fetch ONCE: any request to the active relay origin gains the
  *  X-Joy-Relay-Key header (when a key is configured). One interception point
@@ -120,7 +126,7 @@ export function installRelayKeyFetchInterceptor(): void {
         try {
             const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
             const server = getServerUrl();
-            if (url.startsWith(server)) {
+            if (sameOrigin(url, server)) {
                 const key = getRelayAccessKey(server);
                 if (key) {
                     const headers = new Headers(init?.headers ?? (typeof input === 'object' && 'headers' in input ? (input as Request).headers : undefined));
