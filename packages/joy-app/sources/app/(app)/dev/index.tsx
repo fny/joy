@@ -209,6 +209,12 @@ export default function DevScreen() {
                     icon={<Ionicons name="pulse-outline" size={28} color="#007AFF" />}
                     onPress={() => router.push('/dev/session-state' as any)}
                 />
+                <Item
+                    title="Relay v2 Mode"
+                    subtitle="Drive sessions purely over the native /joy/v2 surface"
+                    icon={<Ionicons name="git-network-outline" size={28} color="#007AFF" />}
+                    onPress={() => router.push('/dev/v2' as any)}
+                />
             </ItemGroup>
 
             {/* Component Demos */}

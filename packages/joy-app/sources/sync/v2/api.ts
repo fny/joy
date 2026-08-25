@@ -1,0 +1,231 @@
+/**
+ * Relay v2 client — the native /joy/v2 durable plane, spoken directly.
+ *
+ * TESTING MODE ONLY (dev "Relay v2 Mode" screens): this bypasses the happy
+ * socket sync engine entirely and drives sessions through the v2 REST + SSE
+ * surface. Content rides the relay as an opaque "ciphertext" string; this
+ * mode uses a readable JSON envelope (encodeContent/decodeContent) instead of
+ * real sealing — the encryption seam is those two functions.
+ *
+ * The relay must be running the v2-mounted server.mjs (the dev relay
+ * entrypoint). The base URL is overridable per install (setV2BaseUrl) so the
+ * mode can target a local relay without touching the app's main server URL.
+ */
+import { randomUUID } from 'expo-crypto';
+import { getCurrentAuth } from '@/auth/AuthContext';
+import { getServerUrl } from '../serverConfig';
+import { MMKV } from 'react-native-mmkv';
+
+const v2Config = new MMKV({ id: 'v2-mode-config' });
+const V2_URL_KEY = 'v2-base-url';
+
+export function getV2BaseUrl(): string {
+    return v2Config.getString(V2_URL_KEY) || getServerUrl();
+}
+export function setV2BaseUrl(url: string | null): void {
+    if (url && url.trim()) v2Config.set(V2_URL_KEY, url.trim());
+    else v2Config.delete(V2_URL_KEY);
+}
+export function isV2UrlOverridden(): boolean {
+    return !!v2Config.getString(V2_URL_KEY);
+}
+
+export class V2ApiError extends Error {
+    constructor(public status: number, public code: string, public body: unknown) {
+        super(`v2 ${status}: ${code}`);
+        this.name = 'V2ApiError';
+    }
+}
+
+function token(): string {
+    const t = getCurrentAuth()?.credentials?.token;
+    if (!t) throw new V2ApiError(401, 'not_logged_in', null);
+    return t;
+}
+
+async function v2fetch(method: string, path: string, body?: unknown): Promise<any> {
+    const res = await fetch(`${getV2BaseUrl()}/joy/v2${path}`, {
+        method,
+        headers: {
+            'Authorization': `Bearer ${token()}`,
+            ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch { /* non-json */ }
+    if (!res.ok) throw new V2ApiError(res.status, json?.error ?? `http_${res.status}`, json);
+    return json;
+}
+
+// ── content envelope (the encryption seam) ──────────────────────────────────
+
+export function encodeContent(text: string): string {
+    return JSON.stringify({ v: 1, t: 'plain', text });
+}
+export function decodeContent(ciphertext: string | null | undefined): string | null {
+    if (!ciphertext) return null;
+    try {
+        const p = JSON.parse(ciphertext);
+        if (p && p.t === 'plain' && typeof p.text === 'string') return p.text;
+    } catch { /* not our envelope */ }
+    // Foreign/undecodable payload: show a marker, never crash the feed.
+    return `⟨${ciphertext.length}b payload⟩`;
+}
+
+// ── types (mirror the relay projections) ────────────────────────────────────
+
+export interface V2SessionRow {
+    sessionId: string;
+    daemonId: string;
+    localSessionId: string | null;
+    state: string;
+    revision: string;
+    headSeq: string;
+    queuedTurns: number;
+}
+
+export interface V2SessionState {
+    sessionId: string;
+    revision: string;
+    headSeq: string;
+    sessionState: string;
+    recoveryRequired: boolean;
+    daemon: { daemonId: string; status: 'online' | 'offline'; lastSeenAt: string | null; epoch: string | null };
+    queue: { queuedTurns: number; deliveredTurns: number };
+    execution: {
+        state: 'idle' | 'dispatching' | 'running' | 'cancelling' | 'orphaned';
+        turnId: string | null;
+        lastProgressAt: string | null;
+        suspectedStalled: boolean;
+        cancelRequested: boolean;
+    };
+}
+
+export interface V2Message {
+    id: string;
+    ciphertext: string;
+    status: 'queued' | 'delivering' | 'delivered' | 'failed' | 'cancelled';
+    failure?: { reason: string; retryable: boolean; mayHaveDelivered: boolean };
+    turnId: string;
+    seq: string;
+    createdAt: number;
+}
+
+export interface V2Event {
+    id: string;
+    seq: string;
+    kind: string;
+    turnId: string | null;
+    commandId: string | null;
+    content: { ciphertext: string } | null;
+    createdAt: number;
+}
+
+// ── sessions ────────────────────────────────────────────────────────────────
+
+export const v2 = {
+    listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
+    sessionState: (id: string): Promise<V2SessionState> => v2fetch('GET', `/sessions/${id}`),
+    createSession: (machineId: string, mode: 'spawn' | 'announce_existing' = 'spawn') =>
+        v2fetch('POST', '/sessions', { mode, daemonId: machineId, creationIntentId: randomUUID() }),
+    deleteSession: (id: string) => v2fetch('DELETE', `/sessions/${id}`),
+
+    listMessages: (id: string, status?: string): Promise<{ messages: V2Message[] }> =>
+        v2fetch('GET', `/sessions/${id}/messages${status ? `?status=${status}` : ''}`),
+    sendMessage: (id: string, text: string, attachments?: string[]) =>
+        v2fetch('POST', `/sessions/${id}/messages`, {
+            ciphertext: encodeContent(text),
+            clientIntentId: randomUUID(),
+            ...(attachments?.length ? { attachments } : {}),
+        }) as Promise<{ messageId: string; turnId: string; seq: string }>,
+    editMessage: (id: string, messageId: string, text: string): Promise<V2Message> =>
+        v2fetch('PATCH', `/sessions/${id}/messages/${messageId}`, { ciphertext: encodeContent(text) }),
+    moveMessage: (id: string, messageId: string, position: number): Promise<V2Message> =>
+        v2fetch('PATCH', `/sessions/${id}/messages/${messageId}`, { position }),
+    deleteMessage: (id: string, messageId: string) => v2fetch('DELETE', `/sessions/${id}/messages/${messageId}`),
+    retryMessage: (id: string, messageId: string) => v2fetch('POST', `/sessions/${id}/messages/${messageId}/retry`),
+
+    cancelTurn: (id: string, turnId: string) =>
+        v2fetch('POST', `/sessions/${id}/turns/${turnId}/cancellations`, { clientIntentId: randomUUID() }),
+
+    listEvents: (id: string, after?: string, limit = 200): Promise<{ messages: V2Event[]; hasMore: boolean }> =>
+        v2fetch('GET', `/sessions/${id}/events?after=${after ?? '0'}&limit=${limit}`),
+
+    /** Upload sealed (here: envelope-encoded) bytes; returns the attachment id. */
+    uploadAttachment: async (sessionId: string, bytes: Uint8Array): Promise<{ attachmentId: string; size: number }> => {
+        const res = await fetch(`${getV2BaseUrl()}/joy/v2/attachments`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token()}`, 'X-Session': sessionId },
+            body: bytes as unknown as BodyInit,
+        });
+        const json = await res.json();
+        if (!res.ok) throw new V2ApiError(res.status, (json as any)?.error ?? `http_${res.status}`, json);
+        return json as { attachmentId: string; size: number };
+    },
+};
+
+// ── SSE doorbell + ephemeral lane ───────────────────────────────────────────
+
+export interface V2StreamHandlers {
+    /** Content-free poke: something changed for a session — go pull. */
+    onPoke?: (sessionId: string, changed: string[]) => void;
+    /** Streaming delta (never persisted); superseded by the durable block. */
+    onEphemeral?: (sessionId: string, turnId: string, text: string | null) => void;
+    onHello?: (sessions: Array<{ sessionId: string; headSeq: string }>) => void;
+    /** Stream ended (network drop, unsupported platform) — poll-only from here. */
+    onClose?: () => void;
+}
+
+/**
+ * Live SSE where the platform supports streaming fetch (web/desktop). On
+ * native the reader may be unavailable — callers must ALWAYS poll as the
+ * baseline and treat this stream purely as a latency win.
+ * Returns an unsubscribe function.
+ */
+export function connectV2Stream(handlers: V2StreamHandlers): () => void {
+    let stopped = false;
+    const ctrl = new AbortController();
+    (async () => {
+        try {
+            const res = await fetch(`${getV2BaseUrl()}/joy/v2/events/stream`, {
+                headers: { 'Authorization': `Bearer ${token()}` },
+                signal: ctrl.signal,
+            });
+            const reader = (res.body as any)?.getReader?.();
+            if (!res.ok || !reader || typeof TextDecoder === 'undefined') {
+                if (!stopped) handlers.onClose?.();
+                return;
+            }
+            const decoder = new TextDecoder();
+            let buf = '';
+            while (!stopped) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                let idx: number;
+                while ((idx = buf.indexOf('\n\n')) >= 0) {
+                    const frame = buf.slice(0, idx);
+                    buf = buf.slice(idx + 2);
+                    if (frame.startsWith(':')) continue; // ping
+                    let event = 'message';
+                    let data = '';
+                    for (const line of frame.split('\n')) {
+                        if (line.startsWith('event: ')) event = line.slice(7);
+                        else if (line.startsWith('data: ')) data = line.slice(6);
+                    }
+                    if (!data) continue;
+                    try {
+                        const d = JSON.parse(data);
+                        if (event === 'hello') handlers.onHello?.(d.sessions ?? []);
+                        else if (event === 'ephemeral') handlers.onEphemeral?.(d.sessionId, d.turnId, decodeContent(d.ciphertext));
+                        else handlers.onPoke?.(d.sessionId ?? d.id, d.changed ?? []);
+                    } catch { /* malformed frame — skip */ }
+                }
+            }
+        } catch { /* aborted or network drop */ }
+        if (!stopped) handlers.onClose?.();
+    })();
+    return () => { stopped = true; ctrl.abort(); };
+}
