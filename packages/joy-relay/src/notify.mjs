@@ -55,6 +55,22 @@ export function createNotify() {
       };
     },
 
+    /** v2 streaming lane: content-bearing SSE frame, never persisted.
+     *  Loss is harmless BY CONSTRUCTION — the durable block that follows
+     *  supersedes every delta. */
+    emitEphemeral(accountId, sessionId, turnId, ciphertext) {
+      const set = sseClients.get(accountId);
+      if (!set) return;
+      const frame = `event: ephemeral
+data: ${JSON.stringify({ v: 1, sessionId, turnId, ciphertext })}
+
+`;
+      for (const client of set) {
+        if (!client.ready) { client.buf.push(frame); continue; }
+        try { client.res.write(frame); } catch { /* dead socket */ }
+      }
+    },
+
     pokeAccount(accountId, sessionId, changed) {
       const set = sseClients.get(accountId);
       if (!set) return;

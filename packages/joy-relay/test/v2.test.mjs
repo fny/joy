@@ -1,0 +1,418 @@
+// e2e for the ADDITIVE /joy/v2 surface: real HTTP server, real PGlite,
+// fake app + fake daemon driving both planes through v2 paths only.
+// v1 stays mounted beside it (native.test.mjs proves it unchanged).
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import * as http from 'node:http';
+import { randomUUID, createHash } from 'node:crypto';
+import { openDb } from '../src/db.mjs';
+import { createCore } from '../src/core.mjs';
+import { createNotify } from '../src/notify.mjs';
+import { createRouter } from '../src/routes.mjs';
+import { createV2Router } from '../src/v2.mjs';
+import { createTunnel } from '../src/tunnel.mjs';
+import { createAttachments } from '../src/attachments.mjs';
+
+const TOKENS = new Map([['app-token', 'account-1'], ['other-token', 'account-2']]);
+
+let server, base, db, core, notify;
+
+beforeAll(async () => {
+  db = await openDb(':memory:');
+  notify = createNotify();
+  core = createCore(db, notify);
+  const auth = { verifyToken: async (t) => TOKENS.get(t) ?? null };
+  const tunnel = createTunnel({ notify });
+  const attachments = createAttachments(db);
+  const v1 = createRouter({ core, auth, notify, db, tunnel });
+  const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments });
+  server = http.createServer(async (req, res) => {
+    if (await v2.handle(req, res)) return;
+    if (await v1.handle(req, res)) return;
+    res.writeHead(599); res.end('would-passthrough');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+
+afterAll(async () => {
+  server.close();
+  await db.close();
+});
+
+async function call(method, path, { body, token = 'app-token', headers = {}, raw } = {}) {
+  const r = await fetch(base + path, {
+    method,
+    headers: raw !== undefined
+      ? { authorization: `Bearer ${token}`, ...headers }
+      : { 'content-type': 'application/json', authorization: `Bearer ${token}`, ...headers },
+    body: raw !== undefined ? raw : (body === undefined ? undefined : JSON.stringify(body)),
+  });
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* non-json */ }
+  return { status: r.status, json, text, headers: r.headers };
+}
+
+/** Fake daemon speaking ONLY v2 daemon paths. */
+function makeDaemon(daemonId) {
+  const d = { daemonId, leaseId: null, token: null, epoch: null };
+  d.headers = () => ({
+    'x-joy-lease-id': d.leaseId, 'x-joy-lease-token': d.token, 'x-joy-lease-epoch': d.epoch,
+  });
+  d.acquire = async () => {
+    const { status, json } = await call('POST', '/joy/v2/daemon/leases', { body: { machineId: daemonId } });
+    expect(status).toBe(200);
+    d.leaseId = json.leaseId; d.token = json.leaseToken; d.epoch = json.epoch;
+    return json;
+  };
+  d.claim = async (lane) => {
+    const { status, json } = await call('POST', `/joy/v2/daemon/leases/${d.leaseId}/claims/${lane}`, {
+      body: { noWait: true }, headers: { 'x-joy-lease-token': d.token },
+    });
+    expect(status).toBe(200);
+    return json.offers;
+  };
+  d.received = (deliveryId) => call('POST', `/joy/v2/daemon/deliveries/${deliveryId}/received`, { headers: d.headers() });
+  d.submitted = (turnId) => call('POST', `/joy/v2/daemon/turns/${turnId}/submitted`, { headers: d.headers() });
+  d.start = (turnId, body = {}) => call('POST', `/joy/v2/daemon/turns/${turnId}/start`, { body, headers: d.headers() });
+  d.fact = (turnId, body) => call('POST', `/joy/v2/daemon/turns/${turnId}/facts`, { body, headers: d.headers() });
+  d.reconcile = (turnId, body) => call('POST', `/joy/v2/daemon/turns/${turnId}/reconcile`, { body, headers: d.headers() });
+  d.bind = (sessionId, body) => call('POST', `/joy/v2/daemon/sessions/${sessionId}/bind`, { body, headers: d.headers() });
+  return d;
+}
+
+async function makeSession(daemon) {
+  const { status, json } = await call('POST', '/joy/v2/sessions', {
+    body: {
+      mode: 'announce_existing', creationIntentId: randomUUID(), daemonId: daemon.daemonId,
+      localSessionId: randomUUID().slice(0, 8), sessionKeyEnvelope: 'wrapped-key',
+    },
+  });
+  expect(status).toBe(200);
+  return json.sessionId;
+}
+
+/** Drive one message from queued to delivered through the daemon lane. */
+async function deliverHead(d, sessionId) {
+  const offers = await d.claim('work');
+  const offer = offers.find((o) => o.sessionId === sessionId && o.kind === 'prompt');
+  expect(offer).toBeTruthy();
+  expect((await d.received(offer.deliveryId)).status).toBe(200);
+  expect((await d.submitted(offer.turnId)).status).toBe(200);
+  expect((await d.start(offer.turnId, { runtimeEventId: randomUUID() })).status).toBe(200);
+  return offer;
+}
+
+describe('v2 sessions + messages lifecycle', () => {
+  it('full path: create, queue offline, deliver, terminal — status transitions observed', async () => {
+    const d = makeDaemon('mach-life');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    await d.bind(sessionId, { localSessionId: 'w1', sessionKeyEnvelope: 'wrapped-key' });
+
+    // Queue a message. Nothing has claimed yet: status must be queued.
+    const post = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'c1' } });
+    expect(post.status).toBe(202);
+    const { messageId, turnId } = post.json;
+    let msg = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${messageId}`);
+    expect(msg.json.status).toBe('queued');
+
+    // Claim + ack: command delivered, turn still queued → message still queued.
+    const offers = await d.claim('work');
+    const offer = offers.find((o) => o.sessionId === sessionId);
+    await d.received(offer.deliveryId);
+    msg = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${messageId}`);
+    expect(msg.json.status).toBe('queued');
+
+    // Submitted → dispatching → "delivering".
+    await d.submitted(turnId);
+    msg = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${messageId}`);
+    expect(msg.json.status).toBe('delivering');
+
+    // Started → running → "delivered".
+    expect((await d.start(turnId, { runtimeEventId: randomUUID() })).status).toBe(200);
+    msg = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${messageId}`);
+    expect(msg.json.status).toBe('delivered');
+
+    // Terminal completed keeps "delivered"; turn read shows terminal.
+    expect((await d.fact(turnId, { type: 'terminal', terminalState: 'completed', runtimeEventId: randomUUID() })).status).toBe(200);
+    msg = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${messageId}`);
+    expect(msg.json.status).toBe('delivered');
+    const turn = await call('GET', `/joy/v2/sessions/${sessionId}/turns/${turnId}`);
+    expect(turn.json.state).toBe('terminal');
+    expect(turn.json.terminalState).toBe('completed');
+    expect(turn.json.messageId).toBe(messageId);
+  });
+
+  it('list + status filter; foreign account sees nothing', async () => {
+    const d = makeDaemon('mach-list');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'a' } });
+    await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'b' } });
+    const all = await call('GET', `/joy/v2/sessions/${sessionId}/messages`);
+    expect(all.json.messages.length).toBe(2);
+    const queued = await call('GET', `/joy/v2/sessions/${sessionId}/messages?status=queued`);
+    expect(queued.json.messages.length).toBe(2);
+    const delivered = await call('GET', `/joy/v2/sessions/${sessionId}/messages?status=delivered`);
+    expect(delivered.json.messages.length).toBe(0);
+    const foreign = await call('GET', `/joy/v2/sessions/${sessionId}/messages`, { token: 'other-token' });
+    expect(foreign.status).toBe(404);
+  });
+
+  it('PATCH edits + reorders while queued; 409 after delivery starts', async () => {
+    const d = makeDaemon('mach-edit');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'first' } })).json;
+    const m2 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'second' } })).json;
+
+    const edited = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`, { body: { ciphertext: 'first-edited' } });
+    expect(edited.status).toBe(200);
+    expect(edited.json.ciphertext).toBe('first-edited');
+
+    // Move the second message to the head.
+    const moved = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m2.messageId}`, { body: { position: 0 } });
+    expect(moved.status).toBe(200);
+    const list = await call('GET', `/joy/v2/sessions/${sessionId}/messages`);
+    expect(list.json.messages.map((x) => x.id)).toEqual([m2.messageId, m1.messageId]);
+
+    // Deliver the (new) head; then editing it must 409.
+    const offer = await deliverHead(d, sessionId);
+    expect(offer.commandId).toBe(m2.messageId);
+    const late = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m2.messageId}`, { body: { ciphertext: 'nope' } });
+    expect(late.status).toBe(409);
+    expect(late.json.error).toBe('not_editable');
+  });
+
+  it('DELETE cancels a queued message; refuses once delivering', async () => {
+    const d = makeDaemon('mach-del');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'kill-me' } })).json;
+    const gone = await call('DELETE', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`);
+    expect(gone.status).toBe(200);
+    expect(gone.json.disposition).toBe('cancelled_before_start');
+    const after = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`);
+    expect(after.json.status).toBe('cancelled');
+
+    const m2 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'running' } })).json;
+    await deliverHead(d, sessionId);
+    const refused = await call('DELETE', `/joy/v2/sessions/${sessionId}/messages/${m2.messageId}`);
+    expect(refused.status).toBe(409);
+  });
+
+  it('cancellation precondition: wrong turnId answers 409 with activeTurnId', async () => {
+    const d = makeDaemon('mach-cxl');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'active' } })).json;
+    await deliverHead(d, sessionId);
+    const wrong = await call('POST', `/joy/v2/sessions/${sessionId}/turns/${randomUUID()}/cancellations`, { body: {} });
+    expect(wrong.status).toBe(409);
+    expect(wrong.json.error).toBe('different_turn_active');
+    expect(wrong.json.activeTurnId).toBe(m1.turnId);
+    const right = await call('POST', `/joy/v2/sessions/${sessionId}/turns/${m1.turnId}/cancellations`, { body: {} });
+    expect(right.status).toBe(200);
+    expect(right.json.disposition).toBe('cancellation_requested');
+  });
+});
+
+describe('v2 retry (orphaned only)', () => {
+  it('lease death orphans the turn; message reads failed+mayHaveDelivered; retry requeues and re-offers', async () => {
+    const d = makeDaemon('mach-orphan');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'doomed' } })).json;
+    await deliverHead(d, sessionId);
+
+    // Not retryable while running.
+    const early = await call('POST', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}/retry`);
+    expect(early.status).toBe(409);
+
+    // Kill the lease; the sweep orphans the running turn.
+    await db.query(`UPDATE daemon_leases SET expires_at = now() - interval '1 minute' WHERE id = $1`, [d.leaseId]);
+    await core.sweepExpiredLeases();
+    const failed = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`);
+    expect(failed.json.status).toBe('failed');
+    expect(failed.json.failure.retryable).toBe(true);
+    expect(failed.json.failure.mayHaveDelivered).toBe(true);
+
+    // Retry re-queues the SAME message; a fresh lease claims it again.
+    const retried = await call('POST', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}/retry`);
+    expect(retried.status).toBe(202);
+    expect(retried.json.messageId).toBe(m1.messageId);
+    const again = await call('GET', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`);
+    expect(again.json.status).toBe('queued');
+
+    await d.acquire(); // new lease, new epoch
+    const offers = await d.claim('work');
+    const offer = offers.find((o) => o.sessionId === sessionId);
+    expect(offer).toBeTruthy();
+    expect(offer.commandId).toBe(m1.messageId);
+  });
+});
+
+describe('v2 attachments (device-born, sealed)', () => {
+  const bytes = Buffer.from('sealed-attachment-bytes-v2');
+  const hash = createHash('sha256').update(bytes).digest('hex');
+
+  it('upload, dedupe, fetch-immutable, reference validation, purge cascade', async () => {
+    const d = makeDaemon('mach-att');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+
+    // Upload → 201; identical retry → 200 with the SAME id.
+    const up1 = await call('POST', '/joy/v2/attachments', {
+      raw: bytes, headers: { 'x-session': sessionId, 'x-cipher-hash': hash },
+    });
+    expect(up1.status).toBe(201);
+    const attachmentId = up1.json.attachmentId;
+    expect(up1.json.size).toBe(bytes.length);
+    const up2 = await call('POST', '/joy/v2/attachments', {
+      raw: bytes, headers: { 'x-session': sessionId, 'x-cipher-hash': hash },
+    });
+    expect(up2.status).toBe(200);
+    expect(up2.json.attachmentId).toBe(attachmentId);
+
+    // Declared hash must match the bytes.
+    const lied = await call('POST', '/joy/v2/attachments', {
+      raw: Buffer.from('other-bytes'), headers: { 'x-session': sessionId, 'x-cipher-hash': hash },
+    });
+    expect(lied.status).toBe(400);
+
+    // Fetch: bytes + immutable caching; foreign account gets 404.
+    const got = await call('GET', `/joy/v2/attachments/${attachmentId}`);
+    expect(got.status).toBe(200);
+    expect(got.text).toBe(bytes.toString());
+    expect(got.headers.get('cache-control')).toContain('immutable');
+    expect((await call('GET', `/joy/v2/attachments/${attachmentId}`, { token: 'other-token' })).status).toBe(404);
+
+    // Message citing an unknown attachment → 422 and NOTHING queued.
+    const bad = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, {
+      body: { ciphertext: 'img', attachments: [randomUUID()] },
+    });
+    expect(bad.status).toBe(422);
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}/messages`)).json.messages.length).toBe(0);
+
+    // Valid reference → 202; purge cascades the attachment away.
+    const ok = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, {
+      body: { ciphertext: 'img', attachments: [attachmentId] },
+    });
+    expect(ok.status).toBe(202);
+    expect((await call('DELETE', `/joy/v2/sessions/${sessionId}`)).status).toBe(200);
+    expect((await call('GET', `/joy/v2/attachments/${attachmentId}`)).status).toBe(404);
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}`)).status).toBe(404);
+  });
+
+  it('upload against a foreign session is refused', async () => {
+    const d = makeDaemon('mach-att2');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const stolen = await call('POST', '/joy/v2/attachments', {
+      raw: bytes, headers: { 'x-session': sessionId, 'x-cipher-hash': hash }, token: 'other-token',
+    });
+    expect(stolen.status).toBe(403);
+  });
+});
+
+describe('v2 ephemeral lane', () => {
+  it('ephemeral output reaches SSE but never the durable event log', async () => {
+    const d = makeDaemon('mach-eph');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'stream-me' } })).json;
+    await deliverHead(d, sessionId);
+
+    // Open the v2 SSE stream and collect frames.
+    const ac = new AbortController();
+    const sse = await fetch(`${base}/joy/v2/events/stream`, {
+      headers: { authorization: 'Bearer app-token' }, signal: ac.signal,
+    });
+    expect(sse.status).toBe(200);
+    const reader = sse.body.getReader();
+    let buf = '';
+    const readUntil = async (marker, ms = 3000) => {
+      const deadline = Date.now() + ms;
+      while (!buf.includes(marker)) {
+        if (Date.now() > deadline) throw new Error(`SSE timeout waiting for ${marker}; got: ${buf}`);
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += Buffer.from(value).toString();
+      }
+    };
+    await readUntil('event: hello');
+
+    const headBefore = (await call('GET', `/joy/v2/sessions/${sessionId}/events`)).json.messages.length;
+    const eph = await d.fact(m1.turnId, { type: 'output', ephemeral: true, ciphertext: 'delta-1' });
+    expect(eph.status).toBe(200);
+    expect(eph.json.ephemeral).toBe(true);
+    await readUntil('event: ephemeral');
+    expect(buf).toContain('delta-1');
+    ac.abort();
+
+    // Durable log unchanged by the ephemeral fact; a durable output still lands.
+    const headAfter = (await call('GET', `/joy/v2/sessions/${sessionId}/events`)).json.messages.length;
+    expect(headAfter).toBe(headBefore);
+    await d.fact(m1.turnId, { type: 'output', ciphertext: 'block-1', runtimeEventId: randomUUID() });
+    const final = (await call('GET', `/joy/v2/sessions/${sessionId}/events`)).json.messages;
+    expect(final.length).toBe(headBefore + 1);
+    expect(final.at(-1).content.ciphertext).toBe('block-1');
+  });
+
+  it('ephemeral fact with a stale epoch is fenced out', async () => {
+    const d = makeDaemon('mach-eph2');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'x' } })).json;
+    await deliverHead(d, sessionId);
+    const zombie = { ...d.headers(), 'x-joy-lease-epoch': String(Number(d.epoch) - 1) };
+    const r = await call('POST', `/joy/v2/daemon/turns/${m1.turnId}/facts`, {
+      body: { type: 'output', ephemeral: true, ciphertext: 'zombie-delta' }, headers: zombie,
+    });
+    expect(r.status).toBe(412);
+  });
+});
+
+describe('v2 tunnel entry', () => {
+  it('/machines/{id}/http fast-fails 503 when no daemon is attached', async () => {
+    const d = makeDaemon('mach-tun');
+    await d.acquire();
+    const r = await call('POST', '/joy/v2/machines/mach-tun/http', { raw: Buffer.from('sealed-junk') });
+    expect(r.status).toBe(503);
+    expect(r.json.error).toBe('daemon_offline');
+  });
+
+  it('ownership is checked before the tunnel', async () => {
+    const r = await call('POST', '/joy/v2/machines/mach-tun/http', { raw: Buffer.from('x'), token: 'other-token' });
+    expect(r.status).toBe(403);
+  });
+
+  it('claims/tunnel long-poll returns empty on timeout under a valid lease', async () => {
+    const d = makeDaemon('mach-tun2');
+    await d.acquire();
+    const { status, json } = await call('POST', `/joy/v2/daemon/leases/${d.leaseId}/claims/tunnel`, {
+      body: { waitMs: 50 }, headers: { 'x-joy-lease-token': d.token },
+    });
+    expect(status).toBe(200);
+    expect(json.requests ?? json.offers ?? []).toEqual([]);
+  });
+});
+
+describe('v2 does not disturb v1', () => {
+  it('v1 paths still answer on the same server', async () => {
+    const caps = await call('GET', '/joy/v1/capabilities', { token: null });
+    expect(caps.status).toBe(200);
+    expect(caps.json.protocol.major).toBe(1);
+    const v1sessions = await call('GET', '/joy/v1/sessions');
+    expect(v1sessions.status).toBe(200);
+  });
+
+  it('a session created via v2 is visible via v1 and vice versa (same store)', async () => {
+    const d = makeDaemon('mach-shared');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const v1 = await call('GET', '/joy/v1/sessions');
+    expect(v1.json.sessions.some((s) => s.sessionId === sessionId)).toBe(true);
+  });
+});
