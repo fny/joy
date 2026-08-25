@@ -35,6 +35,8 @@ const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments });
 
 // Lease-expiry sweep: orphans running turns whose daemon lease lapsed.
 setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-relay] sweep failed:', e)); }, 5_000).unref();
+// Attachment orphan sweep: uploaded-never-referenced ciphertext ages out.
+setInterval(() => { attachments.sweepOrphans().catch((e) => console.error('[joy-relay] attachment sweep failed:', e)); }, 60 * 60 * 1000).unref();
 
 const gate = createGate();
 

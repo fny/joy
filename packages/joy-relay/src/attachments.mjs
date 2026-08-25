@@ -40,19 +40,26 @@ export function createAttachments(db) {
       return Buffer.from(row.body);
     },
 
-    /** Called by POST /messages: every id must exist and belong to the
-     *  session — bytes FIRST, reference second. Marks the reference so the
-     *  orphan sweep never eats a cited attachment. */
-    async reference(t, sessionId, messageId, ids) {
+    /** Called by POST /messages BEFORE acceptance: every id must exist and
+     *  belong to the session, and each row is marked with the intent marker
+     *  in the SAME transaction — from this instant the orphan sweep cannot
+     *  touch it, so acceptance can never land on a swept attachment. */
+    async reference(t, sessionId, marker, ids) {
       for (const id of ids) {
         const { rows: [row] } = await t.query(
           `SELECT id FROM attachments WHERE id = $1 AND session_id = $2`, [id, sessionId]);
         if (!row) throw new ApiError(422, 'unknown_attachment');
-        // messageId null = validate-only pass (pre-accept check).
-        if (messageId) {
-          await t.query(`UPDATE attachments SET referenced_by = $1 WHERE id = $2 AND referenced_by IS NULL`,
-            [messageId, id]);
-        }
+        await t.query(`UPDATE attachments SET referenced_by = $1 WHERE id = $2 AND referenced_by IS NULL`,
+          [marker, id]);
+      }
+    },
+
+    /** After acceptance: upgrade the intent marker to the real messageId.
+     *  Rows already claimed by an earlier message keep their reference. */
+    async claim(t, ids, marker, messageId) {
+      for (const id of ids) {
+        await t.query(`UPDATE attachments SET referenced_by = $1 WHERE id = $2 AND referenced_by = $3`,
+          [messageId, id, marker]);
       }
     },
 
@@ -61,11 +68,14 @@ export function createAttachments(db) {
       await t.query(`DELETE FROM attachments WHERE session_id = $1`, [sessionId]);
     },
 
-    /** Uploaded-but-never-referenced rows older than the TTL. */
+    /** Uploaded-but-never-referenced rows older than the TTL. Stale intent
+     *  markers (acceptance failed after the mark) age out the same way. */
     async sweepOrphans(now = Date.now()) {
       const cutoff = new Date(now - ORPHAN_TTL_MS).toISOString();
       const { rows } = await db.query(
-        `DELETE FROM attachments WHERE referenced_by IS NULL AND created_at < $1 RETURNING id`, [cutoff]);
+        `DELETE FROM attachments
+         WHERE (referenced_by IS NULL OR referenced_by LIKE 'intent:%') AND created_at < $1
+         RETURNING id`, [cutoff]);
       return rows.length;
     },
   };

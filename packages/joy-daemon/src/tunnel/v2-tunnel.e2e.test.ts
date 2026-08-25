@@ -176,3 +176,8 @@ test("v2 entry enforces machine ownership before the tunnel", async () => {
     expect((e as TunnelError).status).toBe(403);
   }
 });
+
+test("entryBase must be a path — an authority-shaped value is refused before any fetch", async () => {
+  await expect(call({ entryBase: "@evil.example/x" })).rejects.toThrow(/invalid entryBase/);
+  await expect(call({ entryBase: "https://evil.example" })).rejects.toThrow(/invalid entryBase/);
+});

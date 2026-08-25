@@ -32,14 +32,28 @@ beforeAll(async () => {
   writeFileSync(join(repo, "tracked.txt"), "hello v2 GREPME\nmodified line\n");
   writeFileSync(join(repo, "untracked.txt"), "new file\n");
 
+  mkdirSync(join(repo, "sub"));
+  writeFileSync(join(repo, "sub", "inner.txt"), "inner\n");
+  g(["add", "sub"]);
+  g(["commit", "-m", "sub"]);
+  writeFileSync(join(repo, "sub", "inner.txt"), "inner\nchanged\n");
+
   const fakeSession = {
     id: "abcd1234",
     agentFlavor: "claude",
     cwd: repo,
     toJSON: () => ({ id: "abcd1234", cwd: repo, agent: "claude" }),
   } as unknown as AgentSession;
+  // A session whose cwd is a SUBDIRECTORY of the repository — git must not
+  // report the rest of the worktree to it.
+  const subSession = {
+    id: "sub00001",
+    agentFlavor: "claude",
+    cwd: join(repo, "sub"),
+    toJSON: () => ({ id: "sub00001", cwd: join(repo, "sub"), agent: "claude" }),
+  } as unknown as AgentSession;
   const registry = {
-    get: (id: string) => (id === "abcd1234" ? fakeSession : undefined),
+    get: (id: string) => (id === "abcd1234" ? fakeSession : id === "sub00001" ? subSession : undefined),
     list: () => [fakeSession],
     size: 1,
     sseClientCount: 0,
@@ -231,5 +245,43 @@ describe("v1 stays intact beside v2", () => {
     expect(r.json[0].id).toBe("abcd1234");
     const pane = await call("GET", "/status");
     expect(pane.json.ok).toBe(true);
+  });
+});
+
+describe("review fixes: regression coverage", () => {
+  test("git status is scoped to a subdirectory cwd", async () => {
+    const r = await call("GET", "/v2/sessions/sub00001/git/status");
+    expect(r.json.ok).toBe(true);
+    // Only the subdir's change is visible — nothing from the repo root.
+    expect(r.json.entries.map((e: any) => e.path)).toEqual(["sub/inner.txt"]);
+    const diff = await call("GET", "/v2/sessions/sub00001/git/diff");
+    expect(diff.json.diff).toContain("+changed");
+    expect(diff.json.diff).not.toContain("tracked.txt");
+  });
+
+  test("porcelain -z: unmerged records mean NOT clean; renames carry origPath", () => {
+    const NUL = "\0";
+    const out = [
+      "# branch.head main",
+      "u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflicted.txt",
+      "2 R. N... 100644 100644 100644 dddd eeee R100 new name.txt", "old name.txt",
+    ].join(NUL) + NUL;
+    const p = parsePorcelainV2(out);
+    expect(p.clean).toBe(false);
+    const conflict = p.entries.find((e) => e.conflicted);
+    expect(conflict?.path).toBe("conflicted.txt");
+    const rename = p.entries.find((e) => e.renamedFrom);
+    expect(rename?.path).toBe("new name.txt"); // -z: spaces arrive raw
+    expect(rename?.renamedFrom).toBe("old name.txt");
+  });
+
+  test("malformed JSON body answers 400, not a silent empty object", async () => {
+    const r = await fetch(base + "/v2/sessions/abcd1234/terminal/keys", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-joy-token": TOKEN },
+      body: "{not json",
+    });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as { error: string }).error).toBe("bad_json");
   });
 });
