@@ -16,7 +16,8 @@ import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-const tweetnacl = createRequire('/home/claude/Workspace/joy/packages/happy-cli/package.json')('tweetnacl');
+const REPO = process.env.JOY_REPO ?? new URL('../../..', import.meta.url).pathname;
+const tweetnacl = createRequire(`${REPO}/packages/happy-cli/package.json`)('tweetnacl');
 
 const arg = (name, dflt) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -40,13 +41,22 @@ const res = await fetch(`${RELAY}/v1/auth`, {
 const { token } = await res.json();
 if (!token) { console.error('mint failed:', res.status); process.exit(1); }
 
-mkdirSync(HOME, { recursive: true });
-writeFileSync(join(HOME, 'access.key'), JSON.stringify({
+// loadCredentials reads a NON-default relay's pairing from
+// <joyHome>/relays/<host[_port]>/ (joyRelayCredsDir), where joyHome follows
+// HAPPY_HOME_DIR. Write BOTH locations so the daemon finds the creds however
+// the relay is addressed.
+const u = new URL(RELAY);
+const relayKey = u.port ? `${u.hostname}_${u.port}` : u.hostname;
+const dirs = [HOME, join(HOME, 'relays', relayKey)];
+const accessKey = JSON.stringify({
   token,
   encryption: { publicKey: b64(randomBytes(32)), machineKey: b64(randomBytes(32)) },
-}, null, 2));
-writeFileSync(join(HOME, 'settings.json'), JSON.stringify({
-  machineId: MACHINE, serverUrl: RELAY,
-}, null, 2));
-console.error(`WROTE ${HOME}/access.key + settings.json (machineId ${MACHINE})`);
+}, null, 2);
+const settings = JSON.stringify({ machineId: MACHINE, serverUrl: RELAY }, null, 2);
+for (const d of dirs) {
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, 'access.key'), accessKey);
+  writeFileSync(join(d, 'settings.json'), settings);
+}
+console.error(`WROTE access.key + settings.json to ${dirs.join(' and ')} (machineId ${MACHINE})`);
 console.log(token);
