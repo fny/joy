@@ -12,9 +12,9 @@ import { moduleDir } from "../esm";
 import { createHash } from "crypto";
 import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
 import { promisify } from "util";
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { readFile, writeFile, readdir, stat, unlink } from "fs/promises";
-import { join, resolve, sep } from "path";
+import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, platform } from "os";
 
 const execAsync = promisify(exec);
@@ -52,8 +52,37 @@ export interface RipgrepResponse { success: boolean; exitCode?: number; stdout?:
 export interface DifftasticRequest { args: string[]; cwd?: string; }
 export interface DifftasticResponse { success: boolean; exitCode?: number; stdout?: string; stderr?: string; error?: string; }
 
+/** Resolve symlinks in `p` even when a suffix of it does not exist yet:
+ *  realpath the deepest EXISTING ancestor (which also resolves a final-
+ *  component symlink when the whole path exists) and re-append the
+ *  untraversed remainder. Null only if realpath itself fails. */
+function realResolve(p: string): string | null {
+  let base = p;
+  const tail: string[] = [];
+  while (!existsSync(base)) {
+    const parent = dirname(base);
+    if (parent === base) break; // filesystem root
+    tail.unshift(basename(base));
+    base = parent;
+  }
+  try {
+    return join(realpathSync(base), ...tail);
+  } catch {
+    return null;
+  }
+}
+
 // Mirrors happy-cli/src/modules/common/pathSecurity.validatePath. Restricts
 // access to paths within the session's working directory; rejects traversal.
+//
+// Containment is checked on REAL paths, not lexical ones: a symlink planted
+// inside the tree (`cwd/link -> /etc`) used to pass the lexical prefix check
+// and let reads AND writes follow it out of the jail. Both sides of the
+// comparison are realpath'd so a cwd that is itself behind a symlink still
+// admits its own files. The returned resolvedPath is the REAL path, so
+// downstream operations cannot re-traverse a link the check already chased.
+// (Validation-to-use raciness — a dir swapped for a symlink after the check —
+// is not closed here; that needs O_NOFOLLOW-style opens.)
 export function validatePath(targetPath: string, workingDirectory: string, extraRoots: string[] = []): { valid: boolean; resolvedPath?: string; error?: string } {
   // Expand a leading ~/ — resolve() doesn't, and the joy-img contract points at
   // files under the caller's home (the per-session media dir).
@@ -61,21 +90,23 @@ export function validatePath(targetPath: string, workingDirectory: string, extra
     ? join(homedir(), targetPath.slice(1))
     : targetPath;
   const resolvedTarget = resolve(workingDirectory, expanded);
+  const denied = {
+    valid: false,
+    resolvedPath: resolvedTarget,
+    error: `Access denied: Path '${targetPath}' is outside the working directory`,
+  };
+  const realTarget = realResolve(resolvedTarget);
+  if (realTarget === null) return denied;
   const within = (root: string) => {
-    const r = resolve(root);
-    return resolvedTarget === r || resolvedTarget.startsWith(r + sep);
+    const r = realResolve(resolve(root));
+    if (r === null) return false;
+    return realTarget === r || realTarget.startsWith(r + sep);
   };
   // Jailed to the session cwd, plus any explicitly allowed extra roots (the
   // readFile op passes the session's own ~/.joy/sessions/<id> dir so the app
   // can fetch joy-img media — each session reaches ONLY its own folder).
-  if (!within(workingDirectory) && !extraRoots.some(within)) {
-    return {
-      valid: false,
-      resolvedPath: resolvedTarget,
-      error: `Access denied: Path '${targetPath}' is outside the working directory`,
-    };
-  }
-  return { valid: true, resolvedPath: resolvedTarget };
+  if (!within(workingDirectory) && !extraRoots.some(within)) return denied;
+  return { valid: true, resolvedPath: realTarget };
 }
 
 export async function handleBash(workingDirectory: string, data: BashRequest): Promise<BashResponse> {

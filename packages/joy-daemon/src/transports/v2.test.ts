@@ -4,7 +4,7 @@
 // adapters, daemon-side porcelain parsing, and that v1 catalog routes still
 // answer on the same server.
 import { test, expect, beforeAll, afterAll, describe } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { execFileSync } from "child_process";
@@ -273,6 +273,27 @@ describe("review fixes: regression coverage", () => {
     const rename = p.entries.find((e) => e.renamedFrom);
     expect(rename?.path).toBe("new name.txt"); // -z: spaces arrive raw
     expect(rename?.renamedFrom).toBe("old name.txt");
+  });
+
+  test("a symlink out of the repo is refused end to end (read, write, grep)", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "joy-v2-outside-"));
+    writeFileSync(join(outside, "passwd"), "root:x:0:0\n");
+    symlinkSync(outside, join(repo, "evil"));
+    try {
+      const read = await call("GET", "/v2/sessions/abcd1234/files/content?path=evil/passwd");
+      expect(read.json.success).toBe(false);
+      expect(read.json.error).toContain("outside the working directory");
+      const write = await call("PUT", "/v2/sessions/abcd1234/files/content", {
+        body: { path: "evil/planted.txt", content: "x" },
+      });
+      expect(write.status).toBe(400);
+      expect(existsSync(join(outside, "planted.txt"))).toBe(false);
+      const grep = await call("GET", "/v2/sessions/abcd1234/files/grep?q=root&path=evil");
+      expect(grep.status).toBe(400);
+    } finally {
+      unlinkSync(join(repo, "evil"));
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   test("malformed JSON body answers 400, not a silent empty object", async () => {
