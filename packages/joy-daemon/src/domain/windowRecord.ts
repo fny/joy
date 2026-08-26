@@ -16,6 +16,9 @@ import { defaultStateDir } from "./receipts";
 export interface WindowRecord {
   /** joy session id (the tmux window suffix j-<id>). */
   id: string;
+  /** Per-session tmux server label (-L <socket>), or absent/null for a
+   *  legacy window on the shared server (pre per-session-servers). */
+  socket?: string | null;
   /** Directory Claude was launched in — stable across in-pane `cd`. */
   launchCwd: string;
   /** Claude's transcript/session uuid, once learned from a transcript entry. */
@@ -99,7 +102,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
+  patch: { launchCwd?: string; socket?: string | null; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -107,6 +110,7 @@ export function saveWindowRecord(
     const next: WindowRecord = {
       id,
       launchCwd: patch.launchCwd ?? prev?.launchCwd ?? "",
+      socket: patch.socket !== undefined ? patch.socket : prev?.socket ?? null,
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,
