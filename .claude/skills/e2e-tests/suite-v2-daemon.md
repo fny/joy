@@ -15,7 +15,10 @@ real answers back as durable v2 events. No scripted actor anywhere.
    (First `rm -rf $HOME/.joy-test`; the random encryption keys are fine —
    the v2 lane needs only token+machineId; happy-plane decryption for this
    throwaway account is not meaningful.)
-3. Start the daemon from source on the PRIVATE tmux server (isolation rules
+3. `mkdir -p /tmp/joy-test-tmux` FIRST — tmux will not create a missing
+   $TMUX_TMPDIR and every per-session spawn fails at new-session until it
+   exists (cost a live debugging round). Then start the daemon from source
+   on the PRIVATE tmux server (isolation rules
    in SKILL.md apply — never the default tmux socket):
    `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux HAPPY_HOME_DIR=$HOME/.joy-test JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 TMUX_SESSION=joy-test setsid nohup pnpm -C packages/joy-daemon start > /tmp/joy-test-daemon.log 2>&1 & echo $! > /tmp/joy-test-daemon.pid`
    (record the pid — teardown kills the PROCESS GROUP by that pid, never a

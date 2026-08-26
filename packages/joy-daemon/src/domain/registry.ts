@@ -483,6 +483,13 @@ export class SessionRegistry {
     const relayPromise = this.relayClient
       ? createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id })
       : null;
+    // Rejection guard: the real await sits ~1.2s downstream (PID-discovery
+    // sleeps), and an unhandled rejection in that window KILLS the daemon on
+    // modern Node (observed live: happy-server-standalone 500s dataKey
+    // session creates — PGlite bytes-column quirk — and the whole daemon
+    // died mid-spawn). This side-branch marks the rejection handled; the
+    // try/catch around the await still sees and logs the same error.
+    relayPromise?.catch(() => {});
 
     await sleep(400);
     const shellPid = parseInt(
