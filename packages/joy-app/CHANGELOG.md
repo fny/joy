@@ -1,3 +1,9 @@
+# Aug 26 — Relay v2 Mode (developer), header search
+
+- **Relay v2 Mode (Developer).** Settings → Developer → Relay v2 Mode drives sessions over the new native `/joy/v2` relay surface end to end: create a session on a machine (pick the folder and agent), watch the reply stream in live, edit/reorder/delete queued messages, retry a failed delivery, cancel a running turn, send attachments. It's the testing surface for the next-generation sync — *needs a relay serving `/joy/v2` and an updated daemon on the machine.*
+- **Search from the header.** The session header gains a search button that opens the find bar — same as pressing Cmd+F on desktop.
+- **Relay password stays home.** The per-relay password now only ever accompanies requests to exactly the configured relay origin — a look-alike domain can no longer receive it.
+
 # Aug 19 — Lighter app, file delete, relay passwords
 
 - **~3.5 MB smaller.** The app was shipping all 19 icon fonts — including families it has never drawn a single glyph from. It now bundles only the two it actually uses (Ionicons and Octicons); everything that referenced the others was moved onto equivalents.
