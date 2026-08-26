@@ -19,7 +19,7 @@ import { randomUUID } from "crypto";
 import { type ChildProcess } from "child_process";
 import { mkdirSync, chmodSync, rmSync, existsSync, readFileSync } from "fs";
 import { join, dirname } from "path";
-import { tmux } from "../tmux/driver";
+import { tmux as defaultTmux, disposeTmuxHandle, type TmuxDriver } from "../tmux/driver";
 import { joyStateDir } from "../paths";
 import { saveWindowRecord, loadWindowRecord, deleteWindowRecord } from "../domain/windowRecord";
 import {
@@ -42,6 +42,8 @@ import {
 export interface CodexInit {
   id: string;
   tmuxWindow: string;
+  tmux?: TmuxDriver;
+  tmuxSocket?: string | null;
   cwd: string;
   model?: string;
   effort?: string;
@@ -81,6 +83,8 @@ export class CodexSession implements AgentSession {
   pid?: number;                          // app-server pid
 
   readonly tmuxWindow: string;
+  readonly #tmux: TmuxDriver;
+  readonly #tmuxSocket: string | null;
   #permissionMode: string;
   #startedAt: number;
   #deps: SessionDeps;
@@ -140,6 +144,8 @@ export class CodexSession implements AgentSession {
     this.effort = init.effort;
     this.status = init.status;
     this.tmuxWindow = init.tmuxWindow;
+    this.#tmux = init.tmux ?? defaultTmux;
+    this.#tmuxSocket = init.tmuxSocket ?? null;
     // Fail closed: an absent mode becomes the collaborative default, NOT yolo
     // (finding #1 — resolveCodexExecutionPolicy also fails closed).
     this.#permissionMode = init.permissionMode ?? "default";
@@ -389,7 +395,7 @@ export class CodexSession implements AgentSession {
   #launchAttach(): void {
     if (!this.#threadId) return;
     const cmd = buildCodexAttachCommand(this.#socketPath, this.#threadId);
-    void tmux.literal(this.tmuxWindow, cmd).then(() => tmux.key(this.tmuxWindow, "Enter")).catch(() => {});
+    void this.#tmux.literal(this.tmuxWindow, cmd).then(() => this.#tmux.key(this.tmuxWindow, "Enter")).catch(() => {});
   }
 
   // ── delivery (inbound app → codex) ──────────────────────────────────────────
@@ -771,17 +777,17 @@ export class CodexSession implements AgentSession {
   // ── pane / control (the tmux window hosts the attached TUI) ───────────────────
 
   async pane(color = false): Promise<{ ok: true; text: string }> {
-    const r = await tmux.captureFresh(this.tmuxWindow, { color });
+    const r = await this.#tmux.captureFresh(this.tmuxWindow, { color });
     return { ok: true, text: r.ok ? r.out : "" };
   }
 
   async resize(cols: number, rows: number): Promise<{ ok: boolean }> {
-    const r = await tmux.command(["resize-window", "-t", this.tmuxWindow, "-x", String(cols), "-y", String(rows)]);
+    const r = await this.#tmux.command(["resize-window", "-t", this.tmuxWindow, "-x", String(cols), "-y", String(rows)]);
     return { ok: r.ok };
   }
 
   async sendRawKeys(script: string, opts?: { literal?: boolean }): Promise<{ ok: boolean; segments: number; error?: string }> {
-    const r = opts?.literal ? await tmux.literal(this.tmuxWindow, script) : await tmux.key(this.tmuxWindow, script);
+    const r = opts?.literal ? await this.#tmux.literal(this.tmuxWindow, script) : await this.#tmux.key(this.tmuxWindow, script);
     return { ok: r.ok, segments: 1, error: r.ok ? undefined : "send failed" };
   }
 
@@ -830,14 +836,18 @@ export class CodexSession implements AgentSession {
       this.#activeTurnId = null;
     }
     if (this.#relay) this.#relay.setThinking(false);
-    tmux.untrack(this.tmuxWindow);
+    this.#tmux.untrack(this.tmuxWindow);
     if (reason === "process_exited") {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
       void this.#relay?.updateJoyState("archived");
       if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
-      try { void tmux.command(["kill-window", "-t", this.tmuxWindow]); } catch { /* ignore */ }
+      try {
+        void (this.#tmuxSocket
+          ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())
+          : this.#tmux.command(["kill-window", "-t", this.tmuxWindow]));
+      } catch { /* ignore */ }
       this.#relay?.stop();
       clearCodexInbound(this.id); // a killed session will never deliver — drop the spool
       clearCheckpoint(this.id);
@@ -869,6 +879,7 @@ export class CodexSession implements AgentSession {
       current_model: this.currentModel,
       pid: this.pid,
       tmux_window: this.tmuxWindow,
+      tmux_socket: this.#tmuxSocket,
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,

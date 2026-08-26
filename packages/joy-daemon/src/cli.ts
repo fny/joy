@@ -149,7 +149,8 @@ async function cmdList(): Promise<number> {
   for (const s of sessions) {
     const st = s.status === "active" ? c.g(s.status)
       : s.status === "ended" ? c.dim("detached/ended") : s.status;
-    console.log(`  ${s.id}  ${st.padEnd(20)}  ${s.cwd}`);
+    const sockHint = s.tmux_socket ? c.dim(`  [tmux -L ${s.tmux_socket}]`) : "";
+    console.log(`  ${s.id}  ${st.padEnd(20)}  ${s.cwd}${sockHint}`);
   }
   return 0;
 }
@@ -532,9 +533,13 @@ async function cmdJump(rest: string[]): Promise<number> {
     return 1;
   }
 
-  const win = String(matches[0].tmux_window);   // e.g. "joy:j-9214e0a2"
-  const tmuxSession = win.split(":")[0];
-  const [tmuxBin, ...sock] = tmuxArgv();        // per-relay tmux server
+  const win = String(matches[0].tmux_window);   // "joy:j-9214e0a2" (shared) or "j-9214e0a2" (own server)
+  const perSessionSocket = matches[0].tmux_socket as string | null | undefined;
+  const tmuxSession = perSessionSocket ? win : win.split(":")[0];
+  // Per-session servers (docs/per-session-tmux-design.md): the session lives
+  // on its OWN -L socket; otherwise the per-relay (or default) server.
+  const [tmuxBin, ...relaySock] = tmuxArgv();
+  const sock = perSessionSocket ? ["-L", perSessionSocket] : relaySock;
   // select-window both validates the window still exists and makes it active.
   const sel = spawnSync(tmuxBin, [...sock, "select-window", "-t", win], { stdio: "ignore" });
   if (sel.status !== 0) { console.log(`${bad} tmux window ${win} not found (session ended?)`); return 1; }

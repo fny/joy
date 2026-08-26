@@ -5,11 +5,12 @@
 // the debug page (SSE + bounded chat log).
 
 import { setTimeout as sleep } from "timers/promises";
-import { existsSync, mkdirSync, statSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, statSync, readFileSync, readdirSync } from "fs";
 import { join, basename, resolve } from "path";
 import { homedir } from "os";
 import { run } from "../tmux/shell";
-import { tmux } from "../tmux/driver";
+import { tmux, tmuxHandleFor, disposeTmuxHandle, type TmuxDriver } from "../tmux/driver";
+import { tmuxServerLabel } from "../paths";
 import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
@@ -98,6 +99,11 @@ interface StoredChatMessage extends ChatMessage {
 }
 
 const MAX_MESSAGES = 500;
+
+// Per-session tmux servers (docs/per-session-tmux-design.md): every NEW
+// claude window gets its own tmux server so a tmux leak dies with the
+// session. Legacy shared-server windows keep working until they end.
+const PER_SESSION_TMUX = process.env.JOY_TMUX_PER_SESSION !== "0";
 
 export class SessionRegistry {
   readonly tmuxSession: string;
@@ -285,10 +291,14 @@ export class SessionRegistry {
       }
     }
 
+    // Per-session server: this session's own tmux server (-L label), created
+    // below via new-session; its control client attaches per handle. Legacy
+    // (flag off) keeps the shared-server bootstrap.
+    const sockLabel = PER_SESSION_TMUX ? tmuxServerLabel(id) : null;
     // BOOTSTRAP — spawn, never control: has-session gates creation, new-session creates
     // the very session the control client attaches to (chicken-and-egg), and this
     // set-hook runs only when there's no session yet (so the client can't be connected).
-    if (!tmux.runSync("has-session", "-t", this.tmuxSession).ok) {
+    if (!sockLabel && !tmux.runSync("has-session", "-t", this.tmuxSession).ok) {
       tmux.runSync("new-session", "-d", "-s", this.tmuxSession, "-c", cwd);
       // When a real terminal attaches, let it drive the window size (tmux's
       // default `latest` behavior). The app's resize-window flips windows to
@@ -405,7 +415,9 @@ export class SessionRegistry {
     };
 
     const flags = buildFlags(true);
-    const tmuxWindow = `${this.tmuxSession}:${windowName}`;
+    const drv: TmuxDriver = sockLabel ? tmuxHandleFor(sockLabel, windowName) : tmux;
+    // On its own server the session IS the window: target by session name.
+    const tmuxWindow = sockLabel ? windowName : `${this.tmuxSession}:${windowName}`;
     const primaryCmd = [...envParts, "claude", ...flags].join(" ");
     // `--continue` exits non-zero ("No conversation found to continue") in a
     // cwd with no prior conversation, leaving a stuck/dead pane. Fall back to a
@@ -426,16 +438,27 @@ export class SessionRegistry {
     // session isn't created until after these succeed, so a failure here can't orphan
     // one.)
     const abortCreate = (why: string): never => {
-      void tmux.command(["kill-window", "-t", tmuxWindow]); // idempotent cleanup of any half-made window
+      if (sockLabel) {
+        drv.runSync("kill-server"); // half-made per-session server: the whole thing goes
+        disposeTmuxHandle(sockLabel);
+      } else {
+        void tmux.command(["kill-window", "-t", tmuxWindow]); // idempotent cleanup of any half-made window
+      }
       throw new Error(`session create failed: ${why}`);
     };
-    if (!(await tmux.commandOnce(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd])).ok) {
+    if (sockLabel) {
+      // Spawns the per-session SERVER too (first command on a fresh -L label);
+      // -x/-y pins the initial size resize-window below re-asserts.
+      if (!drv.runSync("new-session", "-d", "-s", windowName, "-x", "100", "-y", "40", "-c", cwd).ok) {
+        abortCreate("new-session");
+      }
+    } else if (!(await drv.commandOnce(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd])).ok) {
       abortCreate("new-window");
     }
     // Pin a sane default size so the window doesn't inherit whatever terminal last
     // touched the session (could be 182+ cols). Idempotent + cosmetic, so a failure
     // here is non-fatal — claude just renders at the default size until joy-resize.
-    await tmux.command(["resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40"]);
+    await drv.command(["resize-window", "-t", tmuxWindow, "-x", "100", "-y", "40"]);
     // Replace the pane shell with a fresh login shell so it re-sources the user's
     // profile (.bashrc/.zshrc) — a default tmux pane only carries the tmux server's
     // frozen env, so without this a launch/restart wouldn't pick up env-var changes.
@@ -443,16 +466,16 @@ export class SessionRegistry {
     // a named Enter — -l forces the text literal so a command that looks like a key
     // name can't be misread.)
     const shell = process.env.SHELL || "/bin/bash";
-    if (!(await tmux.literal(tmuxWindow, `exec ${shell} -l`)).ok) abortCreate("exec-shell");
-    if (!(await tmux.key(tmuxWindow, "Enter")).ok) abortCreate("exec-shell-enter");
+    if (!(await drv.literal(tmuxWindow, `exec ${shell} -l`)).ok) abortCreate("exec-shell");
+    if (!(await drv.key(tmuxWindow, "Enter")).ok) abortCreate("exec-shell-enter");
 
     // Give the login shell time to source the profile, then launch claude. (Skipped
     // for a detached create — the window stays at the shell prompt and the session is
     // marked detached below.)
     if (!opts.detached) {
       await sleep(900);
-      if (!(await tmux.literal(tmuxWindow, cmd)).ok) abortCreate("launch-claude");
-      if (!(await tmux.key(tmuxWindow, "Enter")).ok) abortCreate("launch-claude-enter");
+      if (!(await drv.literal(tmuxWindow, cmd)).ok) abortCreate("launch-claude");
+      if (!(await drv.key(tmuxWindow, "Enter")).ok) abortCreate("launch-claude-enter");
     }
 
     // Kick off the relay session creation now (after the window is confirmed live) so
@@ -498,6 +521,8 @@ export class SessionRegistry {
 
     const session = new Session({
       id, pid, tmuxWindow, cwd,
+      tmux: sockLabel ? drv : undefined,
+      tmuxSocket: sockLabel,
       model: opts.model,
       effort: opts.effort,
       flags,
@@ -512,7 +537,7 @@ export class SessionRegistry {
     // Persist the window→launch-cwd binding now; the claudeSessionId is merged in
     // once the first transcript entry reveals it. recover()/restart() prefer this
     // over the newest-mtime / pane-current-path heuristics (BUG-6/13/15).
-    saveWindowRecord(id, { launchCwd: cwd });
+    saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel });
     this.broadcast("session_update", session.toJSON());
 
     if (relayPromise) {
@@ -790,21 +815,37 @@ export class SessionRegistry {
     // daemon-owned app-server + thread, not the window).
     const windowNames = result.ok ? result.out.split("\n").map(l => l.trim()).filter(Boolean) : [];
 
-    for (const winName of windowNames) {
-      if (!/^j-[0-9a-f]{8}$/.test(winName)) continue;
+    // Two populations: legacy windows on the shared server, and per-session
+    // servers discovered from their RECORDS (record-driven — no single server
+    // knows them). Same adoption body for both, parameterized by driver.
+    const candidates: Array<{ winName: string; target: string; drv: TmuxDriver; socket: string | null }> =
+      windowNames
+        .filter(w => /^j-[0-9a-f]{8}$/.test(w))
+        .map(w => ({ winName: w, target: `${this.tmuxSession}:${w}`, drv: tmux, socket: null }));
+    for (const rec of listWindowRecords()) {
+      if (!rec.socket || !rec.id) continue;
+      const winName = `j-${rec.id}`;
+      if (run("tmux", "-L", rec.socket, "has-session", "-t", winName).ok) {
+        candidates.push({ winName, target: winName, drv: tmuxHandleFor(rec.socket, winName), socket: rec.socket });
+      } else {
+        process.stderr.write(`[recover] ${rec.id}: per-session server gone (socket ${rec.socket})\n`);
+      }
+    }
+
+    for (const { winName, target, drv, socket } of candidates) {
       const id = winName.slice(2);
       if (this.#sessions.has(id)) continue;
 
-      const tmuxWindow = `${this.tmuxSession}:${winName}`;
+      const tmuxWindow = target;
       // Prefer the persisted launch cwd over the pane's CURRENT dir: the user may
       // have cd'd inside the pane, and the drifted path would mis-key the dedup
       // guard / relay path / transcript lookup (BUG-15).
       const rec = loadWindowRecord(id);
-      const paneCwd = tmux.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_current_path}").out.trim();
+      const paneCwd = drv.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_current_path}").out.trim();
       const cwd = rec?.launchCwd || paneCwd;
       if (!cwd) continue;
 
-      const shellPid = parseInt(tmux.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out.trim());
+      const shellPid = parseInt(drv.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out.trim());
       let pid: number | undefined;
       if (!isNaN(shellPid)) {
         const child = parseInt(run("pgrep", "-P", String(shellPid)).out.split("\n")[0]);
@@ -874,6 +915,8 @@ export class SessionRegistry {
 
       const session = new Session({
         id, pid, tmuxWindow, cwd,
+        tmux: socket ? drv : undefined,
+        tmuxSocket: socket,
         flags: [],
         status: isAlive ? "active" : "ended",
         startedAt: transcriptPath ? statSync(transcriptPath).mtimeMs : Date.now(),
@@ -899,6 +942,27 @@ export class SessionRegistry {
     }
 
     this.#resurrectCodexOrphans();
+    this.#sweepOrphanTmuxServers();
+  }
+
+  /** Retire per-session tmux servers with NO window record (a crash between
+   *  server-spawn and record write, or manual mischief). Conservative: only
+   *  sockets matching OUR label scheme, only when no human client is
+   *  attached. Never touches the shared server or foreign sockets. */
+  #sweepOrphanTmuxServers(): void {
+    try {
+      const dir = process.env.TMUX_TMPDIR || `/tmp/tmux-${process.getuid?.() ?? ""}`;
+      const prefix = tmuxServerLabel("");
+      const known = new Set(listWindowRecords().map(r => r.socket).filter(Boolean));
+      for (const name of (existsSync(dir) ? readdirSync(dir) : [])) {
+        if (!name.startsWith(prefix) || known.has(name)) continue;
+        if (!run("tmux", "-L", name, "has-session").ok) continue; // dead socket file; tmux cleans it
+        const clients = run("tmux", "-L", name, "list-clients").out.trim();
+        if (clients) continue; // a human is attached — leave it alone
+        run("tmux", "-L", name, "kill-server");
+        process.stderr.write(`[recover] retired orphan tmux server ${name} (no record, no clients)\n`);
+      }
+    } catch { /* sweep is best-effort */ }
   }
 
   /** RECORD-based codex recovery (2026-07-31): a codex session whose tmux

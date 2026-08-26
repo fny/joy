@@ -101,11 +101,16 @@ export class TmuxControlClient {
   #attempt = 0;
   #stopped = false;
 
-  constructor(session: string, opts: { onOutput?: (paneId: string) => void } = {}) {
+  constructor(session: string, opts: { onOutput?: (paneId: string) => void; socketArgs?: string[] } = {}) {
     this.#session = session;
     this.#onOutput = opts.onOutput ?? (() => {});
+    this.#socketArgs = opts.socketArgs ?? tmuxArgv().slice(1);
     this.#connect();
   }
+
+  /** tmux socket selector (e.g. ["-L","joy-s-<id>"]) — per-session servers
+   *  attach each control client to its own server. */
+  #socketArgs: string[];
 
   get connected(): boolean { return this.#ready && this.#proc !== null; }
 
@@ -117,11 +122,10 @@ export class TmuxControlClient {
     // Filter the client-attached hook BEFORE we attach, so our own control attach
     // doesn't resize the window. Harmless if the session doesn't exist yet (the
     // attach below then fails → reconnect once the registry has created it).
-    run(...tmuxArgv(), "set-hook", "-t", this.#session, "client-attached", CLIENT_ATTACHED_HOOK);
+    run("tmux", ...this.#socketArgs, "set-hook", "-t", this.#session, "client-attached", CLIENT_ATTACHED_HOOK);
     let proc: ChildProcess;
     try {
-      const [cmd, ...socketArgs] = tmuxArgv();
-      proc = spawn(cmd, [...socketArgs, "-C", "attach-session", "-t", this.#session], { stdio: ["pipe", "pipe", "ignore"] });
+      proc = spawn("tmux", [...this.#socketArgs, "-C", "attach-session", "-t", this.#session], { stdio: ["pipe", "pipe", "ignore"] });
     } catch {
       this.#scheduleReconnect();
       return;

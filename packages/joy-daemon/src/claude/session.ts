@@ -16,7 +16,7 @@ import { setTimeout as sleep } from "timers/promises";
 import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "fs";
 import type { AgentSession } from "../domain/agentSession";
 import { run } from "../tmux/shell";
-import { tmux } from "../tmux/driver";
+import { tmux as defaultTmux, disposeTmuxHandle, type TmuxDriver } from "../tmux/driver";
 import {
   encodeTurnStart,
   encodeTextEvent,
@@ -112,6 +112,8 @@ export interface SessionRecord {
   current_model?: string;
   pid?: number;
   tmux_window: string;
+  /** Per-session tmux server socket label (-L), null on the shared server. */
+  tmux_socket?: string | null;
   cwd: string;
   model?: string;
   effort?: string;
@@ -457,6 +459,10 @@ export interface QueueState {
 export interface SessionInit {
   id: string;
   tmuxWindow: string;
+  /** Per-session tmux driver handle; absent → the shared singleton (legacy). */
+  tmux?: TmuxDriver;
+  /** Per-session server socket label; set → teardown uses kill-server. */
+  tmuxSocket?: string | null;
   cwd: string;
   model?: string;
   effort?: string;
@@ -477,6 +483,8 @@ export class Session {
   readonly agentFlavor = "claude" as const;
   readonly id: string;
   readonly tmuxWindow: string;
+  readonly #tmux: TmuxDriver;
+  readonly #tmuxSocket: string | null;
   readonly cwd: string;
   readonly model?: string;
   readonly effort?: string;
@@ -703,6 +711,8 @@ export class Session {
   constructor(init: SessionInit, deps: SessionDeps) {
     this.id = init.id;
     this.tmuxWindow = init.tmuxWindow;
+    this.#tmux = init.tmux ?? defaultTmux;
+    this.#tmuxSocket = init.tmuxSocket ?? null;
     this.cwd = init.cwd;
     this.model = init.model;
     this.effort = init.effort;
@@ -752,6 +762,7 @@ export class Session {
       claude_session_id: this.claudeSessionId,
       pid: this.pid,
       tmux_window: this.tmuxWindow,
+      tmux_socket: this.#tmuxSocket,
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,
@@ -790,7 +801,7 @@ export class Session {
    */
   #watchStartup(attempts = 0): void {
     if (this.status === "ended" || this.status === "active") return; // already resolved
-    const pane = tmux.captureCached(this.tmuxWindow);
+    const pane = this.#tmux.captureCached(this.tmuxWindow);
     if (pane.ok && paneShowsClaudeRunning(pane.out)) return; // Claude is visibly up
     // An open dialog hides all "running" markers but IS a live claude — e.g. a
     // /model dispatched into a still-starting session (no transcript exists
@@ -813,11 +824,11 @@ export class Session {
    */
   #watchTrustPrompt(attempts = 0): void {
     if (this.status === "ended" || this.status === "active" || this.#trustHandled) return;
-    const pane = tmux.captureCached(this.tmuxWindow);
+    const pane = this.#tmux.captureCached(this.tmuxWindow);
     if (pane.ok && /Yes, I trust this folder|Is this a project you (created|trust)/i.test(pane.out)) {
       // "1" selects "Yes, I trust this folder"; Enter confirms (harmless empty
       // submit if "1" already activated it).
-      void tmux.key(this.tmuxWindow,"1", "Enter"); // fire-and-forget (sync watcher)
+      void this.#tmux.key(this.tmuxWindow,"1", "Enter"); // fire-and-forget (sync watcher)
       this.#trustHandled = true;
       return;
     }
@@ -1014,7 +1025,7 @@ export class Session {
 
     // Stop paying the periodic pane-snapshot sweep for this window. A later
     // user-driven pane view (captureFresh) transparently re-tracks it.
-    tmux.untrack(this.tmuxWindow);
+    this.#tmux.untrack(this.tmuxWindow);
 
     if (reason === "process_exited") {
       // Detached: keep the relay attached AND keep heartbeating presence (the
@@ -1041,7 +1052,9 @@ export class Session {
         // Keep the (retrying) promise so killSession can await the real result.
         this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
       }
-      void tmux.command(["kill-window", "-t", this.tmuxWindow]); // teardown, fire-and-forget
+      void (this.#tmuxSocket
+        ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())          // own server: OS reclaims everything
+        : this.#tmux.command(["kill-window", "-t", this.tmuxWindow])); // legacy shared server
     }
 
     this.#deps.broadcast("session_update", this.toJSON());
@@ -1081,7 +1094,9 @@ export class Session {
     if (this.#deps.relayClient && relaySessionId) {
       this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
     }
-    void tmux.command(["kill-window", "-t", this.tmuxWindow]); // teardown, fire-and-forget
+    void (this.#tmuxSocket
+        ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())          // own server: OS reclaims everything
+        : this.#tmux.command(["kill-window", "-t", this.tmuxWindow])); // legacy shared server
     this.endReason = "killed";
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
@@ -1260,7 +1275,7 @@ export class Session {
     // keys aren't being processed), do NOT type over the residue: the two would
     // concatenate into one garbled submit. Fall back to the queue head + the
     // input_dirty banner, the same recovery path the dispatch gate uses.
-    const pane = await tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     if (pane.ok && paneInputText(pane.out)) {
       this.#preserveDraft(paneInputText(pane.out)!);
       if (!(await this.#clearBoxWithCtrlU())) {
@@ -1294,7 +1309,7 @@ export class Session {
         this.#steerSubmitTimer = null;
         try {
           if (this.status === "ended") { resolve(); return; } // dead session — nothing to deliver to
-          const e = await tmux.key(this.tmuxWindow, "Enter");
+          const e = await this.#tmux.key(this.tmuxWindow, "Enter");
           if (!e.ok) { reject(new Error("steer: submit Enter failed")); return; }
           const delivery = this.#ensureDelivery();
           if (delivery && this.relaySessionId) {
@@ -1424,7 +1439,7 @@ export class Session {
   async #recheckDirtyPause(): Promise<void> {
     if (!this.#dirtyRecheckWanted()) return;
     this.#dirtyRecheckAttempts += 1;
-    const pane = await tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     // Re-check after the await: a resume, an end, or a different pause may have
     // landed while the capture was in flight.
     if (!this.#dirtyRecheckWanted()) return;
@@ -1474,7 +1489,7 @@ export class Session {
    */
   async #clearInputIfDirty(idleOnly: boolean): Promise<"cleared" | "dirty" | "skipped"> {
     if (idleOnly && (this.#turn || this.#dispatchInFlight)) return "skipped";
-    const pane = await tmux.captureFresh(this.tmuxWindow); // FRESH — stale here = concatenation
+    const pane = await this.#tmux.captureFresh(this.tmuxWindow); // FRESH — stale here = concatenation
     // captureFresh can take a control-mode round-trip; re-check the idle guards after
     // it: a turn / dispatch may have begun while it was in flight, in which case the
     // text in the box is no longer stale leftover and must not be cleared.
@@ -1516,7 +1531,7 @@ export class Session {
     const draft = this.#preservedDraft;
     if (!draft || this.status === "ended") return;
     if (this.#queue.length > 0 || this.#dispatchInFlight) return; // box is needed again — keep holding
-    const pane = await tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     if (!pane.ok) return;
     if (paneInputText(pane.out) !== "") return; // user typed anew / no box — never merge
     this.#preservedDraft = null;
@@ -1542,16 +1557,16 @@ export class Session {
    * blind-blasting the budget.
    */
   async #clearBoxWithCtrlU(): Promise<boolean> {
-    const first = await tmux.captureFresh(this.tmuxWindow);
+    const first = await this.#tmux.captureFresh(this.tmuxWindow);
     if (!first.ok) return false;
     let prev = paneInputText(first.out);
     if (prev === "" || prev === null) return true; // already empty
     const budget = Math.min(40, paneInputLineSpan(first.out) * 2 + 4);
     let stalled = 0;
     for (let i = 0; i < budget; i++) {
-      const cu = await tmux.key(this.tmuxWindow, "C-u");
+      const cu = await this.#tmux.key(this.tmuxWindow, "C-u");
       if (!cu.ok) return false;
-      const re = await tmux.captureFresh(this.tmuxWindow);
+      const re = await this.#tmux.captureFresh(this.tmuxWindow);
       if (!re.ok) return false; // can't verify → report dirty, never claim success
       const remaining = paneInputText(re.out);
       if (remaining === "" || remaining === null) return true;
@@ -1622,7 +1637,7 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     if (!this.#canDrain()) return;
 
-    const pane = await tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     if (!this.#canDrain()) return; // re-check after the await
     if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
@@ -1739,7 +1754,7 @@ export class Session {
     // recurring). If the pane shows generation/work, EXTEND the window instead of
     // pausing — bounded, so a genuinely-lost dispatch (a dialog ate it, Claude
     // wasn't ready) still surfaces after the extensions are spent.
-    const pane = tmux.captureCached(this.tmuxWindow);
+    const pane = this.#tmux.captureCached(this.tmuxWindow);
     const working = pane.ok && (paneShowsGenerating(pane.out) || paneShowsWorking(pane.out));
     if (working && this.#dispatchExtends < MAX_DISPATCH_EXTENDS) {
       this.#dispatchExtends += 1;
@@ -1798,7 +1813,7 @@ export class Session {
    *   "⏸ plan mode on"            → plan
    */
   detectPermissionMode(): string | null {
-    const pane = tmux.captureCached(this.tmuxWindow);
+    const pane = this.#tmux.captureCached(this.tmuxWindow);
     if (!pane.ok) return null;
     return parsePermissionModeFromPane(pane.out);
   }
@@ -1819,7 +1834,7 @@ export class Session {
     if (ci < 0) return { ok: false, error: `unrecognized current mode: ${current}` };
     const steps = (ti - ci + CYCLE.length) % CYCLE.length;
     for (let i = 0; i < steps; i++) {
-      await tmux.key(this.tmuxWindow,"BTab");
+      await this.#tmux.key(this.tmuxWindow,"BTab");
       await sleep(120); // footer needs a beat to repaint between cycles
     }
     await sleep(250);
@@ -1844,7 +1859,7 @@ export class Session {
     // a stray Escape on idle is a no-op (Escape doesn't clear the box), whereas a
     // wrong block means "Stop did nothing". FRESH capture — a stale read here could
     // wrongly block a real abort.
-    const pane = await tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     // A genuinely NEW send appeared while we awaited the capture → this abort is
     // stale: the state it was issued against is gone and a fresh message is now in
     // flight. Return before touching anything (no Escape-interrupt, no clear). Note
@@ -1896,7 +1911,7 @@ export class Session {
         this.#broadcastQueue();
       }
     }
-    await tmux.key(this.tmuxWindow, "Escape");
+    await this.#tmux.key(this.tmuxWindow, "Escape");
     this.#setThinking(false);
     // Interrupting mid-tool means Claude won't write that tool's result — close any
     // open tools so their cards don't spin forever.
@@ -1963,7 +1978,7 @@ export class Session {
     // "git commit<Enter>" lands as those exact characters instead of a
     // command + keypress. Used by the pane's plain-text input toggle.
     if (opts?.literal) {
-      const ok = (await tmux.literal(this.tmuxWindow,script)).ok;
+      const ok = (await this.#tmux.literal(this.tmuxWindow,script)).ok;
       return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
     }
     // parse the token language → tmux key-name / literal segments (toTmux
@@ -1981,8 +1996,8 @@ export class Session {
     // Await each segment IN ORDER so a failed one stops the rest from being enqueued.
     for (const seg of segments) {
       const ok = seg.type === "keys"
-        ? (await tmux.key(this.tmuxWindow,...seg.names)).ok
-        : (await tmux.literal(this.tmuxWindow,seg.text)).ok;
+        ? (await this.#tmux.key(this.tmuxWindow,...seg.names)).ok
+        : (await this.#tmux.literal(this.tmuxWindow,seg.text)).ok;
       if (!ok) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
     }
     return { ok: true, segments: segments.length };
@@ -1995,7 +2010,7 @@ export class Session {
     // disconnected. scrollbackLines = one extra screenful of history above the
     // visible region, so the app's pane view scrolls back twice as far as the
     // screen shows (#viewRows tracks the viewer's height via resize()).
-    return { ok: true, text: (await tmux.captureFresh(this.tmuxWindow, { color, scrollbackLines: this.#viewRows })).out };
+    return { ok: true, text: (await this.#tmux.captureFresh(this.tmuxWindow, { color, scrollbackLines: this.#viewRows })).out };
   }
 
   // Viewer height (rows) from the last resize() — sizes the pane view's
@@ -2014,7 +2029,7 @@ export class Session {
     const r = Math.max(10, Math.min(200, Math.floor(rows)));
     if (!Number.isFinite(c) || !Number.isFinite(r)) return { ok: false };
     this.#viewRows = r; // pane view scrollback tracks the viewer's height
-    const res = await tmux.command(["resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)]);
+    const res = await this.#tmux.command(["resize-window", "-t", this.tmuxWindow, "-x", String(c), "-y", String(r)]);
     return { ok: res.ok };
   }
 
@@ -2329,8 +2344,8 @@ export class Session {
   async #typeLines(text: string): Promise<boolean> {
     const lines = text.split(/\r\n|\r|\n/);
     for (let i = 0; i < lines.length; i++) {
-      if (i > 0 && !(await tmux.key(this.tmuxWindow, "C-j")).ok) return false;
-      if (lines[i] !== "" && !(await tmux.literal(this.tmuxWindow, lines[i])).ok) return false;
+      if (i > 0 && !(await this.#tmux.key(this.tmuxWindow, "C-j")).ok) return false;
+      if (lines[i] !== "" && !(await this.#tmux.literal(this.tmuxWindow, lines[i])).ok) return false;
     }
     return true;
   }
@@ -2451,7 +2466,7 @@ export class Session {
       // Mirror + flip thinking ONLY after the Enter has actually gone out over the
       // wire — so the app never shows "sent" before the pane submitted. A failed
       // Enter (disconnect) leaves it unsent; the dispatch echo timeout surfaces it.
-      const e = await tmux.key(this.tmuxWindow, "Enter");
+      const e = await this.#tmux.key(this.tmuxWindow, "Enter");
       if (!e.ok) return;
       // Re-validate AFTER the awaited Enter (it may have queued behind other control
       // commands): a kill / dispatch-timeout / abort that flipped state mid-await must
@@ -2611,7 +2626,7 @@ export class Session {
         this.pid = fresh;
         this.#dialogLivenessPasses = 0; // real process evidence resets the grace
       } else {
-        const pane = tmux.captureCached(this.tmuxWindow);
+        const pane = this.#tmux.captureCached(this.tmuxWindow);
         // An open dialog hides every "claude is running" marker (verified live:
         // model picker/confirm/effort all read running=false) — but a dialog on
         // screen IS a live claude. Without this, a stale pid + open dialog
@@ -2638,7 +2653,7 @@ export class Session {
 
   /** Re-derive Claude's pid from the pane's shell: its live first child. */
   #resolvePidFromPane(): number | undefined {
-    const shell = tmux.runSync("display-message", "-t", this.tmuxWindow, "-p", "#{pane_pid}");
+    const shell = this.#tmux.runSync("display-message", "-t", this.tmuxWindow, "-p", "#{pane_pid}");
     if (!shell.ok) return undefined; // window gone → let the caller end the session
     const shellPid = parseInt(shell.out.trim());
     if (isNaN(shellPid)) return undefined;
@@ -2951,7 +2966,7 @@ export class Session {
   #pollThinking(): void {
     if (this.status === "ended") return;
     if (this.#relay) {
-      const pane = tmux.captureCached(this.tmuxWindow);
+      const pane = this.#tmux.captureCached(this.tmuxWindow);
       if (pane.ok) {
         const generating = paneShowsGenerating(pane.out);
         // Hysteresis: SET on one generating read (thinking should appear fast),
@@ -3068,7 +3083,7 @@ export class Session {
     if (loginContinueFromPane(paneText)) {
       if (!this.#loginContinuePressed) {
         this.#loginContinuePressed = true;
-        void tmux.key(this.tmuxWindow, "Enter").catch(() => { /* pane gone */ });
+        void this.#tmux.key(this.tmuxWindow, "Enter").catch(() => { /* pane gone */ });
       }
     } else {
       this.#loginContinuePressed = false;
@@ -3108,7 +3123,7 @@ export class Session {
     if (this.status === "ended") return;
     const c = code.trim();
     if (!c) return;
-    const pane = await tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     // Login box GONE is a deliberate drop (login already completed/cancelled —
     // typing the code into a normal prompt would submit garbage), but capture
     // FAILURE and typing/submit failures must THROW: the relay-borne caller
@@ -3118,7 +3133,7 @@ export class Session {
     if (!authUrlFromPane(pane.out)) return; // box gone — deliberate drop
     if (!(await this.#typeLines(c))) throw new Error("login-code: typing failed");
     await sleep(ENTER_SUBMIT_DELAY_MS); // paste-detection swallows an immediate Enter
-    const e = await tmux.key(this.tmuxWindow, "Enter");
+    const e = await this.#tmux.key(this.tmuxWindow, "Enter");
     if (!e.ok) throw new Error("login-code: submit Enter failed");
   }
 

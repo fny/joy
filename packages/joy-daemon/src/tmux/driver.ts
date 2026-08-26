@@ -45,19 +45,37 @@ export class TmuxDriver {
   #refreshInFlight = false;   // a sweep is currently running
   #refreshRequested = false;  // another %output/tick landed mid-sweep → run once more
 
-  constructor() {
+  // The argv prefix (["tmux", ...socket selector]) and control session this
+  // instance drives. The default instance keeps today's behavior (relay-
+  // scoped socket, $TMUX_SESSION); per-session handles get their own server.
+  #argv: string[];
+  #interval: ReturnType<typeof setInterval> | null = null;
+
+  constructor(opts: { socketArgs?: string[]; session?: string } = {}) {
+    const socketArgs = opts.socketArgs ?? tmuxArgv().slice(1);
+    this.#argv = ["tmux", ...socketArgs];
     if (ENABLE_CONTROL) {
-      const session = process.env.TMUX_SESSION ?? "joy";
-      this.#client = new TmuxControlClient(session, { onOutput: (paneId) => this.#onOutput(paneId) });
-      const t = setInterval(() => {
+      const session = opts.session ?? process.env.TMUX_SESSION ?? "joy";
+      this.#client = new TmuxControlClient(session, { onOutput: (paneId) => this.#onOutput(paneId), socketArgs });
+      this.#interval = setInterval(() => {
         for (const target of this.#targets) {
           this.#dirty.add(target);
           if (!this.#targetToPane.has(target)) void this.#resolvePane(target);
         }
         void this.#refreshTracked();
       }, SNAPSHOT_REFRESH_MS);
-      t.unref?.();
+      this.#interval.unref?.();
     }
+  }
+
+  /** Per-session teardown: stop the control client and the sweep timer so a
+   *  disposed handle costs nothing. The instance must not be used after. */
+  dispose(): void {
+    if (this.#interval) { clearInterval(this.#interval); this.#interval = null; }
+    this.#client?.stop();
+    this.#client = null;
+    this.#targets.clear(); this.#snapshots.clear(); this.#dirty.clear();
+    this.#paneToTarget.clear(); this.#targetToPane.clear();
   }
 
   /** Stop snapshot-tracking a window (session ended/killed): removes it from the
@@ -103,7 +121,7 @@ export class TmuxDriver {
     if (opts?.color) args.push("-e");
     if (opts?.scrollbackLines && opts.scrollbackLines > 0) args.push("-S", `-${Math.floor(opts.scrollbackLines)}`);
     args.push("-t", target);
-    return run(...tmuxArgv(), ...args);
+    return run(...this.#argv, ...args);
   }
 
   /**
@@ -113,7 +131,7 @@ export class TmuxDriver {
    * kill-session (destroys it), and recover()'s startup scan (runs before attach).
    */
   runSync(...args: string[]): TmuxResult {
-    return run(...tmuxArgv(), ...args);
+    return run(...this.#argv, ...args);
   }
 
   // ── Control-mode NON-IDEMPOTENT writes (keystrokes, new-window) ──────────────
@@ -142,7 +160,7 @@ export class TmuxDriver {
       catch (e) { return { ok: false, out: "", error: String(e) }; } // un-encodable (newline/NUL)
       return this.#client.command(line); // verbatim result — NO spawn retry (non-idempotent)
     }
-    return run(...tmuxArgv(), ...args); // not connected → spawn (nothing went over control)
+    return run(...this.#argv, ...args); // not connected → spawn (nothing went over control)
   }
 
   // ── Control-mode generic command (IDEMPOTENT: resize/display/list/kill/has/hook) ──
@@ -153,12 +171,12 @@ export class TmuxDriver {
   async command(args: string[]): Promise<TmuxResult> {
     if (this.#client?.connected) {
       let line: string;
-      try { line = tmuxCommand(args); } catch { return run(...tmuxArgv(), ...args); }
+      try { line = tmuxCommand(args); } catch { return run(...this.#argv, ...args); }
       const r = await this.#client.command(line);
       if (r.ok) return r;
       // %error / disconnect → idempotent, fall through to a spawn retry
     }
-    return run(...tmuxArgv(), ...args);
+    return run(...this.#argv, ...args);
   }
 
   // ── Control-mode reads (snapshot cache + fresh command), spawn fallback ──────
@@ -252,4 +270,26 @@ export class TmuxDriver {
 function nowMs(): number { return Date.now(); }
 
 /** Process-wide driver: control client + spawn fallback (spawn-only under vitest). */
+// ── Per-session handle pool (docs/per-session-tmux-design.md) ─────────────
+// One TmuxDriver per per-session server, keyed by socket label. create/
+// recover obtain handles here; kill paths dispose them after kill-server.
+const handles = new Map<string, TmuxDriver>();
+
+export function tmuxHandleFor(label: string, session: string): TmuxDriver {
+  let h = handles.get(label);
+  if (!h) {
+    h = new TmuxDriver({ socketArgs: ["-L", label], session });
+    handles.set(label, h);
+  }
+  return h;
+}
+
+export function disposeTmuxHandle(label: string): void {
+  const h = handles.get(label);
+  if (h) {
+    handles.delete(label);
+    h.dispose();
+  }
+}
+
 export const tmux = new TmuxDriver();

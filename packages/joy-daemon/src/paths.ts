@@ -102,6 +102,14 @@ export function tmuxSocketArgs(): string[] {
   return isDefaultRelay() ? [] : ["-L", `joy-${joyRelayKey()}`];
 }
 
+/** Per-SESSION tmux server label (docs/per-session-tmux-design.md): each
+ *  agent session gets its own server so a tmux leak dies with the session
+ *  (kill-server returns every byte to the OS). Relay-scoped so concurrent
+ *  per-relay daemons can never collide on a session id. */
+export function tmuxServerLabel(sessionId: string): string {
+  return isDefaultRelay() ? `joy-s-${sessionId}` : `joy-${joyRelayKey()}-s-${sessionId}`;
+}
+
 /** Test-only: drop the cached relay resolution so env overrides apply. */
 export function __resetRelaySelection(): void {
   cachedRelayUrl = null;
