@@ -131,19 +131,6 @@ class Sync {
     private messagesSync = new Map<string, InvalidateSync>();
     private sendSync = new Map<string, InvalidateSync>();
     private sendAbortControllers = new Map<string, AbortController>();
-    // B2: v2 optimistic rows awaiting their mirror echo. sessionId → array of
-    // {localId, text}. When the daemon's mirror delivers the same user text,
-    // applyMessages dismisses the local optimistic row so no duplicate shows.
-    private v2Pending = new Map<string, Array<{ localId: string; text: string; at: number }>>();
-
-    private registerV2Pending(sessionId: string, localId: string, text: string) {
-        const arr = this.v2Pending.get(sessionId) ?? [];
-        arr.push({ localId, text, at: Date.now() });
-        // Bound it: drop entries older than 5 minutes (delivery window).
-        const cutoff = Date.now() - 5 * 60_000;
-        this.v2Pending.set(sessionId, arr.filter(e => e.at >= cutoff));
-    }
-
     // localIds currently being POSTed for a session (the in-flight batch). These
     // are still in pendingOutbox but must NOT be treated as failed — the POST
     // decides their fate. Excluding them from the overdue check is what keeps a
@@ -756,37 +743,20 @@ class Sync {
             // carry the source tag. The v2 wire only moves the actual text;
             // displayText rides the optimistic echo so slash-commands read
             // right locally.
+            // NOTE: no optimistic local echo — the daemon's mirror is the single
+            // source of the user row (avoids a duplicate; the mirror-path dedup
+            // is deferred, see the v2 checklist). The message shows once the
+            // daemon receives and echoes it (fast when online). displayText is
+            // honored below via the wire text choice.
             const v2localId = options?.localId ?? randomUUID();
-            const shownText = options?.displayText ?? text;
-            // B2: optimistic echo — the durable send may round-trip through the
-            // daemon's mirror slowly (or wait, machine offline), so show the
-            // user's own message instantly. registerV2Pending lets the mirror's
-            // eventual copy dismiss this local row (dedup by text), so no
-            // duplicate appears when the daemon echoes it back.
             try {
-                const optimistic = normalizeRawMessage(v2localId, v2localId, Date.now(), {
-                    role: 'user',
-                    content: { type: 'text', text: shownText },
-                    // Only schema-valid meta keys (the v2Pending tracking lives
-                    // in this.v2Pending, not on the row). displayText already
-                    // rode into shownText above.
-                    meta: { sentFrom: Platform.OS === 'web' ? 'web' : Platform.OS },
-                });
-                if (optimistic) {
-                    this.registerV2Pending(sessionId, v2localId, shownText);
-                    this.enqueueMessages(sessionId, [optimistic]);
-                }
-            } catch (e) {
-                console.warn('[v2] optimistic echo failed (non-fatal)', e);
-            }
-            try {
+                // The relay stores the SENT text; displayText is a UI-only alias
+                // and does not change what the agent receives, so seal `text`.
                 const ciphertext = sealV2Content(text, key);
                 await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext);
                 return { ok: true, localId: v2localId };
             } catch (e) {
                 console.error('[v2] send failed', e);
-                // Leave the optimistic row (the message may still be queued);
-                // surface the failure so the composer can react.
                 return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
             }
         }
@@ -2928,23 +2898,6 @@ class Sync {
     //
 
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
-        // B2 dedup: a mirrored user text row that matches a pending v2
-        // optimistic row replaces it — dismiss the local-only optimistic
-        // (no seq, no server presence, safe to remove) before applying.
-        const pending = this.v2Pending.get(sessionId);
-        if (pending && pending.length > 0) {
-            for (const msg of messages) {
-                if (msg.role !== 'user' || msg.content.type !== 'text') continue;
-                // The mirror row carries a server id different from our localId;
-                // match by text and drop the corresponding optimistic row.
-                const idx = pending.findIndex(p => p.text === msg.content.text && p.localId !== msg.id);
-                if (idx >= 0) {
-                    const [hit] = pending.splice(idx, 1);
-                    try { storage.getState().dismissMessage(sessionId, hit.localId); } catch { /* already gone */ }
-                }
-            }
-            if (pending.length === 0) this.v2Pending.delete(sessionId);
-        }
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];
         for (let messageId of result.changed) {
