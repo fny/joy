@@ -813,6 +813,10 @@ export class SessionRegistry {
 
   // ── Recovery (joy-daemon restart with live tmux windows) ──────────────────────
 
+  /** Window-record passthroughs for the nucleus lane (v2 linkage + keys). */
+  listRecords(): ReturnType<typeof listWindowRecords> { return listWindowRecords(); }
+  saveRecord(id: string, patch: Parameters<typeof saveWindowRecord>[1]): void { saveWindowRecord(id, patch); }
+
   recover(): void {
     // Startup scan — spawn (runs before the control client is reliably attached; kept
     // synchronous so daemon boot doesn't depend on the connection coming up first).

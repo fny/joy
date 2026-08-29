@@ -57,6 +57,27 @@ export class Encryption {
         this.contentDataKey = contentKeyPair.publicKey;
     }
 
+    /**
+     * Open a v2 session-key envelope: "v2sk1:" + b64(epk32 ‖ nonce24 ‖
+     * box(sessionKey → contentKeyPair.publicKey, ephemeral)). The daemon's
+     * nucleus lane seals these at bind (nucleusLane.sealSessionKey). Returns
+     * the 32-byte symmetric content key, or null for plaintext/legacy
+     * envelopes and anything malformed.
+     */
+    openV2SessionKey(envelope: string): Uint8Array | null {
+        if (!envelope.startsWith('v2sk1:')) return null;
+        try {
+            const raw = sodium.from_base64(envelope.slice(6), sodium.base64_variants.ORIGINAL);
+            const epk = raw.slice(0, 32);
+            const nonce = raw.slice(32, 32 + 24);
+            const ct = raw.slice(32 + 24);
+            const key = sodium.crypto_box_open_easy(ct, nonce, epk, this.contentKeyPair.privateKey);
+            return key.length === 32 ? key : null;
+        } catch {
+            return null;
+        }
+    }
+
     //
     // Core encryption opening
     //

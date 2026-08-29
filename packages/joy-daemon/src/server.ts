@@ -149,6 +149,10 @@ if (process.env.JOY_V2_LANE !== "0") {
       relayUrl: joyRelayUrl(),
       token: creds.token,
       machineId: creds.machineId,
+      // dataKey pairing carries the account's content PUBLIC key — the lane
+      // seals v2 content under per-session keys enveloped to it. Legacy
+      // pairings have no such key and stay on plaintext test envelopes.
+      accountContentPublicKey: creds.encryption.type === "dataKey" ? creds.encryption.publicKey : null,
       log: (line) => process.stderr.write(line + "\n"),
     });
   } else {

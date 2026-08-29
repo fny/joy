@@ -44,6 +44,7 @@ import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
+import { v2 } from '@/sync/v2/api';
 import type { Machine, Session } from '@/sync/storageTypes';
 import {
     getEffortLevelsForModel,
@@ -152,6 +153,10 @@ function NewJoyTmuxSessionScreen() {
     const [resumeMb, setResumeMb] = React.useState('1');
     // Free-form extra CLI arguments appended verbatim to the claude command.
     const [extraArgs, setExtraArgs] = React.useState('');
+    // Dual path: create through the v2 relay queue instead of the happy RPC.
+    // The daemon's nucleus lane claims the spawn, launches the agent, and
+    // stamps the resulting card with its v2 link (badge + v2-routed writes).
+    const [viaV2, setViaV2] = React.useState(false);
     const [prompt, setPrompt] = React.useState('');
     const [isSpawning, setIsSpawning] = React.useState(false);
     const [machinePickerOpen, setMachinePickerOpen] = React.useState(false);
@@ -457,6 +462,37 @@ function NewJoyTmuxSessionScreen() {
 
         setIsSpawning(true);
         try {
+            // ── v2 path: durable spawn command on the relay queue; the daemon's
+            // lane executes it and the session card arrives via normal sync,
+            // stamped with its v2 link. We wait for that card to navigate.
+            if (viaV2) {
+                const created = await v2.createSession(selectedMachineId, {
+                    cwd,
+                    agent: selectedAgent,
+                    model: selectedAgent === 'claude' ? currentModel?.key : undefined,
+                });
+                const v2id: string = created.sessionId;
+                const deadline = Date.now() + 120_000;
+                let happySessionId: string | null = null;
+                while (Date.now() < deadline && !happySessionId) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    await sync.refreshSessions();
+                    const all = storage.getState().sessions;
+                    for (const [sid, s] of Object.entries(all)) {
+                        if ((s as { metadata?: { v2?: { sessionId?: string } } }).metadata?.v2?.sessionId === v2id) { happySessionId = sid; break; }
+                    }
+                }
+                if (!happySessionId) {
+                    Modal.alert(t('common.error'), 'v2 spawn accepted but the session card did not arrive within 2 minutes. Check the daemon lane on that machine.');
+                    return;
+                }
+                const trimmedPromptV2 = prompt.trim();
+                if (trimmedPromptV2) await sync.sendMessage(happySessionId, trimmedPromptV2, { source: 'new_session' });
+                router.back();
+                setTimeout(() => router.push(`/session/${happySessionId}` as never), 100);
+                return;
+            }
+
             let result = await sendCreateRpc(false);
 
             // Directory doesn't exist — ask the user before joy-tmux creates
@@ -712,6 +748,20 @@ function NewJoyTmuxSessionScreen() {
                             {/* Fork — claude-only; only meaningful with continue (claude
                                 rejects --fork-session on a fresh session). */}
                             {selectedAgent === 'claude' && (<>
+                            <Pressable
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
+                                onPress={() => setViaV2(v => !v)}
+                                accessibilityRole="button"
+                                accessibilityState={{ checked: viaV2 }}
+                                testID="joy-new-v2-toggle"
+                            >
+                                <Ionicons
+                                    name={viaV2 ? 'checkbox' : 'square-outline'}
+                                    size={15}
+                                    color={viaV2 ? theme.colors.textLink : theme.colors.textSecondary}
+                                />
+                                <Text style={styles.configLabel} numberOfLines={1}>via v2 relay</Text>
+                            </Pressable>
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed, !continueLast && { opacity: 0.4 }]}
                                 onPress={() => setForkSession(v => !v)}

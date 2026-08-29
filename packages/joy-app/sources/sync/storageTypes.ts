@@ -41,6 +41,13 @@ export const MetadataSchema = z.object({
         updatedAt: z.number()
     }).optional(),
     machineId: z.string().optional(),
+    // v2 nucleus linkage (stamped by the daemon's lane at bind): this session's
+    // writes route over the v2 plane; keyEnvelope carries the sealed content key.
+    v2: z.object({
+        sessionId: z.string(),
+        relay: z.string(),
+        keyEnvelope: z.string(),
+    }).optional(),
     claudeSessionId: z.string().optional(), // Claude Code session ID
     codexThreadId: z.string().optional(), // Codex app-server thread ID
     tools: z.array(z.string()).optional(),

@@ -1117,7 +1117,7 @@ export class RelaySession {
   /** Resolves TRUE only when the patch was server-ACKED (metadata advanced).
    *  Callers that need write certainty (the dialog pump) use the result;
    *  fire-and-forget callers ignore it. */
-  private mergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
+  mergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
     const run = this.metadataChain.then(() => this.doMergeMetadata(patch));
     this.metadataChain = run.then(() => undefined, () => undefined); // keep the chain alive past a failure
     return run;

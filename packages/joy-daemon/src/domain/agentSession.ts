@@ -64,4 +64,9 @@ export interface AgentSession {
   // ── claude-hook surface (no-op for agents without Claude Code hooks) ──
   onHookEvent(ev: Record<string, unknown>): { ok: boolean };
   markCompacting(trigger: string): void;
+
+  /** Stamp the happy card's metadata with this session's v2 linkage
+   *  ({sessionId, relay, keyEnvelope}) so the app can route writes over the
+   *  v2 plane and unseal content. Optional: adapters merge best-effort. */
+  setV2Link?(link: { sessionId: string; relay: string; keyEnvelope: string }): void;
 }

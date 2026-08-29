@@ -178,6 +178,38 @@ export const v2 = {
     },
 };
 
+// ── dual-path helpers (explicit relay base — the session's own v2 relay from
+// its metadata link, which may differ from this screen's override) ──────────
+
+async function v2fetchAt(base: string, method: string, path: string, body?: unknown): Promise<any> {
+    const res = await fetch(`${base}/joy/v2${path}`, {
+        method,
+        headers: {
+            'Authorization': `Bearer ${token()}`,
+            ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) throw new V2ApiError(res.status, (json as any)?.error ?? `http_${res.status}`, json);
+    return json;
+}
+
+/** Send a PRE-SEALED ciphertext (the dual-path seam encrypts before calling). */
+export function v2SendCiphertext(base: string, v2SessionId: string, ciphertext: string): Promise<{ messageId: string; turnId: string }> {
+    return v2fetchAt(base, 'POST', `/sessions/${v2SessionId}/messages`, { ciphertext, clientIntentId: randomUUID() });
+}
+
+/** The currently executing turn id, or null. */
+export async function v2ActiveTurn(base: string, v2SessionId: string): Promise<string | null> {
+    const s = await v2fetchAt(base, 'GET', `/sessions/${v2SessionId}`) as V2SessionState;
+    return s.execution?.turnId ?? null;
+}
+
+export function v2CancelTurn(base: string, v2SessionId: string, turnId: string): Promise<unknown> {
+    return v2fetchAt(base, 'POST', `/sessions/${v2SessionId}/turns/${turnId}/cancellations`, { clientIntentId: randomUUID() });
+}
+
 // ── SSE doorbell + ephemeral lane ───────────────────────────────────────────
 
 export interface V2StreamHandlers {

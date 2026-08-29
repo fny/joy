@@ -21,7 +21,8 @@
 // disabled) the acquire loop logs once and retries quietly — the daemon's
 // happy transport is never affected.
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
+import tweetnacl from "tweetnacl";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionRegistry } from "../domain/registry";
@@ -41,6 +42,11 @@ export interface NucleusLaneOpts {
   relayUrl: string;
   token: string;      // account bearer (same credential the happy transport uses)
   machineId: string;  // same machine identity the app's machine list shows
+  /** Account content PUBLIC key (dataKey pairing). Set → v2 content is
+   *  sealed: a per-session symmetric key is generated at spawn, enveloped to
+   *  this key (ephemeral NaCl box) in the bind, and every prompt/output
+   *  ciphertext is secretbox'd under it. Absent → plaintext test envelopes. */
+  accountContentPublicKey?: Uint8Array | null;
   log?: (line: string) => void;
 }
 
@@ -56,9 +62,23 @@ interface WorkOffer {
 }
 interface ControlOffer { deliveryId: string; commandId: string; sessionId: string; targetTurnId: string }
 
-// ── content envelope (the encryption seam — mirrors app sync/v2/api.ts) ────
-export function decodeContent(ciphertext: string | null | undefined): string | null {
+// ── content codec (the encryption seam — mirrors app sync/v2/api.ts) ───────
+// Sealed wire format: "v2e1:" + b64(nonce24 ‖ secretbox(utf8(json), nonce, key)).
+// Legacy/test format: plain JSON {v:1,t:'plain',text}. decode accepts both so
+// pre-encryption sessions keep working; encode seals whenever a key exists.
+export function decodeContent(ciphertext: string | null | undefined, key?: Uint8Array | null): string | null {
   if (!ciphertext) return null;
+  if (ciphertext.startsWith("v2e1:")) {
+    if (!key) return null; // sealed content without the session key — refuse
+    try {
+      const raw = Buffer.from(ciphertext.slice(5), "base64");
+      const n = tweetnacl.secretbox.nonceLength;
+      const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
+      if (!pt) return null;
+      const p = JSON.parse(Buffer.from(pt).toString("utf8"));
+      return typeof p.text === "string" ? p.text : null;
+    } catch { return null; }
+  }
   try {
     const p = JSON.parse(ciphertext);
     if (p && typeof p.text === "string") return p.text;
@@ -73,8 +93,22 @@ export function decodeSpawnSpec(ciphertext: string | null | undefined): { cwd?: 
     return null;
   } catch { return null; }
 }
-export function encodeContent(text: string): string {
-  return JSON.stringify({ v: 1, t: "plain", text });
+export function encodeContent(text: string, key?: Uint8Array | null): string {
+  const json = JSON.stringify({ v: 1, t: "plain", text });
+  if (!key) return json;
+  const nonce = new Uint8Array(randomBytes(tweetnacl.secretbox.nonceLength));
+  const ct = tweetnacl.secretbox(new Uint8Array(Buffer.from(json, "utf8")), nonce, key);
+  return "v2e1:" + Buffer.concat([Buffer.from(nonce), Buffer.from(ct)]).toString("base64");
+}
+
+/** Envelope a fresh session key to the account: "v2sk1:" + b64(epk32 ‖ nonce24
+ *  ‖ box(sessionKey, nonce, accountPub, ephemeralSecret)). The app opens it
+ *  with its content keypair (crypto_box_open_easy). */
+export function sealSessionKey(sessionKey: Uint8Array, accountPub: Uint8Array): string {
+  const eph = tweetnacl.box.keyPair();
+  const nonce = new Uint8Array(randomBytes(tweetnacl.box.nonceLength));
+  const ct = tweetnacl.box(sessionKey, nonce, accountPub, eph.secretKey);
+  return "v2sk1:" + Buffer.concat([Buffer.from(eph.publicKey), Buffer.from(nonce), Buffer.from(ct)]).toString("base64");
 }
 
 export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
@@ -102,6 +136,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // v2 sessionId → local session id, rebuilt from the relay on start and
   // extended by every bind we perform.
   const bound = new Map<string, string>();
+  // v2 sessionId → content key. Generated at spawn, persisted in the window
+  // record, reloaded on restart. Absent entry = plaintext (legacy) session.
+  const sessionKeys = new Map<string, Uint8Array>();
   // turnIds currently executing here (guards the received→submitted re-offer
   // window) and turnIds a control-lane cancel has targeted.
   const inFlight = new Set<string>();
@@ -167,6 +204,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     for (const s of r.sessions ?? []) {
       if (s.daemonId === machineId && s.localSessionId) bound.set(s.sessionId, s.localSessionId);
     }
+    // Content keys ride the window records (same trust domain as transcripts).
+    for (const rec of registry.listRecords()) {
+      if (rec.v2SessionId && rec.v2SessionKey) {
+        try { sessionKeys.set(rec.v2SessionId, new Uint8Array(Buffer.from(rec.v2SessionKey, "base64"))); } catch { /* bad record */ }
+      }
+    }
   }
 
   async function claim(lane: "work" | "control"): Promise<Array<WorkOffer & ControlOffer>> {
@@ -216,13 +259,30 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         });
         writeSpawnIntent(offer.commandId, session.id);
       }
+      // Content sealing: with the account's content public key on hand,
+      // mint the session's symmetric key, persist it beside the window
+      // record, and envelope it to the account in the bind. Without the
+      // key (legacy pairing) the session stays on plaintext envelopes.
+      let envelope = "v2:plaintext";
+      if (opts.accountContentPublicKey) {
+        const key = new Uint8Array(randomBytes(32));
+        sessionKeys.set(offer.sessionId, key);
+        registry.saveRecord(session.id, { v2SessionId: offer.sessionId, v2SessionKey: Buffer.from(key).toString("base64") });
+        envelope = sealSessionKey(key, opts.accountContentPublicKey);
+      } else {
+        registry.saveRecord(session.id, { v2SessionId: offer.sessionId });
+      }
       await api("POST", `/daemon/sessions/${offer.sessionId}/bind`, {
         spawnCommandId: offer.commandId,
         localSessionId: session.id,
-        sessionKeyEnvelope: "v2:plaintext",
+        sessionKeyEnvelope: envelope,
       }, leaseRef);
       bound.set(offer.sessionId, session.id);
-      log(`spawned ${spec.agent ?? "claude"} in ${spec.cwd} → local ${session.id} (v2 ${offer.sessionId.slice(0, 8)})`);
+      // Stamp the happy card so the app can route this session's writes over
+      // v2 (dual path) and show its V2 badge — envelope included so the app
+      // needs no extra fetch to obtain the content key.
+      session.setV2Link?.({ sessionId: offer.sessionId, relay: relayUrl, keyEnvelope: envelope });
+      log(`spawned ${spec.agent ?? "claude"} in ${spec.cwd} → local ${session.id} (v2 ${offer.sessionId.slice(0, 8)}${envelope.startsWith("v2sk1:") ? ", sealed" : ", plaintext"})`);
     } catch (e) {
       // Spawn failed (missing binary, bad cwd) — the command stays queued and
       // keeps being offered; log loudly so the loop's noise points at the cause.
@@ -254,7 +314,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }
         return;
       }
-      const text = decodeContent(offer.ciphertext);
+      const text = decodeContent(offer.ciphertext, sessionKeys.get(offer.sessionId));
       if (text === null) {
         if (!notedSkips.has(turnId)) {
           notedSkips.add(turnId);
@@ -343,7 +403,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           if (!isOurs(m as { session_id?: string })) continue;
           if (m.role !== "assistant" || !m.content) continue;
           await api("POST", `/daemon/turns/${turnId}/facts`, {
-            type: "output", ciphertext: encodeContent(m.content), runtimeEventId: `chat:${bootNonce}:${m.id}`,
+            type: "output", ciphertext: encodeContent(m.content, sessionKeys.get(offer.sessionId)), runtimeEventId: `chat:${bootNonce}:${m.id}`,
           }, leaseRef);
         }
         if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");

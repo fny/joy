@@ -90,6 +90,9 @@ export interface SessionRowData {
     subtitle: string;
     avatarId: string;
     flavor: string | null;
+    /** True when the daemon stamped a v2 link — writes route over the v2
+     *  relay queue. Drives the V2 badge (temporary, dual-stack era). */
+    isV2: boolean;
     state: SessionState;
     // Only present on inactive sessions — active sessions never show "last seen"
     // and activeAt updates on every heartbeat, causing needless deep-equal diffs
@@ -164,6 +167,7 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         subtitle: getSessionSubtitle(session),
         avatarId: getSessionAvatarId(session),
         flavor: session.metadata?.flavor ?? null,
+        isV2: !!session.metadata?.v2?.sessionId,
         state,
         ...(!session.active && { activeAt: session.activeAt, createdAt: session.createdAt }),
         hasDraft: !!session.draft,

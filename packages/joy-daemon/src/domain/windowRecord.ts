@@ -19,6 +19,12 @@ export interface WindowRecord {
   /** Per-session tmux server label (-L <socket>), or absent/null for a
    *  legacy window on the shared server (pre per-session-servers). */
   socket?: string | null;
+  /** v2 nucleus linkage: the relay-side session id this local session serves. */
+  v2SessionId?: string;
+  /** v2 content key (base64, 32 bytes) — the symmetric key sealed to the
+   *  account in the bind envelope. Persisted so prompts stay decryptable
+   *  across daemon restarts. Same trust domain as the transcripts beside it. */
+  v2SessionKey?: string;
   /** Directory Claude was launched in — stable across in-pane `cd`. */
   launchCwd: string;
   /** Claude's transcript/session uuid, once learned from a transcript entry. */
@@ -102,7 +108,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -111,6 +117,8 @@ export function saveWindowRecord(
       id,
       launchCwd: patch.launchCwd ?? prev?.launchCwd ?? "",
       socket: patch.socket !== undefined ? patch.socket : prev?.socket ?? null,
+      v2SessionId: patch.v2SessionId ?? prev?.v2SessionId,
+      v2SessionKey: patch.v2SessionKey ?? prev?.v2SessionKey,
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,
