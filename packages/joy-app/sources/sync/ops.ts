@@ -557,15 +557,22 @@ export async function sessionAbort(sessionId: string): Promise<void> {
     // turn or the call fails — the agent still stops either way.
     const v2link = storage.getState().sessions[sessionId]?.metadata?.v2;
     if (v2link?.sessionId) {
+        // v2 session: cancel ONLY through the relay control lane (the turn
+        // then terminalizes CANCELLED). We do NOT also fire the happy abort —
+        // a double-abort could interrupt a fresh unrelated turn. If there is
+        // no active turn, there is nothing to cancel; if the relay call
+        // itself fails, surface it rather than racing the happy path.
+        let turnId: string | null = null;
         try {
-            const turnId = await v2ActiveTurn(v2link.relay, v2link.sessionId);
-            if (turnId) {
-                await v2CancelTurn(v2link.relay, v2link.sessionId, turnId);
-                return;
-            }
+            turnId = await v2ActiveTurn(v2link.relay, v2link.sessionId);
         } catch (e) {
-            console.warn('[v2] cancel failed, falling back to happy abort', e);
+            console.warn('[v2] could not read active turn; not falling back (avoids double-abort)', e);
+            return;
         }
+        if (turnId) {
+            await v2CancelTurn(v2link.relay, v2link.sessionId, turnId);
+        }
+        return;
     }
     await apiSocket.sessionRPC(sessionId, 'abort', {
         reason: `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.`
