@@ -435,6 +435,9 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                     >
                         {session.name}
                     </Text>
+                    {session.isV2 && (
+                        <View style={styles.v2Badge}><Text style={styles.v2BadgeText}>V2</Text></View>
+                    )}
                 </View>
             </View>
         </Pressable>
@@ -620,6 +623,11 @@ const stylesheet = StyleSheet.create((theme) => ({
         flexDirection: 'row',
         alignItems: 'center',
     },
+    v2Badge: {
+        marginLeft: 6, paddingHorizontal: 4, paddingVertical: 1, borderRadius: 4,
+        backgroundColor: theme.colors.textLink, opacity: 0.85, alignSelf: 'center',
+    },
+    v2BadgeText: { fontSize: 9, fontWeight: '700', color: theme.colors.surface, letterSpacing: 0.5 },
     sessionTitle: {
         fontSize: 15,
         flex: 1,
