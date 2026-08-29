@@ -4,6 +4,8 @@
  */
 
 import { apiSocket } from './apiSocket';
+import { v2ActiveTurn, v2CancelTurn } from './v2/api';
+import { storage } from './storage';
 import { downloadEncryptedAttachment } from './apiAttachments';
 import { decryptBlob } from '@/encryption/blob';
 import { encodeBase64 } from '@/encryption/base64';
@@ -549,6 +551,22 @@ export async function machineUpdateMetadata(
  * Abort the current session operation
  */
 export async function sessionAbort(sessionId: string): Promise<void> {
+    // v2 dual path: cancel through the relay's control lane so the durable
+    // turn terminalizes as CANCELLED (a raw daemon abort would read
+    // completed). Falls through to the happy abort when v2 has no active
+    // turn or the call fails — the agent still stops either way.
+    const v2link = storage.getState().sessions[sessionId]?.metadata?.v2;
+    if (v2link?.sessionId) {
+        try {
+            const turnId = await v2ActiveTurn(v2link.relay, v2link.sessionId);
+            if (turnId) {
+                await v2CancelTurn(v2link.relay, v2link.sessionId, turnId);
+                return;
+            }
+        } catch (e) {
+            console.warn('[v2] cancel failed, falling back to happy abort', e);
+        }
+    }
     await apiSocket.sessionRPC(sessionId, 'abort', {
         reason: `The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.`
     });

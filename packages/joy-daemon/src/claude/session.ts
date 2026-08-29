@@ -2935,6 +2935,12 @@ export class Session {
     }
   }
 
+  /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
+   *  the relay is attached by then on the spawn path — best-effort merge). */
+  setV2Link(link: { sessionId: string; relay: string; keyEnvelope: string }): void {
+    void this.#relay?.mergeMetadata({ v2: link });
+  }
+
   markCompacting(trigger: string): void {
     if (this.status === "ended") return;
     this.#compacting = { trigger: trigger === "manual" ? "manual" : "auto", since: Date.now() };

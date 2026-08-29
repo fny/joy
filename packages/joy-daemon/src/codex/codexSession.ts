@@ -805,6 +805,12 @@ export class CodexSession implements AgentSession {
 
   // ── claude-hook surface (no-op for codex) ─────────────────────────────────────
   onHookEvent(): { ok: boolean } { return { ok: true }; }
+  /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
+   *  the relay is attached by then on the spawn path — best-effort merge). */
+  setV2Link(link: { sessionId: string; relay: string; keyEnvelope: string }): void {
+    void this.#relay?.mergeMetadata({ v2: link });
+  }
+
   markCompacting(): void { /* codex compaction is server-side */ }
   reassertLifecycle(): void { void this.#relay?.updateJoyState(this.status === "ended" ? "detached" : "running"); }
 

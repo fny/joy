@@ -12,6 +12,9 @@ import { Session, Machine } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
 import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
+import { sealV2Content } from './v2/crypto';
+import { v2SendCiphertext, v2ActiveTurn, v2CancelTurn } from './v2/api';
+
 import * as Notifications from 'expo-notifications';
 import { syncCurrentPushToken } from './pushRegistration';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
@@ -705,6 +708,26 @@ class Sync {
             if (!session) {
                 console.error(`Session ${sessionId} not found in storage after sync`);
                 return { ok: false, reason: 'session not found' };
+            }
+        }
+
+        // ── v2 dual path: a session stamped with a v2 link routes its WRITES
+        // over the relay's durable queue. Reads stay on the happy mirror (the
+        // daemon echoes the conversation onto this card), so display, history
+        // and every other feature are untouched — only the send travels v2.
+        const v2link = session.metadata?.v2;
+        if (v2link?.sessionId) {
+            try {
+                const key = v2link.keyEnvelope ? this.encryption.openV2SessionKey(v2link.keyEnvelope) : null;
+                const ciphertext = sealV2Content(text, key);
+                await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext);
+                if (options?.attachments?.length) {
+                    console.warn('[v2] attachments not yet carried on the v2 path — text sent without them');
+                }
+                return { ok: true, localId: randomUUID() }; // no optimistic row: the daemon's mirror echoes the message
+            } catch (e) {
+                console.error('[v2] send failed', e);
+                return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
             }
         }
 

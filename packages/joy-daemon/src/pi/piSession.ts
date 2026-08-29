@@ -344,6 +344,12 @@ export class PiSession implements AgentSession {
   async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "not supported for pi (bare v1)" }; }
   transcript(): { lines: unknown[] } { return { lines: [] }; }
   onHookEvent(): { ok: boolean } { return { ok: true }; }
+  /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
+   *  the relay is attached by then on the spawn path — best-effort merge). */
+  setV2Link(link: { sessionId: string; relay: string; keyEnvelope: string }): void {
+    void this.#relay?.mergeMetadata({ v2: link });
+  }
+
   markCompacting(): void { /* pi compacts itself */ }
   reassertLifecycle(): void { void this.#relay?.updateJoyState(this.status === "ended" ? "detached" : "running"); }
 
