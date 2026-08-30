@@ -1,3 +1,9 @@
+# Aug 30 — v2 sessions, end to end (developer)
+
+- **v2 as a real transport (opt-in per session).** New joy-tmux session → tick **via v2 relay** and the session runs over the new relay pipeline: sends and cancels travel the durable, end-to-end-encrypted v2 path, while the conversation still shows the same way. Everything is sealed — the relay stores ciphertext it cannot read. *Needs a relay serving `/joy/v2` and an updated daemon on the machine.*
+- **V2 badge.** Sessions running on the v2 path show a small **V2** tag in the session list, so it is clear at a glance which are the new-pipeline sessions.
+- **Safer by construction.** A v2 session refuses to send if it cannot encrypt (never falls back to plaintext), image attachments are blocked with a clear message on the v2 path for now, and cancelling a v2 turn goes through the one clean path.
+
 # Aug 26 — Relay v2 Mode (developer), header search
 
 - **Relay v2 Mode (Developer).** Settings → Developer → Relay v2 Mode drives sessions over the new native `/joy/v2` relay surface end to end: create a session on a machine (pick the folder and agent), watch the reply stream in live, edit/reorder/delete queued messages, retry a failed delivery, cancel a running turn, send attachments. It's the testing surface for the next-generation sync — *needs a relay serving `/joy/v2` and an updated daemon on the machine.*
