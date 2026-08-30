@@ -743,11 +743,17 @@ class Sync {
             // carry the source tag. The v2 wire only moves the actual text;
             // displayText rides the optimistic echo so slash-commands read
             // right locally.
-            // NOTE: no optimistic local echo — the daemon's mirror is the single
-            // source of the user row (avoids a duplicate; the mirror-path dedup
-            // is deferred, see the v2 checklist). The message shows once the
-            // daemon receives and echoes it (fast when online). displayText is
-            // honored below via the wire text choice.
+            // B2 (optimistic echo) is intentionally NOT done here — the daemon's
+            // mirror is the single source of the user row, so the message shows
+            // once the daemon echoes it (fast when online). A local optimistic
+            // row duplicates the mirror because the two use different id spaces
+            // AND the daemon's transcript re-echo suppression (received-receipts)
+            // does not currently cover the nucleus-lane path. Correct fix is
+            // daemon-side: have the lane record a received-receipt for the
+            // prompt so the transcript tailer suppresses the user-echo mirror,
+            // leaving the app's (future) optimistic row as the sole copy. See
+            // docs/v2-dual-path.md. displayText is a UI-only alias; the wire
+            // carries `text`, which is what the agent must receive.
             const v2localId = options?.localId ?? randomUUID();
             try {
                 // The relay stores the SENT text; displayText is a UI-only alias
