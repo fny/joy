@@ -113,6 +113,10 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments }) 
   });
   route('GET', '/sessions/([\\w-]+)/events', {}, async (ctx, m, body, url) =>
     core.sessionEvents(ctx.accountId, m[1], url.searchParams.get('after'), url.searchParams.get('limit')));
+  // Retry a spawn that FAILED (e.g. cwd missing), opting into directory
+  // creation — the durable-queue analog of v1's 'Create directory?' approval.
+  route('POST', '/sessions/([\\w-]+)/spawn/retry', {}, async (ctx, m, body) =>
+    core.retrySpawn(ctx.accountId, ctx.actorId, m[1], body.createDir === true));
 
   // ── client: SSE doorbell (same stream contract as v1) ─────────────────────
   route('GET', '/events/stream', {}, async (ctx, m, body, url, req, res) => {
@@ -383,6 +387,8 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments }) 
       if (!body.localSessionId || !body.sessionKeyEnvelope) throw new ApiError(400, 'missing_bind_fields');
       return core.bindSession(m[1], lease, body).then(() => ({ ok: true }));
     }));
+  route('POST', '/daemon/sessions/([\\w-]+)/spawn-failed', { auth: false },
+    withLeaseHeaders((lease, m, body) => core.spawnFailed(m[1], lease, body.reason ?? 'spawn_failed')));
   route('POST', '/daemon/turns/([\\w-]+)/submitted', { auth: false },
     withLeaseHeaders((lease, m) => core.turnSubmitted(m[1], lease).then(() => ({ ok: true }))));
   route('POST', '/daemon/turns/([\\w-]+)/start', { auth: false },

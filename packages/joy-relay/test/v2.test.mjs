@@ -437,6 +437,53 @@ describe('v2 tunnel entry', () => {
   });
 });
 
+describe('v2 spawn dir-missing → client retry', () => {
+  it('daemon reports dir_missing → session failed; client retry(createDir) → offer carries it → binds', async () => {
+    const d = makeDaemon('mach-spawn');
+    await d.acquire();
+    // spawn-mode session
+    const { status, json } = await call('POST', '/joy/v2/sessions', {
+      body: { mode: 'spawn', daemonId: 'mach-spawn', creationIntentId: randomUUID(),
+        spawnSpec: JSON.stringify({ v: 1, t: 'spawn', cwd: '/nope/missing', agent: 'claude' }) },
+    });
+    expect(status).toBe(200);
+    const sid = json.sessionId;
+    // daemon claims the spawn, reports dir_missing
+    const offers = await d.claim('work');
+    const spawn = offers.find(o => o.kind === 'spawn_session' && o.sessionId === sid);
+    expect(spawn).toBeTruthy();
+    expect(spawn.createDir).toBe(false);
+    const failed = await call('POST', `/joy/v2/daemon/sessions/${sid}/spawn-failed`, { body: { reason: 'dir_missing:/nope/missing' }, headers: d.headers() });
+    expect(failed.status).toBe(200);
+    // session now failed with the reason; NOT offered again
+    const st = await call('GET', `/joy/v2/sessions/${sid}`);
+    expect(st.json.sessionState).toBe('failed');
+    expect(st.json.spawnFailure).toBe('dir_missing:/nope/missing');
+    expect((await d.claim('work')).some(o => o.sessionId === sid)).toBe(false);
+    // client retries opting into createDir
+    const retry = await call('POST', `/joy/v2/sessions/${sid}/spawn/retry`, { body: { createDir: true } });
+    expect(retry.status).toBe(200);
+    const st2 = await call('GET', `/joy/v2/sessions/${sid}`);
+    expect(st2.json.sessionState).toBe('provisioning');
+    expect(st2.json.spawnFailure).toBeNull();
+    // the re-offered spawn now carries createDir; daemon binds
+    const offers2 = await d.claim('work');
+    const spawn2 = offers2.find(o => o.kind === 'spawn_session' && o.sessionId === sid);
+    expect(spawn2).toBeTruthy();
+    expect(spawn2.createDir).toBe(true);
+    const bound = await d.bind(sid, { spawnCommandId: spawn2.commandId, localSessionId: 'w1', sessionKeyEnvelope: 'k' });
+    expect(bound.status).toBe(200);
+  });
+
+  it('retry is refused once the session is bound', async () => {
+    const d = makeDaemon('mach-spawn2');
+    await d.acquire();
+    const sid = await makeSession(d); // announce_existing → already bound (local_session_id set)
+    const r = await call('POST', `/joy/v2/sessions/${sid}/spawn/retry`, { body: { createDir: true } });
+    expect(r.status).toBe(409);
+  });
+});
+
 describe('v2 does not disturb v1', () => {
   it('v1 paths still answer on the same server', async () => {
     const caps = await call('GET', '/joy/v1/capabilities', { token: null });

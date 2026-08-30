@@ -474,8 +474,32 @@ function NewJoyTmuxSessionScreen() {
                 const v2id: string = created.sessionId;
                 const deadline = Date.now() + 120_000;
                 let happySessionId: string | null = null;
+                let promptedForDir = false;
                 while (Date.now() < deadline && !happySessionId) {
                     await new Promise(r => setTimeout(r, 2000));
+
+                    // The daemon binds the session on success; poll the v2 state
+                    // so we can also catch a pre-bind spawn FAILURE (e.g. the
+                    // directory does not exist) and offer to create it + retry —
+                    // the durable-queue analog of v1's "Create directory?".
+                    const st = await v2.sessionState(v2id).catch(() => null);
+                    if (st?.spawnFailure && st.spawnFailure.startsWith('dir_missing:') && !promptedForDir) {
+                        promptedForDir = true;
+                        const missing = st.spawnFailure.slice('dir_missing:'.length);
+                        const approved = await Modal.confirm(
+                            'Create directory?',
+                            `The directory '${missing}' does not exist on the machine. Create it?`,
+                            { cancelText: t('common.cancel'), confirmText: t('common.create') },
+                        );
+                        if (!approved) {
+                            await v2.deleteSession(v2id).catch(() => {});
+                            return;
+                        }
+                        await v2.retrySpawn(v2id, true);
+                        promptedForDir = false; // allow a fresh prompt if it fails again for another reason
+                        continue;
+                    }
+
                     await sync.refreshSessions();
                     const all = storage.getState().sessions;
                     for (const [sid, s] of Object.entries(all)) {
@@ -483,7 +507,7 @@ function NewJoyTmuxSessionScreen() {
                     }
                 }
                 if (!happySessionId) {
-                    Modal.alert(t('common.error'), 'v2 spawn accepted but the session card did not arrive within 2 minutes. Check the daemon lane on that machine.');
+                    Modal.alert(t('common.error'), 'v2 spawn accepted but the session did not start within 2 minutes. Check the daemon lane on that machine.');
                     return;
                 }
                 const trimmedPromptV2 = prompt.trim();

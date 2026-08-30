@@ -25,7 +25,7 @@ import { randomUUID, randomBytes } from "node:crypto";
 import tweetnacl from "tweetnacl";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import type { SessionRegistry } from "../domain/registry";
+import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, joyStateDir } from "../paths";
 
@@ -59,6 +59,7 @@ interface WorkOffer {
   kind: "spawn_session" | "prompt";
   turnId?: string; ciphertext?: string | null;
   attachments?: Array<{ id: string; size: number }>;
+  createDir?: boolean;
 }
 interface ControlOffer { deliveryId: string; commandId: string; sessionId: string; targetTurnId: string }
 
@@ -85,7 +86,7 @@ export function decodeContent(ciphertext: string | null | undefined, key?: Uint8
     return null;
   } catch { return null; }
 }
-export function decodeSpawnSpec(ciphertext: string | null | undefined): { cwd?: string; agent?: string; model?: string; yolo?: boolean } | null {
+export function decodeSpawnSpec(ciphertext: string | null | undefined): { cwd?: string; agent?: string; model?: string; yolo?: boolean; createDir?: boolean } | null {
   if (!ciphertext) return null;
   try {
     const p = JSON.parse(ciphertext);
@@ -155,6 +156,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // Turns we can't run (no local session / undecodable) — logged once, not
   // per re-offer, so a stranded turn doesn't spam the journal every claim.
   const notedSkips = new Set<string>();
+  // spawn commandIds abandoned for good (e.g. directory missing and the
+  // caller did not opt into creation) — never re-attempted, so the lane does
+  // not hot-loop a permanently-failing spawn.
+  const abandonedSpawns = new Set<string>();
 
   const baseHeaders = (): Record<string, string> => {
     const h: Record<string, string> = {};
@@ -236,6 +241,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
 
   async function handleSpawn(offer: WorkOffer, leaseRef: Lease): Promise<void> {
     await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
+    // A client retry re-queues the spawn WITH createDir on the offer — clear
+    // the abandon mark so we attempt it again. Without createDir it stays
+    // abandoned (avoids re-spinning a still-missing directory).
+    if (offer.createDir) abandonedSpawns.delete(offer.commandId);
+    if (abandonedSpawns.has(offer.commandId)) return;
     const spec = decodeSpawnSpec(offer.ciphertext);
     if (!spec?.cwd) {
       // Undecodable/incomplete spec: leave the command for a human — binding
@@ -256,6 +266,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           agent: (spec.agent as AgentSession["agentFlavor"]) ?? "claude",
           model: spec.model,
           yolo: spec.yolo ?? true,
+          // create-if-missing comes from the client's retry choice (the
+          // relay rides it on the offer) or the spawnSpec. Off + missing →
+          // report a spawn failure so the client can offer to create + retry.
+          createDir: offer.createDir ?? spec.createDir ?? false,
         });
         writeSpawnIntent(offer.commandId, session.id);
       }
@@ -284,10 +298,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       session.setV2Link?.({ sessionId: offer.sessionId, relay: relayUrl, keyEnvelope: envelope });
       log(`spawned ${spec.agent ?? "claude"} in ${spec.cwd} → local ${session.id} (v2 ${offer.sessionId.slice(0, 8)}${envelope.startsWith("v2sk1:") ? ", sealed" : ", plaintext"})`);
     } catch (e) {
-      // Spawn failed (missing binary, bad cwd) — the command stays queued and
-      // keeps being offered; log loudly so the loop's noise points at the cause.
+      if (e instanceof DirectoryCreationApprovalRequired) {
+        // Report the missing directory to the relay so the client can offer to
+        // create it and retry (v1-parity). The relay marks the session failed,
+        // which drops it from the work claim — no hot-retry, no app spinner.
+        abandonedSpawns.add(offer.commandId);
+        try {
+          await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`, { reason: `dir_missing:${spec.cwd}` }, leaseRef);
+        } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report dir_missing: ${String(e2)}`); }
+        log(`spawn ${offer.sessionId.slice(0, 8)}: directory does not exist — reported for client retry (${spec.cwd})`);
+        return;
+      }
+      // Other failures (missing binary, transient) — the command stays queued
+      // and keeps being offered; back off so we don't hot-loop.
       log(`spawn ${offer.sessionId.slice(0, 8)} FAILED: ${String(e)}`);
-      await sleep(5_000); // don't hot-loop a permanently failing spawn
+      await sleep(5_000);
     }
   }
 

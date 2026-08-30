@@ -226,6 +226,49 @@ export function createCore(db, notify) {
     notify.pokeAccount(accountId, sessionId, ['state', 'events']);
   }
 
+  /** Daemon reports a spawn could not run (e.g. cwd missing, createDir off).
+   *  Marks the session failed with a machine-readable reason so the client can
+   *  offer to create the directory and retry. Fenced to the owning daemon. */
+  async function spawnFailed(sessionId, leaseRef, reason) {
+    let poke = null;
+    await db.tx(async (t) => {
+      const lease = await fencedLease(t, leaseRef.id, leaseRef.token_hash, leaseRef.epoch);
+      const s = await loadSession(t, sessionId, null);
+      if (s.owner_daemon_id !== lease.daemon_id || s.account_id !== lease.account_id) throw new ApiError(403, 'not_owner_daemon');
+      if (s.state !== 'provisioning' && s.state !== 'starting') return; // already progressed
+      await t.query(`UPDATE native_sessions SET state = 'failed', spawn_failure = $2, updated_at = now() WHERE id = $1`,
+        [sessionId, String(reason).slice(0, 300)]);
+      poke = [s.account_id, s.id];
+    });
+    if (poke) notify.pokeAccount(poke[0], poke[1], ['state']);
+    return { ok: true };
+  }
+
+  /** Client retries a FAILED spawn, opting into directory creation. Resets the
+   *  session to provisioning, sets spawn_create_dir so the next work offer
+   *  carries it, re-queues the spawn command, and wakes the daemon. */
+  async function retrySpawn(accountId, actorId, sessionId, createDir) {
+    let wake = null;
+    const out = await db.tx(async (t) => {
+      const s = await loadSession(t, sessionId, accountId);
+      if (s.state !== 'failed' && s.state !== 'provisioning') throw new ApiError(409, 'not_retryable');
+      if (s.local_session_id) throw new ApiError(409, 'already_bound');
+      const spawn = await one(t, `SELECT * FROM commands WHERE session_id = $1 AND kind = 'spawn_session'`, [sessionId]);
+      if (!spawn) throw new ApiError(404, 'spawn_command_not_found');
+      await t.query(
+        `UPDATE native_sessions SET state = 'provisioning', spawn_failure = NULL, spawn_create_dir = $2, updated_at = now() WHERE id = $1`,
+        [sessionId, createDir === true]);
+      await t.query(`UPDATE commands SET state = 'queued', disposition = 'queued' WHERE id = $1`, [spawn.id]);
+      // clear any prior delivery so offerCommand re-offers cleanly
+      await t.query(`UPDATE deliveries SET disposition = 'superseded' WHERE command_id = $1 AND disposition IS NULL`, [spawn.id]);
+      wake = s.owner_daemon_id;
+      return { sessionId, state: 'provisioning', createDir: createDir === true };
+    });
+    if (wake) notify.wakeDaemon(wake, 'work');
+    notify.pokeAccount(accountId, sessionId, ['state']);
+    return out;
+  }
+
   // ── Prompt acceptance ─────────────────────────────────────────────────────
 
   async function acceptPrompt(accountId, actorId, sessionId, body) {
@@ -447,6 +490,7 @@ export function createCore(db, notify) {
             deliveryId, commandId: c.id, sessionId: s.id, kind: 'spawn_session',
             seq: String(c.seq), ciphertext: c.ciphertext,
             clientIntentId: c.client_intent_id, requestHash: c.request_hash,
+            createDir: s.spawn_create_dir === true,
           });
         }
         if (!s.local_session_id) continue; // prompts only after binding
@@ -701,6 +745,7 @@ export function createCore(db, notify) {
       return {
         sessionId, revision: String(s.revision), headSeq: String(Number(s.next_seq) - 1),
         sessionState: s.state, recoveryRequired: s.recovery_required,
+        spawnFailure: s.spawn_failure ?? null,
         daemon: {
           daemonId: s.owner_daemon_id, status: online ? 'online' : 'offline',
           lastSeenAt: lease ? lease.renewed_at : null,
@@ -770,5 +815,6 @@ export function createCore(db, notify) {
     turnSubmitted, turnStarted, turnFact, reconcileTurn,
     listSessions, sessionState, sessionEvents, sweepExpiredLeases,
     fencedLease, hashToken, assertDaemonOwned,
+    spawnFailed, retrySpawn,
   };
 }
