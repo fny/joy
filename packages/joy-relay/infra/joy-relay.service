@@ -1,14 +1,23 @@
 # systemd — /etc/systemd/system/joy-relay.service (bare on host: fast edit-restart)
+# PROMOTED 2026-08-30: stable now runs the native nucleus entrypoint
+# (server.mjs = /joy/v1 + /joy/v2 + byte-for-byte passthrough) on the SAME
+# internal port 3105 (caddy :4997 → 3105). Non-/joy traffic is proxied to
+# happy-server exactly as proxy.mjs did, so existing app/socket traffic is
+# unchanged; this only ADDS the native /joy routes (which :4997 previously
+# 404'd). Rollback: set ExecStart back to proxy.mjs and restart.
 [Unit]
-Description=joy-relay (phase 0: passthrough to happy-server)
+Description=joy-relay (native /joy/v1 + /joy/v2 nucleus + passthrough to happy-server)
 After=network-online.target
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/joy-relay
+Environment=JOY_RELAY_PORT=3105
+Environment=JOY_RELAY_UPSTREAM_PORT=3005
+Environment=JOY_RELAY_DATA_DIR=/home/ubuntu/joy-relay-data/stable
 # Perimeter key (gate.mjs): create this file with JOY_RELAY_ACCESS_KEY=…
 # to enforce the relay key; absent file = open (unset key = open gate).
 EnvironmentFile=-/home/ubuntu/joy-relay.env
-ExecStart=/usr/bin/node proxy.mjs
+ExecStart=/usr/bin/node server.mjs
 Restart=always
 RestartSec=2
 [Install]
