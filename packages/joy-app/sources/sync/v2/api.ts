@@ -99,6 +99,9 @@ export interface V2SessionState {
     headSeq: string;
     sessionState: string;
     recoveryRequired: boolean;
+    /** Set when a spawn failed pre-bind (e.g. 'dir_missing:/path'); the client
+     *  offers to create the directory and calls retrySpawn. */
+    spawnFailure?: string | null;
     daemon: { daemonId: string; status: 'online' | 'offline'; lastSeenAt: string | null; epoch: string | null };
     queue: { queuedTurns: number; deliveredTurns: number };
     execution: {
@@ -143,6 +146,10 @@ export const v2 = {
             ...(spec ? { spawnSpec: JSON.stringify({ v: 1, t: 'spawn', ...spec }) } : {}),
         }),
     deleteSession: (id: string) => v2fetch('DELETE', `/sessions/${id}`),
+    // Retry a spawn that FAILED (e.g. directory missing), opting into
+    // directory creation — the client half of the v1-parity approval flow.
+    retrySpawn: (id: string, createDir: boolean) =>
+        v2fetch('POST', `/sessions/${id}/spawn/retry`, { createDir }),
 
     listMessages: (id: string, status?: string): Promise<{ messages: V2Message[] }> =>
         v2fetch('GET', `/sessions/${id}/messages${status ? `?status=${status}` : ''}`),

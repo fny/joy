@@ -145,6 +145,14 @@ const MIGRATIONS = [
   );
   CREATE INDEX attachments_by_session ON attachments (session_id);
   `,
+  // 004 — spawn directory-creation approval (v1 parity for the durable queue):
+  // a spawn whose cwd is missing FAILS with a reason the client can read, then
+  // the client RETRIES with create_dir set. spawn_failure surfaces the reason;
+  // spawn_create_dir rides the next work offer so the daemon creates the dir.
+  `
+  ALTER TABLE native_sessions ADD COLUMN spawn_failure TEXT;
+  ALTER TABLE native_sessions ADD COLUMN spawn_create_dir BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
 ];
 
 export async function openDb(dataDir) {
