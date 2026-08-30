@@ -27,6 +27,9 @@ export interface V2Row {
     localId: string | null;
     createdAt: number;
     updatedAt: number;
+    /** Placeholder so code that touches `content` (shape-compatible with the
+     *  happy row) never faults; the real payload is __v2Plain. */
+    content: { t: 'plain' };
     /** Already-decrypted content in the app's RawRecord shape. */
     __v2Plain: unknown;
 }
@@ -44,20 +47,41 @@ interface RawV2Event {
 function toRow(e: RawV2Event, key: Uint8Array | null): V2Row | null {
     const seq = Number(e.seq);
     const text = e.content ? openV2Content(e.content.ciphertext, key) : null;
+    if (e.content && text === null) {
+        // Sealed content we could not open (missing/incorrect session key) —
+        // loud, because it renders as an empty chat otherwise.
+        console.warn(`[v2 reads] could not open ${e.kind} seq=${e.seq} (key=${key ? 'present' : 'MISSING'})`);
+    }
 
     if (e.kind === 'turn.queued') {
         if (text === null) return null;
         return {
-            id: e.id, seq, localId: e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt,
+            id: e.id, seq, localId: e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' },
             __v2Plain: { role: 'user', content: { type: 'text', text } },
         };
     }
     if (e.kind === 'output' || (e.kind === 'turn.terminal' && text !== null)) {
         if (text === null) return null;
         return {
-            id: e.id, seq, localId: null, createdAt: e.createdAt, updatedAt: e.createdAt,
-            // The agent role carries an array of content blocks.
-            __v2Plain: { role: 'agent', content: [{ type: 'text', text }] },
+            id: e.id, seq, localId: null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' },
+            // Agent text rides the SESSION ENVELOPE — the same wire shape the
+            // daemon emits for v1 (role:'session' → content.data.ev), which the
+            // app's normalizer understands. (role:'agent' means a raw Claude
+            // transcript record, a different shape entirely.)
+            __v2Plain: {
+                role: 'session',
+                content: {
+                    type: 'session',
+                    data: {
+                        id: e.id,
+                        time: e.createdAt,
+                        role: 'agent',
+                        turn: e.turnId ?? 'v2',
+                        ev: { t: 'text', text },
+                    },
+                },
+                meta: { sentFrom: 'joy' },
+            },
         };
     }
     return null; // lifecycle events the chat does not render

@@ -2154,6 +2154,14 @@ class Sync {
             if (!Number.isFinite(pageMin)) break; // empty page — nothing older
             beforeSeq = pageMin;
         }
+        // v2 pages can repeat the same rows when paging backward (the log only
+        // pages forward), so de-dup by id before the ordered apply — the
+        // reducer is order-dependent and duplicate ids corrupt its state.
+        const seenIds = new Set<string>();
+        for (let i = collected.length - 1; i >= 0; i--) {
+            if (seenIds.has(collected[i].id)) collected.splice(i, 1);
+            else seenIds.add(collected[i].id);
+        }
         const anyMessages = collected.length > 0;
         // Single ordered apply: ascending seq, exactly what the reducer expects.
         collected.sort((a, b) => a.seq - b.seq);
