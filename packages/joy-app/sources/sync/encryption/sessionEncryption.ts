@@ -41,6 +41,18 @@ export class SessionEncryption {
                 results[i] = cached;
             } else if (message.content.t === 'encrypted') {
                 toDecrypt.push({ index: i, message });
+            } else if ((message as { __v2Plain?: unknown }).__v2Plain) {
+                // v2 read path: the row arrives ALREADY decrypted (unsealed by
+                // sources/sync/v2/reads.ts with the session's v2 content key),
+                // so pass the plaintext straight through to normalization.
+                results[i] = {
+                    id: message.id,
+                    seq: message.seq,
+                    localId: message.localId ?? null,
+                    content: (message as { __v2Plain?: unknown }).__v2Plain as never,
+                    createdAt: message.createdAt,
+                };
+                this.cache.setCachedMessage(message.id, results[i]!);
             } else {
                 // Not encrypted or invalid
                 results[i] = {

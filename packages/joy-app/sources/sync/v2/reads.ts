@@ -1,0 +1,117 @@
+/**
+ * v2 read adapter — serves the app's existing message-fetch engine from the
+ * relay's v2 event log instead of happy-server's /v3 message pages.
+ *
+ * Why an adapter rather than a new pipeline: the v1 read engine (paging,
+ * forward/backward cursors, the ORDER-DEPENDENT reducer, eviction re-anchor)
+ * is battle-tested and keyed to a monotonic gap-free `seq`. The v2 event log
+ * has exactly that shape, so translating events into the same row shape lets
+ * the whole proven engine run on v2 with no behavioral change.
+ *
+ * Mapping (v2 event kind → app row):
+ *   turn.queued     → user text message (the prompt)
+ *   output          → agent text message
+ *   turn.terminal   → agent text when it carries content, else skipped
+ *   others          → skipped (lifecycle noise the app does not render)
+ *
+ * Content is UNSEALED here with the session's v2 key (the same key the send
+ * path seals with), then handed over already-decrypted — v2 rows carry
+ * `__v2Plain` so the sync layer skips its happy-side decryption.
+ */
+import { openV2Content } from './crypto';
+import { getV2BaseUrl } from './api';
+
+export interface V2Row {
+    id: string;
+    seq: number;
+    localId: string | null;
+    createdAt: number;
+    updatedAt: number;
+    /** Already-decrypted content in the app's RawRecord shape. */
+    __v2Plain: unknown;
+}
+
+export interface V2Page { messages: V2Row[]; hasMore: boolean }
+
+interface RawV2Event {
+    id: string; seq: string; kind: string;
+    turnId: string | null; commandId: string | null;
+    content: { ciphertext: string } | null;
+    createdAt: number;
+}
+
+/** Translate one v2 event into an app row, or null when it is not renderable. */
+function toRow(e: RawV2Event, key: Uint8Array | null): V2Row | null {
+    const seq = Number(e.seq);
+    const text = e.content ? openV2Content(e.content.ciphertext, key) : null;
+
+    if (e.kind === 'turn.queued') {
+        if (text === null) return null;
+        return {
+            id: e.id, seq, localId: e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt,
+            __v2Plain: { role: 'user', content: { type: 'text', text } },
+        };
+    }
+    if (e.kind === 'output' || (e.kind === 'turn.terminal' && text !== null)) {
+        if (text === null) return null;
+        return {
+            id: e.id, seq, localId: null, createdAt: e.createdAt, updatedAt: e.createdAt,
+            // The agent role carries an array of content blocks.
+            __v2Plain: { role: 'agent', content: [{ type: 'text', text }] },
+        };
+    }
+    return null; // lifecycle events the chat does not render
+}
+
+async function fetchEvents(
+    base: string, token: string, v2SessionId: string, afterSeq: number, limit: number,
+): Promise<{ events: RawV2Event[]; hasMore: boolean }> {
+    const res = await fetch(`${base}/joy/v2/sessions/${v2SessionId}/events?after=${afterSeq}&limit=${limit}`, {
+        headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`v2 events ${res.status}`);
+    const j = await res.json() as { messages?: RawV2Event[]; hasMore?: boolean };
+    return { events: j.messages ?? [], hasMore: !!j.hasMore };
+}
+
+/**
+ * Forward page: everything after `afterSeq`. Mirrors the v1 forward sync.
+ */
+export async function v2MessagesAfter(
+    opts: { base?: string; token: string; v2SessionId: string; key: Uint8Array | null; afterSeq: number; limit?: number },
+): Promise<V2Page> {
+    const base = opts.base ?? getV2BaseUrl();
+    const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, opts.afterSeq, opts.limit ?? 100);
+    const messages = events.map(e => toRow(e, opts.key)).filter((r): r is V2Row => r !== null);
+    return { messages, hasMore };
+}
+
+/**
+ * Backward page: the newest rows BEFORE `beforeSeq` (or the newest overall
+ * when beforeSeq is the sentinel). The v2 log only pages forward, so we walk
+ * forward from 0 collecting rows below the bound and keep the last `limit` —
+ * correct, and bounded by the log's own pagination.
+ */
+export async function v2MessagesBefore(
+    opts: { base?: string; token: string; v2SessionId: string; key: Uint8Array | null; beforeSeq: number; limit?: number },
+): Promise<V2Page> {
+    const base = opts.base ?? getV2BaseUrl();
+    const limit = opts.limit ?? 100;
+    const rows: V2Row[] = [];
+    let cursor = 0;
+    for (;;) {
+        const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, cursor, 500);
+        if (events.length === 0) break;
+        for (const e of events) {
+            const seq = Number(e.seq);
+            if (seq >= opts.beforeSeq) continue;
+            const row = toRow(e, opts.key);
+            if (row) rows.push(row);
+        }
+        cursor = Number(events[events.length - 1].seq);
+        if (!hasMore) break;
+        if (cursor >= opts.beforeSeq) break;
+    }
+    const tail = rows.slice(-limit);
+    return { messages: tail, hasMore: rows.length > tail.length };
+}

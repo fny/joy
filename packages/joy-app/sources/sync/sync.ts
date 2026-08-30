@@ -14,6 +14,8 @@ import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
 import { sealV2Content } from './v2/crypto';
 import { v2SendCiphertext, v2ActiveTurn, v2CancelTurn } from './v2/api';
+import { v2MessagesAfter, v2MessagesBefore } from './v2/reads';
+import { connectV2Stream } from './v2/api';
 
 import * as Notifications from 'expo-notifications';
 import { syncCurrentPushToken } from './pushRegistration';
@@ -416,6 +418,49 @@ class Sync {
     // there. Coalesced by InvalidateSync.
     refreshOpenSessionMeta = () => {
         this.sessionsSync.invalidate();
+    }
+
+    // ── v2 live driver ────────────────────────────────────────────────────
+    // v1 gets live updates from the happy socket. v2 sessions instead ride the
+    // relay's SSE doorbell (content-free pokes) with a poll fallback, both of
+    // which simply invalidate the message sync — the same entry point the
+    // socket path uses, so the fetch/reducer pipeline is identical.
+    private v2StreamStop: (() => void) | null = null;
+    private v2PollTimer: ReturnType<typeof setInterval> | null = null;
+
+    private v2SessionIdIndex(): Map<string, string> {
+        const idx = new Map<string, string>(); // v2SessionId → happy sessionId
+        for (const [sid, s] of Object.entries(storage.getState().sessions)) {
+            const v2 = (s as { metadata?: { v2?: { sessionId?: string } } }).metadata?.v2?.sessionId;
+            if (v2) idx.set(v2, sid);
+        }
+        return idx;
+    }
+
+    startV2Live() {
+        if (this.v2StreamStop || this.v2PollTimer) return;
+        const invalidateFor = (v2SessionId: string) => {
+            const sid = this.v2SessionIdIndex().get(v2SessionId);
+            if (sid) this.getMessagesSync(sid).invalidate();
+        };
+        try {
+            this.v2StreamStop = connectV2Stream({
+                onPoke: (v2SessionId) => invalidateFor(v2SessionId),
+                onEphemeral: (v2SessionId) => invalidateFor(v2SessionId),
+            });
+        } catch { /* SSE unavailable — the poll below carries it */ }
+        // Poll fallback: keeps v2 sessions live where SSE cannot run (native)
+        // or when the stream drops. Cheap: only sessions that are v2-linked.
+        this.v2PollTimer = setInterval(() => {
+            for (const sid of this.v2SessionIdIndex().values()) {
+                this.getMessagesSync(sid).invalidate();
+            }
+        }, 2500);
+    }
+
+    stopV2Live() {
+        this.v2StreamStop?.(); this.v2StreamStop = null;
+        if (this.v2PollTimer) { clearInterval(this.v2PollTimer); this.v2PollTimer = null; }
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
@@ -2066,9 +2111,12 @@ class Sync {
         let hasMore = false;
         const collected: ApiMessage[] = [];
         for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
-            const response = await apiSocket.request(
-                `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
-            );
+            const v2ctx = this.v2ReadCtx(sessionId);
+            const response = v2ctx
+                ? { ok: true, status: 200, json: async () => await v2MessagesBefore({ base: v2ctx.base, token: v2ctx.token, v2SessionId: v2ctx.v2SessionId, key: v2ctx.key, beforeSeq }) } as Response
+                : await apiSocket.request(
+                    `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
+                );
             if (!response.ok) {
                 if (page === 0) throw new Error(`Failed to fetch initial page for ${sessionId}: ${response.status}`);
                 break; // keep what we have — older pages are a bonus
@@ -2138,7 +2186,12 @@ class Sync {
         let afterSeq = fromSeq;
         let pages = 0;
         while (true) {
-            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
+            // v2 sessions read from the relay's event log (same seq semantics),
+            // v1 sessions from happy-server's message pages.
+            const v2ctx = this.v2ReadCtx(sessionId);
+            const response = v2ctx
+                ? { ok: true, json: async () => await v2MessagesAfter({ base: v2ctx.base, token: v2ctx.token, v2SessionId: v2ctx.v2SessionId, key: v2ctx.key, afterSeq }) } as Response
+                : await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
             if (!response.ok) {
                 throw new Error(`Failed to forward-sync ${sessionId}: ${response.status}`);
             }
@@ -2273,9 +2326,12 @@ class Sync {
                 if (beforeSeq === undefined || beforeSeq <= 1) {
                     return;
                 }
-                const response = await apiSocket.request(
-                    `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
-                );
+                const v2ctxOlder = this.v2ReadCtx(sessionId);
+                const response = v2ctxOlder
+                    ? { ok: true, status: 200, json: async () => await v2MessagesBefore({ base: v2ctxOlder.base, token: v2ctxOlder.token, v2SessionId: v2ctxOlder.v2SessionId, key: v2ctxOlder.key, beforeSeq }) } as Response
+                    : await apiSocket.request(
+                        `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
+                    );
                 if (!response.ok) {
                     throw new Error(`Failed to load older messages for ${sessionId}: ${response.status}`);
                 }
@@ -2903,6 +2959,19 @@ class Sync {
     // Apply store
     //
 
+    /** v2 read context for a session, or null when it is not a v2 session.
+     *  Returns the relay base, the v2 session id, and the unsealed content key
+     *  so pages can be fetched and opened from the v2 event log. */
+    private v2ReadCtx(sessionId: string): { base: string; v2SessionId: string; key: Uint8Array | null; token: string } | null {
+        const session = storage.getState().sessions[sessionId];
+        const link = session?.metadata?.v2;
+        if (!link?.sessionId) return null;
+        const token = this.credentials?.token;
+        if (!token) return null;
+        const key = link.keyEnvelope ? this.encryption.openV2SessionKey(link.keyEnvelope) : null;
+        return { base: link.relay, v2SessionId: link.sessionId, key, token };
+    }
+
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];
@@ -2996,4 +3065,8 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     } else {
         await sync.create(credentials, encryption);
     }
+
+    // v2 sessions get their live updates from the relay (SSE doorbell + poll
+    // fallback) rather than the happy socket.
+    sync.startV2Live();
 }
