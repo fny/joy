@@ -1,3 +1,8 @@
+# Aug 30 (2) — v2 on the main relay, create-directory prompt
+
+- **v2 works on the Joy Relay.** The main relay now serves the v2 pipeline, so v2 sessions work without switching relays — no more errors when a session tries the new path.
+- **"Create directory?" on v2.** Starting a v2 session in a folder that does not exist now asks whether to create it, the same as a normal session, instead of spinning forever.
+
 # Aug 30 — v2 sessions, end to end (developer)
 
 - **v2 as a real transport (opt-in per session).** New joy-tmux session → tick **via v2 relay** and the session runs over the new relay pipeline: sends and cancels travel the durable, end-to-end-encrypted v2 path, while the conversation still shows the same way. Everything is sealed — the relay stores ciphertext it cannot read. *Needs a relay serving `/joy/v2` and an updated daemon on the machine.*
