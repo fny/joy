@@ -217,11 +217,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
   }
 
-  async function claim(lane: "work" | "control"): Promise<Array<WorkOffer & ControlOffer>> {
-    if (!lease) return [];
-    const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${lease.leaseId}/claims/${lane}`, {
+  async function claim(lane: "work" | "control", asLease?: Lease | null): Promise<Array<WorkOffer & ControlOffer>> {
+    const l = asLease ?? lease;
+    if (!l) return [];
+    const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${l.leaseId}/claims/${lane}`, {
       method: "POST",
-      headers: { ...baseHeaders(), "x-joy-lease-token": lease.leaseToken, "content-type": "application/json" },
+      headers: { ...baseHeaders(), "x-joy-lease-token": l.leaseToken, "content-type": "application/json" },
       body: JSON.stringify({ waitMs: CLAIM_WAIT_MS }),
     });
     const json = (await res.json().catch(() => null)) as any;
@@ -530,7 +531,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           announced = false;
         }
         const leaseRef = lease!;
-        const offers = await claim(lane);
+        const offers = await claim(lane, leaseRef);
         let anyNew = offers.length === 0; // empty = the long-poll waited; no spin
         for (const offer of offers) {
           if (stopped) break;
@@ -544,10 +545,18 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (!anyNew) await sleep(2_000);
       } catch (e) {
         if (isLeaseDeath(e)) {
-          // Superseded (another daemon generation holds this machineId) or
-          // expired. Back off with jitter before re-acquiring so two daemons
-          // misconfigured onto one machineId thrash slowly and VISIBLY
-          // instead of supersession ping-pong at claim speed.
+          if (lane === "control") {
+            // The control lane NEVER acquires. Its long-poll simply raced a
+            // lease rotation by the work lane; nulling the shared lease here
+            // made the two lanes re-acquire in a loop (observed live: epoch
+            // climbing every few seconds). Drop this claim and pick up the
+            // work lane's current lease on the next pass.
+            await sleep(1_000);
+            continue;
+          }
+          // Work lane: superseded (another daemon generation holds this
+          // machineId) or expired. Back off with jitter so two daemons
+          // misconfigured onto one machineId thrash slowly and VISIBLY.
           lease = null;
           log(`${lane} lane: lease lost (${String((e as Error).message ?? e)}) — re-acquiring after backoff`);
           await sleep(10_000 + Math.floor(Math.random() * 10_000));
