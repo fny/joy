@@ -47,6 +47,8 @@ export const MetadataSchema = z.object({
         sessionId: z.string(),
         relay: z.string(),
         keyEnvelope: z.string(),
+        /** Daemon-local session id — addresses the machine plane over the tunnel. */
+        localSessionId: z.string().optional(),
     }).optional(),
     claudeSessionId: z.string().optional(), // Claude Code session ID
     codexThreadId: z.string().optional(), // Codex app-server thread ID

@@ -33,8 +33,8 @@ export class TunnelError extends Error {
 export interface TunnelResponse { status: number; headers: Record<string, string>; body: Uint8Array }
 
 /** Tunnel key for one machine — mirrors the daemon's deriveTunnelKey. */
-export async function deriveTunnelKey(masterSecret: Uint8Array, machineId: string): Promise<Uint8Array> {
-    return deriveKey(masterSecret, 'Joy Tunnel', [machineId]);
+export async function deriveTunnelKey(machineKey: Uint8Array, machineId: string): Promise<Uint8Array> {
+    return deriveKey(machineKey, 'Joy Tunnel', [machineId]);
 }
 
 async function streamKey(tunnelKey: Uint8Array, streamId: Uint8Array): Promise<Uint8Array> {
@@ -124,7 +124,7 @@ async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise
 export interface TunnelFetchOpts {
     relayUrl: string;
     accountToken: string;
-    masterSecret: Uint8Array;
+    machineKey: Uint8Array;
     machineId: string;
     method: string;
     /** Daemon-local path, e.g. /v2/sessions/abc/git/status */
@@ -139,7 +139,7 @@ export interface TunnelFetchOpts {
  * the daemon's own status arrives INSIDE the sealed envelope.
  */
 export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse> {
-    const key = await deriveTunnelKey(opts.masterSecret, opts.machineId);
+    const key = await deriveTunnelKey(opts.machineKey, opts.machineId);
     const wire = await sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {} }, opts.body ?? new Uint8Array(0));
 
     const res = await fetch(`${opts.relayUrl}/joy/v2/machines/${encodeURIComponent(opts.machineId)}/http`, {

@@ -92,7 +92,7 @@ describe('tunnel crypto interop (app libsodium ↔ daemon node:crypto)', () => {
             return { ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => resp.buffer } as never;
         }) as never;
         const r = await mod.tunnelFetch({
-            relayUrl: 'https://relay.test', accountToken: 'tok', masterSecret: master, machineId: 'm1',
+            relayUrl: 'https://relay.test', accountToken: 'tok', machineKey: master, machineId: 'm1',
             method: 'PUT', path: '/v2/sessions/s1/files/content', headers: { 'content-type': 'application/json' }, body: bodyOut,
         });
         globalThis.fetch = origFetch;
@@ -117,7 +117,7 @@ describe('tunnel crypto interop (app libsodium ↔ daemon node:crypto)', () => {
             ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => cut.buffer.slice(cut.byteOffset, cut.byteOffset + cut.length),
         }) as never) as never;
         await expect(mod.tunnelFetch({
-            relayUrl: 'https://relay.test', accountToken: 't', masterSecret: master, machineId: 'm2',
+            relayUrl: 'https://relay.test', accountToken: 't', machineKey: master, machineId: 'm2',
             method: 'GET', path: '/v2/status',
         })).rejects.toThrow();
         globalThis.fetch = origFetch;

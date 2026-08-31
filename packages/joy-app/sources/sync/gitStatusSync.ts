@@ -11,6 +11,8 @@ import { parseStatusSummary, getStatusCounts, isDirty } from './git-parsers/pars
 import { parseStatusSummaryV2, getStatusCountsV2, isDirtyV2, getCurrentBranchV2, getTrackingInfoV2 } from './git-parsers/parseStatusV2';
 import { parseCurrentBranch } from './git-parsers/parseBranch';
 import { parseNumStat, mergeDiffSummaries } from './git-parsers/parseDiff';
+import { sync } from './sync';
+import { machineGitStatus } from './v2/machine';
 
 
 export class GitStatusSync {
@@ -130,6 +132,33 @@ export class GitStatusSync {
      * online session; returns null if none is live (we then keep the last good
      * status rather than clearing or failing).
      */
+    /** Daemon-parsed porcelain (v2) → the app's GitStatus shape. */
+    private fromV2GitStatus(d: import('./v2/machine').V2GitStatus): GitStatus {
+        const modified: string[] = [];
+        const staged: string[] = [];
+        const untracked: string[] = [];
+        for (const e of d.entries ?? []) {
+            if (e.untracked) { untracked.push(e.path); continue; }
+            if (e.staged) staged.push(e.path);
+            if (e.unstaged) modified.push(e.path);
+        }
+        return {
+            branch: d.branch ?? null,
+            ahead: d.ahead ?? 0,
+            behind: d.behind ?? 0,
+            modifiedCount: modified.length,
+            stagedCount: staged.length,
+            untrackedCount: untracked.length,
+            modifiedFiles: modified,
+            stagedFiles: staged,
+            untrackedFiles: untracked,
+            linesAdded: 0,
+            linesRemoved: 0,
+            stashCount: 0,
+            lastUpdatedAt: Date.now(),
+        } as unknown as GitStatus;
+    }
+
     private resolveLiveSessionForProject(projectKey: string): string | null {
         const sessions = storage.getState().sessions;
         for (const s of Object.values(sessions)) {
@@ -147,9 +176,24 @@ export class GitStatusSync {
         try {
             // Route through a live session resolved NOW (not a frozen first session).
             const sessionId = this.resolveLiveSessionForProject(projectKey);
+            console.log(`[v2 git] fetch for ${projectKey} → session=${sessionId ?? 'NONE'}`);
             if (!sessionId) return; // no online session → keep last good status
             const session = storage.getState().sessions[sessionId];
             if (!session?.metadata?.path) {
+                return;
+            }
+
+            // v2 sessions read git state from the DAEMON's machine plane over
+            // the sealed tunnel — one parsed call instead of four shell
+            // round-trips, and no happy socket involved.
+            const mctx = sync.machineCtx(sessionId);
+            if (mctx) {
+                const { status, data } = await machineGitStatus(mctx);
+                if (status === 200 && data?.ok) {
+                    storage.getState().applyGitStatus(projectKey, this.fromV2GitStatus(data));
+                } else if (status === 200 && data && !data.ok) {
+                    storage.getState().applyGitStatus(projectKey, null); // not a repo
+                }
                 return;
             }
 

@@ -99,7 +99,7 @@ beforeAll(async () => {
   // Real executor: v1 claim lane (unchanged), local target = the real daemon,
   // instance token injected daemon-side so remote callers never hold it.
   executor = startTunnelExecutor({
-    relayUrl, accountToken: "tok-A", masterSecret: SECRET_A,
+    relayUrl, accountToken: "tok-A", machineKey: SECRET_A,
     machineId: MACHINE, targetBase: daemonUrl,
     targetHeaders: { "X-Joy-Token": TOKEN },
   });

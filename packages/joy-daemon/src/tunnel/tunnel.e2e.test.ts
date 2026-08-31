@@ -118,7 +118,7 @@ beforeAll(async () => {
   targetUrl = `http://127.0.0.1:${(target.address() as any).port}`;
 
   executor = startTunnelExecutor({
-    relayUrl: tapUrl, accountToken: "tok-A", masterSecret: SECRET_A,
+    relayUrl: tapUrl, accountToken: "tok-A", machineKey: SECRET_A,
     machineId: MACHINE, targetBase: targetUrl,
   });
   // Wait for the executor to attach (first claim poll).

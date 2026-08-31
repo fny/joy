@@ -128,6 +128,11 @@ class Sync {
     serverID!: string;
     anonID!: string;
     private credentials!: AuthCredentials;
+    /** Account master secret — needed to derive the machine tunnel key
+     *  (deriveKey(master,'Joy Tunnel',[machineId])). Held in memory only. */
+    private masterSecret: Uint8Array | null = null;
+    setMasterSecret(secret: Uint8Array) { this.masterSecret = secret; }
+    getMasterSecret(): Uint8Array | null { return this.masterSecret; }
     public encryptionCache = new EncryptionCache();
     private sessionsSync: InvalidateSync;
     private messagesSync = new Map<string, InvalidateSync>();
@@ -2980,6 +2985,24 @@ class Sync {
         return { base: link.relay, v2SessionId: link.sessionId, key, token };
     }
 
+    /** Machine-plane context for a v2 session (tunnel target + local session
+     *  id), or null when the session is not v2 or prerequisites are missing. */
+    machineCtx(sessionId: string): { relayUrl: string; accountToken: string; machineKey: Uint8Array; machineId: string; localSessionId: string } | null {
+        const session = storage.getState().sessions[sessionId];
+        const link = session?.metadata?.v2;
+        const machineId = session?.metadata?.machineId;
+        const localSessionId = link?.localSessionId;
+        if (!link?.sessionId || !machineId || !localSessionId) return null;
+        const token = this.credentials?.token;
+        // The tunnel key is rooted on the PER-MACHINE key (what the daemon
+        // stores as access.key machineKey and publishes as the machine
+        // record's dataEncryptionKey) — a dataKey daemon never holds the
+        // account master, and per-machine scoping limits the blast radius.
+        const machineKey = this.machineDataKeys.get(machineId);
+        if (!token || !machineKey) return null;
+        return { relayUrl: link.relay, accountToken: token, machineKey, machineId, localSessionId };
+    }
+
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];
@@ -3026,6 +3049,26 @@ class Sync {
 // Global singleton instance
 export const sync = new Sync();
 
+// DEV probe: lets the e2e harness exercise the machine plane (tunnel) from the
+// console. Harmless in production — it only exposes calls the app already makes.
+if (typeof globalThis !== 'undefined') {
+    (globalThis as { __joyV2?: unknown }).__joyV2 = {
+        machineCtx: (sid: string) => sync.machineCtx(sid),
+        gitStatus: async (sid: string) => {
+            const ctx = sync.machineCtx(sid);
+            if (!ctx) return { error: 'no machineCtx' };
+            const { machineGitStatus } = await import('./v2/machine');
+            return machineGitStatus(ctx);
+        },
+        pane: async (sid: string) => {
+            const ctx = sync.machineCtx(sid);
+            if (!ctx) return { error: 'no machineCtx' };
+            const { machinePane } = await import('./v2/machine');
+            return machinePane(ctx);
+        },
+    };
+}
+
 //
 // Init sequence
 //
@@ -3057,6 +3100,7 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
         throw new Error(`Invalid secret key length: ${secretKey.length}, expected 32`);
     }
     const encryption = await Encryption.create(secretKey);
+    sync.setMasterSecret(secretKey);
 
     // Initialize socket connection
     const API_ENDPOINT = getServerUrl();

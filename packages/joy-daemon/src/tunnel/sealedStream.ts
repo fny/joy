@@ -40,10 +40,19 @@ function hmac512(key: Uint8Array, data: Uint8Array): Buffer {
 }
 
 /** Tunnel key for one machine — same chain shape as the perimeter key
- *  (hmac(seed, master) → chain → hmac(chain, 0x00||index)), with its own seed
+ *  (hmac(seed, root) → chain → hmac(chain, 0x00||index)), with its own seed
  *  string so the trees can never collide. Both ends COMPUTE this; it is never
- *  distributed and the relay never holds it. */
-export function deriveTunnelKey(master: Uint8Array, machineId: string): Uint8Array {
+ *  distributed and the relay never holds it.
+ *
+ *  The ROOT is the per-machine key (access.key `machineKey`, which the app
+ *  reads back as the machine record's dataEncryptionKey) — NOT the account
+ *  master. A dataKey-paired daemon never receives the account secret (by
+ *  design: a machine must not be able to impersonate the whole account), so
+ *  the master is not a shared secret here. Rooting on machineKey also scopes
+ *  the blast radius: one machine's key cannot decrypt another machine's
+ *  tunnel traffic. */
+export function deriveTunnelKey(machineKey: Uint8Array, machineId: string): Uint8Array {
+  const master = machineKey;
   const I = hmac512(new TextEncoder().encode("Joy Tunnel Master Seed"), master);
   const chain = I.subarray(32);
   const I2 = hmac512(chain, Buffer.concat([Buffer.from([0x00]), Buffer.from(machineId, "utf8")]));
