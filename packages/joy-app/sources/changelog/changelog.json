@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Aug 31 (3) — The terminal says why it is empty",
+      "summary": "",
+      "markdown": "- **A session the machine no longer has now says so.** Opening the terminal for a session the daemon doesn't know showed an empty black terminal with a small \"session_not_found — retrying…\" note, as though it were still loading — it never would. It now states plainly that the session ended or the daemon restarted without reattaching it. Same for a machine your account can't reach.\n- Genuine blips (a timeout, a daemon restarting mid-poll) still show the retry banner and still recover on their own."
+    },
+    {
       "title": "Aug 31 (2) — Terminal view fixes",
       "summary": "",
       "markdown": "- **The terminal opens on your session, not on a blank.** The view sized the tmux window to twice the height it renders, so Claude — which pins its input box to the bottom — put the box at the fold with a screenful of empty space above it, and the conversation a full screen higher. The window now matches what you actually see. (Scrolling back further is gone with it; Claude keeps no terminal scrollback, and the taller window was the only way to fake it.)\n- **Rotating no longer leaves the pane the wrong height.** A resize was only sent when the column count changed, so a height-only change kept a stale row count.\n- **The terminal can no longer shrink your session to 20×10.** Opening it before the layout had measured sent a real 20×10 resize, which stuck after you left the screen — leaving a session whose terminal shows nothing useful and whose typed messages can stop landing."
@@ -111,5 +116,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Aug 31 (2) — Terminal view fixes"
+  "latestTitle": "Aug 31 (3) — The terminal says why it is empty"
 }

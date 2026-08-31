@@ -1,3 +1,8 @@
+# Aug 31 (3) — The terminal says why it is empty
+
+- **A session the machine no longer has now says so.** Opening the terminal for a session the daemon doesn't know showed an empty black terminal with a small "session_not_found — retrying…" note, as though it were still loading — it never would. It now states plainly that the session ended or the daemon restarted without reattaching it. Same for a machine your account can't reach.
+- Genuine blips (a timeout, a daemon restarting mid-poll) still show the retry banner and still recover on their own.
+
 # Aug 31 (2) — Terminal view fixes
 
 - **The terminal opens on your session, not on a blank.** The view sized the tmux window to twice the height it renders, so Claude — which pins its input box to the bottom — put the box at the fold with a screenful of empty space above it, and the conversation a full screen higher. The window now matches what you actually see. (Scrolling back further is gone with it; Claude keeps no terminal scrollback, and the taller window was the only way to fake it.)
