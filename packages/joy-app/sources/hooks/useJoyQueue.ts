@@ -26,6 +26,14 @@ export function useJoyQueue(
 ) {
     const state = metaQueue ?? EMPTY;
 
+    // NOTE (v2 migration): these operate on the DAEMON's local dispatch queue
+    // — the qids come from the daemon's joy__queue metadata and refer to items
+    // waiting to be typed into the agent. That is a different queue from the
+    // relay's durable v2 message queue (whose ids are v2 messageIds, edited via
+    // PATCH /joy/v2/sessions/:id/messages/:mid). For a v2 session the relay
+    // queue is the one the app should show; this hook stays on the machine
+    // RPC until the session screen's queue strip is switched over, so it keeps
+    // working rather than silently addressing the wrong queue.
     const call = React.useCallback(async (rpc: string, params: Record<string, unknown>) => {
         if (!machineId || !joySessionId) return;
         try {
