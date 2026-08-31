@@ -1,3 +1,9 @@
+# Aug 31 (2) — Terminal view fixes
+
+- **The terminal opens on your session, not on a blank.** The view sized the tmux window to twice the height it renders, so Claude — which pins its input box to the bottom — put the box at the fold with a screenful of empty space above it, and the conversation a full screen higher. The window now matches what you actually see. (Scrolling back further is gone with it; Claude keeps no terminal scrollback, and the taller window was the only way to fake it.)
+- **Rotating no longer leaves the pane the wrong height.** A resize was only sent when the column count changed, so a height-only change kept a stale row count.
+- **The terminal can no longer shrink your session to 20×10.** Opening it before the layout had measured sent a real 20×10 resize, which stuck after you left the screen — leaving a session whose terminal shows nothing useful and whose typed messages can stop landing.
+
 # Aug 31 — Every joy session runs on v2
 
 - **v2 is the only path now.** New joy-tmux sessions always run on the v2 relay pipeline — the "via v2 relay" tick is gone because it is no longer a choice. Sends, cancels, files, git, terminal, usage and history all travel the sealed v2 path, and every option the old screen offered (model, effort, permission mode, fallback model, continue/resume, fork, extra arguments) rides along with the spawn. *Needs an updated daemon on the machine.*
