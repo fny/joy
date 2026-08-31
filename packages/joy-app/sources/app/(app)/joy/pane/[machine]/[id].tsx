@@ -25,6 +25,7 @@ import { useRootGutter } from '@/hooks/useRootGutter';
 import { sync } from '@/sync/sync';
 import { machinePane, machineResize, machineSendKeys } from '@/sync/v2/machine';
 import { paneSizeFor, paneSizeChanged, type PaneSize } from '@/utils/paneSize';
+import { describePaneError } from '@/utils/paneError';
 
 const POLL_MS = 1500;
 
@@ -75,6 +76,7 @@ export default React.memo(function JoyPaneScreen() {
     // Simple ON by default: the status chrome matters only when intervening,
     // and the toggle is one tap away.
     const [simpleMode, setSimpleMode] = React.useState(true);
+    const failure = React.useMemo(() => describePaneError(paneError), [paneError]);
     const scrollRef = React.useRef<ScrollView>(null);
     const mountedRef = React.useRef(true);
 
@@ -212,10 +214,10 @@ export default React.memo(function JoyPaneScreen() {
                 keep the last capture visible + scrollable and show a small banner
                 instead. The 1.5s poll keeps retrying, and a success clears the
                 banner + refreshes the text. */}
-            {paneError != null && (
+            {failure?.kind === 'transient' && (
                 <View style={styles.errorBanner}>
                     <Text style={styles.errorBannerText} numberOfLines={2}>
-                        {`⚠ ${paneError} — retrying…`}
+                        {`⚠ ${failure.message}`}
                     </Text>
                 </View>
             )}
@@ -225,7 +227,11 @@ export default React.memo(function JoyPaneScreen() {
                 onLayout={(e) => drivePaneSize(e.nativeEvent.layout.width, e.nativeEvent.layout.height)}
                 onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
             >
-                <AnsiText text={(simpleMode ? simplifyPane(pane) : pane) || '…'} style={styles.paneText} />
+                {failure?.kind === 'gone' && !pane ? (
+                    <Text style={styles.paneGoneText}>{failure.message}</Text>
+                ) : (
+                    <AnsiText text={(simpleMode ? simplifyPane(pane) : pane) || '…'} style={styles.paneText} />
+                )}
             </ScrollView>
 
             {/* Quick keys — horizontally scrollable */}
@@ -304,6 +310,15 @@ const styles = StyleSheet.create((theme, runtime) => ({
     errorBannerText: {
         color: '#FFB340',
         fontSize: 12,
+    },
+    // A session that is gone is not an error flash — it replaces the pane, so
+    // the view says what happened instead of showing an empty terminal.
+    paneGoneText: {
+        color: '#9a9a9a',
+        fontSize: 13,
+        lineHeight: 19,
+        paddingVertical: 24,
+        paddingHorizontal: 4,
     },
     paneScroll: {
         flex: 1,
