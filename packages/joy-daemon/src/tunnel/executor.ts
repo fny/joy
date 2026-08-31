@@ -52,6 +52,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
     // which we treat as "re-acquire", not as fatal.
     if (renewTimer) clearInterval(renewTimer);
     renewTimer = setInterval(() => {
+      if (opts.borrowLease) return; // the nucleus lane renews the lease it owns
       void fetch(`${opts.relayUrl}/joy/v1/daemon-leases/${lease!.id}`, {
         method: "PUT", headers: { "x-joy-lease-token": lease!.token },
       }).catch(() => {});
@@ -62,7 +63,11 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
     const postFrames = async (bytes: Uint8Array, done: boolean) => {
       const r = await fetch(`${opts.relayUrl}/joy/v1/tunnel/${requestId}/frames${done ? "?done=1" : ""}`, {
         method: "POST",
-        headers: { "x-joy-lease-id": lease!.id, "x-joy-lease-token": lease!.token, "content-type": "application/octet-stream" },
+        headers: (() => {
+          const l = activeLease();
+          if (!l) throw new Error("no lease for frame post");
+          return { "x-joy-lease-id": l.id, "x-joy-lease-token": l.token, "content-type": "application/octet-stream" };
+        })(),
         body: bytes as any,
       });
       if (!r.ok) throw new Error(`frames post failed: ${r.status}`);
@@ -122,6 +127,16 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
     pendingWire.push(w.push(new Uint8Array(0), true));
     await postFrames(Buffer.concat(pendingWire.map(Buffer.from)), true);
   }
+
+  /** The lease this executor should present: the lane's (borrowed) or its
+   *  own. Null while the lane has not acquired one yet. */
+  const activeLease = (): { id: string; token: string } | null => {
+    if (opts.borrowLease) {
+      const b = opts.borrowLease();
+      return b ? { id: b.leaseId, token: b.leaseToken } : null;
+    }
+    return lease ? { id: lease.id, token: lease.token } : null;
+  };
 
   const loop = (async () => {
     if (!opts.borrowLease) await acquire();
