@@ -2999,7 +2999,14 @@ class Sync {
         // record's dataEncryptionKey) — a dataKey daemon never holds the
         // account master, and per-machine scoping limits the blast radius.
         const machineKey = this.machineDataKeys.get(machineId);
-        if (!token || !machineKey) return null;
+        if (!token || !machineKey) {
+            // A v2 session whose machine key is unknown CANNOT use the machine
+            // plane. Say so loudly rather than quietly falling back to the
+            // happy socket — a silent dual path hides exactly the breakage
+            // this migration is meant to surface.
+            console.error(`[v2] machine plane unavailable for session ${sessionId}: ${!token ? 'no token' : `no key for machine ${machineId}`}`);
+            return null;
+        }
         return { relayUrl: link.relay, accountToken: token, machineKey, machineId, localSessionId };
     }
 
