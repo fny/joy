@@ -23,6 +23,9 @@ export const CodexApprovalBar = React.memo(function CodexApprovalBar({ sessionId
     const answer = React.useCallback((decision: 'allow' | 'deny') => {
         if (!machineId || !joyId || !approval) return;
         setAnswering(true);
+        // v2 gap: the daemon's /v2 plane has no codex-approval endpoint yet
+        // (approvals are a codex app-server concept, not a machine-plane one),
+        // so this stays on the machine RPC for both v1 and v2 sessions.
         apiSocket.machineRPC(machineId, 'joy-codex-approve', { id: joyId, requestId: approval.requestId, decision })
             .catch(() => { /* daemon re-pushes metadata; the bar reflects it */ })
             .finally(() => setAnswering(false));
