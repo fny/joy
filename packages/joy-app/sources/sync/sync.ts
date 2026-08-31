@@ -3099,6 +3099,30 @@ if (typeof globalThis !== 'undefined') {
             const { machinePane } = await import('./v2/machine');
             return machinePane(ctx);
         },
+        // Broad machine-plane sweep used by the e2e harness.
+        sweep: async (sid: string) => {
+            const ctx = sync.machineCtx(sid);
+            if (!ctx) return { error: 'no machineCtx' };
+            const m = await import('./v2/machine');
+            const only = { relayUrl: ctx.relayUrl, accountToken: ctx.accountToken, machineKey: ctx.machineKey, machineId: ctx.machineId };
+            const r: Record<string, string> = {};
+            const t = async (name: string, fn: () => Promise<{ status: number; data: unknown }>) => {
+                try { const x = await fn(); r[name] = `${x.status}${x.data ? '' : ' (no data)'}`; }
+                catch (e) { r[name] = `ERR ${(e as Error).message}`; }
+            };
+            await t('write', () => m.machineWriteFile(ctx, 'v2probe.txt', 'hello-v2'));
+            await t('read', () => m.machineReadFile(ctx, 'v2probe.txt'));
+            await t('entries', () => m.machineListDir(ctx, '.', 1));
+            await t('grep', () => m.machineGrep(ctx, 'hello-v2'));
+            await t('delete', () => m.machineDeleteFile(ctx, 'v2probe.txt'));
+            await t('slash', () => m.machineSlashCommands(ctx));
+            await t('status', () => m.machineStatusOnly(only));
+            await t('usage', () => m.machineUsageOnly(only, 'today'));
+            await t('limits', () => m.machineLimitsOnly(only, 'claude'));
+            await t('config', () => m.machineConfigRead(only, 'claude'));
+            await t('history', () => m.machineHistory(only, '/tmp/v2-reads-test'));
+            return r;
+        },
     };
 }
 
