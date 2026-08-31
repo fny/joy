@@ -86,7 +86,26 @@ export function decodeContent(ciphertext: string | null | undefined, key?: Uint8
     return null;
   } catch { return null; }
 }
-export function decodeSpawnSpec(ciphertext: string | null | undefined): { cwd?: string; agent?: string; model?: string; yolo?: boolean; createDir?: boolean } | null {
+/** The client's spawn options, carried on the durable command. Mirrors the
+ *  option set the v1 `joy-create-session` RPC accepted — the new-session screen
+ *  is v2-only now, so anything missing here is an option the user cannot set. */
+export interface SpawnSpec {
+  cwd?: string;
+  agent?: string;
+  model?: string;
+  effort?: string;
+  yolo?: boolean;
+  createDir?: boolean;
+  continue?: boolean;
+  resume_id?: string;
+  resumeLimitMb?: number;
+  permissionMode?: string;
+  fallbackModel?: string;
+  forkSession?: boolean;
+  extraArgs?: string;
+}
+
+export function decodeSpawnSpec(ciphertext: string | null | undefined): SpawnSpec | null {
   if (!ciphertext) return null;
   try {
     const p = JSON.parse(ciphertext);
@@ -281,11 +300,19 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           cwd: spec.cwd,
           agent: (spec.agent as AgentSession["agentFlavor"]) ?? "claude",
           model: spec.model,
+          effort: spec.effort,
           yolo: spec.yolo ?? true,
           // create-if-missing comes from the client's retry choice (the
           // relay rides it on the offer) or the spawnSpec. Off + missing →
           // report a spawn failure so the client can offer to create + retry.
           createDir: offer.createDir ?? spec.createDir ?? false,
+          continue: spec.continue,
+          resume_id: spec.resume_id,
+          resumeLimitMb: spec.resumeLimitMb,
+          permissionMode: spec.permissionMode,
+          fallbackModel: spec.fallbackModel,
+          forkSession: spec.forkSession,
+          extraArgs: spec.extraArgs,
         });
         writeSpawnIntent(offer.commandId, session.id);
       }

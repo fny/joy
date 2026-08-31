@@ -6,9 +6,9 @@
 //   - No worktree picker
 //   - Full claude CLI surface: permission mode, fallback model, continue,
 //     fork, plus a free-form extra-arguments string
-//   - Spawn goes through machineRPC('joy-create-session', ...) instead of
-//     machineSpawnNewSession; the joy-tmux daemon on the selected machine
-//     opens a new tmux window running the assembled claude command.
+//   - Spawn is v2-only: v2.createSession() puts a durable spawn command on the
+//     relay queue and the daemon's nucleus lane launches the agent. There is no
+//     v1 RPC fallback — a broken spawn must surface, not silently reroute.
 import React from 'react';
 import {
     View,
@@ -44,7 +44,7 @@ import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
-import { v2 } from '@/sync/v2/api';
+import { v2SpawnAndWait } from '@/sync/v2/spawn';
 import type { Machine, Session } from '@/sync/storageTypes';
 import {
     getEffortLevelsForModel,
@@ -99,11 +99,6 @@ function parseGitUrl(input: string): { url: string; repoName: string } | null {
     return { url: v, repoName };
 }
 
-type JoyCreateResult =
-    | { ok: true; relaySessionId?: string; session: { id: string } }
-    | { error: string }
-    | { requestToApproveDirectoryCreation: true; directory: string };
-
 function NewJoyTmuxSessionScreen() {
     const { theme } = useUnistyles();
     // See scaledComposerMetrics: keeps the send button centered on the
@@ -153,10 +148,6 @@ function NewJoyTmuxSessionScreen() {
     const [resumeMb, setResumeMb] = React.useState('1');
     // Free-form extra CLI arguments appended verbatim to the claude command.
     const [extraArgs, setExtraArgs] = React.useState('');
-    // Dual path: create through the v2 relay queue instead of the happy RPC.
-    // The daemon's nucleus lane claims the spawn, launches the agent, and
-    // stamps the resulting card with its v2 link (badge + v2-routed writes).
-    const [viaV2, setViaV2] = React.useState(false);
     const [prompt, setPrompt] = React.useState('');
     const [isSpawning, setIsSpawning] = React.useState(false);
     const [machinePickerOpen, setMachinePickerOpen] = React.useState(false);
@@ -407,154 +398,29 @@ function NewJoyTmuxSessionScreen() {
         const cwd = gitClone
             ? resolveAbsolutePath(`~/Workspace/${gitClone.repoName}`, selectedHomeDir)
             : resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedHomeDir);
-        // Race the RPC against a 30s timeout. machineRPC has no built-in
-        // timeout — a machine without joy-tmux would hang the spinner
-        // forever. 30s is enough for the slowest legitimate spawn (claude
-        // CLI startup + first transcript entry) and short enough to surface
-        // misconfigurations.
-        const sendCreateRpc = (createDir: boolean) => Promise.race<JoyCreateResult>([
-            apiSocket.machineRPC<JoyCreateResult, {
-                cwd: string;
-                agent?: string;
-                gitUrl?: string;
-                model?: string;
-                effort?: string;
-                continue?: boolean;
-                resume_id?: string;
-                resume_limit_mb?: number;
-                createDir?: boolean;
-                permissionMode?: string;
-                fallbackModel?: string;
-                forkSession?: boolean;
-                extraArgs?: string;
-            }>(selectedMachineId, 'joy-create-session', {
+        setIsSpawning(true);
+        try {
+            // Spawn is v2-only: a durable command lands on the relay queue,
+            // the daemon's nucleus lane executes it, and the session card
+            // arrives via normal sync stamped with its v2 link. We wait for
+            // that card so we can navigate straight into the session.
+            const happySessionId = await v2SpawnAndWait(selectedMachineId, {
                 cwd,
-                agent: selectedAgent !== 'claude' ? selectedAgent : undefined,
-                gitUrl: gitClone?.url,
-                // Codex sends its own model/effort from the model/list catalog;
-                // claude sends its keys.
+                agent: selectedAgent,
+                // Codex/opencode carry their own model ids from their catalogs;
+                // claude sends its key. Effort is claude/codex only.
                 model: selectedAgent === 'codex' ? codexModel?.model : selectedAgent === 'opencode' ? ocModel?.id : selectedAgent === 'pi' ? undefined : currentModel?.key,
                 effort: selectedAgent === 'codex' ? codexEffort : selectedAgent === 'claude' && currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
-                // resume a specific conversation by id; it takes precedence over
-                // `continue` (most-recent), so don't send both.
+                // resume by id wins over --continue (most recent); never both.
                 resume_id: resumeId.trim() || undefined,
-                // history (MB) to backfill; default 2, 0 = full. Applies to BOTH
-                // resume-by-id and --continue (the daemon caps continue's replay
-                // at bind time), so send it whenever either path is active.
-                // Claude-only params are never sent for codex (their UI rows are
-                // hidden there too): fork/fallback/resume_limit_mb are claude
-                // CLI concepts.
-                resume_limit_mb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
                 continue: (continueLast && !resumeId.trim()) || undefined,
-                createDir: createDir || undefined,
+                resumeLimitMb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
                 permissionMode: selectedAgent !== 'opencode' && selectedAgent !== 'pi' ? currentMode.key : undefined,
                 fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
                 forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
                 extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' ? (extraArgs.trim() || undefined) : undefined,
-            }),
-            new Promise<never>((_, reject) => setTimeout(
-                () => reject(new Error(gitClone
-                    ? 'clone + spawn did not finish within 4 minutes — large repo or slow network?'
-                    : 'joy-tmux did not respond within 30s — is the daemon running on the selected machine?')),
-                gitClone ? 240_000 : 30_000,
-            )),
-        ]);
-
-        setIsSpawning(true);
-        try {
-            // ── v2 path: durable spawn command on the relay queue; the daemon's
-            // lane executes it and the session card arrives via normal sync,
-            // stamped with its v2 link. We wait for that card to navigate.
-            if (viaV2) {
-                const created = await v2.createSession(selectedMachineId, {
-                    cwd,
-                    agent: selectedAgent,
-                    model: selectedAgent === 'claude' ? currentModel?.key : undefined,
-                });
-                const v2id: string = created.sessionId;
-                const deadline = Date.now() + 120_000;
-                let happySessionId: string | null = null;
-                let promptedForDir = false;
-                while (Date.now() < deadline && !happySessionId) {
-                    await new Promise(r => setTimeout(r, 2000));
-
-                    // The daemon binds the session on success; poll the v2 state
-                    // so we can also catch a pre-bind spawn FAILURE (e.g. the
-                    // directory does not exist) and offer to create it + retry —
-                    // the durable-queue analog of v1's "Create directory?".
-                    const st = await v2.sessionState(v2id).catch(() => null);
-                    if (st?.spawnFailure && st.spawnFailure.startsWith('dir_missing:') && !promptedForDir) {
-                        promptedForDir = true;
-                        const missing = st.spawnFailure.slice('dir_missing:'.length);
-                        const approved = await Modal.confirm(
-                            'Create directory?',
-                            `The directory '${missing}' does not exist on the machine. Create it?`,
-                            { cancelText: t('common.cancel'), confirmText: t('common.create') },
-                        );
-                        if (!approved) {
-                            await v2.deleteSession(v2id).catch(() => {});
-                            return;
-                        }
-                        await v2.retrySpawn(v2id, true);
-                        promptedForDir = false; // allow a fresh prompt if it fails again for another reason
-                        continue;
-                    }
-
-                    await sync.refreshSessions();
-                    const all = storage.getState().sessions;
-                    for (const [sid, s] of Object.entries(all)) {
-                        if ((s as { metadata?: { v2?: { sessionId?: string } } }).metadata?.v2?.sessionId === v2id) { happySessionId = sid; break; }
-                    }
-                }
-                if (!happySessionId) {
-                    Modal.alert(t('common.error'), 'v2 spawn accepted but the session did not start within 2 minutes. Check the daemon lane on that machine.');
-                    return;
-                }
-                const trimmedPromptV2 = prompt.trim();
-                if (trimmedPromptV2) await sync.sendMessage(happySessionId, trimmedPromptV2, { source: 'new_session' });
-                router.back();
-                setTimeout(() => router.push(`/session/${happySessionId}` as never), 100);
-                return;
-            }
-
-            let result = await sendCreateRpc(false);
-
-            // Directory doesn't exist — ask the user before joy-tmux creates
-            // it. Matches the same pattern as the regular /new spawn flow.
-            if ('requestToApproveDirectoryCreation' in result) {
-                setIsSpawning(false);
-                const approved = await Modal.confirm(
-                    'Create directory?',
-                    `The directory '${result.directory}' does not exist. Create it?`,
-                    { cancelText: t('common.cancel'), confirmText: t('common.create') },
-                );
-                if (!approved) return;
-                setIsSpawning(true);
-                result = await sendCreateRpc(true);
-            }
-
-            if ('error' in result) {
-                Modal.alert(t('common.error'), result.error);
-                return;
-            }
-
-            if ('requestToApproveDirectoryCreation' in result) {
-                // Shouldn't happen on the retry, but guard so TS narrowing
-                // stays sound and we surface the misconfiguration instead of
-                // crashing.
-                Modal.alert(t('common.error'), 'Directory still missing after creation approval');
-                return;
-            }
-
-            if (!result.relaySessionId) {
-                // Relay session wasn't created — joy-tmux may be offline. Refresh
-                // the session list and back out; the user can pick it up later.
-                await sync.refreshSessions();
-                Modal.alert(t('common.error'), 'joy-tmux did not return a relay session ID. Check the daemon is connected to the relay.');
-                return;
-            }
-
-            await sync.refreshSessions();
+            });
+            if (!happySessionId) return; // user declined the directory prompt
 
             // Remember this machine+folder so the next new-session pre-selects it.
             // Store the tilde-relative form (~/…) so it stays portable across machines.
@@ -564,16 +430,10 @@ function NewJoyTmuxSessionScreen() {
                 ...recentMachinePaths.filter(r => !(r.machineId === selectedMachineId && r.path === usedPath)),
             ].slice(0, 10));
 
-            // Send the initial prompt if any. joy-tmux's onMessage handler types
-            // it into the tmux pane (or delivers via the agent's API for
-            // codex/opencode).
             const trimmedPrompt = prompt.trim();
-            if (trimmedPrompt) {
-                await sync.sendMessage(result.relaySessionId, trimmedPrompt, { source: 'new_session' });
-            }
-
+            if (trimmedPrompt) await sync.sendMessage(happySessionId, trimmedPrompt, { source: 'new_session' });
             router.back();
-            navigateToSession(result.relaySessionId);
+            setTimeout(() => router.push(`/session/${happySessionId}` as never), 100);
         } catch (error) {
             const msg = error instanceof Error ? error.message : 'Failed to start joy-tmux session';
             Modal.alert(t('common.error'), msg);
@@ -772,20 +632,6 @@ function NewJoyTmuxSessionScreen() {
                             {/* Fork — claude-only; only meaningful with continue (claude
                                 rejects --fork-session on a fresh session). */}
                             {selectedAgent === 'claude' && (<>
-                            <Pressable
-                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
-                                onPress={() => setViaV2(v => !v)}
-                                accessibilityRole="button"
-                                accessibilityState={{ checked: viaV2 }}
-                                testID="joy-new-v2-toggle"
-                            >
-                                <Ionicons
-                                    name={viaV2 ? 'checkbox' : 'square-outline'}
-                                    size={15}
-                                    color={viaV2 ? theme.colors.textLink : theme.colors.textSecondary}
-                                />
-                                <Text style={styles.configLabel} numberOfLines={1}>via v2 relay</Text>
-                            </Pressable>
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed, !continueLast && { opacity: 0.4 }]}
                                 onPress={() => setForkSession(v => !v)}

@@ -5,6 +5,8 @@
 
 import { sessionBash } from './ops';
 import { storage } from './storage';
+import { sync } from './sync';
+import { machineGitStatus, machineGitDiff, type V2GitStatus } from './v2/machine';
 import { parseStatusSummaryV2, getCurrentBranchV2 } from './git-parsers/parseStatusV2';
 import { parseNumStat, createDiffStatsMap } from './git-parsers/parseDiff';
 
@@ -36,6 +38,24 @@ export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFil
         const session = storage.getState().sessions[sessionId];
         if (!session?.metadata?.path) {
             return null;
+        }
+
+        // v2 sessions read git state from the daemon's machine plane over the
+        // sealed tunnel: one parsed status call plus two numstat calls, instead
+        // of shelling out through the happy socket.
+        const mctx = await sync.awaitMachineCtx(sessionId);
+        if (mctx) {
+            const { status, data } = await machineGitStatus(mctx);
+            if (status !== 200 || !data?.ok) return null; // not a repo (or git failed)
+            const [unstaged, staged] = await Promise.all([
+                machineGitDiff(mctx, { numstat: true }),
+                machineGitDiff(mctx, { numstat: true, staged: true }),
+            ]);
+            return fromV2Status(
+                data,
+                unstaged.data?.diff ?? '',
+                staged.data?.diff ?? '',
+            );
         }
 
         // Get git status in porcelain v2 format (includes branch info and repo check)
@@ -70,6 +90,55 @@ export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFil
         console.error('Error fetching git status files for session', sessionId, ':', error);
         return null;
     }
+}
+
+/** Porcelain v2 status letter → the UI's file status. */
+function statusFromCode(code: string): GitFileStatus['status'] {
+    switch (code) {
+        case 'A': return 'added';
+        case 'D': return 'deleted';
+        case 'R': case 'C': return 'renamed';
+        default: return 'modified';
+    }
+}
+
+/**
+ * Build the file-level view from the daemon's PARSED status (v2 machine plane)
+ * plus numstat output for line counts. The v1 path reparses raw porcelain here;
+ * over v2 the daemon has already done that work.
+ */
+function fromV2Status(d: V2GitStatus, unstagedNumstat: string, stagedNumstat: string): GitStatusFiles {
+    const unstagedStats = createDiffStatsMap(parseNumStat(unstagedNumstat.trim()));
+    const stagedStats = createDiffStatsMap(parseNumStat(stagedNumstat.trim()));
+    const stagedFiles: GitFileStatus[] = [];
+    const unstagedFiles: GitFileStatus[] = [];
+    const mk = (path: string, status: GitFileStatus['status'], isStaged: boolean, oldPath?: string): GitFileStatus => {
+        const stats = (isStaged ? stagedStats : unstagedStats)[path];
+        return {
+            fileName: path.split('/').pop() ?? path,
+            filePath: path,
+            fullPath: path,
+            status,
+            isStaged,
+            linesAdded: stats?.added ?? 0,
+            linesRemoved: stats?.removed ?? 0,
+            ...(oldPath ? { oldPath } : {}),
+        };
+    };
+
+    for (const e of d.entries ?? []) {
+        if (e.untracked) { unstagedFiles.push(mk(e.path, 'untracked', false)); continue; }
+        if (e.staged) stagedFiles.push(mk(e.path, statusFromCode(e.staged), true, e.renamedFrom));
+        if (e.unstaged) unstagedFiles.push(mk(e.path, statusFromCode(e.unstaged), false, e.renamedFrom));
+    }
+
+    return {
+        stagedFiles,
+        unstagedFiles,
+        branch: d.branch ?? null,
+        totalStaged: stagedFiles.length,
+        totalUnstaged: unstagedFiles.length,
+    };
 }
 
 /**

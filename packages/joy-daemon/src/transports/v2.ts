@@ -297,6 +297,19 @@ route("GET", "/v2/sessions/:id/slash-commands", withSession((ctx, session) => {
 route("POST", "/v2/sessions/:id/hooks", withSession(async (_ctx, session, _p, body) =>
   ok(await scall("hookEvent", session, body))));
 
+// This session's cost row. Session-scoped so the client never has to fetch the
+// session record first just to learn its claude session id (the v1 usage screen
+// made that extra round-trip). A session that hasn't bound a claude id yet has
+// no usage to report — `entry: null`, not an error.
+route("GET", "/v2/sessions/:id/usage", withSession(async (ctx, session) => {
+  const claudeSessionId = session.claudeSessionId;
+  if (!claudeSessionId) return ok({ ok: true, entry: null });
+  return ok(await mcall("sessionUsage", ctx.registry, {
+    period: ctx.url.searchParams.get("period") ?? "all",
+    claudeSessionId,
+  }));
+}));
+
 // ── session events (SSE, filtered to this session) ─────────────────────────
 route("GET", "/v2/sessions/:id/events", withSession((ctx, session, p) => {
   ctx.res.writeHead(200, {
@@ -422,6 +435,9 @@ route("GET", "/v2/sessions/:id/git/entries", withSession(async (ctx, session) =>
 route("GET", "/v2/sessions/:id/git/diff", withSession(async (ctx, session) => {
   const args = ["diff"];
   if (ctx.url.searchParams.get("staged") === "1") args.push("--cached");
+  // numstat=1 returns per-file added/removed counts instead of the patch text —
+  // what the file-list UI needs, without shipping whole diffs to render a "+3 −1".
+  if (ctx.url.searchParams.get("numstat") === "1") args.push("--numstat");
   const p = ctx.url.searchParams.get("path");
   if (p) {
     const j = jailed(session, p);

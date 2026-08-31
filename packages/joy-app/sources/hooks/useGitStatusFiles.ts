@@ -10,14 +10,22 @@
 import * as React from 'react';
 import { useFocusEffect } from 'expo-router';
 import { getGitStatusFiles, GitStatusFiles } from '@/sync/gitStatusFiles';
-import { storage, useSessionGitStatusFiles } from '@/sync/storage';
+import { storage, useSession, useSessionGitStatusFiles } from '@/sync/storage';
 
 export function useGitStatusFiles(sessionId: string) {
     const cached = useSessionGitStatusFiles(sessionId);
     const [isFetching, setIsFetching] = React.useState(false);
+    // On a cold load the screen mounts BEFORE sessions hydrate, so the project
+    // key does not exist yet. Track it reactively and key the refresh on it:
+    // otherwise the focus effect fires once against an unhydrated store, bails,
+    // and the screen shows "not a git repository" until the user navigates away
+    // and back.
+    const session = useSession(sessionId);
+    const pathKey = session?.metadata?.machineId && session?.metadata?.path
+        ? `${session.metadata.machineId}:${session.metadata.path}`
+        : null;
 
     const refresh = React.useCallback(async () => {
-        const pathKey = storage.getState().getSessionPathKey(sessionId);
         if (!pathKey) return;
         setIsFetching(true);
         try {
@@ -28,7 +36,7 @@ export function useGitStatusFiles(sessionId: string) {
         } finally {
             setIsFetching(false);
         }
-    }, [sessionId]);
+    }, [sessionId, pathKey]);
 
     // Refresh on mount and every time the screen is focused
     useFocusEffect(

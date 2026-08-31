@@ -32,6 +32,8 @@ export interface V2Row {
     content: { t: 'plain' };
     /** Already-decrypted content in the app's RawRecord shape. */
     __v2Plain: unknown;
+    /** Marks rows that came from the v2 event log (vs the happy mirror). */
+    __fromV2: true;
 }
 
 export interface V2Page { messages: V2Row[]; hasMore: boolean }
@@ -56,14 +58,14 @@ function toRow(e: RawV2Event, key: Uint8Array | null): V2Row | null {
     if (e.kind === 'turn.queued') {
         if (text === null) return null;
         return {
-            id: e.id, seq, localId: e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' },
+            id: e.id, seq, localId: e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' }, __fromV2: true as const,
             __v2Plain: { role: 'user', content: { type: 'text', text } },
         };
     }
     if (e.kind === 'output' || (e.kind === 'turn.terminal' && text !== null)) {
         if (text === null) return null;
         return {
-            id: e.id, seq, localId: null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' },
+            id: e.id, seq, localId: null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' }, __fromV2: true as const,
             // Agent text rides the SESSION ENVELOPE — the same wire shape the
             // daemon emits for v1 (role:'session' → content.data.ev), which the
             // app's normalizer understands. (role:'agent' means a raw Claude

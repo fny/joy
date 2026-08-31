@@ -1,8 +1,7 @@
-// Per-session cost, reported by the joy-tmux daemon on the session's machine
-// via the joy-tmux daemon (joy-session-usage op). Works for any session
-// whose machine runs joy-tmux: the conversation is matched by claude session
-// id, which comes from happy metadata or (for joy sessions) the daemon's
-// live record.
+// Per-session cost, read over v2 from the daemon on the session's machine
+// (GET /v2/sessions/:id/usage through the sealed tunnel). The daemon resolves
+// the conversation's claude session id itself, so this screen needs no
+// separate lookup.
 //
 // Personal-build dev page — plain strings, no i18n (matches the /joy pages).
 import * as React from 'react';
@@ -13,7 +12,8 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useSession } from '@/sync/storage';
-import { apiSocket } from '@/sync/apiSocket';
+import { sync } from '@/sync/sync';
+import { machineSessionUsage } from '@/sync/v2/machine';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 
@@ -40,8 +40,10 @@ export default React.memo(function SessionUsageScreen() {
     const session = useSession(id);
 
     const machineId = session?.metadata?.machineId;
-    const metaClaudeId = session?.metadata?.claudeSessionId;
-    const joySessionId = session?.metadata?.joy__sessionId;
+    // The v2 link arrives with session sync, which can land AFTER first paint.
+    // Keying the effect on it means we retry once it does instead of latching
+    // "no v2 machine context" forever.
+    const v2SessionId = (session?.metadata as { v2?: { sessionId?: string } } | undefined)?.v2?.sessionId;
 
     const [state, setState] = React.useState<
         | { phase: 'loading' }
@@ -57,38 +59,28 @@ export default React.memo(function SessionUsageScreen() {
         let cancelled = false;
         (async () => {
             try {
-                // Resolve the claude session id: happy metadata carries it;
-                // joy sessions ask the daemon for the live record.
-                let claudeId = metaClaudeId ?? null;
-                if (!claudeId && joySessionId) {
-                    const live = await raceTimeout(
-                        apiSocket.machineRPC<{ claude_session_id?: string; error?: string }, { id: string }>(
-                            machineId, 'joy-get-session', { id: joySessionId }),
-                        5000, 'joy-tmux did not respond',
-                    );
-                    claudeId = live.claude_session_id ?? null;
-                }
-                if (!claudeId) {
-                    if (!cancelled) setState({ phase: 'error', message: 'No claude session id known for this session yet.' });
+                const ctx = await sync.awaitMachineCtx(id);
+                if (cancelled) return;
+                if (!ctx) {
+                    setState({ phase: 'error', message: 'No v2 machine context for this session yet.' });
                     return;
                 }
-                const result = await raceTimeout(
-                    apiSocket.machineRPC<{ ok?: boolean; entry?: SessionUsage | null; error?: string }, { period: string; claudeSessionId: string }>(
-                        machineId, 'joy-session-usage', { period: 'all', claudeSessionId: claudeId }),
-                    60000, 'joy-tmux did not respond — is the daemon running on this machine?',
+                const { status, data } = await raceTimeout(
+                    machineSessionUsage(ctx, 'all'),
+                    60000, 'the daemon did not respond — is it running on this machine?',
                 );
                 if (cancelled) return;
-                if (!result.ok) {
-                    setState({ phase: 'error', message: result.error || 'usage query failed' });
+                if (status !== 200 || !data || data.error) {
+                    setState({ phase: 'error', message: data?.error ?? `usage query failed (${status})` });
                     return;
                 }
-                setState({ phase: 'done', entry: result.entry ?? null });
+                setState({ phase: 'done', entry: (data.entry ?? null) as SessionUsage | null });
             } catch (e) {
                 if (!cancelled) setState({ phase: 'error', message: e instanceof Error ? e.message : 'usage query failed' });
             }
         })();
         return () => { cancelled = true; };
-    }, [machineId, metaClaudeId, joySessionId]);
+    }, [machineId, id, v2SessionId]);
 
     if (state.phase === 'loading') {
         return (

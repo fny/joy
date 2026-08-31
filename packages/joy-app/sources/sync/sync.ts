@@ -2284,6 +2284,11 @@ class Sync {
                 // Carry the authoritative server log order onto the message so
                 // the display sort can use it instead of the (skew-prone) createdAt.
                 normalized.seq = decrypted.seq;
+                // Carry the v2 provenance tag: for a v2 session only event-log
+                // rows are applied (the daemon's happy mirror would double it).
+                if ((messages[i] as { __fromV2?: boolean })?.__fromV2) {
+                    (normalized as { __fromV2?: boolean }).__fromV2 = true;
+                }
                 normalizedMessages.push(normalized);
             }
             if (opts?.deriveThinking) {
@@ -3010,6 +3015,23 @@ class Sync {
         return { relayUrl: link.relay, accountToken: token, machineKey, machineId, localSessionId };
     }
 
+    /**
+     * machineCtx, but patient: the machine key arrives with session sync, which
+     * can land AFTER a screen's first fetch — and it lives in a plain Map, so
+     * nothing re-renders to tell a caller it showed up. Callers that would
+     * otherwise cache a failure ("not a git repo", "no usage") must wait for it
+     * instead of latching. Returns null only if it never arrives.
+     */
+    async awaitMachineCtx(sessionId: string, timeoutMs = 15_000): Promise<ReturnType<Sync['machineCtx']>> {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+            const ctx = this.machineCtx(sessionId);
+            if (ctx) return ctx;
+            if (Date.now() >= deadline) return null;
+            await new Promise(r => setTimeout(r, 500));
+        }
+    }
+
     /** Machine-plane context addressed by MACHINE (not happy session) — for
      *  screens that already hold machineId + the daemon-local session id
      *  (terminal, machine view). Returns null when the machine's key or a v2
@@ -3037,6 +3059,14 @@ class Sync {
     }
 
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
+        // v2 sessions read their history from the v2 EVENT LOG. The daemon
+        // also mirrors the conversation onto the happy card (dual-stack), so
+        // socket-delivered rows would render a SECOND copy of every message.
+        // Drop them: for a v2 session the event log is the single source.
+        if (messages.length > 0 && storage.getState().sessions[sessionId]?.metadata?.v2?.sessionId) {
+            messages = messages.filter(m => (m as { __fromV2?: boolean }).__fromV2 === true);
+            if (messages.length === 0) return;
+        }
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];
         for (let messageId of result.changed) {
@@ -3087,6 +3117,18 @@ export const sync = new Sync();
 if (typeof globalThis !== 'undefined') {
     (globalThis as { __joyV2?: unknown }).__joyV2 = {
         machineCtx: (sid: string) => sync.machineCtx(sid),
+        // Session card as the app sees it: the v2 link, presence and the
+        // thinking flag that gates the composer's send-vs-hold decision.
+        card: (sid: string) => {
+            const s = storage.getState().sessions[sid];
+            if (!s) return null;
+            return { v2: s.metadata?.v2, presence: s.presence, thinking: s.thinking, active: s.active, updatedAt: s.updatedAt };
+        },
+        send: (sid: string, text: string) => sync.sendMessage(sid, text, { source: 'chat' }),
+        gitFiles: async (sid: string) => {
+            const { getGitStatusFiles } = await import('./gitStatusFiles');
+            return getGitStatusFiles(sid);
+        },
         gitStatus: async (sid: string) => {
             const ctx = sync.machineCtx(sid);
             if (!ctx) return { error: 'no machineCtx' };

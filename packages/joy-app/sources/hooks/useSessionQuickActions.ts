@@ -8,6 +8,7 @@ import { storage, useLocalSetting, useMachine, useSetting } from '@/sync/storage
 import { apiSocket } from '@/sync/apiSocket';
 import { Machine, Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
+import { v2SpawnAndWait } from '@/sync/v2/spawn';
 import { resolveMessageModeMeta } from '@/sync/messageMeta';
 import { t } from '@/text';
 import { HappyError } from '@/utils/errors';
@@ -273,17 +274,12 @@ export function useSessionQuickActions(
             if (!canForkJoy || !machineId || !directory || !claudeSessionId) {
                 throw new HappyError(t('session.forkErrorMissingMetadata'), false);
             }
-            type JoyCreateResult = { relaySessionId?: string; error?: string };
-            const result = await apiSocket.machineRPC<JoyCreateResult, Record<string, unknown>>(
-                machineId,
-                'joy-create-session',
-                { cwd: directory, resume_id: claudeSessionId, forkSession: true },
-            );
-            if (result.error || !result.relaySessionId) {
-                throw new HappyError(result.error ?? t('session.forkErrorGeneric'), false);
-            }
+            const forked = await v2SpawnAndWait(machineId, {
+                cwd: directory, resume_id: claudeSessionId, forkSession: true,
+            });
+            if (!forked) return; // user declined the directory prompt
             try { await sync.refreshSessions(); } catch { /* broadcast will hydrate */ }
-            navigateToSession(result.relaySessionId);
+            navigateToSession(forked);
             return;
         }
         if (!canFork) {
