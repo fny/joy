@@ -138,7 +138,23 @@ export interface V2Event {
 export const v2 = {
     listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
     sessionState: (id: string): Promise<V2SessionState> => v2fetch('GET', `/sessions/${id}`),
-    createSession: (machineId: string, spec?: { cwd: string; agent?: string; model?: string }) =>
+    // The full option set the new-session screen can set. Keep in sync with the
+    // daemon's SpawnSpec (packages/joy-daemon/src/relay/nucleusLane.ts) — a
+    // field missing there is an option the user silently cannot use.
+    createSession: (machineId: string, spec?: {
+        cwd: string;
+        agent?: string;
+        model?: string;
+        effort?: string;
+        createDir?: boolean;
+        continue?: boolean;
+        resume_id?: string;
+        resumeLimitMb?: number;
+        permissionMode?: string;
+        fallbackModel?: string;
+        forkSession?: boolean;
+        extraArgs?: string;
+    }) =>
         v2fetch('POST', '/sessions', {
             mode: 'spawn', daemonId: machineId, creationIntentId: randomUUID(),
             // The daemon's nucleus lane decodes this envelope to launch the

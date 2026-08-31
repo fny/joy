@@ -176,7 +176,6 @@ export class GitStatusSync {
         try {
             // Route through a live session resolved NOW (not a frozen first session).
             const sessionId = this.resolveLiveSessionForProject(projectKey);
-            console.log(`[v2 git] fetch for ${projectKey} → session=${sessionId ?? 'NONE'}`);
             if (!sessionId) return; // no online session → keep last good status
             const session = storage.getState().sessions[sessionId];
             if (!session?.metadata?.path) {
@@ -186,7 +185,7 @@ export class GitStatusSync {
             // v2 sessions read git state from the DAEMON's machine plane over
             // the sealed tunnel — one parsed call instead of four shell
             // round-trips, and no happy socket involved.
-            const mctx = sync.machineCtx(sessionId);
+            const mctx = await sync.awaitMachineCtx(sessionId);
             if (mctx) {
                 const { status, data } = await machineGitStatus(mctx);
                 if (status === 200 && data?.ok) {

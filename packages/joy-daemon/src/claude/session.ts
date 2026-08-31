@@ -821,16 +821,25 @@ export class Session {
    * permissions` doesn't skip it. The user already chose this folder when
    * creating the session, so auto-confirm "Yes, I trust this folder". Polls for
    * a bounded window; fires at most once.
+   *
+   * The option ORDER is not stable across claude versions — current builds list
+   * "No, exit" first — so never hard-code a digit: a blind "1" answers *no* and
+   * the daemon kills the very session it just spawned (the pane drops back to a
+   * shell and every dispatch queues forever). Locate the trust line in the
+   * rendered menu and drive the cursor to it instead.
    */
   #watchTrustPrompt(attempts = 0): void {
     if (this.status === "ended" || this.status === "active" || this.#trustHandled) return;
     const pane = this.#tmux.captureCached(this.tmuxWindow);
     if (pane.ok && /Yes, I trust this folder|Is this a project you (created|trust)/i.test(pane.out)) {
-      // "1" selects "Yes, I trust this folder"; Enter confirms (harmless empty
-      // submit if "1" already activated it).
-      void this.#tmux.key(this.tmuxWindow,"1", "Enter"); // fire-and-forget (sync watcher)
-      this.#trustHandled = true;
-      return;
+      const keys = trustPromptKeys(pane.out);
+      if (keys) {
+        void this.#tmux.key(this.tmuxWindow, ...keys); // fire-and-forget (sync watcher)
+        this.#trustHandled = true;
+        return;
+      }
+      // Prompt text matched but the menu hasn't painted its options yet — keep
+      // polling rather than guessing at a selection.
     }
     if (attempts < 60) setTimeout(() => this.#watchTrustPrompt(attempts + 1), 700);
   }
@@ -4041,6 +4050,45 @@ export function parsePermissionModeFromPane(text: string): string {
   if (/accept edits on/i.test(text)) return "acceptEdits";
   if (/plan mode on/i.test(text)) return "plan";
   return "default"; // no marker line in default mode
+}
+
+/**
+ * Keys that answer the folder-trust dialog with "yes", derived from the pane
+ * rather than assumed. Claude has shipped the options in both orders and with
+ * and without leading digits, so a hard-coded "1" is a coin flip that, when it
+ * loses, exits the agent.
+ *
+ * Returns the key sequence to send, or null if the option list hasn't painted
+ * yet (caller keeps polling). Exported for tests.
+ */
+export function trustPromptKeys(pane: string): string[] | null {
+  const YES = /Yes,\s*I\s*trust\s*this\s*folder|Yes,\s*proceed/i;
+  const NO = /No,\s*exit/i;
+  const options: { yes: boolean; digit?: string; selected: boolean }[] = [];
+  for (const raw of pane.split("\n")) {
+    if (!YES.test(raw) && !NO.test(raw)) continue;
+    // Menu rows only: the question itself ("...Is this a project you trust?")
+    // never carries an option label, but a wrapped paragraph might — require
+    // the row to be short and to start with the marker/indent/digit shape.
+    const row = raw.trimEnd();
+    if (!/^\s*(❯|>)?\s*(\d+[.)])?\s*(Yes|No)\b/.test(row)) continue;
+    options.push({
+      yes: YES.test(row),
+      digit: row.match(/^\s*(?:❯|>)?\s*(\d+)[.)]/)?.[1],
+      selected: /^\s*(❯|>)\s/.test(row),
+    });
+  }
+  const target = options.findIndex(o => o.yes);
+  if (target < 0) return null;
+  // Explicitly numbered menus accept the digit directly.
+  const digit = options[target].digit;
+  if (digit) return [digit, "Enter"];
+  // Otherwise walk the cursor from its current row to the trust row. With no
+  // marker rendered, assume the first row is selected (claude's default).
+  const cursor = Math.max(0, options.findIndex(o => o.selected));
+  const delta = target - cursor;
+  const arrows = Array.from({ length: Math.abs(delta) }, () => (delta > 0 ? "Down" : "Up"));
+  return [...arrows, "Enter"];
 }
 
 function summarizeInput(input: unknown): string {

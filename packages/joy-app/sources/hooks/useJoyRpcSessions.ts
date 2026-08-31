@@ -5,6 +5,7 @@ import { apiSocket } from '@/sync/apiSocket';
 import type { JoySession } from '@/joy/types';
 import { useActiveInterval } from './useActiveInterval';
 import { sync } from '@/sync/sync';
+import { v2SpawnAndWait } from '@/sync/v2/spawn';
 import { machineKillSession, machinePane } from '@/sync/v2/machine';
 
 const POLL_INTERVAL_MS = 5000;
@@ -45,7 +46,7 @@ export function useJoyRpcSessions(machineId: string | null) {
 
     const createSession = React.useCallback(async (cwd: string) => {
         if (!machineId) throw new Error('no machine selected');
-        await apiSocket.machineRPC(machineId, 'joy-create-session', { cwd });
+        await v2SpawnAndWait(machineId, { cwd });
         await refresh();
     }, [machineId, refresh]);
 

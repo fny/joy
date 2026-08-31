@@ -35,9 +35,9 @@ export interface V2GitStatus {
 export const machineGitStatus = (ctx: MachineCtx) =>
     j<V2GitStatus>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/git/status`);
 
-export const machineGitDiff = (ctx: MachineCtx, opts?: { staged?: boolean; path?: string }) =>
+export const machineGitDiff = (ctx: MachineCtx, opts?: { staged?: boolean; path?: string; numstat?: boolean }) =>
     j<{ ok: boolean; diff?: string; error?: string }>(ctx, 'GET',
-        `/v2/sessions/${ctx.localSessionId}/git/diff?staged=${opts?.staged ? 1 : 0}${opts?.path ? `&path=${encodeURIComponent(opts.path)}` : ''}`);
+        `/v2/sessions/${ctx.localSessionId}/git/diff?staged=${opts?.staged ? 1 : 0}${opts?.numstat ? '&numstat=1' : ''}${opts?.path ? `&path=${encodeURIComponent(opts.path)}` : ''}`);
 
 // ── files ──────────────────────────────────────────────────────────────────
 export const machineReadFile = (ctx: MachineCtx, path: string) =>
@@ -94,6 +94,11 @@ export const machineUsage = (ctx: MachineCtx, period = '30days') =>
     j<Record<string, unknown>>(ctx, 'GET', `/v2/usage?period=${encodeURIComponent(period)}`);
 export const machineLimits = (ctx: MachineCtx, harness: string) =>
     j<Record<string, unknown>>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/limits`);
+/** This session's cost row (period like joy-usage plus "all"). Session-scoped:
+ *  the daemon resolves the claude session id, so no extra round-trip here. */
+export const machineSessionUsage = (ctx: MachineCtx, period = 'all') =>
+    j<{ ok?: boolean; entry?: unknown; error?: string }>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/usage?period=${encodeURIComponent(period)}`);
+
 export const machineSlashCommands = (ctx: MachineCtx) =>
     j<{ slashCommands: string[] }>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/slash-commands`);
 

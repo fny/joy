@@ -1,3 +1,10 @@
+# Aug 31 — Every joy session runs on v2
+
+- **v2 is the only path now.** New joy-tmux sessions always run on the v2 relay pipeline — the "via v2 relay" tick is gone because it is no longer a choice. Sends, cancels, files, git, terminal, usage and history all travel the sealed v2 path, and every option the old screen offered (model, effort, permission mode, fallback model, continue/resume, fork, extra arguments) rides along with the spawn. *Needs an updated daemon on the machine.*
+- **Sessions in a brand-new folder start properly.** Claude asks whether you trust a folder it has not seen before. Joy was answering that prompt with the wrong option and quietly shutting the session down, so anything you typed sat unsent forever. It now answers correctly no matter how the prompt is laid out.
+- **Changes tab works on a cold open.** Opening a session's Changes straight from a link used to say "not a git repository" until you navigated away and back. It now waits for the session to load instead of giving up.
+- **Per-session usage over v2.** The session usage screen reads its cost row through the new path in one call, and no longer fails with an encryption error on v2 sessions.
+
 # Aug 30 (2) — v2 on the main relay, create-directory prompt
 
 - **v2 works on the Joy Relay.** The main relay now serves the v2 pipeline, so v2 sessions work without switching relays — no more errors when a session tries the new path.

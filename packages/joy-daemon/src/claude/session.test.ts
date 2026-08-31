@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, trustPromptKeys } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -1199,4 +1199,44 @@ test("loginContinueFromPane: matches the post-login continue screen only", () =>
   expect(loginContinueFromPane("Login successful.\n   Press  Enter  to continue")).toBe(true);
   expect(loginContinueFromPane("❯ discussing login successful flows in the app")).toBe(false);
   expect(loginContinueFromPane("Press Enter to continue")).toBe(false);
+});
+
+// Regression: the daemon used to answer the folder-trust dialog with a hard-coded
+// "1". Current claude builds list "No, exit" FIRST, so that answered *no* and
+// killed the session the daemon had just spawned — the pane fell back to a shell
+// and every dispatched prompt sat queued forever.
+test("trustPromptKeys: walks to the trust row when 'No, exit' is listed first", () => {
+  const pane = [
+    " Accessing workspace:",
+    " /tmp/v2-final",
+    " Quick safety check: Is this a project you created or one you trust?",
+    " Claude Code'll be able to read, edit, and execute files here.",
+    " Security guide",
+    " \u276f No, exit",
+    "   Yes, I trust this folder",
+    " Enter to confirm \u00b7 Esc to cancel",
+  ].join("\n");
+  expect(trustPromptKeys(pane)).toEqual(["Down", "Enter"]);
+});
+
+test("trustPromptKeys: walks up when the trust row is listed first", () => {
+  const pane = [" Do you trust the files in this folder?", "   Yes, I trust this folder", " \u276f No, exit"].join("\n");
+  expect(trustPromptKeys(pane)).toEqual(["Up", "Enter"]);
+});
+
+test("trustPromptKeys: no marker rendered yet assumes the first row is selected", () => {
+  const pane = [" Is this a project you trust?", "   No, exit", "   Yes, I trust this folder"].join("\n");
+  expect(trustPromptKeys(pane)).toEqual(["Down", "Enter"]);
+});
+
+test("trustPromptKeys: numbered menus select by digit", () => {
+  const pane = [" Is this a project you trust?", " \u276f 1. Yes, proceed", "   2. No, exit"].join("\n");
+  expect(trustPromptKeys(pane)).toEqual(["1", "Enter"]);
+  const reordered = [" Is this a project you trust?", " \u276f 1. No, exit", "   2. Yes, I trust this folder"].join("\n");
+  expect(trustPromptKeys(reordered)).toEqual(["2", "Enter"]);
+});
+
+test("trustPromptKeys: null until the options paint (never guesses)", () => {
+  expect(trustPromptKeys(" Quick safety check: Is this a project you trust?")).toBeNull();
+  expect(trustPromptKeys("")).toBeNull();
 });
