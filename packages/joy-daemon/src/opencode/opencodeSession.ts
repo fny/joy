@@ -577,7 +577,9 @@ export class OpencodeSession implements AgentSession {
   /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
    *  the relay is attached by then on the spawn path — best-effort merge). */
   setV2Link(link: { sessionId: string; relay: string; keyEnvelope: string }): void {
-    void this.#relay?.mergeMetadata({ v2: link });
+    // localSessionId lets the app address this session's MACHINE plane
+    // (/v2/sessions/<local id>/…) through the sealed tunnel.
+    void this.#relay?.mergeMetadata({ v2: { ...link, localSessionId: this.id } });
   }
 
   markCompacting(): void { /* server-side */ }

@@ -13,7 +13,7 @@ import { openHeadAndBody, type RequestHead, type ResponseHead } from "./wire";
 export interface ExecutorOpts {
   relayUrl: string;            // nucleus base, e.g. http://127.0.0.1:PORT
   accountToken: string;        // bearer for lease acquisition
-  masterSecret: Uint8Array;    // account secret → tunnel key
+  machineKey: Uint8Array;      // per-machine key (access.key machineKey) → tunnel key
   machineId: string;           // daemon identity (lease daemon_id)
   targetBase: string;          // local surface, e.g. http://127.0.0.1:4997
   targetHeaders?: Record<string, string>; // e.g. X-Joy-Token for the local API
@@ -28,7 +28,7 @@ const STRIP = new Set(["host", "connection", "content-length", "transfer-encodin
 
 export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   const log = opts.log ?? (() => {});
-  const key = deriveTunnelKey(opts.masterSecret, opts.machineId);
+  const key = deriveTunnelKey(opts.machineKey, opts.machineId);
   let stopped = false;
   let lease: { id: string; token: string } | null = null;
   let renewTimer: ReturnType<typeof setInterval> | null = null;

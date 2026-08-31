@@ -20,6 +20,7 @@ import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync, readFileSync } from "fs";
 import { initRelay, loadCredentials } from "./relay/relay.ts";
 import { startNucleusLane } from "./relay/nucleusLane.ts";
+import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
 import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyHomeDir } from "./paths";
 
@@ -157,6 +158,27 @@ if (process.env.JOY_V2_LANE !== "0") {
     });
   } else {
     process.stderr.write("[v2-lane] no credentials (access.key) — lane not started\n");
+  }
+
+  // Sealed tunnel executor: serves this machine's /v2/* plane (files, git,
+  // terminal, usage…) to the app THROUGH the relay, which only ever sees
+  // opaque frames. Keyed on the per-machine key both ends share — a dataKey
+  // daemon never holds the account master. Requires the local HTTP surface,
+  // so it starts after startHttpServer bound its port.
+  const tunnelCreds = loadCredentials();
+  if (tunnelCreds && tunnelCreds.encryption.type === "dataKey" && tunnelCreds.encryption.machineKey.length === 32) {
+    startTunnelExecutor({
+      relayUrl: joyRelayUrl(),
+      accountToken: tunnelCreds.token,
+      machineKey: tunnelCreds.encryption.machineKey,
+      machineId: tunnelCreds.machineId,
+      targetBase: `http://127.0.0.1:${PORT}`,
+      targetHeaders: { "X-Joy-Token": SERVER_TOKEN },
+      log: (line) => process.stderr.write(line + "\n"),
+    });
+    process.stderr.write("[tunnel] executor started\n");
+  } else {
+    process.stderr.write("[tunnel] no dataKey machineKey — executor not started\n");
   }
 }
 
