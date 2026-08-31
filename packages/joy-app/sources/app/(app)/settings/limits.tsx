@@ -15,6 +15,8 @@ import { apiSocket } from '@/sync/apiSocket';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { Typography } from '@/constants/Typography';
+import { sync } from '@/sync/sync';
+import { machineLimitsOnly } from '@/sync/v2/machine';
 
 interface Bucket { utilization?: number; resets_at?: string }
 interface CodexWindow { used_percent?: number; window_minutes?: number; resets_in_seconds?: number; resets_at?: number }
@@ -78,7 +80,12 @@ function MachineLimits(props: { machineId: string; name: string }) {
         (async () => {
             try {
                 const reply = await Promise.race([
-                    apiSocket.machineRPC<LimitsReply, {}>(props.machineId, 'joy-limits', {}),
+                    (() => { const c = sync.machineOnlyCtx(props.machineId); return c
+                        // v2: per-harness limits from the daemon over the tunnel,
+                        // merged into the legacy {claude, codex} reply shape.
+                        ? Promise.all([machineLimitsOnly(c, 'claude'), machineLimitsOnly(c, 'codex')])
+                            .then(([cl, cx]) => ({ ok: true, claude: cl.data, codex: cx.data }) as unknown as LimitsReply)
+                        : apiSocket.machineRPC<LimitsReply, {}>(props.machineId, 'joy-limits', {}); })(),
                     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('daemon did not respond — joy update needed?')), 30000)),
                 ]);
                 if (!cancelled) setState({ phase: 'done', reply });

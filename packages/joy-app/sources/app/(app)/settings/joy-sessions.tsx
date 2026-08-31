@@ -14,6 +14,8 @@ import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { StyleSheet } from 'react-native-unistyles';
+import { sync } from '@/sync/sync';
+import { machineStatusOnly } from '@/sync/v2/machine';
 
 // Survives navigation: which machines answered the joy-tmux probe last time.
 // Lets revisits render the machine list instantly while a background
@@ -74,7 +76,7 @@ export default React.memo(function JoySessionsScreen() {
         if (!selectedMachineId) return;
         let cancelled = false;
         Promise.race([
-            apiSocket.machineRPC<JoyStatus, {}>(selectedMachineId, 'joy-status', {}),
+            (function(){ const c0 = sync.machineOnlyCtx(selectedMachineId); return c0 ? machineStatusOnly(c0).then(r => r.data as never) : apiSocket.machineRPC<JoyStatus, {}>(selectedMachineId, 'joy-status', {}); })(),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
         ]).then(s => { if (!cancelled) setDaemonStatus(s); }).catch(() => { /* card stays hidden */ });
         return () => { cancelled = true; };

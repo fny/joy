@@ -3022,6 +3022,13 @@ class Sync {
         return { relayUrl, accountToken: token, machineKey, machineId, localSessionId };
     }
 
+    /** Machine-scoped tunnel context (no session needed) — usage, limits,
+     *  harness config, history, machine status. */
+    machineOnlyCtx(machineId: string): { relayUrl: string; accountToken: string; machineKey: Uint8Array; machineId: string } | null {
+        const c = this.machineCtxFor(machineId, '');
+        return c ? { relayUrl: c.relayUrl, accountToken: c.accountToken, machineKey: c.machineKey, machineId } : null;
+    }
+
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];

@@ -24,6 +24,8 @@ import { Modal } from '@/modal';
 import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
+import { sync } from '@/sync/sync';
+import { machineSlashCommandsAll } from '@/sync/v2/machine';
 
 // Bytes → "X.X GB" for the system readouts.
 const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
@@ -159,7 +161,8 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     // refreshed list into machine metadata, so machine.metadata.slashCommands
     // updates without a separate fetch.
     const [refreshingCommands, doRefreshCommands] = useHappyAction(React.useCallback(async () => {
-        await apiSocket.machineRPC(machineId, 'joy-refresh-commands', {});
+        const c0 = sync.machineOnlyCtx(machineId);
+        if (c0) { await machineSlashCommandsAll(c0, true); } else { await apiSocket.machineRPC(machineId, 'joy-refresh-commands', {}); }
     }, [machineId]));
 
     if (!status && !failed) {

@@ -15,6 +15,8 @@ import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { Typography } from '@/constants/Typography';
+import { sync } from '@/sync/sync';
+import { machineUsageOnly, machineStatusOnly } from '@/sync/v2/machine';
 
 // Survives navigation so revisits render instantly (same trick as joy-sessions).
 let cachedBurnMachineIds: Set<string> | null = null;
@@ -361,7 +363,7 @@ export default React.memo(function UsageSettingsScreen() {
                     // Sessions fetch is best-effort: an older daemon without
                     // joy-session-usage still gets the main report.
                     const [rep, sess] = await Promise.all([
-                        withTimeout(apiSocket.machineRPC<BurnReport, { period: string }>(id, 'joy-usage', { period })),
+                        withTimeout((function(){ const c0 = sync.machineOnlyCtx(id); return c0 ? machineUsageOnly(c0, period).then(r => r.data as never) : apiSocket.machineRPC<BurnReport, { period: string }>(id, 'joy-usage', { period }); })()),
                         withTimeout(apiSocket.machineRPC<{ ok?: boolean; sessions?: SessionRow[] }, { period: string }>(id, 'joy-session-usage', { period })).catch(() => null),
                     ]);
                     return { id, rep, sess };
