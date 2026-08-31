@@ -29,16 +29,23 @@ export function joyHomeDir(): string {
   return join(homedir(), ".joy");
 }
 
-/** The ORIGINAL relay. Lives here (not relay.ts) so path scoping, credential
- *  selection, and tmux namespacing all share one definition. */
-export const DEFAULT_RELAY_URL = "https://api.cluster-fluster.com";
+/** The relay a daemon talks to when nothing is configured. Override with
+ *  $JOY_RELAY_URL (alias or URL) or ~/.joy/relay.json {serverUrl}. */
+export const DEFAULT_RELAY_URL = "https://joy.voltai.party:4997";
+
+/** The ORIGINAL relay, and the ONLY one that keeps the legacy on-disk layout:
+ *  credentials in ~/.happy (shared with happy-cli), bare tmux namespaces, state
+ *  in ~/.joy/state. Every other relay — today's default included — is scoped by
+ *  relay key, which is what lets the default move without relocating an
+ *  existing install's credentials, state or live tmux sockets. */
+export const LEGACY_RELAY_URL = "https://api.cluster-fluster.com";
 
 /** Shorthand names accepted by --relay / JOY_RELAY_URL — mirrors the app's
  *  KNOWN_RELAYS (joy-app sources/sync/serverConfig.ts). */
 export const RELAY_ALIASES: Record<string, string> = {
-  happy: DEFAULT_RELAY_URL,
+  happy: LEGACY_RELAY_URL,
   "happy-joy": "https://joy.voltai.party:24997",
-  joy: "https://joy.voltai.party:4997",
+  joy: DEFAULT_RELAY_URL,
   "joy-dev": "https://joy.voltai.party:14997",
 };
 
@@ -82,8 +89,17 @@ export function joyRelayUrl(): string {
   return cachedRelayUrl;
 }
 
+/** Talking to the relay a fresh install would pick. Display only — it must
+ *  never gate on-disk layout, or changing the default would move files. */
 export function isDefaultRelay(): boolean {
   return joyRelayUrl() === DEFAULT_RELAY_URL;
+}
+
+/** The legacy relay's bare on-disk layout (see LEGACY_RELAY_URL). This — not
+ *  isDefaultRelay — is what credential dirs, state dirs and tmux namespaces
+ *  key on, so those stay put no matter what the default becomes. */
+export function usesLegacyLayout(): boolean {
+  return joyRelayUrl() === LEGACY_RELAY_URL;
 }
 
 /** Stable per-relay identifier: host, or host_port — same convention as the
@@ -99,7 +115,7 @@ export function joyRelayKey(serverUrl: string = joyRelayUrl()): string {
  *  window registry or a control-mode client. (Eventually, when the joy relay
  *  becomes primary, its daemon takes the plain "joy" namespace.) */
 export function tmuxSocketArgs(): string[] {
-  return isDefaultRelay() ? [] : ["-L", `joy-${joyRelayKey()}`];
+  return usesLegacyLayout() ? [] : ["-L", `joy-${joyRelayKey()}`];
 }
 
 /** Per-SESSION tmux server label (docs/per-session-tmux-design.md): each
@@ -107,7 +123,7 @@ export function tmuxSocketArgs(): string[] {
  *  (kill-server returns every byte to the OS). Relay-scoped so concurrent
  *  per-relay daemons can never collide on a session id. */
 export function tmuxServerLabel(sessionId: string): string {
-  return isDefaultRelay() ? `joy-s-${sessionId}` : `joy-${joyRelayKey()}-s-${sessionId}`;
+  return usesLegacyLayout() ? `joy-s-${sessionId}` : `joy-${joyRelayKey()}-s-${sessionId}`;
 }
 
 /** Test-only: drop the cached relay resolution so env overrides apply. */
@@ -128,7 +144,7 @@ let stateMigrated = false;
  *  under ~/.joy/relays/<key>/state, so concurrent per-relay daemons never
  *  share state. Only the default relay's dir carries migration history. */
 export function joyStateDir(): string {
-  if (!isDefaultRelay()) return join(joyRelayCredsDir(), "state");
+  if (!usesLegacyLayout()) return join(joyRelayCredsDir(), "state");
   const dir = join(joyHomeDir(), "state");
   if (!stateMigrated) {
     stateMigrated = true;

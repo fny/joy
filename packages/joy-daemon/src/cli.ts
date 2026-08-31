@@ -11,7 +11,7 @@ import { join, dirname, resolve, basename, sep } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
-import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
+import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, usesLegacyLayout, joyRelayCredsDir, resolveRelayAlias } from "./paths";
 import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay/pairing";
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
@@ -34,7 +34,7 @@ for (let i = process.argv.length - 1; i >= 2; i--) {
 const DEFAULT_PORT = 4997;
 // Credentials home for the SELECTED relay: ~/.happy for the default (shared
 // with happy-cli), ~/.joy/relays/<key>/ otherwise.
-const CREDS_DIR = isDefaultRelay() ? happyHomeDir() : joyRelayCredsDir();
+const CREDS_DIR = usesLegacyLayout() ? happyHomeDir() : joyRelayCredsDir();
 const STATE_DIR = joyStateDir();
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
@@ -76,7 +76,7 @@ function daemonPort(): number | null {
   const st = readState();
   if (st?.port) return st.port;
   if (process.env.PORT) return parseInt(process.env.PORT);
-  return isDefaultRelay() ? DEFAULT_PORT : null;
+  return DEFAULT_PORT;
 }
 
 function base(): string | null {
@@ -238,7 +238,7 @@ function cmdAuth(): number {
   const accessKey = join(CREDS_DIR, "access.key");
   if (!existsSync(accessKey)) {
     console.log(`${bad} not authenticated (relay ${joyRelayUrl()})`);
-    if (isDefaultRelay()) {
+    if (usesLegacyLayout()) {
       console.log(`  joy-daemon shares the Joy app's credentials (${c.dim(accessKey)}).`);
       console.log(`  Run ${c.b("happy auth login")} (or set up the Joy app) to create them.`);
     } else {
@@ -331,28 +331,37 @@ async function cmdNotify(args: string[]): Promise<number> {
 // One service PER RELAY: the default keeps the historical names, a non-default
 // relay's unit gets the relay key appended — so per-relay daemons install,
 // start, and uninstall independently.
-function serviceName(): string { return isDefaultRelay() ? "joy-daemon" : `joy-daemon-${joyRelayKey()}`; }
+// ONE unit per machine, whatever relay it serves. The relay is carried by the
+// unit's JOY_RELAY_URL, not by its name: a per-relay name invited a second
+// daemon to sit alongside the first, which is exactly the confusion this
+// removes (two daemons, two accounts, one very long debugging session).
+function serviceName(): string { return "joy-daemon"; }
 function systemdUnitPath(): string { return join(homedir(), ".config", "systemd", "user", `${serviceName()}.service`); }
 const LAUNCHD_LABEL = "vip.voltai.joy-daemon";
-function launchdLabel(): string { return isDefaultRelay() ? LAUNCHD_LABEL : `${LAUNCHD_LABEL}.${joyRelayKey()}`; }
+function launchdLabel(): string { return LAUNCHD_LABEL; } // one agent per machine, as with systemd
 function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`); }
 // Historical service names (joy-tmux until 2026-08-13, joy-server for a few
 // hours after; per-relay units shipped with a -<relayKey> suffix under both).
 // removeService() tears these down too, so a re-install MIGRATES the old unit
 // away instead of leaving two daemons supervising the same tmux server.
-const LEGACY_SERVICE_BASES = ["joy-tmux", "joy-server"];
+const LEGACY_SERVICE_BASES = ["joy-tmux", "joy-server", "joy-daemon"];
 const LEGACY_LAUNCHD_LABELS = ["vip.voltai.joy-tmux", "party.voltai.joy-tmux", "vip.voltai.joy-server"];
 
-// Every systemd unit name that may exist for THIS relay: the current name plus
-// each legacy base (with the same per-relay suffix rule the old code used).
+// Every systemd unit name that may exist on this machine: the current name,
+// plus each legacy base BOTH bare and with the per-relay suffix the old naming
+// used. The suffixed form matters on upgrade — "joy-daemon-<relayKey>.service"
+// is what this daemon shipped as until 2026-08-31, and leaving it enabled
+// beside the new unit means two daemons supervising one tmux server.
 function systemdUnitNamesForCleanup(): string[] {
-  const legacy = LEGACY_SERVICE_BASES.map((b) => (isDefaultRelay() ? b : `${b}-${joyRelayKey()}`));
-  return [serviceName(), ...legacy];
+  const key = joyRelayKey();
+  const legacy = LEGACY_SERVICE_BASES.flatMap((b) => [b, `${b}-${key}`]);
+  return [...new Set([serviceName(), ...legacy])];
 }
 
 function launchdLabelsForCleanup(): string[] {
-  const legacy = LEGACY_LAUNCHD_LABELS.map((l) => (isDefaultRelay() ? l : `${l}.${joyRelayKey()}`));
-  return [launchdLabel(), ...legacy];
+  const key = joyRelayKey();
+  const legacy = [...LEGACY_LAUNCHD_LABELS, LAUNCHD_LABEL].flatMap((l) => [l, `${l}.${key}`]);
+  return [...new Set([launchdLabel(), ...legacy])];
 }
 
 // Tear down whatever service is currently installed — current OR legacy name —
@@ -382,7 +391,9 @@ function cmdInstall(): number {
   removeService(); // idempotent: start from a clean slate so the new config takes effect
   // Bake the relay into the unit so the service supervises the daemon for
   // exactly the relay it was installed for.
-  const relayEnvSystemd = isDefaultRelay() ? "" : `Environment=JOY_RELAY_URL=${joyRelayUrl()}\n`;
+  // Always explicit: the unit should say which relay it serves rather than
+  // inheriting a default that may move under it.
+  const relayEnvSystemd = `Environment=JOY_RELAY_URL=${joyRelayUrl()}\n`;
   if (plat === "linux") {
     const unit = `[Unit]
 Description=joy-daemon daemon (relay ${joyRelayUrl()})
@@ -432,7 +443,7 @@ WantedBy=default.target
   <array><string>${NODE}</string><string>--import</string><string>tsx</string><string>${SERVER_TS}</string></array>
   <key>WorkingDirectory</key><string>${PKG_DIR}</string>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${process.env.PATH ?? ""}</string>${isDefaultRelay() ? "" : `<key>JOY_RELAY_URL</key><string>${joyRelayUrl()}</string>`}</dict>
+  <dict><key>PATH</key><string>${process.env.PATH ?? ""}</string><key>JOY_RELAY_URL</key><string>${joyRelayUrl()}</string></dict>
   <key>RunAtLoad</key><true/>
   <!-- KeepAlive=true (restart on ANY exit, incl. clean exit 0) is load-bearing:
        the daemon self-restarts by exiting 0 (see scheduleDaemonRestart). Do not

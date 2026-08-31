@@ -22,7 +22,7 @@ import { initRelay, loadCredentials } from "./relay/relay.ts";
 import { startNucleusLane } from "./relay/nucleusLane.ts";
 import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
-import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyHomeDir } from "./paths";
+import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir } from "./paths";
 
 // ~/.joy/env: optional KEY=value lines loaded into the daemon's environment at
 // boot (never overriding real env). This is how provider API keys (e.g.
@@ -52,7 +52,10 @@ import { startResourceAlerts } from "./domain/resourceAlerts";
 // Control-server port: the DEFAULT relay keeps the historical 4997; any other
 // relay's daemon binds a DYNAMIC port (0) so N per-relay daemons coexist —
 // the CLI discovers the real port from daemon.json, written on listen below.
-const PORT = parseInt(process.env.PORT ?? (isDefaultRelay() ? "4997" : "0"));
+// The daemon's local HTTP port. 4997 for every relay now that one machine
+// runs one daemon; $PORT still overrides (a second daemon must be told a
+// port explicitly rather than silently landing on a random one).
+const PORT = parseInt(process.env.PORT ?? "4997");
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
 const __dirname = moduleDir(import.meta.url);
 const PUBLIC_DIR = join(__dirname, "..", "public"); // public/ is at the package root, src/ is one level down

@@ -9,7 +9,7 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
-import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey, isDefaultRelay, DEFAULT_RELAY_URL } from '../paths';
+import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey, usesLegacyLayout, DEFAULT_RELAY_URL } from '../paths';
 import { loadOutbound, saveOutbound, clearOutbound, type PersistedOutboundItem } from '../domain/outboundStore';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
@@ -173,10 +173,11 @@ const DEFAULT_SERVER_URL = DEFAULT_RELAY_URL;
 export function loadCredentials(): Credentials | null {
   // Relay selection is shared with path scoping (paths.joyRelayUrl):
   // JOY_RELAY_URL (alias or URL) / ~/.joy/relay.json override the default.
-  // Credentials for the DEFAULT relay stay in ~/.happy (shared with
-  // happy-cli); any OTHER relay reads its own pairing from
-  // ~/.joy/relays/<host[_port]>/ — the two ecosystems never mix credentials.
-  const relayUrl = isDefaultRelay() ? undefined : joyRelayUrl();
+  // Credentials for the LEGACY relay stay in ~/.happy (shared with happy-cli);
+  // every other relay — the current default included — reads its own pairing
+  // from ~/.joy/relays/<host[_port]>/, so the two ecosystems never mix
+  // credentials and moving the default never relocates a pairing.
+  const relayUrl = usesLegacyLayout() ? undefined : joyRelayUrl();
   const happyHome = relayUrl ? joyRelayCredsDir(relayUrl) : happyHomeDir();
 
   const accessKeyPath = join(happyHome, 'access.key');

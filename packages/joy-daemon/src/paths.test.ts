@@ -31,6 +31,7 @@ afterEach(() => {
 
 describe("state migration (transition safety)", () => {
     it("renames legacy state to ~/.joy/state — content served from the new path", async () => {
+        process.env.JOY_RELAY_URL = "happy"; // the bare layout is the legacy relay's
         const legacy = join(happy, "joy-tmux-state");
         mkdirSync(legacy, { recursive: true });
         writeFileSync(join(legacy, "joy-hook.mjs"), "// forwarder");
@@ -45,6 +46,7 @@ describe("state migration (transition safety)", () => {
     });
 
     it("fresh machine (no legacy, no state): new path used, no legacy artifacts", async () => {
+        process.env.JOY_RELAY_URL = "happy"; // the bare layout is the legacy relay's
         const { joyStateDir } = await freshPaths();
         expect(joyStateDir()).toBe(join(joy, "state"));
         expect(() => lstatSync(join(happy, "joy-tmux-state"))).toThrow();
@@ -58,10 +60,26 @@ describe("state migration (transition safety)", () => {
 });
 
 describe("per-relay namespacing (concurrent daemons)", () => {
-    it("default relay: default selection, plain tmux server, ~/.joy/state", async () => {
+    it("no configuration → the joy relay, scoped like any other relay", async () => {
         const p = await freshPaths();
+        expect(p.joyRelayUrl()).toBe("https://joy.voltai.party:4997");
         expect(p.joyRelayUrl()).toBe(p.DEFAULT_RELAY_URL);
         expect(p.isDefaultRelay()).toBe(true);
+        // The DEFAULT does not get the bare layout — only the legacy relay does.
+        expect(p.usesLegacyLayout()).toBe(false);
+        expect(p.tmuxSocketArgs()).toEqual(["-L", "joy-joy.voltai.party_4997"]);
+        expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_4997", "state"));
+    });
+
+    // The point of splitting isDefaultRelay from usesLegacyLayout: moving the
+    // default must never relocate an existing install's credentials, state or
+    // live tmux sockets. Those key on the LEGACY relay alone.
+    it("the legacy relay keeps the bare layout even though it is no longer the default", async () => {
+        process.env.JOY_RELAY_URL = "happy";
+        const p = await freshPaths();
+        expect(p.joyRelayUrl()).toBe(p.LEGACY_RELAY_URL);
+        expect(p.isDefaultRelay()).toBe(false);
+        expect(p.usesLegacyLayout()).toBe(true);
         expect(p.tmuxSocketArgs()).toEqual([]);
         expect(p.joyStateDir()).toBe(join(joy, "state"));
     });
@@ -70,7 +88,8 @@ describe("per-relay namespacing (concurrent daemons)", () => {
         process.env.JOY_RELAY_URL = "joy";
         const p = await freshPaths();
         expect(p.joyRelayUrl()).toBe("https://joy.voltai.party:4997");
-        expect(p.isDefaultRelay()).toBe(false);
+        expect(p.isDefaultRelay()).toBe(true); // the alias resolves to today's default
+        expect(p.usesLegacyLayout()).toBe(false);
         expect(p.joyRelayKey()).toBe("joy.voltai.party_4997");
         expect(p.tmuxSocketArgs()).toEqual(["-L", "joy-joy.voltai.party_4997"]);
         // state sits beside that relay's credentials — nothing shared with the
@@ -87,17 +106,12 @@ describe("per-relay namespacing (concurrent daemons)", () => {
         expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_14997", "state"));
     });
 
-    it("an explicit default-relay env value stays default (no accidental namespacing)", async () => {
-        process.env.JOY_RELAY_URL = "happy";
-        const p = await freshPaths();
-        expect(p.isDefaultRelay()).toBe(true);
-        expect(p.tmuxSocketArgs()).toEqual([]);
-        expect(p.joyStateDir()).toBe(join(joy, "state"));
-    });
+
 });
 
 describe("isolation: HAPPY_HOME_DIR override", () => {
     it("joy home follows an overridden happy home when JOY_HOME_DIR is unset", async () => {
+        process.env.JOY_RELAY_URL = "happy"; // bare state dir → legacy relay
         delete process.env.JOY_HOME_DIR;
         const { joyHomeDir, joyStateDir } = await freshPaths();
         expect(joyHomeDir()).toBe(happy);
