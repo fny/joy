@@ -209,6 +209,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     for (const s of r.sessions ?? []) {
       if (s.daemonId === machineId && s.localSessionId) bound.set(s.sessionId, s.localSessionId);
     }
+    // Re-stamp the happy card's v2 link for every bound session. Sessions that
+    // bound before a field existed (e.g. localSessionId, which the app needs to
+    // address the machine plane) would otherwise stay stale forever, since
+    // setV2Link only ran at bind time.
+    for (const s of r.sessions ?? []) {
+      if (s.daemonId !== machineId || !s.localSessionId) continue;
+      const sess = registry.get(s.localSessionId);
+      if (!sess) continue;
+      const rec = registry.listRecords().find((x) => x.id === s.localSessionId);
+      const envelope = rec?.v2SessionKey && opts.accountContentPublicKey
+        ? sealSessionKey(new Uint8Array(Buffer.from(rec.v2SessionKey, "base64")), opts.accountContentPublicKey)
+        : "v2:plaintext";
+      sess.setV2Link?.({ sessionId: s.sessionId, relay: relayUrl, keyEnvelope: envelope });
+    }
+
     // Content keys ride the window records (same trust domain as transcripts).
     for (const rec of registry.listRecords()) {
       if (rec.v2SessionId && rec.v2SessionKey) {
