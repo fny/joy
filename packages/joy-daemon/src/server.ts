@@ -142,10 +142,11 @@ registry.recover();
 // claims the relay's durable v2 queue for this machine. Same credentials and
 // machine identity as the happy path. Fail-soft: against a relay without
 // /joy/v2 it idles and retries; JOY_V2_LANE=0 disables it outright.
+let nucleusLane: import("./relay/nucleusLane.ts").NucleusLaneHandle | null = null;
 if (process.env.JOY_V2_LANE !== "0") {
   const creds = loadCredentials();
   if (creds) {
-    startNucleusLane({
+    nucleusLane = startNucleusLane({
       registry,
       relayUrl: joyRelayUrl(),
       token: creds.token,
@@ -172,6 +173,9 @@ if (process.env.JOY_V2_LANE !== "0") {
       accountToken: tunnelCreds.token,
       machineKey: tunnelCreds.encryption.machineKey,
       machineId: tunnelCreds.machineId,
+      // Borrow the lane's lease: acquiring a second one for the same machine
+      // would release the lane's and the two would evict each other forever.
+      borrowLease: () => nucleusLane?.currentLease() ?? null,
       targetBase: `http://127.0.0.1:${PORT}`,
       targetHeaders: { "X-Joy-Token": SERVER_TOKEN },
       log: (line) => process.stderr.write(line + "\n"),

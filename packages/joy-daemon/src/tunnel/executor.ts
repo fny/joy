@@ -14,6 +14,12 @@ export interface ExecutorOpts {
   relayUrl: string;            // nucleus base, e.g. http://127.0.0.1:PORT
   accountToken: string;        // bearer for lease acquisition
   machineKey: Uint8Array;      // per-machine key (access.key machineKey) → tunnel key
+  /** Borrow the nucleus lane's lease instead of acquiring a competing one.
+   *  acquireLease RELEASES any prior lease for the machine, so two acquirers
+   *  on one machineId evict each other in a loop (observed live: the lane and
+   *  this executor ping-ponging, lease epoch climbing forever). When this is
+   *  provided the executor never calls acquire. */
+  borrowLease?: () => { leaseId: string; leaseToken: string } | null;
   machineId: string;           // daemon identity (lease daemon_id)
   targetBase: string;          // local surface, e.g. http://127.0.0.1:4997
   targetHeaders?: Record<string, string>; // e.g. X-Joy-Token for the local API
@@ -118,15 +124,25 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   }
 
   const loop = (async () => {
-    await acquire();
+    if (!opts.borrowLease) await acquire();
     while (!stopped) {
       try {
-        const r = await fetch(`${opts.relayUrl}/joy/v1/daemon-leases/${lease!.id}/claims/tunnel`, {
+        // Borrowed mode: use the lane's CURRENT lease; if it has none yet,
+        // wait rather than acquiring (which would evict the lane).
+        const borrowed = opts.borrowLease?.();
+        if (opts.borrowLease && !borrowed) { await sleep(1000); continue; }
+        const leaseId = borrowed ? borrowed.leaseId : lease!.id;
+        const leaseToken = borrowed ? borrowed.leaseToken : lease!.token;
+        const r = await fetch(`${opts.relayUrl}/joy/v1/daemon-leases/${leaseId}/claims/tunnel`, {
           method: "POST",
-          headers: { "x-joy-lease-token": lease!.token, "content-type": "application/json" },
+          headers: { "x-joy-lease-token": leaseToken, "content-type": "application/json" },
           body: JSON.stringify({ waitMs: 25_000 }),
         });
-        if (r.status === 401 || r.status === 412) { await acquire(); continue; } // lease lapsed/fenced
+        if (r.status === 401 || r.status === 412) {
+          // Borrowed lease rotated — pick up the new one next pass.
+          if (opts.borrowLease) { await sleep(1000); continue; }
+          await acquire(); continue;
+        } // lease lapsed/fenced
         if (!r.ok) { await sleep(1000); continue; }
         const { requests } = await r.json() as { requests: { requestId: string; payload: string }[] };
         // Concurrent execution: one slow request must not head-of-line block

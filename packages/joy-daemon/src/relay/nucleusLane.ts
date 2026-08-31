@@ -50,7 +50,7 @@ export interface NucleusLaneOpts {
   log?: (line: string) => void;
 }
 
-export interface NucleusLaneHandle { stop(): Promise<void> }
+export interface NucleusLaneHandle { stop(): Promise<void>; currentLease(): { leaseId: string; leaseToken: string } | null }
 
 interface Lease { leaseId: string; leaseToken: string; epoch: string }
 
@@ -581,5 +581,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       stopped = true;
       lease = null;
     },
+    // The tunnel executor BORROWS this lease rather than acquiring its own
+    // (a second acquirer on the same machineId evicts the first).
+    currentLease: () => (lease ? { leaseId: lease.leaseId, leaseToken: lease.leaseToken } : null),
   };
 }
