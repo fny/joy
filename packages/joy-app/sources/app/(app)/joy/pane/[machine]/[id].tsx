@@ -24,6 +24,7 @@ import { useIsTablet } from '@/utils/responsive';
 import { useRootGutter } from '@/hooks/useRootGutter';
 import { sync } from '@/sync/sync';
 import { machinePane, machineResize, machineSendKeys } from '@/sync/v2/machine';
+import { paneSizeFor, paneSizeChanged, type PaneSize } from '@/utils/paneSize';
 
 const POLL_MS = 1500;
 
@@ -51,12 +52,6 @@ function simplifyPane(text: string): string {
     while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
     return kept.join('\n');
 }
-// Pane font metrics — char width ≈ 0.6em for the mono fonts below; used to
-// map the rendered pixel width to terminal columns for adaptive sizing.
-const PANE_LINE_HEIGHT = 15; // must match styles.paneText.lineHeight
-const CHAR_WIDTH = 11 * 0.6; // styles.paneText.fontSize (11) × mono advance ≈ 0.6em
-const PANE_H_PADDING = 16; // styles.paneScroll paddingHorizontal (8) × 2
-
 export default React.memo(function JoyPaneScreen() {
     const { theme } = useUnistyles();
     const params = useLocalSearchParams<{ machine: string; id: string }>();
@@ -116,32 +111,13 @@ export default React.memo(function JoyPaneScreen() {
     // pane — "last connector drives the width". Only fires when the column
     // count actually changes (each resize reflows claude's TUI), and is
     // re-asserted on focus so re-opening on a different device re-claims.
-    const lastSizeRef = React.useRef({ cols: 0, rows: 0 });
+    const lastSizeRef = React.useRef<PaneSize | null>(null);
     const drivePaneSize = React.useCallback((widthPx: number, heightPx: number) => {
-        // An UNMEASURED layout (0×0 on first render) must never drive a resize.
-        // The clamps below would turn it into a real 20×10 — shrinking the
-        // agent's terminal and leaving it that way after this screen closes.
-        // At 20 columns claude's TUI is mangled badly enough that the daemon's
-        // pane parser goes blind, which silently breaks dispatch.
-        if (!(widthPx > 0) || !(heightPx > 0)) return;
-        // floor (not round) of the padding-adjusted width, so the rendered line
-        // never exceeds the content box — otherwise it wraps or (previously)
-        // scrolled sideways.
-        const cols = Math.max(20, Math.floor((widthPx - PANE_H_PADDING) / CHAR_WIDTH));
-        // Match the window to the RENDERED viewport, exactly like a real
-        // terminal. It used to be doubled, to buy scrollback: claude runs on
-        // tmux's alternate screen (history_size=0), so a taller window is the
-        // only way to see more conversation. But claude pins its input box to
-        // the window's BOTTOM, and this view auto-scrolls to the end — so a
-        // window twice the viewport lands the reader on the input box with a
-        // screenful of dead space above it and the conversation pushed off the
-        // fold. Reachable scrollback is not worth a view that opens on a blank.
-        const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT));
-        // Re-send on EITHER axis: rows now track the viewport too, so a height
-        // change alone (rotation, keyboard, split resize) must re-size the window.
-        if (!cols || !rows) return;
-        if (cols === lastSizeRef.current.cols && rows === lastSizeRef.current.rows) return;
-        lastSizeRef.current = { cols, rows };
+        // Sizing rules (and the breakage behind them) live in @/utils/paneSize.
+        const size = paneSizeFor(widthPx, heightPx);
+        if (!size || !paneSizeChanged(size, lastSizeRef.current)) return;
+        lastSizeRef.current = size;
+        const { cols, rows } = size;
         const rctx = sync.machineCtxFor(machineId, sessionId);
         void (rctx ? machineResize(rctx, cols, rows) : apiSocket.machineRPC(machineId, 'joy-resize', { id: sessionId, cols, rows }))
             .then(() => setTimeout(() => void refresh(), 200))
@@ -150,7 +126,7 @@ export default React.memo(function JoyPaneScreen() {
 
     // Re-claim the size on focus (it may have drifted to another viewer or a
     // real terminal since we last looked).
-    useFocusEffect(React.useCallback(() => { lastSizeRef.current = { cols: 0, rows: 0 }; }, []));
+    useFocusEffect(React.useCallback(() => { lastSizeRef.current = null; }, []));
     // Poll only while focused AND foregrounded so a locked phone doesn't keep
     // mirroring the pane every 1.5s (battery — see useActiveInterval).
     useActiveInterval(() => void refresh(), POLL_MS);
