@@ -5,6 +5,7 @@
 
 import { apiSocket } from './apiSocket';
 import { v2ActiveTurn, v2CancelTurn } from './v2/api';
+import { machineReadFile, machineWriteFile, machineDeleteFile, machineListDir, machineGrep } from './v2/machine';
 import { storage } from './storage';
 import { downloadEncryptedAttachment } from './apiAttachments';
 import { decryptBlob } from '@/encryption/blob';
@@ -635,6 +636,13 @@ export async function sessionBash(sessionId: string, request: SessionBashRequest
  */
 export async function sessionReadFile(sessionId: string, path: string): Promise<SessionReadFileResponse> {
     try {
+        // v2 sessions read from the DAEMON's machine plane over the sealed
+        // tunnel (no ~1MB RPC envelope, so no blobRef spill path needed).
+        const mctx = sync.machineCtx(sessionId);
+        if (mctx) {
+            const { data } = await machineReadFile(mctx, path);
+            return (data ?? { success: false, error: 'no response' }) as SessionReadFileResponse;
+        }
         const request: SessionReadFileRequest = { path };
         const response = await apiSocket.sessionRPC<SessionReadFileResponse, SessionReadFileRequest>(
             sessionId,
@@ -674,6 +682,11 @@ export async function sessionWriteFile(
     expectedHash?: string | null
 ): Promise<SessionWriteFileResponse> {
     try {
+        const mctx = sync.machineCtx(sessionId);
+        if (mctx) {
+            const { data } = await machineWriteFile(mctx, path, content, expectedHash ?? undefined);
+            return (data ?? { success: false, error: 'no response' }) as SessionWriteFileResponse;
+        }
         const request: SessionWriteFileRequest = { path, content, expectedHash };
         const response = await apiSocket.sessionRPC<SessionWriteFileResponse, SessionWriteFileRequest>(
             sessionId,
@@ -696,6 +709,11 @@ export async function sessionWriteFile(
  */
 export async function sessionDeleteFile(sessionId: string, path: string): Promise<SessionDeleteFileResponse> {
     try {
+        const mctx = sync.machineCtx(sessionId);
+        if (mctx) {
+            const { data } = await machineDeleteFile(mctx, path);
+            return (data ?? { success: false, error: 'no response' }) as SessionDeleteFileResponse;
+        }
         const request: SessionDeleteFileRequest = { path };
         return await apiSocket.sessionRPC<SessionDeleteFileResponse, SessionDeleteFileRequest>(
             sessionId,
@@ -715,6 +733,11 @@ export async function sessionDeleteFile(sessionId: string, path: string): Promis
  */
 export async function sessionListDirectory(sessionId: string, path: string): Promise<SessionListDirectoryResponse> {
     try {
+        const mctx = sync.machineCtx(sessionId);
+        if (mctx) {
+            const { data } = await machineListDir(mctx, path, 1);
+            return (data ?? { success: false, error: 'no response' }) as SessionListDirectoryResponse;
+        }
         const request: SessionListDirectoryRequest = { path };
         const response = await apiSocket.sessionRPC<SessionListDirectoryResponse, SessionListDirectoryRequest>(
             sessionId,
@@ -739,6 +762,11 @@ export async function sessionGetDirectoryTree(
     maxDepth: number
 ): Promise<SessionGetDirectoryTreeResponse> {
     try {
+        const mctx = sync.machineCtx(sessionId);
+        if (mctx) {
+            const { data } = await machineListDir(mctx, path, maxDepth);
+            return (data ?? { success: false, error: 'no response' }) as SessionGetDirectoryTreeResponse;
+        }
         const request: SessionGetDirectoryTreeRequest = { path, maxDepth };
         const response = await apiSocket.sessionRPC<SessionGetDirectoryTreeResponse, SessionGetDirectoryTreeRequest>(
             sessionId,
@@ -763,6 +791,16 @@ export async function sessionRipgrep(
     cwd?: string
 ): Promise<SessionRipgrepResponse> {
     try {
+        const mctx = sync.machineCtx(sessionId);
+        if (mctx) {
+            // v2 takes TYPED params (no raw argv). Recover the query: the last
+            // arg after -e, or the last non-flag argument.
+            const eIdx = args.lastIndexOf('-e');
+            const q = eIdx >= 0 && args[eIdx + 1] ? args[eIdx + 1] : [...args].reverse().find(a => !a.startsWith('-')) ?? '';
+            const glob = args.includes('-g') ? args[args.indexOf('-g') + 1] : undefined;
+            const { data } = await machineGrep(mctx, q, { glob, caseSensitive: !args.includes('-i') });
+            return (data ?? { success: false, error: 'no response' }) as SessionRipgrepResponse;
+        }
         const request: SessionRipgrepRequest = { args, cwd };
         const response = await apiSocket.sessionRPC<SessionRipgrepResponse, SessionRipgrepRequest>(
             sessionId,

@@ -3003,6 +3003,25 @@ class Sync {
         return { relayUrl: link.relay, accountToken: token, machineKey, machineId, localSessionId };
     }
 
+    /** Machine-plane context addressed by MACHINE (not happy session) — for
+     *  screens that already hold machineId + the daemon-local session id
+     *  (terminal, machine view). Returns null when the machine's key or a v2
+     *  relay for it is unknown. */
+    machineCtxFor(machineId: string, localSessionId: string): { relayUrl: string; accountToken: string; machineKey: Uint8Array; machineId: string; localSessionId: string } | null {
+        const token = this.credentials?.token;
+        const machineKey = this.machineDataKeys.get(machineId);
+        if (!token || !machineKey) return null;
+        // Prefer a v2 relay this machine is actually linked on; fall back to
+        // the app's own server URL (same origin serves /joy/v2 once promoted).
+        let relayUrl: string | null = null;
+        for (const s of Object.values(storage.getState().sessions)) {
+            const link = (s as { metadata?: { v2?: { relay?: string }; machineId?: string } }).metadata;
+            if (link?.machineId === machineId && link?.v2?.relay) { relayUrl = link.v2.relay; break; }
+        }
+        if (!relayUrl) relayUrl = getServerUrl();
+        return { relayUrl, accountToken: token, machineKey, machineId, localSessionId };
+    }
+
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];

@@ -4,6 +4,8 @@ import * as React from 'react';
 import { apiSocket } from '@/sync/apiSocket';
 import type { JoySession } from '@/joy/types';
 import { useActiveInterval } from './useActiveInterval';
+import { sync } from '@/sync/sync';
+import { machineKillSession, machinePane } from '@/sync/v2/machine';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -49,7 +51,8 @@ export function useJoyRpcSessions(machineId: string | null) {
 
     const killSession = React.useCallback(async (id: string) => {
         if (!machineId) throw new Error('no machine selected');
-        await apiSocket.machineRPC(machineId, 'joy-kill-session', { id });
+        const kctx = sync.machineCtxFor(machineId, id);
+        if (kctx) { await machineKillSession(kctx); } else { await apiSocket.machineRPC(machineId, 'joy-kill-session', { id }); }
         await refresh();
     }, [machineId, refresh]);
 
