@@ -97,4 +97,34 @@ export const machineLimits = (ctx: MachineCtx, harness: string) =>
 export const machineSlashCommands = (ctx: MachineCtx) =>
     j<{ slashCommands: string[] }>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/slash-commands`);
 
+// ── machine-wide (no session id needed) ────────────────────────────────────
+/** Context for machine-scoped calls; localSessionId is unused by these. */
+export type MachineOnlyCtx = Omit<MachineCtx, 'localSessionId'> & { localSessionId?: string };
+
+const jm = <T>(ctx: MachineOnlyCtx, method: string, path: string, body?: unknown) =>
+    tunnelJson<T>({
+        relayUrl: ctx.relayUrl, accountToken: ctx.accountToken, machineKey: ctx.machineKey,
+        machineId: ctx.machineId, method, path, json: body,
+    });
+
+export const machineStatusOnly = (ctx: MachineOnlyCtx) => jm<Record<string, unknown>>(ctx, 'GET', '/v2/status');
+export const machineUsageOnly = (ctx: MachineOnlyCtx, period = '30days') =>
+    jm<Record<string, unknown>>(ctx, 'GET', `/v2/usage?period=${encodeURIComponent(period)}`);
+export const machineLimitsOnly = (ctx: MachineOnlyCtx, harness: string) =>
+    jm<Record<string, unknown>>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/limits`);
+export const machineConfigRead = (ctx: MachineOnlyCtx, harness: string) =>
+    jm<Record<string, unknown>>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/config`);
+export const machineConfigSchema = (ctx: MachineOnlyCtx, harness: string) =>
+    jm<Record<string, unknown>>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/config/schema`);
+export const machineConfigWrite = (ctx: MachineOnlyCtx, harness: string, raw: string) =>
+    jm<Record<string, unknown>>(ctx, 'PUT', `/v2/harnesses/${encodeURIComponent(harness)}/config`, { raw });
+export const machineConfigSet = (ctx: MachineOnlyCtx, harness: string, edits: string[]) =>
+    jm<Record<string, unknown>>(ctx, 'PATCH', `/v2/harnesses/${encodeURIComponent(harness)}/config`, { edits });
+export const machineHistory = (ctx: MachineOnlyCtx, directory: string) =>
+    jm<Record<string, unknown>>(ctx, 'GET', `/v2/history?directory=${encodeURIComponent(directory)}`);
+export const machineHistoryMessages = (ctx: MachineOnlyCtx, directory: string, sessionId: string, limit = 10) =>
+    jm<Record<string, unknown>>(ctx, 'GET', `/v2/history/${encodeURIComponent(sessionId)}/messages?directory=${encodeURIComponent(directory)}&limit=${limit}`);
+export const machineSlashCommandsAll = (ctx: MachineOnlyCtx, refresh = false) =>
+    jm<{ slashCommands: string[] }>(ctx, 'GET', `/v2/slash-commands${refresh ? '?refresh=1' : ''}`);
+
 export { TunnelError, tunnelFetch };

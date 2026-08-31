@@ -16,6 +16,8 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
 import { Typography } from '@/constants/Typography';
+import { sync } from '@/sync/sync';
+import { machineConfigRead, machineConfigSchema, machineConfigSet, machineConfigWrite } from '@/sync/v2/machine';
 
 interface ReadReply {
     ok: boolean;
@@ -77,7 +79,7 @@ export default React.memo(function AgentConfigEditorScreen() {
 
     const load = React.useCallback(async () => {
         try {
-            const r = await apiSocket.machineRPC<ReadReply, { agent: string }>(machineId, 'joy-agent-config-read', { agent });
+            const r = await (sync.machineOnlyCtx(machineId) ? machineConfigRead(sync.machineOnlyCtx(machineId)!, agent).then(r => r.data as unknown as ReadReply) : apiSocket.machineRPC<ReadReply, { agent: string }>(machineId, 'joy-agent-config-read', { agent }));
             setReply(r);
             if (r.ok && typeof r.raw === 'string') setRawDraft(r.raw);
         } catch (e) {
@@ -89,7 +91,7 @@ export default React.memo(function AgentConfigEditorScreen() {
         void load();
         (async () => {
             try {
-                const s = await apiSocket.machineRPC<{ ok: boolean; schema?: any; error?: string }, { agent: string }>(machineId, 'joy-agent-config-schema', { agent });
+                const s = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); return ctx0 ? machineConfigSchema(ctx0, agent).then(r => r.data as never) : apiSocket.machineRPC<{ ok: boolean; schema?: any; error?: string }, { agent: string }>(machineId, 'joy-agent-config-schema', { agent }); })();
                 if (s.ok) setSchema(s.schema);
                 else { setSchemaError(s.error ?? 'no schema'); setMode('raw'); }
             } catch (e) {
@@ -102,9 +104,9 @@ export default React.memo(function AgentConfigEditorScreen() {
     const applyLines = React.useCallback(async (lines: string[]) => {
         setBusy(true);
         try {
-            const r = await apiSocket.machineRPC<{ ok: boolean; error?: string; raw?: string }, { agent: string; lines: string[] }>(
+            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); return ctx0 ? machineConfigSet(ctx0, agent, lines).then(r => r.data as never) : apiSocket.machineRPC<{ ok: boolean; error?: string; raw?: string }, { agent: string; lines: string[] }>(
                 machineId, 'joy-agent-config-set', { agent, lines },
-            );
+            ); })();
             if (!r.ok) { Modal.alert('Error', r.error ?? 'apply failed'); return false; }
             await load();
             return true;
@@ -119,9 +121,9 @@ export default React.memo(function AgentConfigEditorScreen() {
     const saveRaw = React.useCallback(async () => {
         setBusy(true);
         try {
-            const r = await apiSocket.machineRPC<{ ok: boolean; error?: string }, { agent: string; raw: string }>(
+            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); return ctx0 ? machineConfigWrite(ctx0, agent, rawDraft).then(r => r.data as never) : apiSocket.machineRPC<{ ok: boolean; error?: string }, { agent: string; raw: string }>(
                 machineId, 'joy-agent-config-write', { agent, raw: rawDraft },
-            );
+            ); })();
             if (!r.ok) { Modal.alert('Error', r.error ?? 'save failed'); return; }
             Modal.alert('Saved', 'Previous file kept as .joy-bak');
             await load();

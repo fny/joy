@@ -5,7 +5,7 @@
 
 import { apiSocket } from './apiSocket';
 import { v2ActiveTurn, v2CancelTurn } from './v2/api';
-import { machineReadFile, machineWriteFile, machineDeleteFile, machineListDir, machineGrep } from './v2/machine';
+import { machineReadFile, machineWriteFile, machineDeleteFile, machineListDir, machineGrep, machineHistory, machineHistoryMessages } from './v2/machine';
 import { storage } from './storage';
 import { downloadEncryptedAttachment } from './apiAttachments';
 import { decryptBlob } from '@/encryption/blob';
@@ -415,11 +415,15 @@ export interface JoyLogMessage {
  * directory on a machine, newest first.
  */
 export async function machineListLogs(machineId: string, directory: string): Promise<JoyLogEntry[]> {
-    const result = await apiSocket.machineRPC<{ ok: boolean; logs?: JoyLogEntry[]; error?: string }, { directory: string }>(
-        machineId,
-        'joy-list-logs',
-        { directory }
-    );
+    // v2: on-disk history from the daemon over the tunnel.
+    const hctx = sync.machineOnlyCtx(machineId);
+    const result = hctx
+        ? ((await machineHistory(hctx, directory)).data ?? { ok: false, error: 'no response' }) as { ok: boolean; logs?: JoyLogEntry[]; error?: string }
+        : await apiSocket.machineRPC<{ ok: boolean; logs?: JoyLogEntry[]; error?: string }, { directory: string }>(
+            machineId,
+            'joy-list-logs',
+            { directory }
+        );
     if (!result.ok) throw new Error(result.error || 'Failed to list logs');
     return result.logs ?? [];
 }
@@ -433,14 +437,17 @@ export async function machineReadLog(
     sessionId: string,
     limit = 10
 ): Promise<JoyLogMessage[]> {
-    const result = await apiSocket.machineRPC<
-        { ok: boolean; messages?: JoyLogMessage[]; error?: string },
-        { directory: string; sessionId: string; limit: number }
-    >(
-        machineId,
-        'joy-read-log',
-        { directory, sessionId, limit }
-    );
+    const rctx = sync.machineOnlyCtx(machineId);
+    const result = rctx
+        ? ((await machineHistoryMessages(rctx, directory, sessionId, limit)).data ?? { ok: false, error: 'no response' }) as { ok: boolean; messages?: JoyLogMessage[]; error?: string }
+        : await apiSocket.machineRPC<
+            { ok: boolean; messages?: JoyLogMessage[]; error?: string },
+            { directory: string; sessionId: string; limit: number }
+        >(
+            machineId,
+            'joy-read-log',
+            { directory, sessionId, limit }
+        );
     if (!result.ok) throw new Error(result.error || 'Failed to read log');
     return result.messages ?? [];
 }

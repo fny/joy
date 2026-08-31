@@ -3,6 +3,8 @@ import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import type { Machine } from '@/sync/storageTypes';
+import { sync } from '@/sync/sync';
+import { machineStatusOnly } from '@/sync/v2/machine';
 
 // Machines that answer a joy-tmux `joy-status` probe — i.e. the boxes actually
 // running the joy daemon, not every Happy machine. Probes online machines in
