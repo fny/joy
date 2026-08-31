@@ -116,29 +116,41 @@ export default React.memo(function JoyPaneScreen() {
     // pane — "last connector drives the width". Only fires when the column
     // count actually changes (each resize reflows claude's TUI), and is
     // re-asserted on focus so re-opening on a different device re-claims.
-    const lastColsRef = React.useRef(0);
+    const lastSizeRef = React.useRef({ cols: 0, rows: 0 });
     const drivePaneSize = React.useCallback((widthPx: number, heightPx: number) => {
+        // An UNMEASURED layout (0×0 on first render) must never drive a resize.
+        // The clamps below would turn it into a real 20×10 — shrinking the
+        // agent's terminal and leaving it that way after this screen closes.
+        // At 20 columns claude's TUI is mangled badly enough that the daemon's
+        // pane parser goes blind, which silently breaks dispatch.
+        if (!(widthPx > 0) || !(heightPx > 0)) return;
         // floor (not round) of the padding-adjusted width, so the rendered line
         // never exceeds the content box — otherwise it wraps or (previously)
         // scrolled sideways.
         const cols = Math.max(20, Math.floor((widthPx - PANE_H_PADDING) / CHAR_WIDTH));
-        // 2× the viewport height: claude runs on tmux's alternate screen, so its
-        // pane has NO tmux scrollback (history_size=0) — the only way to scroll
-        // back further in this view is a taller window, which makes claude's TUI
-        // render twice the conversation; the ScrollView scrolls within it (the
-        // input box stays at the pane's bottom, i.e. at the scroll end).
-        const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT) * 2);
-        if (cols === lastColsRef.current || !cols) return;
-        lastColsRef.current = cols;
+        // Match the window to the RENDERED viewport, exactly like a real
+        // terminal. It used to be doubled, to buy scrollback: claude runs on
+        // tmux's alternate screen (history_size=0), so a taller window is the
+        // only way to see more conversation. But claude pins its input box to
+        // the window's BOTTOM, and this view auto-scrolls to the end — so a
+        // window twice the viewport lands the reader on the input box with a
+        // screenful of dead space above it and the conversation pushed off the
+        // fold. Reachable scrollback is not worth a view that opens on a blank.
+        const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT));
+        // Re-send on EITHER axis: rows now track the viewport too, so a height
+        // change alone (rotation, keyboard, split resize) must re-size the window.
+        if (!cols || !rows) return;
+        if (cols === lastSizeRef.current.cols && rows === lastSizeRef.current.rows) return;
+        lastSizeRef.current = { cols, rows };
         const rctx = sync.machineCtxFor(machineId, sessionId);
         void (rctx ? machineResize(rctx, cols, rows) : apiSocket.machineRPC(machineId, 'joy-resize', { id: sessionId, cols, rows }))
             .then(() => setTimeout(() => void refresh(), 200))
             .catch(() => { /* best-effort */ });
     }, [machineId, sessionId, refresh]);
 
-    // Re-claim the width on focus (the size may have drifted to another viewer
-    // or a real terminal since we last looked).
-    useFocusEffect(React.useCallback(() => { lastColsRef.current = 0; }, []));
+    // Re-claim the size on focus (it may have drifted to another viewer or a
+    // real terminal since we last looked).
+    useFocusEffect(React.useCallback(() => { lastSizeRef.current = { cols: 0, rows: 0 }; }, []));
     // Poll only while focused AND foregrounded so a locked phone doesn't keep
     // mirroring the pane every 1.5s (battery — see useActiveInterval).
     useActiveInterval(() => void refresh(), POLL_MS);
