@@ -71,6 +71,7 @@ import { DialogBar } from './DialogBar';
 import { CodexApprovalBar } from './CodexApprovalBar';
 import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
+import { machineSetMode, machineSendKeys } from '@/sync/v2/machine';
 
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
@@ -744,7 +745,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // raw-keystroke RPC (see joy-tmux keyTokens.ts).
     const sendJoyKeys = React.useCallback((script: string) => {
         if (!machineId || !joySessionId) return;
-        void apiSocket.machineRPC(machineId, 'joy-send-keys', { id: joySessionId, script })
+        const kctx = sync.machineCtxFor(machineId, joySessionId);
+        void (kctx ? machineSendKeys(kctx, script) : apiSocket.machineRPC(machineId, 'joy-send-keys', { id: joySessionId, script }))
             .catch(() => { /* keystroke best-effort; stored state still updates */ });
     }, [machineId, joySessionId]);
 
@@ -755,7 +757,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             // the pane footer, walks Shift+Tab the right number of steps in
             // the real cycle (bypass → auto → default → acceptEdits → plan),
             // and verifies the footer afterwards. No client-side guessing.
-            void apiSocket.machineRPC(machineId, 'joy-set-mode', { id: joySessionId, mode: mode.key })
+            const mctx = sync.machineCtxFor(machineId, joySessionId);
+            void (mctx ? machineSetMode(mctx, mode.key) : apiSocket.machineRPC(machineId, 'joy-set-mode', { id: joySessionId, mode: mode.key }))
                 .catch(() => { /* best-effort; stored state still updates */ });
         }
         storage.getState().updateSessionPermissionMode(sessionId, mode.key);

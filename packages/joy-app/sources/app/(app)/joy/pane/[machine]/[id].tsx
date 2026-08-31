@@ -22,6 +22,8 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useActiveInterval } from '@/hooks/useActiveInterval';
 import { useIsTablet } from '@/utils/responsive';
 import { useRootGutter } from '@/hooks/useRootGutter';
+import { sync } from '@/sync/sync';
+import { machinePane, machineResize, machineSendKeys } from '@/sync/v2/machine';
 
 const POLL_MS = 1500;
 
@@ -88,11 +90,15 @@ export default React.memo(function JoyPaneScreen() {
 
     const refresh = React.useCallback(async () => {
         try {
+            // v2: read the pane from the daemon over the sealed tunnel.
+            const mctx = sync.machineCtxFor(machineId, sessionId);
             const result = await Promise.race([
-                apiSocket.machineRPC<{ ok?: boolean; text?: string; error?: string }, { id: string; color?: boolean }>(
-                    machineId, 'joy-pane', { id: sessionId, color: true },
-                ),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+                mctx
+                    ? machinePane(mctx, true).then(r => (r.data ?? { error: 'no response' }) as { ok?: boolean; text?: string; error?: string })
+                    : apiSocket.machineRPC<{ ok?: boolean; text?: string; error?: string }, { id: string; color?: boolean }>(
+                        machineId, 'joy-pane', { id: sessionId, color: true },
+                    ),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
             ]);
             if (!mountedRef.current) return;
             if (result.error) {
@@ -124,7 +130,8 @@ export default React.memo(function JoyPaneScreen() {
         const rows = Math.max(10, Math.round(heightPx / PANE_LINE_HEIGHT) * 2);
         if (cols === lastColsRef.current || !cols) return;
         lastColsRef.current = cols;
-        void apiSocket.machineRPC(machineId, 'joy-resize', { id: sessionId, cols, rows })
+        const rctx = sync.machineCtxFor(machineId, sessionId);
+        void (rctx ? machineResize(rctx, cols, rows) : apiSocket.machineRPC(machineId, 'joy-resize', { id: sessionId, cols, rows }))
             .then(() => setTimeout(() => void refresh(), 200))
             .catch(() => { /* best-effort */ });
     }, [machineId, sessionId, refresh]);
@@ -144,10 +151,13 @@ export default React.memo(function JoyPaneScreen() {
         if (!script) return false;
         setSending(true);
         try {
+            const kctx = sync.machineCtxFor(machineId, sessionId);
             const result = await Promise.race([
-                apiSocket.machineRPC<{ ok?: boolean; error?: string }, { id: string; script: string; literal?: boolean }>(
-                    machineId, 'joy-send-keys', { id: sessionId, script, literal },
-                ),
+                kctx
+                    ? machineSendKeys(kctx, script, literal).then(r => (r.data ?? { error: 'no response' }) as { ok?: boolean; error?: string })
+                    : apiSocket.machineRPC<{ ok?: boolean; error?: string }, { id: string; script: string; literal?: boolean }>(
+                        machineId, 'joy-send-keys', { id: sessionId, script, literal },
+                    ),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond')), 10000)),
             ]);
             if (result.error) {

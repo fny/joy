@@ -17,6 +17,7 @@ import { isMachineOnline } from '@/utils/machineUtils';
 import { useRouter } from 'expo-router';
 import { useSession } from '@/sync/storage';
 import { DuplicateSheet } from '@/components/DuplicateSheet';
+import { machineRestartSession } from '@/sync/v2/machine';
 
 export interface SessionActionItem {
     id: string;
