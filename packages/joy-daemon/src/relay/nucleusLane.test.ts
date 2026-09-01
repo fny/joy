@@ -12,7 +12,7 @@ const spawnSpec = (cwd: string, agent = "claude") => JSON.stringify({ v: 1, t: "
 
 /** Scripted relay: the test pushes offers; the server hands them out once per
  *  claim, records every lifecycle call the lane makes. */
-function makeFakeRelay() {
+function makeFakeRelay(sessions: any[] = []) {
     const calls: Array<{ path: string; body: any }> = [];
     let workOffers: any[] = [];
     let controlOffers: any[] = [];
@@ -27,7 +27,7 @@ function makeFakeRelay() {
             if (/^\/daemon\/leases\/[^/]+$/.test(path) && req.method === "PUT") return send({ ok: true });
             if (path.endsWith("/claims/work")) { const o = workOffers; workOffers = []; return send({ offers: o }); }
             if (path.endsWith("/claims/control")) { const o = controlOffers; controlOffers = []; return send({ offers: o }); }
-            if (path === "/sessions") return send({ sessions: [] });
+            if (path === "/sessions") return send({ sessions });
             // lifecycle writes: record + ack
             calls.push({ path, body });
             send({ ok: true });
@@ -141,5 +141,40 @@ describe("nucleusLane turn lifecycle", () => {
         expect(session.enqueued.length).toBe(0);            // left queued, not fed to the agent
         // no terminal fabricated for an undecodable prompt
         expect(relay.calls.some(c => c.path.includes("/turns/tbad/facts"))).toBe(false);
+    }, 15_000);
+
+    it("startup reconcile: relay-live sessions with no local runtime get archived; live/pre-bind/foreign rows untouched", async () => {
+        const relay = makeFakeRelay([
+            // bound on THIS daemon, no runtime → orphan (window died while we were down)
+            { sessionId: "v2dead", daemonId: "m4", state: "active", localSessionId: "gone1" },
+            { sessionId: "v2dead2", daemonId: "m4", state: "starting", localSessionId: "gone2" },
+            // bound + live → its own card publisher owns the truth
+            { sessionId: "v2live", daemonId: "m4", state: "active", localSessionId: "loc4" },
+            // pre-bind spawn we may still claim
+            { sessionId: "v2prov", daemonId: "m4", state: "provisioning", localSessionId: null },
+            // already history
+            { sessionId: "v2old", daemonId: "m4", state: "archived", localSessionId: "gone3" },
+            // another machine's — not ours to touch (relay would 403 anyway)
+            { sessionId: "v2other", daemonId: "mX", state: "active", localSessionId: "gone4" },
+        ]);
+        const url = await relay.listen(); srv = relay.server;
+        const session = makeFakeSession("loc4");
+        const registry: any = {
+            get: (i: string) => (i === "loc4" ? session : undefined), create: async () => session, chatHistory: () => [],
+            listRecords: () => [{ v2SessionId: "v2live", socket: null, id: "loc4" }, { id: "gone1", socket: "s", launchCwd: "/proj/a" }],
+            saveRecord: () => {},
+        };
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m4", log: () => {} });
+        await sleep(1500);
+
+        const patched = relay.calls.filter(c => /^\/daemon\/sessions\/[^/]+$/.test(c.path) && c.body.state === "archived");
+        expect(patched.map(c => c.path).sort()).toEqual(["/daemon/sessions/v2dead", "/daemon/sessions/v2dead2"]);
+        // the surviving window record lends the card its path
+        const card = JSON.parse(patched.find(c => c.path.endsWith("v2dead"))!.body.encryptedMetadata);
+        expect(card.t).toBe("card");
+        expect(card.metadata.path).toBe("/proj/a");
+        expect(card.metadata.joy__state).toBe("archived");
+        expect(relay.calls.some(c => c.path.endsWith("/v2live") && c.body.state === "archived")).toBe(false);
+        expect(relay.calls.some(c => c.path.includes("v2prov") || c.path.includes("v2old") || c.path.includes("v2other"))).toBe(false);
     }, 15_000);
 });

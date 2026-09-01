@@ -1,3 +1,8 @@
+# Sep 1 (2) — No more empty date headers
+
+- **Sessions that died while their daemon was down are archived, not haunted.** A session the relay still believed was running — but that no machine actually had anymore — grouped itself under "Yesterday" / "2 days ago" and then hid, leaving a date header with nothing under it. Two fixes: the daemon now archives any session it's supposed to own but has no runtime for the moment it reconnects, and the sidebar decides "active" once, the same way for grouping and for showing, so a row can never be filed as history and then dropped as active.
+- **Desktop shows its release.** The JS-update row on web/desktop now always shows the commit and release time instead of "web bundle (unstamped build)".
+
 # Sep 1 — Everything speaks v2
 
 - **The entire app now runs on the joy relay's v2 surface.** Login, the session and machine lists, chat, push registration, the message queue, codex approvals, files, git, terminal, usage, limits, agent config, history — every call the app makes goes to `/joy/v2` or through the end-to-end-encrypted machine tunnel. The happy socket is gone from the app entirely; live updates arrive over the relay's event stream with a polling fallback.
