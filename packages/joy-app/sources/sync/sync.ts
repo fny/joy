@@ -485,6 +485,7 @@ class Sync {
                 this.getMessagesSync(sid).invalidate();
             }
             this.sessionsSync.invalidate();
+            this.machinesSync.invalidate();
         }, 2500);
     }
 
@@ -810,12 +811,17 @@ class Sync {
             // account, corruption), REFUSE — never fall back to plaintext,
             // which would leak readable content to the relay.
             let key: Uint8Array | null = null;
-            if (v2link.keyEnvelope) {
+            if (v2link.keyEnvelope && v2link.keyEnvelope !== 'v2:plaintext') {
                 key = this.encryption.openV2SessionKey(v2link.keyEnvelope);
                 if (!key) {
                     console.error('[v2] session key envelope present but unopenable — refusing plaintext send');
                     return { ok: false, reason: 'v2 content key unavailable (cannot seal) — refusing to send in the clear' };
                 }
+            } else if (v2link.keyEnvelope !== 'v2:plaintext') {
+                // No envelope at all — the session has not BOUND yet (the
+                // envelope arrives with the bind). Refuse rather than sending
+                // in the clear; the caller retries once the card completes.
+                return { ok: false, reason: 'v2 session not bound yet — no content key to seal with' };
             }
             // B3: honor displayText (what the user sees) vs the sent text, and
             // carry the source tag. The v2 wire only moves the actual text;
@@ -1520,6 +1526,7 @@ class Sync {
             activeAt: number;  // Changed from lastActiveAt
             createdAt: number;
             updatedAt: number;
+            leaseAlive?: boolean;
         }>;
 
         // First, collect and decrypt encryption keys for all machines
@@ -1570,6 +1577,7 @@ class Sync {
                     updatedAt: machine.updatedAt,
                     active: machine.active,
                     activeAt: machine.activeAt,
+                    leaseAlive: machine.leaseAlive,
                     metadata,
                     metadataVersion: machine.metadataVersion,
                     daemonState,
@@ -1585,6 +1593,7 @@ class Sync {
                     updatedAt: machine.updatedAt,
                     active: machine.active,
                     activeAt: machine.activeAt,
+                    leaseAlive: machine.leaseAlive,
                     metadata: null,
                     metadataVersion: machine.metadataVersion,
                     daemonState: null,
@@ -3119,6 +3128,15 @@ export const sync = new Sync();
 if (typeof globalThis !== 'undefined') {
     (globalThis as { __joyV2?: unknown }).__joyV2 = {
         machineCtx: (sid: string) => sync.machineCtx(sid),
+        cardProbe: async (v2id: string) => {
+            const { v2 } = await import('./v2/api');
+            const { openCard } = await import('./v2/card');
+            const row = (await v2.listSessions()).sessions.find(r => r.sessionId.startsWith(v2id));
+            if (!row) return { stage: 'no-row' };
+            const key = row.sessionKeyEnvelope ? sync.encryption.openV2SessionKey(row.sessionKeyEnvelope) : null;
+            const card = openCard(row.encryptedMetadata, key);
+            return { stage: 'done', hasKey: !!key, metaLen: (row.encryptedMetadata ?? '').length, card: card ? Object.keys(card) : null };
+        },
         // Session card as the app sees it: the v2 link, presence and the
         // thinking flag that gates the composer's send-vs-hold decision.
         card: (sid: string) => {

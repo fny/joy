@@ -62,7 +62,13 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec): Prom
         await sync.refreshSessions();
         const all = storage.getState().sessions;
         for (const [sid, s] of Object.entries(all)) {
-            if ((s as { metadata?: { v2?: { sessionId?: string } } }).metadata?.v2?.sessionId === v2id) return sid;
+            const link = (s as { metadata?: { v2?: { sessionId?: string; localSessionId?: string; keyEnvelope?: string } } }).metadata?.v2;
+            // BOUND, not merely created: the v2 row exists from the moment of
+            // creation, but prompts are only accepted (and sealable) once the
+            // daemon has bound it — localSessionId and the key envelope arrive
+            // together in the bind. Matching earlier made the initial prompt
+            // race the bind and bounce off 409 session_not_ready.
+            if (link?.sessionId === v2id && link.localSessionId && link.keyEnvelope) return sid;
         }
     }
     throw new Error('v2 spawn accepted but the session did not start within 2 minutes. Check the daemon lane on that machine.');

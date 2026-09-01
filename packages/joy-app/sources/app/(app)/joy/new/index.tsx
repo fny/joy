@@ -441,7 +441,12 @@ function NewJoyTmuxSessionScreen() {
             ].slice(0, 10));
 
             const trimmedPrompt = prompt.trim();
-            if (trimmedPrompt) await sync.sendMessage(happySessionId, trimmedPrompt, { source: 'new_session' });
+            if (trimmedPrompt) {
+                const sendRes = await sync.sendMessage(happySessionId, trimmedPrompt, { source: 'new_session' });
+                // A failed initial send must be VISIBLE — it was silently eaten
+                // once (the bind race) and read as "messages go into the void".
+                if (!sendRes.ok) Modal.alert(t('common.error'), `Initial message not sent: ${sendRes.reason ?? 'unknown'}`);
+            }
             router.back();
             setTimeout(() => router.push(`/session/${happySessionId}` as never), 100);
         } catch (error) {

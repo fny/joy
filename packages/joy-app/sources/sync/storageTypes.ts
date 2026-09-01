@@ -299,6 +299,9 @@ export interface Machine {
     updatedAt: number;
     active: boolean;
     activeAt: number;  // Changed from lastActiveAt to activeAt for consistency
+    /** v2 lease liveness from the relay — the same authority the work queue
+     *  trusts. When present it wins over activeAt-freshness heuristics. */
+    leaseAlive?: boolean;
     metadata: MachineMetadata | null;
     metadataVersion: number;
     daemonState: any | null;  // Dynamic daemon state (runtime info)
