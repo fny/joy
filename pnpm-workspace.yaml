@@ -1,11 +1,5 @@
 packages:
-  - "packages/happy-app"
   - "packages/joy-app"
   - "packages/joy-daemon"
   - "packages/joy-relay"
-  - "packages/happy-agent"
-  - "packages/happy-cli"
-  - "packages/happy-server"
-  - "packages/happy-wire"
-  - "packages/happy-app-logs"
   - "packages/codium"
