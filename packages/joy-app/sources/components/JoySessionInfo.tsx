@@ -20,7 +20,8 @@ import { useSessionStatus, formatPathRelativeToHome, getSessionName, getSessionA
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
-import { apiSocket } from '@/sync/apiSocket';
+import { sync } from '@/sync/sync';
+import { machineSessionInfoFor, machineSessionLog } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
 import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { HappyError } from '@/utils/errors';
@@ -108,9 +109,10 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         let cancelled = false;
         (async () => {
             try {
+                const ictx = sync.machineOnlyCtx(machineId);
+                if (!ictx) { setLiveFailed(true); return; }
                 const result = await Promise.race([
-                    apiSocket.machineRPC<JoySessionRecord & { error?: string }, { id: string }>(
-                        machineId, 'joy-get-session', { id: joySessionId }),
+                    machineSessionInfoFor(ictx, joySessionId).then(r => r.data as unknown as JoySessionRecord & { error?: string }),
                     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
                 ]);
                 if (cancelled) return;
@@ -141,8 +143,10 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         if (!machineId || !joySessionId) throw new HappyError('No machine or joy session id on this session', false);
         if (Platform.OS !== 'web') throw new HappyError('Download is web-only for now', false);
         type LogResult = { ok?: boolean; filename?: string; contentBase64?: string; error?: string };
+        const lctx = sync.machineOnlyCtx(machineId);
+        if (!lctx) throw new HappyError('No machine context for this session', false);
         const result = await Promise.race([
-            apiSocket.machineRPC<LogResult, { id: string }>(machineId, 'joy-session-log', { id: joySessionId }),
+            machineSessionLog(lctx, joySessionId).then(r => r.data as unknown as LogResult),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond')), 60000)),
         ]);
         if (!result.ok || !result.contentBase64) {

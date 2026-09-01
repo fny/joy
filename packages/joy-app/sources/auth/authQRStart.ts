@@ -23,11 +23,11 @@ export async function authQRStart(keypair: QRAuthKeyPair): Promise<boolean> {
     try {
         const serverUrl = getServerUrl();
         if (process.env.EXPO_PUBLIC_DEBUG) {
-            console.log(`[AUTH DEBUG] Sending auth request to: ${serverUrl}/v1/auth/account/request`);
+            console.log(`[AUTH DEBUG] Sending auth request to: ${serverUrl}/joy/v2/auth/account/request`);
             console.log(`[AUTH DEBUG] Public key: ${encodeBase64(keypair.publicKey).substring(0, 20)}...`);
         }
 
-        await axios.post(`${serverUrl}/v1/auth/account/request`, {
+        await axios.post(`${serverUrl}/joy/v2/auth/account/request`, {
             publicKey: encodeBase64(keypair.publicKey),
         }, {
             headers: {

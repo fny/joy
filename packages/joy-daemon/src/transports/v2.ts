@@ -254,6 +254,9 @@ route("GET", "/v2/harnesses/:harness/limits", async (_ctx, p) => {
 });
 
 // ── machine: history (on-disk transcripts) ─────────────────────────────────
+// Past opencode conversations for a directory (the resume picker).
+route("GET", "/v2/harnesses/opencode/sessions", async (ctx) =>
+  ok(await mcall("opencodeSessions", ctx.registry, { cwd: ctx.url.searchParams.get("cwd") ?? "" })));
 route("GET", "/v2/history", async (ctx) =>
   ok(await mcall("listLogs", ctx.registry, { directory: ctx.url.searchParams.get("directory") ?? "" })));
 route("GET", "/v2/history/:sessionId/messages", async (ctx, p) =>
@@ -325,6 +328,10 @@ route("POST", "/v2/sessions/:id/hooks", withSession(async (_ctx, session, _p, bo
 // session record first just to learn its claude session id (the v1 usage screen
 // made that extra round-trip). A session that hasn't bound a claude id yet has
 // no usage to report — `entry: null`, not an error.
+// The daemon's own event log for one session (spawn/dispatch/lifecycle
+// breadcrumbs — the debugging view in session info).
+route("GET", "/v2/sessions/:id/log", withSession(async (ctx, _s, p) =>
+  ok(await mcall("sessionLog", ctx.registry, { id: p.id }))));
 route("GET", "/v2/sessions/:id/usage", withSession(async (ctx, session) => {
   const claudeSessionId = session.claudeSessionId;
   if (!claudeSessionId) return ok({ ok: true, entry: null });

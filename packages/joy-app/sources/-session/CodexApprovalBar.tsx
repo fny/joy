@@ -4,13 +4,14 @@ import { Text } from '@/components/StyledText';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useSession } from '@/sync/storage';
-import { apiSocket } from '@/sync/apiSocket';
+import { sync } from '@/sync/sync';
+import { tunnelJson } from '@/sync/v2/tunnel';
 import { t } from '@/text';
 import { Typography } from '@/constants/Typography';
 
 // joy-tmux surfaces a codex approval request (non-yolo: the agent wants to run
 // a command or apply a patch) as session.metadata.joy__codexApproval. Pinned
-// bar with Allow / Deny; the answer rides the joy-codex-approve session RPC.
+// bar with Allow / Deny; the answer rides the sealed tunnel to the daemon.
 // The daemon holds the codex request open until answered (or a timeout).
 export const CodexApprovalBar = React.memo(function CodexApprovalBar({ sessionId }: { sessionId: string }) {
     const { theme } = useUnistyles();
@@ -23,10 +24,14 @@ export const CodexApprovalBar = React.memo(function CodexApprovalBar({ sessionId
     const answer = React.useCallback((decision: 'allow' | 'deny') => {
         if (!machineId || !joyId || !approval) return;
         setAnswering(true);
-        // v2 gap: the daemon's /v2 plane has no codex-approval endpoint yet
-        // (approvals are a codex app-server concept, not a machine-plane one),
-        // so this stays on the machine RPC for both v1 and v2 sessions.
-        apiSocket.machineRPC(machineId, 'joy-codex-approve', { id: joyId, requestId: approval.requestId, decision })
+        // The answer rides the sealed tunnel to the daemon's approvals route.
+        const ctx = sync.machineCtxFor(machineId, joyId);
+        if (!ctx) { console.error('[v2] approval dropped: no machine context'); setAnswering(false); return; }
+        tunnelJson({
+            relayUrl: ctx.relayUrl, accountToken: ctx.accountToken, machineKey: ctx.machineKey,
+            machineId: ctx.machineId, method: 'POST', path: `/v2/sessions/${joyId}/approvals`,
+            json: { requestId: approval.requestId, decision },
+        })
             .catch(() => { /* daemon re-pushes metadata; the bar reflects it */ })
             .finally(() => setAnswering(false));
     }, [machineId, joyId, approval]);

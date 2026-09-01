@@ -13,7 +13,6 @@ import { View, Text, TextInput, ScrollView, ActivityIndicator, Pressable, Platfo
 import { Stack, useLocalSearchParams } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
@@ -79,7 +78,9 @@ export default React.memo(function AgentConfigEditorScreen() {
 
     const load = React.useCallback(async () => {
         try {
-            const r = await (sync.machineOnlyCtx(machineId) ? machineConfigRead(sync.machineOnlyCtx(machineId)!, agent).then(r => r.data as unknown as ReadReply) : apiSocket.machineRPC<ReadReply, { agent: string }>(machineId, 'joy-agent-config-read', { agent }));
+            const rctx = sync.machineOnlyCtx(machineId);
+            if (!rctx) throw new Error('no machine context');
+            const r = await machineConfigRead(rctx, agent).then(r => r.data as unknown as ReadReply);
             setReply(r);
             if (r.ok && typeof r.raw === 'string') setRawDraft(r.raw);
         } catch (e) {
@@ -91,7 +92,7 @@ export default React.memo(function AgentConfigEditorScreen() {
         void load();
         (async () => {
             try {
-                const s = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); return ctx0 ? machineConfigSchema(ctx0, agent).then(r => r.data as never) : apiSocket.machineRPC<{ ok: boolean; schema?: any; error?: string }, { agent: string }>(machineId, 'joy-agent-config-schema', { agent }); })();
+                const s = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); if (!ctx0) return Promise.reject(new Error('no machine context')); return machineConfigSchema(ctx0, agent).then(r => r.data as unknown as { ok: boolean; schema?: unknown; error?: string }); })();
                 if (s.ok) setSchema(s.schema);
                 else { setSchemaError(s.error ?? 'no schema'); setMode('raw'); }
             } catch (e) {
@@ -104,9 +105,7 @@ export default React.memo(function AgentConfigEditorScreen() {
     const applyLines = React.useCallback(async (lines: string[]) => {
         setBusy(true);
         try {
-            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); return ctx0 ? machineConfigSet(ctx0, agent, lines).then(r => r.data as never) : apiSocket.machineRPC<{ ok: boolean; error?: string; raw?: string }, { agent: string; lines: string[] }>(
-                machineId, 'joy-agent-config-set', { agent, lines },
-            ); })();
+            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); if (!ctx0) return Promise.reject(new Error('no machine context')); return machineConfigSet(ctx0, agent, lines).then(r => r.data as unknown as { ok: boolean; error?: string; raw?: string }); })();
             if (!r.ok) { Modal.alert('Error', r.error ?? 'apply failed'); return false; }
             await load();
             return true;
@@ -121,9 +120,7 @@ export default React.memo(function AgentConfigEditorScreen() {
     const saveRaw = React.useCallback(async () => {
         setBusy(true);
         try {
-            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); return ctx0 ? machineConfigWrite(ctx0, agent, rawDraft).then(r => r.data as never) : apiSocket.machineRPC<{ ok: boolean; error?: string }, { agent: string; raw: string }>(
-                machineId, 'joy-agent-config-write', { agent, raw: rawDraft },
-            ); })();
+            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); if (!ctx0) return Promise.reject(new Error('no machine context')); return machineConfigWrite(ctx0, agent, rawDraft).then(r => r.data as unknown as { ok: boolean; error?: string }); })();
             if (!r.ok) { Modal.alert('Error', r.error ?? 'save failed'); return; }
             Modal.alert('Saved', 'Previous file kept as .joy-bak');
             await load();

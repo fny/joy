@@ -20,7 +20,7 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
         }
 
         try {
-            const response = await axios.post(`${serverUrl}/v1/auth/account/request`, {
+            const response = await axios.post(`${serverUrl}/joy/v2/auth/account/request`, {
                 publicKey: encodeBase64(keypair.publicKey),
             }, {
                 headers: {

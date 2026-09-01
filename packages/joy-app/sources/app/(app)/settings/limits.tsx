@@ -85,7 +85,7 @@ function MachineLimits(props: { machineId: string; name: string }) {
                         // merged into the legacy {claude, codex} reply shape.
                         ? Promise.all([machineLimitsOnly(c, 'claude'), machineLimitsOnly(c, 'codex')])
                             .then(([cl, cx]) => ({ ok: true, claude: cl.data, codex: cx.data }) as unknown as LimitsReply)
-                        : apiSocket.machineRPC<LimitsReply, {}>(props.machineId, 'joy-limits', {}); })(),
+                        : Promise.reject(new Error('no machine context')); })(),
                     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('daemon did not respond — joy update needed?')), 30000)),
                 ]);
                 if (!cancelled) setState({ phase: 'done', reply });

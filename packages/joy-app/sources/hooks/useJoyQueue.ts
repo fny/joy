@@ -1,5 +1,6 @@
 import * as React from 'react';
-import { apiSocket } from '@/sync/apiSocket';
+import { sync } from '@/sync/sync';
+import { tunnelJson } from '@/sync/v2/tunnel';
 
 // Mirrors joy-tmux Session.queueState(). The queue holds messages the user
 // lined up while Claude was busy; the daemon dispatches them one at a time
@@ -26,27 +27,28 @@ export function useJoyQueue(
 ) {
     const state = metaQueue ?? EMPTY;
 
-    // NOTE (v2 migration): these operate on the DAEMON's local dispatch queue
-    // — the qids come from the daemon's joy__queue metadata and refer to items
-    // waiting to be typed into the agent. That is a different queue from the
-    // relay's durable v2 message queue (whose ids are v2 messageIds, edited via
-    // PATCH /joy/v2/sessions/:id/messages/:mid). For a v2 session the relay
-    // queue is the one the app should show; this hook stays on the machine
-    // RPC until the session screen's queue strip is switched over, so it keeps
-    // working rather than silently addressing the wrong queue.
-    const call = React.useCallback(async (rpc: string, params: Record<string, unknown>) => {
+    // These operate on the DAEMON's local dispatch queue — qids come from the
+    // daemon's joy__queue metadata (a different queue from the relay's durable
+    // v2 turn queue). Mutations travel the sealed tunnel to the daemon's
+    // /v2/sessions/:id/queue routes.
+    const call = React.useCallback(async (method: string, sub: string, body?: Record<string, unknown>) => {
         if (!machineId || !joySessionId) return;
         try {
-            await apiSocket.machineRPC(machineId, rpc, { id: joySessionId, ...params });
+            const ctx = machineId && joySessionId ? sync.machineCtxFor(machineId, joySessionId) : null;
+            if (!ctx) { console.error('[v2] queue op dropped: no machine context'); return; }
+            await tunnelJson({
+                relayUrl: ctx.relayUrl, accountToken: ctx.accountToken, machineKey: ctx.machineKey,
+                machineId: ctx.machineId, method, path: `/v2/sessions/${joySessionId}/queue${sub}`, json: body,
+            });
         } catch { /* best-effort; the daemon re-pushes joy__queue metadata */ }
     }, [machineId, joySessionId]);
 
     return {
         ...state,
-        add: (text: string) => call('joy-queue-add', { text }),
-        edit: (qid: string, text: string) => call('joy-queue-edit', { qid, text }),
-        cancel: (qid: string) => call('joy-queue-cancel', { qid }),
-        reorder: (qid: string, toIndex: number) => call('joy-queue-reorder', { qid, toIndex }),
-        resume: () => call('joy-queue-resume', {}),
+        add: (text: string) => call('POST', '', { text }),
+        edit: (qid: string, text: string) => call('PATCH', `/${qid}`, { text }),
+        cancel: (qid: string) => call('DELETE', `/${qid}`),
+        reorder: (qid: string, toIndex: number) => call('POST', `/${qid}/move`, { toIndex }),
+        resume: () => call('POST', '/resume', {}),
     };
 }

@@ -15,7 +15,6 @@ import { ItemList } from '@/components/ItemList';
 import { useMachine, storage } from '@/sync/storage';
 import { useMachineOnline } from '@/hooks/useMachineOnline';
 import { formatOSPlatform } from '@/utils/sessionUtils';
-import { apiSocket } from '@/sync/apiSocket';
 import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
@@ -25,7 +24,7 @@ import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 import { sync } from '@/sync/sync';
-import { machineSlashCommandsAll } from '@/sync/v2/machine';
+import { machineStatusOnly, machineSlashCommandsAll } from '@/sync/v2/machine';
 
 // Bytes → "X.X GB" for the system readouts.
 const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
@@ -91,8 +90,10 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
             return;
         }
         let cancelled = false;
+        const sctx = sync.machineOnlyCtx(machineId);
+        if (!sctx) { setFailed(true); return; }
         Promise.race([
-            apiSocket.machineRPC<JoyStatus, {}>(machineId, 'joy-status', {}),
+            machineStatusOnly(sctx).then(r => r.data as unknown as JoyStatus),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
         ]).then(s => { if (!cancelled) setStatus(s); })
             .catch(() => { if (!cancelled) setFailed(true); });
@@ -162,7 +163,8 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     // updates without a separate fetch.
     const [refreshingCommands, doRefreshCommands] = useHappyAction(React.useCallback(async () => {
         const c0 = sync.machineOnlyCtx(machineId);
-        if (c0) { await machineSlashCommandsAll(c0, true); } else { await apiSocket.machineRPC(machineId, 'joy-refresh-commands', {}); }
+        if (!c0) throw new Error('no machine context');
+        await machineSlashCommandsAll(c0, true);
     }, [machineId]));
 
     if (!status && !failed) {

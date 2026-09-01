@@ -58,7 +58,6 @@ import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES, JOY_CODEX_PERMISSION_MODES } from '@/sync/joyModels';
-import { apiSocket } from '@/sync/apiSocket';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
 import { JoyQueueStrip } from '@/components/JoyQueueStrip';
@@ -71,7 +70,7 @@ import { DialogBar } from './DialogBar';
 import { CodexApprovalBar } from './CodexApprovalBar';
 import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
-import { machineSetMode, machineSendKeys } from '@/sync/v2/machine';
+import { machineSetMode, machineSendKeys, machineSetModel, machineSessionUsage, machineHarnessModels } from '@/sync/v2/machine';
 
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
@@ -581,9 +580,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     React.useEffect(() => {
         if (flavor !== 'opencode' || !machineId) return;
         let cancelled = false;
-        apiSocket.machineRPC<{ ok?: boolean; models?: { id: string; displayName: string }[] }, {}>(machineId, 'joy-opencode-models', {})
-            .then((res) => { if (!cancelled && res.models?.length) setOcModels(res.models); })
-            .catch(() => { /* old daemon — chip stays display-only */ });
+        const octx = sync.machineOnlyCtx(machineId);
+        if (!octx) return;
+        machineHarnessModels(octx, 'opencode')
+            .then(({ data }) => {
+                const models = (data?.models ?? []) as { id: string; displayName: string }[];
+                if (!cancelled && models.length) setOcModels(models);
+            })
+            .catch(() => { /* chip stays display-only */ });
         return () => { cancelled = true; };
     }, [flavor, machineId]);
 
@@ -700,10 +704,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         let cancelled = false;
         const fetchCost = async () => {
             try {
-                const r = await apiSocket.machineRPC<{ ok?: boolean; entry?: { cost?: number } | null }, { period: string; claudeSessionId: string }>(
-                    costMachineId, 'joy-session-usage', { period: 'all', claudeSessionId: costClaudeId },
-                );
-                if (!cancelled && r?.ok && r.entry?.cost != null) setSessionCostUsd(r.entry.cost);
+                const uctx = sync.machineCtx(sessionId);
+                if (!uctx) return;
+                const { data } = await machineSessionUsage(uctx, 'all');
+                const cost = (data?.entry as { cost?: number } | null | undefined)?.cost;
+                if (!cancelled && data?.ok && cost != null) setSessionCostUsd(cost);
             } catch { /* info line just omits the segment */ }
         };
         void fetchCost();
@@ -746,7 +751,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const sendJoyKeys = React.useCallback((script: string) => {
         if (!machineId || !joySessionId) return;
         const kctx = sync.machineCtxFor(machineId, joySessionId);
-        void (kctx ? machineSendKeys(kctx, script) : apiSocket.machineRPC(machineId, 'joy-send-keys', { id: joySessionId, script }))
+        if (!kctx) { console.error('[v2] send-keys dropped: no machine context'); return; }
+        void machineSendKeys(kctx, script)
             .catch(() => { /* keystroke best-effort; stored state still updates */ });
     }, [machineId, joySessionId]);
 
@@ -758,7 +764,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             // the real cycle (bypass → auto → default → acceptEdits → plan),
             // and verifies the footer afterwards. No client-side guessing.
             const mctx = sync.machineCtxFor(machineId, joySessionId);
-            void (mctx ? machineSetMode(mctx, mode.key) : apiSocket.machineRPC(machineId, 'joy-set-mode', { id: joySessionId, mode: mode.key }))
+            if (!mctx) { console.error('[v2] set-mode dropped: no machine context'); return; }
+            void machineSetMode(mctx, mode.key)
                 .catch(() => { /* best-effort; stored state still updates */ });
         }
         storage.getState().updateSessionPermissionMode(sessionId, mode.key);
@@ -768,8 +775,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         if (isJoyDaemon && flavor === 'opencode') {
             // No pane: the daemon switches the opencode session server-side.
             if (machineId && joySessionId) {
-                void apiSocket.machineRPC(machineId, 'joy-opencode-set-model', { id: joySessionId, model: mode.key })
-                    .catch(() => { /* best-effort; stored state still updates */ });
+                const octx = sync.machineCtxFor(machineId, joySessionId);
+                if (octx) {
+                    void machineSetModel(octx, mode.key)
+                        .catch(() => { /* best-effort; stored state still updates */ });
+                }
             }
         } else if (isJoyDaemon) {
             // /model <key> switches the interactive session directly; keys in

@@ -85,6 +85,9 @@ export const machineKillSession = (ctx: MachineCtx) =>
 export const machineRestartSession = (ctx: MachineCtx) =>
     j<{ ok: boolean; relaySessionId?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/restart`);
 
+export const machineSetModel = (ctx: MachineCtx, model: string) =>
+    j<{ ok?: boolean; error?: string }>(ctx, 'PATCH', `/v2/sessions/${ctx.localSessionId}`, { model });
+
 export const machineSetMode = (ctx: MachineCtx, permissionMode: string) =>
     j<{ ok?: boolean; error?: string }>(ctx, 'PATCH', `/v2/sessions/${ctx.localSessionId}`, { permissionMode });
 
@@ -112,6 +115,24 @@ const jm = <T>(ctx: MachineOnlyCtx, method: string, path: string, body?: unknown
         machineId: ctx.machineId, method, path, json: body,
     });
 
+export const machineHarnessModels = (ctx: MachineOnlyCtx, harness: string) =>
+    jm<{ ok?: boolean; models?: Array<Record<string, unknown>>; error?: string }>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/models`);
+export const machineHistoryLogs = (ctx: MachineOnlyCtx, directory: string) =>
+    jm<{ ok?: boolean; logs?: Array<Record<string, unknown>>; sessions?: Array<Record<string, unknown>>; error?: string }>(ctx, 'GET', `/v2/history?directory=${encodeURIComponent(directory)}`);
+export const machineSessionUsageAll = (ctx: MachineOnlyCtx, period = '30days') =>
+    jm<{ ok?: boolean; sessions?: unknown[] }>(ctx, 'GET', `/v2/usage/sessions?period=${encodeURIComponent(period)}`);
+export const machineSessionInfoFor = (ctx: MachineOnlyCtx, localSessionId: string) =>
+    jm<Record<string, unknown>>(ctx, 'GET', `/v2/sessions/${encodeURIComponent(localSessionId)}`);
+export const machineSessionLog = (ctx: MachineOnlyCtx, localSessionId: string) =>
+    jm<{ ok?: boolean; lines?: unknown[]; log?: unknown[]; error?: string }>(ctx, 'GET', `/v2/sessions/${encodeURIComponent(localSessionId)}/log`);
+export const machineRestartSessionFor = (ctx: MachineOnlyCtx, localSessionId: string, body?: Record<string, unknown>) =>
+    jm<{ ok?: boolean; relaySessionId?: string; error?: string }>(ctx, 'POST', `/v2/sessions/${encodeURIComponent(localSessionId)}/restart`, body ?? {});
+export const machineKillSessionFor = (ctx: MachineOnlyCtx, localSessionId: string) =>
+    jm<{ ok?: boolean }>(ctx, 'DELETE', `/v2/sessions/${encodeURIComponent(localSessionId)}`);
+export const machineOpencodeSessions = (ctx: MachineOnlyCtx, cwd: string) =>
+    jm<{ ok?: boolean; sessions?: Array<Record<string, unknown>>; error?: string }>(ctx, 'GET', `/v2/harnesses/opencode/sessions?cwd=${encodeURIComponent(cwd)}`);
+export const machineListSessions = (ctx: MachineOnlyCtx) =>
+    jm<{ sessions?: Array<Record<string, unknown>> }>(ctx, 'GET', '/v2/sessions');
 export const machineStatusOnly = (ctx: MachineOnlyCtx) => jm<Record<string, unknown>>(ctx, 'GET', '/v2/status');
 export const machineUsageOnly = (ctx: MachineOnlyCtx, period = '30days') =>
     jm<Record<string, unknown>>(ctx, 'GET', `/v2/usage?period=${encodeURIComponent(period)}`);

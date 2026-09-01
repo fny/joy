@@ -9,11 +9,11 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { ItemList } from '@/components/ItemList';
 import { RoundButton } from '@/components/RoundButton';
 import { Modal } from '@/modal';
+import { sync } from '@/sync/sync';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey, getDerivedRelayPerimeterKey } from '@/sync/serverConfig';
 import * as Clipboard from 'expo-clipboard';
-import { apiSocket } from '@/sync/apiSocket';
 import { switchRelayAndReload, loginToRelay } from '@/sync/relaySwitch';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { normalizeSecretKey } from '@/auth/secretKeyBackup';
@@ -107,8 +107,9 @@ export default function ServerConfigScreen() {
         setRelayAccessKey(relayKeyInput.trim() || null);
         Modal.alert(t('server.relayAccessKeySaved'), undefined, [{ text: t('common.ok') }]);
         // Bounce the socket so the handshake carries (or drops) the key now.
-        apiSocket.disconnect();
-        apiSocket.connect();
+        // Bounce the v2 live stream so the next connect carries the new key.
+        sync.stopV2Live();
+        sync.startV2Live();
     }, [relayKeyInput]);
     const [error, setError] = useState<string | null>(null);
     const [isValidating, setIsValidating] = useState(false);
