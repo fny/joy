@@ -1,7 +1,6 @@
 // /joy/v1 router: thin HTTP shell over core.mjs. Hand-rolled matching and
 // validation (zero-dep bias) — every handler validates the fields it uses and
-// returns typed ApiErrors; anything unmatched falls through to the legacy
-// passthrough.
+// returns typed ApiErrors; anything unmatched is a 404 at the server.
 import { ApiError, hashToken } from './core.mjs';
 
 const CAPABILITIES = {

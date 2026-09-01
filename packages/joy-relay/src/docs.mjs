@@ -1,7 +1,8 @@
 // Browsable JOY relay API docs: GET /openapi.json + GET /docs (Redoc) on both
 // entrypoints. Documents the /joy/v1 surface ONLY, generated from the live
 // route table (routes.mjs routeTable()) so it cannot drift from dispatch.
-// Everything outside /joy/v1 is upstream passthrough and deliberately absent.
+// /joy/v2 (accounts, sessions, tunnel) is documented in docs/API.md; the
+// generated table below covers the /joy/v1 nucleus routes.
 // The perimeter gate wraps these like everything else once it's flipped.
 
 const P = { type: 'object', additionalProperties: true };
@@ -65,7 +66,7 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
         '- Daemon surface: the lease token (`x-joy-lease-token`, plus `x-joy-lease-id` / `x-joy-lease-epoch` on lifecycle writes) — never the bearer.',
         '- When the perimeter gate is enabled, EVERY request additionally carries `x-joy-relay-key` (or `?joyRelayKey=`), derived from the account secret.',
         '',
-        'Machine-level operations (queue, pane, usage, limits, agent config…) are the joy-daemon\'s API — see its local /docs on each machine. Paths outside /joy/v1 are proxied untouched to the upstream store and are not part of this API.',
+        'Machine-level operations (queue, pane, usage, limits, agent config…) are the joy-daemon\'s API — see its local /docs on each machine. The /joy/v2 account, session and tunnel surface is described in docs/API.md; there is no upstream — unknown paths are 404.',
       ].join('\n'),
     },
     servers: [{ url: host }],

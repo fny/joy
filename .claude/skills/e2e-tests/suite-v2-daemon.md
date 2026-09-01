@@ -13,14 +13,14 @@ real answers back as durable v2 events. No scripted actor anywhere.
    `TOKEN=$(node .claude/skills/e2e-tests/mint-daemon-creds.mjs --relay http://127.0.0.1:3105 --home $HOME/.joy-test --machine v2-live-e2e)`
    Save $TOKEN — the SAME account drives the client side.
    (First `rm -rf $HOME/.joy-test`; the random encryption keys are fine —
-   the v2 lane needs only token+machineId; happy-plane decryption for this
-   throwaway account is not meaningful.)
+   the v2 lane needs only token+machineId; app-side decryption of this
+   throwaway account's cards is not meaningful.)
 3. `mkdir -p /tmp/joy-test-tmux` FIRST — tmux will not create a missing
    $TMUX_TMPDIR and every per-session spawn fails at new-session until it
    exists (cost a live debugging round). Then start the daemon from source
    on the PRIVATE tmux server (isolation rules
    in SKILL.md apply — never the default tmux socket):
-   `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux HAPPY_HOME_DIR=$HOME/.joy-test JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 TMUX_SESSION=joy-test setsid nohup pnpm -C packages/joy-daemon start > /tmp/joy-test-daemon.log 2>&1 & echo $! > /tmp/joy-test-daemon.pid`
+   `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux JOY_HOME_DIR=$HOME/.joy-test JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 TMUX_SESSION=joy-test setsid nohup pnpm -C packages/joy-daemon start > /tmp/joy-test-daemon.log 2>&1 & echo $! > /tmp/joy-test-daemon.pid`
    (record the pid — teardown kills the PROCESS GROUP by that pid, never a
    name-based pkill that could hit the live daemon)
 4. Gate: `grep -m1 "\[v2-lane\] started" /tmp/joy-test-daemon.log` within

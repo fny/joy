@@ -6,7 +6,7 @@ contortions of `resilient-queue-design.md` (kept as the problem-statement
 record; its §2 root causes and §12 open problems are all resolved here).
 Problem statement: `joy-relay-design-brief.md`. Design developed in a
 three-round consultation with GPT (codex, xhigh), grounded in the actual
-joy-daemon/happy-server/joy-app code.
+joy-daemon/joy-relay/joy-app code.
 
 ## Executive summary
 
@@ -73,9 +73,9 @@ The quadlet stays reserved for that promotion.
 
 ```
 Incoming request
-├─ legacy endpoint / legacy session → byte-for-byte proxy → happy-server
-└─ /joy/v1/* (native)
-   ├─ auth (verifies existing Happy tokens — same master-secret scheme)
+├─ /joy/v2/* account plane (login, pairing, machines, push — accounts.mjs)
+└─ /joy/v1/* + /joy/v2/* session plane (native)
+   ├─ auth (EdDSA tokens minted and verified by the relay — tokens.mjs)
    ├─ session coordinator: serializes intents per session; every mutation
    │  locks the session row, takes one seq, mutates state, appends the
    │  event — one transaction
@@ -321,7 +321,7 @@ cancelling-unconfirmed / daemon-offline-N-queued / orphaned /
 foreground-done-background-running.
 
 Presence comes from **leases, never a shared boolean**: every daemon
-installation (joy vs happy, per relay) is its own row; online = current lease
+installation (per relay) is its own row; online = current lease
 by Postgres receive time (skew-free); `suspectedStalled` is a visible
 heuristic ("online, running, no accepted progress for 120 s"), never a
 fabricated terminal state. This fixes the shared `machine.active` stomping.
@@ -351,7 +351,7 @@ primary failure we're fixing.
 
 - **P0 (now):** passthrough proxy, unchanged.
 - **P1 — native nucleus:** route only `/joy/v1/*` locally; Joy Postgres up;
-  verify existing Happy tokens (shared master-secret verification — pairing
+  verify existing tokens (shared master-secret verification — pairing
   unchanged); daemon registration/leases/capabilities/state; legacy clients
   100% upstream.
 - **P2 — semantic shadow:** upgraded clients send visible intent/lifecycle
@@ -371,8 +371,14 @@ primary failure we're fixing.
   Postgres, routed by backend).
 - **P5 — own storage:** export PGlite → import preserving ids/seqs/
   timestamps, verify counts + ciphertext hashes, flip after a read-only
-  comparison window; keep happy-server as a shrinking sidecar; own
-  `/v1/auth` last.
+  comparison window; own auth last.
+
+**Status (2026-09-01): all phases complete.** The relay is the only server —
+the account plane (accounts, pairing, machines, push, EdDSA tokens) is native
+(`src/accounts.mjs`, `src/tokens.mjs`, migration 005), the proxy is gone, and
+unknown paths are 404. Account rows were imported id-for-id so existing
+tokens keep verifying (`JOY_RELAY_TOKEN_ISSUERS` accepts the earlier issuer
+label).
 
 ## 14. Build order (incremental PRs)
 

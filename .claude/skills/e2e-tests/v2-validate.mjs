@@ -1,7 +1,7 @@
 // Headless validation of the prod-mirror stack + v2 actor: everything the
 // suite's browser tests assert, driven via the same HTTP the app uses.
 import { createRequire } from 'node:module';
-const tweetnacl = createRequire('/home/claude/Workspace/joy/packages/happy-cli/package.json')('tweetnacl');
+const tweetnacl = createRequire('/home/claude/Workspace/joy/packages/joy-daemon/package.json')('tweetnacl');
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 
@@ -14,15 +14,15 @@ const b64 = (u8) => Buffer.from(u8).toString('base64');
 let pass = 0, fail = 0;
 const ok = (cond, name) => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name}`); } };
 
-// 1. Mint a throwaway account THROUGH the relay (prod path).
+// 1. Mint a throwaway account on the relay (the app's login path).
 const kp = tweetnacl.sign.keyPair();
 const challenge = tweetnacl.randomBytes(32);
-const authRes = await fetch(`${RELAY}/v1/auth`, {
+const authRes = await fetch(`${RELAY}/joy/v2/auth`, {
   method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ publicKey: b64(kp.publicKey), challenge: b64(challenge), signature: b64(tweetnacl.sign.detached(challenge, kp.secretKey)) }),
 });
 const { token } = await authRes.json();
-ok(!!token, 'account minted through relay → local happy-server');
+ok(!!token, 'account minted on the relay (POST /joy/v2/auth)');
 
 const api = async (method, path, body) => {
   const r = await fetch(`${RELAY}/joy/v2${path}`, {

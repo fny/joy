@@ -1,6 +1,6 @@
 # joy API reference
 
-The two programmable surfaces: the **relay** (a happy-server instance the app
+The two programmable surfaces: the **relay** (joy-relay, the one server the app
 and daemons meet through) and the **joy-daemon** (per-machine process that owns
 tmux panes and agent adapters). Maintained by hand — update this file whenever
 an op is added/renamed (source of truth: `packages/joy-daemon/src/domain/operations.ts`
@@ -9,16 +9,18 @@ and `src/domain/fileOps.ts`); FEATURES.md is the companion feature map.
 ## Topology
 
 ```
-joy-app ⇄ relay (happy-server, e.g. joy.voltai.party:4997 or api.cluster-fluster.com)
-              ⇄ joy-daemon (one per machine per account/backend)
+joy-app ⇄ joy-relay (e.g. joy.voltai.party:4997, /joy/v2 over HTTPS + SSE)
+              ⇄ joy-daemon (one per machine per account/relay)
                     ⇄ tmux panes: claude | codex | opencode | pi
 ```
 
-- Accounts are auto-created on first `/v1/auth` contact; one backup code works
-  on every relay (machines register per-account-per-backend).
+- Accounts are auto-created on first `POST /joy/v2/auth` contact (ed25519
+  challenge signature); one backup code works on every relay (machines
+  register per-account-per-relay).
 - All session/machine payloads between app and daemon are end-to-end encrypted
   (libsodium); the relay stores/forwards ciphertext. Attachment blobs are
-  encrypted client-side with `deriveKey(sessionKey, 'Happy Blobs', ['session'])`.
+  encrypted client-side with `deriveKey(sessionKey, 'Happy Blobs', ['session'])`
+  (the label is a wire constant — renaming it would orphan every existing blob).
 - The daemon also runs a **local HTTP server** (`~/.joy/daemon.json` carries
   port + bearer token) exposing the same ops over REST — that is what the
   `joy` CLI and hooks use. Wire identifiers: `joy__source: "joy-daemon"`, tag
@@ -30,8 +32,8 @@ Every operation exists in up to three forms, generated from one table:
 
 | Form | Carrier | Naming |
 |---|---|---|
-| Machine RPC | relay socket (`machineRPC`) | `joy-*` rpcName |
-| Session RPC | relay socket (`sessionRPC`) | bare name (happy-compatible) |
+| Machine RPC | relay E2E tunnel (`POST /joy/v2/machines/:id/http`, sealed frames) | `joy-*` rpcName |
+| Session RPC | relay E2E tunnel (same carrier) | bare name |
 | HTTP | local daemon server | method + path below |
 
 ## Machine-readable spec
@@ -76,7 +78,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-opencode-sessions` / `joy-opencode-set-model` | GET /opencode/sessions, POST /sessions/:id/opencode/model | opencode extras |
 | `joy-refresh-commands` | POST /commands/refresh | Re-scan slash commands |
 
-## Session-scope operations (happy-compatible names)
+## Session-scope operations
 
 | rpcName | HTTP | What |
 |---|---|---|
@@ -112,13 +114,27 @@ continue/fork/restart always carry current wording) · codex thread
 `developerInstructions` (restore now passes fresh wording too) · opencode
 first-prompt preamble · pi none at launch (use `/joy-prompt`).
 
-## Relay-level surface (happy-server, pristine)
+## Relay-level surface (joy-relay, `/joy/v2`)
 
-`/v1/auth` account create/login · sessions/messages tables (encrypted rows,
-seq-ordered) · machine registry + encrypted `daemonState` (cpu/ram/disk beat,
-20s) · push tokens · attachment blobs (request-upload → PUT/S3, 10MB cap) ·
-socket.io RPC forwarding (≈1MB message cap → the 400KB inline file threshold).
-happy-server is NEVER modified; joy-relay is a proxy in front of it.
+joy-relay is the only server; everything lives in its embedded PGlite store
+(`packages/joy-relay`, live spec at `/docs` on the relay). Bearer tokens are
+EdDSA JWTs minted by the relay (`JOY_RELAY_TOKEN_SECRET`, issuers
+`JOY_RELAY_TOKEN_ISSUERS`). Every path below is under `/joy/v2`:
+
+| Area | Routes | Notes |
+|---|---|---|
+| Account | `POST /auth` · `GET /account/profile` | login = signed challenge over the ed25519 public key; account auto-created |
+| Pairing | `POST /auth/request` (doubles as poll) · `GET /auth/request/status?publicKey=` · `POST /auth/response`; `…/auth/account/*` for the account-secret flavour | sealed response, first write wins, 24h TTL |
+| Machines | `GET/POST /machines` · `GET/PATCH/DELETE /machines/:id` | POST upserts (403 `machine_owned_elsewhere`); PATCH is CAS on `metadata`/`daemonState` (`expected*Version` → `success`\|`version-mismatch`); `active`/`activeAt` derived from daemon leases |
+| Push | `POST/GET /push-tokens` · `DELETE /push-tokens/:token` · `POST /push {title, body?, data?}` | relay delivers via Expo; dead tokens dropped |
+| Sessions | `GET/POST /sessions` · `GET/DELETE /sessions/:id` · `GET /sessions/:id/events` · `GET /events/stream` (SSE) · `POST /sessions/:id/spawn/retry` | sealed session cards; durable queue |
+| Messages / turns | `GET/POST /sessions/:id/messages` · `GET/PATCH/DELETE …/messages/:id` · `POST …/messages/:id/retry` · `GET …/turns/:id` · `POST …/turns/:id/cancellations` | server-owned queue, real cancellation |
+| Attachments | `POST /attachments` · `GET /attachments/:id` | ciphertext only, deduped per session, orphan-swept |
+| Tunnel | `POST /machines/:id/http` | E2E-sealed request/response frames to the daemon's local HTTP server (≈1MB frame cap → the 400KB inline file threshold) |
+| Daemon lane | `POST /daemon/leases` · `PUT /daemon/leases/:id` · `…/claims/{work,control,tunnel}` · `…/deliveries/:id/received` · `…/sessions/:id/{bind,spawn-failed}` · `PATCH /daemon/sessions/:id` · `…/turns/:id/{submitted,start,facts,reconcile}` · `…/tunnel/:id/frames` | lease-token authenticated; presence = unexpired lease |
+
+A perimeter key (`JOY_RELAY_ACCESS_KEY`, header `x-joy-relay-key`) can gate
+the whole surface; unknown paths are 404 — there is no upstream.
 
 ## Background daemon behaviors (not ops)
 
@@ -126,5 +142,6 @@ happy-server is NEVER modified; joy-relay is a proxy in front of it.
 - Resource alerts: RAM/disk ≥90% (5min sampling) and claude/codex quota ≥90%
   (4h polling) → push, edge-triggered, 85% re-arm, 4h cooldown per alert
   (`domain/resourceAlerts.ts`).
-- Machine heartbeat: cpu/ram/disk/load into encrypted daemonState every 20s.
+- Machine heartbeat: cpu/ram/disk/load into encrypted daemonState every 20s
+  (`PATCH /joy/v2/machines/:id`, CAS on `daemonStateVersion`).
 - `~/.joy/env` loaded at boot + re-read at pi spawn (FIREWORKS_API_KEY etc.).
