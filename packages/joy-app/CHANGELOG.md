@@ -1,3 +1,10 @@
+# Sep 1 — Everything speaks v2
+
+- **The entire app now runs on the joy relay's v2 surface.** Login, the session and machine lists, chat, push registration, the message queue, codex approvals, files, git, terminal, usage, limits, agent config, history — every call the app makes goes to `/joy/v2` or through the end-to-end-encrypted machine tunnel. The happy socket is gone from the app entirely; live updates arrive over the relay's event stream with a polling fallback.
+- **Session cards are sealed.** The daemon publishes each session's name, path, state and queue as an encrypted card only your devices can open — the relay stores ciphertext. Presence now comes from the same lease signal the work queue dispatches on, so "online" can never disagree with "a message would actually be delivered".
+- **First message can't vanish.** Creating a session with an initial prompt used to race the daemon's bind and silently lose the message; the app now waits for the bind (and refuses to ever send unencrypted while waiting). If an initial send fails you see the error.
+- *Needs the updated relay and an updated daemon on the machine.*
+
 # Aug 31 (3) — The terminal says why it is empty
 
 - **A session the machine no longer has now says so.** Opening the terminal for a session the daemon doesn't know showed an empty black terminal with a small "session_not_found — retrying…" note, as though it were still loading — it never would. It now states plainly that the session ended or the daemon restarted without reattaching it. Same for a machine your account can't reach.

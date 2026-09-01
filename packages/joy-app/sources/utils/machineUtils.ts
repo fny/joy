@@ -9,5 +9,10 @@ import type { Machine } from '@/sync/storageTypes';
 export const MACHINE_ONLINE_WINDOW_MS = 60_000;
 
 export function isMachineOnline(machine: Machine): boolean {
+    // The relay's v2 lease liveness is authoritative when present: it is the
+    // same signal the work queue dispatches on, so "online" here can never
+    // disagree with "a spawn would actually run". The activeAt window is the
+    // fallback for records that predate leaseAlive.
+    if (machine.leaseAlive !== undefined) return machine.leaseAlive;
     return Date.now() - machine.activeAt < MACHINE_ONLINE_WINDOW_MS;
 }
