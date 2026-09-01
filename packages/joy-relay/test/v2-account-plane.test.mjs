@@ -1,85 +1,86 @@
-// The account-plane completion of /joy/v2: machines, auth, profile, push and
-// the daemon's session-card publish. With these, a client needs NOTHING
-// outside /joy/v2 — this suite pins that contract.
+// The account plane of /joy/v2, served natively: login, pairing, profile,
+// machines, push and the daemon's session-card publish. With these, a client
+// needs NOTHING outside /joy/v2 — this suite pins that contract.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
+import { generateKeyPairSync, sign, randomBytes } from 'node:crypto';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import { createNotify } from '../src/notify.mjs';
 import { createV2Router } from '../src/v2.mjs';
 import { createTunnel } from '../src/tunnel.mjs';
 import { createAttachments } from '../src/attachments.mjs';
+import { createTokenAuthority } from '../src/tokens.mjs';
+import { createAccounts } from '../src/accounts.mjs';
+import { createAuth } from '../src/auth.mjs';
 
-const TOKENS = new Map([['app-token', 'account-1'], ['other-token', 'account-2']]);
+let server, base, db, core, notify, tokens, accounts;
+let expoCalls;
 
-let server, base, db, core, notify;
-let upstreamServer, upstreamCalls;
+/** ed25519 identity → the base64 fields /auth expects. */
+function identity() {
+  const kp = generateKeyPairSync('ed25519');
+  const raw = kp.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  return {
+    publicKey: raw.toString('base64'),
+    signChallenge: (challenge) => sign(null, challenge, kp.privateKey).toString('base64'),
+  };
+}
+async function loginNew() {
+  const id = identity();
+  const challenge = randomBytes(32);
+  const r = await call('POST', '/joy/v2/auth', {
+    token: null, body: { publicKey: id.publicKey, challenge: challenge.toString('base64'), signature: id.signChallenge(challenge) },
+  });
+  expect(r.status).toBe(200);
+  expect(r.json.success).toBe(true);
+  return { ...id, token: r.json.token };
+}
+
+let APP; // the default caller
+let OTHER;
 
 beforeAll(async () => {
-  // Fake upstream account authority: records every call so the tests can
-  // assert the delegation happened with the caller's bearer, verbatim body.
-  upstreamCalls = [];
-  upstreamServer = http.createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => { body += c; });
-    req.on('end', () => {
-      upstreamCalls.push({ method: req.method, url: req.url, auth: req.headers.authorization ?? null, body });
-      if (req.url === '/v1/machines') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify([
-          { id: 'mach-live', metadata: 'enc-m1', dataEncryptionKey: 'dek-1', active: true },
-          { id: 'mach-dead', metadata: 'enc-m2', dataEncryptionKey: 'dek-2', active: true },
-        ]));
-        return;
-      }
-      if (req.url === '/v1/auth/request') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ state: 'requested' }));
-        return;
-      }
-      if (req.url === '/v1/account/profile') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ id: 'account-1', timestamp: 1 }));
-        return;
-      }
-      if (req.url === '/v1/push-tokens') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: true }));
-        return;
-      }
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'nope' }));
-    });
-  });
-  await new Promise((r) => upstreamServer.listen(0, '127.0.0.1', r));
-
+  expoCalls = [];
   db = await openDb(':memory:');
   notify = createNotify();
   core = createCore(db, notify);
-  const auth = { verifyToken: async (t) => TOKENS.get(t) ?? null };
+  tokens = await createTokenAuthority({ secret: 'test-secret-test-secret', issuers: ['joy', 'legacy'] });
+  // Fake Expo: records each push request and answers a ticket per message.
+  const fakeFetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    expoCalls.push(body[0]);
+    const to = body[0].to;
+    const ticket = to.includes('dead')
+      ? { status: 'error', message: 'gone', details: { error: 'DeviceNotRegistered' } }
+      : { status: 'ok', id: 'ticket' };
+    return { ok: true, status: 200, json: async () => ({ data: [ticket] }) };
+  };
+  accounts = createAccounts(db, tokens, { fetchImpl: fakeFetch });
+  const auth = createAuth({ tokens, accounts });
   const tunnel = createTunnel({ notify });
   const attachments = createAttachments(db);
-  const v2 = createV2Router({
-    core, auth, notify, db, tunnel, attachments,
-    upstream: { host: '127.0.0.1', port: upstreamServer.address().port },
-  });
+  const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
   server = http.createServer(async (req, res) => {
     if (await v2.handle(req, res)) return;
     res.writeHead(599); res.end();
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
+  APP = await loginNew();
+  OTHER = await loginNew();
 });
 
 afterAll(async () => {
-  server.close(); upstreamServer.close();
+  server.close();
   await db.close();
 });
 
-async function call(method, path, { body, token = 'app-token', headers = {} } = {}) {
+async function call(method, path, { body, token, headers = {} } = {}) {
+  const bearer = token === undefined ? APP?.token : token;
   const r = await fetch(base + path, {
     method,
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers },
+    headers: { 'content-type': 'application/json', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
@@ -87,11 +88,11 @@ async function call(method, path, { body, token = 'app-token', headers = {} } = 
   return { status: r.status, json };
 }
 
-function makeDaemon(daemonId) {
+function makeDaemon(daemonId, token) {
   const d = { daemonId, leaseId: null, token: null, epoch: null };
   d.headers = () => ({ 'x-joy-lease-id': d.leaseId, 'x-joy-lease-token': d.token, 'x-joy-lease-epoch': d.epoch });
   d.acquire = async () => {
-    const r = await call('POST', '/joy/v2/daemon/leases', { body: { machineId: daemonId } });
+    const r = await call('POST', '/joy/v2/daemon/leases', { body: { machineId: daemonId }, token });
     expect(r.status).toBe(200);
     d.leaseId = r.json.leaseId; d.token = r.json.leaseToken; d.epoch = String(r.json.epoch);
   };
@@ -116,44 +117,165 @@ async function spawnBound(d) {
   return sid;
 }
 
+describe('login + tokens', () => {
+  it('a bad signature is refused; a good one creates the account and mints a token', async () => {
+    const id = identity();
+    const challenge = randomBytes(32);
+    const bad = await call('POST', '/joy/v2/auth', {
+      token: null, body: { publicKey: id.publicKey, challenge: challenge.toString('base64'), signature: Buffer.alloc(64).toString('base64') },
+    });
+    expect(bad.status).toBe(401);
+    const good = await loginNew();
+    const p = await call('GET', '/joy/v2/account/profile', { token: good.token });
+    expect(p.status).toBe(200);
+    expect(p.json.publicKey).toBe(Buffer.from(good.publicKey, 'base64').toString('hex').toUpperCase());
+  });
+
+  it('logging in twice with the same key yields the same account', async () => {
+    const id = identity();
+    const once = async () => {
+      const challenge = randomBytes(32);
+      const r = await call('POST', '/joy/v2/auth', {
+        token: null, body: { publicKey: id.publicKey, challenge: challenge.toString('base64'), signature: id.signChallenge(challenge) },
+      });
+      return (await call('GET', '/joy/v2/account/profile', { token: r.json.token })).json.id;
+    };
+    expect(await once()).toBe(await once());
+  });
+
+  it('tokens from every configured issuer verify; unknown issuers and forgeries do not', async () => {
+    const { id } = (await call('GET', '/joy/v2/account/profile')).json;
+    const legacy = await createTokenAuthority({ secret: 'test-secret-test-secret', issuers: ['legacy'] });
+    expect((await call('GET', '/joy/v2/account/profile', { token: legacy.mint(id) })).status).toBe(200);
+    const stranger = await createTokenAuthority({ secret: 'test-secret-test-secret', issuers: ['stranger'] });
+    expect((await call('GET', '/joy/v2/account/profile', { token: stranger.mint(id) })).status).toBe(401);
+    const wrongSecret = await createTokenAuthority({ secret: 'another-secret-entirely', issuers: ['joy'] });
+    expect((await call('GET', '/joy/v2/account/profile', { token: wrongSecret.mint(id) })).status).toBe(401);
+    // a valid signature over an account that does not exist is still 401
+    expect((await call('GET', '/joy/v2/account/profile', { token: tokens.mint('ghost') })).status).toBe(401);
+    expect((await call('GET', '/joy/v2/machines', { token: 'bogus' })).status).toBe(401);
+  });
+});
+
+describe('pairing', () => {
+  const ephemeral = () => randomBytes(32).toString('base64');
+
+  it('terminal: request → pending → response → authorized with token + sealed blob', async () => {
+    const pk = ephemeral();
+    const nf = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
+    expect(nf.json).toEqual({ status: 'not_found', supportsV2: false });
+    const req = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk, supportsV2: true } });
+    expect(req.json).toEqual({ state: 'requested' });
+    const pending = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
+    expect(pending.json).toEqual({ status: 'pending', supportsV2: true });
+    // answering needs auth
+    expect((await call('POST', '/joy/v2/auth/response', { token: null, body: { publicKey: pk, response: 'sealed' } })).status).toBe(401);
+    const ans = await call('POST', '/joy/v2/auth/response', { body: { publicKey: pk, response: 'sealed-1' } });
+    expect(ans.json).toEqual({ success: true });
+    // first write wins
+    await call('POST', '/joy/v2/auth/response', { token: OTHER.token, body: { publicKey: pk, response: 'sealed-2' } });
+    const poll = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
+    expect(poll.json.state).toBe('authorized');
+    expect(poll.json.response).toBe('sealed-1');
+    // the minted token belongs to the ANSWERING account
+    const me = await call('GET', '/joy/v2/account/profile', { token: poll.json.token });
+    expect(me.json.id).toBe((await call('GET', '/joy/v2/account/profile')).json.id);
+    const done = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
+    expect(done.json.status).toBe('authorized');
+  });
+
+  it('account flavour is independent of terminal flavour; unknown keys 404 on response', async () => {
+    const pk = ephemeral();
+    expect((await call('POST', '/joy/v2/auth/response', { body: { publicKey: pk, response: 'x' } })).status).toBe(404);
+    const req = await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
+    expect(req.json).toEqual({ state: 'requested' });
+    // a terminal-flavoured answer does not satisfy the account request
+    expect((await call('POST', '/joy/v2/auth/response', { body: { publicKey: pk, response: 'x' } })).status).toBe(404);
+    const ans = await call('POST', '/joy/v2/auth/account/response', { body: { publicKey: pk, response: 'sealed-acct' } });
+    expect(ans.status).toBe(200);
+    const poll = await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
+    expect(poll.json.state).toBe('authorized');
+    expect(poll.json.response).toBe('sealed-acct');
+  });
+
+  it('rejects malformed keys', async () => {
+    const r = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: Buffer.alloc(5).toString('base64') } });
+    expect(r.status).toBe(401);
+  });
+});
+
 describe('machines', () => {
-  it('lists upstream machines with the caller bearer and merges lease liveness', async () => {
+  it('upsert creates, replaces the blob with a version bump, and lists with lease liveness', async () => {
+    const c = await call('POST', '/joy/v2/machines', { body: { id: 'mach-live', metadata: 'enc-m1', dataEncryptionKey: 'dek-1' } });
+    expect(c.status).toBe(200);
+    expect(c.json.machine).toMatchObject({ id: 'mach-live', metadata: 'enc-m1', metadataVersion: 1, daemonStateVersion: 0, dataEncryptionKey: 'dek-1', active: false });
+    const same = await call('POST', '/joy/v2/machines', { body: { id: 'mach-live', metadata: 'enc-m1' } });
+    expect(same.json.machine.metadataVersion).toBe(1);
+    expect(same.json.machine.dataEncryptionKey).toBe('dek-1'); // carried forward
+    const changed = await call('POST', '/joy/v2/machines', { body: { id: 'mach-live', metadata: 'enc-m1b' } });
+    expect(changed.json.machine.metadataVersion).toBe(2);
+    await call('POST', '/joy/v2/machines', { body: { id: 'mach-dead', metadata: 'enc-m2' } });
+
     const d = makeDaemon('mach-live');
     await d.acquire();
     const r = await call('GET', '/joy/v2/machines');
     expect(r.status).toBe(200);
     const byId = Object.fromEntries(r.json.machines.map((m) => [m.id, m]));
     expect(byId['mach-live'].leaseAlive).toBe(true);
+    expect(byId['mach-live'].active).toBe(true);
     expect(byId['mach-dead'].leaseAlive).toBe(false);
-    expect(byId['mach-live'].dataEncryptionKey).toBe('dek-1');
-    // the delegation used the CALLER's token, not a relay credential
-    const up = upstreamCalls.find((c) => c.url === '/v1/machines');
-    expect(up.auth).toBe('Bearer app-token');
+    expect(byId['mach-dead'].active).toBe(false);
+    expect(byId['mach-live'].activeAt).toBeGreaterThan(Date.now() - 10_000);
+    const one = await call('GET', '/joy/v2/machines/mach-live');
+    expect(one.json.machine.metadata).toBe('enc-m1b');
   });
 
-  it('requires auth', async () => {
-    const r = await call('GET', '/joy/v2/machines', { token: 'bogus' });
-    expect(r.status).toBe(401);
+  it('daemonState PATCH is a CAS; a stale version answers version-mismatch with the current one', async () => {
+    await call('POST', '/joy/v2/machines', { body: { id: 'mach-cas', metadata: 'm' } });
+    const ok = await call('PATCH', '/joy/v2/machines/mach-cas', { body: { daemonState: 's1', expectedDaemonStateVersion: 0 } });
+    expect(ok.json).toMatchObject({ result: 'success', daemonStateVersion: 1 });
+    const stale = await call('PATCH', '/joy/v2/machines/mach-cas', { body: { daemonState: 's2', expectedDaemonStateVersion: 0 } });
+    expect(stale.json).toMatchObject({ result: 'version-mismatch', daemonStateVersion: 1 });
+    const meta = await call('PATCH', '/joy/v2/machines/mach-cas', { body: { metadata: 'renamed', expectedMetadataVersion: 1 } });
+    expect(meta.json).toMatchObject({ result: 'success', metadataVersion: 2 });
+    const got = await call('GET', '/joy/v2/machines/mach-cas');
+    expect(got.json.machine).toMatchObject({ metadata: 'renamed', daemonState: 's1' });
+    expect((await call('PATCH', '/joy/v2/machines/mach-cas', { body: {} })).status).toBe(400);
+  });
+
+  it('is scoped to the owning account', async () => {
+    await call('POST', '/joy/v2/machines', { body: { id: 'mach-mine', metadata: 'm' } });
+    expect((await call('GET', '/joy/v2/machines/mach-mine', { token: OTHER.token })).status).toBe(404);
+    expect((await call('POST', '/joy/v2/machines', { token: OTHER.token, body: { id: 'mach-mine', metadata: 'steal' } })).status).toBe(403);
+    expect((await call('DELETE', '/joy/v2/machines/mach-mine', { token: OTHER.token })).status).toBe(404);
+    expect((await call('DELETE', '/joy/v2/machines/mach-mine')).status).toBe(200);
+    expect((await call('GET', '/joy/v2/machines/mach-mine')).status).toBe(404);
   });
 });
 
-describe('auth + profile + push delegation', () => {
-  it('auth/request needs no auth and forwards the body', async () => {
-    const r = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: 'pk1', supportsV2: true } });
-    expect(r.status).toBe(200);
-    expect(r.json.state).toBe('requested');
-    const up = upstreamCalls.find((c) => c.url === '/v1/auth/request');
-    expect(JSON.parse(up.body).publicKey).toBe('pk1');
+describe('push', () => {
+  it('registers tokens idempotently, lists, deletes', async () => {
+    expect((await call('POST', '/joy/v2/push-tokens', { body: { token: 'ExponentPushToken[a]' } })).status).toBe(200);
+    expect((await call('POST', '/joy/v2/push-tokens', { body: { token: 'ExponentPushToken[a]' } })).status).toBe(200);
+    expect((await call('POST', '/joy/v2/push-tokens', { body: { token: 'ExponentPushToken[dead]' } })).status).toBe(200);
+    const list = await call('GET', '/joy/v2/push-tokens');
+    expect(list.json.tokens.map((t) => t.token).sort()).toEqual(['ExponentPushToken[a]', 'ExponentPushToken[dead]']);
+    expect((await call('GET', '/joy/v2/push-tokens', { token: OTHER.token })).json.tokens).toEqual([]);
+    expect((await call('POST', '/joy/v2/push-tokens', { body: {} })).status).toBe(400);
   });
 
-  it('profile and push ride the caller bearer', async () => {
-    const p = await call('GET', '/joy/v2/account/profile');
-    expect(p.status).toBe(200);
-    expect(p.json.id).toBe('account-1');
-    const push = await call('POST', '/joy/v2/push-tokens', { body: { token: 'expo-tok' } });
-    expect(push.status).toBe(200);
-    const up = upstreamCalls.filter((c) => c.url === '/v1/push-tokens').pop();
-    expect(up.auth).toBe('Bearer app-token');
+  it('delivers one Expo request per token and drops DeviceNotRegistered tokens', async () => {
+    const r = await call('POST', '/joy/v2/push', { body: { title: 'Done', body: 'finished', data: { sessionId: 's1' } } });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ sent: 1, targeted: 2 });
+    expect(r.json.errors).toHaveLength(1);
+    expect(expoCalls.map((c) => c.to).sort()).toEqual(['ExponentPushToken[a]', 'ExponentPushToken[dead]']);
+    expect(expoCalls[0]).toMatchObject({ title: 'Done', body: 'finished', sound: 'default' });
+    expect(expoCalls[0].data.sessionId).toBe('s1');
+    const list = await call('GET', '/joy/v2/push-tokens');
+    expect(list.json.tokens.map((t) => t.token)).toEqual(['ExponentPushToken[a]']);
+    expect((await call('DELETE', '/joy/v2/push-tokens/ExponentPushToken%5Ba%5D')).status).toBe(200);
+    expect((await call('GET', '/joy/v2/push-tokens')).json.tokens).toEqual([]);
   });
 });
 
@@ -178,7 +300,7 @@ describe('session card publish (daemon PATCH)', () => {
   it('a foreign daemon cannot write the card', async () => {
     const owner = makeDaemon('mach-own'); await owner.acquire();
     const sid = await spawnBound(owner);
-    const thief = makeDaemon('mach-thief'); await thief.acquire();
+    const thief = makeDaemon('mach-thief', OTHER.token); await thief.acquire();
     const r = await call('PATCH', `/joy/v2/daemon/sessions/${sid}`, {
       headers: thief.headers(), token: null, body: { state: 'archived' },
     });

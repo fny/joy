@@ -1,12 +1,11 @@
 {
   "name": "@fny/joy-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "joy relay — phase 1: native /joy/v1 nucleus (durable queue, turns, cancellation, leases, events) + legacy passthrough to happy-server (strangler pattern)",
+  "description": "joy relay — the one server: accounts, pairing, machines, push, durable queue, turns, cancellation, leases, events, attachments, tunnel",
   "scripts": {
-    "start": "node proxy.mjs",
-    "start:native": "node server.mjs",
+    "start": "node server.mjs",
     "test": "vitest run"
   },
   "dependencies": {

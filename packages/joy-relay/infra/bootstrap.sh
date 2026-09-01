@@ -1,41 +1,26 @@
 #!/usr/bin/env bash
 # Idempotent bootstrap for the joy relay box (joy.voltai.party).
-# Run as ubuntu with sudo (deploy.sh does both the rsync and this). Assumes:
-# repo build context rsynced to ~/relay-src, joy-relay package (including
-# these infra files, at ~/joy-relay/infra) rsynced to ~/joy-relay.
+# Run as ubuntu with sudo (deploy.sh does both the rsync and this). Assumes
+# the joy-relay package (including these infra files, at ~/joy-relay/infra)
+# was rsynced to ~/joy-relay and ~/joy-relay-dev.
 #
-# Edge layout: 4997 = Joy Relay (STABLE proxy), 14997 = Joy Relay Dev (dev
-# proxy, iterate freely), 24997 = Happy Joy (happy-server direct).
-# 80/443/1443 are DISABLED: ufw allows only 22 + the three relay ports;
+# Edge layout: 4997 = Joy Relay (STABLE), 14997 = Joy Relay Dev.
+# 80/443/1443 are DISABLED: ufw allows only 22 + the two relay ports;
 # certbot renews through a pre/post-hook punch-hole on :80 (the EC2 security
-# group must keep 22, 80, 4997, 14997, 24997 allowed — 80 stays ufw-closed
-# outside renewals).
+# group must keep 22, 80, 4997, 14997 allowed — 80 stays ufw-closed outside
+# renewals).
 set -euo pipefail
 
 INFRA=~/joy-relay/infra
 
 echo "== packages =="
 sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman caddy curl fail2ban certbot ufw > /dev/null
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq caddy curl fail2ban certbot ufw > /dev/null
 if ! command -v node >/dev/null || [[ "$(node -v)" != v22* ]]; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - > /dev/null
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs > /dev/null
 fi
-node -v; podman --version; caddy version | head -1
-
-echo "== secrets =="
-sudo mkdir -p /etc/joy-relay
-if ! sudo test -f /etc/joy-relay/happy.env; then
-  echo "HANDY_MASTER_SECRET=$(openssl rand -hex 32)" | sudo tee /etc/joy-relay/happy.env > /dev/null
-  echo "PORT=3005" | sudo tee -a /etc/joy-relay/happy.env > /dev/null
-  sudo chmod 600 /etc/joy-relay/happy.env
-  echo "happy.env created"
-fi
-if ! sudo test -f /etc/joy-relay/pg.env; then
-  echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" | sudo tee /etc/joy-relay/pg.env > /dev/null
-  sudo chmod 600 /etc/joy-relay/pg.env
-  echo "pg.env created"
-fi
+node -v; caddy version | head -1
 
 echo "== fail2ban =="
 sudo cp "$INFRA/jail.local" /etc/fail2ban/jail.local
@@ -43,6 +28,7 @@ sudo systemctl enable --now fail2ban > /dev/null
 sudo systemctl restart fail2ban
 
 echo "== certs =="
+sudo mkdir -p /etc/joy-relay
 sudo install -D -m 755 "$INFRA/certbot-hooks/pre-open-http.sh" /etc/letsencrypt/renewal-hooks/pre/open-http.sh
 sudo install -D -m 755 "$INFRA/certbot-hooks/post-close-http.sh" /etc/letsencrypt/renewal-hooks/post/close-http.sh
 sudo install -D -m 755 "$INFRA/certbot-hooks/deploy-caddy.sh" /etc/letsencrypt/renewal-hooks/deploy/caddy.sh
@@ -58,36 +44,29 @@ fi
 # (Re)install the cert where caddy can read it, even if certbot didn't run.
 sudo /etc/letsencrypt/renewal-hooks/deploy/caddy.sh
 
-echo "== happy-server image =="
-cd ~/relay-src
-sudo podman build -q -f "$INFRA/Containerfile.happy" -t localhost/happy-server:latest .
-
-echo "== joy-relay-dev deps + data dir =="
-# The dev instance runs the native nucleus (server.mjs) and needs its own
-# node_modules (pglite) and a data dir OUTSIDE the checkout (deploy rsyncs
-# with --delete; data must survive).
+echo "== relay deps + data dirs =="
+# Each instance needs its own node_modules (pglite) and a data dir OUTSIDE
+# the checkout (deploy rsyncs with --delete; data must survive).
+(cd ~/joy-relay && npm install --omit=dev --no-audit --no-fund --silent)
 (cd ~/joy-relay-dev && npm install --omit=dev --no-audit --no-fund --silent)
-mkdir -p ~/joy-relay-data/dev
+mkdir -p ~/joy-relay-data/stable ~/joy-relay-data/dev
 
-echo "== quadlets + units =="
-sudo mkdir -p /etc/containers/systemd
-sudo cp "$INFRA/happy-server.container" /etc/containers/systemd/
-sudo cp "$INFRA/postgres.container" /etc/containers/systemd/
+echo "== units =="
 sudo cp "$INFRA/joy-relay.service" /etc/systemd/system/
 sudo cp "$INFRA/joy-relay-dev.service" /etc/systemd/system/
 sudo cp "$INFRA/Caddyfile" /etc/caddy/Caddyfile
 sudo systemctl daemon-reload
-sudo systemctl enable joy-relay-dev.service > /dev/null 2>&1 || true
-sudo systemctl restart happy-server.service postgres.service joy-relay.service joy-relay-dev.service caddy
-sleep 3
-sudo systemctl is-active happy-server joy-relay joy-relay-dev caddy postgres fail2ban | tr '\n' ' '; echo
+sudo systemctl enable joy-relay.service joy-relay-dev.service > /dev/null 2>&1 || true
+sudo systemctl restart joy-relay.service joy-relay-dev.service caddy
+sleep 2
+sudo systemctl is-active joy-relay joy-relay-dev caddy fail2ban | tr '\n' ' '; echo
 
 echo "== firewall =="
 # 22 first — never lock ourselves out. 80/443/1443 are intentionally absent.
 sudo ufw allow OpenSSH > /dev/null
 sudo ufw allow 4997/tcp > /dev/null
 sudo ufw allow 14997/tcp > /dev/null
-sudo ufw allow 24997/tcp > /dev/null
+sudo ufw delete allow 24997/tcp > /dev/null 2>&1 || true
 sudo ufw default deny incoming > /dev/null
 sudo ufw default allow outgoing > /dev/null
 sudo ufw --force enable > /dev/null

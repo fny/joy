@@ -1,8 +1,6 @@
-# joy.voltai.party edge — one host, three doors into the same happy-server
-# universe:
-#   4997  Joy Relay        joy-relay STABLE proxy (:3105) — keep this one boring
-#   14997 Joy Relay Dev    joy-relay DEV proxy (:3106) — restart/iterate freely
-#   24997 Happy Joy        happy-server direct (:3005) — upstream reference
+# joy.voltai.party edge — one host, two doors into the relay:
+#   4997  Joy Relay        STABLE (:3105) — keep this one boring
+#   14997 Joy Relay Dev    DEV (:3106) — restart/iterate freely
 # 80/443/1443 are closed at the host firewall (ufw, see bootstrap.sh); certs
 # come from certbot, renewed standalone through a ufw punch-hole on :80 — so
 # caddy must never bind 80/443 itself (auto_https off, file-based tls).
@@ -16,8 +14,4 @@ joy.voltai.party:4997 {
 joy.voltai.party:14997 {
     tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem
     reverse_proxy 127.0.0.1:3106
-}
-joy.voltai.party:24997 {
-    tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem
-    reverse_proxy 127.0.0.1:3005
 }

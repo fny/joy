@@ -1,8 +1,8 @@
-// Relay access gate: a shared key required on EVERY request (HTTP + WebSocket
-// upgrade) before anything reaches happy-server. This keys the relay itself —
-// without it, anyone who can reach the port can auto-create accounts and use
-// the box (happy-server's /v1/auth is open by design). Per-account bearer auth
-// and E2E encryption are unchanged underneath; this is a perimeter key.
+// Relay access gate: a shared key required on EVERY request before anything
+// reaches the relay. Without it, anyone who can reach the port can auto-create
+// accounts and use the box (/joy/v2/auth is open by design). Per-account
+// bearer auth and E2E encryption are unchanged underneath; this is a perimeter
+// key.
 //
 // Key comes from JOY_RELAY_ACCESS_KEY in the service environment. UNSET → the
 // gate is open (deploy-then-flip: ship support everywhere, then set the key).

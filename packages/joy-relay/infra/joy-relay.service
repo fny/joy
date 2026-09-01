@@ -1,21 +1,21 @@
 # systemd — /etc/systemd/system/joy-relay.service (bare on host: fast edit-restart)
-# PROMOTED 2026-08-30: stable now runs the native nucleus entrypoint
-# (server.mjs = /joy/v1 + /joy/v2 + byte-for-byte passthrough) on the SAME
-# internal port 3105 (caddy :4997 → 3105). Non-/joy traffic is proxied to
-# happy-server exactly as proxy.mjs did, so existing app/socket traffic is
-# unchanged; this only ADDS the native /joy routes (which :4997 previously
-# 404'd). Rollback: set ExecStart back to proxy.mjs and restart.
+# The STABLE relay: server.mjs on internal port 3105 (caddy :4997 → 3105).
+# The relay is the only server — accounts, pairing, machines, push and the
+# durable session plane all live in its PGlite store under JOY_RELAY_DATA_DIR.
 [Unit]
-Description=joy-relay (native /joy/v1 + /joy/v2 nucleus + passthrough to happy-server)
+Description=joy-relay (stable)
 After=network-online.target
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/joy-relay
 Environment=JOY_RELAY_PORT=3105
-Environment=JOY_RELAY_UPSTREAM_PORT=3005
 Environment=JOY_RELAY_DATA_DIR=/home/ubuntu/joy-relay-data/stable
-# Perimeter key (gate.mjs): create this file with JOY_RELAY_ACCESS_KEY=…
-# to enforce the relay key; absent file = open (unset key = open gate).
+# ~/joy-relay.env carries the secrets (never in this unit):
+#   JOY_RELAY_ACCESS_KEY    perimeter key (gate.mjs); unset = open gate
+#   JOY_RELAY_TOKEN_SECRET  bearer-token signing secret; unset = generated once
+#                           into $JOY_RELAY_DATA_DIR/token.secret
+#   JOY_RELAY_TOKEN_ISSUERS comma list of accepted token issuers, first mints
+#                           (default "joy")
 EnvironmentFile=-/home/ubuntu/joy-relay.env
 ExecStart=/usr/bin/node server.mjs
 Restart=always
