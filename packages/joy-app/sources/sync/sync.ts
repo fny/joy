@@ -1149,6 +1149,7 @@ class Sync {
         // its own work queue trusts. No happy mirror, no /v1.
         const { v2 } = await import('./v2/api');
         const { openCard } = await import('./v2/card');
+        const { v2ActiveAt } = await import('./v2/liveness');
         const { sessions: rows } = await v2.listSessions();
 
         // Register a (legacy, key-less) session encryption per id: v2 message
@@ -1198,7 +1199,9 @@ class Sync {
                 agentStateVersion: 0,
                 dataEncryptionKey: null,
                 active: row.state === 'provisioning' || row.state === 'starting' || row.state === 'active',
-                activeAt: row.lastTurnAt ?? row.updatedAt,
+                // Lease liveness is the heartbeat (see v2/liveness.ts): an idle
+                // session stays fresh while its daemon is online.
+                activeAt: v2ActiveAt(row, existing?.activeAt),
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
                 lastMessage: null,

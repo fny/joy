@@ -1,9 +1,9 @@
 {
   "entries": [
     {
-      "title": "Sep 1 (2) — No more empty date headers",
+      "title": "Sep 1 (2) — Idle sessions stay in the sidebar",
       "summary": "",
-      "markdown": "- **Sessions that died while their daemon was down are archived, not haunted.** A session the relay still believed was running — but that no machine actually had anymore — grouped itself under \"Yesterday\" / \"2 days ago\" and then hid, leaving a date header with nothing under it. Two fixes: the daemon now archives any session it's supposed to own but has no runtime for the moment it reconnects, and the sidebar decides \"active\" once, the same way for grouping and for showing, so a row can never be filed as history and then dropped as active.\n- **Desktop shows its release.** The JS-update row on web/desktop now always shows the commit and release time instead of \"web bundle (unstamped build)\"."
+      "markdown": "- **A live session no longer vanishes 90 seconds after its last reply.** The app judged \"still alive\" by the time of the last turn, which under v2 nothing refreshed while you weren't talking — so a freshly created session dropped out of the active list (or off the sidebar entirely) as soon as it sat idle. Liveness now follows the daemon's relay lease, the same signal that decides whether a message would be delivered: online means active, however long it's been quiet, and a daemon that dies shows offline within about 20 seconds.\n- **Sessions that died while their daemon was down are archived, not haunted.** A session the relay still believed was running — but that no machine actually had anymore — grouped itself under \"Yesterday\" / \"2 days ago\" and then hid, leaving a date header with nothing under it. Two fixes: the daemon now archives any session it's supposed to own but has no runtime for the moment it reconnects, and the sidebar decides \"active\" once, the same way for grouping and for showing, so a row can never be filed as history and then dropped as active.\n- **Desktop shows its release.** The JS-update row on web/desktop now always shows the commit and release time instead of \"web bundle (unstamped build)\"."
     },
     {
       "title": "Sep 1 — Everything speaks v2",
@@ -126,5 +126,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 1 (2) — No more empty date headers"
+  "latestTitle": "Sep 1 (2) — Idle sessions stay in the sidebar"
 }
