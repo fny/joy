@@ -1,4 +1,4 @@
-# Happy Layout — Core Spec
+# Joy Layout — Core Spec
 
 ## Current Layout (from code)
 

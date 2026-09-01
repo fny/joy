@@ -91,7 +91,7 @@ Stress the dispatch/abort/queue machinery with rapid fire: interrupt an agent mi
 
 Guards the "blank/partial chat until you send the first message" regression and the daemon `recover()` transcript-binding bug (a session re-adopted with `transcript=null` never re-binds, so the app shows an empty or truncated history).
 
-- Start from a session with a **multi-turn history** — at least 3 user→agent exchanges (reuse the session from earlier tests, or build one: e.g. `What is 2+2?`, `Now multiply that by 10`, `Write one sentence about the ocean`). Before killing, **record the complete expected message set and order** from the server sequence (`GET /v1/sessions/<relay-id>/messages`) and the Claude session id.
+- Start from a session with a **multi-turn history** — at least 3 user→agent exchanges (reuse the session from earlier tests, or build one: e.g. `What is 2+2?`, `Now multiply that by 10`, `Write one sentence about the ocean`). Before killing, **record the complete expected message set and order** from the relay sequence (`GET /joy/v2/sessions/<relay-id>/messages`) and the Claude session id.
 - In the session, select **Kill**. Confirm the tmux window closed and the session no longer appears in the sidebar.
 - Resume it: New-session page → select the same folder → **continue** (and separately, as a second pass, via the **Claude session id** path) → submit an empty message to land on the session page.
 - **The critical assertion — do NOT send any message to "wake" the session first:** on landing, the chat must render the **ENTIRE prior conversation immediately** — every prior user AND agent message, in server `seq` order, nothing missing. Assert specifically:

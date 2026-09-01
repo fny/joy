@@ -8,10 +8,10 @@ Control your coding agents — Claude Code, Codex, OpenCode, Pi — from your ph
 
 ---
 
-`joy` is a personal fork of [Happy Coder](https://github.com/slopus/happy). It pairs a
-client app with a tmux-based daemon so you can drive coding agents from anywhere: the
-daemon runs your sessions on your machine, the app mirrors them in real time over an
-end-to-end encrypted relay, and you can take over from any device.
+`joy` pairs a client app with a tmux-based daemon so you can drive coding agents from
+anywhere: the daemon runs your sessions on your machine, the app mirrors them in real time
+over an end-to-end encrypted relay, and you can take over from any device. It started as a
+fork of Happy Coder and is now its own three-package system.
 
 The packages that make up joy are:
 
@@ -21,13 +21,10 @@ The packages that make up joy are:
   (claude in tmux control mode; codex, opencode, and pi through their native protocols),
   tails their transcripts, and bridges everything to the relay. Also serves a local REST
   API (`/docs?token=…` on each machine) and a scripting CLI (`joy run/ask/send/wait`).
-- **[joy-relay](packages/joy-relay)** - the self-hosted relay: a gated proxy in front of
-  happy-server plus the native `/joy/v1` durable-session protocol (see
-  `https://joy.voltai.party:4997/docs`).
-
-The `happy-*` packages in this repo are a pristine mirror of upstream
-[slopus/happy](https://github.com/slopus/happy), kept around for reference and for porting
-upstream changes — joy's own code lives only in `joy-app` and `joy-daemon`.
+- **[joy-relay](packages/joy-relay)** - the self-hosted relay and the only server:
+  accounts, pairing, machines, push, and the `/joy/v2` durable-session protocol
+  (server-owned queue, real cancellation, E2E tunnel) in one Node process on an embedded
+  PGlite store (see `https://joy.voltai.party:4997/docs`).
 
 ## How does it work?
 
@@ -59,8 +56,7 @@ pnpm install
 ### Run the daemon (joy-daemon)
 
 Pair a machine with your relays from your account backup code (one code works on every
-relay): `joy auth <relay…>`. Credentials land under `~/.joy/relays/` (default-relay creds
-in `~/.happy/access.key`; set `HAPPY_HOME_DIR` to point elsewhere).
+relay): `joy auth <relay…>`. Credentials land under `~/.joy/relays/<host>_<port>/`.
 
 ```bash
 cd packages/joy-daemon

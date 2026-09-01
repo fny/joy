@@ -10,7 +10,8 @@ the definition of done; the in-app What's New lives separately in
 joy is a phone/desktop cockpit for coding agents running inside tmux on your
 machines. A **joy-daemon** per machine adopts or spawns agent sessions
 (claude, codex, opencode, pi), parses their state, and relays everything
-end-to-end encrypted through a **relay** (happy-server) to the **joy-app**
+end-to-end encrypted through the **joy-relay** (`/joy/v2`: durable queue,
+accounts, machines, push, E2E tunnel — one server, PGlite-backed) to the **joy-app**
 (Expo RN: iOS/Android/web/Tauri desktop). One account backup code works on
 every relay; machines register per account.
 
@@ -96,9 +97,10 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 
 ## Identity & relays
 
-- One backup code pairs everything: app relay picker (Happy Cloud + Joy
-  Relay), `joy auth <relay...>` CLI self-pairing, per-relay MMKV scoping so
-  accounts never bleed. joy-dev/happy-joy doors removed from the picker.
+- One backup code pairs everything: app relay picker (Joy Relay + custom
+  URL), `joy auth <relay...>` CLI self-pairing, per-relay MMKV scoping so
+  accounts never bleed. The relay is the account authority (ed25519 login,
+  EdDSA bearer tokens, terminal + account pairing flows).
 - Relay perimeter password: settable per relay from Settings → Account (lock
   on each relay row) as well as Server Configuration. Stored per relay and
   sent as `X-Joy-Relay-Key`; a logged-in client also derives one from the
@@ -118,12 +120,10 @@ rendered modes (Markdown, HTML, CSV/TSV, images), zoom/wrap, download, delete
 saves and conflict diff. Daemon FS
 ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
 
-## Account, voice, extras
+## Account & extras
 
 - Account: backup-key reveal/restore, QR device-link approval, terminal-auth
-  deep links, push-token administration, GitHub/service connections.
-- Voice assistant (ElevenLabs realtime) with language pick and custom agent id.
-- Encrypted Markdown artifacts (routes live; not linked from nav yet).
+  deep links (`joy://`), push-token administration.
 - joy CLI: `joy` daemon control (`update`, `auth <relay...>`, `new --agent`,
   install/uninstall services), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
@@ -133,8 +133,9 @@ ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
 
 ## Cross-cutting invariants
 
-- happy-* packages are pristine upstream mirrors; happy-server is never
-  modified.
+- Three packages, no upstream: joy-app, joy-daemon, joy-relay. There is no
+  proxy and no second server — an endpoint the relay doesn't implement
+  doesn't exist.
 - Everything user-visible is E2E-encrypted through the relay.
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux

@@ -1,24 +1,24 @@
 ---
 name: e2e-tests
-description: Run the joy end-to-end suite as an agent — drive joy-app in a browser against a freshly-built joy-daemon, asserting session artifacts (Claude log, happy-server seq, tmux window, UI) stay consistent and in order.
+description: Run the joy end-to-end suite as an agent — drive joy-app in a browser against a freshly-built joy-daemon, asserting session artifacts (Claude log, relay seq, tmux window, UI) stay consistent and in order.
 ---
 
-In `packages/joy-app` and `packages/joy-daemon` you'll find a React Native application and a tmux controller respectively. They communicate through `packages/joy-relay`, which serves the native `/joy/v1` + `/joy/v2` surfaces itself and proxies everything else to `packages/happy-server` — which must **never be modified**.
+In `packages/joy-app` and `packages/joy-daemon` you'll find a React Native application and a tmux controller respectively. They communicate through `packages/joy-relay`, the one server: accounts, pairing, machines, push and the `/joy/v1` + `/joy/v2` session plane, all in one Node process on an embedded PGlite store.
 
-You will test the EXACT prod topology, entirely on this box: `stack.sh` boots a local happy-server (standalone PGlite mode) plus a local joy-relay in front of it, the app runs as a web build via `/chrome-cli` pointed at the relay, and a dedicated joy-daemon process is pinned to the relay's test port. No request leaves the machine; accounts are throwaway by construction (they live in the stack's own PGlite and die with `stack.sh reset`). Run the whole flow end to end.
+You will test the EXACT prod topology, entirely on this box: `stack.sh` boots a local joy-relay, the app runs as a web build via `/chrome-cli` pointed at the relay, and a dedicated joy-daemon process is pinned to the relay's test port. No request leaves the machine; accounts are throwaway by construction (they live in the stack's own PGlite and die with `stack.sh reset`). Run the whole flow end to end.
 
 If anything breaks: make a note, attempt to fix it with a focused commit, and continue the suite. If state is ever contaminated, purge whatever data was created and continue from that point rather than rerunning the whole suite.
 
 ## The prod-mirror stack
 
 ```bash
-.claude/skills/e2e-tests/stack.sh start   # happy-server :3005 (pglite) + joy-relay :3105
-.claude/skills/e2e-tests/stack.sh status  # both pids
+.claude/skills/e2e-tests/stack.sh start   # joy-relay :3105 (PGlite under ~/.joy-e2e/relay-data)
+.claude/skills/e2e-tests/stack.sh status  # pid
 .claude/skills/e2e-tests/stack.sh stop
-.claude/skills/e2e-tests/stack.sh reset   # stop + WIPE all server/relay state (accounts, sessions, v2 store)
+.claude/skills/e2e-tests/stack.sh reset   # stop + WIPE all relay state (accounts, machines, sessions)
 ```
 
-State and logs live under `~/.joy-e2e/` (`happy-data/`, `relay-data/`, `logs/`). The relay URL for EVERYTHING — app server URL, daemon `JOY_RELAY_URL`, happy-cli `HAPPY_SERVER_URL`, curl checks — is **`http://127.0.0.1:3105`**. Never point any harness piece at a remote server; the deployed relays and Happy Cloud are out of bounds for tests.
+State and logs live under `~/.joy-e2e/` (`relay-data/`, `logs/`). The relay URL for EVERYTHING — app server URL, daemon `JOY_RELAY_URL`, curl checks — is **`http://127.0.0.1:3105`**. Never point any harness piece at a remote server; the deployed relays are out of bounds for tests.
 
 ## Test account (create fresh, or reuse a saved one)
 
@@ -27,65 +27,18 @@ Run against a **throwaway account on the local stack** — created through the a
 - **Create fresh (default):** follow Test 0 (Create Account) in the browser. After a `stack.sh reset` this is the ONLY way — the old account is gone with the database.
 - **Reuse a saved account:** if you already have the account's restore secret key, log in with Login → "Restore with Secret Key Instead" → paste key (on success the app `router.back()`s to the QR page, which LOOKS like a failure — check `/` for the session list). **Do NOT paste any restore key into this file** — it's committable; keep account secrets outside the repo (e.g. a local scratch note).
 
-**Daemon credentials MUST be a dataKey account.** A legacy-credential account makes *every* machineRPC silently return `null` — `joy-create-session` fails with `Cannot use 'in' operator … in null`, and the same symptom appears if a machine's stored key drifts from the server's machine record (a machineKey mismatch after a re-auth). A fresh "Create Account" is dataKey; verify via the RPC health check (Setup step 5), don't assume. Standard daemon start once creds exist under `~/.joy-test`:
-  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux HAPPY_HOME_DIR=$HOME/.joy-test JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`
+**Daemon credentials** come from the app's terminal-pairing flow (so the daemon shares the account's data key and the app can decrypt its session cards) or, for daemon/relay-only suites, from `mint-daemon-creds.mjs` (a fresh account with random keys — the v2 lane needs only token + machineId). Standard daemon start once creds exist under `~/.joy-test`:
+  `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux JOY_HOME_DIR=$HOME/.joy-test JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`
 
-**Mint fresh daemon creds non-interactively (~1 min):** run `HAPPY_HOME_DIR=$HOME/.joy-test HAPPY_SERVER_URL=http://127.0.0.1:3105 npx tsx joytest-auth.ts` from `packages/happy-cli`; it prints `APPROVE_KEY=<key>`; in a browser already logged into the target account open `http://localhost:8082/terminal/connect#key=<key>` and click "Accept Connection"; the script writes a fresh dataKey `access.key` + `settings.json` (with a new machineId) into `$HAPPY_HOME_DIR` and exits `WROTE_DATAKEY`. Then verify RPC health (Setup step 5) before testing.
+**Pair the daemon with the browser account (~1 min):** `JOY_HOME_DIR=$HOME/.joy-test JOY_RELAY_URL=http://127.0.0.1:3105 pnpm -C packages/joy-daemon cli auth http://127.0.0.1:3105` prints a pairing key / link; in a browser already logged into the target account open `http://localhost:8082/terminal/connect#key=<key>` and click "Accept Connection"; the daemon writes `access.key` + `settings.json` (with a new machineId) under `$JOY_HOME_DIR/relays/127.0.0.1_3105/`. Then verify RPC health (Setup step 5) before testing.
 
-`joytest-auth.ts` is an UNTRACKED file — recreate it at `packages/happy-cli/joytest-auth.ts` from this source if it's gone (it's the non-interactive daemon-auth helper: replicates happy-cli's `waitForAuthentication` without the Ink TUI):
-
-```ts
-// E2E test helper: non-interactive daemon auth. Replicates happy-cli's
-// waitForAuthentication WITHOUT the Ink TUI — POST /v1/auth/request, then poll
-// until the web app (driven separately) approves, then write a dataKey access.key.
-import { configuration } from "@/configuration";
-import { decodeBase64, encodeBase64, encodeBase64Url } from "@/api/encryption";
-import { decryptWithEphemeralKey } from "@/ui/auth";
-import { writeCredentialsDataKey, writeCredentialsLegacy, updateSettings } from "@/persistence";
-import { randomBytes, randomUUID } from "node:crypto";
-import tweetnacl from "tweetnacl";
-import axios from "axios";
-
-async function main() {
-  const secret = new Uint8Array(randomBytes(32));
-  const keypair = tweetnacl.box.keyPair.fromSecretKey(secret);
-  const pubB64 = encodeBase64(keypair.publicKey);
-  const hdrs = { headers: { "X-Happy-Client": "cli/e2e" } };
-  console.error("SERVER=" + configuration.serverUrl);
-  console.error("HOME=" + configuration.happyHomeDir);
-  console.error("APPROVE_KEY=" + encodeBase64Url(keypair.publicKey));
-  await axios.post(`${configuration.serverUrl}/v1/auth/request`, { publicKey: pubB64, supportsV2: true }, hdrs);
-  console.error("REQUEST_SENT");
-  const deadline = Date.now() + 180000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const resp = await axios.post(`${configuration.serverUrl}/v1/auth/request`, { publicKey: pubB64, supportsV2: true }, hdrs);
-    if (resp.data.state !== "authorized") continue;
-    const token = resp.data.token as string;
-    const decrypted = decryptWithEphemeralKey(decodeBase64(resp.data.response), keypair.secretKey);
-    if (!decrypted) { console.error("DECRYPT_FAILED"); process.exit(1); }
-    if (decrypted.length === 32) {
-      await writeCredentialsLegacy({ secret: decrypted, token });
-      console.error("WROTE_LEGACY (warning: machineRPC will not work)");
-    } else if (decrypted[0] === 0) {
-      await writeCredentialsDataKey({ publicKey: decrypted.slice(1, 33), machineKey: new Uint8Array(randomBytes(32)), token });
-      console.error("WROTE_DATAKEY");
-    } else { console.error("BAD_RESPONSE"); process.exit(1); }
-    const s = await updateSettings(async (st: any) => ({ ...st, machineId: st.machineId || randomUUID() }));
-    console.error("DONE machineId=" + (s as any).machineId);
-    process.exit(0);
-  }
-  console.error("TIMEOUT — not approved within 180s");
-  process.exit(1);
-}
-main().catch((e) => { console.error("ERR", e?.message || e); process.exit(1); });
-```
+**Mint headless daemon creds (no browser, daemon/relay suites):** `TOKEN=$(node .claude/skills/e2e-tests/mint-daemon-creds.mjs --relay http://127.0.0.1:3105 --home $HOME/.joy-test --machine v2-live-e2e)` — prints the account bearer so the same account can drive the client side over HTTP.
 
 ## Isolation — never touch prod or the harness
 
 There are usually OTHER joy daemons running on this machine. Do not clobber them. Use a dedicated set throughout:
 
-- `HAPPY_HOME_DIR=$HOME/.joy-test` (happy data — **not** `~/.happy` (prod) or `~/.happy-e2e` (harness))
+- `JOY_HOME_DIR=$HOME/.joy-test` (daemon home — **not** `~/.joy` (the live daemon on this box))
 - `TMUX_SESSION=joy-test`
 - daemon `PORT=4999`, shut down any existing `joy-*` tmux sessions and processes, leave vanilla `joy` alone
 - Metro on a DEDICATED **`:8082`** — never the user's dev server on `:8081`; kill any process already holding `:8082`
@@ -126,11 +79,11 @@ If a previous run left state, kill/remove it first (see Setup).
 ## Setup (run once, fail-fast — do not start tests until all pass)
 
 1. **Build gate.** `pnpm install`, then `pnpm -C packages/joy-daemon typecheck && pnpm -C packages/joy-daemon test` and `pnpm -C packages/joy-app typecheck`. tsx ships TS errors as *runtime* crashes, so never e2e-test code that doesn't typecheck.
-1a. **Stack up.** `stack.sh start` and wait for "stack healthy". `stack.sh reset` first when you want a pristine database. Sanity: `curl -s http://127.0.0.1:3105/joy/v1/capabilities` (native) and a junk `POST /v1/auth/request` through the relay must answer with a real happy-server response (proxy path).
+1a. **Stack up.** `stack.sh start` and wait for "stack healthy". `stack.sh reset` first when you want a pristine database. Sanity: `curl -s http://127.0.0.1:3105/joy/v1/capabilities` and `curl -s http://127.0.0.1:3105/joy/v2/auth/request/status?publicKey=00` (→ 401 malformed key) both answer from the relay itself.
 2. **Purge stale state.** Kill any `joy-test` tmux session, any process on `:4999` and `:8082`; `rm -rf $HOME/.joy-test $HOME/joy-test`.
-3. **Fresh bundle.** Start Metro with `--clear` on `:8082`, with `EXPO_PUBLIC_HAPPY_SERVER_URL=http://127.0.0.1:3105` so the app targets the local relay (or set the custom server URL in the app UI). **Verify the served bundle is fresh** (Metro's file-watcher can silently serve a frozen bundle, and the browser caches modules) — grep the served bundle for a known-current string and hard-reload chrome (clear its cache) before trusting the UI.
-4. **Start the daemon from latest source** (pinned to the test relay): `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 HAPPY_HOME_DIR=$HOME/.joy-test TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`. Confirm the process start-time is *after* HEAD's commit (a long-lived tsx daemon does NOT hot-reload).
-5. **RPC health check (critical).** Once an account + session exist, make one `machineRPC` call (e.g. list sessions) and assert it returns **non-null**. A legacy-credential account makes *every* RPC silently return `null` — abort the suite with a clear message if so. A fresh "Create Account" should be a **dataKey** account; verify, don't assume.
+3. **Fresh bundle.** Start Metro with `--clear` on `:8082`, with `EXPO_PUBLIC_JOY_SERVER_URL=http://127.0.0.1:3105` so the app targets the local relay (or set the custom server URL in the app UI). **Verify the served bundle is fresh** (Metro's file-watcher can silently serve a frozen bundle, and the browser caches modules) — grep the served bundle for a known-current string and hard-reload chrome (clear its cache) before trusting the UI.
+4. **Start the daemon from latest source** (pinned to the test relay): `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 JOY_HOME_DIR=$HOME/.joy-test TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`. Confirm the process start-time is *after* HEAD's commit (a long-lived tsx daemon does NOT hot-reload).
+5. **RPC health check (critical).** Once the daemon is paired, make one machine op through the relay tunnel (e.g. the app's machine page, or `joy-status` via `POST /joy/v2/machines/<id>/http`) and assert it returns **non-null**. A machineKey drift between the daemon's `access.key` and the app's copy of the machine record makes every op fail to decrypt — abort the suite with a clear message if so.
 
 ## Definitions — "session artifacts" and how to validate them
 
@@ -139,7 +92,7 @@ The same messages, in the same order, must appear in all four artifacts:
 | Artifact | How to read it |
 |---|---|
 | Claude session log | `~/.claude/projects/<cwd-with-/-as->/<claude-session-id>.jsonl` |
-| happy-server sequence | `GET <serverUrl>/v1/sessions/<relay-id>/messages` (Authorization: Bearer `<token from access.key>`) |
+| relay sequence | `GET <relayUrl>/joy/v2/sessions/<relay-id>/messages` (Authorization: Bearer `<token from access.key>`) |
 | `joy-daemon` tmux window | `tmux capture-pane -t joy-test:<window> -p` |
 | UI | `/chrome-cli` snapshot / eval against the session view |
 
@@ -175,7 +128,7 @@ The tests are split into three suite files in this directory:
 | **Chat** (agent-agnostic) | `suite-chat.md` | The shared pipeline: create/send/receive, ordering, exactly-once, queueing, abort, restart-history, terminal view, multi-client. **Run once with AGENT=claude and once with AGENT=codex.** |
 | **Claude** | `suite-claude.md` | claude-only: background tasks/agents (teal N/M), joy-bg long-running, permission prompts, slash commands, continue/fork/resume-by-id, transcript-binding recovery (dotted dirs, blind recover, two-sessions-one-dir), final integration. |
 | **Codex** | `suite-codex.md` | codex-only: new-session codex options, model identity, attach TUI, thread resume, orphan rejoin, non-yolo approvals, settings persistence. |
-| **v2** | `suite-v2.md` | the native /joy/v2 durable plane through the app's dev "Relay v2 Mode": queueing, delivery states, ephemeral streaming, retry, cancellation, attachments. Daemon side driven by the scripted actor until the real daemon grows a nucleus lane. |
+| **v2** | `suite-v2.md` | the native /joy/v2 durable plane through the app's dev "Relay v2 Mode": queueing, delivery states, ephemeral streaming, retry, cancellation, attachments. Daemon side driven by the scripted actor; `suite-v2-daemon.md` runs the same plane with the real daemon. |
 
 **Run order:** Setup + Test 0 (below) → chat suite (AGENT=claude) → claude suite →
 chat suite (AGENT=codex) → codex suite → v2 suite → Teardown.

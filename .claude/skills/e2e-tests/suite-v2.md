@@ -16,10 +16,10 @@ Prereq: `stack.sh start` healthy (see SKILL.md).
 node .claude/skills/e2e-tests/v2-validate.mjs
 ```
 
-Mints a throwaway account through the relay (prod auth path into the local
-happy-server), runs the actor, and asserts 20 checks:
+Mints a throwaway account on the relay (`POST /joy/v2/auth`, the app's login
+path), runs the actor, and asserts 20 checks:
 
-1. account mint via relay proxy; 2. spawn-mode session create against the
+1. account mint on the relay; 2. spawn-mode session create against the
 actor's machine; 3. spawn claim + bind → session active; 4–5. message 202 →
 `delivered`; 6. durable `echo:` block in the event log; 7. ephemeral deltas
 absent from the log; 8–9. offline queueing (kill actor → `queued`; restart →
@@ -70,4 +70,4 @@ Open **Dev Tools → Relay v2 Mode**:
    gone; a direct `GET /joy/v2/attachments/<id>` with the token is 404.
 
 Cross-check each step against the server artifact (`curl` the v2 endpoints
-with the account token) exactly like the chat suite checks happy-server seq.
+with the account token) exactly like the chat suite checks the relay's message seq.

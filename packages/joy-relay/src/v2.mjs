@@ -425,7 +425,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     }));
   // Card publish: the daemon keeps the session's ENCRYPTED metadata (sealed
   // with the session content key) and lifecycle state current, so clients can
-  // render the session list from v2 alone — no happy mirror required.
+  // render the session list from v2 alone.
   route('PATCH', '/daemon/sessions/([\\w-]+)', { auth: false },
     withLeaseHeaders((lease, m, body) => core.updateSessionCard(m[1], lease, body).then(() => ({ ok: true }))));
   route('POST', '/daemon/sessions/([\\w-]+)/spawn-failed', { auth: false },
