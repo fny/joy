@@ -1,7 +1,6 @@
 #!/usr/bin/env -S node --import tsx
-// joy — CLI for the joy-daemon daemon. Mirrors happy-cli's surface (start/stop/
-// restart/status/list/doctor/install/auth/notify) but drives the joy-daemon
-// daemon over its localhost HTTP API. The daemon writes daemon.json
+// joy — CLI for the joy-daemon daemon (start/stop/restart/status/list/doctor/
+// install/auth/notify), driving the daemon over its localhost HTTP API. The daemon writes daemon.json
 // (token+pid+port) into its relay-scoped state dir on startup, which is how
 // this CLI finds and authenticates to it — one daemon (and one state dir,
 // tmux server, service unit) per relay; --relay picks which one.
@@ -11,7 +10,7 @@ import { join, dirname, resolve, basename, sep } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
-import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, usesLegacyLayout, joyRelayCredsDir, resolveRelayAlias } from "./paths";
+import { joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
 import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay/pairing";
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
@@ -32,9 +31,8 @@ for (let i = process.argv.length - 1; i >= 2; i--) {
 }
 
 const DEFAULT_PORT = 4997;
-// Credentials home for the SELECTED relay: ~/.happy for the default (shared
-// with happy-cli), ~/.joy/relays/<key>/ otherwise.
-const CREDS_DIR = usesLegacyLayout() ? happyHomeDir() : joyRelayCredsDir();
+// Credentials home for the SELECTED relay: ~/.joy/relays/<key>/.
+const CREDS_DIR = joyRelayCredsDir();
 const STATE_DIR = joyStateDir();
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
@@ -238,13 +236,8 @@ function cmdAuth(): number {
   const accessKey = join(CREDS_DIR, "access.key");
   if (!existsSync(accessKey)) {
     console.log(`${bad} not authenticated (relay ${joyRelayUrl()})`);
-    if (usesLegacyLayout()) {
-      console.log(`  joy-daemon shares the Joy app's credentials (${c.dim(accessKey)}).`);
-      console.log(`  Run ${c.b("happy auth login")} (or set up the Joy app) to create them.`);
-    } else {
-      console.log(`  This relay needs its own pairing in ${c.dim(CREDS_DIR)}`);
-      console.log(`  (access.key + settings.json, same shapes as ~/.happy's).`);
-    }
+    console.log(`  This relay needs its own pairing in ${c.dim(CREDS_DIR)}`);
+    console.log(`  (access.key + settings.json) — run ${c.b("joy auth <relay>")} with your backup code.`);
     return 1;
   }
   let machineId = "?", server = "?";
@@ -271,10 +264,6 @@ async function cmdAuthPair(relayArgs: string[]): Promise<number> {
   for (const arg of relayArgs) {
     const url = resolveRelayAlias(arg);
     if (!/^https?:\/\//.test(url)) { console.log(`${bad} unknown relay: ${arg}`); return 2; }
-    if (url === resolveRelayAlias("happy")) {
-      console.log(`${bad} ${arg}: the default relay's credentials live in ~/.happy (shared with the Joy app) — not managed here`);
-      return 2;
-    }
     targets.push({ name: arg, url });
   }
 
@@ -934,10 +923,10 @@ async function cmdKill(rest: string[]): Promise<number> {
 function help(): void {
   console.log(`${c.b("joy")} — joy-daemon daemon control
 
-${c.b("Usage:")} joy [--relay <happy|happy-joy|joy|joy-dev|url>] <command>
+${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
 
   ${c.dim("--relay selects which relay's daemon the command addresses (default:")}
-  ${c.dim("$JOY_RELAY_URL / ~/.joy/relay.json / Happy Cloud). Per-relay daemons run")}
+  ${c.dim("$JOY_RELAY_URL / ~/.joy/relay.json / the joy relay). Per-relay daemons run")}
   ${c.dim("side by side — own state, own tmux server, own service unit.")}
 
   ${c.b("start")}        Start the daemon (detached)
@@ -961,10 +950,10 @@ ${c.b("Usage:")} joy [--relay <happy|happy-joy|joy|joy-dev|url>] <command>
                they never queue — and only yolo / read-only sessions are scriptable
                (exit 5). Exit codes: 0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 mode.
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
-  ${c.b("auth")}         Show authentication status (shared with the Joy app)
+  ${c.b("auth")}         Show authentication status for the selected relay
                joy auth <relay...>: pair this machine with relays using your
                account backup code (one code works on every relay) — e.g.
-               ${c.dim("joy auth joy joy-dev happy-joy")}
+               ${c.dim("joy auth joy joy-dev")}
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
   ${c.b("update")}       Update @fny/joy-daemon from the repo's release branch, then reinstall + restart
   ${c.b("install")}      Install autostart service (systemd on Linux, launchd on macOS)

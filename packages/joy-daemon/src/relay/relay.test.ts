@@ -1,71 +1,78 @@
-import { test, expect } from "vitest";
-import { randomBytes } from "node:crypto";
+import { test, expect, afterEach } from "vitest";
 import { RelaySession } from "./relay";
+import { registerV2CardPublisher, unregisterV2CardPublisher } from "./v2Card";
 
-// A mock RelayClient that simulates the server's optimistic-concurrency check:
-// an update succeeds only if expectedVersion matches the server's current
-// version, otherwise it returns version-mismatch with the current version.
-function mockClient() {
-  let serverVersion = 0;
-  return {
-    serverVersion: () => serverVersion,
-    updateSessionMetadata: async (_sid: string, expectedVersion: number, _enc: string) => {
-      if (expectedVersion !== serverVersion) {
-        return { result: "version-mismatch", version: serverVersion };
-      }
-      serverVersion += 1;
-      return { result: "success", version: serverVersion };
-    },
-    // unused by mergeMetadata
-    trackSession() {}, untrackSession() {}, subscribe() { return () => {}; },
-    emitAlive() {},
-  };
+// RelaySession is a local card holder: every metadata write merges into its
+// snapshot and publishes the WHOLE card through the v2 publisher the nucleus
+// lane registers per session. No network client is involved in the merge.
+const ID = "rs-test";
+
+function newSession() {
+  return new RelaySession({ client: {} as any, relaySessionId: ID, metadata: { path: "/x" } });
 }
 
-function newSession(client: any) {
-  return new RelaySession({
-    client,
-    relaySessionId: "rs-test",
-    sessionKey: new Uint8Array(randomBytes(32)),
-    variant: "dataKey",
-    metadata: {},
-    metadataVersion: 0,
-  } as any);
-}
+afterEach(() => unregisterV2CardPublisher(ID));
 
-// Two metadata writers firing concurrently must NOT clobber each other. Before
-// the serialization fix, both read the same base (V0) and the loser re-sent its
-// stale blob on the version-mismatch retry, erasing the winner's field.
+// Concurrent writers must NOT clobber each other: each patch reads the
+// already-merged card, so every field survives.
 test("concurrent metadata writes don't clobber (joy__state survives a queue/summary write)", async () => {
-  const client = mockClient();
-  const s = newSession(client);
+  const published: Record<string, unknown>[] = [];
+  registerV2CardPublisher(ID, (m) => { published.push({ ...m }); });
+  const s = newSession();
 
   await Promise.all([
     s.updateJoyState("detached"),
     s.updateSummary("My Title"),
   ]);
 
-  const meta = (s as any).metadata as Record<string, unknown>;
+  const meta = s.metadataSnapshot!;
   expect(meta.joy__state).toBe("detached");
   expect((meta.summary as any)?.text).toBe("My Title");
-  // both writes landed → server advanced twice
-  expect(client.serverVersion()).toBe(2);
+  expect(meta.path).toBe("/x");
+  // both writes published, the last one carrying the full merged card
+  expect(published.length).toBe(2);
+  expect(published[1].joy__state).toBe("detached");
+  expect((published[1].summary as any)?.text).toBe("My Title");
 });
 
 test("serialized writes accumulate across many concurrent patches", async () => {
-  const client = mockClient();
-  const s = newSession(client);
-
+  const s = newSession();
   await Promise.all([
     s.updateJoyState("running"),
     s.updateSummary("T"),
     s.updateRetry({ attempt: 1, total: 5, nextAt: 0, status: 500 }),
     s.updateQueue({ queue: ["a"], inFlight: false, paused: false } as any),
   ]);
-
-  const meta = (s as any).metadata as Record<string, unknown>;
+  const meta = s.metadataSnapshot!;
   expect(meta.joy__state).toBe("running");
   expect((meta.summary as any)?.text).toBe("T");
   expect(meta.joy__retry).toBeTruthy();
   expect(meta.joy__queue).toBeTruthy();
+});
+
+// archive() reports whether the archived card actually reached the relay —
+// end("killed") surfaces this so a dead session never lingers in the app.
+test("archive publishes joy__state:'archived' and reports the publish outcome", async () => {
+  const s = newSession();
+  // no publisher registered (not v2-bound) → merged locally, publish false
+  expect(await s.archive()).toBe(false);
+  expect(s.metadataSnapshot!.joy__state).toBe("archived");
+
+  let seen: Record<string, unknown> | null = null;
+  registerV2CardPublisher(ID, async (m) => { seen = m; });
+  expect(await s.archive()).toBe(true);
+  expect(seen!.joy__state).toBe("archived");
+
+  registerV2CardPublisher(ID, async () => { throw new Error("lane down"); });
+  expect(await s.archive()).toBe(false);
+});
+
+test("receipts are delivered immediately when a sink is set, else buffered", () => {
+  const s = newSession();
+  const got: string[] = [];
+  s.stampReceiptOnLastQueued({ uuid: "m1", turn: "t1" });
+  s.setReceiptSink((r) => got.push(r.uuid));
+  expect(got).toEqual(["m1"]);
+  s.stampReceiptOnLastQueued({ uuid: "m2", turn: "t1" });
+  expect(got).toEqual(["m1", "m2"]);
 });

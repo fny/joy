@@ -1,12 +1,12 @@
 // The operation catalog: every operation joy-daemon exposes, defined exactly
 // once with its routing metadata for both transports. Transports derive their
-// wiring from this table, so the HTTP debug surface and the relay RPC surface
+// wiring from this table, so the HTTP debug surface and the v2 tunnel RPC surface
 // can never drift apart — adding an op here makes it reachable everywhere.
 //
 //   machine scope → ctx is the SessionRegistry (registered once per daemon,
 //                   RPC name prefixed joy-*)
-//   session scope → ctx is a resolved Session (registered per relay session
-//                   by Session.attachRelay via bindSessionOps)
+//   session scope → ctx is a resolved Session (dispatched by the v2 tunnel
+//                   executor / HTTP route per session id)
 //
 // Handlers return the RPC-shaped result (the frozen app contract). HTTP
 // routes reuse the same result; the few legacy HTTP divergences (create's
@@ -15,7 +15,6 @@
 import type { Session } from "../claude/session";
 import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
-import type { RelaySession } from "../relay/relay.ts";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
@@ -190,11 +189,7 @@ export interface SessionOp {
   summary?: string;
   params?: OpSchema;
   result?: OpSchema;
-  /** rs is present on the RELAY transport only (bindSessionOps) — handlers
-   *  needing the data plane (blob upload for oversized responses) use it and
-   *  must fall back gracefully when absent (local HTTP transport, no message
-   *  size cap → inline is always fine there). */
-  handler: (session: AgentSession, params: Record<string, unknown>, rs?: RelaySession) => Promise<unknown> | unknown;
+  handler: (session: AgentSession, params: Record<string, unknown>) => Promise<unknown> | unknown;
 }
 
 export type Op = MachineOp | SessionOp;
@@ -1002,11 +997,11 @@ export const sessionOps: SessionOp[] = [
     name: "readFile",
     scope: "session",
     rpcName: "readFile",
-    summary: "Read a file (≤400KB inline base64; larger spills to an encrypted blob)",
+    summary: "Read a file (inline base64)",
     http: { method: "POST", path: "/sessions/:id/readFile" },
     // Second allowed root: the session's own ~/.joy/sessions/<id>/ so the app
     // can fetch joy-img media the agent saved there — scoped per session.
-    handler: async (session, params, rs) => {
+    handler: async (session, params) => {
       const p = params as unknown as Parameters<typeof handleReadFile>[1];
       // Remap a joy-media path that names the WRONG session id onto THIS
       // session's media dir (2026-07-13). The agent hand-constructs the
@@ -1021,25 +1016,9 @@ export const sessionOps: SessionOp[] = [
         const remapped = join(joySessionDir(session.id), "media", m[1]);
         if (remapped !== p.path && existsSync(remapped)) effective = { ...p, path: remapped };
       }
-      const res = await handleReadFile(session.cwd, effective, [joySessionDir(session.id)]);
-      // Oversized responses can't ride the RPC ack: socket.io drops messages
-      // over ~1MB, and base64 + E2E wrapping means ~400KB of raw file is the
-      // safe inline ceiling. Above it, ship the bytes as an encrypted
-      // attachment blob (server cap 10MB) and return only the ref — the app
-      // downloads + decrypts via the normal attachment path. rs missing =
-      // local HTTP transport, which has no message cap; stay inline there.
-      const INLINE_MAX_BYTES = 400 * 1024;
-      if (res.success && res.content && rs) {
-        const raw = Buffer.from(res.content, "base64");
-        if (raw.length > INLINE_MAX_BYTES) {
-          const name = typeof effective?.path === "string" ? effective.path.split(/[/\\]/).pop() || "file" : "file";
-          const ref = await rs.uploadFileBlob(new Uint8Array(raw), name);
-          if (ref) return { success: true, blobRef: ref, size: raw.length };
-          // Upload failed — return the inline payload anyway; the relay leg
-          // may drop it, but a maybe is better than a certain failure.
-        }
-      }
-      return res;
+      // Always inline: both transports (local HTTP, v2 tunnel) carry the
+      // response as one HTTP body with no per-message size cap.
+      return handleReadFile(session.cwd, effective, [joySessionDir(session.id)]);
     },
   },
   {
@@ -1091,15 +1070,3 @@ export const sessionOps: SessionOp[] = [
     handler: (session, params) => handleDifftastic(session.cwd, params as unknown as Parameters<typeof handleDifftastic>[1]),
   },
 ];
-
-/**
- * Register every session-scoped op on a freshly-attached relay session,
- * binding `session` as the handler ctx. Wired into the registry as the
- * onRelayAttached hook (server.ts), so launch/recover/reconnect all get the
- * identical op surface.
- */
-export function bindSessionOps(session: AgentSession, rs: RelaySession): void {
-  for (const op of sessionOps) {
-    rs.registerRpc(op.rpcName, async (params) => op.handler(session, (params ?? {}) as Record<string, unknown>, rs));
-  }
-}

@@ -43,7 +43,7 @@ export type CodexEffect =
   | { kind: "title"; value: string }
   | { kind: "notify"; headline: string; detail: string | null };
 
-// Tool-name parity with happy-app's codex renderers (CodexDiffView /
+// Tool-name parity with joy-app's codex renderers (CodexDiffView /
 // CodexPatchView) and the claude wire vocabulary.
 const TOOL_BASH = "CodexBash";
 const TOOL_PATCH = "CodexPatch";

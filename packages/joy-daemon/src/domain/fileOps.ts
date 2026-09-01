@@ -1,30 +1,34 @@
 // File/shell operation handlers exposed to the app for joy-daemon sessions.
 //
-// Mirrors the behavior of happy-cli's registerCommonHandlers so the app's
-// file browser, search, diff view, and archive button behave the same against
-// joy-daemon sessions as they do against happy-cli sessions. Request/response
-// shapes mirror packages/happy-app/sources/sync/ops.ts.
+// Backs the app's file browser, search, diff view, and archive button.
+// Request/response shapes are the frozen app contract (joy-app
+// sources/sync/ops.ts).
 //
 // All handlers are pure functions of (workingDirectory, params) — transport
-// binding (relay RPC, HTTP) happens in operations.ts.
+// binding (v2 tunnel RPC, HTTP) happens in operations.ts.
 
-import { moduleDir } from "../esm";
 import { createHash } from "crypto";
 import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
 import { promisify } from "util";
 import { existsSync, realpathSync, lstatSync } from "fs";
 import { readFile, writeFile, readdir, stat, lstat, unlink } from "fs/promises";
 import { join, resolve, sep, dirname, basename } from "path";
-import { homedir, platform } from "os";
+import { homedir } from "os";
 
 const execAsync = promisify(exec);
 
-// Resolve to happy-cli's bundled tool binaries the same way happy-cli does
-// (postinstall unpacks them into packages/happy-cli/tools/unpacked/). The
-// binaries are platform-specific and live next to joy-daemon in the monorepo.
-const HAPPY_CLI_TOOLS = resolve(moduleDir(import.meta.url), "..", "happy-cli", "tools", "unpacked");
-const DIFFT_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "difft.exe" : "difft");
-const RG_BIN = join(HAPPY_CLI_TOOLS, platform() === "win32" ? "rg.exe" : "rg");
+// ripgrep + difftastic come from the host: $JOY_TOOLS_DIR/<bin> if set
+// (a directory holding rg/difft), else whatever is on PATH.
+function toolBin(name: string): string {
+  const dir = process.env.JOY_TOOLS_DIR;
+  if (dir) {
+    const p = join(dir, name);
+    if (existsSync(p)) return p;
+  }
+  return name;
+}
+const DIFFT_BIN = toolBin("difft");
+const RG_BIN = toolBin("rg");
 
 export interface BashRequest { command: string; cwd?: string; timeout?: number; }
 export interface BashResponse { success: boolean; stdout?: string; stderr?: string; exitCode?: number; error?: string; }
@@ -78,7 +82,7 @@ function realResolve(p: string): string | null {
   }
 }
 
-// Mirrors happy-cli/src/modules/common/pathSecurity.validatePath. Restricts
+// Path jail for every file op. Restricts
 // access to paths within the session's working directory; rejects traversal.
 //
 // Containment is checked on REAL paths, not lexical ones: a symlink planted
@@ -116,7 +120,7 @@ export function validatePath(targetPath: string, workingDirectory: string, extra
 }
 
 export async function handleBash(workingDirectory: string, data: BashRequest): Promise<BashResponse> {
-  // Special case: "/" means "use the shell's default cwd" (matches happy-cli; used by CLI detection).
+  // Special case: "/" means "use the shell's default cwd" (used by CLI detection).
   if (data.cwd && data.cwd !== "/") {
     const validation = validatePath(data.cwd, workingDirectory);
     if (!validation.valid) return { success: false, error: validation.error };
@@ -125,10 +129,9 @@ export async function handleBash(workingDirectory: string, data: BashRequest): P
 
   try {
     const options: ExecOptions = {
-      // No cwd → the session's working directory. happy-cli gets this
-      // implicitly (its process cwd IS the session dir); joy-daemon's daemon
-      // cwd is unrelated, so it must be explicit. "/" still means "shell
-      // default" (CLI detection).
+      // No cwd → the session's working directory (the daemon's own cwd is
+      // unrelated, so it must be explicit). "/" still means "shell default"
+      // (CLI detection).
       cwd: data.cwd === "/" ? undefined : (data.cwd ?? workingDirectory),
       timeout: data.timeout || 30_000,
       windowsHide: true,
@@ -326,7 +329,7 @@ export async function handleGetDirectoryTree(workingDirectory: string, data: Get
 }
 
 // Spawn an external tool, capture stdout/stderr, return result. Used by
-// ripgrep and difftastic. Matches happy-cli's behavior: ANY exit code counts
+// ripgrep and difftastic. ANY exit code counts
 // as success — the app inspects exitCode itself. Only spawn errors (ENOENT,
 // permission denied) cause success=false.
 function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -353,10 +356,8 @@ export async function handleRipgrep(workingDirectory: string, data: RipgrepReque
     if (!validation.valid) return { success: false, error: validation.error };
     cwd = validation.resolvedPath;
   }
-  // Prefer the bundled rg shipped alongside happy-cli; fall back to system `rg`.
-  const binary = existsSync(RG_BIN) ? RG_BIN : "rg";
   try {
-    const result = await runTool(binary, data.args, cwd ?? workingDirectory);
+    const result = await runTool(RG_BIN, data.args, cwd ?? workingDirectory);
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run ripgrep" };
@@ -369,10 +370,6 @@ export async function handleDifftastic(workingDirectory: string, data: Difftasti
     const validation = validatePath(cwd, workingDirectory);
     if (!validation.valid) return { success: false, error: validation.error };
     cwd = validation.resolvedPath;
-  }
-  // Always use the bundled difft (no reliable system-wide install path).
-  if (!existsSync(DIFFT_BIN)) {
-    return { success: false, error: `difft binary not found at ${DIFFT_BIN}. Run \`node scripts/unpack-tools.cjs\` in packages/happy-cli to unpack it.` };
   }
   try {
     const result = await runTool(DIFFT_BIN, data.args, cwd ?? workingDirectory, { FORCE_COLOR: "1" });

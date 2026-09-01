@@ -1,25 +1,23 @@
-// The daemon's v2 nucleus lane: the client side of the relay's durable queue,
-// running ALONGSIDE the happy-socket transport (dual-stack — nothing about
-// the existing path changes). It acquires a machine lease, long-polls the
-// work and control lanes, and bridges claimed v2 turns onto the SAME session
-// machinery every other transport uses:
+// The daemon's v2 nucleus lane: the client side of the relay's durable queue
+// and the daemon's ONLY app-facing message plane. It acquires a machine
+// lease, long-polls the work and control lanes, and bridges claimed v2 turns
+// onto the SAME session machinery every other transport uses:
 //
 //   spawn_session offer → registry.create() → bind (spawnCommandId)
 //   prompt offer        → session.enqueue() → busy()/chat-log observation
 //                          → output facts (per assistant message) → terminal
 //   cancel offer        → session.abort() → terminal(cancelled)
 //
-// Sessions are pinned to ONE plane per message: prompts arriving here never
-// also arrive via the happy socket (each message travels the lane it was
-// posted on), which is what keeps dual-stack free of double delivery.
+// Each message travels exactly one lane (the one it was posted on), so a
+// prompt is never delivered twice.
 //
 // Content rides as the v2 test-mode envelope ({v:1,t:'plain',text} /
 // {v:1,t:'spawn',...}) — the same seam the app's Relay v2 Mode uses; real
 // sealing replaces encode/decode in both places together.
 //
-// Fail-soft by design: against a relay without /joy/v2 (or with the lane
-// disabled) the acquire loop logs once and retries quietly — the daemon's
-// happy transport is never affected.
+// Fail-soft by design: against an unreachable relay (or with the lane
+// disabled) the acquire loop logs once and retries quietly — local sessions
+// keep running; only app reachability waits.
 
 import { randomUUID, randomBytes } from "node:crypto";
 import { hostname } from "node:os";
@@ -42,7 +40,7 @@ const ACQUIRE_RETRY_MS = 60_000;
 export interface NucleusLaneOpts {
   registry: SessionRegistry;
   relayUrl: string;
-  token: string;      // account bearer (same credential the happy transport uses)
+  token: string;      // account bearer (from access.key)
   machineId: string;  // same machine identity the app's machine list shows
   /** Account content PUBLIC key (dataKey pairing). Set → v2 content is
    *  sealed: a per-session symmetric key is generated at spawn, enveloped to
@@ -248,7 +246,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       }
     }
 
-    // Re-stamp the happy card's v2 link for every bound session. Sessions that
+    // Re-stamp the session card's v2 link for every bound session. Sessions that
     // bound before a field existed (e.g. localSessionId, which the app needs to
     // address the machine plane) would otherwise stay stale forever, since
     // setV2Link only ran at bind time.
@@ -308,17 +306,22 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // bind (or a daemon restart's rebind) publishes the current card without
   // waiting for the next change.
   function wireCardPublisher(localId: string, v2SessionId: string): void {
-    registerV2CardPublisher(localId, (metadata) => {
+    registerV2CardPublisher(localId, async (metadata) => {
       const key = sessionKeys.get(v2SessionId) ?? null;
       const l = lease;
-      if (!l) return; // lane down — rebind republishes
-      void api("PATCH", `/daemon/sessions/${v2SessionId}`, {
-        encryptedMetadata: sealCard(metadata, key),
-        state: cardStateFor(metadata.joy__state),
-      }, l).catch((e) => log(`card publish ${v2SessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`));
+      if (!l) throw new Error("lane down"); // rebind republishes
+      try {
+        await api("PATCH", `/daemon/sessions/${v2SessionId}`, {
+          encryptedMetadata: sealCard(metadata, key),
+          state: cardStateFor(metadata.joy__state),
+        }, l);
+      } catch (e) {
+        log(`card publish ${v2SessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
+        throw e;
+      }
     });
     const current = registry.get(localId)?.cardMetadata?.();
-    if (current) publishV2Card(localId, current);
+    if (current) void publishV2Card(localId, current);
   }
 
   async function claim(lane: "work" | "control", asLease?: Lease | null): Promise<Array<WorkOffer & ControlOffer>> {
@@ -405,9 +408,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         sessionKeyEnvelope: envelope,
       }, leaseRef);
       bound.set(offer.sessionId, session.id);
-      // Stamp the happy card so the app can route this session's writes over
-      // v2 (dual path) and show its V2 badge — envelope included so the app
-      // needs no extra fetch to obtain the content key.
+      // Stamp the session card with its v2 link so the app can address this
+      // session — envelope included so the app needs no extra fetch to obtain
+      // the content key.
       session.setV2Link?.({ sessionId: offer.sessionId, relay: relayUrl, keyEnvelope: envelope });
       wireCardPublisher(session.id, offer.sessionId);
       log(`spawned ${spec.agent ?? "claude"} in ${spec.cwd} → local ${session.id} (v2 ${offer.sessionId.slice(0, 8)}${envelope.startsWith("v2sk1:") ? ", sealed" : ", plaintext"})`);

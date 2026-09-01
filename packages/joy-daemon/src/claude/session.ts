@@ -1,7 +1,7 @@
 // Session: one Claude Code instance running in a tmux window, bridged to the
-// Happy relay. Owns ALL per-session state that used to be scattered across
-// eight parallel Maps in server.ts (relay session, transcript watcher, turn
-// state, delivery receipts, pending attachments).
+// joy relay. Owns ALL per-session state that used to be scattered across
+// eight parallel Maps in server.ts (relay session card, transcript watcher,
+// turn state, delivery receipts).
 //
 // The two invariants this class exists to enforce:
 //   1. There is exactly ONE teardown path — end(reason). Every way a session
@@ -39,7 +39,6 @@ import {
   type DeliveryState,
   type DeliverySource,
 } from "../domain/receipts";
-import { writeAttachmentToCwd } from "../domain/attachments";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { OPTIONS_SYSTEM_PROMPT } from "./optionsPrompt";
 import { saveWindowRecord, loadWindowRecord } from "../domain/windowRecord";
@@ -573,7 +572,7 @@ export class Session {
   // Consecutive #pollEnd passes where ONLY a pane dialog vouched for liveness
   // (no live pid, no running markers) — bounded grace, see #pollEnd.
   #dialogLivenessPasses = 0;
-  // The (retrying) archive POST fired when this session is killed — awaited by
+  // The archived-card publish fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
   #archivePromise: Promise<boolean> | null = null;
@@ -624,12 +623,6 @@ export class Session {
   // create, so the cap is applied ONCE when the transcript binds (startTailer).
   #backfillCapBytes = 0;
   #delivery: DeliveryState | null = null;
-  // Attachment REFS, not download promises (5.6-sol audit #4): bytes are
-  // fetched at CONSUMPTION (the text message that carries them), so a failed
-  // download throws inside #onRelayMessage → the pull halts un-confirmed and
-  // the retry re-downloads. Eager promises made the file row "delivered" the
-  // moment it was seen, with settled-failed promises unrecoverable on retry.
-  #pendingAttachments: { ref: string; name?: string }[] = [];
   // The most recent `!cmd` command, captured from <bash-input> so it can head
   // the bash-output card.
   #pendingBashCmd?: string;
@@ -728,9 +721,6 @@ export class Session {
     // Title lock survives restarts via the window record.
     const rec = loadWindowRecord(this.id);
     this.#titleLocked = rec?.titleLockedByUser === true;
-    // Attachment refs staged before a crash — their file rows are already
-    // cursor-confirmed, so the refs must survive into this process.
-    if (rec?.pendingAttachments?.length) this.#pendingAttachments = rec.pendingAttachments;
     // Reload any queue items a previous daemon left undelivered (B1). They
     // drain on the first idle exactly like freshly queued messages.
     const persisted = loadQueue(this.id);
@@ -845,37 +835,31 @@ export class Session {
   }
 
   /**
-   * Wire a relay session: message/file-event callbacks, session-scoped op
-   * registration (via deps hook), heartbeats. The ONE wiring path — used by
-   * launch, recovery, and relay-reconnect alike.
+   * Wire a relay session (the session card): banner reconciles, receipt sink,
+   * the attach hook. The ONE wiring path — used by launch and recovery alike.
    * Returns false (and stops the relay session) if this session already ended,
    * guarding against kill racing the async relay creation.
    */
   attachRelay(rs: RelaySession, allowEnded = false): boolean {
     // Normally refuse an ended session (guards a kill racing async relay
-    // creation). Recovery passes allowEnded so a finished session's file/git
-    // RPCs still work — but incoming messages are NOT typed into its dead pane
-    // (see #onRelayMessage).
+    // creation). Recovery passes allowEnded so a finished session's card
+    // (detached state, title) is still published.
     if (this.status === "ended" && !allowEnded) {
       rs.stop();
       return false;
     }
-    // A detached session (ended, window still around) KEEPS heartbeating
-    // presence — that per-session liveness is how the app distinguishes "daemon
-    // alive, Claude dead" (red detached) from "daemon gone" (falls back to
-    // offline). The app renders joy__state='detached' as red, not green online.
-    // It does NOT keep the 3s message pull: a dead pane ignores messages, so
-    // recovery-attached ended sessions drop to the 30s keepalive immediately.
+    // A detached session (ended, window still around) keeps its card published
+    // with joy__state='detached', which the app renders red — distinct from
+    // "daemon gone" (machine presence lapses → offline).
     if (this.status === "ended") rs.pausePull();
     this.#relay = rs;
     this.relaySessionId = rs.relaySessionId;
 
-    // Reconcile a stale retry banner. If the relay says we were retrying but no
+    // Reconcile a stale retry banner. If the card says we were retrying but no
     // retry is live in memory, clear it. That's the daemon-restart case:
     // recover() rebuilds the Session with #retry=null, but joy__retry persisted
-    // server-side, so the app would otherwise show a stuck "retrying N/…". A
-    // plain socket reconnect keeps #retry (the backoff timer survives in-process),
-    // so a genuinely-live banner is preserved. (Idempotent — no-op if unset.)
+    // on the relay's card, so the app would otherwise show a stuck
+    // "retrying N/…". (Idempotent — no-op if unset.)
     if (!this.#retry) void rs.updateRetry(null);
     // Same reconcile for a stale persisted thinking flag (see clearThinkingMeta).
     if (!this.#thinking) void rs.clearThinkingMeta();
@@ -936,24 +920,6 @@ export class Session {
     // fable, 2026-07-08). updateModelCode no-ops when already in sync.
     if (this.currentModel) void rs.updateModelCode(this.currentModel);
 
-    // File events arrive ahead of the user-text message. Kick off the
-    // download/decrypt immediately; the next message drains the bucket.
-    rs.onFileEvent = (ev) => {
-      // Stage the REF only; download happens when the accompanying text
-      // message consumes it (see #pendingAttachments doc). Duplicate refs
-      // from a re-pulled file row are collapsed. PERSISTED (5.6-sol verify
-      // #4): the file row's cursor confirm is only sound if the ref survives
-      // a daemon crash until its text row consumes it.
-      if (!this.#pendingAttachments.some((a) => a.ref === ev.ref)) {
-        this.#pendingAttachments.push({ ref: ev.ref, name: ev.name });
-        saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
-      }
-    };
-
-    rs.onMessage = async (text, seq) => {
-      await this.#onRelayMessage(text, seq);
-    };
-
     this.#deps.onRelayAttached?.(this, rs);
     rs.start();
     this.#deps.broadcast("session_update", this.toJSON());
@@ -999,9 +965,6 @@ export class Session {
   end(reason: "killed" | "process_exited"): boolean {
     if (this.status === "ended") return false;
 
-    // Capture before any relay detach — needed for the archive POST.
-    const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
-
     this.#tailer?.close();
     this.#tailer = null;
     this.#closeOpenTools(); // before the relay detaches below — don't strand tool spinners
@@ -1037,15 +1000,11 @@ export class Session {
     this.#tmux.untrack(this.tmuxWindow);
 
     if (reason === "process_exited") {
-      // Detached: keep the relay attached AND keep heartbeating presence (the
-      // session-alive loop keeps running), so the app sees a live presence +
-      // joy__state='detached' → red "detached". When the daemon dies the
-      // heartbeat stops and it lapses to offline. Messages are still ignored
-      // (dead pane) via #onRelayMessage — so the 3s message pull is dropped
-      // too (pausePull), leaving only the 30s presence keepalive.
-      // Clear thinking first: #pollThinking stops the instant status==='ended',
-      // so without this the keepalive would re-assert a stale thinking:true
-      // (Claude usually died mid-turn) forever on the dead session.
+      // Detached: keep the card holder attached so the app sees
+      // joy__state='detached' → red "detached" (machine presence going away
+      // is what turns it offline). Clear thinking first: #pollThinking stops
+      // the instant status==='ended', so a stale thinking:true (Claude
+      // usually died mid-turn) would otherwise stick on the dead session.
       this.#setThinking(false);
       this.#clearCompacting();
       if (this.#relay) {
@@ -1053,13 +1012,12 @@ export class Session {
         this.#relay.pausePull();
       }
     } else {
-      // Killed → archived: flag, archive, detach, kill the window.
-      if (this.#relay) void this.#relay.updateJoyState("archived");
-      this.#relay?.stop();
-      this.#relay = null;
-      if (this.#deps.relayClient && relaySessionId) {
-        // Keep the (retrying) promise so killSession can await the real result.
-        this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
+      // Killed → archived: publish the archived card, detach, kill the window.
+      if (this.#relay) {
+        // Keep the promise so killSession can await the real result.
+        this.#archivePromise = this.#relay.archive();
+        this.#relay.stop();
+        this.#relay = null;
       }
       void (this.#tmuxSocket
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())          // own server: OS reclaims everything
@@ -1070,21 +1028,11 @@ export class Session {
     return true;
   }
 
-  /** Resolve once the kill-path archive POST settles (true if archived or there
-   *  was nothing to archive). Lets killSession report a real failure so the app
+  /** Resolve once the kill-path archived-card publish settles (true if archived
+   *  or there was nothing to archive). Lets killSession report a real failure so the app
    *  runs its own fallback archive instead of trusting an unconditional success. */
   async awaitArchive(): Promise<boolean> {
     return this.#archivePromise ? await this.#archivePromise : true;
-  }
-
-  /** Re-assert lifecycle metadata the app reads, on relay reconnect — so a
-   *  one-shot transition (notably joy__state:'detached') lost to a merge timeout
-   *  at the moment of death reconciles instead of leaving a dead session green.
-   *  updateJoyState no-ops if the value already stuck, so this is cheap. */
-  reassertLifecycle(): void {
-    if (this.status === "ended" && this.endReason === "process_exited") {
-      void this.#relay?.updateJoyState("detached");
-    }
   }
 
   /**
@@ -1094,14 +1042,10 @@ export class Session {
    */
   forceKill(): boolean {
     if (this.status !== "ended") return this.end("killed");
-    const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
     if (this.#relay) {
-      void this.#relay.updateJoyState("archived");
+      this.#archivePromise = this.#relay.archive();
       this.#relay.stop();
       this.#relay = null;
-    }
-    if (this.#deps.relayClient && relaySessionId) {
-      this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
     }
     void (this.#tmuxSocket
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())          // own server: OS reclaims everything
@@ -1161,9 +1105,9 @@ export class Session {
   /**
    * Add a message to the verified dispatch queue. opts default to an explicit,
    * visible queue-add (mirrored to the relay so it shows in chat). The other
-   * callers override: relay app-sends pass {source:"relay",mirrorToRelay:false,
-   * seq,visible:false} (the app already has the bubble); /send passes
-   * {mirrorToRelay:true,visible:false}; 5xx retry passes {visible:false}.
+   * callers override: v2-lane app-sends pass {source:"rpc",visible:false} (the
+   * app already has the bubble); /send passes {mirrorToRelay:true,visible:false};
+   * 5xx retry passes {visible:false}.
    */
   enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
     // Joy-owned commands are handled HERE — before the text is queued or reaches Claude.
@@ -2063,107 +2007,6 @@ export class Session {
     return { lines };
   }
 
-  // ── Relay message handling ──────────────────────────────────────────────────
-
-  async #onRelayMessage(text: string, seq: number): Promise<void> {
-    // An ended session keeps its relay attached only to serve file/git RPCs on
-    // its directory. Its pane is a dead-Claude shell, so typing a relayed
-    // message there would run it as a shell command — drop it instead. (To
-    // continue an ended session, the app uses the explicit restart/resume flow.)
-    if (this.status === "ended") {
-      process.stderr.write(`[relay] ${this.id}: ignoring message for ended session\n`);
-      return;
-    }
-    // Drain attachments first so paths can be appended to this turn's text.
-    // Atomic swap: take the bucket, replace with an empty one so any
-    // late-arriving file event lands in the next batch (matches happy-cli's
-    // drainAttachmentsForUserMessage swap-then-await order).
-    const drained = this.#pendingAttachments;
-    this.#pendingAttachments = [];
-    let augmented = text;
-    if (drained.length > 0) {
-      let paths: string[] = [];
-      try {
-        const rs = this.#relay;
-        if (!rs || !this.#deps.relayClient) throw new Error("no relay for attachment download");
-        const { sessionKey, variant } = rs.encryptionMaterial;
-        const results = await Promise.all(drained.map(async (a) => ({
-          bytes: await this.#deps.relayClient!.downloadAndDecryptAttachment(rs.relaySessionId, a.ref, sessionKey, variant),
-          name: a.name,
-        })));
-        // ALL-OR-NOTHING (5.6-sol file-upload diagnosis): a single failed
-        // download used to be silently skipped while the rest + text went
-        // through — one attachment permanently lost. Throw instead so the
-        // pull halts and the WHOLE message retries with every attachment.
-        for (const item of results) {
-          if (!item.bytes) throw new Error("attachment download returned no bytes");
-          const refPath = writeAttachmentToCwd(this.cwd, item.bytes, item.name);
-          if (refPath === null) throw new Error("attachment write failed");
-          paths.push(refPath);
-        }
-      } catch (e) {
-        // Restore the refs and propagate: the pull halts at this seq and the
-        // retry re-downloads — the message is NOT delivered without its
-        // attachments (5.6-sol audit #4).
-        this.#pendingAttachments = drained.concat(this.#pendingAttachments);
-        throw e;
-      }
-      if (paths.length > 0) {
-        // Bare relative paths appended after the text, space-separated.
-        // tmux send-keys -l + Enter sends a single line, so line breaks
-        // can't be preserved. Claude resolves them against the session cwd
-        // and reads each file as an image.
-        augmented = text + " " + paths.join(" ");
-      }
-    }
-    // Nothing to deliver: a blank caption that carried no (surviving)
-    // attachments. Return cleanly so the cursor advances — do NOT enqueue an
-    // empty message (it would type a bare Enter into the pane).
-    if (!augmented.trim() && drained.length === 0) return;
-
-    // Joy-owned commands from the RELAY are AWAITED (not fire-and-forget):
-    // the pull cursor only advances when #onRelayMessage resolves, so holding
-    // it until the steer's typing lands means a crash mid-steer re-pulls and
-    // retries instead of silently consuming the command (codex review
-    // finding 2 — the /steer bypass hole). The narrow double-window (typed+
-    // submitted, crash before cursor persist → replay re-types) is bounded by
-    // the submit delay and preferred over loss.
-    const cmd = parseJoyCommand(augmented);
-    if (cmd) {
-      if (cmd.name === "steer" && cmd.args.trim()) {
-        await this.#steer(cmd.args, { seq, source: "relay", mirrorToRelay: false });
-      } else if (cmd.name === "btw" && cmd.args.trim()) {
-        await this.#steer(augmented, { seq, source: "relay", mirrorToRelay: false });
-      } else if (cmd.name === "title") {
-        this.#setTitle(cmd.args, { byUser: true });
-      } else if (cmd.name === "login-code" && cmd.args.trim()) {
-        await this.#submitLoginCode(cmd.args);
-      } else if (cmd.name === "joy-prompt") {
-        this.enqueue(joyPromptReinjection(OPTIONS_SYSTEM_PROMPT), {
-          source: "relay", mirrorToRelay: false, visible: false,
-        });
-      }
-      if (drained.length > 0) saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
-      return;
-    }
-    // Route through the verified dispatch queue (NOT sendText directly): the app
-    // send is serialized behind any in-flight turn and only typed into an empty,
-    // ready box — never on top of a busy turn or stuck text (the lost/merged-send
-    // bugs). visible:false — the app already has this message in its chat history,
-    // so it must not also appear as an editable queue chip. mirrorToRelay:false —
-    // it came FROM the relay. seq is carried so receipt-matching still pairs the
-    // transcript echo with this send. requireDurable: the spool write is the
-    // ack — if it fails, this throws and the pull loop halts at the confirmed
-    // cursor (codex review finding 2).
-    this.enqueue(augmented, { seq, source: "relay", mirrorToRelay: false, visible: false, requireDurable: true });
-    // Persist the cleared refs ONLY here — after durable handoff (spool write
-    // or awaited command delivery above). Clearing earlier meant a crash or
-    // spool failure between download and enqueue retried the text WITHOUT its
-    // attachments (5.6-sol verify round 2). A throw anywhere above skips this,
-    // leaving the restored refs persisted for the retry.
-    if (drained.length > 0) saveWindowRecord(this.id, { pendingAttachments: this.#pendingAttachments });
-  }
-
   /**
    * Emit a standalone agent-side note (e.g. slash-command output) as a
    * response. Wraps it in a transient turn when none is open so the app
@@ -2943,9 +2786,6 @@ export class Session {
         return { ok: false };
     }
   }
-
-  /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
-   *  the relay is attached by then on the spawn path — best-effort merge). */
 
   /** Card snapshot for the nucleus lane's v2 publish (see AgentSession). */
   cardMetadata(): Record<string, unknown> | null {

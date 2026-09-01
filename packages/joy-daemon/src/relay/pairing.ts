@@ -57,7 +57,9 @@ function hmac512(key: Uint8Array, data: Uint8Array): Uint8Array {
   return new Uint8Array(createHmac("sha512", key).update(data).digest());
 }
 
-// The app's HMAC-SHA512 key tree ("Happy EnCoder" usage, ["content"] path).
+// The app's HMAC-SHA512 key tree (["content"] path). The "Happy EnCoder"
+// seed string below is a WIRE CONSTANT: every existing account's content key
+// derives from it, so it stays verbatim even though nothing else is "happy".
 /** Relay perimeter key, hex — the SAME key tree as the app's
  *  deriveKey(masterSecret, 'Joy Relay', ['perimeter']) (see encryption.ts),
  *  so every client of the account derives the identical value and the relay
@@ -100,7 +102,7 @@ function decryptBox(bundle: Uint8Array, recipientSecret: Uint8Array): Uint8Array
 }
 
 async function post(relayUrl: string, path: string, body: unknown, token?: string): Promise<Record<string, unknown>> {
-  const headers: Record<string, string> = { "Content-Type": "application/json", "X-Happy-Client": "cli/joy-auth" };
+  const headers: Record<string, string> = { "Content-Type": "application/json", "X-Joy-Client": "cli/joy-auth" };
   const relayKey = joyRelayAccessKey();
   if (relayKey) headers["X-Joy-Relay-Key"] = relayKey;
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -118,7 +120,7 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
   const signKp = tweetnacl.sign.keyPair.fromSeed(accountSecret);
   const challenge = new Uint8Array(randomBytes(32));
   const signature = tweetnacl.sign.detached(challenge, signKp.secretKey);
-  const auth = await post(relayUrl, "/v1/auth", {
+  const auth = await post(relayUrl, "/joy/v2/auth", {
     publicKey: b64(signKp.publicKey), challenge: b64(challenge), signature: b64(signature),
   });
   const accountToken = String(auth.token ?? "");
@@ -126,14 +128,14 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
 
   // 2. terminal request + self-approval
   const termKp = tweetnacl.box.keyPair();
-  await post(relayUrl, "/v1/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  await post(relayUrl, "/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
   const contentPub = boxSeedKeypair(deriveContentSeed(accountSecret)).publicKey;
   const bundle = new Uint8Array([0x00, ...contentPub]);
-  await post(relayUrl, "/v1/auth/response",
+  await post(relayUrl, "/joy/v2/auth/response",
     { publicKey: b64(termKp.publicKey), response: b64(encryptBox(bundle, termKp.publicKey)) }, accountToken);
 
   // 3. pick up the approval
-  const resp = await post(relayUrl, "/v1/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  const resp = await post(relayUrl, "/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
   if (resp.state !== "authorized") throw new Error(`pairing not authorized (state=${String(resp.state)})`);
   const decrypted = decryptBox(unb64(String(resp.response)), termKp.secretKey);
   if (!decrypted || decrypted[0] !== 0) throw new Error("bad approval payload");

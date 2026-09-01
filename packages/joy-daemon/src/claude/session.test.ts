@@ -902,7 +902,7 @@ test("enqueue dedupes a re-pulled seq — spool-written/cursor-unwritten replay 
 
 test("enqueue with requireDurable throws when the spool write fails — cursor must not advance", () => {
   const s = mkSession("dd2");
-  // Point the spool at an impossible path via HAPPY_HOME_DIR? saveQueue takes
+  // Point the spool at an impossible path via JOY_HOME_DIR? saveQueue takes
   // baseDir internally — simulate by monkeypatching writeFileSync is brittle;
   // instead verify the CONTRACT via the exported saveQueue directly:
   // a failing write returns false (queueStore), and enqueue() maps false to a

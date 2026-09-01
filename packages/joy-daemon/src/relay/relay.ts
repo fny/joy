@@ -1,18 +1,29 @@
 /**
- * Relay integration for joy-daemon.
- * Self-contained — no deps on joy-daemon internals.
- * External deps: socket.io-client, tweetnacl.
+ * Relay integration for joy-daemon — the account plane over `/joy/v2` HTTP.
+ *
+ * Three concerns live here:
+ *   - RelayClient: the machine row (sealed metadata + daemonState with CAS
+ *     versions), push notifications, and credential loading. Plain fetch —
+ *     the relay has no socket surface, and machine presence is derived
+ *     server-side from the nucleus lane's lease.
+ *   - RelaySession: the per-session CARD — the metadata object the app renders
+ *     (title, lifecycle state, queue, banners…). Held locally, merged
+ *     serially, and published to the relay through the v2 card seam
+ *     (./v2Card → nucleusLane) on every change.
+ *   - Wire encoders: the transcript-mirror record shapes the agent
+ *     normalizers still produce (see `send`).
+ *
+ * Self-contained — no deps on joy-daemon internals beyond paths + the card
+ * seam. External deps: tweetnacl.
  */
 import { setTimeout as sleep } from "timers/promises";
 import { execSync } from 'node:child_process';
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsSync } from 'node:fs';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { existsSync, readFileSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
-import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey, usesLegacyLayout, DEFAULT_RELAY_URL } from '../paths';
+import { joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey } from '../paths';
 import { publishV2Card } from './v2Card';
-import { loadOutbound, saveOutbound, clearOutbound, type PersistedOutboundItem } from '../domain/outboundStore';
-import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -28,6 +39,8 @@ export interface Credentials {
     | { type: 'legacy'; secret: Uint8Array };
 }
 
+/** A transcript-mirror record (user text / agent session event). Produced by
+ *  the agent normalizers and handed to RelaySession.send; see there. */
 export interface WireRecord {
   role: 'user' | 'agent' | 'session';
   content: { type: string; [k: string]: unknown };
@@ -92,68 +105,14 @@ function decryptDataKey(buf: Uint8Array, key: Uint8Array): unknown | null {
   } catch { return null; }
 }
 
+/** Machine-blob sealing (metadata + daemonState). The app opens the dataKey
+ *  variant with the machine key it unwraps from `dataEncryptionKey`. */
 function encryptWire(variant: EncryptionVariant, key: Uint8Array, data: unknown): Uint8Array {
   return variant === 'legacy' ? encryptLegacy(data, key) : encryptDataKey(data, key);
 }
 
 function decryptWire(variant: EncryptionVariant, key: Uint8Array, buf: Uint8Array): unknown | null {
   return variant === 'legacy' ? decryptLegacy(buf, key) : decryptDataKey(buf, key);
-}
-
-// ── Blob crypto (image attachments) ────────────────────────────────────────────
-//
-// Mirrors happy-cli's deriveKey + decryptBlob: HMAC-SHA512 key tree derivation
-// rooted at the encryption secret, then NaCl secretbox unwrap. Used to download
-// + decrypt image attachments that the app uploads via /v1/sessions/{id}/attachments.
-
-function hmacSha512(key: Uint8Array, data: Uint8Array): Uint8Array {
-  return new Uint8Array(createHmac('sha512', key).update(data).digest());
-}
-
-function deriveKeyTreeRoot(seed: Uint8Array, usage: string): { key: Uint8Array; chainCode: Uint8Array } {
-  const I = hmacSha512(new TextEncoder().encode(usage + ' Master Seed'), seed);
-  return { key: I.slice(0, 32), chainCode: I.slice(32) };
-}
-
-function deriveKeyTreeChild(chainCode: Uint8Array, index: string): { key: Uint8Array; chainCode: Uint8Array } {
-  const data = new Uint8Array([0, ...new TextEncoder().encode(index)]);
-  const I = hmacSha512(chainCode, data);
-  return { key: I.slice(0, 32), chainCode: I.slice(32) };
-}
-
-function deriveKey(master: Uint8Array, usage: string, path: string[]): Uint8Array {
-  let state = deriveKeyTreeRoot(master, usage);
-  for (const seg of path) {
-    state = deriveKeyTreeChild(state.chainCode, seg);
-  }
-  return state.key;
-}
-
-/**
- * Decrypt a NaCl secretbox bundle: [24-byte nonce][ciphertext + 16-byte tag].
- * Returns null on tamper / wrong key. Matches happy-cli's decryptBlob.
- */
-function decryptBlob(bundle: Uint8Array, key: Uint8Array): Uint8Array | null {
-  const NONCE_LEN = tweetnacl.secretbox.nonceLength;
-  if (bundle.length < NONCE_LEN + 16) return null;
-  const nonce = bundle.slice(0, NONCE_LEN);
-  const ciphertext = bundle.slice(NONCE_LEN);
-  const plain = tweetnacl.secretbox.open(ciphertext, nonce, key);
-  return plain ? new Uint8Array(plain) : null;
-}
-
-/**
- * Encrypt a blob for attachment upload: [24-byte nonce][secretbox ct+tag].
- * Mirror of decryptBlob / the app's encryption/blob.ts. Concatenation via
- * set() — spreading multi-MB arrays overflows the stack.
- */
-function encryptBlob(data: Uint8Array, key: Uint8Array): Uint8Array {
-  const nonce = randomBytesU8(tweetnacl.secretbox.nonceLength);
-  const ct = tweetnacl.secretbox(data, nonce, key);
-  const out = new Uint8Array(nonce.length + ct.length);
-  out.set(nonce, 0);
-  out.set(ct, nonce.length);
-  return out;
 }
 
 function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint8Array): Uint8Array {
@@ -169,19 +128,15 @@ function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint
 
 // ── Credentials ────────────────────────────────────────────────────────────────
 
-const DEFAULT_SERVER_URL = DEFAULT_RELAY_URL;
-
 export function loadCredentials(): Credentials | null {
   // Relay selection is shared with path scoping (paths.joyRelayUrl):
   // JOY_RELAY_URL (alias or URL) / ~/.joy/relay.json override the default.
-  // Credentials for the LEGACY relay stay in ~/.happy (shared with happy-cli);
-  // every other relay — the current default included — reads its own pairing
-  // from ~/.joy/relays/<host[_port]>/, so the two ecosystems never mix
-  // credentials and moving the default never relocates a pairing.
-  const relayUrl = usesLegacyLayout() ? undefined : joyRelayUrl();
-  const happyHome = relayUrl ? joyRelayCredsDir(relayUrl) : happyHomeDir();
+  // Every relay reads its own pairing from ~/.joy/relays/<host_port>/, so
+  // moving the default never relocates a pairing.
+  const serverUrl = joyRelayUrl();
+  const credsDir = joyRelayCredsDir(serverUrl);
 
-  const accessKeyPath = join(happyHome, 'access.key');
+  const accessKeyPath = join(credsDir, 'access.key');
   if (!existsSync(accessKeyPath)) return null;
 
   try {
@@ -191,16 +146,15 @@ export function loadCredentials(): Credentials | null {
     };
     if (!ak.token) return null;
 
-    let serverUrl = relayUrl ?? process.env.HAPPY_SERVER_URL ?? DEFAULT_SERVER_URL;
     let machineId: string | undefined;
     try {
-      const s = JSON.parse(readFileSync(join(happyHome, 'settings.json'), 'utf8')) as { serverUrl?: string; machineId?: string };
-      if (s.serverUrl && !process.env.HAPPY_SERVER_URL) serverUrl = s.serverUrl;
+      const s = JSON.parse(readFileSync(join(credsDir, 'settings.json'), 'utf8')) as { machineId?: string };
       if (s.machineId) machineId = s.machineId;
     } catch {}
-    // M5 (machineId): a random fallback would silently break RPC on every restart
+    // A random fallback would give this daemon a new machine identity on
+    // every restart (orphaning its sessions in the app) — say so loudly.
     if (!machineId) {
-      process.stderr.write('[relay] WARNING: machineId missing from settings.json — RPC handlers will not be reachable. Run the happy-cli daemon once to populate it.\n');
+      process.stderr.write('[relay] WARNING: machineId missing from settings.json — this daemon will appear as a NEW machine on every restart. Re-run `joy auth` to repair the pairing.\n');
       machineId = crypto.randomUUID();
     }
 
@@ -220,126 +174,50 @@ export function loadCredentials(): Credentials | null {
   } catch { return null; }
 }
 
-// ── RPC encryption (matches happy-cli encryptWithDataKey / decryptWithDataKey) ─
+// ── Relay HTTP client (account plane) ─────────────────────────────────────────
 
-function encryptRpc(key: Uint8Array, data: unknown): string {
-  const nonce = randomBytesU8(12);
-  const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  const pt = new TextEncoder().encode(JSON.stringify(data));
-  const ct = Buffer.concat([cipher.update(pt), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  // version(1=0x00) + nonce(12) + ciphertext + tag(16)
-  const bundle = new Uint8Array(1 + 12 + ct.length + 16);
-  bundle[0] = 0;
-  bundle.set(nonce, 1);
-  bundle.set(new Uint8Array(ct), 13);
-  bundle.set(new Uint8Array(tag), 13 + ct.length);
-  return Buffer.from(bundle).toString('base64');
-}
-
-function decryptRpc(key: Uint8Array, b64: string): unknown {
-  const bundle = Buffer.from(b64, 'base64');
-  if (bundle.length < 1 + 12 + 16 || bundle[0] !== 0) return null;
-  const nonce = bundle.slice(1, 13);
-  const tag = bundle.slice(bundle.length - 16);
-  const ct = bundle.slice(13, bundle.length - 16);
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', key, nonce);
-    decipher.setAuthTag(tag);
-    const pt = Buffer.concat([decipher.update(ct), decipher.final()]);
-    return JSON.parse(new TextDecoder().decode(pt));
-  } catch { return null; }
-}
-
-// ── Relay HTTP + socket client ────────────────────────────────────────────────
-
-interface RawMessage {
-  id: string;
-  seq: number;
-  content: string | { c: string; t?: string };
-  localId: string | null;
-}
-
-function rawContentB64(c: RawMessage['content']): string | null {
-  if (typeof c === 'string') return c;
-  if (c && typeof c === 'object' && typeof c.c === 'string') return c.c;
-  return null;
-}
-
-export interface CreateSessionResult {
-  sessionId: string;
-  sessionKey: Uint8Array;
-  variant: EncryptionVariant;
-  // The server's CURRENT metadata + version. On tag-dedup the server returns the
-  // EXISTING session (it ignores the POSTed metadata), so this is the source of
-  // truth to merge onto — using it avoids clobbering a previously-set title.
-  metadata: Record<string, unknown> | null;
-  metadataVersion: number;
-}
+const DAEMON_STATE_INTERVAL_MS = 20_000;
 
 export class RelayClient {
   readonly serverUrl: string;
   readonly creds: Credentials;
-  private socket: Socket | null = null;
-  private listeners = new Map<string, Set<() => void>>();
-  private activeSessions = new Set<RelaySession>();
-  private machineAliveTimer: ReturnType<typeof setInterval> | null = null;
-  // Server-side daemonState version (CAS) for machine-update-state; seeded from
-  // getOrCreateMachine, re-synced from each ack. Plus the previous cpu-tick
+  private daemonStateTimer: ReturnType<typeof setInterval> | null = null;
+  // Server-side daemonState version (CAS) for PATCH /machines/:id; seeded from
+  // getOrCreateMachine, re-synced from each reply. Plus the previous cpu-tick
   // snapshot so we can report CPU% as a busy-delta between heartbeats.
   private daemonStateVersion = 0;
   private prevCpuSample: { idle: number; total: number } | null = null;
+  // Log the ownership conflict once, not every 20s.
+  private ownedElsewhereLogged = false;
 
   constructor(creds: Credentials) {
     this.creds = creds;
     this.serverUrl = creds.serverUrl;
   }
 
-  trackSession(rs: RelaySession): void { this.activeSessions.add(rs); }
-  untrackSession(rs: RelaySession): void { this.activeSessions.delete(rs); }
-
-  onReconnect: (() => void) | null = null;
-
-  private rpcHandlers = new Map<string, (params: unknown) => Promise<unknown>>();
-
-  /** Register a session-scoped RPC handler that the app calls via apiSocket.sessionRPC. */
-  registerSessionRpcHandler(relaySessionId: string, method: string, handler: (params: unknown) => Promise<unknown>): void {
-    const prefixed = `${relaySessionId}:${method}`;
-    this.rpcHandlers.set(prefixed, handler);
-    log(`rpc: registering session ${prefixed}`);
-    this.socket?.emit('rpc-register', { method: prefixed });
+  /** Start the daemonState heartbeat (host cpu/ram/disk the app shows on the
+   *  machine header). First beat immediately, then every 20s. Presence itself
+   *  is NOT ours: the relay derives active/activeAt from the nucleus lane's
+   *  lease. */
+  start(): void {
+    if (this.daemonStateTimer) return;
+    void this.pushDaemonState();
+    this.daemonStateTimer = setInterval(() => void this.pushDaemonState(), DAEMON_STATE_INTERVAL_MS);
   }
 
-  /** Drop every session-scoped RPC handler for a relay session (called on
-   *  detach/stop) so dead handlers neither linger in the map nor get
-   *  re-registered on the next socket reconnect. */
-  unregisterSessionRpcHandlers(relaySessionId: string): void {
-    const prefix = `${relaySessionId}:`;
-    for (const key of this.rpcHandlers.keys()) {
-      if (key.startsWith(prefix)) this.rpcHandlers.delete(key);
-    }
+  close(): void {
+    if (this.daemonStateTimer) { clearInterval(this.daemonStateTimer); this.daemonStateTimer = null; }
   }
 
-  registerRpcHandler(method: string, handler: (params: unknown) => Promise<unknown>): void {
-    const prefixed = `${this.creds.machineId}:${method}`;
-    this.rpcHandlers.set(prefixed, handler);
-    log(`rpc: registering ${prefixed}`);
-    this.socket?.emit('rpc-register', { method: prefixed }, (ack: unknown) => {
-      log(`rpc: registered ${prefixed} ack=${JSON.stringify(ack)}`);
-    });
+  private url(path: string): string {
+    return `${this.creds.serverUrl.replace(/\/$/, '')}/joy/v2${path}`;
   }
 
-  /** Heartbeat machine presence so the app shows this machine online. The
-   *  server marks the machine active on each machine-alive and lapses it to
-   *  offline without one (this is what happy-cli's daemon did — joy now owns
-   *  it). Beats immediately on every (re)connect, then every 20s. */
-  private startMachineAlive(): void {
-    const beat = () => {
-      this.socket?.emit('machine-alive', { machineId: this.creds.machineId, time: Date.now() });
-      this.pushDaemonState();
-    };
-    beat();
-    if (!this.machineAliveTimer) this.machineAliveTimer = setInterval(beat, 20_000);
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = { Authorization: `Bearer ${this.creds.token}`, 'Content-Type': 'application/json' };
+    const relayKey = joyRelayAccessKey();
+    if (relayKey) h['X-Joy-Relay-Key'] = relayKey;
+    return h;
   }
 
   /** Machine encryption variant + key, matching getOrCreateMachine's metadata. */
@@ -364,12 +242,6 @@ export class RelayClient {
     return Math.max(0, Math.min(100, Math.round((1 - di / dt) * 100)));
   }
 
-  /** Push host CPU%/RAM% into the machine's encrypted daemonState (version-checked
-   *  CAS; the app decrypts it and shows it on the machine header). Rides the
-   *  machine-alive heartbeat — this op also bumps the machine's active/lastActiveAt
-   *  server-side, so it doubles as presence. Best-effort: a 'Machine not found'
-   *  (no session has registered the machine yet) or version drift just no-ops and
-   *  the next beat retries with the re-synced version. */
   /**
    * Reclaimable-aware available memory. os.freemem() reports only TRULY free
    * pages — on macOS that excludes inactive/purgeable/file-cache the OS holds
@@ -404,8 +276,8 @@ export class RelayClient {
     return bytes;
   }
 
-  private pushDaemonState(): void {
-    if (!this.socket) return;
+  /** The sealed daemonState blob: host CPU%/RAM% + detail for the machine page. */
+  private sealedDaemonState(): string {
     const cpu = this.sampleCpuPercent();
     const memTotal = totalmem();
     const memFree = this.availableMemBytes(); // reclaimable-aware (see helper)
@@ -419,7 +291,7 @@ export class RelayClient {
       diskTotal = Number(s.blocks) * Number(s.bsize);
     } catch { /* leave 0 — app shows cpu/ram regardless */ }
     const { variant, key } = this.machineCrypto();
-    const daemonState = b64encode(encryptWire(variant, key, {
+    return b64encode(encryptWire(variant, key, {
       cpu, ram, time: Date.now(),
       // Detail for the machine page (bytes + cpu info); the sidebar still uses cpu/ram %.
       cpuCount: list.length,
@@ -428,268 +300,62 @@ export class RelayClient {
       memFree, memTotal,
       diskFree, diskTotal,
     }));
-    this.socket.emit(
-      'machine-update-state',
-      { machineId: this.creds.machineId, daemonState, expectedVersion: this.daemonStateVersion },
-      (ack: unknown) => {
-        if (!isObj(ack)) return;
-        const a = ack as { result?: string; version?: number };
-        // success → server bumped to expectedVersion+1; version-mismatch → adopt
-        // the server's current version so the next beat lands.
-        if ((a.result === 'success' || a.result === 'version-mismatch') && typeof a.version === 'number') {
-          this.daemonStateVersion = a.version;
-        }
-      },
-    );
   }
 
-  connect(): void {
-    if (this.socket) return;
-    const relayKey = joyRelayAccessKey();
-    this.socket = io(this.creds.serverUrl, {
-      path: '/v1/updates',
-      transports: ['websocket'],
-      // Perimeter key for joy-relay's gate: header works from node; the query
-      // fallback keeps parity with the browser client (no WS headers there).
-      ...(relayKey ? { extraHeaders: { 'X-Joy-Relay-Key': relayKey }, query: { joyRelayKey: relayKey } } : {}),
-      auth: { token: this.creds.token, clientType: 'machine-scoped', machineId: this.creds.machineId },
-      reconnection: true,
-      reconnectionDelay: 1_000,
-      reconnectionDelayMax: 10_000,
-    });
-    let firstConnect = true;
-    this.socket.on('connect', () => {
-      log('socket connected');
-      // Re-assert each session's CURRENT thinking value (not a blanket false —
-      // that desynced from Session.#thinking, so the pane poll's change-gate
-      // never re-asserted a true mid-turn and the app stuck on "not working").
-      for (const rs of this.activeSessions) rs.reassertAlive();
-      // Re-register all RPC handlers on (re)connect
-      for (const method of this.rpcHandlers.keys()) {
-        log(`rpc: re-registering ${method}`);
-        this.socket?.emit('rpc-register', { method });
-      }
-      this.startMachineAlive();
-      if (!firstConnect) this.onReconnect?.();
-      firstConnect = false;
-    });
-    this.socket.on('disconnect', (r: string) => log(`socket disconnected: ${r}`));
-    this.socket.on('connect_error', (e: Error) => log(`socket connect_error: ${e.message}`));
-    this.socket.on('update', (p: unknown) => this.handlePoke(p));
-    this.socket.on('rpc-request', async (req: unknown, callback: (res: string) => void) => {
-      if (!isObj(req)) return;
-      const method = String(req['method'] ?? '');
-      log(`rpc: incoming request method=${method}`);
-      const handler = this.rpcHandlers.get(method);
-      const key = this.creds.encryption.type === 'dataKey'
-        ? this.creds.encryption.machineKey
-        : this.creds.encryption.secret;
-      if (!handler) {
-        callback(encryptRpc(key, { error: 'Method not found' }));
+  /** Push host CPU%/RAM% into the machine's encrypted daemonState
+   *  (`PATCH /machines/:id`, version-checked CAS; the app decrypts it and
+   *  shows it on the machine header). Best-effort: a 404 (no session has
+   *  registered the machine yet) no-ops; a version-mismatch adopts the
+   *  server's current version and retries ONCE so the beat still lands. */
+  async pushDaemonState(): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch(this.url(`/machines/${encodeURIComponent(this.creds.machineId)}`), {
+          method: 'PATCH',
+          headers: this.headers(),
+          body: JSON.stringify({ daemonState: this.sealedDaemonState(), expectedDaemonStateVersion: this.daemonStateVersion }),
+        });
+        if (r.status === 404) return; // machine row not upserted yet — next beat retries
+        if (!r.ok) { log(`daemonState: HTTP ${r.status}`); return; }
+        const a = await r.json().catch(() => null) as { result?: string; daemonStateVersion?: number } | null;
+        if (!a) return;
+        // success → server bumped to expectedVersion+1; version-mismatch → adopt
+        // the server's current version and retry once.
+        if (typeof a.daemonStateVersion === 'number') this.daemonStateVersion = a.daemonStateVersion;
+        if (a.result !== 'version-mismatch') return;
+      } catch (e) {
+        log(`daemonState push failed: ${e}`);
         return;
       }
-      try {
-        const params = decryptRpc(key, String(req['params'] ?? ''));
-        const result = await handler(params);
-        callback(encryptRpc(key, result));
-      } catch (e) {
-        callback(encryptRpc(key, { error: String(e) }));
-      }
-    });
-  }
-
-  close(): void { this.socket?.close(); this.socket = null; }
-
-  /** Emit the server's version-checked session metadata update (used for summaries). */
-  updateSessionMetadata(sid: string, expectedVersion: number, metadataB64: string): Promise<{ result: string; version?: number; metadata?: string } | null> {
-    return new Promise((resolve) => {
-      if (!this.socket) { resolve(null); return; }
-      let done = false;
-      const finish = (v: { result: string; version?: number; metadata?: string } | null) => { if (!done) { done = true; resolve(v); } };
-      this.socket.emit('update-metadata', { sid, expectedVersion, metadata: metadataB64 }, (ack: unknown) => {
-        finish(isObj(ack) ? (ack as { result: string; version?: number; metadata?: string }) : null);
-      });
-      setTimeout(() => finish(null), 5000);
-    });
-  }
-
-  private handlePoke(payload: unknown): void {
-    const sid = isObj(payload) ? String(payload['sessionId'] ?? '') : '';
-    if (sid && this.listeners.has(sid)) {
-      for (const cb of this.listeners.get(sid)!) try { cb(); } catch {}
-      return;
-    }
-    for (const s of this.listeners.values()) for (const cb of s) try { cb(); } catch {}
-  }
-
-  subscribe(sessionId: string, onPoke: () => void): () => void {
-    if (!this.listeners.has(sessionId)) this.listeners.set(sessionId, new Set());
-    this.listeners.get(sessionId)!.add(onPoke);
-    return () => {
-      const s = this.listeners.get(sessionId);
-      if (s) { s.delete(onPoke); if (!s.size) this.listeners.delete(sessionId); }
-    };
-  }
-
-  private url(path: string): string {
-    return `${this.creds.serverUrl.replace(/\/$/, '')}${path}`;
-  }
-
-  private headers(): Record<string, string> {
-    const h: Record<string, string> = { Authorization: `Bearer ${this.creds.token}`, 'Content-Type': 'application/json' };
-    const relayKey = joyRelayAccessKey();
-    if (relayKey) h['X-Joy-Relay-Key'] = relayKey;
-    return h;
-  }
-
-  /**
-   * Download + decrypt an attachment blob. Mirrors happy-cli's
-   * downloadAndDecryptAttachment. Two-step flow:
-   *   1. POST /v1/sessions/{id}/attachments/request-download → { downloadUrl }
-   *   2. GET downloadUrl → encrypted bytes (NaCl secretbox bundle)
-   * The blob key is derived from the session's encryption key with the
-   * "Happy Blobs" usage and a variant-specific path. Returns null on any
-   * failure (network, auth, decryption).
-   */
-  /**
-   * Encrypt + upload a blob as a session attachment; the inverse of
-   * downloadAndDecryptAttachment, and the DATA PLANE for RPC responses too
-   * big for socket.io's ~1MB message cap (big readFile results ride this,
-   * with only the ref returned over the RPC). Handles both storage modes the
-   * server offers: local (PUT back to the server, bearer auth) and S3
-   * (presigned POST policy with form fields). Returns the ref, or null on
-   * any failure. Server caps attachments at 10MB.
-   */
-  async encryptAndUploadAttachment(
-    relaySessionId: string,
-    bytes: Uint8Array,
-    sessionKey: Uint8Array,
-    variant: EncryptionVariant,
-    filename: string,
-  ): Promise<string | null> {
-    try {
-      const path = variant === 'dataKey' ? ['session'] : ['master'];
-      const blobKey = deriveKey(sessionKey, 'Happy Blobs', path);
-      const encrypted = encryptBlob(bytes, blobKey);
-
-      const reqRes = await fetch(this.url(`/v1/sessions/${relaySessionId}/attachments/request-upload`), {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({ filename, size: encrypted.length }),
-      });
-      if (!reqRes.ok) {
-        log(`attachment request-upload failed: HTTP ${reqRes.status}`);
-        return null;
-      }
-      const req = await reqRes.json() as { ref?: string; uploadUrl?: string; method?: 'PUT' | 'POST'; formFields?: Record<string, string> };
-      if (!req.ref || !req.uploadUrl) return null;
-
-      if (req.method === 'POST') {
-        // S3 presigned POST: policy fields first, then the file part.
-        const form = new FormData();
-        for (const [k, v] of Object.entries(req.formFields ?? {})) form.append(k, v);
-        form.append("file", new Blob([encrypted.buffer as ArrayBuffer]), filename);
-        const up = await fetch(req.uploadUrl, { method: 'POST', body: form });
-        if (!up.ok) { log(`attachment S3 POST failed: HTTP ${up.status}`); return null; }
-      } else {
-        const isServerUrl = req.uploadUrl.startsWith(this.creds.serverUrl);
-        const relayKey = joyRelayAccessKey();
-        const up = await fetch(req.uploadUrl, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            ...(isServerUrl ? { Authorization: `Bearer ${this.creds.token}` } : {}),
-            ...(isServerUrl && relayKey ? { 'X-Joy-Relay-Key': relayKey } : {}),
-          },
-          body: encrypted,
-        });
-        if (!up.ok) { log(`attachment PUT failed: HTTP ${up.status}`); return null; }
-      }
-      return req.ref;
-    } catch (e) {
-      log(`encryptAndUploadAttachment failed: ${e}`);
-      return null;
     }
   }
 
-  async downloadAndDecryptAttachment(
-    relaySessionId: string,
-    ref: string,
-    sessionKey: Uint8Array,
-    variant: EncryptionVariant,
-  ): Promise<Uint8Array | null> {
-    try {
-      // Step 1: request a download URL (the server may presign an S3 URL or
-      // hand back a self-served path requiring our bearer token).
-      const reqRes = await fetch(this.url(`/v1/sessions/${relaySessionId}/attachments/request-download`), {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({ ref }),
-      });
-      if (!reqRes.ok) return null;
-      const reqData = await reqRes.json() as { downloadUrl?: string };
-      if (!reqData.downloadUrl) return null;
-
-      // Step 2: fetch the encrypted bytes. Only send bearer when the URL
-      // points back at our server — S3 presigned URLs reject extra headers.
-      const isServerUrl = reqData.downloadUrl.startsWith(this.creds.serverUrl);
-      const dlKey = joyRelayAccessKey();
-      const dlRes = await fetch(reqData.downloadUrl, {
-        headers: isServerUrl
-          ? { Authorization: `Bearer ${this.creds.token}`, ...(dlKey ? { 'X-Joy-Relay-Key': dlKey } : {}) }
-          : {},
-      });
-      if (!dlRes.ok) return null;
-      const encrypted = new Uint8Array(await dlRes.arrayBuffer());
-
-      // Step 3: decrypt with the per-session blob key.
-      // Legacy sessions: deriveKey(secret, 'Happy Blobs', ['master']).
-      // DataKey sessions: deriveKey(dataKey, 'Happy Blobs', ['session']).
-      const path = variant === 'dataKey' ? ['session'] : ['master'];
-      const blobKey = deriveKey(sessionKey, 'Happy Blobs', path);
-      return decryptBlob(encrypted, blobKey);
-    } catch (e) {
-      log(`downloadAndDecryptAttachment failed for ${ref}: ${e}`);
-      return null;
-    }
-  }
-
-  /**
-   * Upsert the machine row's metadata server-side. Mirrors happy-cli's
-   * `getOrCreateMachine` (api.ts:144): POST /v1/machines with the
-   * machineId and an encrypted MachineMetadata payload.
-   *
-   * The point of doing this from joy-daemon is purely a UX guarantee:
-   * the app's path picker uses `selectedMachine.metadata.homeDir` to
-   * format paths as `~/foo`. If happy-cli's daemon has never run on
-   * this host, that field is undefined and the picker shows literal
-   * `~/foo`. joy-daemon always knows its homedir, so we can guarantee
-   * the field is set.
-   *
-   * Caveat: this REST POST is an unconditional upsert — the server
-   * replaces the full metadata blob. If happy-cli's daemon had set
-   * optional fields (cliAvailability, resumeSupport), our upsert
-   * wipes them until happy-cli re-upserts on its next session spawn.
-   * Acceptable trade-off for the picker reliability gain.
-   */
-  /** GET this machine's current (decrypted) metadata, so a re-upsert can carry
-   *  forward app-owned fields instead of clobbering them. Best-effort → null. */
   // Last known app-set machine displayName (null = confirmed absent) — see
   // getOrCreateMachine for the TTL rationale.
   #displayNameCache: { name: string | null; at: number } | null = null;
 
+  /** GET this machine's current (decrypted) metadata, so a re-upsert can carry
+   *  forward app-owned fields instead of clobbering them. Best-effort → null. */
   private async fetchOwnMachineMetadata(): Promise<Record<string, unknown> | null> {
     try {
-      const res = await fetch(this.url('/v1/machines'), { headers: this.headers() });
+      const res = await fetch(this.url(`/machines/${encodeURIComponent(this.creds.machineId)}`), { headers: this.headers() });
       if (!res.ok) return null;
-      const rows = await res.json() as Array<{ id: string; metadata?: string }>;
-      const row = Array.isArray(rows) ? rows.find((m) => m.id === this.creds.machineId) : undefined;
-      if (!row?.metadata) return null;
+      const body = await res.json() as { machine?: { metadata?: string } };
+      if (!body?.machine?.metadata) return null;
       const { variant, key } = this.machineCrypto();
-      return decryptWire(variant, key, b64decode(row.metadata)) as Record<string, unknown> | null;
+      return decryptWire(variant, key, b64decode(body.machine.metadata)) as Record<string, unknown> | null;
     } catch { return null; }
   }
 
+  /**
+   * Upsert the machine row's sealed metadata (`POST /machines`). The app's
+   * path picker uses `machine.metadata.homeDir` to format paths as `~/foo`,
+   * and the machine header shows host/version — so the daemon owns this blob
+   * and re-pushes it whenever the command scan changes (commands.ts).
+   *
+   * The POST replaces the full metadata blob; the relay bumps
+   * metadataVersion only when the blob actually changed.
+   */
   async getOrCreateMachine(metadata: Record<string, unknown>): Promise<boolean> {
     // Always report the LIVE hostname (an OS rename shouldn't need a daemon
     // restart), and never clobber an app-set displayName: this is a full-blob
@@ -699,10 +365,10 @@ export class RelayClient {
     const blob: Record<string, unknown> = { ...metadata, host: hostname() };
     if (blob.displayName === undefined) {
       // Short-TTL cache: boot attaches many sessions and each push landed here,
-      // re-downloading the FULL machine list per push just to carry one string
-      // forward. 60s is long enough to dedup a burst, short enough that an
-      // app-side rename (which happens on the server, invisibly to us) isn't
-      // clobbered by a stale value for more than a minute.
+      // re-fetching the machine row per push just to carry one string forward.
+      // 60s is long enough to dedup a burst, short enough that an app-side
+      // rename (which happens on the server, invisibly to us) isn't clobbered
+      // by a stale value for more than a minute.
       const now = Date.now();
       if (!this.#displayNameCache || now - this.#displayNameCache.at > 60_000) {
         const current = await this.fetchOwnMachineMetadata();
@@ -719,8 +385,8 @@ export class RelayClient {
       if (this.creds.encryption.type === 'dataKey') {
         variant = 'dataKey';
         encryptionKey = this.creds.encryption.machineKey;
-        // Same envelope as createSession: [0x00][encrypted(machineKey, publicKey)]
-        // so the server can hand the dataKey to authorized clients.
+        // Envelope [0x00][box(machineKey → account publicKey)] so the relay can
+        // hand the machine key to authorized clients.
         const encryptedKey = libsodiumEncryptForPublicKey(encryptionKey, this.creds.encryption.publicKey);
         const bundle = new Uint8Array(1 + encryptedKey.length);
         bundle.set([0], 0);
@@ -731,7 +397,7 @@ export class RelayClient {
         encryptionKey = this.creds.encryption.secret;
       }
 
-      const r = await fetch(this.url('/v1/machines'), {
+      const r = await fetch(this.url('/machines'), {
         method: 'POST',
         headers: this.headers(),
         body: JSON.stringify({
@@ -740,15 +406,26 @@ export class RelayClient {
           dataEncryptionKey: dataEncryptionKeyB64,
         }),
       });
-      if (!r.ok) return false;
+      if (r.status === 403) {
+        // Another account already owns this machine id: the pairing is wrong
+        // (creds copied between accounts). Nothing here can fix it — say so
+        // once, loudly, and stop retrying quietly every push.
+        const body = await r.json().catch(() => null) as { error?: string } | null;
+        if (!this.ownedElsewhereLogged) {
+          this.ownedElsewhereLogged = true;
+          log(`getOrCreateMachine: HTTP 403 ${body?.error ?? ''} — machine ${this.creds.machineId} belongs to another account; re-run \`joy auth\` to re-pair`);
+        }
+        return false;
+      }
+      if (!r.ok) { log(`getOrCreateMachine: HTTP ${r.status}`); return false; }
       // Seed the daemonState CAS version from the row so the first
-      // machine-update-state beat lands without a version-mismatch round-trip.
+      // daemonState beat lands without a version-mismatch round-trip.
       try {
         const body = await r.json() as { machine?: { daemonStateVersion?: number } };
         if (typeof body?.machine?.daemonStateVersion === 'number') {
           this.daemonStateVersion = body.machine.daemonStateVersion;
         }
-      } catch { /* version self-syncs from the first ack */ }
+      } catch { /* version self-syncs from the first reply */ }
       return true;
     } catch (e) {
       log(`getOrCreateMachine failed: ${e}`);
@@ -757,188 +434,43 @@ export class RelayClient {
   }
 
   /**
-   * Mark a session inactive on the API server (flips `active=false`).
-   * Mirrors happy-cli's `deactivateSession`: POST /v1/sessions/{id}/archive.
-   * Without this the session keeps showing as active in the app even after
-   * the underlying tmux window has been killed, because killSession only
-   * cleans up local state — it doesn't tell the server to archive.
+   * Send a push notification to all the account's devices (`POST /push`): the
+   * relay holds the Expo tokens and posts to Expo per token, dropping
+   * DeviceNotRegistered tokens itself. Returns how many devices were
+   * targeted. Title/body are NOT end-to-end encrypted — no conversation
+   * content in them.
    */
-  async archiveSession(relaySessionId: string): Promise<boolean> {
-    // Retry: a transient 5xx/network blip used to drop the archive entirely
-    // (it was fire-and-forget), leaving a killed session stuck in the app's
-    // active list. 404/410 = already gone = success; other 4xx = permanent.
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        const r = await fetch(this.url(`/v1/sessions/${relaySessionId}/archive`), {
-          method: 'POST',
-          headers: this.headers(),
-          body: '{}',
-        });
-        if (r.ok || r.status === 404 || r.status === 410) return true;
-        if (r.status >= 400 && r.status < 500) { log(`archiveSession ${relaySessionId}: HTTP ${r.status} (permanent)`); return false; }
-        log(`archiveSession ${relaySessionId}: HTTP ${r.status} (attempt ${attempt + 1})`);
-      } catch (e) {
-        log(`archiveSession failed for ${relaySessionId} (attempt ${attempt + 1}): ${e}`);
-      }
-      if (attempt < 3) await sleep(500 * 2 ** attempt);
-    }
-    return false;
+  async sendPush(title: string, body: string, data?: Record<string, unknown>): Promise<{ sent: number }> {
+    const res = await fetch(this.url('/push'), {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ title, body: body || undefined, data: { source: 'joy-daemon', timestamp: Date.now(), ...data } }),
+    });
+    if (!res.ok) throw new Error(`push: HTTP ${res.status}`);
+    const j = await res.json().catch(() => null) as { sent?: number } | null;
+    return { sent: typeof j?.sent === 'number' ? j.sent : 0 };
   }
 
   /**
-   * Send a push notification to all the user's devices (mirrors happy-cli's
-   * `notify`): fetch the account's Expo push tokens from the server (authed
-   * with the daemon's bearer), then POST the messages straight to Expo. Returns
-   * how many devices were targeted.
-   */
-  async sendPush(title: string, body: string): Promise<{ sent: number }> {
-    const res = await fetch(this.url('/v1/push-tokens'), { headers: this.headers() });
-    if (!res.ok) throw new Error(`push-tokens: HTTP ${res.status}`);
-    const data = await res.json() as { tokens?: { token: string }[] };
-    const tokens = (data.tokens ?? []).map(t => t.token).filter(Boolean);
-    if (tokens.length === 0) return { sent: 0 };
-    // One request PER TOKEN: Expo rejects a batch that mixes projects
-    // (PUSH_TOO_MANY_EXPERIENCE_IDS), and an account that ever installed
-    // another Expo app (the upstream happy app) holds mixed tokens — one
-    // zombie token used to 400 the WHOLE batch and silently kill every
-    // notification (found 2026-07-05: three stale @bulkacorp/happy tokens
-    // blacked out all pushes).
-    let sent = 0;
-    for (const to of tokens) {
-      try {
-        const r = await fetch('https://exp.host/--/api/v2/push/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify([{ to, title, body: body || undefined, sound: 'default', data: { source: 'joy-daemon', timestamp: Date.now() } }]),
-        });
-        if (r.ok) {
-          // HTTP 200 only means Expo ACCEPTED the request — per-ticket errors
-          // (DeviceNotRegistered for a deleted app's token, etc.) ride in the
-          // body and used to be counted as "sent".
-          const j = await r.json().catch(() => null) as { data?: Array<{ status?: string; message?: string }> } | null;
-          const ticket = j?.data?.[0];
-          if (ticket?.status === "ok") sent++;
-          else log(`push to ${to.slice(0, 28)}…: ticket ${ticket?.status ?? "?"} ${ticket?.message ?? ""}`);
-        }
-        else log(`push to ${to.slice(0, 28)}…: HTTP ${r.status}`);
-      } catch (e) { log(`push to ${to.slice(0, 28)}…: ${e}`); }
-    }
-    return { sent };
-  }
-
-  /**
-   * Auto-notification for a session (mirrors happy-cli's sendSessionNotification):
-   * POST a push-event to the server, which decides whether to actually push —
-   * suppressing it when the app is focused on this session. This is why we go
-   * through the server instead of sendPush (which always blasts every device).
+   * Auto-notification for a session (done/permission/question). Rides
+   * sendPush with the session id + kind in `data` so the app can deep-link.
+   * Fire-and-forget with one retry: the very first outbound request after a
+   * daemon restart can hit a transient "fetch failed" before the network/
+   * undici pool warms; a dropped notification is user-visible.
    */
   async sendSessionPushEvent(sessionId: string, kind: 'done' | 'permission' | 'question', title: string, body: string): Promise<void> {
-    const body_ = JSON.stringify({ kind, title, body, data: { kind, sessionId, source: 'joy-daemon' } });
-    // One retry: the very first outbound request after a daemon restart can hit a
-    // transient "fetch failed" before the network/undici pool warms; a dropped
-    // notification is user-visible, so give it a second shot.
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await fetch(this.url(`/v1/sessions/${encodeURIComponent(sessionId)}/push-event`), {
-          method: 'POST', headers: this.headers(), body: body_,
-        });
+        const { sent } = await this.sendPush(title, body, { kind, sessionId });
         // Success IS logged: "no push arrived" must be distinguishable between
-        // never-sent, server-suppressed (app focused), and delivery failure.
-        if (res.ok) { log(`push-event ${kind} sent for ${sessionId} (server decides suppression)`); return; }
-        if (res.status >= 400 && res.status < 500) { log(`push-event ${kind} for ${sessionId}: HTTP ${res.status}`); return; }
-        log(`push-event ${kind} for ${sessionId}: HTTP ${res.status} (attempt ${attempt + 1})`);
+        // never-sent, no registered device, and delivery failure.
+        log(`push ${kind} sent for ${sessionId} (${sent} device(s))`);
+        return;
       } catch (e) {
-        log(`push-event ${kind} failed for ${sessionId} (attempt ${attempt + 1}): ${e}`);
+        log(`push ${kind} failed for ${sessionId} (attempt ${attempt + 1}): ${e}`);
       }
       if (attempt === 0) await sleep(1000);
     }
-  }
-
-  async createSession(opts: { tag: string; metadata: unknown }): Promise<CreateSessionResult> {
-    let sessionKey: Uint8Array;
-    let variant: EncryptionVariant;
-    let dataEncryptionKeyB64: string | null = null;
-
-    if (this.creds.encryption.type === 'dataKey') {
-      // machineKey is the stable per-machine symmetric key stored in access.key.
-      // Using it as the sessionKey ensures messages can be decrypted across restarts,
-      // even when the server deduplicates sessions by tag and returns an existing session ID.
-      sessionKey = this.creds.encryption.machineKey;
-      variant = 'dataKey';
-      const encryptedKey = libsodiumEncryptForPublicKey(sessionKey, this.creds.encryption.publicKey);
-      const bundle = new Uint8Array(1 + encryptedKey.length);
-      bundle.set([0], 0); bundle.set(encryptedKey, 1);
-      dataEncryptionKeyB64 = b64encode(bundle);
-    } else {
-      sessionKey = this.creds.encryption.secret;
-      variant = 'legacy';
-    }
-
-    const res = await fetch(this.url('/v1/sessions'), {
-      method: 'POST',
-      headers: this.headers(),
-      body: JSON.stringify({
-        tag: opts.tag,
-        metadata: b64encode(encryptWire(variant, sessionKey, opts.metadata)),
-        agentState: null,
-        dataEncryptionKey: dataEncryptionKeyB64,
-      }),
-    });
-    if (!res.ok) throw new Error(`createSession: HTTP ${res.status}`);
-    const data = await res.json() as { session: { id: string; metadata?: string | null; metadataVersion?: number } };
-    let serverMeta: Record<string, unknown> | null = null;
-    if (data.session.metadata) {
-      try { serverMeta = decryptWire(variant, sessionKey, b64decode(data.session.metadata)) as Record<string, unknown> | null; } catch { serverMeta = null; }
-    }
-    return { sessionId: data.session.id, sessionKey, variant, metadata: serverMeta, metadataVersion: data.session.metadataVersion ?? 0 };
-  }
-
-  async append(sessionId: string, encrypted: Uint8Array, localId: string): Promise<{ seq: number }> {
-    const res = await fetch(this.url(`/v3/sessions/${encodeURIComponent(sessionId)}/messages`), {
-      method: 'POST',
-      headers: this.headers(),
-      body: JSON.stringify({ messages: [{ content: b64encode(encrypted), localId }] }),
-    });
-    if (!res.ok) {
-      const err = new Error(`append: HTTP ${res.status}`) as Error & { status?: number };
-      err.status = res.status; // lets drain() distinguish permanent (4xx) from transient
-      throw err;
-    }
-    const data = await res.json() as { messages: Array<{ seq: number }> };
-    if (!data.messages?.[0]) throw new Error('append: empty response');
-    return data.messages[0];
-  }
-
-  async readSince(sessionId: string, afterSeq: number, limit = 100): Promise<{ messages: RawMessage[]; hasMore: boolean }> {
-    const res = await fetch(
-      this.url(`/v3/sessions/${encodeURIComponent(sessionId)}/messages?after_seq=${afterSeq}&limit=${limit}`),
-      { headers: this.headers() },
-    );
-    if (!res.ok) throw new Error(`readSince: HTTP ${res.status}`);
-    return res.json() as Promise<{ messages: RawMessage[]; hasMore: boolean }>;
-  }
-
-  async fetchLastSeq(sessionId: string): Promise<number> {
-    let lastSeq = 0;
-    let hasMore = true;
-    while (hasMore) {
-      const r = await this.readSince(sessionId, lastSeq, 100);
-      for (const m of r.messages) if (m.seq > lastSeq) lastSeq = m.seq;
-      hasMore = r.hasMore;
-    }
-    return lastSeq;
-  }
-
-  emitAlive(sessionId: string, thinking: boolean): void {
-    this.socket?.volatile.emit('session-alive', {
-      sid: sessionId, time: Date.now(), thinking, mode: 'remote',
-    });
-  }
-
-  decryptMessage(msg: RawMessage, key: Uint8Array, variant: EncryptionVariant): unknown | null {
-    const b64 = rawContentB64(msg.content);
-    if (!b64) return null;
-    try { return decryptWire(variant, key, b64decode(b64)); } catch { return null; }
   }
 }
 
@@ -1008,7 +540,7 @@ export interface JoyDialogInfo {
 }
 
 /** A codex approval request awaiting the user (non-yolo). The app shows an
- *  Allow/Deny bar and answers via the joy-codex-approve RPC. */
+ *  Allow/Deny bar and answers via the v2 approvals endpoint. */
 export interface JoyCodexApprovalInfo {
   requestId: string;
   kind: "command" | "patch";
@@ -1031,73 +563,24 @@ export interface JoyQueueInfo {
   hidden?: { id: string; text: string; createdAt: number }[];
 }
 
+/**
+ * The per-session CARD holder. `relaySessionId` is the daemon's local session
+ * id (the card seam is keyed by it; the relay-side v2 session id lives in the
+ * nucleus lane's binding). Metadata is local truth: the daemon is its only
+ * writer, it is rebuilt on attach (summary, slash commands, model, state are
+ * all re-pushed by the Session), and every merge publishes the full card via
+ * the v2 seam.
+ */
 export class RelaySession {
   private readonly client: RelayClient;
   readonly relaySessionId: string;
-  private readonly sessionKey: Uint8Array;
-  private readonly variant: EncryptionVariant;
-  private lastSeq: number;
-  private queue: Array<{ localId: string; wire: WireRecord; attempts: number; receipt?: { uuid: string; turn: string; poisoned?: boolean } }> = [];
-  /** Receipt payloads acked before a Session registered the sink (restart
-   *  drain can outrun attachRelay) — flushed on setReceiptSink. Persisted. */
-  private ackedReceipts: { uuid: string; turn: string }[] = [];
-  private receiptSink: ((r: { uuid: string; turn: string }) => void) | null = null;
-  private draining = false;
-  // Last-known session metadata blob + its server version, so we can merge in
-  // a summary update (Claude's ai-title) without clobbering the other fields.
-  private metadata: Record<string, unknown> | null;
-  private metadataVersion = 0;
+  // The session card the app renders — merged serially (see mergeMetadata).
+  private metadata: Record<string, unknown>;
 
-  onMessage: (text: string, seq: number) => void | Promise<void> = () => {};
-  /**
-   * Fires for each file/attachment event the app sends ahead of a user
-   * message (envelope `role:'session'`, `ev.t:'file'`). The handler is
-   * expected to download + decrypt the blob (via the parent RelayClient)
-   * and stash it for the next user message.
-   */
-  onFileEvent: (ev: { ref: string; name: string; size: number; mimeType?: string }) => void = () => {};
-  /** Exposed so handlers (e.g. attachment download) can derive blob keys. */
-  get encryptionMaterial(): { sessionKey: Uint8Array; variant: EncryptionVariant } {
-    return { sessionKey: this.sessionKey, variant: this.variant };
-  }
-
-  /** Upload bytes as this session's encrypted attachment blob — the data
-   *  plane for RPC responses too big for socket.io's message cap (the RPC
-   *  then carries only the ref). Returns the ref, or null on failure. */
-  uploadFileBlob(bytes: Uint8Array, filename: string): Promise<string | null> {
-    return this.client.encryptAndUploadAttachment(this.relaySessionId, bytes, this.sessionKey, this.variant, filename);
-  }
-
-  constructor(opts: {
-    client: RelayClient;
-    relaySessionId: string;
-    sessionKey: Uint8Array;
-    variant: EncryptionVariant;
-    initialSeq?: number;
-    metadata?: Record<string, unknown> | null;
-    metadataVersion?: number;
-  }) {
+  constructor(opts: { client: RelayClient; relaySessionId: string; metadata: Record<string, unknown> }) {
     this.client = opts.client;
     this.relaySessionId = opts.relaySessionId;
-    this.sessionKey = opts.sessionKey;
-    this.variant = opts.variant;
-    this.lastSeq = opts.initialSeq ?? 0;
-    this.metadata = opts.metadata ?? null;
-    this.metadataVersion = opts.metadataVersion ?? 0;
-    // Restore rows a previous daemon accepted but never delivered (persisted
-    // from enqueue until server ack — codex review finding 1). VITEST guard
-    // mirrors the dispatch-queue spool: unit tests construct sessions freely.
-    if (!process.env.VITEST) {
-      const persisted = loadOutbound(this.relaySessionId);
-      if (persisted.items.length > 0 || persisted.ackedReceipts.length > 0) {
-        this.queue = persisted.items.map((i: PersistedOutboundItem) => ({
-          localId: i.localId, wire: i.wire as WireRecord, attempts: 0, receipt: i.receipt,
-        }));
-        this.ackedReceipts = persisted.ackedReceipts;
-        log(`restored ${this.queue.length} undelivered outbound row(s) for ${this.relaySessionId}`);
-        void this.drain();
-      }
-    }
+    this.metadata = { ...opts.metadata };
   }
 
   // Serializes metadata writes for this session (see mergeMetadata).
@@ -1107,61 +590,35 @@ export class RelaySession {
   get metadataSnapshot(): Record<string, unknown> | null { return this.metadata; }
 
   /**
-   * Merge a patch into the session metadata and persist it (server is
-   * version-checked; retries on mismatch). The single write path so the title,
-   * lifecycle state, etc. don't clobber each other.
+   * Merge a patch into the session card and publish it. The single write path
+   * so the title, lifecycle state, etc. don't clobber each other.
    *
    * Calls are SERIALIZED per session: concurrent patches (joy__state / joy__queue
-   * / joy__retry / summary all fire near-simultaneously from the Session) used to
-   * each read the same base metadata and race — the loser re-sent its stale blob
-   * on the version-mismatch retry and erased the winner's field (e.g. a `detached`
-   * state wiped by a queue update, leaving a dead session shown as live). The
-   * daemon is the only writer of session metadata, so serializing here means each
-   * merge reads an already-updated `this.metadata` and no field is lost.
+   * / joy__retry / summary all fire near-simultaneously from the Session) each
+   * read an already-updated `this.metadata`, so no field is lost.
+   *
+   * Resolves TRUE once the merge is applied locally — the daemon's durable
+   * truth. The card publish is awaited (so a caller sequencing an archive sees
+   * the PATCH land first) but its outcome does not fail the merge: a lost
+   * publish costs staleness until the next merge, never state.
    */
-  /** Resolves TRUE only when the patch was server-ACKED (metadata advanced).
-   *  Callers that need write certainty (the dialog pump) use the result;
-   *  fire-and-forget callers ignore it. */
   mergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
     const run = this.metadataChain.then(() => this.doMergeMetadata(patch));
     this.metadataChain = run.then(() => undefined, () => undefined); // keep the chain alive past a failure
     return run;
   }
 
+  /** Whether the LAST card publish reached the relay (false: not v2-bound
+   *  yet, lane down, or the PATCH failed). */
+  lastPublishOk = false;
+
   private async doMergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
-    if (!this.metadata) return false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      // Recompute merged + enc from CURRENT metadata each attempt, so a
-      // version bump re-merges the patch onto fresh state instead of re-sending
-      // a stale blob.
-      const merged = { ...this.metadata, ...patch };
-      const enc = b64encode(encryptWire(this.variant, this.sessionKey, merged));
-      const ack = await this.client.updateSessionMetadata(this.relaySessionId, this.metadataVersion, enc);
-      if (!ack) continue; // timeout/no-ack — retry rather than silently dropping the transition
-      if (ack.result === 'success') {
-        this.metadata = merged;
-        if (typeof ack.version === 'number') this.metadataVersion = ack.version;
-        // v2 card: every metadata change re-publishes the sealed card to the
-        // relay's durable plane (the app renders its session list from it).
-        const localId = typeof merged.joy__sessionId === 'string' ? merged.joy__sessionId : null;
-        if (localId) publishV2Card(localId, merged);
-        return true;
-      }
-      if (ack.result === 'version-mismatch' && typeof ack.version === 'number') {
-        this.metadataVersion = ack.version;
-        if (ack.metadata) {
-          try {
-            const dec = decryptWire(this.variant, this.sessionKey, b64decode(ack.metadata));
-            if (dec && typeof dec === 'object') {
-              this.metadata = dec as Record<string, unknown>;
-            }
-          } catch {}
-        }
-        continue; // retry with the server's current version
-      }
-      return false;
-    }
-    return false;
+    const merged = { ...this.metadata, ...patch };
+    this.metadata = merged;
+    // v2 card: every metadata change re-publishes the sealed card to the
+    // relay's durable plane (the app renders its session list from it).
+    this.lastPublishOk = await publishV2Card(this.relaySessionId, merged);
+    return true;
   }
 
   /**
@@ -1204,6 +661,19 @@ export class RelaySession {
   async updateJoyState(state: JoyLifecycleState): Promise<void> {
     if ((this.metadata?.joy__state as string | undefined) === state) return;
     await this.mergeMetadata({ joy__state: state });
+  }
+
+  /**
+   * Archive the session card on the relay (the v2 equivalent of the old
+   * "mark inactive" call): publishes `joy__state: 'archived'`, which the card
+   * publisher maps to the relay's `state: 'archived'`. Resolves TRUE when the
+   * PATCH landed — killSession reports that to the app, because a killed
+   * session that stays "active" in the list is the failure users notice.
+   * Always publishes (no unchanged-skip) so a retry after a lost PATCH works.
+   */
+  async archive(): Promise<boolean> {
+    await this.mergeMetadata({ joy__state: 'archived' });
+    return this.lastPublishOk;
   }
 
   /**
@@ -1256,20 +726,13 @@ export class RelaySession {
 
   /** Single-flight latest-desired-value reconciler. Callers assert the desired
    *  dialog every pane poll; at most ONE metadata write is in flight, always
-   *  targeting the LATEST desired value, and the acked-state comparison runs
-   *  inside the loop (doMergeMetadata only advances this.metadata on ack).
-   *  This closes two races the naive dedupe-then-queue version had (verify
-   *  round): a clear skipped because a not-yet-acked SET made acked state look
-   *  clear (stranding the banner after end()), and 3s assertions queueing a
-   *  backlog of redundant writes behind slow no-ack retries. */
+   *  targeting the LATEST desired value, and the state comparison runs inside
+   *  the loop. Kept as a pump even though merges are local now: it still
+   *  collapses a burst of 3s assertions into one write per change, and a
+   *  desired value that moves mid-write gets one immediate try (teardown's
+   *  clear has no next poll to retry from). */
   private desiredDialog: JoyDialogInfo | null = null;
   private dialogWriteBusy = false;
-  // A write completed WITHOUT an ack: the server may or may not hold it, so
-  // the local acked view can't be trusted for skipping — force-assert the
-  // desired value until a write acks (verify round 3: a set whose ack was
-  // lost, followed by desired→null, matched "already clear" locally and never
-  // sent the clear, stranding the banner server-side).
-  private dialogWriteUncertain = false;
   updateDialog(info: JoyDialogInfo | null): void {
     this.desiredDialog = info;
     if (this.dialogWriteBusy) return; // in-flight write re-checks desired on completion
@@ -1282,29 +745,12 @@ export class RelaySession {
         : b != null && b.title === a.title && JSON.stringify(b.options) === JSON.stringify(a.options);
     this.dialogWriteBusy = true;
     try {
-      // Loop until an ACKED write matches the (possibly re-updated) desired
-      // value. Certainty comes from mergeMetadata's RETURN (verify round 4:
-      // inferring it from local state let a forced re-write of an already-
-      // equal value clear uncertainty without any ack). After a failed write,
-      // stop ONLY if desired hasn't moved meanwhile — teardown's clear has no
-      // next poll to retry from, so a moved desired gets one immediate try.
       for (;;) {
         const want = this.desiredDialog;
-        if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined) && !this.dialogWriteUncertain) return;
-        // Rejection normalized to false IN the loop (verify round 5): exiting
-        // through the outer catch skipped the moved-desired retry, so a SET
-        // that threw while desired became null lost teardown's clear.
-        const acked = await this.mergeMetadata({ joy__dialog: want }).catch(() => false);
-        if (acked) {
-          this.dialogWriteUncertain = false; // loop re-checks a moved desired
-          continue;
-        }
-        this.dialogWriteUncertain = true;
-        if (this.desiredDialog === want) return; // unmoved — next assertion retries
-        // desired moved while writing → loop and try it now
+        if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined)) return;
+        await this.mergeMetadata({ joy__dialog: want }).catch(() => false);
+        // loop: re-check a desired value that moved while writing
       }
-    } catch {
-      this.dialogWriteUncertain = true; // next assertion retries
     } finally {
       this.dialogWriteBusy = false;
     }
@@ -1328,316 +774,59 @@ export class RelaySession {
     await this.mergeMetadata({ joy__queue: info });
   }
 
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private unsubscribe: (() => void) | null = null;
-
+  /** Publish the current card (attach / restart rebind). Idempotent. */
   start(): void {
-    this.client.trackSession(this);
-    this.unsubscribe = this.client.subscribe(this.relaySessionId, () => void this.pull());
-    this.client.emitAlive(this.relaySessionId, false);
-    // Poll for incoming messages every 3s (machine-scoped socket doesn't receive update pokes)
-    // and send keepalive every 30s
-    let ticks = 0;
-    this.heartbeatTimer = setInterval(() => {
-      void this.pull();
-      // Keepalive every 30s — re-assert the CURRENT thinking state, not a
-      // hardcoded false (which used to stomp "thinking" mid-turn).
-      if (++ticks % 10 === 0) this.client.emitAlive(this.relaySessionId, this.lastThinking);
-    }, 3_000);
+    void publishV2Card(this.relaySessionId, this.metadata).then((ok) => { this.lastPublishOk = ok; });
   }
+
+  /** Detached sessions used to downgrade their poll cadence here; with no
+   *  inbound poll left this is a no-op kept for the Session call sites. */
+  pausePull(): void {}
+
+  stop(): void {}
 
   /**
-   * Downgrade a DETACHED session's heartbeat: drop the 3s message pull (a dead
-   * pane ignores messages anyway — the poll is the daemon's only message path
-   * because the machine-scoped socket never receives new-message pokes, but
-   * that only matters for LIVE sessions) while keeping the 30s presence
-   * keepalive, so the app still shows red "detached" instead of offline.
-   * Without this, every detached session that ever accumulates polls the
-   * server over HTTPS every 3s forever.
+   * Transcript-mirror sink. The v1 message lane (per-row encrypted appends)
+   * is gone: the app reads the conversation from the agent's own transcript
+   * via the machine plane and from the v2 output facts the nucleus lane emits
+   * per assistant message. The agent normalizers still produce WireRecords
+   * (their tests pin the shapes), so this stays as the one place they land —
+   * a no-op today, the seam if a mirror lane ever returns.
    */
-  pausePull(): void {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = setInterval(() => {
-      this.client.emitAlive(this.relaySessionId, this.lastThinking);
-    }, 30_000);
-  }
+  send(_wire: WireRecord, _localId?: string): void {}
 
-  stop(): void {
-    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    this.client.unregisterSessionRpcHandlers(this.relaySessionId);
-    this.client.untrackSession(this);
-  }
+  private receiptSink: ((r: { uuid: string; turn: string }) => void) | null = null;
+  private pendingReceipts: { uuid: string; turn: string }[] = [];
 
-  private pulling = false;
-
-  // Consecutive decrypt-failure counts per seq (quarantine after 3 rounds).
-
-  private decryptFailures = new Map<number, number>();
-
-  private async pull(): Promise<void> {
-    // Re-entrancy guard (like drain()): pull() fires from both the 3s heartbeat
-    // and the poke subscription. Without this, a second pull could read the next
-    // seq window and inject a later text message into the pane while an earlier
-    // message is still parked awaiting its attachment download — reordering
-    // app→Claude messages. Serialize so onMessage runs strictly in seq order.
-    if (this.pulling) return;
-    this.pulling = true;
-    try {
-      let { messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq);
-      if (messages.length > 0) log(`pull ${this.relaySessionId}: got ${messages.length} msgs, lastSeq=${this.lastSeq}`);
-      let advanced = false;
-      let deliveryHalted = false;
-      while (messages.length > 0) {
-        const roundStart = this.lastSeq;
-        for (const msg of messages) {
-          // M2: decrypt before advancing seq so a failed decrypt doesn't silently consume the seq.
-          // Quarantine backstop: a message that fails decrypt on several separate
-          // pull rounds (key rotation, foreign-key history on a tag-dedup'd
-          // session) is advanced past — with the old skip-forever behavior, a
-          // whole page of undecryptable rows made readSince return the identical
-          // page every round: a zero-delay hot loop that hammered the server and
-          // blocked the session's inbound messages until a daemon restart.
-          const dec = this.client.decryptMessage(msg, this.sessionKey, this.variant);
-          if (dec === null) {
-            const attempts = (this.decryptFailures.get(msg.seq) ?? 0) + 1;
-            if (attempts >= 3) {
-              this.decryptFailures.delete(msg.seq);
-              log(`pull msg seq=${msg.seq} DECRYPT_FAILED x${attempts} — quarantining (advancing past it)`);
-              if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; }
-            } else {
-              this.decryptFailures.set(msg.seq, attempts);
-              log(`pull msg seq=${msg.seq} DECRYPT_FAILED (attempt ${attempts}) — skipping without advancing seq`);
-            }
-            continue;
-          }
-          this.decryptFailures.delete(msg.seq);
-          log(`pull msg seq=${msg.seq} dec=${JSON.stringify(dec)?.slice(0, 120)}`);
-          // Confirmed-cursor contract (codex review finding 2): for rows that
-          // require DELIVERY (user text → onMessage), the cursor advances only
-          // AFTER delivery resolves — see below. Non-deliverable rows (session
-          // events, own-sends, non-user roles) are consumed here as before.
-          const advance = () => { if (msg.seq > this.lastSeq) { this.lastSeq = msg.seq; advanced = true; } };
-          if (!isObj(dec)) { advance(); continue; }
-          const role = dec['role'];
-
-          // File attachment envelope: role='session', ev.t='file'. App sends
-          // these ahead of the user-text message; the handler downloads and
-          // stashes them, drained on the next text message.
-          if (role === 'session') {
-            const c = dec['content'] as { type?: string; data?: { ev?: { t?: string; ref?: string; name?: string; size?: number; mimeType?: string } } } | undefined;
-            const ev = c?.data?.ev;
-            if (c?.type === 'session' && ev?.t === 'file' && typeof ev.ref === 'string' && typeof ev.name === 'string' && typeof ev.size === 'number') {
-              this.onFileEvent({ ref: ev.ref, name: ev.name, size: ev.size, mimeType: ev.mimeType });
-            }
-            advance();
-            continue;
-          }
-
-          if (role !== 'user') { advance(); continue; }
-          // H1: skip messages sent by joy itself to avoid double-injecting into tmux.
-          // Log the skip: this is the ONLY silent drop on the pull path, and an
-          // app message swallowed here (mis-tagged meta) is otherwise undiagnosable
-          // (the 2026-07-04 lost-message hunt had no way to see 6004's meta).
-          const meta = dec['meta'] as { sentFrom?: string } | undefined;
-          if (meta?.sentFrom === 'joy') {
-            log(`pull: skip own-send seq=${msg.seq} sentFrom=joy`);
-            advance();
-            continue;
-          }
-          if (meta?.sentFrom) log(`pull: user msg seq=${msg.seq} sentFrom=${meta.sentFrom}`);
-          const c = dec['content'] as { type?: string; text?: string } | undefined;
-          // Deliver ANY text-type user row — including BLANK text (5.6-sol
-          // file-upload diagnosis): an attachment-only send carries an empty
-          // caption, and gating on text.trim() meant onMessage never fired,
-          // so the file rows staged their refs and NOTHING ever drained them
-          // — images silently never reached Claude. #onRelayMessage no-ops
-          // when there's truly nothing (blank text AND no staged attachment).
-          if (c?.type === 'text' && typeof c.text === 'string') {
-            // CONFIRMED-CURSOR (codex review finding 2, closes B1/B2): the
-            // cursor advances only after onMessage resolves — which itself
-            // resolves only after durable handoff (spool write for queued
-            // text, typing landed for steer commands). On failure the pull
-            // HALTS here: later rows are not processed (advancing past a
-            // failed seq would break cursor contiguity), the cursor persists
-            // at the last confirmed row, and the next 3s tick retries this
-            // seq. Poison-pill risk is bounded by the spool seq-dedupe (a
-            // re-pulled seq that already staged is a no-op) and by delivery
-            // failures being environmental (disk, pane) rather than
-            // content-dependent.
-            try {
-              await this.onMessage(c.text, msg.seq);
-            } catch (e) {
-              log(`pull: delivery failed for seq=${msg.seq} — HALTING at confirmed cursor ${this.lastSeq} (retry next tick): ${e}`);
-              deliveryHalted = true;
-              break;
-            }
-            advance();
-            continue;
-          }
-          // User row with no deliverable text — consumed.
-          advance();
-        }
-        if (deliveryHalted) break;
-        if (!hasMore) break;
-        // Spin guard: if this whole page advanced the cursor by nothing (every
-        // row undecryptable and not yet quarantined), refetching from the same
-        // cursor returns the identical page — break and let the next 3s pull
-        // tick retry (which also steps the quarantine counters) instead of
-        // hot-looping inside one round.
-        if (this.lastSeq === roundStart) break;
-        ({ messages, hasMore } = await this.client.readSince(this.relaySessionId, this.lastSeq));
-      }
-      // Low: only write to disk when seq actually changed
-      if (advanced) savePersistedSeq(this.relaySessionId, this.lastSeq);
-    } catch (e) { log(`pull error for ${this.relaySessionId}: ${e}`); }
-    finally { this.pulling = false; }
-  }
-
-  /** Enqueue a wire record for exactly-once delivery. `localId` is the
-   *  server-side dedupe key: claude passes none (random per row, deduped at the
-   *  transcript layer via forwardedUuids), but codex passes a DETERMINISTIC key
-   *  derived from the codex event identity so a reconnect+replay re-sends the
-   *  same localId and the server rejects the duplicate. */
-  send(wire: WireRecord, localId?: string): void {
-    this.queue.push({ localId: localId ?? crypto.randomUUID(), wire, attempts: 0 });
-    this.persistOutbound();
-    void this.drain();
-  }
-
-  /** Attach a receipt payload to the most recently queued row — the LAST row
-   *  of a transcript entry's group. Drain is FIFO, so this row's ack implies
-   *  the whole group landed; only then is the receipt written (via the sink),
-   *  replacing the old record-at-handoff that turned dropped sends into
-   *  "forwarded". If the queue already drained (all rows acked), deliver now. */
+  /** A transcript entry's rows have been handed to `send`. With no outbound
+   *  queue there is nothing to wait for: the receipt is delivered at once
+   *  (or held until the Session registers its sink on attach). */
   stampReceiptOnLastQueued(receipt: { uuid: string; turn: string }): void {
-    const tail = this.queue[this.queue.length - 1];
-    if (tail) {
-      tail.receipt = receipt;
-      this.persistOutbound();
-    } else {
-      this.deliverReceipt(receipt);
-    }
+    if (this.receiptSink) this.receiptSink(receipt);
+    else this.pendingReceipts.push(receipt);
   }
 
   /** Session registers the receipts writer here (attachRelay). Flushes any
-   *  receipts whose rows acked before registration. */
+   *  receipts stamped before registration. */
   setReceiptSink(sink: (r: { uuid: string; turn: string }) => void): void {
     this.receiptSink = sink;
-    if (this.ackedReceipts.length > 0) {
-      const pending = this.ackedReceipts.splice(0);
-      this.persistOutbound();
-      for (const r of pending) sink(r);
-    }
+    const pending = this.pendingReceipts.splice(0);
+    for (const r of pending) sink(r);
   }
 
-  private deliverReceipt(receipt: { uuid: string; turn: string }): void {
-    if (this.receiptSink) {
-      this.receiptSink(receipt);
-    } else {
-      this.ackedReceipts.push(receipt);
-      this.persistOutbound();
-    }
-  }
+  /** There is no outbound spool any more, so it can never be degraded; the
+   *  transcript checkpoint gate in Session#scheduleCheckpoint reads this. */
+  readonly outboundPersistDegraded = false;
 
-  /** True while the last outbound spool write failed — the transcript
-   *  checkpoint must NOT advance past entries whose rows aren't durably
-   *  spooled (5.6-sol audit #2: correlated loss of both the rows and the
-   *  replay that would have recovered them). */
-  outboundPersistDegraded = false;
-
-  private persistOutbound(): void {
-    // Self-GC: an empty state (all delivered, receipts flushed) deletes the
-    // file instead of leaving an empty husk per session forever.
-    if (this.queue.length === 0 && this.ackedReceipts.length === 0) {
-      clearOutbound(this.relaySessionId);
-      this.outboundPersistDegraded = false;
-      return;
-    }
-    this.outboundPersistDegraded = !saveOutbound(this.relaySessionId, {
-      items: this.queue.map((q) => ({ localId: q.localId, wire: q.wire as unknown, receipt: q.receipt })),
-      ackedReceipts: this.ackedReceipts,
-    });
-  }
-
-  private async drain(): Promise<void> {
-    if (this.draining) return;
-    this.draining = true;
-    while (this.queue.length > 0) {
-      const item = this.queue[0];
-      try {
-        const enc = encryptWire(this.variant, this.sessionKey, item.wire);
-        await this.client.append(this.relaySessionId, enc, item.localId);
-        this.queue.shift();
-        // Group receipt rides the entry's LAST row — its ack means every row
-        // of that transcript entry is durably on the server. A POISONED
-        // receipt (a sibling row was dropped) is discarded instead: partial
-        // delivery must not read as forwarded.
-        if (item.receipt && !item.receipt.poisoned) this.deliverReceipt(item.receipt);
-        this.persistOutbound();
-      } catch (e) {
-        item.attempts++;
-        // Permanent 4xx (archived session 404/410, auth 401/403) will never
-        // succeed: drop the ROW, but NEVER its receipt — "not delivered" must
-        // not become "forwarded" (codex review finding 1). The transcript
-        // entry stays unreceipted, so a later rebind/replay can retry it.
-        // 408/429 are retryable. Retryables are NEVER dropped — parked with
-        // capped backoff until the relay comes back (the queue is persisted,
-        // so a restart resumes it too).
-        const status = (e as { status?: number }).status;
-        const permanent = typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
-        if (permanent) {
-          // Dropping ANY row of a transcript-entry group poisons the whole
-          // group's receipt (5.6-sol audit #1): without this, a mid-group 400
-          // dropped one row and the LAST row's ack still wrote the receipt —
-          // partial delivery read as "forwarded". Walk forward to the group
-          // terminator (the receipt-bearing row) and strip its receipt, so the
-          // entry stays unreceipted and a later rebind/replay can retry it
-          // whole. Rows already sent stay sent (server localId dedupe absorbs
-          // the replay's duplicates).
-          // POISON (not strip) the group's terminator receipt: stripping
-          // removed the group boundary, so a SECOND failed row in the same
-          // group walked into the NEXT group and killed its receipt too
-          // (5.6-sol verify #1). The poisoned marker keeps the delimiter in
-          // place; ack discards it instead of delivering.
-          const groupEnd = this.queue.findIndex((q) => q.receipt !== undefined);
-          if (groupEnd >= 0) {
-            if (!this.queue[groupEnd].receipt!.poisoned) {
-              log(`send permanently failed (HTTP ${status}) mid-group — poisoning group receipt ${this.queue[groupEnd].receipt!.uuid}`);
-              this.queue[groupEnd].receipt!.poisoned = true;
-            }
-          } else {
-            log(`send permanently failed (HTTP ${status}), dropping row (receipt withheld): ${e}`);
-          }
-          this.queue.shift();
-          this.persistOutbound();
-          continue;
-        }
-        const delay = Math.min(500 * 2 ** Math.min(item.attempts, 7), 30_000);
-        if (item.attempts === 1 || item.attempts % 10 === 0) {
-          log(`send failed (attempt ${item.attempts}), retrying in ${delay}ms (queue parked, ${this.queue.length} waiting): ${e}`);
-        }
-        await sleep(delay);
-      }
-    }
-    this.draining = false;
-  }
-
-  /** Last thinking value we emitted — so the keepalive heartbeat re-asserts the
-   *  REAL state instead of stomping it to false every 30s. */
+  /** Last thinking value we recorded. */
   private lastThinking = false;
 
   setThinking(thinking: boolean): void {
     const changed = this.lastThinking !== thinking;
     this.lastThinking = thinking;
-    this.client.emitAlive(this.relaySessionId, thinking);
-    // ALSO persist on change: the ephemeral only reaches currently-connected
-    // clients and the server never stores it, so a cold app start showed every
-    // session idle until the next 30s keepalive happened to land ("close the
-    // app and the status is lost"). The app treats joy__thinking + live
-    // presence as thinking, so state survives restarts; presence gating keeps
-    // a daemon death from freezing a stale blue.
+    // Persisted on change: the app treats joy__thinking + live machine
+    // presence as thinking, so a cold app start shows the real state and a
+    // daemon death can't freeze a stale blue.
     if (changed) {
       void this.mergeMetadata({ joy__thinking: thinking ? { since: Date.now() } : null }).catch(() => {});
     }
@@ -1652,20 +841,9 @@ export class RelaySession {
     await this.mergeMetadata({ joy__thinking: null });
   }
 
-  /** Re-emit presence with the CURRENT thinking value — used on socket
-   *  reconnect to refresh the app without clobbering the real state. */
-  reassertAlive(): void {
-    this.client.emitAlive(this.relaySessionId, this.lastThinking);
-  }
-
-  /** Fire an auto push-notification for this session (done/permission/question).
-   *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
-   *  WHICH session at a glance; body is the AI summary (or the per-kind reason).
-   *  The server suppresses it when the app is focused on this session. */
-  /** Agent-authored notification (<joy-notify/> tag): free-form title + body,
-   *  same server-side focus suppression as the automatic pushes. Title falls
-   *  back to the session's host/folder so a push always identifies its source;
-   *  when the agent titles it, the location rides in the body suffix instead. */
+  /** Agent-authored notification (<joy-notify/> tag): free-form title + body.
+   *  Title falls back to the session's host/folder so a push always identifies
+   *  its source; when the agent titles it, the folder rides as a prefix. */
   notifyCustom(headline: string, detail: string | null): void {
     // Project-prefixed headline ("joy: Deploy finished") so every push reads
     // as <where>: <what> at a glance; detail (when given) is the body.
@@ -1675,6 +853,9 @@ export class RelaySession {
     void this.client.sendSessionPushEvent(this.relaySessionId, 'done', finalTitle, detail ?? headline);
   }
 
+  /** Fire an auto push-notification for this session (done/permission/question).
+   *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
+   *  WHICH session at a glance; body is the reply snippet (or the per-kind reason). */
   notify(kind: 'done' | 'permission' | 'question', snippet?: string): void {
     const summary = (this.metadata?.summary as { text?: string } | undefined)?.text?.trim();
     // Prefer the caller's snippet (the reply's first line) — the session
@@ -1693,11 +874,6 @@ export class RelaySession {
     const path = (this.metadata?.path as string | undefined)?.trim();
     const folder = path ? path.split(/[\\/]/).filter(Boolean).pop() : undefined;
     return [host, folder].filter(Boolean).join('/') || 'Joy session';
-  }
-
-  /** Register a session-scoped RPC handler bound to this relay session. */
-  registerRpc(method: string, handler: (params: unknown) => Promise<unknown>): void {
-    this.client.registerSessionRpcHandler(this.relaySessionId, method, handler);
   }
 }
 
@@ -1752,11 +928,8 @@ export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts
   return sessionEnvelope(ev, opts);
 }
 
-// User messages are sorted by the relay's server-assigned createdAt, NOT an
-// embedded time — so on a replay burst they'd diverge from agent events (a
-// different clock). joyTime carries Claude's transcript timestamp; joy-app
-// reads it (MessageMetaSchema.joyTime) and orders joy user messages by it,
-// putting both sides on one clock.
+// joyTime carries Claude's transcript timestamp so a replay burst keeps user
+// and agent rows on one clock (the app orders joy user messages by it).
 export function encodeUserMessage(text: string, timeMs?: number): WireRecord {
   return { role: 'user', content: { type: 'text', text }, meta: { sentFrom: 'joy', joyTime: timeMs } };
 }
@@ -1767,77 +940,26 @@ export function initRelay(): RelayClient | null {
   const creds = loadCredentials();
   if (!creds) { log('no credentials found — relay disabled'); return null; }
   const client = new RelayClient(creds);
-  client.connect();
+  client.start();
   log(`initialized → ${creds.serverUrl}`);
   return client;
 }
 
-export async function createRelaySession(
+/** Build the session card holder for a local session. Purely local: the
+ *  relay-side v2 session row is created by the nucleus lane at spawn/bind,
+ *  and the card reaches it through the publisher the lane registers. */
+export function createRelaySession(
   client: RelayClient,
-  opts: { tag: string; cwd: string; id: string; state?: JoyLifecycleState; flavor?: string },
-): Promise<RelaySession> {
+  opts: { tag?: string; cwd: string; id: string; state?: JoyLifecycleState; flavor?: string },
+): RelaySession {
   const state = opts.state ?? 'running';
   const metadata: Record<string, unknown> = { path: opts.cwd, host: hostname(), version: '0.1.0', machineId: client.creds.machineId, joy__source: 'joy-daemon', joy__sessionId: opts.id, joy__state: state };
   // Agent flavor drives the app's per-agent rendering (codex diff/patch views).
   // Absent → the app treats a joy-daemon session as claude.
   if (opts.flavor) metadata.flavor = opts.flavor;
-  const result = await client.createSession({ tag: opts.tag, metadata });
-  // Resume from persisted seq so messages sent during downtime are delivered.
-  // On first-ever start (no saved seq), fetch to end to avoid replaying history.
-  let initialSeq = loadPersistedSeq(result.sessionId);
-  if (initialSeq === 0) {
-    initialSeq = await client.fetchLastSeq(result.sessionId);
-    if (initialSeq > 0) savePersistedSeq(result.sessionId, initialSeq);
-  }
-  // On tag-dedup the server kept its EXISTING metadata (title, prior joy__state).
-  // Use it as the base so we don't wipe the title; fall back to ours for a
-  // brand-new session. Then push the intended state (a no-op if unchanged).
-  const baseMeta = result.metadata ?? metadata;
-  const rs = new RelaySession({
-    client,
-    relaySessionId: result.sessionId,
-    sessionKey: result.sessionKey,
-    variant: result.variant,
-    initialSeq,
-    metadata: baseMeta,
-    metadataVersion: result.metadataVersion,
-  });
-  await rs.updateJoyState(state);
-  return rs;
-}
-
-// ── lastSeq persistence ───────────────────────────────────────────────────────
-// Stores the last processed seq per relay session so messages sent during
-// joy-daemon downtime are delivered on next startup, not silently skipped.
-
-function seqStatePath(relaySessionId: string): string {
-  const dir = joyStateDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  return join(dir, `${relaySessionId}.seq`);
-}
-
-function loadPersistedSeq(relaySessionId: string): number {
-  try {
-    const p = seqStatePath(relaySessionId);
-    if (existsSync(p)) return parseInt(readFileSync(p, 'utf8').trim(), 10) || 0;
-  } catch {}
-  return 0;
-}
-
-function savePersistedSeq(relaySessionId: string, seq: number): void {
-  // Low: write-temp-then-rename for atomic update — crash mid-write can't corrupt
-  try {
-    const p = seqStatePath(relaySessionId);
-    const tmp = p + '.tmp';
-    writeFileSync(tmp, String(seq));
-    renameSync(tmp, p);
-  } catch {}
+  return new RelaySession({ client, relaySessionId: opts.id, metadata });
 }
 
 // ── Util ──────────────────────────────────────────────────────────────────────
 
 function log(msg: string): void { process.stderr.write(`[relay] ${msg}\n`); }
-
-function isObj(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null;
-}

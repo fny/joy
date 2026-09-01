@@ -1,6 +1,6 @@
 // Slash-command discovery for the app's "/" menu + machine page.
 //
-// joy-daemon runs the bare `claude` CLI (no Agent SDK), so unlike happy-cli it
+// joy-daemon runs the bare `claude` CLI (no Agent SDK), so unlike an SDK-driven harness it
 // has no built-in channel telling the app which slash commands exist. We
 // discover them from the filesystem instead — the names only, since the app's
 // suggestion list (sync/suggestionCommands.ts) keys off names and supplies its

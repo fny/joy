@@ -39,7 +39,6 @@ export interface AgentSession {
   end(reason: "killed" | "process_exited"): boolean;
   awaitArchive(): Promise<boolean>;
   forceKill(): boolean;
-  reassertLifecycle(): void;
   attachRelay(rs: RelaySession, allowEnded?: boolean): boolean;
   beginWatching(): void;
 
@@ -65,7 +64,7 @@ export interface AgentSession {
   onHookEvent(ev: Record<string, unknown>): { ok: boolean };
   markCompacting(trigger: string): void;
 
-  /** Stamp the happy card's metadata with this session's v2 linkage
+  /** Stamp the session card's metadata with this session's v2 linkage
    *  ({sessionId, relay, keyEnvelope}) so the app can route writes over the
    *  v2 plane and unseal content. Optional: adapters merge best-effort. */
   setV2Link?(link: { sessionId: string; relay: string; keyEnvelope: string }): void;

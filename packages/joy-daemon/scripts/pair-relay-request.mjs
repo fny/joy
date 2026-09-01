@@ -21,7 +21,7 @@ const unb64 = (s) => new Uint8Array(Buffer.from(s, "base64"));
 async function post(path, body) {
   const r = await fetch(relayUrl + path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Happy-Client": "cli/pair-request" },
+    headers: { "Content-Type": "application/json", "X-Joy-Client": "cli/pair-request" },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${path} -> HTTP ${r.status}: ${await r.text()}`);
@@ -35,7 +35,7 @@ function decryptBox(bundle, recipientSecret) {
 
 // ── 1. auth request ──
 const termKp = nacl.box.keyPair();
-await post("/v1/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+await post("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
 const key = b64url(termKp.publicKey);
 console.log("Approve this pairing from a browser logged into " + relayUrl + ":");
 console.log("");
@@ -50,7 +50,7 @@ let resp;
 for (;;) {
   if (Date.now() > deadline) { console.error("TIMEOUT: not approved within 30 min"); process.exit(1); }
   await new Promise((r) => setTimeout(r, 2000));
-  resp = await post("/v1/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  resp = await post("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
   if (resp.state === "authorized") break;
 }
 const decrypted = decryptBox(unb64(resp.response), termKp.secretKey);

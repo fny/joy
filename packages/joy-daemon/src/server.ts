@@ -22,7 +22,7 @@ import { initRelay, loadCredentials } from "./relay/relay.ts";
 import { startNucleusLane } from "./relay/nucleusLane.ts";
 import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
-import { happyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir } from "./paths";
+import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
 
 // ~/.joy/env: optional KEY=value lines loaded into the daemon's environment at
 // boot (never overriding real env). This is how provider API keys (e.g.
@@ -43,9 +43,7 @@ try {
   }
 } catch { /* no ~/.joy/env — fine */ }
 import { SessionRegistry } from "./domain/registry";
-import { bindSessionOps } from "./domain/operations";
 import { startHttpServer } from "./transports/http";
-import { registerMachineOps } from "./transports/relay-machine";
 import { computeUsage, periodToRange } from "./claude/usage";
 import { startResourceAlerts } from "./domain/resourceAlerts";
 
@@ -109,21 +107,20 @@ const relayClient = initRelay();
 const machineMetadata = {
   host: hostname(),
   platform: osPlatform(),
-  happyCliVersion: "joy-daemon/0.1.0",
+  joyDaemonVersion: "joy-daemon/0.1.0",
   homeDir: homedir(),
-  happyHomeDir: happyHomeDir(),
-  happyLibDir: __dirname,
+  joyHomeDir: joyRelayCredsDir(),
+  joyLibDir: __dirname,
 };
 
 const registry = new SessionRegistry({
   tmuxSession: TMUX_SESSION,
   relayClient,
   baseMachineMetadata: machineMetadata,
-  // Whenever a session gets a relay session attached (launch, recover, or
-  // reconnect), register the session-scoped catalog ops AND push its slash
-  // commands (project ∪ machine), folding the project into machine knowledge.
+  // Whenever a session gets a relay session attached (launch or recover),
+  // push its slash commands (project ∪ machine), folding the project into
+  // machine knowledge. Session ops arrive over the v2 tunnel (tunnel/executor).
   onRelayAttached: (session, rs) => {
-    bindSessionOps(session, rs);
     void registry.commands.onSessionAttached(session.cwd, rs, session.agentFlavor);
   },
 });
@@ -141,10 +138,10 @@ startHttpServer({
 registry.commands.rescanMachine();
 registry.recover();
 
-// v2 nucleus lane: dual-stack ADDITIVE transport beside the happy socket —
-// claims the relay's durable v2 queue for this machine. Same credentials and
-// machine identity as the happy path. Fail-soft: against a relay without
-// /joy/v2 it idles and retries; JOY_V2_LANE=0 disables it outright.
+// v2 nucleus lane: the daemon's app-facing message plane — claims the relay's
+// durable v2 queue for this machine. Same credentials and machine identity as
+// the account plane (RelayClient). Fail-soft: against a relay without /joy/v2
+// it idles and retries; JOY_V2_LANE=0 disables it outright.
 let nucleusLane: import("./relay/nucleusLane.ts").NucleusLaneHandle | null = null;
 if (process.env.JOY_V2_LANE !== "0") {
   const creds = loadCredentials();
@@ -195,8 +192,6 @@ if (relayClient) {
   // so homeDir is preserved. Best-effort — failures only degrade those UIs.
   void registry.commands.pushMachineIfChanged();
 
-  registerMachineOps(relayClient, registry);
-
   // Personal/plugin commands change rarely; re-scan on a coarse interval and
   // push only when the set actually changes (no fs.watch). Sessions refresh
   // their project portion on attach; the machine page has an explicit refresh.
@@ -204,8 +199,6 @@ if (relayClient) {
     registry.commands.rescanMachine();
     void registry.commands.pushMachineIfChanged();
   }, 5 * 60 * 1000).unref();
-
-  relayClient.onReconnect = () => registry.onRelayReconnect();
 
   // Push alerts when the box or an account quota crosses 90% (see
   // resourceAlerts.ts for the hysteresis + 4h cooldown semantics).

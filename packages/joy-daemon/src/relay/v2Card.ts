@@ -4,15 +4,17 @@
 // lease needed to PATCH the relay's card.
 //
 // A tiny registry rather than imports in either direction: relay.ts must not
-// depend on nucleusLane (it predates v2), and the lane must not reach into
-// RelaySession internals. The lane registers a publisher per bound session;
-// the metadata path fires it with the freshly merged card.
+// depend on nucleusLane, and the lane must not reach into RelaySession
+// internals. The lane registers a publisher per bound session; the metadata
+// path fires it with the freshly merged card.
 //
-// Publishing is fire-and-forget by design: the card is a rendering of state
-// the daemon already holds durably (window records + happy metadata), so a
-// lost PATCH costs staleness until the next merge, never correctness.
+// Publishing is best-effort by design: the card is a rendering of state the
+// daemon already holds durably (window records + session metadata), so a lost
+// PATCH costs staleness until the next merge, never correctness. The publish
+// promise is still surfaced so a caller that WANTS certainty (archive on
+// kill — the app must not keep showing a dead session) can await the PATCH.
 
-export type CardPublisher = (metadata: Record<string, unknown>) => void;
+export type CardPublisher = (metadata: Record<string, unknown>) => Promise<void> | void;
 
 const publishers = new Map<string, CardPublisher>();
 
@@ -24,11 +26,14 @@ export function unregisterV2CardPublisher(localSessionId: string): void {
   publishers.delete(localSessionId);
 }
 
-/** Called from the metadata merge path with the COMPLETE merged card. A
+/** Called from the metadata merge path with the COMPLETE merged card.
+ *  Resolves true when a publisher was registered AND its PATCH resolved; a
  *  session with no registered publisher (not v2-bound yet, or the lane is
- *  down) is silently skipped — the lane re-publishes on rebind. */
-export function publishV2Card(localSessionId: string, metadata: Record<string, unknown>): void {
-  try { publishers.get(localSessionId)?.(metadata); } catch { /* fire-and-forget */ }
+ *  down) resolves false — the lane re-publishes on rebind. Never rejects. */
+export async function publishV2Card(localSessionId: string, metadata: Record<string, unknown>): Promise<boolean> {
+  const fn = publishers.get(localSessionId);
+  if (!fn) return false;
+  try { await fn(metadata); return true; } catch { return false; }
 }
 
 /** The card's lifecycle state, derived from the daemon's joy__state. */

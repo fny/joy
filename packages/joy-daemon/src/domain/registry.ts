@@ -1,8 +1,7 @@
 // SessionRegistry: the single owner of all Session instances plus the
 // machine-level concerns that span sessions — creating them (tmux window +
 // claude spawn + relay attach), recovering them after a joy-daemon restart,
-// re-attaching relays after a socket reconnect, and fanning out events to
-// the debug page (SSE + bounded chat log).
+// and fanning out events to the debug page (SSE + bounded chat log).
 
 import { setTimeout as sleep } from "timers/promises";
 import { existsSync, mkdirSync, statSync, readFileSync, readdirSync } from "fs";
@@ -396,7 +395,7 @@ export class SessionRegistry {
     const buildFlags = (withContinue: boolean): string[] => {
       const f: string[] = [];
       // Teach Claude the <options> convention the app renders as a picker (the
-      // happy SDK injects this per-message; a tmux pane can't, so bake it in).
+      // the app SDK injected this per-message; a tmux pane can't, so bake it in).
       f.push("--append-system-prompt", optionsPromptArg());
       if (claudeSettings) f.push("--settings", `'${claudeSettings}'`);
       if (opts.model) f.push("--model", opts.model);
@@ -478,18 +477,11 @@ export class SessionRegistry {
       if (!(await drv.key(tmuxWindow, "Enter")).ok) abortCreate("launch-claude-enter");
     }
 
-    // Kick off the relay session creation now (after the window is confirmed live) so
-    // its network round-trips overlap the PID-discovery sleeps below.
-    const relayPromise = this.relayClient
+    // Build the relay session (local card holder — no network) now that the
+    // window is confirmed live; it's attached once the Session object exists.
+    const relaySession = this.relayClient
       ? createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id })
       : null;
-    // Rejection guard: the real await sits ~1.2s downstream (PID-discovery
-    // sleeps), and an unhandled rejection in that window KILLS the daemon on
-    // modern Node (observed live: happy-server-standalone 500s dataKey
-    // session creates — PGlite bytes-column quirk — and the whole daemon
-    // died mid-spawn). This side-branch marks the rejection handled; the
-    // try/catch around the await still sees and logs the same error.
-    relayPromise?.catch(() => {});
 
     await sleep(400);
     const shellPid = parseInt(
@@ -547,14 +539,7 @@ export class SessionRegistry {
     saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel });
     this.broadcast("session_update", session.toJSON());
 
-    if (relayPromise) {
-      try {
-        const rs = await relayPromise;
-        session.attachRelay(rs); // no-ops (and stops rs) if kill raced the create
-      } catch (e) {
-        process.stderr.write(`[relay] failed to create session for ${id}: ${e}\n`);
-      }
-    }
+    if (relaySession) session.attachRelay(relaySession); // no-ops (and stops rs) if kill raced the create
 
     // Detached create: don't launch/watch Claude — mark the session detached
     // (relay stays attached so file/git/diff RPCs work on the cwd; the window
@@ -614,7 +599,7 @@ export class SessionRegistry {
     this.broadcast("session_update", session.toJSON());
     if (this.relayClient) {
       try {
-        const rs = await createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "opencode" });
+        const rs = createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "opencode" });
         session.attachRelay(rs);
       } catch (e) {
         process.stderr.write(`[relay] failed to create opencode session for ${id}: ${e}\n`);
@@ -641,7 +626,7 @@ export class SessionRegistry {
     this.broadcast("session_update", session.toJSON());
     if (this.relayClient) {
       try {
-        const rs = await createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "pi" });
+        const rs = createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "pi" });
         session.attachRelay(rs);
       } catch (e) {
         process.stderr.write(`[relay] failed to create pi session for ${id}: ${e}\n`);
@@ -709,7 +694,7 @@ export class SessionRegistry {
 
     if (this.relayClient) {
       try {
-        const rs = await createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "codex" });
+        const rs = createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "codex" });
         session.attachRelay(rs);
       } catch (e) {
         process.stderr.write(`[relay] failed to create codex session for ${id}: ${e}\n`);
@@ -1047,30 +1032,6 @@ export class SessionRegistry {
     }
   }
 
-  /** Re-attach relay sessions orphaned by a socket reconnect. */
-  onRelayReconnect(): void {
-    for (const session of this.#sessions.values()) {
-      // NEVER re-attach a killed session: end("killed") stopped its relay and
-      // wrote joy__state:'archived', but the Session object stays in #sessions
-      // — re-attaching here recreated a relay session under the same tag and
-      // overwrote 'archived' with 'detached', resurrecting the card in the app
-      // (red, heartbeating) on every socket blip. Same filter list() applies.
-      if (this.#isKilled(session)) continue;
-      // Re-attach any session missing a relay — including ended ones, so their
-      // file/git RPCs survive a socket reconnect too.
-      if (session.relayAttached) {
-        // A detached session keeps its relay, so it's skipped here — but a
-        // one-shot joy__state:'detached' write lost to a merge timeout at the
-        // moment of death would never be re-driven, leaving a dead session shown
-        // green. Re-assert it on reconnect (no-ops if it already stuck).
-        session.reassertLifecycle();
-        continue;
-      }
-      process.stderr.write(`[relay] reconnect: creating session for orphaned ${session.id}\n`);
-      this.#attachRelayAsync(session);
-    }
-  }
-
   // afterAttach runs once the relay is attached (or immediately if there's no
   // relay / attach fails) — recovery uses it to start the transcript tailer only
   // AFTER the relay is live, so the replay-from-0 backfill has somewhere to go.
@@ -1079,17 +1040,14 @@ export class SessionRegistry {
     // A session recovered as ended (window present, Claude dead) is detached;
     // anything else attaching here is running.
     const state = session.status === "ended" ? "detached" : "running";
-    createRelaySession(this.relayClient, { tag: `joy-daemon-${session.id}`, cwd: session.cwd, id: session.id, state })
-      .then(rs => {
-        process.stderr.write(`[relay] session ${session.id} → relay ${rs.relaySessionId}\n`);
-        // Recovery/reconnect contexts have no kill-race, so allow ended sessions
-        // to attach (their file/git RPCs stay live; messages won't touch the pane).
-        session.attachRelay(rs, true);
-        afterAttach?.();
-      })
-      .catch(e => {
-        process.stderr.write(`[relay] failed to create session for ${session.id}: ${e}\n`);
-        afterAttach?.(); // still start watching (death detection, etc.) without a relay
-      });
+    try {
+      const rs = createRelaySession(this.relayClient, { tag: `joy-daemon-${session.id}`, cwd: session.cwd, id: session.id, state });
+      // Recovery contexts have no kill-race, so allow ended sessions to attach
+      // (their file/git RPCs stay live; messages won't touch the pane).
+      session.attachRelay(rs, true);
+    } catch (e) {
+      process.stderr.write(`[relay] failed to create session for ${session.id}: ${e}\n`);
+    }
+    afterAttach?.(); // start watching (death detection, etc.) with or without a relay
   }
 }
