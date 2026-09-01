@@ -2946,6 +2946,12 @@ export class Session {
 
   /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
    *  the relay is attached by then on the spawn path — best-effort merge). */
+
+  /** Card snapshot for the nucleus lane's v2 publish (see AgentSession). */
+  cardMetadata(): Record<string, unknown> | null {
+    return this.#relay?.metadataSnapshot ?? null;
+  }
+
   setV2Link(link: { sessionId: string; relay: string; keyEnvelope: string }): void {
     // localSessionId lets the app address this session's MACHINE plane
     // (/v2/sessions/<local id>/…) through the sealed tunnel.

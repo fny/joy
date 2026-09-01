@@ -31,7 +31,7 @@ const auth = createAuth({ upstreamHost: TARGET_HOST, upstreamPort: TARGET_PORT }
 const tunnel = createTunnel({ notify });
 const router = createRouter({ core, auth, notify, db, tunnel });
 const attachments = createAttachments(db);
-const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments });
+const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, upstream: { host: TARGET_HOST, port: TARGET_PORT } });
 
 // Lease-expiry sweep: orphans running turns whose daemon lease lapsed.
 setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-relay] sweep failed:', e)); }, 5_000).unref();
