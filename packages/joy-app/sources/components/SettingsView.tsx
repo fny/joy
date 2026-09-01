@@ -315,12 +315,12 @@ export const SettingsView = React.memo(function SettingsView() {
                 <Item
                     title={t('settings.joyHttp')}
                     subtitle={t('settings.joyHttpSubtitle')}
-                    icon={<Ionicons name="globe-outline" size={29} color={theme.colors.textSecondary} />}
+                    icon={<Ionicons name="globe-outline" size={29} color={theme.colors.text} />}
                     onPress={() => router.push('/settings/joy-http')}
                 />
                 <Item
                     title={t('settings.developerTools')}
-                    icon={<Ionicons name="construct-outline" size={29} color={theme.colors.accents.indigo} />}
+                    icon={<Ionicons name="construct-outline" size={29} color={theme.colors.text} />}
                     onPress={() => router.push('/dev')}
                 />
                 {/* Raw settings JSON editor (relocated from the mods page). Joy
@@ -328,7 +328,7 @@ export const SettingsView = React.memo(function SettingsView() {
                 <Item
                     title="Raw settings"
                     subtitle="View and edit the raw settings JSON"
-                    icon={<Ionicons name="code-slash-outline" size={29} color={theme.colors.textSecondary} />}
+                    icon={<Ionicons name="code-slash-outline" size={29} color={theme.colors.text} />}
                     onPress={() => router.push('/settings/raw')}
                 />
             </ItemGroup>
