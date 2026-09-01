@@ -97,7 +97,6 @@ export class PiSession implements AgentSession {
     this.#relay = rs;
     this.relaySessionId = rs.relaySessionId;
     if (this.status === "ended") rs.pausePull();
-    rs.onMessage = async (text, seq) => { this.enqueue(text, { seq, mirrorToRelay: false }); };
     rs.setReceiptSink(() => { /* localId dedupe covers exactly-once */ });
     this.#deps.onRelayAttached?.(this, rs);
     rs.start();
@@ -344,9 +343,6 @@ export class PiSession implements AgentSession {
   async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "not supported for pi (bare v1)" }; }
   transcript(): { lines: unknown[] } { return { lines: [] }; }
   onHookEvent(): { ok: boolean } { return { ok: true }; }
-  /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
-   *  the relay is attached by then on the spawn path — best-effort merge). */
-
   /** Card snapshot for the nucleus lane's v2 publish (see AgentSession). */
   cardMetadata(): Record<string, unknown> | null {
     return this.#relay?.metadataSnapshot ?? null;
@@ -359,7 +355,6 @@ export class PiSession implements AgentSession {
   }
 
   markCompacting(): void { /* pi compacts itself */ }
-  reassertLifecycle(): void { void this.#relay?.updateJoyState(this.status === "ended" ? "detached" : "running"); }
 
   // ── teardown ──────────────────────────────────────────────────────────────
 
@@ -367,7 +362,6 @@ export class PiSession implements AgentSession {
     if (this.status === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
-    const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
     if (this.#proc && this.#proc.exitCode === null) {
       try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
     }
@@ -381,8 +375,7 @@ export class PiSession implements AgentSession {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
-      void this.#relay?.updateJoyState("archived");
-      if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
+      if (this.#relay) this.#archivePromise = this.#relay.archive();
       this.#relay?.stop();
       deleteWindowRecord(this.id);
     }
@@ -392,8 +385,7 @@ export class PiSession implements AgentSession {
 
   forceKill(): boolean {
     if (this.status === "ended") {
-      const relaySessionId = this.relaySessionId;
-      if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
+      if (this.#relay) this.#archivePromise = this.#relay.archive();
       return true;
     }
     return this.end("killed");

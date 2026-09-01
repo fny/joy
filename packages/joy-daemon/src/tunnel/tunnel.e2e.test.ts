@@ -1,9 +1,8 @@
 // End-to-end tunnel test: the REAL relay router (routes.mjs + core.mjs +
-// PGlite db), a REAL local HTTP target standing in for the daemon surface,
-// the real executor, the real client. The only stub is auth's upstream
-// account check — createAuth exposes fetchImpl for exactly this.
+// PGlite db + the native account plane), a REAL local HTTP target standing in
+// for the daemon surface, the real executor, the real client. Nothing stubbed.
 //
-// What "thorough" means here: the happy path at three sizes, streaming
+// What "thorough" means here: the success path at three sizes, streaming
 // (chunks observed before the response completes), header/body fidelity,
 // and the adversarial/broken cases — offline daemon, foreign account,
 // wrong client secret, and relay blindness (no plaintext in transit).
@@ -21,7 +20,7 @@ import { tunnelFetch, TunnelError } from "./client";
 import { openDb } from "../../../joy-relay/src/db.mjs";
 import { createCore } from "../../../joy-relay/src/core.mjs";
 import { createNotify } from "../../../joy-relay/src/notify.mjs";
-import { createAuth } from "../../../joy-relay/src/auth.mjs";
+import { createTestRelayAccounts } from "./testRelayAccounts";
 import { createRouter } from "../../../joy-relay/src/routes.mjs";
 import { createV2Router } from "../../../joy-relay/src/v2.mjs";
 import { createAttachments } from "../../../joy-relay/src/attachments.mjs";
@@ -37,6 +36,7 @@ let relay: http.Server; let relayUrl: string;
 let target: http.Server; let targetUrl: string;
 let executor: ExecutorHandle | null = null;
 let db: any;
+let tokA: string; let tokB: string;
 let seenOnWire: Buffer[] = []; // TCP-level tap for the blindness assertion
 let tap: net.Server; let tapUrl: string;
 
@@ -45,21 +45,15 @@ beforeAll(async () => {
   db = await openDb(dataDir);
   const notify = createNotify();
   const core = createCore(db, notify);
-  // Auth stub: 'tok-A' → account A, 'tok-B' → account B, anything else 401.
-  const auth = createAuth({
-    upstreamHost: "x", upstreamPort: 0,
-    fetchImpl: async (_url: string, init: any) => {
-      const token = String(init?.headers?.Authorization ?? "").replace("Bearer ", "");
-      if (token === "tok-A") return { ok: true, json: async () => ({ id: "acct-A" }) } as any;
-      if (token === "tok-B") return { ok: true, json: async () => ({ id: "acct-B" }) } as any;
-      return { ok: false } as any;
-    },
-  });
+  // Real account plane: two fresh accounts, real EdDSA bearers.
+  const acc = await createTestRelayAccounts(db);
+  const { auth, accounts } = acc;
+  tokA = acc.tokA; tokB = acc.tokB;
   const tunnel = createTunnel({ notify });
   const router = createRouter({ core, auth, notify, db, tunnel });
   // The executor and client both speak /joy/v2 now — mount it like server.mjs.
   const attachments = createAttachments(db);
-  const v2router = createV2Router({ core, auth, notify, db, tunnel, attachments });
+  const v2router = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
 
   relay = http.createServer((req, res) => {
     void (async () => {
@@ -125,7 +119,7 @@ beforeAll(async () => {
   targetUrl = `http://127.0.0.1:${(target.address() as any).port}`;
 
   executor = startTunnelExecutor({
-    relayUrl: tapUrl, accountToken: "tok-A", machineKey: SECRET_A,
+    relayUrl: tapUrl, accountToken: tokA, machineKey: SECRET_A,
     machineId: MACHINE, targetBase: targetUrl,
   });
   // Wait for the executor to attach (first claim poll).
@@ -141,7 +135,7 @@ afterAll(async () => {
 
 const call = (over: Partial<Parameters<typeof tunnelFetch>[0]> = {}) =>
   tunnelFetch({
-    relayUrl: tapUrl, accountToken: "tok-A", masterSecret: SECRET_A, machineId: MACHINE,
+    relayUrl: tapUrl, accountToken: tokA, masterSecret: SECRET_A, machineId: MACHINE,
     method: "GET", path: "/hello", ...over,
   });
 
@@ -186,7 +180,7 @@ test("relay blindness: no plaintext marker in anything on the wire", () => {
 });
 
 test("foreign account is refused before any tunneling happens", async () => {
-  await expect(call({ accountToken: "tok-B" })).rejects.toMatchObject({ status: 403 });
+  await expect(call({ accountToken: tokB })).rejects.toMatchObject({ status: 403 });
 });
 
 test("wrong client secret cannot read the daemon's sealed reply", async () => {
@@ -195,7 +189,7 @@ test("wrong client secret cannot read the daemon's sealed reply", async () => {
 
 test("offline daemon fails fast with daemon_offline", async () => {
   await expect(tunnelFetch({
-    relayUrl: tapUrl, accountToken: "tok-A", masterSecret: SECRET_A,
+    relayUrl: tapUrl, accountToken: tokA, masterSecret: SECRET_A,
     machineId: "m-never-attached", method: "GET", path: "/hello",
   })).rejects.toMatchObject({ code: expect.stringMatching(/daemon_offline|daemon_unknown/) });
 });

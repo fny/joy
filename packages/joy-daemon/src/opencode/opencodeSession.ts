@@ -180,7 +180,6 @@ export class OpencodeSession implements AgentSession {
     this.#relay = rs;
     this.relaySessionId = rs.relaySessionId;
     if (this.status === "ended") rs.pausePull();
-    rs.onMessage = async (text, seq) => { await this.#onRelayMessage(text, seq); };
     rs.setReceiptSink(() => { /* exactly-once rides localId dedupe; no checkpoint */ });
     this.#deps.onRelayAttached?.(this, rs);
     rs.start();
@@ -269,23 +268,6 @@ export class OpencodeSession implements AgentSession {
   }
 
   // ── inbound ────────────────────────────────────────────────────────────────
-
-  async #onRelayMessage(text: string, seq: number): Promise<void> {
-    if (this.status === "ended") return;
-    if (this.#inbound.some((i) => i.seq === seq)) { void this.#drainInbound(); return; }
-    // App already shows the /joy-prompt row — no mirror. A crash-redelivery of
-    // this seq worst-cases a duplicate reinjection, which is benign.
-    if (this.#handleJoyPrompt(text, false, seq)) return;
-    // msg_ prefix is REQUIRED by the prompt schema; deterministic per relay seq
-    // so a cursor redelivery reuses the same id (idempotent server-side).
-    const item: CodexInboundItem = { clientId: `msg_joy${this.id}s${seq}`, text, state: "queued", at: Date.now(), seq };
-    this.#inbound.push(item);
-    if (!saveCodexInbound(this.id, this.#inbound)) {
-      this.#inbound.pop();
-      throw new Error("opencode inbound persist failed");
-    }
-    await this.#drainInbound();
-  }
 
   /** /joy-prompt — re-deliver the CURRENT joy instructions in-band. Opencode's
    *  preamble rides the FIRST prompt only, so after enough turns (or a
@@ -574,9 +556,6 @@ export class OpencodeSession implements AgentSession {
 
   transcript(): { lines: unknown[] } { return { lines: [] }; }
   onHookEvent(): { ok: boolean } { return { ok: true }; }
-  /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
-   *  the relay is attached by then on the spawn path — best-effort merge). */
-
   /** Card snapshot for the nucleus lane's v2 publish (see AgentSession). */
   cardMetadata(): Record<string, unknown> | null {
     return this.#relay?.metadataSnapshot ?? null;
@@ -589,7 +568,6 @@ export class OpencodeSession implements AgentSession {
   }
 
   markCompacting(): void { /* server-side */ }
-  reassertLifecycle(): void { void this.#relay?.updateJoyState(this.status === "ended" ? "detached" : "running"); }
 
   // ── teardown ──────────────────────────────────────────────────────────────
 
@@ -597,7 +575,6 @@ export class OpencodeSession implements AgentSession {
     if (this.status === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
-    const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
     if (this.#proc?.pid) killOpencodeServerPid(this.#proc.pid);
@@ -608,8 +585,7 @@ export class OpencodeSession implements AgentSession {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
-      void this.#relay?.updateJoyState("archived");
-      if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
+      if (this.#relay) this.#archivePromise = this.#relay.archive();
       this.#relay?.stop();
       clearCodexInbound(this.id);
       deleteWindowRecord(this.id);
@@ -620,8 +596,7 @@ export class OpencodeSession implements AgentSession {
 
   forceKill(): boolean {
     if (this.status === "ended") {
-      const relaySessionId = this.relaySessionId;
-      if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
+      if (this.#relay) this.#archivePromise = this.#relay.archive();
       return true;
     }
     return this.end("killed");

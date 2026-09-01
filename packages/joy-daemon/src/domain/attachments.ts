@@ -1,13 +1,15 @@
 // File attachment helpers.
 //
 // When the app sends a file alongside a chat message, joy-daemon:
-//   1. Downloads + decrypts the blob via the relay (see relay.ts)
+//   1. Fetches the blob from the relay's v2 attachment store (not wired yet —
+//      the v2 plane has raw /joy/v2/attachments endpoints but no production
+//      sealing format; see nucleusLane's attachment TODO)
 //   2. Writes the file to the session's cwd
 //   3. Appends the bare path to the chat text before piping into tmux
 //
 // Images (PNG / JPEG / GIF / WEBP, sniffed from magic bytes rather than
 // trusting the wire mimeType — iOS reports image/heic or empty strings) get a
-// paste-* filename, mirroring happy-cli's detectClaudeImageMime. Any other
+// paste-* filename, matching what the claude CLI expects for pasted images. Any other
 // file type keeps its original (sanitized) name so the agent can read or
 // reference it by a meaningful path.
 

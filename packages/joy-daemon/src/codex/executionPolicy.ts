@@ -1,4 +1,4 @@
-// Permission-mode → codex execution policy. Ported from happy-cli's
+// Permission-mode → codex execution policy. Ported from the original CLI harness's
 // executionPolicy.ts (the upstream reference) so joy's codex sessions honor the
 // same permission vocabulary. Two shapes matter:
 //   - thread/start / thread/resume take `sandbox` = a SandboxMode STRING (kebab).

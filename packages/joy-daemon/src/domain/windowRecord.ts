@@ -40,9 +40,6 @@ export interface WindowRecord {
    *  (receipts only need to cover post-checkpoint overlap). Path-scoped: a
    *  /clear rotation binds a NEW file, where offset 0 is correct. */
   transcriptCheckpoint?: { path: string; offset: number };
-  /** Attachment refs staged (file rows cursor-confirmed) but not yet consumed
-   *  by their text message — must survive a daemon crash (5.6-sol verify #4). */
-  pendingAttachments?: { ref: string; name?: string }[];
   /** Agent type — the discriminator recovery uses to reconstruct the right
    *  session class (claude Session vs CodexSession). Absent = claude (legacy). */
   agent?: "claude" | "codex" | "opencode" | "pi";
@@ -108,7 +105,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; pendingAttachments?: { ref: string; name?: string }[]; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -122,7 +119,6 @@ export function saveWindowRecord(
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,
-      pendingAttachments: patch.pendingAttachments ?? prev?.pendingAttachments,
       agent: patch.agent ?? prev?.agent,
       codexThreadId: patch.codexThreadId ?? prev?.codexThreadId,
       codexSocketPath: patch.codexSocketPath ?? prev?.codexSocketPath,

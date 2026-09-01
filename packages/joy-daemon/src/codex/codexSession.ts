@@ -185,15 +185,10 @@ export class CodexSession implements AgentSession {
     this.#relay = rs;
     this.relaySessionId = rs.relaySessionId;
     if (this.status === "ended") rs.pausePull();
-    // Inbound app messages → deliver to codex via turn/start.
-    rs.onMessage = async (text, seq) => { await this.#onRelayMessage(text, seq); };
-    // Terminal-row ACK → advance the delivered-turn checkpoint (finding #2). The
-    // receipt effect for a turn's turn-end row carries its turn id; the checkpoint
-    // advances only when the relay server has durably accepted the terminal row.
+    // Terminal-row receipt → advance the delivered-turn checkpoint (finding #2).
+    // The receipt effect for a turn's turn-end row carries its turn id.
     rs.setReceiptSink((r) => { this.#markTurnDelivered(r.turn); });
     this.#deps.onRelayAttached?.(this, rs);
-    // The app answers held approval requests through this session-scoped RPC.
-    rs.registerRpc("joy-codex-approve", async (params) => this.#answerApproval(params as Record<string, unknown> | undefined));
     rs.start();
     void rs.updateJoyState(this.status === "ended" ? "detached" : "running");
     return true;
@@ -398,33 +393,7 @@ export class CodexSession implements AgentSession {
     void this.#tmux.literal(this.tmuxWindow, cmd).then(() => this.#tmux.key(this.tmuxWindow, "Enter")).catch(() => {});
   }
 
-  // ── delivery (inbound app → codex) ──────────────────────────────────────────
-
-  async #onRelayMessage(text: string, seq: number): Promise<void> {
-    if (this.status === "ended") return;
-    // Dedupe by relay seq (finding #3b): the confirmed cursor can redeliver a
-    // seq after a crash-before-cursor-persist. A seq already spooled is a no-op
-    // (idempotent) — do NOT throw, so the cursor advances past it.
-    if (this.#inbound.some((i) => i.seq === seq)) { this.#pumpDispatch(); return; }
-    // App already shows the /joy-prompt row — no mirror. A crash-redelivery of
-    // this seq worst-cases a duplicate reinjection, which is benign.
-    if (this.#handleJoyPrompt(text, false, seq)) return;
-    // Deterministic clientId per seq so a redelivery reuses the SAME id (no
-    // second turn). Persist BEFORE anything else and THROW on failure so the
-    // relay's confirmed cursor does not advance past an unpersisted message.
-    const item: CodexInboundItem = { clientId: `codex-in:${this.id}:${seq}`, text, state: "queued", at: Date.now(), seq };
-    this.#inbound.push(item);
-    if (!saveCodexInbound(this.id, this.#inbound)) {
-      this.#inbound.pop();
-      throw new Error("codex inbound persist failed");
-    }
-    // Do NOT mirror back to the relay here: the app already appended the user's
-    // row to the card — that row is what this pull delivered. Re-sending it
-    // created a DUPLICATE user bubble for every codex message (bug 2026-07-29).
-    // The claude path does the same (session.ts relay-source enqueue passes
-    // mirrorToRelay:false). Mirroring is only for non-relay intake (enqueue()).
-    this.#pumpDispatch();
-  }
+  // ── delivery (app → codex) ──────────────────────────────────────────────────
 
   /** FIFO dispatch pump (finding #4). Sends ONE queued item's turn/start only
    *  when no turn is active; re-invoked on turn/completed, explicit rejection,
@@ -541,8 +510,9 @@ export class CodexSession implements AgentSession {
     void this.#relay?.updateCodexApproval(head ? head.info : null);
   }
 
-  /** joy-codex-approve RPC handler: the app answers the head approval. */
-  #answerApproval(params: Record<string, unknown> | undefined): { ok: boolean } {
+  /** The app answers the head approval (POST /v2/sessions/:id/approvals over
+   *  the tunnel — transports/v2.ts). */
+  answerApproval(params: Record<string, unknown> | undefined): { ok: boolean } {
     const requestId = String(params?.requestId ?? "");
     const allow = params?.decision === "allow" || params?.decision === true;
     const p = this.#pendingApprovals.get(requestId);
@@ -805,9 +775,6 @@ export class CodexSession implements AgentSession {
 
   // ── claude-hook surface (no-op for codex) ─────────────────────────────────────
   onHookEvent(): { ok: boolean } { return { ok: true }; }
-  /** v2 linkage → happy-card metadata (nucleus lane calls this post-bind;
-   *  the relay is attached by then on the spawn path — best-effort merge). */
-
   /** Card snapshot for the nucleus lane's v2 publish (see AgentSession). */
   cardMetadata(): Record<string, unknown> | null {
     return this.#relay?.metadataSnapshot ?? null;
@@ -820,7 +787,6 @@ export class CodexSession implements AgentSession {
   }
 
   markCompacting(): void { /* codex compaction is server-side */ }
-  reassertLifecycle(): void { void this.#relay?.updateJoyState(this.status === "ended" ? "detached" : "running"); }
 
   // ── teardown ──────────────────────────────────────────────────────────────
 
@@ -828,7 +794,6 @@ export class CodexSession implements AgentSession {
     if (this.status === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
-    const relaySessionId = this.#relay?.relaySessionId ?? this.relaySessionId;
     // Decline any pending approvals so codex isn't left waiting, and clear the bar.
     for (const p of this.#pendingApprovals.values()) { try { p.answer(false); } catch { /* ignore */ } }
     this.#pendingApprovals.clear();
@@ -855,8 +820,7 @@ export class CodexSession implements AgentSession {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
-      void this.#relay?.updateJoyState("archived");
-      if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
+      if (this.#relay) this.#archivePromise = this.#relay.archive();
       try {
         void (this.#tmuxSocket
           ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())
@@ -875,8 +839,7 @@ export class CodexSession implements AgentSession {
 
   forceKill(): boolean {
     if (this.status === "ended") {
-      const relaySessionId = this.relaySessionId;
-      if (this.#deps.relayClient && relaySessionId) this.#archivePromise = this.#deps.relayClient.archiveSession(relaySessionId);
+      if (this.#relay) this.#archivePromise = this.#relay.archive();
       return true;
     }
     return this.end("killed");

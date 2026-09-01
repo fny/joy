@@ -3,7 +3,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { joyStateDir } from "../paths";
 
-// Mirrors joy-app's sources/sync/prompt/systemPrompt.ts. The happy app injects
+// Mirrors joy-app's sources/sync/prompt/systemPrompt.ts. The joy app injects
 // this per-message via the SDK so Claude emits <options>…</options> blocks that
 // the app renders as a tap-to-pick options card. A plain Claude Code terminal
 // can't receive a per-message system prompt, so we instead bake this into the

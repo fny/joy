@@ -21,7 +21,7 @@ import type { AgentSession } from "../domain/agentSession";
 import { openDb } from "../../../joy-relay/src/db.mjs";
 import { createCore } from "../../../joy-relay/src/core.mjs";
 import { createNotify } from "../../../joy-relay/src/notify.mjs";
-import { createAuth } from "../../../joy-relay/src/auth.mjs";
+import { createTestRelayAccounts } from "./testRelayAccounts";
 import { createRouter } from "../../../joy-relay/src/routes.mjs";
 import { createV2Router } from "../../../joy-relay/src/v2.mjs";
 import { createTunnel } from "../../../joy-relay/src/tunnel.mjs";
@@ -36,6 +36,7 @@ let relay: http.Server; let relayUrl: string;
 let daemonUrl: string;
 let executor: ExecutorHandle | null = null;
 let db: any;
+let tokA: string; let tokB: string;
 
 beforeAll(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "joy-v2tun-db-"));
@@ -53,19 +54,14 @@ beforeAll(async () => {
   db = await openDb(dataDir);
   const notify = createNotify();
   const core = createCore(db, notify);
-  const auth = createAuth({
-    upstreamHost: "x", upstreamPort: 0,
-    fetchImpl: async (_url: string, init: any) => {
-      const token = String(init?.headers?.Authorization ?? "").replace("Bearer ", "");
-      if (token === "tok-A") return { ok: true, json: async () => ({ id: "acct-A" }) } as any;
-      if (token === "tok-B") return { ok: true, json: async () => ({ id: "acct-B" }) } as any;
-      return { ok: false } as any;
-    },
-  });
+  // Real account plane: two fresh accounts, real EdDSA bearers.
+  const acc = await createTestRelayAccounts(db);
+  const { auth, accounts } = acc;
+  tokA = acc.tokA; tokB = acc.tokB;
   const tunnel = createTunnel({ notify });
   const attachments = createAttachments(db);
   const v1 = createRouter({ core, auth, notify, db, tunnel });
-  const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments });
+  const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
   relay = http.createServer((req, res) => {
     void (async () => {
       if (await v2.handle(req, res)) return;
@@ -99,7 +95,7 @@ beforeAll(async () => {
   // Real executor: v1 claim lane (unchanged), local target = the real daemon,
   // instance token injected daemon-side so remote callers never hold it.
   executor = startTunnelExecutor({
-    relayUrl, accountToken: "tok-A", machineKey: SECRET_A,
+    relayUrl, accountToken: tokA, machineKey: SECRET_A,
     machineId: MACHINE, targetBase: daemonUrl,
     targetHeaders: { "X-Joy-Token": TOKEN },
   });
@@ -116,7 +112,7 @@ afterAll(async () => {
 const V2_ENTRY = "/joy/v2/machines";
 const call = (over: Partial<Parameters<typeof tunnelFetch>[0]> = {}) =>
   tunnelFetch({
-    relayUrl, accountToken: "tok-A", masterSecret: SECRET_A, machineId: MACHINE,
+    relayUrl, accountToken: tokA, masterSecret: SECRET_A, machineId: MACHINE,
     entryBase: V2_ENTRY, method: "GET", path: "/v2/status", ...over,
   });
 
@@ -167,11 +163,11 @@ test("both entries route to the same tunnel: v1 entry serves v2 paths too", asyn
 });
 
 test("v2 entry enforces machine ownership before the tunnel", async () => {
-  await expect(call({ accountToken: "tok-B" })).rejects.toMatchObject(
+  await expect(call({ accountToken: tokB })).rejects.toMatchObject(
     expect.any(TunnelError) as any,
   );
   try {
-    await call({ accountToken: "tok-B" });
+    await call({ accountToken: tokB });
   } catch (e) {
     expect((e as TunnelError).status).toBe(403);
   }
