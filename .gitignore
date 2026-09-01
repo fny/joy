@@ -10,9 +10,6 @@ web-build/
 expo-env.d.ts
 /ios
 /android
-/packages/happy-app/ios
-/packages/happy-app/android
-/packages/happy-app/build
 
 # Native
 .kotlin/
@@ -47,7 +44,7 @@ CLAUDE.local.md
 CLAUDE.md
 
 # Expo web bundle output (large WASM files)
-packages/happy-app/dist-web/
+packages/joy-app/dist-web/
 
 # Build artifacts (added for EAS snapshot)
 **/dist/

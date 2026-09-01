@@ -86,7 +86,6 @@
     "@revenuecat/purchases-js": "^1.24.3",
     "@shopify/flash-list": "~2.3.0",
     "@shopify/react-native-skia": "~2.5.3",
-    "@slopus/happy-wire": "workspace:*",
     "@stablelib/blake2s": "^2.0.1",
     "@tauri-apps/api": "2.9.1",
     "@tauri-apps/cli": "^2.8.1",
