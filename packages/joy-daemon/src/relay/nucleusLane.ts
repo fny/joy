@@ -22,6 +22,7 @@
 // happy transport is never affected.
 
 import { randomUUID, randomBytes } from "node:crypto";
+import { hostname } from "node:os";
 import tweetnacl from "tweetnacl";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -263,6 +264,41 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       wireCardPublisher(s.localSessionId, s.sessionId);
     }
 
+    await reconcileOrphans(r.sessions ?? []);
+  }
+
+  // Sessions the relay still lists as live for THIS daemon but that no local
+  // runtime backs — the window died while the daemon was down, a tmux
+  // kill-server, a wiped record. Nothing else can ever archive them (card
+  // writes are fenced to the owner daemon), so left alone they stay
+  // active/starting forever and the app shows a session that does not exist.
+  // Archive them, with a minimal card from the window record when one
+  // survives so the row still reads as "that project, on this machine".
+  // Rows with no localSessionId are pre-bind spawns we may yet claim — skip.
+  async function reconcileOrphans(rows: Array<{ sessionId: string; daemonId: string; state: string; localSessionId?: string | null }>): Promise<void> {
+    const l = lease;
+    if (!l) return;
+    for (const s of rows) {
+      if (s.daemonId !== machineId || !s.localSessionId) continue;
+      if (s.state !== "active" && s.state !== "starting") continue;
+      if (registry.get(s.localSessionId)) continue; // live (or ended-but-known: its own publisher tells the truth)
+      const rec = registry.listRecords().find((x) => x.id === s.localSessionId);
+      const key = sessionKeys.get(s.sessionId) ?? null;
+      const card = {
+        path: rec?.launchCwd ?? "",
+        host: hostname(),
+        machineId,
+        joy__state: "archived",
+        joy__sessionId: s.localSessionId,
+        v2: { sessionId: s.sessionId, relay: relayUrl, localSessionId: s.localSessionId },
+      };
+      try {
+        await api("PATCH", `/daemon/sessions/${s.sessionId}`, { encryptedMetadata: sealCard(card, key), state: "archived" }, l);
+        log(`reconcile: archived orphan ${s.sessionId.slice(0, 8)} (local ${s.localSessionId} has no runtime)`);
+      } catch (e) {
+        log(`reconcile: archive ${s.sessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
   }
 
 

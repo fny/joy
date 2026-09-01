@@ -30,21 +30,12 @@ import { getCurrentRealtimeSessionId, getVoiceSession } from '@/realtime/Realtim
 import { isMutableTool } from "@/components/tools/knownTools";
 import { DecryptedArtifact } from "./artifactTypes";
 import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
+import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
+export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
 // Debounce timer for realtimeMode changes
 let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const REALTIME_MODE_DEBOUNCE_MS = 150;
-
-// Client-side liveness window. The server keeps a session active:true until its
-// own ~10-min reaper runs, so when a daemon dies the app would show "online" for
-// up to 10 min. The joy-tmux keepalive beats every 30s, so treat a session whose
-// last activity is older than this as offline — far above the cadence to avoid
-// flapping an idle-but-alive session.
-const SESSION_STALE_AFTER_MS = 90_000;
-
-export function isFresh(session: { activeAt: number }): boolean {
-    return Date.now() - session.activeAt < SESSION_STALE_AFTER_MS;
-}
 
 /**
  * Centralized session online state resolver
@@ -53,13 +44,6 @@ export function isFresh(session: { activeAt: number }): boolean {
 function resolveSessionOnlineState(session: { active: boolean; activeAt: number }): "online" | number {
     // Online only if the server says active AND we've heard from it recently.
     return session.active && isFresh(session) ? "online" : session.activeAt;
-}
-
-/**
- * Checks if a session should be shown in the active sessions group
- */
-function isSessionActive(session: { active: boolean; activeAt: number }): boolean {
-    return session.active && isFresh(session);
 }
 
 // Known entitlement IDs
@@ -127,6 +111,7 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
     // useSessionStatus does at render, so the sidebar can't show a live color
     // for a session the in-session view already calls disconnected.
     const isOnline = session.presence === "online" && isFresh(session);
+    const inActiveGroup = isSessionInActiveGroup(session);
     const hasPermissions = !!(session.agentState?.requests && Object.keys(session.agentState.requests).length > 0);
 
     let state: SessionState;
@@ -169,9 +154,11 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         flavor: session.metadata?.flavor ?? null,
         isV2: !!session.metadata?.v2?.sessionId,
         state,
-        ...(!session.active && { activeAt: session.activeAt, createdAt: session.createdAt }),
+        // Group-consistent, NOT the raw relay flag: a stale-but-flagged row
+        // is history, so it carries its timestamps and reads as inactive.
+        ...(!inActiveGroup && { activeAt: session.activeAt, createdAt: session.createdAt }),
         hasDraft: !!session.draft,
-        active: session.active,
+        active: inActiveGroup,
         machineId: session.metadata?.machineId ?? null,
         path: session.metadata?.path ?? null,
         homeDir: session.metadata?.homeDir ?? null,
@@ -350,12 +337,7 @@ function buildSessionListViewDataInner(
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
-        // joy__state is a metadata-driven safety net independent of the server's
-        // `active` flag: 'detached' (Claude died) and 'archived' (killed/cleaned
-        // up) both belong out of the active group even if a dropped archive POST
-        // left the server still reporting active=true.
-        const joyState = session.metadata?.joy__state;
-        if (isSessionActive(session) && joyState !== 'detached' && joyState !== 'archived') {
+        if (isSessionInActiveGroup(session)) {
             activeSessions.push(session);
         } else {
             inactiveSessions.push(session);
