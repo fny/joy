@@ -361,6 +361,12 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, up
   });
   // Pairing/auth handshake. No auth on request (it IS the login), auth on
   // response (an existing device approves a new one).
+  // Direct challenge login (secret-key restore): the ONE call that turns an
+  // account secret into a bearer token.
+  route('POST', '/auth', { auth: false }, async (ctx, m, body, url, req) =>
+    upstreamJson('POST', '/v1/auth', { body, extraHeaders: { 'x-happy-client': String(req.headers['x-happy-client'] ?? 'joy-app') } }));
+  route('POST', '/auth/request/status', { auth: false }, async (ctx, m, body) =>
+    upstreamJson('POST', '/v1/auth/request/status', { body }));
   route('POST', '/auth/request', { auth: false }, async (ctx, m, body, url, req) =>
     upstreamJson('POST', '/v1/auth/request', { body, extraHeaders: { 'x-happy-client': String(req.headers['x-happy-client'] ?? 'joy-app') } }));
   route('POST', '/auth/response', {}, async (ctx, m, body, url, req) =>
@@ -373,6 +379,10 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, up
     upstreamJson('GET', '/v1/account/profile', { token: bearerOf(req) }));
   route('POST', '/push-tokens', {}, async (ctx, m, body, url, req) =>
     upstreamJson('POST', '/v1/push-tokens', { token: bearerOf(req), body }));
+  route('GET', '/push-tokens', {}, async (ctx, m, body, url, req) =>
+    upstreamJson('GET', '/v1/push-tokens', { token: bearerOf(req) }));
+  route('DELETE', '/push-tokens/([^/]+)', {}, async (ctx, m, body, url, req) =>
+    upstreamJson('DELETE', `/v1/push-tokens/${m[1]}`, { token: bearerOf(req) }));
 
   // ── client: E2E tunnel to a machine (endpoint-agnostic, relay-blind) ──────
   route('POST', '/machines/([\\w.-]+)/http', { raw: true }, async (ctx, m, body, url, req, res) => {

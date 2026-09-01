@@ -15,7 +15,7 @@ export async function authApprove(token: string, publicKey: Uint8Array, answerV1
     
     // First, check the auth request status
     const statusResponse = await axios.get<AuthRequestStatus>(
-        `${API_ENDPOINT}/v1/auth/request/status`,
+        `${API_ENDPOINT}/joy/v2/auth/request/status`,
         {
             params: {
                 publicKey: publicKeyBase64
@@ -43,7 +43,7 @@ export async function authApprove(token: string, publicKey: Uint8Array, answerV1
     
     // Handle pending status
     if (status === 'pending') {
-        await axios.post(`${API_ENDPOINT}/v1/auth/response`, {
+        await axios.post(`${API_ENDPOINT}/joy/v2/auth/response`, {
             publicKey: publicKeyBase64,
             response: supportsV2 ? encodeBase64(answerV2) : encodeBase64(answerV1)
         }, {

@@ -38,7 +38,7 @@ import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { t } from '@/text';
 import { useAllMachines, useSessions, useSetting, useSettingMutable, storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
-import { apiSocket } from '@/sync/apiSocket';
+import { machineStatusOnly, machineHarnessModels, machineHistoryLogs, machineOpencodeSessions } from '@/sync/v2/machine';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
@@ -181,8 +181,10 @@ function NewJoyTmuxSessionScreen() {
         probedRef.current = true;
         let cancelled = false;
         const probeOne = async (machineId: string): Promise<string> => {
+            const octx = sync.machineOnlyCtx(machineId);
+            if (!octx) throw new Error('no machine context');
             const result = await Promise.race([
-                apiSocket.machineRPC(machineId, 'joy-list-sessions', {}).then(() => machineId),
+                machineStatusOnly(octx).then(() => machineId),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
             ]);
             return result;
@@ -254,7 +256,9 @@ function NewJoyTmuxSessionScreen() {
     React.useEffect(() => {
         if (selectedAgent !== 'codex' || !selectedMachineId) return;
         let cancelled = false;
-        apiSocket.machineRPC<{ ok?: boolean; models?: typeof codexModels }, {}>(selectedMachineId, 'joy-codex-models', {})
+        const cctx = sync.machineOnlyCtx(selectedMachineId);
+        if (!cctx) return;
+        machineHarnessModels(cctx, 'codex').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof codexModels | undefined }))
             .then((res) => {
                 if (cancelled || !res.models?.length) return;
                 setCodexModels(res.models);
@@ -271,7 +275,9 @@ function NewJoyTmuxSessionScreen() {
     React.useEffect(() => {
         if (selectedAgent !== 'opencode' || !selectedMachineId) return;
         let cancelled = false;
-        apiSocket.machineRPC<{ ok?: boolean; models?: typeof ocModels }, {}>(selectedMachineId, 'joy-opencode-models', {})
+        const octx2 = sync.machineOnlyCtx(selectedMachineId);
+        if (!octx2) return;
+        machineHarnessModels(octx2, 'opencode').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof ocModels | undefined }))
             .then((res) => {
                 if (cancelled || !res.models?.length) return;
                 setOcModels(res.models);
@@ -295,7 +301,9 @@ function NewJoyTmuxSessionScreen() {
         if (!selectedMachineId) return;
         setOcPastLoading(true);
         const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
-        apiSocket.machineRPC<{ ok?: boolean; sessions?: typeof ocPast }, {}>(selectedMachineId, 'joy-opencode-sessions', { cwd })
+        const sctx = sync.machineOnlyCtx(selectedMachineId);
+        if (!sctx) return;
+        machineOpencodeSessions(sctx, cwd).then(r => ({ ok: r.data?.ok, sessions: r.data?.sessions as typeof ocPast | undefined }))
             .then((res) => { setOcPast(res.sessions ?? []); })
             .catch(() => { setOcPast([]); })
             .finally(() => setOcPastLoading(false));
@@ -311,7 +319,9 @@ function NewJoyTmuxSessionScreen() {
         if (!selectedMachineId) return;
         setCcPastLoading(true);
         const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
-        apiSocket.machineRPC<{ ok?: boolean; logs?: typeof ccPast }, {}>(selectedMachineId, 'joy-list-logs', { directory: cwd })
+        const lctx = sync.machineOnlyCtx(selectedMachineId);
+        if (!lctx) return;
+        machineHistoryLogs(lctx, cwd).then(r => ({ ok: r.data?.ok, logs: r.data?.logs as typeof ccPast | undefined }))
             .then((res) => { setCcPast((res.logs ?? []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs)); })
             .catch(() => { setCcPast([]); })
             .finally(() => setCcPastLoading(false));

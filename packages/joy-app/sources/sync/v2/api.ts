@@ -91,6 +91,28 @@ export interface V2SessionRow {
     revision: string;
     headSeq: string;
     queuedTurns: number;
+    sessionKeyEnvelope: string | null;
+    encryptedMetadata: string | null;
+    online: boolean;
+    createdAt: number;
+    updatedAt: number;
+    lastTurnAt: number | null;
+}
+
+export interface V2Machine {
+    id: string;
+    metadata: string | null;
+    metadataVersion: number;
+    daemonState: string | null;
+    daemonStateVersion: number;
+    dataEncryptionKey: string | null;
+    seq: number;
+    active: boolean;
+    activeAt: number;
+    createdAt: number;
+    updatedAt: number;
+    /** Merged by the relay from v2 lease liveness — the queue's own authority. */
+    leaseAlive: boolean;
 }
 
 export interface V2SessionState {
@@ -137,6 +159,9 @@ export interface V2Event {
 
 export const v2 = {
     listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
+    listMachines: (): Promise<{ machines: V2Machine[] }> => v2fetch('GET', '/machines'),
+    accountProfile: (): Promise<Record<string, unknown>> => v2fetch('GET', '/account/profile'),
+    registerPushToken: (token: string) => v2fetch('POST', '/push-tokens', { token }),
     sessionState: (id: string): Promise<V2SessionState> => v2fetch('GET', `/sessions/${id}`),
     // The full option set the new-session screen can set. Keep in sync with the
     // daemon's SpawnSpec (packages/joy-daemon/src/relay/nucleusLane.ts) — a

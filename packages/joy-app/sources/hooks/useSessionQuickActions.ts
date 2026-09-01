@@ -5,10 +5,10 @@ import { Modal } from '@/modal';
 import { machineResumeSession, sessionArchive, sessionDelete, sessionKill, forkAndSpawn, type ForkSource } from '@/sync/ops';
 import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
 import { storage, useLocalSetting, useMachine, useSetting } from '@/sync/storage';
-import { apiSocket } from '@/sync/apiSocket';
 import { Machine, Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { v2SpawnAndWait } from '@/sync/v2/spawn';
+import { machineRestartSessionFor } from '@/sync/v2/machine';
 import { resolveMessageModeMeta } from '@/sync/messageMeta';
 import { t } from '@/text';
 import { HappyError } from '@/utils/errors';
@@ -308,18 +308,19 @@ export function useSessionQuickActions(
             throw new HappyError('joy-tmux machine is offline', false);
         }
         type RestartResult = { ok?: boolean; relaySessionId?: string; error?: string };
+        const rctx = sync.machineOnlyCtx(machineId!);
+        if (!rctx) throw new HappyError('No machine context for this session', false);
         const result = await Promise.race([
-            apiSocket.machineRPC<RestartResult, { id: string; cwd?: string }>(machineId, 'joy-restart-session', {
-                id: joySessionId!,
-                cwd: session.metadata?.path,
-            }),
+            machineRestartSessionFor(rctx, joySessionId!, { cwd: session.metadata?.path }).then(r => r.data as unknown as RestartResult),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s')), 30000)),
         ]);
-        if (!result.ok || !result.relaySessionId) {
-            throw new HappyError(result.error || 'Failed to restart session', false);
+        if (!result?.ok) {
+            throw new HappyError(result?.error || 'Failed to restart session', false);
         }
+        // The restarted session keeps its v2 identity (the window record's
+        // binding survives restart), so the card we're on stays correct.
         await sync.refreshSessions();
-        navigateToSession(result.relaySessionId);
+        navigateToSession(session.id);
     });
 
     const restartSession = React.useCallback(() => {

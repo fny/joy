@@ -1,10 +1,9 @@
 import * as React from 'react';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
-import { apiSocket } from '@/sync/apiSocket';
-import type { Machine } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { machineStatusOnly } from '@/sync/v2/machine';
+import type { Machine } from '@/sync/storageTypes';
 
 // Machines that answer a joy-tmux `joy-status` probe — i.e. the boxes actually
 // running the joy daemon, not every Happy machine. Probes online machines in
@@ -27,7 +26,12 @@ export function useJoyMachines(): { machines: Machine[]; probing: boolean } {
         let cancelled = false;
         (async () => {
             const probe = (id: string) => Promise.race([
-                apiSocket.machineRPC(id, 'joy-status', {}).then(() => id),
+                (async () => {
+                    const ctx = sync.machineOnlyCtx(id);
+                    if (!ctx) throw new Error('no machine context');
+                    await machineStatusOnly(ctx);
+                    return id;
+                })(),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
             ]);
             const results = await Promise.allSettled(onlineIds.map(probe));

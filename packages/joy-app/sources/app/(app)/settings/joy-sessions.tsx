@@ -46,7 +46,7 @@ export default React.memo(function JoySessionsScreen() {
         let cancelled = false;
         (async () => {
             const probeOne = (id: string) => Promise.race([
-                apiSocket.machineRPC(id, 'joy-list-sessions', {}).then(() => id),
+                (async () => { const c = sync.machineOnlyCtx(id); if (!c) throw new Error('no ctx'); await machineStatusOnly(c); return id; })(),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
             ]);
             const results = await Promise.allSettled(onlineMachines.map(m => probeOne(m.id)));
@@ -76,7 +76,7 @@ export default React.memo(function JoySessionsScreen() {
         if (!selectedMachineId) return;
         let cancelled = false;
         Promise.race([
-            (function(){ const c0 = sync.machineOnlyCtx(selectedMachineId); return c0 ? machineStatusOnly(c0).then(r => r.data as never) : apiSocket.machineRPC<JoyStatus, {}>(selectedMachineId, 'joy-status', {}); })(),
+            (function(){ const c0 = sync.machineOnlyCtx(selectedMachineId); if (!c0) return Promise.reject(new Error('no machine context')); return machineStatusOnly(c0).then(r => r.data as never); })(),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
         ]).then(s => { if (!cancelled) setDaemonStatus(s); }).catch(() => { /* card stays hidden */ });
         return () => { cancelled = true; };

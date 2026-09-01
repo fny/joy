@@ -14,7 +14,6 @@ import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator, Platfo
 import { useLocalSearchParams, useFocusEffect, router } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { apiSocket } from '@/sync/apiSocket';
 import { Modal } from '@/modal';
 import { AnsiText } from '@/components/AnsiText';
 import { TerminalKeyBar } from '@/components/TerminalKeyBar';
@@ -89,12 +88,9 @@ export default React.memo(function JoyPaneScreen() {
         try {
             // v2: read the pane from the daemon over the sealed tunnel.
             const mctx = sync.machineCtxFor(machineId, sessionId);
+            if (!mctx) throw new Error(`Machine encryption not found for ${machineId}`);
             const result = await Promise.race([
-                mctx
-                    ? machinePane(mctx, true).then(r => (r.data ?? { error: 'no response' }) as { ok?: boolean; text?: string; error?: string })
-                    : apiSocket.machineRPC<{ ok?: boolean; text?: string; error?: string }, { id: string; color?: boolean }>(
-                        machineId, 'joy-pane', { id: sessionId, color: true },
-                    ),
+                machinePane(mctx, true).then(r => (r.data ?? { error: 'no response' }) as { ok?: boolean; text?: string; error?: string }),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
             ]);
             if (!mountedRef.current) return;
@@ -121,7 +117,8 @@ export default React.memo(function JoyPaneScreen() {
         lastSizeRef.current = size;
         const { cols, rows } = size;
         const rctx = sync.machineCtxFor(machineId, sessionId);
-        void (rctx ? machineResize(rctx, cols, rows) : apiSocket.machineRPC(machineId, 'joy-resize', { id: sessionId, cols, rows }))
+        if (!rctx) return; // no machine context — the pane read surfaces the error
+        void machineResize(rctx, cols, rows)
             .then(() => setTimeout(() => void refresh(), 200))
             .catch(() => { /* best-effort */ });
     }, [machineId, sessionId, refresh]);
@@ -142,12 +139,9 @@ export default React.memo(function JoyPaneScreen() {
         setSending(true);
         try {
             const kctx = sync.machineCtxFor(machineId, sessionId);
+            if (!kctx) { Modal.alert('Error', `Machine encryption not found for ${machineId}`); return false; }
             const result = await Promise.race([
-                kctx
-                    ? machineSendKeys(kctx, script, literal).then(r => (r.data ?? { error: 'no response' }) as { ok?: boolean; error?: string })
-                    : apiSocket.machineRPC<{ ok?: boolean; error?: string }, { id: string; script: string; literal?: boolean }>(
-                        machineId, 'joy-send-keys', { id: sessionId, script, literal },
-                    ),
+                machineSendKeys(kctx, script, literal).then(r => (r.data ?? { error: 'no response' }) as { ok?: boolean; error?: string }),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond')), 10000)),
             ]);
             if (result.error) {

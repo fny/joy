@@ -19,7 +19,6 @@ import { Switch } from '@/components/Switch';
 import { useConnectAccount } from '@/hooks/useConnectAccount';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { getServerUrl, relayNameForUrl, KNOWN_RELAYS, getStoredRelayAccessKey, setRelayAccessKey } from '@/sync/serverConfig';
-import { apiSocket } from '@/sync/apiSocket';
 import { switchRelayAndReload } from '@/sync/relaySwitch';
 import { getDisplayName } from '@/sync/profile';
 import { Image } from 'expo-image';
@@ -163,8 +162,9 @@ export default React.memo(() => {
         setRelayKeyTick((n) => n + 1);
         // The active relay's socket must re-handshake to carry (or drop) it.
         if (url === activeServerUrl) {
-            apiSocket.disconnect();
-            apiSocket.connect();
+            // Bounce the v2 live stream so the next connect carries the new key.
+            sync.stopV2Live();
+            sync.startV2Live();
         }
     }, [activeServerUrl]);
     const [switchingRelay, setSwitchingRelay] = useState<string | null>(null);

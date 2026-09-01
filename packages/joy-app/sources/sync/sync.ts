@@ -154,6 +154,8 @@ class Sync {
     private sessionQueueProcessing = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
+    /** v2 session content keys (opened from each row's envelope at list time). */
+    private v2SessionKeys = new Map<string, Uint8Array>();
     private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
     private settingsSync: InvalidateSync;
     private profileSync: InvalidateSync;
@@ -448,22 +450,48 @@ class Sync {
             const sid = this.v2SessionIdIndex().get(v2SessionId);
             if (sid) this.getMessagesSync(sid).invalidate();
         };
-        try {
-            this.v2StreamStop = connectV2Stream({
-                onPoke: (v2SessionId) => invalidateFor(v2SessionId),
-                onEphemeral: (v2SessionId) => invalidateFor(v2SessionId),
-            });
-        } catch { /* SSE unavailable — the poll below carries it */ }
-        // Poll fallback: keeps v2 sessions live where SSE cannot run (native)
-        // or when the stream drops. Cheap: only sessions that are v2-linked.
+        // The doorbell is the app's ONLY realtime channel: it feeds the
+        // connection indicator too. The stream reconnects itself with a small
+        // backoff; between attempts the poll below keeps data flowing, so
+        // 'connecting' here means "no live stream", not "no data".
+        const connect = () => {
+            if (this.v2LiveStopped) return;
+            storage.getState().setSocketStatus('connecting');
+            try {
+                this.v2StreamStop = connectV2Stream({
+                    onHello: () => storage.getState().setSocketStatus('connected'),
+                    onPoke: (v2SessionId) => {
+                        invalidateFor(v2SessionId);
+                        // A state poke may mean a card/presence change (bind,
+                        // title, joy__state, lease death) — refresh the LIST.
+                        this.sessionsSync.invalidate();
+                    },
+                    onEphemeral: (v2SessionId) => invalidateFor(v2SessionId),
+                    onClose: () => {
+                        this.v2StreamStop = null;
+                        if (this.v2LiveStopped) return;
+                        storage.getState().setSocketStatus('connecting');
+                        setTimeout(connect, 3000);
+                    },
+                });
+            } catch { /* SSE unavailable — the poll carries it */ }
+        };
+        this.v2LiveStopped = false;
+        connect();
+        // Poll fallback: keeps sessions live where SSE cannot run (native)
+        // or while the stream is down.
         this.v2PollTimer = setInterval(() => {
             for (const sid of this.v2SessionIdIndex().values()) {
                 this.getMessagesSync(sid).invalidate();
             }
+            this.sessionsSync.invalidate();
         }, 2500);
     }
 
+    private v2LiveStopped = false;
+
     stopV2Live() {
+        this.v2LiveStopped = true;
         this.v2StreamStop?.(); this.v2StreamStop = null;
         if (this.v2PollTimer) { clearInterval(this.v2PollTimer); this.v2PollTimer = null; }
     }
@@ -1109,89 +1137,73 @@ class Sync {
     private fetchSessions = async () => {
         if (!this.credentials) return;
 
-        const API_ENDPOINT = getServerUrl();
-        const response = await fetch(`${API_ENDPOINT}/v1/sessions`, {
-            headers: {
-                'Authorization': `Bearer ${this.credentials.token}`,
-                'Content-Type': 'application/json',
-                'X-Happy-Client': getHappyClientId(),
-            }
-        });
+        // Sessions come ENTIRELY from the v2 relay: the daemon publishes each
+        // session's sealed CARD (metadata under the session content key) and
+        // the relay merges presence from lease liveness — the same authority
+        // its own work queue trusts. No happy mirror, no /v1.
+        const { v2 } = await import('./v2/api');
+        const { openCard } = await import('./v2/card');
+        const { sessions: rows } = await v2.listSessions();
 
-        if (!response.ok) {
-            throw new Error(`Failed to fetch sessions: ${response.status}`);
-        }
-
-        const data = await response.json();
-        const sessions = data.sessions as Array<{
-            id: string;
-            tag: string;
-            seq: number;
-            metadata: string;
-            metadataVersion: number;
-            agentState: string | null;
-            agentStateVersion: number;
-            dataEncryptionKey: string | null;
-            active: boolean;
-            activeAt: number;
-            createdAt: number;
-            updatedAt: number;
-            lastMessage: ApiMessage | null;
-        }>;
-
-        // Initialize all session encryptions first
+        // Register a (legacy, key-less) session encryption per id: v2 message
+        // content never uses it (rows arrive decrypted via __v2Plain), but the
+        // engine's lookups expect an entry to exist.
         const sessionKeys = new Map<string, Uint8Array | null>();
-        for (const session of sessions) {
-            if (session.dataEncryptionKey) {
-                let decrypted = await this.encryption.decryptEncryptionKey(session.dataEncryptionKey);
-                if (!decrypted) {
-                    console.error(`Failed to decrypt data encryption key for session ${session.id}`);
-                    continue;
-                }
-                sessionKeys.set(session.id, decrypted);
-            } else {
-                sessionKeys.set(session.id, null);
-            }
-        }
+        for (const row of rows) sessionKeys.set(row.sessionId, null);
         await this.encryption.initializeSessions(sessionKeys);
 
-        // Decrypt sessions
-        let decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
-        for (const session of sessions) {
-            // Get session encryption (should always exist after initialization)
-            const sessionEncryption = this.encryption.getSessionEncryption(session.id);
-            if (!sessionEncryption) {
-                console.error(`Session encryption not found for ${session.id} - this should never happen`);
-                continue;
+        const relayUrl = getServerUrl();
+        const decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
+        for (const row of rows) {
+            // Session content key: envelope sealed to the account content key.
+            const key = row.sessionKeyEnvelope ? this.encryption.openV2SessionKey(row.sessionKeyEnvelope) : null;
+            if (key) this.v2SessionKeys.set(row.sessionId, key);
+
+            // The card IS the metadata. A session with no card yet (spawn still
+            // provisioning, or a pre-card daemon) gets a minimal one carrying
+            // the v2 link — enough for the spawn poller and the reads engine.
+            let metadata = openCard(row.encryptedMetadata, key) as Session['metadata'] | null;
+            if (!metadata) {
+                metadata = {
+                    path: '',
+                    host: '',
+                    machineId: row.daemonId,
+                    v2: { sessionId: row.sessionId, relay: relayUrl, keyEnvelope: row.sessionKeyEnvelope ?? '', localSessionId: row.localSessionId ?? undefined },
+                } as unknown as Session['metadata'];
+            } else {
+                // The card's v2 link may predate fields (or the relay moved) —
+                // the ROW is authoritative for linkage.
+                (metadata as Record<string, unknown>).v2 = {
+                    ...(metadata as { v2?: Record<string, unknown> }).v2,
+                    sessionId: row.sessionId, relay: relayUrl,
+                    keyEnvelope: row.sessionKeyEnvelope ?? (metadata as { v2?: { keyEnvelope?: string } }).v2?.keyEnvelope ?? '',
+                    localSessionId: row.localSessionId ?? (metadata as { v2?: { localSessionId?: string } }).v2?.localSessionId,
+                };
             }
 
-            // Decrypt metadata using session-specific encryption
-            let metadata = await sessionEncryption.decryptMetadata(session.metadataVersion, session.metadata);
-
-            // Decrypt agent state using session-specific encryption
-            let agentState = await sessionEncryption.decryptAgentState(session.agentStateVersion, session.agentState);
-
-            // Put it all together. REST /sessions does NOT carry live activity —
-            // `thinking` arrives only via `session-alive` ephemerals. Preserve the
-            // last known local value instead of hardcoding false, so a full refresh
-            // (app foreground / reconnect / resync) mid-turn doesn't stomp a live
-            // session to idle until the next ~30s keepalive (which also misroutes
-            // queued sends). The next activity ephemeral corrects it either way.
-            const existing = storage.getState().sessions[session.id];
-            const processedSession = {
-                ...session,
+            const existing = storage.getState().sessions[row.sessionId];
+            decryptedSessions.push({
+                id: row.sessionId,
+                tag: row.sessionId,
+                seq: Number(row.revision),
+                metadata,
+                metadataVersion: Number(row.revision),
+                agentState: null,
+                agentStateVersion: 0,
+                dataEncryptionKey: null,
+                active: row.state === 'provisioning' || row.state === 'starting' || row.state === 'active',
+                activeAt: row.lastTurnAt ?? row.updatedAt,
+                createdAt: row.createdAt,
+                updatedAt: row.updatedAt,
+                lastMessage: null,
                 thinking: existing?.thinking ?? false,
                 thinkingAt: existing?.thinkingAt ?? 0,
-                metadata,
-                agentState
-            };
-            decryptedSessions.push(processedSession);
+                presence: row.online ? 'online' : (row.lastTurnAt ?? row.updatedAt),
+            } as unknown as (Omit<Session, 'presence'> & { presence?: "online" | number }));
         }
 
-        // Apply to storage
         this.applySessions(decryptedSessions);
-        log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} sessions`);
-
+        log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} v2 sessions`);
     }
 
     public refreshMachines = async () => {
@@ -1489,24 +1501,14 @@ class Sync {
     private fetchMachines = async () => {
         if (!this.credentials) return;
 
-        console.log('📊 Sync: Fetching machines...');
-        const API_ENDPOINT = getServerUrl();
-        const response = await fetch(`${API_ENDPOINT}/v1/machines`, {
-            headers: {
-                'Authorization': `Bearer ${this.credentials.token}`,
-                'Content-Type': 'application/json',
-                'X-Happy-Client': getHappyClientId(),
-            }
-        });
-
-        if (!response.ok) {
-            console.error(`Failed to fetch machines: ${response.status}`);
-            return;
-        }
-
-        const data = await response.json();
-        console.log(`📊 Sync: Fetched ${Array.isArray(data) ? data.length : 0} machines from server`);
-        const machines = data as Array<{
+        console.log('📊 Sync: Fetching machines (v2)...');
+        // Machines over v2: the relay serves the account's machine records
+        // (delegating internally) and merges leaseAlive from the same lease
+        // table its work queue runs on.
+        const { v2 } = await import('./v2/api');
+        const data = (await v2.listMachines()).machines;
+        console.log(`📊 Sync: Fetched ${Array.isArray(data) ? data.length : 0} machines from v2`);
+        const machines = data as unknown as Array<{
             id: string;
             metadata: string;
             metadataVersion: number;
@@ -3201,14 +3203,8 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     const encryption = await Encryption.create(secretKey);
     sync.setMasterSecret(secretKey);
 
-    // Initialize socket connection
-    const API_ENDPOINT = getServerUrl();
-    apiSocket.initialize({ endpoint: API_ENDPOINT, token: credentials.token }, encryption);
-
-    // Wire socket status to storage
-    apiSocket.onStatusChange((status) => {
-        storage.getState().setSocketStatus(status);
-    });
+    // No happy socket: the app's realtime is the v2 SSE doorbell (plus the
+    // poll fallback). Connection status is wired inside startV2Live.
 
     // Initialize sessions engine
     if (restore) {

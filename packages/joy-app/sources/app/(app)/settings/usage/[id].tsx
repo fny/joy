@@ -16,7 +16,7 @@ import { isMachineOnline } from '@/utils/machineUtils';
 import { apiSocket } from '@/sync/apiSocket';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
-import { machineUsageOnly, machineStatusOnly } from '@/sync/v2/machine';
+import { machineUsageOnly, machineSessionUsageAll, machineStatusOnly } from '@/sync/v2/machine';
 
 // Survives navigation so revisits render instantly (same trick as joy-sessions).
 let cachedBurnMachineIds: Set<string> | null = null;
@@ -327,7 +327,7 @@ export default React.memo(function UsageSettingsScreen() {
         let cancelled = false;
         (async () => {
             const probeOne = (mid: string) => Promise.race([
-                apiSocket.machineRPC(mid, 'joy-status', {}).then(() => mid),
+                (async () => { const c = sync.machineOnlyCtx(mid); if (!c) throw new Error('no ctx'); await machineStatusOnly(c); return mid; })(),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
             ]);
             const results = await Promise.allSettled(onlineIds.map(probeOne));
@@ -363,8 +363,8 @@ export default React.memo(function UsageSettingsScreen() {
                     // Sessions fetch is best-effort: an older daemon without
                     // joy-session-usage still gets the main report.
                     const [rep, sess] = await Promise.all([
-                        withTimeout((function(){ const c0 = sync.machineOnlyCtx(id); return c0 ? machineUsageOnly(c0, period).then(r => r.data as never) : apiSocket.machineRPC<BurnReport, { period: string }>(id, 'joy-usage', { period }); })()),
-                        withTimeout(apiSocket.machineRPC<{ ok?: boolean; sessions?: SessionRow[] }, { period: string }>(id, 'joy-session-usage', { period })).catch(() => null),
+                        withTimeout((function(){ const c0 = sync.machineOnlyCtx(id); if (!c0) return Promise.reject(new Error('no machine context')); return machineUsageOnly(c0, period).then(r => r.data as unknown as BurnReport); })()),
+                        withTimeout((function(){ const c0 = sync.machineOnlyCtx(id); if (!c0) return Promise.reject(new Error('no machine context')); return machineSessionUsageAll(c0, period).then(r => r.data as unknown as { ok?: boolean; sessions?: SessionRow[] } | null); })()).catch(() => null),
                     ]);
                     return { id, rep, sess };
                 }));

@@ -1,7 +1,7 @@
 // Manages joy-tmux sessions via RPC through the relay.
 // Mirrors useJoyTmuxSessions but uses machineRPC instead of direct HTTP.
 import * as React from 'react';
-import { apiSocket } from '@/sync/apiSocket';
+import { machineListSessions } from '@/sync/v2/machine';
 import type { JoySession } from '@/joy/types';
 import { useActiveInterval } from './useActiveInterval';
 import { sync } from '@/sync/sync';
@@ -24,7 +24,9 @@ export function useJoyRpcSessions(machineId: string | null) {
     const refresh = React.useCallback(async () => {
         if (!machineId) return;
         try {
-            const result = await apiSocket.machineRPC<JoySession[], {}>(machineId, 'joy-list-sessions', {});
+            const lctx = sync.machineOnlyCtx(machineId);
+            if (!lctx) throw new Error('no machine context');
+            const result = ((await machineListSessions(lctx)).data?.sessions ?? []) as unknown as JoySession[];
             if (mountedRef.current) {
                 setSessions(Array.isArray(result) ? result : []);
                 setError(null);
@@ -53,16 +55,17 @@ export function useJoyRpcSessions(machineId: string | null) {
     const killSession = React.useCallback(async (id: string) => {
         if (!machineId) throw new Error('no machine selected');
         const kctx = sync.machineCtxFor(machineId, id);
-        if (kctx) { await machineKillSession(kctx); } else { await apiSocket.machineRPC(machineId, 'joy-kill-session', { id }); }
+        if (!kctx) throw new Error('no machine context');
+        await machineKillSession(kctx);
         await refresh();
     }, [machineId, refresh]);
 
     const fetchPane = React.useCallback(async (id: string): Promise<string> => {
         if (!machineId) throw new Error('no machine selected');
-        const result = await apiSocket.machineRPC<{ ok: boolean; text: string }, { id: string }>(
-            machineId, 'joy-pane', { id }
-        );
-        return result.text ?? '';
+        const pctx = sync.machineCtxFor(machineId, id);
+        if (!pctx) throw new Error('no machine context');
+        const result = await machinePane(pctx);
+        return (result.data as { text?: string } | null)?.text ?? '';
     }, [machineId]);
 
     return { sessions, loading, error, refresh, createSession, killSession, fetchPane };
