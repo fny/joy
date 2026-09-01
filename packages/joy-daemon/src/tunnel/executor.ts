@@ -40,10 +40,10 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   let renewTimer: ReturnType<typeof setInterval> | null = null;
 
   async function acquire(): Promise<void> {
-    const r = await fetch(`${opts.relayUrl}/joy/v1/daemons/${encodeURIComponent(opts.machineId)}/leases`, {
+    const r = await fetch(`${opts.relayUrl}/joy/v2/daemon/leases`, {
       method: "POST",
       headers: { authorization: `Bearer ${opts.accountToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ capabilities: { tunnel: 1 } }),
+      body: JSON.stringify({ machineId: opts.machineId, capabilities: { tunnel: 1 } }),
     });
     if (!r.ok) throw new Error(`lease acquire failed: ${r.status} ${await r.text()}`);
     const j = await r.json() as { leaseId: string; leaseToken: string; ttlSeconds: number };
@@ -53,7 +53,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
     if (renewTimer) clearInterval(renewTimer);
     renewTimer = setInterval(() => {
       if (opts.borrowLease) return; // the nucleus lane renews the lease it owns
-      void fetch(`${opts.relayUrl}/joy/v1/daemon-leases/${lease!.id}`, {
+      void fetch(`${opts.relayUrl}/joy/v2/daemon/leases/${lease!.id}`, {
         method: "PUT", headers: { "x-joy-lease-token": lease!.token },
       }).catch(() => {});
     }, Math.max(2, j.ttlSeconds / 2) * 1000);
@@ -61,7 +61,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
 
   async function execute(requestId: string, payloadB64: string): Promise<void> {
     const postFrames = async (bytes: Uint8Array, done: boolean) => {
-      const r = await fetch(`${opts.relayUrl}/joy/v1/tunnel/${requestId}/frames${done ? "?done=1" : ""}`, {
+      const r = await fetch(`${opts.relayUrl}/joy/v2/daemon/tunnel/${requestId}/frames${done ? "?done=1" : ""}`, {
         method: "POST",
         headers: (() => {
           const l = activeLease();
@@ -148,7 +148,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
         if (opts.borrowLease && !borrowed) { await sleep(1000); continue; }
         const leaseId = borrowed ? borrowed.leaseId : lease!.id;
         const leaseToken = borrowed ? borrowed.leaseToken : lease!.token;
-        const r = await fetch(`${opts.relayUrl}/joy/v1/daemon-leases/${leaseId}/claims/tunnel`, {
+        const r = await fetch(`${opts.relayUrl}/joy/v2/daemon/leases/${leaseId}/claims/tunnel`, {
           method: "POST",
           headers: { "x-joy-lease-token": leaseToken, "content-type": "application/json" },
           body: JSON.stringify({ waitMs: 25_000 }),

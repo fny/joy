@@ -1,5 +1,5 @@
 // Client half of the tunnel: seal an HTTP request, POST it to the relay's
-// /joy/v1/daemons/{machineId}/http, unseal the streamed response. This is
+// /joy/v2/machines/{machineId}/http, unseal the streamed response. This is
 // what `joy --machine <id>` will use, and the reference implementation for
 // the app's version (libsodium crypto_aead_chacha20poly1305_ietf pairs with
 // the node:crypto AEAD in sealedStream.ts).
@@ -37,7 +37,7 @@ export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse
   const key = deriveTunnelKey(opts.masterSecret, opts.machineId);
   const wire = sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {} }, opts.body ?? new Uint8Array(0));
 
-  const entry = opts.entryBase ?? "/joy/v1/daemons";
+  const entry = opts.entryBase ?? "/joy/v2/machines";
   // entryBase is a PATH, never an authority: raw concatenation would let
   // "@evil.example/x" rehost the URL and leak the account bearer there.
   if (!/^\/[A-Za-z0-9/._-]*$/.test(entry)) throw new Error(`invalid entryBase: ${entry}`);

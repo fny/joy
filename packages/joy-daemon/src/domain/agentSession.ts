@@ -69,4 +69,8 @@ export interface AgentSession {
    *  ({sessionId, relay, keyEnvelope}) so the app can route writes over the
    *  v2 plane and unseal content. Optional: adapters merge best-effort. */
   setV2Link?(link: { sessionId: string; relay: string; keyEnvelope: string }): void;
+
+  /** Snapshot of the session's card metadata (the object the app renders in
+   *  its list). Used by the nucleus lane to publish the v2 card at bind. */
+  cardMetadata?(): Record<string, unknown> | null;
 }

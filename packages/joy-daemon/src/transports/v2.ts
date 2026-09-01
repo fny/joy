@@ -294,6 +294,30 @@ route("GET", "/v2/sessions/:id/slash-commands", withSession((ctx, session) => {
   if (ctx.url.searchParams.get("refresh") === "1") ctx.registry.commands.refresh();
   return ok({ slashCommands: ctx.registry.commands.forProject(session.cwd, session.agentFlavor) });
 }));
+// ── session queue (the daemon-local dispatch queue) ─────────────────────────
+// The editable line of messages waiting for the agent. Distinct from the
+// relay's durable turn queue: this one lives on the machine, next to the
+// agent, and the app reaches it over the sealed tunnel.
+route("GET", "/v2/sessions/:id/queue", withSession(async (ctx, _s, p) =>
+  ok(await mcall("queueList", ctx.registry, { id: p.id }))));
+route("POST", "/v2/sessions/:id/queue", withSession(async (ctx, _s, p, body) =>
+  ok(await mcall("queueAdd", ctx.registry, { id: p.id, ...(body as Record<string, unknown>) }))));
+route("PATCH", "/v2/sessions/:id/queue/:qid", withSession(async (ctx, _s, p, body) =>
+  ok(await mcall("queueEdit", ctx.registry, { id: p.id, qid: p.qid, ...(body as Record<string, unknown>) }))));
+route("DELETE", "/v2/sessions/:id/queue/:qid", withSession(async (ctx, _s, p) =>
+  ok(await mcall("queueCancel", ctx.registry, { id: p.id, qid: p.qid }))));
+route("POST", "/v2/sessions/:id/queue/:qid/move", withSession(async (ctx, _s, p, body) =>
+  ok(await mcall("queueReorder", ctx.registry, { id: p.id, qid: p.qid, ...(body as Record<string, unknown>) }))));
+route("POST", "/v2/sessions/:id/queue/resume", withSession(async (ctx, _s, p) =>
+  ok(await mcall("queueResume", ctx.registry, { id: p.id }))));
+
+// ── approvals (codex holds tool calls for a human decision) ─────────────────
+route("POST", "/v2/sessions/:id/approvals", withSession(async (_ctx, session, _p, body) => {
+  const answer = (session as { answerApproval?: (p: Record<string, unknown>) => { ok: boolean } }).answerApproval;
+  if (!answer) return ok({ error: "approvals_unsupported" }, 400);
+  return ok(answer.call(session, body as Record<string, unknown>));
+}));
+
 route("POST", "/v2/sessions/:id/hooks", withSession(async (_ctx, session, _p, body) =>
   ok(await scall("hookEvent", session, body))));
 

@@ -78,7 +78,31 @@ const MSG_SELECT = `
   FROM commands c JOIN turns tu ON tu.id = c.turn_id
   WHERE c.session_id = $1 AND c.kind = 'prompt'`;
 
-export function createV2Router({ core, auth, notify, db, tunnel, attachments }) {
+export function createV2Router({ core, auth, notify, db, tunnel, attachments, upstream }) {
+  // Internal delegation to the account authority (the relay's embedded
+  // happy-server). The APP speaks only /joy/v2; whether a route is answered
+  // natively or by consulting upstream is the relay's business — same pattern
+  // as auth.mjs ("/v1/auth is owned last by design"), now applied to the
+  // remaining account-plane reads so clients can drop /v1 entirely.
+  async function upstreamJson(method, path, { token, body, extraHeaders } = {}) {
+    const r = await fetch(`http://${upstream.host}:${upstream.port}${path}`, {
+      method,
+      headers: {
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+        ...(extraHeaders ?? {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const json = await r.json().catch(() => null);
+    if (!r.ok) throw new ApiError(r.status, json?.error ?? 'upstream_error');
+    return json;
+  }
+  const bearerOf = (req) => {
+    const h = req.headers.authorization ?? '';
+    return h.startsWith('Bearer ') ? h.slice(7) : null;
+  };
+
   const routes = [];
   const route = (method, pattern, opts, handler) =>
     routes.push({ method, regex: new RegExp(`^${pattern}$`), opts, handler });
@@ -320,6 +344,36 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments }) 
     return null;
   });
 
+  // ── client: account plane (machines, auth, profile, push) ────────────────
+  // These complete the v2 surface: with them, a client needs NOTHING outside
+  // /joy/v2. Delegation upstream is invisible and swappable.
+  route('GET', '/machines', {}, async (ctx, m, body, url, req) => {
+    const list = await upstreamJson('GET', '/v1/machines', { token: bearerOf(req) });
+    const machines = Array.isArray(list) ? list : (list?.machines ?? []);
+    // Merge v2 daemon liveness: a machine is ONLINE iff its daemon holds a
+    // live (unexpired, unreleased) lease — the same authority the work queue
+    // trusts, so the app's presence can never disagree with dispatchability.
+    const { rows } = await db.query(
+      `SELECT daemon_id FROM daemon_leases
+       WHERE account_id = $1 AND released_at IS NULL AND expires_at > now()`, [ctx.accountId]);
+    const alive = new Set(rows.map((r) => r.daemon_id));
+    return { machines: machines.map((mc) => ({ ...mc, leaseAlive: alive.has(mc.id) })) };
+  });
+  // Pairing/auth handshake. No auth on request (it IS the login), auth on
+  // response (an existing device approves a new one).
+  route('POST', '/auth/request', { auth: false }, async (ctx, m, body, url, req) =>
+    upstreamJson('POST', '/v1/auth/request', { body, extraHeaders: { 'x-happy-client': String(req.headers['x-happy-client'] ?? 'joy-app') } }));
+  route('POST', '/auth/response', {}, async (ctx, m, body, url, req) =>
+    upstreamJson('POST', '/v1/auth/response', { token: bearerOf(req), body }));
+  route('POST', '/auth/account/request', { auth: false }, async (ctx, m, body) =>
+    upstreamJson('POST', '/v1/auth/account/request', { body }));
+  route('POST', '/auth/account/response', {}, async (ctx, m, body, url, req) =>
+    upstreamJson('POST', '/v1/auth/account/response', { token: bearerOf(req), body }));
+  route('GET', '/account/profile', {}, async (ctx, m, body, url, req) =>
+    upstreamJson('GET', '/v1/account/profile', { token: bearerOf(req) }));
+  route('POST', '/push-tokens', {}, async (ctx, m, body, url, req) =>
+    upstreamJson('POST', '/v1/push-tokens', { token: bearerOf(req), body }));
+
   // ── client: E2E tunnel to a machine (endpoint-agnostic, relay-blind) ──────
   route('POST', '/machines/([\\w.-]+)/http', { raw: true }, async (ctx, m, body, url, req, res) => {
     // Ownership FIRST, before reading the body.
@@ -387,6 +441,11 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments }) 
       if (!body.localSessionId || !body.sessionKeyEnvelope) throw new ApiError(400, 'missing_bind_fields');
       return core.bindSession(m[1], lease, body).then(() => ({ ok: true }));
     }));
+  // Card publish: the daemon keeps the session's ENCRYPTED metadata (sealed
+  // with the session content key) and lifecycle state current, so clients can
+  // render the session list from v2 alone — no happy mirror required.
+  route('PATCH', '/daemon/sessions/([\\w-]+)', { auth: false },
+    withLeaseHeaders((lease, m, body) => core.updateSessionCard(m[1], lease, body).then(() => ({ ok: true }))));
   route('POST', '/daemon/sessions/([\\w-]+)/spawn-failed', { auth: false },
     withLeaseHeaders((lease, m, body) => core.spawnFailed(m[1], lease, body.reason ?? 'spawn_failed')));
   route('POST', '/daemon/turns/([\\w-]+)/submitted', { auth: false },

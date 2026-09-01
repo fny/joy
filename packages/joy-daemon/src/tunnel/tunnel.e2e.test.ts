@@ -23,6 +23,8 @@ import { createCore } from "../../../joy-relay/src/core.mjs";
 import { createNotify } from "../../../joy-relay/src/notify.mjs";
 import { createAuth } from "../../../joy-relay/src/auth.mjs";
 import { createRouter } from "../../../joy-relay/src/routes.mjs";
+import { createV2Router } from "../../../joy-relay/src/v2.mjs";
+import { createAttachments } from "../../../joy-relay/src/attachments.mjs";
 import { createTunnel } from "../../../joy-relay/src/tunnel.mjs";
 
 const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
@@ -55,11 +57,16 @@ beforeAll(async () => {
   });
   const tunnel = createTunnel({ notify });
   const router = createRouter({ core, auth, notify, db, tunnel });
+  // The executor and client both speak /joy/v2 now — mount it like server.mjs.
+  const attachments = createAttachments(db);
+  const v2router = createV2Router({ core, auth, notify, db, tunnel, attachments });
 
   relay = http.createServer((req, res) => {
-    void router.handle(req, res).then((handled: boolean) => {
-      if (!handled) { res.writeHead(404); res.end(); }
-    });
+    void (async () => {
+      if (await v2router.handle(req, res)) return;
+      if (await router.handle(req, res)) return;
+      res.writeHead(404); res.end();
+    })();
   });
   await new Promise<void>((r) => relay.listen(0, "127.0.0.1", r));
   relayUrl = `http://127.0.0.1:${(relay.address() as any).port}`;

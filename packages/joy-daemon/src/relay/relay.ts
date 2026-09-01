@@ -10,6 +10,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statfsS
 import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
 import { happyHomeDir, joyStateDir, joyHomeDir, joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey, usesLegacyLayout, DEFAULT_RELAY_URL } from '../paths';
+import { publishV2Card } from './v2Card';
 import { loadOutbound, saveOutbound, clearOutbound, type PersistedOutboundItem } from '../domain/outboundStore';
 import { io, type Socket } from 'socket.io-client';
 import tweetnacl from 'tweetnacl';
@@ -1102,6 +1103,9 @@ export class RelaySession {
   // Serializes metadata writes for this session (see mergeMetadata).
   private metadataChain: Promise<void> = Promise.resolve();
 
+  /** Read-only snapshot of the current card metadata (nucleus lane bind). */
+  get metadataSnapshot(): Record<string, unknown> | null { return this.metadata; }
+
   /**
    * Merge a patch into the session metadata and persist it (server is
    * version-checked; retries on mismatch). The single write path so the title,
@@ -1137,6 +1141,10 @@ export class RelaySession {
       if (ack.result === 'success') {
         this.metadata = merged;
         if (typeof ack.version === 'number') this.metadataVersion = ack.version;
+        // v2 card: every metadata change re-publishes the sealed card to the
+        // relay's durable plane (the app renders its session list from it).
+        const localId = typeof merged.joy__sessionId === 'string' ? merged.joy__sessionId : null;
+        if (localId) publishV2Card(localId, merged);
         return true;
       }
       if (ack.result === 'version-mismatch' && typeof ack.version === 'number') {

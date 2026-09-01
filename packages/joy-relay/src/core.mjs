@@ -226,6 +226,31 @@ export function createCore(db, notify) {
     notify.pokeAccount(accountId, sessionId, ['state', 'events']);
   }
 
+  /** Daemon publishes the session CARD: encrypted metadata (sealed with the
+   *  session content key) and/or lifecycle state. Fenced to the owning daemon.
+   *  This is what lets clients render the session list from v2 alone. */
+  async function updateSessionCard(sessionId, leaseRef, body) {
+    const allowed = new Set(['starting', 'active', 'detached', 'archived']);
+    if (body.state !== undefined && !allowed.has(body.state)) throw new ApiError(400, 'bad_state');
+    if (body.encryptedMetadata !== undefined && typeof body.encryptedMetadata !== 'string') {
+      throw new ApiError(400, 'bad_metadata');
+    }
+    const accountId = await db.tx(async (t) => {
+      const lease = await fencedLease(t, leaseRef.id, leaseRef.token_hash, leaseRef.epoch);
+      const s = await loadSession(t, sessionId, null);
+      if (s.owner_daemon_id !== lease.daemon_id) throw new ApiError(403, 'not_owner_daemon');
+      await t.query(
+        `UPDATE native_sessions SET
+           encrypted_metadata = COALESCE($2, encrypted_metadata),
+           state = COALESCE($3, state),
+           revision = revision + 1, updated_at = now()
+         WHERE id = $1`,
+        [sessionId, body.encryptedMetadata ?? null, body.state ?? null]);
+      return s.account_id;
+    });
+    notify.pokeAccount(accountId, sessionId, ['state']);
+  }
+
   /** Daemon reports a spawn could not run (e.g. cwd missing, createDir off).
    *  Marks the session failed with a machine-readable reason so the client can
    *  offer to create the directory and retry. Fenced to the owning daemon. */
@@ -703,13 +728,25 @@ export function createCore(db, notify) {
   async function listSessions(accountId) {
     const { rows } = await db.query(
       `SELECT s.*,
-         (SELECT count(*)::int FROM turns t WHERE t.session_id = s.id AND t.state = 'queued') AS queued_turns
+         (SELECT count(*)::int FROM turns t WHERE t.session_id = s.id AND t.state = 'queued') AS queued_turns,
+         EXISTS (SELECT 1 FROM daemon_leases l WHERE l.daemon_id = s.owner_daemon_id
+                   AND l.released_at IS NULL AND l.expires_at > now()) AS online,
+         (SELECT tu.state FROM turns tu WHERE tu.session_id = s.id
+            AND tu.state IN ('dispatching','running','cancelling')
+          ORDER BY tu.request_seq LIMIT 1) AS executing_state,
+         (SELECT max(GREATEST(tu.created_at, COALESCE(tu.terminal_at, tu.created_at))) FROM turns tu WHERE tu.session_id = s.id) AS last_turn_at
        FROM native_sessions s WHERE s.account_id = $1 ORDER BY s.created_at`, [accountId]);
     return rows.map((s) => ({
       sessionId: s.id, daemonId: s.owner_daemon_id, localSessionId: s.local_session_id,
       state: s.state, revision: String(s.revision), headSeq: String(Number(s.next_seq) - 1),
       sessionKeyEnvelope: s.session_key_envelope, encryptedMetadata: s.encrypted_metadata,
       queuedTurns: s.queued_turns,
+      // presence + activity, from the ONE authority the queue itself trusts
+      online: !!s.online,
+      executing: s.executing_state ?? null,
+      updatedAt: new Date(s.updated_at).getTime(),
+      createdAt: new Date(s.created_at).getTime(),
+      lastTurnAt: s.last_turn_at ? new Date(s.last_turn_at).getTime() : null,
     }));
   }
 
@@ -814,7 +851,7 @@ export function createCore(db, notify) {
     acquireLease, renewLease, claimWork, claimControl, deliveryReceived,
     turnSubmitted, turnStarted, turnFact, reconcileTurn,
     listSessions, sessionState, sessionEvents, sweepExpiredLeases,
-    fencedLease, hashToken, assertDaemonOwned,
+    fencedLease, hashToken, assertDaemonOwned, updateSessionCard,
     spawnFailed, retrySpawn,
   };
 }

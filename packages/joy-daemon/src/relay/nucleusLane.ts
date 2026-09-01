@@ -25,6 +25,7 @@ import { randomUUID, randomBytes } from "node:crypto";
 import tweetnacl from "tweetnacl";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { registerV2CardPublisher, unregisterV2CardPublisher, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, joyStateDir } from "../paths";
@@ -113,6 +114,17 @@ export function decodeSpawnSpec(ciphertext: string | null | undefined): SpawnSpe
     return null;
   } catch { return null; }
 }
+/** Seal a session CARD (the metadata object the app renders in its list)
+ *  with the session content key. Plaintext JSON when the session has no key
+ *  (legacy pairing) — same policy as message content. */
+export function sealCard(metadata: Record<string, unknown>, key?: Uint8Array | null): string {
+  const json = JSON.stringify({ v: 1, t: "card", metadata });
+  if (!key) return json;
+  const nonce = new Uint8Array(randomBytes(tweetnacl.secretbox.nonceLength));
+  const ct = tweetnacl.secretbox(new Uint8Array(Buffer.from(json, "utf8")), nonce, key);
+  return "v2e1:" + Buffer.concat([Buffer.from(nonce), Buffer.from(ct)]).toString("base64");
+}
+
 export function encodeContent(text: string, key?: Uint8Array | null): string {
   const json = JSON.stringify({ v: 1, t: "plain", text });
   if (!key) return json;
@@ -228,6 +240,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     for (const s of r.sessions ?? []) {
       if (s.daemonId === machineId && s.localSessionId) bound.set(s.sessionId, s.localSessionId);
     }
+    // Content keys ride the window records (same trust domain as transcripts).
+    for (const rec of registry.listRecords()) {
+      if (rec.v2SessionId && rec.v2SessionKey) {
+        try { sessionKeys.set(rec.v2SessionId, new Uint8Array(Buffer.from(rec.v2SessionKey, "base64"))); } catch { /* bad record */ }
+      }
+    }
+
     // Re-stamp the happy card's v2 link for every bound session. Sessions that
     // bound before a field existed (e.g. localSessionId, which the app needs to
     // address the machine plane) would otherwise stay stale forever, since
@@ -241,14 +260,29 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         ? sealSessionKey(new Uint8Array(Buffer.from(rec.v2SessionKey, "base64")), opts.accountContentPublicKey)
         : "v2:plaintext";
       sess.setV2Link?.({ sessionId: s.sessionId, relay: relayUrl, keyEnvelope: envelope });
+      wireCardPublisher(s.localSessionId, s.sessionId);
     }
 
-    // Content keys ride the window records (same trust domain as transcripts).
-    for (const rec of registry.listRecords()) {
-      if (rec.v2SessionId && rec.v2SessionKey) {
-        try { sessionKeys.set(rec.v2SessionId, new Uint8Array(Buffer.from(rec.v2SessionKey, "base64"))); } catch { /* bad record */ }
-      }
-    }
+  }
+
+
+  // Register the v2 card publisher for a bound session: every metadata merge
+  // (title, joy__state, model, queue…) re-seals the full card with the session
+  // content key and PATCHes the relay. Also fires ONCE immediately so a fresh
+  // bind (or a daemon restart's rebind) publishes the current card without
+  // waiting for the next change.
+  function wireCardPublisher(localId: string, v2SessionId: string): void {
+    registerV2CardPublisher(localId, (metadata) => {
+      const key = sessionKeys.get(v2SessionId) ?? null;
+      const l = lease;
+      if (!l) return; // lane down — rebind republishes
+      void api("PATCH", `/daemon/sessions/${v2SessionId}`, {
+        encryptedMetadata: sealCard(metadata, key),
+        state: cardStateFor(metadata.joy__state),
+      }, l).catch((e) => log(`card publish ${v2SessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`));
+    });
+    const current = registry.get(localId)?.cardMetadata?.();
+    if (current) publishV2Card(localId, current);
   }
 
   async function claim(lane: "work" | "control", asLease?: Lease | null): Promise<Array<WorkOffer & ControlOffer>> {
@@ -339,6 +373,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // v2 (dual path) and show its V2 badge — envelope included so the app
       // needs no extra fetch to obtain the content key.
       session.setV2Link?.({ sessionId: offer.sessionId, relay: relayUrl, keyEnvelope: envelope });
+      wireCardPublisher(session.id, offer.sessionId);
       log(`spawned ${spec.agent ?? "claude"} in ${spec.cwd} → local ${session.id} (v2 ${offer.sessionId.slice(0, 8)}${envelope.startsWith("v2sk1:") ? ", sealed" : ", plaintext"})`);
     } catch (e) {
       if (e instanceof DirectoryCreationApprovalRequired) {
