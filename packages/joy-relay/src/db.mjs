@@ -153,6 +153,55 @@ const MIGRATIONS = [
   ALTER TABLE native_sessions ADD COLUMN spawn_failure TEXT;
   ALTER TABLE native_sessions ADD COLUMN spawn_create_dir BOOLEAN NOT NULL DEFAULT FALSE;
   `,
+  // 005 — the account plane goes native: accounts (identity = ed25519 public
+  // key, uppercase hex), pairing requests (sealed responses, first write
+  // wins), machines (sealed metadata/daemonState with CAS versions) and Expo
+  // push tokens. Account ids are opaque strings so rows imported from an
+  // earlier authority keep their ids and every existing token stays valid.
+  `
+  CREATE TABLE accounts (
+    id TEXT PRIMARY KEY,
+    public_key TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE auth_requests (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('terminal','account')),
+    public_key TEXT NOT NULL,
+    supports_v2 BOOLEAN NOT NULL DEFAULT FALSE,
+    response TEXT,
+    response_account_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (kind, public_key)
+  );
+
+  CREATE TABLE machines (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    metadata TEXT NOT NULL,
+    metadata_version INT NOT NULL DEFAULT 1,
+    daemon_state TEXT,
+    daemon_state_version INT NOT NULL DEFAULT 0,
+    data_encryption_key TEXT,
+    seq BIGINT NOT NULL DEFAULT 0,
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX machines_by_account ON machines (account_id, last_active_at DESC);
+
+  CREATE TABLE push_tokens (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    token TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (account_id, token)
+  );
+  `,
 ];
 
 export async function openDb(dataDir) {

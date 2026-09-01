@@ -78,31 +78,7 @@ const MSG_SELECT = `
   FROM commands c JOIN turns tu ON tu.id = c.turn_id
   WHERE c.session_id = $1 AND c.kind = 'prompt'`;
 
-export function createV2Router({ core, auth, notify, db, tunnel, attachments, upstream }) {
-  // Internal delegation to the account authority (the relay's embedded
-  // happy-server). The APP speaks only /joy/v2; whether a route is answered
-  // natively or by consulting upstream is the relay's business — same pattern
-  // as auth.mjs ("/v1/auth is owned last by design"), now applied to the
-  // remaining account-plane reads so clients can drop /v1 entirely.
-  async function upstreamJson(method, path, { token, body, extraHeaders } = {}) {
-    const r = await fetch(`http://${upstream.host}:${upstream.port}${path}`, {
-      method,
-      headers: {
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-        ...(extraHeaders ?? {}),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const json = await r.json().catch(() => null);
-    if (!r.ok) throw new ApiError(r.status, json?.error ?? 'upstream_error');
-    return json;
-  }
-  const bearerOf = (req) => {
-    const h = req.headers.authorization ?? '';
-    return h.startsWith('Bearer ') ? h.slice(7) : null;
-  };
-
+export function createV2Router({ core, auth, notify, db, tunnel, attachments, accounts }) {
   const routes = [];
   const route = (method, pattern, opts, handler) =>
     routes.push({ method, regex: new RegExp(`^${pattern}$`), opts, handler });
@@ -344,45 +320,41 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, up
     return null;
   });
 
-  // ── client: account plane (machines, auth, profile, push) ────────────────
-  // These complete the v2 surface: with them, a client needs NOTHING outside
-  // /joy/v2. Delegation upstream is invisible and swappable.
-  route('GET', '/machines', {}, async (ctx, m, body, url, req) => {
-    const list = await upstreamJson('GET', '/v1/machines', { token: bearerOf(req) });
-    const machines = Array.isArray(list) ? list : (list?.machines ?? []);
-    // Merge v2 daemon liveness: a machine is ONLINE iff its daemon holds a
-    // live (unexpired, unreleased) lease — the same authority the work queue
-    // trusts, so the app's presence can never disagree with dispatchability.
-    const { rows } = await db.query(
-      `SELECT daemon_id FROM daemon_leases
-       WHERE account_id = $1 AND released_at IS NULL AND expires_at > now()`, [ctx.accountId]);
-    const alive = new Set(rows.map((r) => r.daemon_id));
-    return { machines: machines.map((mc) => ({ ...mc, leaseAlive: alive.has(mc.id) })) };
-  });
-  // Pairing/auth handshake. No auth on request (it IS the login), auth on
-  // response (an existing device approves a new one).
+  // ── client: account plane (auth, pairing, profile, machines, push) ───────
+  // Served natively by accounts.mjs: with these, a client needs NOTHING
+  // outside /joy/v2 and the relay is the only server in the system.
+  //
   // Direct challenge login (secret-key restore): the ONE call that turns an
-  // account secret into a bearer token.
-  route('POST', '/auth', { auth: false }, async (ctx, m, body, url, req) =>
-    upstreamJson('POST', '/v1/auth', { body, extraHeaders: { 'x-happy-client': String(req.headers['x-happy-client'] ?? 'joy-app') } }));
-  route('POST', '/auth/request/status', { auth: false }, async (ctx, m, body) =>
-    upstreamJson('POST', '/v1/auth/request/status', { body }));
-  route('POST', '/auth/request', { auth: false }, async (ctx, m, body, url, req) =>
-    upstreamJson('POST', '/v1/auth/request', { body, extraHeaders: { 'x-happy-client': String(req.headers['x-happy-client'] ?? 'joy-app') } }));
-  route('POST', '/auth/response', {}, async (ctx, m, body, url, req) =>
-    upstreamJson('POST', '/v1/auth/response', { token: bearerOf(req), body }));
-  route('POST', '/auth/account/request', { auth: false }, async (ctx, m, body) =>
-    upstreamJson('POST', '/v1/auth/account/request', { body }));
-  route('POST', '/auth/account/response', {}, async (ctx, m, body, url, req) =>
-    upstreamJson('POST', '/v1/auth/account/response', { token: bearerOf(req), body }));
-  route('GET', '/account/profile', {}, async (ctx, m, body, url, req) =>
-    upstreamJson('GET', '/v1/account/profile', { token: bearerOf(req) }));
-  route('POST', '/push-tokens', {}, async (ctx, m, body, url, req) =>
-    upstreamJson('POST', '/v1/push-tokens', { token: bearerOf(req), body }));
-  route('GET', '/push-tokens', {}, async (ctx, m, body, url, req) =>
-    upstreamJson('GET', '/v1/push-tokens', { token: bearerOf(req) }));
-  route('DELETE', '/push-tokens/([^/]+)', {}, async (ctx, m, body, url, req) =>
-    upstreamJson('DELETE', `/v1/push-tokens/${m[1]}`, { token: bearerOf(req) }));
+  // account secret into a bearer token. No auth — it IS the login.
+  route('POST', '/auth', { auth: false }, async (ctx, m, body) => accounts.login(body));
+  // Pairing handshake, two flavours with identical mechanics: `terminal`
+  // (a daemon being paired) and `account` (a new device restoring the
+  // account). The requester posts an ephemeral key and polls (POST doubles
+  // as the poll); an authorized device answers with the sealed secret.
+  route('POST', '/auth/request', { auth: false }, async (ctx, m, body) => accounts.pairingRequest('terminal', body));
+  route('GET', '/auth/request/status', { auth: false }, async (ctx, m, body, url) =>
+    accounts.pairingStatus('terminal', url.searchParams.get('publicKey')));
+  route('POST', '/auth/response', {}, async (ctx, m, body) => accounts.pairingRespond('terminal', ctx.accountId, body));
+  route('POST', '/auth/account/request', { auth: false }, async (ctx, m, body) => accounts.pairingRequest('account', body));
+  route('GET', '/auth/account/request/status', { auth: false }, async (ctx, m, body, url) =>
+    accounts.pairingStatus('account', url.searchParams.get('publicKey')));
+  route('POST', '/auth/account/response', {}, async (ctx, m, body) => accounts.pairingRespond('account', ctx.accountId, body));
+  route('GET', '/account/profile', {}, async (ctx) => accounts.profile(ctx.accountId));
+
+  // Machines: sealed metadata + daemonState with CAS versions; presence is
+  // derived from lease liveness (see accounts.liveness).
+  route('GET', '/machines', {}, async (ctx) => accounts.listMachines(ctx.accountId));
+  route('POST', '/machines', {}, async (ctx, m, body) => accounts.upsertMachine(ctx.accountId, body));
+  route('GET', '/machines/([\\w.-]+)', {}, async (ctx, m) => accounts.getMachine(ctx.accountId, m[1]));
+  route('PATCH', '/machines/([\\w.-]+)', {}, async (ctx, m, body) => accounts.patchMachine(ctx.accountId, m[1], body));
+  route('DELETE', '/machines/([\\w.-]+)', {}, async (ctx, m) => accounts.deleteMachine(ctx.accountId, m[1]));
+
+  // Push: token registry + delivery. Daemons ask the relay to deliver so no
+  // device token ever has to leave the relay.
+  route('POST', '/push-tokens', {}, async (ctx, m, body) => accounts.registerPushToken(ctx.accountId, body.token));
+  route('GET', '/push-tokens', {}, async (ctx) => accounts.listPushTokens(ctx.accountId));
+  route('DELETE', '/push-tokens/([^/]+)', {}, async (ctx, m) => accounts.deletePushToken(ctx.accountId, decodeURIComponent(m[1])));
+  route('POST', '/push', {}, async (ctx, m, body) => accounts.sendPush(ctx.accountId, body));
 
   // ── client: E2E tunnel to a machine (endpoint-agnostic, relay-blind) ──────
   route('POST', '/machines/([\\w.-]+)/http', { raw: true }, async (ctx, m, body, url, req, res) => {
@@ -521,7 +493,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, up
     // (JSON, SSE, attachments, tunnel, errors) in one place.
     const cors = {
       'access-control-allow-origin': req.headers.origin ?? '*',
-      'access-control-allow-headers': 'authorization, content-type, x-session, x-cipher-hash, x-joy-relay-key, x-happy-client',
+      'access-control-allow-headers': 'authorization, content-type, x-session, x-cipher-hash, x-joy-relay-key, x-joy-client',
       'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
       'access-control-max-age': '86400',
     };
