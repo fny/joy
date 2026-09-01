@@ -30,6 +30,7 @@ import { t } from '@/text';
 type BuildConfig = {
     buildCommitSha?: unknown;
     buildCommitTimestamp?: unknown;
+    buildExportedAt?: unknown;
 };
 
 function getBuildConfig(): BuildConfig {
@@ -79,9 +80,17 @@ function otaDetail(): string {
         // The export step stamps the bundle instead (EXPO_PUBLIC_BUILD_* are
         // inlined at build time) — show that, like an OTA id on mobile.
         if (Platform.OS === 'web') {
-            const sha = process.env.EXPO_PUBLIC_BUILD_SHA;
-            const when = process.env.EXPO_PUBLIC_BUILD_TIME
-                ? new Date(process.env.EXPO_PUBLIC_BUILD_TIME).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            // Env stamps win when the export script set them; otherwise fall
+            // back to what app.config.js resolved at export time (commit sha
+            // via git, export timestamp) so a bare `expo export` is never
+            // unstamped.
+            const cfg = getBuildConfig();
+            const sha = process.env.EXPO_PUBLIC_BUILD_SHA
+                ?? (typeof cfg.buildCommitSha === 'string' ? cfg.buildCommitSha.slice(0, 7) : undefined);
+            const at = process.env.EXPO_PUBLIC_BUILD_TIME
+                ?? (typeof cfg.buildExportedAt === 'string' ? cfg.buildExportedAt : undefined);
+            const when = at
+                ? new Date(at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
                 : '';
             if (sha) return `web ${sha}${when ? ` · ${when}` : ''}`;
             return 'web bundle (unstamped build)';

@@ -236,6 +236,9 @@ export default {
                 consoleLoggingDefault,
                 buildCommitSha: buildMetadata.commitSha,
                 buildCommitTimestamp: buildMetadata.commitTimestamp,
+                // When this bundle was EXPORTED — the web/desktop analog of an
+                // OTA's publish time (expo-updates never runs there).
+                buildExportedAt: new Date().toISOString(),
             }
         },
         owner: "fny"

@@ -10,6 +10,7 @@ export interface AppConfig {
     serverUrl?: string;
     buildCommitSha?: string;
     buildCommitTimestamp?: string;
+    buildExportedAt?: string;
 }
 
 /**
