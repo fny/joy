@@ -66,21 +66,6 @@ async function v2fetch(method: string, path: string, body?: unknown): Promise<an
     return json;
 }
 
-// ── content envelope (the encryption seam) ──────────────────────────────────
-
-export function encodeContent(text: string): string {
-    return JSON.stringify({ v: 1, t: 'plain', text });
-}
-export function decodeContent(ciphertext: string | null | undefined): string | null {
-    if (!ciphertext) return null;
-    try {
-        const p = JSON.parse(ciphertext);
-        if (p && p.t === 'plain' && typeof p.text === 'string') return p.text;
-    } catch { /* not our envelope */ }
-    // Foreign/undecodable payload: show a marker, never crash the feed.
-    return `⟨${ciphertext.length}b payload⟩`;
-}
-
 // ── types (mirror the relay projections) ────────────────────────────────────
 
 export interface V2SessionRow {
@@ -135,28 +120,6 @@ export interface V2SessionState {
     };
 }
 
-export interface V2Message {
-    id: string;
-    ciphertext: string;
-    status: 'queued' | 'delivering' | 'delivered' | 'failed' | 'cancelled';
-    failure?: { reason: string; retryable: boolean; mayHaveDelivered: boolean };
-    turnId: string;
-    seq: string;
-    createdAt: number;
-}
-
-export interface V2Event {
-    id: string;
-    seq: string;
-    kind: string;
-    turnId: string | null;
-    commandId: string | null;
-    content: { ciphertext: string } | null;
-    createdAt: number;
-}
-
-// ── sessions ────────────────────────────────────────────────────────────────
-
 export const v2 = {
     listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
     listMachines: (): Promise<{ machines: V2Machine[] }> => v2fetch('GET', '/machines'),
@@ -199,39 +162,6 @@ export const v2 = {
     // directory creation — the client half of the v1-parity approval flow.
     retrySpawn: (id: string, createDir: boolean) =>
         v2fetch('POST', `/sessions/${id}/spawn/retry`, { createDir }),
-
-    listMessages: (id: string, status?: string): Promise<{ messages: V2Message[] }> =>
-        v2fetch('GET', `/sessions/${id}/messages${status ? `?status=${status}` : ''}`),
-    sendMessage: (id: string, text: string, attachments?: string[]) =>
-        v2fetch('POST', `/sessions/${id}/messages`, {
-            ciphertext: encodeContent(text),
-            clientIntentId: randomUUID(),
-            ...(attachments?.length ? { attachments } : {}),
-        }) as Promise<{ messageId: string; turnId: string; seq: string }>,
-    editMessage: (id: string, messageId: string, text: string): Promise<V2Message> =>
-        v2fetch('PATCH', `/sessions/${id}/messages/${messageId}`, { ciphertext: encodeContent(text) }),
-    moveMessage: (id: string, messageId: string, position: number): Promise<V2Message> =>
-        v2fetch('PATCH', `/sessions/${id}/messages/${messageId}`, { position }),
-    deleteMessage: (id: string, messageId: string) => v2fetch('DELETE', `/sessions/${id}/messages/${messageId}`),
-    retryMessage: (id: string, messageId: string) => v2fetch('POST', `/sessions/${id}/messages/${messageId}/retry`),
-
-    cancelTurn: (id: string, turnId: string) =>
-        v2fetch('POST', `/sessions/${id}/turns/${turnId}/cancellations`, { clientIntentId: randomUUID() }),
-
-    listEvents: (id: string, after?: string, limit = 200): Promise<{ messages: V2Event[]; hasMore: boolean }> =>
-        v2fetch('GET', `/sessions/${id}/events?after=${after ?? '0'}&limit=${limit}`),
-
-    /** Upload sealed (here: envelope-encoded) bytes; returns the attachment id. */
-    uploadAttachment: async (sessionId: string, bytes: Uint8Array): Promise<{ attachmentId: string; size: number }> => {
-        const res = await fetch(`${getV2BaseUrl()}/joy/v2/attachments`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${token()}`, 'X-Session': sessionId },
-            body: bytes as unknown as BodyInit,
-        });
-        const json = await res.json();
-        if (!res.ok) throw new V2ApiError(res.status, (json as any)?.error ?? `http_${res.status}`, json);
-        return json as { attachmentId: string; size: number };
-    },
 };
 
 // ── dual-path helpers (explicit relay base — the session's own v2 relay from
@@ -254,9 +184,12 @@ async function v2fetchAt(base: string, method: string, path: string, body?: unkn
 /** Send a PRE-SEALED ciphertext (the dual-path seam encrypts before calling).
  *  `attachments` are the relay ids the sealed content cites — the relay
  *  validates they exist for this session and pins them to the message. */
-export function v2SendCiphertext(base: string, v2SessionId: string, ciphertext: string, attachments?: string[]): Promise<{ messageId: string; turnId: string }> {
+/** `clientIntentId` is the message's identity at the relay: a retry MUST
+ *  reuse it (the draft-release path passes its persisted localId) so the
+ *  relay replays the first acceptance instead of queueing a second turn. */
+export function v2SendCiphertext(base: string, v2SessionId: string, ciphertext: string, clientIntentId: string, attachments?: string[]): Promise<{ messageId: string; turnId: string }> {
     return v2fetchAt(base, 'POST', `/sessions/${v2SessionId}/messages`, {
-        ciphertext, clientIntentId: randomUUID(),
+        ciphertext, clientIntentId,
         ...(attachments?.length ? { attachments } : {}),
     });
 }
@@ -305,7 +238,8 @@ export interface V2StreamHandlers {
     /** Content-free poke: something changed for a session — go pull. */
     onPoke?: (sessionId: string, changed: string[]) => void;
     /** Streaming delta (never persisted); superseded by the durable block. */
-    onEphemeral?: (sessionId: string, turnId: string, text: string | null) => void;
+    /** An ephemeral output frame landed (the app only re-reads; the text stays sealed). */
+    onEphemeral?: (sessionId: string, turnId: string) => void;
     onHello?: (sessions: Array<{ sessionId: string; headSeq: string }>) => void;
     /** Stream ended (network drop, unsupported platform) — poll-only from here. */
     onClose?: () => void;
@@ -364,7 +298,7 @@ export function connectV2Stream(handlers: V2StreamHandlers): () => void {
                     try {
                         const d = JSON.parse(data);
                         if (event === 'hello') handlers.onHello?.(d.sessions ?? []);
-                        else if (event === 'ephemeral') handlers.onEphemeral?.(d.sessionId, d.turnId, decodeContent(d.ciphertext));
+                        else if (event === 'ephemeral') handlers.onEphemeral?.(d.sessionId, d.turnId);
                         else handlers.onPoke?.(d.sessionId ?? d.id, d.changed ?? []);
                     } catch { /* malformed frame — skip */ }
                 }

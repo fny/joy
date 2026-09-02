@@ -240,8 +240,6 @@ export const it: TranslationStructure = {
         disableAnalytics: 'Disabilita analisi',
         analyticsDisabled: 'Tutto il tracciamento e la telemetria disabilitati',
         analyticsEnabled: 'Analisi anonime di utilizzo attive',
-        imageUpload: 'Caricamento immagini',
-        imageUploadSubtitle: 'Allega immagini ai messaggi per farle analizzare da Claude',
         limitSessionMemory: 'Limita le sessioni in memoria',
         limitSessionMemorySubtitle: 'Numero massimo di sessioni recenti in memoria; le più vecchie vengono scaricate e ricaricate alla riapertura',
         limitSessionMemoryMessage: 'Numero massimo di sessioni recenti da tenere in memoria. Vuoto = conserva tutte.',
@@ -250,6 +248,8 @@ export const it: TranslationStructure = {
     },
 
     errors: {
+        sendFailedTitle: 'Messaggio non inviato',
+        sendFailedMessage: 'Non è stato possibile inviare il messaggio. È stato rimesso nella casella di testo per riprovare.',
         networkError: 'Si è verificato un errore di rete',
         serverError: 'Si è verificato un errore del server',
         unknownError: 'Si è verificato un errore sconosciuto',
@@ -387,11 +387,6 @@ export const it: TranslationStructure = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: 'Invio…',
-        waitingForConnection: 'In attesa di connessione…',
-        notDeliveredRetry: 'Non inviato · Tocca per riprovare',
-    },
 
     commandPalette: {
         placeholder: 'Digita un comando o cerca...',
@@ -976,12 +971,11 @@ export const it: TranslationStructure = {
         draw: 'Disegna',
         pasteNoImageTitle: 'Nessuna immagine',
         pasteNoImageMessage: 'Gli appunti non contengono immagini.',
-        permissionTitle: 'Accesso alla libreria foto',
-        permissionMessage: "Consenti l'accesso alla tua libreria foto per allegare immagini ai messaggi.",
         limitTitle: 'Limite immagini raggiunto',
         limitMessage: ({ max }: { max: number }) => `Puoi allegare fino a ${max} immagini per messaggio.`,
         fileTooLargeTitle: 'File troppo grande',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" supera il limite di ${maxMb}MB e non è stato aggiunto.`,
+        emptyFileMessage: ({ name }: { name: string }) => `"${name}" è vuoto e non è stato inviato.`,
         uploadFailedTitle: 'Caricamento non riuscito',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? 'Non è stato possibile caricare l\'allegato. Il messaggio non è stato inviato.'

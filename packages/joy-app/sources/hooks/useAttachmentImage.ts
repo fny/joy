@@ -10,21 +10,34 @@ import * as React from 'react';
 import { sync } from '@/sync/sync';
 import { encodeBase64 } from '@/encryption/base64';
 
-const MAX_CACHE_ENTRIES = 50;
+// Bounded by BYTES, not entries: fifty 10MB pictures as base64 would pin
+// ~670MB of strings on a phone. 48MB keeps a scroll-back of ordinary
+// screenshots warm and lets a few large photos evict everything older.
+const MAX_CACHE_BYTES = 48 * 1024 * 1024;
 const cache = new Map<string, string>();
+let cacheBytes = 0;
 const inFlight = new Map<string, Promise<string | null>>();
 
 function rememberInCache(id: string, dataUri: string) {
-    if (cache.has(id)) cache.delete(id);
+    const prev = cache.get(id);
+    if (prev !== undefined) { cache.delete(id); cacheBytes -= prev.length; }
     cache.set(id, dataUri);
-    while (cache.size > MAX_CACHE_ENTRIES) {
+    cacheBytes += dataUri.length;
+    while (cacheBytes > MAX_CACHE_BYTES && cache.size > 1) {
         const oldest = cache.keys().next().value;
         if (oldest === undefined) break;
+        cacheBytes -= cache.get(oldest)!.length;
         cache.delete(oldest);
     }
 }
 
-export function detectImageMime(bytes: Uint8Array): string {
+/** The four formats every renderer on our platforms decodes AND the daemon
+ *  sniffs (domain/attachments.ts) — anything else is shown as a file row,
+ *  never mislabeled as image/png and handed to the image view. */
+export const INLINE_IMAGE_MIMES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+export const INLINE_IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
+
+function detectImageMime(bytes: Uint8Array): string | null {
     if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
         return 'image/png';
     }
@@ -41,7 +54,7 @@ export function detectImageMime(bytes: Uint8Array): string {
     ) {
         return 'image/webp';
     }
-    return 'image/png';
+    return null;
 }
 
 async function loadAttachmentDataUri(sessionId: string, id: string): Promise<string | null> {
@@ -53,7 +66,12 @@ async function loadAttachmentDataUri(sessionId: string, id: string): Promise<str
         console.warn(`[attachment-image] load failed for ${id}: ${message}`);
         return null;
     }
-    return `data:${detectImageMime(bytes)};base64,${encodeBase64(bytes)}`;
+    const mime = detectImageMime(bytes);
+    if (!mime) {
+        console.warn(`[attachment-image] ${id}: bytes are not a renderable image`);
+        return null;
+    }
+    return `data:${mime};base64,${encodeBase64(bytes)}`;
 }
 
 export type AttachmentImageState = {

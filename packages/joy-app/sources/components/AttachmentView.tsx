@@ -8,7 +8,7 @@ import { View, Text } from 'react-native';
 import { Image } from 'expo-image';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useAttachmentImage } from '@/hooks/useAttachmentImage';
+import { useAttachmentImage, INLINE_IMAGE_MIMES, INLINE_IMAGE_EXT_RE } from '@/hooks/useAttachmentImage';
 import { thumbhashToDataUri } from '@/utils/thumbhash';
 import type { MessageAttachment } from '@/sync/typesRaw';
 
@@ -17,9 +17,6 @@ const MAX_IMAGE_WIDTH = 280;
 const MAX_IMAGE_HEIGHT = 360;
 const DEFAULT_ASPECT = 4 / 3; // when the sender did not report dimensions
 
-// The sender's mime is authoritative; fall back to the extension for
-// attachments that were sent without one.
-const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|heic|heif|bmp|tiff?|avif)$/i;
 
 function formatSize(bytes: number): string {
     if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -27,8 +24,11 @@ function formatSize(bytes: number): string {
     return `${bytes} B`;
 }
 
-export function isImageAttachment(a: MessageAttachment): boolean {
-    return a.mime ? a.mime.startsWith('image/') : IMAGE_EXT_RE.test(a.name);
+// The sender's mime is authoritative; fall back to the extension for
+// attachments sent without one. Only formats we can actually decode count —
+// iOS transcodes HEIC to JPEG at pick time, so those never reach here as HEIC.
+function isImageAttachment(a: MessageAttachment): boolean {
+    return a.mime ? INLINE_IMAGE_MIMES.has(a.mime.toLowerCase()) : INLINE_IMAGE_EXT_RE.test(a.name);
 }
 
 export const AttachmentView = React.memo(function AttachmentView(props: { sessionId: string; attachment: MessageAttachment }) {

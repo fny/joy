@@ -259,8 +259,6 @@ export const pl: TranslationStructure = {
         disableAnalytics: 'Wyłącz analitykę',
         analyticsDisabled: 'Wszystkie śledzenie i telemetria wyłączone',
         analyticsEnabled: 'Anonimowa analityka użytkowania aktywna',
-        imageUpload: 'Przesyłanie obrazów',
-        imageUploadSubtitle: 'Dołącz obrazy do wiadomości, aby Claude mógł je przeanalizować',
         limitSessionMemory: 'Ogranicz sesje w pamięci',
         limitSessionMemorySubtitle: 'Maksymalna liczba ostatnich sesji w pamięci; starsze są wyładowywane i wczytywane ponownie przy powrocie',
         limitSessionMemoryMessage: 'Maksymalna liczba ostatnich sesji w pamięci. Puste = zachowaj wszystkie.',
@@ -269,6 +267,8 @@ export const pl: TranslationStructure = {
     },
 
     errors: {
+        sendFailedTitle: 'Wiadomość nie została wysłana',
+        sendFailedMessage: 'Nie udało się wysłać wiadomości. Została przywrócona do pola tekstowego, aby można było spróbować ponownie.',
         networkError: 'Wystąpił błąd sieci',
         serverError: 'Wystąpił błąd serwera',
         unknownError: 'Wystąpił nieznany błąd',
@@ -406,11 +406,6 @@ export const pl: TranslationStructure = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: 'Wysyłanie…',
-        waitingForConnection: 'Oczekiwanie na połączenie…',
-        notDeliveredRetry: 'Nie wysłano · Dotknij, aby ponowić',
-    },
 
     commandPalette: {
         placeholder: 'Wpisz polecenie lub wyszukaj...',
@@ -994,12 +989,11 @@ export const pl: TranslationStructure = {
         draw: 'Rysuj',
         pasteNoImageTitle: 'Brak obrazu',
         pasteNoImageMessage: 'Schowek nie zawiera obrazu.',
-        permissionTitle: 'Dostęp do biblioteki zdjęć',
-        permissionMessage: 'Zezwól na dostęp do biblioteki zdjęć, aby załączać obrazy do wiadomości.',
         limitTitle: 'Osiągnięto limit obrazów',
         limitMessage: ({ max }: { max: number }) => `Możesz dołączyć maksymalnie ${max} obrazów na wiadomość.`,
         fileTooLargeTitle: 'Plik zbyt duży',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" przekracza limit ${maxMb}MB i nie został dodany.`,
+        emptyFileMessage: ({ name }: { name: string }) => `„${name}” jest pusty i nie został wysłany.`,
         uploadFailedTitle: 'Przesyłanie nieudane',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? 'Nie udało się przesłać załącznika. Wiadomość nie została wysłana.'
