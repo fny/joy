@@ -34,6 +34,11 @@ export interface PiInit {
   model?: string;          // pi --model spec (see src/pi/models.ts)
   status: SessionStatus;
   startedAt: number;
+  /** pi's own session id (`pi --session-id`): chosen by the daemon for a
+   *  fresh session, reused to resume; persisted in the window record. */
+  piSessionId?: string;
+  /** `pi -c`: continue pi's newest session for this cwd (no id known yet). */
+  continueLast?: boolean;
 }
 
 /** Locate the pi binary: PATH first, then the pnpm-global shim. */
@@ -50,6 +55,8 @@ export class PiSession implements AgentSession {
   readonly agentFlavor = "pi" as const;
   readonly id: string;
   readonly cwd: string;
+  #piSessionId: string | undefined;
+  #continueLast: boolean;
   readonly model?: string;
   readonly effort?: string = undefined;
   status: SessionStatus;
@@ -82,6 +89,8 @@ export class PiSession implements AgentSession {
     this.id = init.id;
     this.cwd = init.cwd;
     this.model = init.model;
+    this.#piSessionId = init.piSessionId;
+    this.#continueLast = init.continueLast === true;
     this.status = init.status;
     this.#startedAt = init.startedAt;
     this.#deps = deps;
@@ -112,23 +121,16 @@ export class PiSession implements AgentSession {
 
   #start(): void {
     try {
-      const args = ["--mode", "rpc", "--no-session"];
+      const args = ["--mode", "rpc"];
       if (this.model) args.push("--model", this.model);
-      // Provider keys: merge ~/.joy/env fresh at SPAWN time (not just daemon
-      // boot) so a key added after the daemon started still reaches pi —
-      // "pi had trouble using the fireworks api key" was this ordering.
+      // Sessions persist in ~/.pi/agent/sessions/<cwd>/… so they can be
+      // resumed: an explicit id (ours or --resume's) via --session-id, or
+      // pi's newest for the cwd via -c.
+      if (this.#piSessionId) args.push("--session-id", this.#piSessionId);
+      else if (this.#continueLast) args.push("-c");
+      // Provider keys come from the sealed store, applied to process.env by
+      // the registry right before this spawn (domain/envStore.ts).
       const env = { ...process.env };
-      try {
-        for (const raw of readFileSync(join(homedir(), ".joy", "env"), "utf8").split("\n")) {
-          const line = raw.trim().replace(/^export\s+/, "");
-          if (!line || line.startsWith("#")) continue;
-          const eq = line.indexOf("=");
-          if (eq <= 0) continue;
-          const k = line.slice(0, eq).trim();
-          const v = line.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
-          if (k && v) env[k] = v;
-        }
-      } catch { /* no ~/.joy/env — spawn with daemon env */ }
       const proc = spawn(piBinary(), args, {
         cwd: this.cwd,
         env,
@@ -163,7 +165,7 @@ export class PiSession implements AgentSession {
   }
 
   #persistRecord(): void {
-    saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "pi", piSettings: { model: this.currentModel ?? this.model } });
+    saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "pi", piSettings: { model: this.currentModel ?? this.model, sessionId: this.#piSessionId } });
   }
 
   #send(cmd: Record<string, unknown>): void {

@@ -59,7 +59,7 @@ export interface WindowRecord {
   /** Reconcile checkpoint: last fully-delivered opencode message id. */
   opencodeDeliveredThrough?: string;
   opencodeSettings?: { model?: string; providerID?: string };
-  piSettings?: { model?: string };
+  piSettings?: { model?: string; sessionId?: string };
   updatedAt: number;
 }
 
@@ -105,7 +105,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string } },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {

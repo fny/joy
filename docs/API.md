@@ -73,7 +73,11 @@ annotations are incremental (permissive objects where absent).
 | `joy-restart-daemon` | POST /daemon/restart | Exec-restart the daemon |
 | `joy-status` | GET /status | Daemon + sessions snapshot |
 | `joy-notify` | POST /notify | Push notification to all devices |
-| `joy-send` | POST /send | Deliver text to a session (queue-routed) |
+| `joy-send` | POST /send | Deliver text to a session (queue-routed). `from` (`joy:<id>` \| `cli` \| `app` \| `cron:<name>`) + optional `replyTo` make the DAEMON wrap the text in `<joy-message from=… reply-to=…>` and stamp `meta.from` on the mirrored record — the sender's own wrapper is stripped, a `joy:` sender must exist here. `exclusive` keeps the old refuse-if-busy scripting contract. Returns `queued_id` |
+| `joy-check` | GET /sessions/:id/check | `idle` \| `busy` (busySince) \| `needs_input` (held approvals, or a `<joy-options>` question) \| `ended`, plus queue depth and permissionMode — the one computation behind `joy check`/`wait`/`ask` |
+| `joy-approvals` / `joy-approvals-answer` | GET/POST /sessions/:id/approvals | Held tool-call approvals (codex) and `{requestId, decision: allow\|deny}` |
+| `joy-env-list` / `joy-env-set` / `joy-env-unset` | GET /env · POST /env · DELETE /env/:name | The sealed environment store (`~/.joy/env.sealed`, AES-GCM under the machine key): names only out, values in; applied to `process.env` at boot and before EVERY spawn so all four agents inherit it. Also on the tunnel as `/v2/env` |
+| (stream) | GET /sessions/:id/events?after=&last=&follow=1 | NDJSON of the session's adapter records (`{seq, at, record}` — text, tool calls, turn lifecycle+usage, user rows with `meta.from`); first line `{hello, seq}`. Backs `joy events`, `wait`, `ask` |
 | `joy-queue-list/add/edit/cancel/resume/reorder` | /sessions/:id/queue… | Durable dispatch queue CRUD |
 | `joy-send-keys` | POST /sessions/:id/keys | Raw key tokens into the pane (escape hatch, not primary interaction) |
 | `joy-set-mode` | POST /sessions/:id/mode | Permission/model/effort switches |
@@ -120,7 +124,7 @@ annotations are incremental (permissive objects where absent).
 
 ## Agent tag vocabulary (agent → app, taught via agentTagsPrompt.ts)
 
-`<options>` picker · `<joy-img>` inline image · `<joy-file>` file chip ·
+`<joy-options>` picker · `<joy-img>` inline image · `<joy-file>` file chip ·
 `<joy-notify>` push · `<joy-title>` retitle · `<joy-bg>` long-running process
 chip (claude-only extras add plan-mode/AskUserQuestion rules).
 
@@ -160,4 +164,4 @@ the whole surface; unknown paths are 404 — there is no upstream.
   (`domain/resourceAlerts.ts`).
 - Machine heartbeat: cpu/ram/disk/load into encrypted daemonState every 20s
   (`PATCH /joy/v2/machines/:id`, CAS on `daemonStateVersion`).
-- `~/.joy/env` loaded at boot + re-read at pi spawn (FIREWORKS_API_KEY etc.).
+- Provider keys: the sealed store `~/.joy/env.sealed` (machine key), applied at boot and re-read before every spawn for every agent; a plaintext `~/.joy/env` is sealed into it on first boot and deleted.

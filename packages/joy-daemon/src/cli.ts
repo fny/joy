@@ -144,11 +144,13 @@ async function cmdList(): Promise<number> {
   if (!r || !r.ok) { console.log(`${bad} daemon not running (joy start)`); return 1; }
   const sessions = (await r.json()) as any[];
   if (sessions.length === 0) { console.log("no sessions"); return 0; }
-  for (const s of sessions) {
-    const st = s.status === "active" ? c.g(s.status)
-      : s.status === "ended" ? c.dim("detached/ended") : s.status;
-    const sockHint = s.tmux_socket ? c.dim(`  [tmux -L ${s.tmux_socket}]`) : "";
-    console.log(`  ${s.id}  ${st.padEnd(20)}  ${s.cwd}${sockHint}`);
+  const checks = await Promise.all(sessions.map((s) => checkState(s.id)));
+  const ago = (t?: number) => (t ? fmtUptime(Date.now() - t) + " ago" : "");
+  for (const [i, s] of sessions.entries()) {
+    const ck = checks[i];
+    const state = s.status === "ended" ? c.dim("ended") : ck?.state === "needs_input" ? c.y("needs input") : ck?.state === "busy" ? c.y("busy") : c.g("idle");
+    const title = s.summary?.text ?? (typeof s.summary === "string" ? s.summary : "");
+    console.log(`  ${c.b(s.id)}  ${String(s.agent ?? "claude").padEnd(8)} ${state.padEnd(20)} ${String(title).slice(0, 40).padEnd(40)}  ${s.cwd}${s.last_active_at ? c.dim("  " + ago(s.last_active_at)) : ""}`);
   }
   return 0;
 }
@@ -600,78 +602,8 @@ async function resolveSession(idOrPrefix: string): Promise<any | null> {
   return null;
 }
 
-/**
- * Wait on the daemon's SSE stream (/events) for a `stop` event belonging to
- * the session — fired at every turn end. Returns two promises: `ready` resolves
- * once the stream is actually CONNECTED (its first frame decoded — the daemon
- * always opens with a `history` event), and `done` resolves true on the stop /
- * false on timeout. The caller must `await ready` BEFORE sending, or a fast
- * turn's stop can fire in the gap before the stream is listening and be missed.
- */
-function sseWaitForStop(rec: any, timeoutMs: number, controller: AbortController): { ready: Promise<void>; done: Promise<boolean> } {
-  let markReady: () => void;
-  const ready = new Promise<void>((r) => { markReady = r; });
-  const done = new Promise<boolean>((resolveWait) => {
-    const timer = setTimeout(() => { controller.abort(); resolveWait(false); }, timeoutMs);
-    (async () => {
-      try {
-        const res = await fetch(base() + "/events", { headers: authHeaders(), signal: controller.signal });
-        if (!res.ok || !res.body) { clearTimeout(timer); markReady(); resolveWait(false); return; }
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
-        let event = "";
-        let readyFired = false;
-        for (;;) {
-          const { done: streamDone, value } = await reader.read();
-          if (streamDone) break;
-          if (!readyFired) { readyFired = true; markReady(); } // first bytes → connected
-          buf += dec.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = buf.indexOf("\n")) >= 0) {
-            const line = buf.slice(0, nl).trimEnd();
-            buf = buf.slice(nl + 1);
-            if (line.startsWith("event: ")) { event = line.slice(7); continue; }
-            if (line.startsWith("data: ") && event === "stop") {
-              try {
-                const d = JSON.parse(line.slice(6));
-                if (d.session_id === rec.claude_session_id || d.session_id === rec.id) {
-                  clearTimeout(timer); controller.abort(); resolveWait(true); return;
-                }
-              } catch { /* ignore malformed frame */ }
-            }
-            if (line === "") event = "";
-          }
-        }
-      } catch { /* aborted or connection lost */ }
-      clearTimeout(timer);
-      markReady();
-      resolveWait(false);
-    })();
-  });
-  return { ready, done };
-}
 
-/** Assistant text blocks from transcript lines[from..] joined as the response. */
-function assistantTextFromLines(lines: any[], from: number): string {
-  const parts: string[] = [];
-  for (const e of lines.slice(from)) {
-    if (e?.message?.role !== "assistant") continue;
-    const content = e.message.content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) parts.push(b.text.trim());
-    }
-  }
-  return parts.join("\n\n");
-}
 
-async function transcriptLines(id: string): Promise<any[]> {
-  const r = await api("GET", `/sessions/${id}/transcript`).catch(() => null);
-  if (!r || !r.ok) return [];
-  const j = await r.json().catch(() => null) as { lines?: any[] } | null;
-  return Array.isArray(j?.lines) ? j!.lines! : [];
-}
 
 /** Shared flag parsing: pulls `--flag value` / boolean flags out of argv. */
 function takeFlag(rest: string[], name: string): string | undefined {
@@ -693,6 +625,219 @@ function takeBool(rest: string[], name: string): boolean {
 // Creates the directory if missing (scripts are non-interactive). Prints the
 // session id (or the full record with --json). A -m message is queued and
 // drains once claude is ready — follow with `joy wait` to block on it.
+// ── events / turn-wait plumbing (joy events, wait, ask, run, check) ─────────
+
+/** Who is talking: a joy session (JOY_SESSION_ID is exported into every
+ *  agent pane / process by the daemon) or a human at a shell. The daemon
+ *  writes the <joy-message> wrapper from this — the CLI never does. */
+function senderIdentity(): string {
+  const sid = process.env.JOY_SESSION_ID;
+  return sid && /^[0-9a-f]{8}$/.test(sid) ? `joy:${sid}` : "cli";
+}
+
+type LoggedRecord = { seq: number; at: number; localId?: string; record: { role: string; content: any; meta?: any } };
+
+/** Stream a session's NDJSON record log. Yields the hello line first
+ *  ({ hello, seq }), then records; ends at EOF (no follow) or on abort. */
+async function* streamEvents(id: string, opts: { after?: number; last?: number; follow?: boolean; signal?: AbortSignal }): AsyncGenerator<any> {
+  const q = new URLSearchParams();
+  if (opts.after !== undefined) q.set("after", String(opts.after));
+  if (opts.last !== undefined) q.set("last", String(opts.last));
+  if (opts.follow) q.set("follow", "1");
+  const res = await fetch(`${base()}/sessions/${id}/events?${q}`, { headers: authHeaders(), signal: opts.signal });
+  if (!res.ok || !res.body) throw new Error(`events ${res.status}`);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try { yield JSON.parse(line); } catch { /* partial */ }
+    }
+  }
+}
+
+const evOf = (r: LoggedRecord): any => r.record?.content?.data?.ev ?? null;
+const textOf = (r: LoggedRecord): string | null => {
+  if (r.record?.role === "user") { const t = r.record.content?.text; return typeof t === "string" ? t : null; }
+  const ev = evOf(r); return ev?.t === "text" && typeof ev.text === "string" ? ev.text : null;
+};
+
+/** One human-readable line per record (the old `log` look, every agent). */
+function renderRecord(r: LoggedRecord): string | null {
+  const when = c.dim(new Date(r.at).toISOString().slice(11, 19));
+  if (r.record.role === "user") {
+    const from = r.record.meta?.from ? c.dim(` (from ${r.record.meta.from})`) : "";
+    const t = String(r.record.content?.text ?? "").replace(/^<joy-message\b[^>]*>\s*/, "").replace(/\s*<\/joy-message>\s*$/, "");
+    return `${when} ${c.b("user     ")}${from} ${t.replace(/\s+/g, " ").slice(0, 200)}`;
+  }
+  const ev = evOf(r);
+  if (!ev) return null;
+  switch (ev.t) {
+    case "text": return `${when} ${c.g("assistant")} ${String(ev.text).replace(/\s+/g, " ").slice(0, 200)}`;
+    case "tool-call-start": return `${when} ${c.dim("tool     ")} ${ev.name}${ev.args && Object.keys(ev.args).length ? " " + JSON.stringify(ev.args).slice(0, 120) : ""}`;
+    case "tool-call-end": return `${when} ${c.dim("tool-end ")} ${ev.call}`;
+    case "turn-start": return `${when} ${c.dim("turn     ")} start`;
+    case "turn-end": return `${when} ${c.dim("turn     ")} end ${ev.status ?? ""}${ev.usage ? " " + JSON.stringify(ev.usage).slice(0, 100) : ""}`;
+    case "service": return `${when} ${c.dim("service  ")} ${String(ev.text).slice(0, 200)}`;
+    default: return null;
+  }
+}
+
+async function checkState(id: string): Promise<any | null> {
+  const r = await api("GET", `/sessions/${id}/check`).catch(() => null);
+  if (!r) return null;
+  return await r.json().catch(() => null);
+}
+
+/** Record seq the session's log is at right now (0 when it has none). */
+async function currentSeq(id: string): Promise<number> {
+  const r = await api("GET", `/sessions/${id}/events?last=0`).catch(() => null);
+  if (!r || !r.ok) return 0;
+  const first = (await r.text()).split("\n")[0];
+  try { return Number(JSON.parse(first).seq) || 0; } catch { return 0; }
+}
+
+type TurnOutcome = { state: "answered" | "needs_input" | "timeout" | "gone"; text: string; check: any; records: LoggedRecord[] };
+const OUTCOME_EXIT: Record<TurnOutcome["state"], number> = { answered: 0, needs_input: 6, timeout: 4, gone: 1 };
+
+/**
+ * Block until the turn behind `queuedId` (or, without one, whatever is
+ * running) has ended, collecting the records produced meanwhile. Ends when
+ * the queue no longer holds the item AND the session reports idle /
+ * needs_input — polled, so it holds for every adapter regardless of how it
+ * signals turn-end. The assistant text of the turn is the joined text
+ * records after `afterSeq`.
+ */
+async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: string | null; timeoutMs: number }): Promise<TurnOutcome> {
+  const deadline = Date.now() + opts.timeoutMs;
+  const controller = new AbortController();
+  const records: LoggedRecord[] = [];
+  let sawActivity = false;
+  const pump = (async () => {
+    try {
+      for await (const line of streamEvents(id, { after: opts.afterSeq, follow: true, signal: controller.signal })) {
+        if (line?.hello) continue;
+        records.push(line);
+        const ev = evOf(line);
+        if (ev && (ev.t === "turn-start" || ev.t === "text" || ev.t === "tool-call-start")) sawActivity = true;
+      }
+    } catch { /* aborted */ }
+  })();
+  const finish = async (state: TurnOutcome["state"], check: any): Promise<TurnOutcome> => {
+    await wait(150); // let a trailing text record land before we stop reading
+    controller.abort();
+    await pump.catch(() => {});
+    const text = records.map((r) => (r.record.role !== "user" ? textOf(r) : null)).filter((t): t is string => !!t && t.trim().length > 0).join("\n\n").trim();
+    return { state, text, check, records };
+  };
+  const startedAt = Date.now();
+  let dispatched = !opts.queuedId;
+  for (;;) {
+    if (Date.now() > deadline) return finish("timeout", await checkState(id));
+    if (!dispatched) {
+      const q = await api("GET", `/sessions/${id}/queue`).catch(() => null);
+      const qs = q && q.ok ? await q.json().catch(() => null) as any : null;
+      const items: any[] = qs?.items ?? qs?.queue ?? [];
+      dispatched = !items.some((it) => String(it.id) === String(opts.queuedId));
+      if (!dispatched) { await wait(400); continue; }
+    }
+    const ck = await checkState(id);
+    if (!ck) return finish("gone", null);
+    if (ck.state === "ended") return finish("gone", ck);
+    if (ck.state === "needs_input") return finish("needs_input", ck);
+    if (ck.state === "busy") { sawActivity = true; await wait(400); continue; }
+    // idle — but a harness that flips busy asynchronously may not have started
+    // yet: give it a short grace unless we already saw the turn happen.
+    if (sawActivity || Date.now() - startedAt > 3000) return finish("answered", ck);
+    await wait(300);
+  }
+}
+
+/** A send that always leaves an audit trail: the queued id back from the
+ *  daemon, or a typed failure (exit code). */
+async function sendTo(rec: any, text: string, opts: { exclusive?: boolean; from?: string; replyTo?: string | null }): Promise<{ ok: true; queuedId: string | null; seq: number } | { ok: false; code: number }> {
+  const seq = await currentSeq(rec.id);
+  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: opts.exclusive === true, from: opts.from, replyTo: opts.replyTo ?? undefined }).catch(() => null);
+  if (!r) { console.error(`${bad} daemon not running`); return { ok: false, code: 1 }; }
+  const body = await r.json().catch(() => ({})) as any;
+  if (body.error === "busy") { console.error(`${bad} session ${rec.id} is busy (--no-queue)`); return { ok: false, code: 3 }; }
+  if (body.error === "mode_not_scriptable") { console.error(`${bad} mode "${body.mode}" not scriptable with --no-queue (need yolo or read-only)`); return { ok: false, code: 5 }; }
+  if (body.error === "bad_from") { console.error(`${bad} unknown sender ${body.from} (JOY_SESSION_ID must name a session on this daemon)`); return { ok: false, code: 2 }; }
+  if (!r.ok || body.error) { console.error(`${bad} send failed: ${JSON.stringify(body)}`); return { ok: false, code: 1 }; }
+  return { ok: true, queuedId: body.queued_id ?? null, seq };
+}
+
+// joy check <session> — one line; the exit code IS the answer.
+async function cmdCheck(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  const target = rest[0];
+  if (!target) { console.error("usage: joy check <session> [--json]"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  const ck = await checkState(rec.id);
+  if (!ck) { console.error(`${bad} daemon not running`); return 1; }
+  if (json) { console.log(JSON.stringify({ session: rec.id, ...ck })); }
+  else if (ck.state === "idle") console.log(`${ok} ${rec.id} idle${ck.queue ? ` (${ck.queue} queued)` : ""}`);
+  else if (ck.state === "busy") console.log(`${c.y("●")} ${rec.id} busy${ck.busySince ? ` for ${fmtUptime(Date.now() - ck.busySince)}` : ""}${ck.queue ? `, ${ck.queue} queued` : ""}`);
+  else if (ck.state === "needs_input") {
+    const what = ck.approvals?.length ? `approval: ${ck.approvals[0].title}` : `question: ${String(ck.question ?? "").replace(/\s+/g, " ").slice(0, 120)}${ck.options?.length ? ` [${ck.options.join(" | ")}]` : ""}`;
+    console.log(`${c.y("?")} ${rec.id} needs input — ${what}`);
+  } else console.log(`${bad} ${rec.id} ${ck.state}${ck.reason ? ` (${ck.reason})` : ""}`);
+  return ck.state === "idle" ? 0 : ck.state === "busy" ? 3 : ck.state === "needs_input" ? 6 : 1;
+}
+
+// joy about <session> — everything about one session.
+async function cmdAbout(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  const target = rest[0];
+  if (!target) { console.error("usage: joy about <session> [--json]"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  const [ck, qr, ar, ur, evText] = await Promise.all([
+    checkState(rec.id),
+    api("GET", `/sessions/${rec.id}/queue`).then((r) => r.json()).catch(() => null),
+    api("GET", `/sessions/${rec.id}/approvals`).then((r) => r.json()).catch(() => null),
+    rec.claude_session_id ? api("GET", `/usage/sessions?period=all&claudeSessionId=${encodeURIComponent(rec.claude_session_id)}`).then((r) => r.json()).catch(() => null) : Promise.resolve(null),
+    api("GET", `/sessions/${rec.id}/events`).then((r) => r.text()).catch(() => ""),
+  ]);
+  const usage = (ur as any)?.entry ?? null;
+  const turns = String(evText).split("\n").filter((l) => l.includes('"turn-end"')).length;
+  const q = qr as any;
+  const info = {
+    id: rec.id, agent: rec.agent ?? "claude", title: rec.summary?.text ?? (typeof rec.summary === "string" ? rec.summary : null),
+    status: rec.status, state: ck?.state ?? null, permissionMode: ck?.permissionMode ?? null,
+    model: rec.current_model ?? rec.model ?? null, effort: rec.effort ?? null,
+    cwd: rec.cwd, pid: rec.pid ?? null, tmux: { target: rec.tmux_window ?? null, socket: rec.tmux_socket ?? null },
+    relaySessionId: rec.relay_session_id ?? null, claudeSessionId: rec.claude_session_id ?? null,
+    startedAt: rec.started_at ?? null, uptimeMs: rec.started_at ? Date.now() - rec.started_at : null,
+    lastActiveAt: rec.last_active_at ?? null, turns, queue: q?.pendingCount ?? (q?.items?.length ?? 0),
+    approvals: (ar as any)?.approvals ?? [], usage,
+  };
+  if (json) { console.log(JSON.stringify(info)); return 0; }
+  const row = (k: string, v: unknown) => { if (v !== null && v !== undefined && v !== "") console.log(`  ${k.padEnd(12)} ${v}`); };
+  console.log(`${c.b(info.id)}  ${info.agent}${info.title ? `  ${c.dim(String(info.title))}` : ""}`);
+  row("state", `${info.status}${info.state ? ` / ${info.state}` : ""}`);
+  row("mode", info.permissionMode);
+  row("model", `${info.model ?? "?"}${info.effort ? ` (${info.effort})` : ""}`);
+  row("cwd", info.cwd);
+  row("pid", info.pid);
+  row("tmux", info.tmux.socket ? `tmux -L ${info.tmux.socket} attach   (${info.tmux.target})` : info.tmux.target);
+  row("uptime", info.uptimeMs != null ? fmtUptime(info.uptimeMs) : null);
+  row("last active", info.lastActiveAt ? fmtUptime(Date.now() - info.lastActiveAt) + " ago" : null);
+  row("turns", info.turns);
+  row("queue", info.queue);
+  if (info.approvals.length) row("approvals", info.approvals.map((a: any) => `${a.requestId}: ${a.title}`).join("; "));
+  if (usage) row("cost", `$${Number(usage.cost ?? 0).toFixed(2)}  (${usage.calls ?? "?"} calls${usage.models?.length ? ", " + usage.models.map((m: any) => m.name).join(" + ") : ""})`);
+  return 0;
+}
+
 async function cmdNew(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   const readOnly = takeBool(rest, "--read-only");
@@ -700,15 +845,17 @@ async function cmdNew(rest: string[]): Promise<number> {
   const model = takeFlag(rest, "--model");
   const effort = takeFlag(rest, "--effort");
   const resumeId = takeFlag(rest, "--resume");
-  const agent = takeFlag(rest, "--agent");
+  const agent = takeFlag(rest, "--agent") || "claude";
   const msg = takeFlag(rest, "-m") ?? takeFlag(rest, "--message");
   const dir = rest[0];
-  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi] [--model m] [--read-only] [--continue|--resume id] [--json]"); return 2; }
+  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi] [--model m] [--effort e] [--read-only] [--continue|--resume id] [--json]"); return 2; }
+  const mode = permissionModeFor(agent, readOnly);
+  if (!mode.ok) { console.error(`${bad} ${mode.error}`); return 2; }
   const cwd = resolve(expandTilde(dir));
   const r = await api("POST", "/sessions", {
     cwd, createDir: true, model, effort,
-    agent: agent || undefined,
-    permissionMode: readOnly ? "plan" : "bypassPermissions",
+    agent,
+    permissionMode: mode.mode,
     continue: cont || undefined,
     resume_id: resumeId || undefined,
   }).catch(() => null);
@@ -717,52 +864,48 @@ async function cmdNew(rest: string[]): Promise<number> {
   if (r.status !== 201) { console.error(`${bad} create failed: ${JSON.stringify(body)}`); return 1; }
   const rec = body as any;
   if (msg && msg.trim()) {
-    // Bootstrap message: NOT exclusive — the session is still starting and the
-    // dispatch queue owns delivering it once the pane is ready.
-    await api("POST", "/send", { session_id: rec.id, text: msg }).catch(() => null);
+    await api("POST", "/send", { session_id: rec.id, text: msg, from: senderIdentity() }).catch(() => null);
   }
   if (json) console.log(JSON.stringify(rec));
   else console.log(rec.id);
   return 0;
 }
 
+/** --read-only per agent: claude's plan mode; codex's read-only sandbox
+ *  (approvals on request); opencode and pi have no such switch — refuse
+ *  loudly rather than pretend. */
+function permissionModeFor(agent: string, readOnly: boolean): { ok: true; mode: string } | { ok: false; error: string } {
+  if (!readOnly) return { ok: true, mode: "bypassPermissions" };
+  if (agent === "claude") return { ok: true, mode: "plan" };
+  if (agent === "codex") return { ok: true, mode: "read-only" };
+  return { ok: false, error: `--read-only is not available for ${agent} (no read-only mode in that harness)` };
+}
+
 // joy ask <session> <text...> [--timeout secs] [--json]
 // Exclusive send + wait for the turn to finish + print the response text.
 async function cmdAsk(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
+  const noQueue = takeBool(rest, "--no-queue");
   const timeoutS = Number(takeFlag(rest, "--timeout") ?? 600);
   const [target, ...words] = rest;
   const text = words.join(" ").trim();
-  if (!target || !text) { console.error("usage: joy ask <session> <text...> [--timeout secs] [--json]"); return 2; }
+  if (!target || !text) { console.error("usage: joy ask <session> <text...> [--timeout secs] [--no-queue] [--json]"); return 2; }
   const rec = await resolveSession(target);
   if (!rec) return 1;
-
-  const baseline = (await transcriptLines(rec.id)).length;
-  // Open the stop-listener and WAIT for it to connect BEFORE sending, so a fast
-  // turn's stop event can't fire in the gap before the stream is listening.
-  const controller = new AbortController();
-  const { ready, done: stopped } = sseWaitForStop(rec, timeoutS * 1000, controller);
-  await ready;
-
-  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: true }).catch(() => null);
-  if (!r) { controller.abort(); console.error(`${bad} daemon not running`); return 1; }
-  const body = await r.json().catch(() => ({})) as any;
-  if (body.error === "busy") { controller.abort(); console.error(`${bad} session ${rec.id} is busy (mid-turn or queued work)`); return 3; }
-  if (body.error === "mode_not_scriptable") {
-    controller.abort();
-    console.error(`${bad} session ${rec.id} is in "${body.mode}" mode — scripting needs yolo (bypassPermissions) or read-only (plan)`);
-    return 5;
+  const sent = await sendTo(rec, text, { exclusive: noQueue, from: senderIdentity() });
+  if (!sent.ok) return sent.code;
+  const out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, timeoutMs: timeoutS * 1000 });
+  if (json) {
+    console.log(JSON.stringify({ session: rec.id, state: out.state, text: out.text, turn: sent.queuedId,
+      question: out.check?.question ?? null, options: out.check?.options ?? null, approval: out.check?.approvals?.[0] ?? null,
+      usage: [...out.records].reverse().map((r) => evOf(r)?.usage).find(Boolean) ?? null }));
+  } else {
+    if (out.text) console.log(out.text);
+    if (out.state === "needs_input") console.error(`${c.y("?")} ${rec.id} is waiting for input${out.check?.approvals?.length ? ` (approval: ${out.check.approvals[0].title})` : ""}`);
+    else if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`);
+    else if (out.state === "gone") console.error(`${bad} session ${rec.id} gone`);
   }
-  if (!r.ok) { controller.abort(); console.error(`${bad} send failed: ${JSON.stringify(body)}`); return 1; }
-
-  if (!(await stopped)) {
-    console.error(`${bad} timed out after ${timeoutS}s waiting for the turn to finish (session ${rec.id})`);
-    return 4;
-  }
-  const response = assistantTextFromLines(await transcriptLines(rec.id), baseline);
-  if (json) console.log(JSON.stringify({ ok: true, session: rec.id, response }));
-  else console.log(response);
-  return 0;
+  return OUTCOME_EXIT[out.state];
 }
 
 // joy run <prompt...> [--dir d] [--model m] [--effort e] [--read-only]
@@ -780,44 +923,29 @@ async function cmdRun(rest: string[]): Promise<number> {
   const dir = takeFlag(rest, "--dir") ?? ".";
   const model = takeFlag(rest, "--model");
   const effort = takeFlag(rest, "--effort");
+  const agent = takeFlag(rest, "--agent") || "claude";
   const prompt = rest.join(" ").trim();
-  if (!prompt) { console.error("usage: joy run <prompt...> [--dir d] [--model m] [--read-only] [--timeout secs] [--json]"); return 2; }
+  if (!prompt) { console.error("usage: joy run <prompt...> [--dir d] [--agent a] [--model m] [--read-only] [--timeout secs] [--json]"); return 2; }
+  const mode = permissionModeFor(agent, readOnly);
+  if (!mode.ok) { console.error(`${bad} ${mode.error}`); return 2; }
   const cwd = resolve(expandTilde(dir));
 
-  const cr = await api("POST", "/sessions", {
-    cwd, createDir: true, model, effort,
-    permissionMode: readOnly ? "plan" : "bypassPermissions",
-  }).catch(() => null);
+  const cr = await api("POST", "/sessions", { cwd, createDir: true, model, effort, agent, permissionMode: mode.mode }).catch(() => null);
   if (!cr) { console.error(`${bad} daemon not running (joy start)`); return 1; }
   const rec = await cr.json().catch(() => ({})) as any;
   if (cr.status !== 201) { console.error(`${bad} create failed: ${JSON.stringify(rec)}`); return 1; }
-  // The `stop` SSE event is keyed by the CLAUDE session id, but the create
-  // response returns BEFORE the transcript binds, so rec.claude_session_id is
-  // still unset here. Derive it from the transcript path (…/<claudeId>.jsonl)
-  // so the stop matcher can pair the turn — otherwise the wait hangs forever.
-  if (!rec.claude_session_id && typeof rec.transcript_path === "string") {
-    rec.claude_session_id = basename(rec.transcript_path, ".jsonl");
-  }
 
-  let response = "";
+  let out: TurnOutcome | null = null;
   let code = 0;
   try {
-    // Fresh session → baseline 0; a session with no prompt emits no assistant
-    // text, so the FIRST stop belongs to our prompt's turn. Connect the
-    // stop-listener before sending (the cold-start delay makes this trivially
-    // in time). Plain (non-exclusive) send: this session is ours alone and is
-    // still "starting", so the dispatch queue owns waiting for a ready pane —
-    // exclusive's mode probe would race the startup.
-    const controller = new AbortController();
-    const { ready, done } = sseWaitForStop(rec, timeoutS * 1000, controller);
-    await ready;
-    const sr = await api("POST", "/send", { session_id: rec.id, text: prompt }).catch(() => null);
-    if (!sr || !sr.ok) { controller.abort(); console.error(`${bad} send failed`); code = 1; }
-    else if (!(await done)) { console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`); code = 4; }
-    else response = assistantTextFromLines(await transcriptLines(rec.id), 0);
+    const sent = await sendTo(rec, prompt, { from: senderIdentity(), replyTo: null });
+    if (!sent.ok) code = sent.code;
+    else {
+      out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, timeoutMs: timeoutS * 1000 });
+      code = OUTCOME_EXIT[out.state];
+      if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`);
+    }
   } finally {
-    // ALWAYS tear down. Grab the FRESHEST pid + transcript path first (the
-    // create-time pid can be stale before the session bound), then kill.
     let pid = rec.pid as number | undefined;
     let tp = rec.transcript_path as string | undefined;
     try {
@@ -825,10 +953,6 @@ async function cmdRun(rest: string[]): Promise<number> {
       if (g.ok) { const s = await g.json() as any; pid = s.pid ?? pid; tp = s.transcript_path ?? tp; }
     } catch { /* use create-time values */ }
     await api("DELETE", `/sessions/${rec.id}`).catch(() => {});
-    // Wait for claude to ACTUALLY exit before deleting its log — a kill mid-turn
-    // flushes a final transcript write on the way out, which would re-create the
-    // file after a delete. Poll the pid locally (same user → signal 0 works)
-    // until it's gone, bounded, THEN purge (which still guards a trailing flush).
     if (typeof pid === "number") {
       for (let i = 0; i < 40; i++) { // ~10s ceiling
         try { process.kill(pid, 0); } catch { break; } // ESRCH → dead
@@ -837,78 +961,202 @@ async function cmdRun(rest: string[]): Promise<number> {
     }
     if (tp) await purgeTranscript(tp);
   }
-  if (code !== 0) return code;
-  if (json) console.log(JSON.stringify({ ok: true, cwd, response }));
-  else console.log(response);
-  return 0;
+  if (json) console.log(JSON.stringify({ ok: code === 0, state: out?.state ?? "error", cwd, response: out?.text ?? "" }));
+  else if (out?.text) console.log(out.text);
+  return code;
 }
 
 // joy send <session> <text...> — exclusive fire-and-forget (no wait).
 async function cmdSend(rest: string[]): Promise<number> {
+  const noQueue = takeBool(rest, "--no-queue");
+  const noReply = takeBool(rest, "--no-reply");
+  const from = takeFlag(rest, "--from");
+  const json = takeBool(rest, "--json");
   const [target, ...words] = rest;
   const text = words.join(" ").trim();
-  if (!target || !text) { console.error("usage: joy send <session> <text...>"); return 2; }
+  if (!target || !text) { console.error("usage: joy send <session> <text...> [--no-queue] [--no-reply] [--json]"); return 2; }
   const rec = await resolveSession(target);
   if (!rec) return 1;
-  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: true }).catch(() => null);
-  if (!r) { console.error(`${bad} daemon not running`); return 1; }
-  const body = await r.json().catch(() => ({})) as any;
-  if (body.error === "busy") { console.error(`${bad} session ${rec.id} is busy`); return 3; }
-  if (body.error === "mode_not_scriptable") { console.error(`${bad} mode "${body.mode}" not scriptable (need yolo or read-only)`); return 5; }
-  if (!r.ok) { console.error(`${bad} send failed: ${JSON.stringify(body)}`); return 1; }
-  console.log("sent");
+  const sender = from ?? senderIdentity();
+  const r = await sendTo(rec, text, { exclusive: noQueue, from: sender, replyTo: noReply ? null : undefined });
+  if (!r.ok) return r.code;
+  if (json) console.log(JSON.stringify({ ok: true, session: rec.id, turn: r.queuedId, from: sender }));
+  else console.log(r.queuedId ? `queued ${r.queuedId}` : "sent");
   return 0;
 }
 
 // joy wait <session> [--timeout secs] — block until the session is idle.
 async function cmdWaitIdle(rest: string[]): Promise<number> {
   const timeoutS = Number(takeFlag(rest, "--timeout") ?? 600);
+  const turn = takeFlag(rest, "--turn");
+  const json = takeBool(rest, "--json");
   const target = rest[0];
-  if (!target) { console.error("usage: joy wait <session> [--timeout secs]"); return 2; }
+  if (!target) { console.error("usage: joy wait <session> [--turn id] [--timeout secs] [--json]"); return 2; }
   const rec = await resolveSession(target);
   if (!rec) return 1;
-  const deadline = Date.now() + timeoutS * 1000;
-  for (;;) {
-    const r = await api("GET", `/sessions/${rec.id}`).catch(() => null);
-    if (!r || !r.ok) { console.error(`${bad} session ${rec.id} gone`); return 1; }
-    const s = await r.json() as any;
-    if (s.busy === false) return 0;
-    const left = deadline - Date.now();
-    if (left <= 0) { console.error(`${bad} timed out after ${timeoutS}s (session still busy)`); return 4; }
-    // Ride the SSE stop for the next turn end (cheap), bounded by the deadline;
-    // then loop to RE-CHECK busy — a stop is per-turn, not "fully idle". Cap the
-    // window at 5s so a stop that fired just before we connected (idle already)
-    // doesn't stall the loop — the re-check catches it promptly either way.
-    const controller = new AbortController();
-    await sseWaitForStop(rec, Math.min(left, 5_000), controller).done;
-  }
+  const out = await waitTurn(rec.id, { afterSeq: 0, queuedId: turn ?? null, timeoutMs: timeoutS * 1000 });
+  if (json) console.log(JSON.stringify({ session: rec.id, state: out.state, check: out.check }));
+  else if (out.state === "answered") console.log(`${ok} ${rec.id} idle`);
+  else if (out.state === "needs_input") console.log(`${c.y("?")} ${rec.id} needs input`);
+  else if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id} still busy)`);
+  else console.error(`${bad} session ${rec.id} gone`);
+  return OUTCOME_EXIT[out.state];
 }
 
 // joy log <session> [-n count] — recent user/assistant text from the transcript.
-async function cmdLogTail(rest: string[]): Promise<number> {
-  const n = Number(takeFlag(rest, "-n") ?? 12);
+async function cmdEvents(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  const follow = takeBool(rest, "--follow") || takeBool(rest, "-f");
+  const last = takeFlag(rest, "--last") ?? takeFlag(rest, "-n");
   const target = rest[0];
-  if (!target) { console.error("usage: joy log <session> [-n count]"); return 2; }
+  if (!target) { console.error("usage: joy events <session> [--follow] [--last N] [--json]"); return 2; }
   const rec = await resolveSession(target);
   if (!rec) return 1;
-  const lines = await transcriptLines(rec.id);
-  const out: string[] = [];
-  for (const e of lines) {
-    const role = e?.message?.role;
-    if (role !== "user" && role !== "assistant") continue;
-    const content = e.message.content;
-    let txt = "";
-    if (typeof content === "string") txt = content;
-    else if (Array.isArray(content)) txt = content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join(" ");
-    txt = txt.trim();
-    if (!txt || txt.startsWith("<task-notification>")) continue;
-    out.push(`${role === "user" ? c.b("user     ") : c.g("assistant")} ${txt.replace(/\s+/g, " ").slice(0, 200)}`);
+  const controller = new AbortController();
+  process.on("SIGINT", () => { controller.abort(); process.exit(0); });
+  try {
+    for await (const line of streamEvents(rec.id, { last: last !== undefined ? Number(last) : (follow ? 0 : 12), follow, signal: controller.signal })) {
+      if (line?.hello) continue;
+      if (json) console.log(JSON.stringify(line));
+      else { const s = renderRecord(line); if (s) console.log(s); }
+    }
+  } catch (e) {
+    if (!controller.signal.aborted) { console.error(`${bad} ${e instanceof Error ? e.message : String(e)}`); return 1; }
   }
-  for (const l of out.slice(-n)) console.log(l);
   return 0;
 }
 
 // joy kill <session> — end the session (kills its tmux window).
+// ── controls: the app's session menu, as verbs ──────────────────────────────
+async function cmdAbort(rest: string[]): Promise<number> {
+  if (!rest[0]) { console.error("usage: joy abort <session>"); return 2; }
+  const rec = await resolveSession(rest[0]);
+  if (!rec) return 1;
+  const r = await api("POST", `/sessions/${rec.id}/abort`).catch(() => null);
+  if (!r || !r.ok) { console.error(`${bad} abort failed`); return 1; }
+  console.log(`${ok} interrupted ${rec.id}`);
+  return 0;
+}
+
+async function cmdApprovals(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  if (!rest[0]) { console.error("usage: joy approvals <session> [--json]"); return 2; }
+  const rec = await resolveSession(rest[0]);
+  if (!rec) return 1;
+  const r = await api("GET", `/sessions/${rec.id}/approvals`).catch(() => null);
+  const body = r ? await r.json().catch(() => null) as any : null;
+  if (!body) { console.error(`${bad} daemon not running`); return 1; }
+  const list: any[] = body.approvals ?? [];
+  if (json) { console.log(JSON.stringify(list)); return 0; }
+  if (list.length === 0) { console.log("no pending approvals"); return 0; }
+  for (const a of list) console.log(`  ${c.b(a.requestId)}  ${String(a.kind).padEnd(8)} ${a.title}${a.detail ? c.dim("  " + String(a.detail).slice(0, 100)) : ""}  ${c.dim(fmtUptime(Date.now() - a.since) + " ago")}`);
+  return 0;
+}
+
+async function cmdDecide(rest: string[], decision: "allow" | "deny"): Promise<number> {
+  const [target, requestId] = rest;
+  if (!target) { console.error(`usage: joy ${decision === "allow" ? "approve" : "deny"} <session> [requestId]`); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  let id = requestId;
+  if (!id) {
+    const r = await api("GET", `/sessions/${rec.id}/approvals`).catch(() => null);
+    const body = r ? await r.json().catch(() => null) as any : null;
+    id = body?.approvals?.[0]?.requestId;
+    if (!id) { console.log("no pending approvals"); return 0; }
+  }
+  const r = await api("POST", `/sessions/${rec.id}/approvals`, { requestId: id, decision }).catch(() => null);
+  const body = r ? await r.json().catch(() => ({})) as any : null;
+  if (!r || !r.ok || !body?.ok) { console.error(`${bad} ${body?.error ?? "no such approval"}`); return 1; }
+  console.log(`${ok} ${decision === "allow" ? "approved" : "denied"} ${id}`);
+  return 0;
+}
+
+async function cmdQueue(rest: string[]): Promise<number> {
+  const target = rest[0];
+  if (!target) { console.error("usage: joy queue <session> [cancel <id>]"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  if (rest[1] === "cancel") {
+    const qid = rest[2];
+    if (!qid) { console.error("usage: joy queue <session> cancel <id>"); return 2; }
+    const r = await api("DELETE", `/sessions/${rec.id}/queue/${encodeURIComponent(qid)}`).catch(() => null);
+    const body = r ? await r.json().catch(() => ({})) as any : null;
+    if (!r || !r.ok || body?.ok === false) { console.error(`${bad} not queued: ${qid}`); return 1; }
+    console.log(`${ok} cancelled ${qid}`);
+    return 0;
+  }
+  const r = await api("GET", `/sessions/${rec.id}/queue`).catch(() => null);
+  const qs = r ? await r.json().catch(() => null) as any : null;
+  if (!qs) { console.error(`${bad} daemon not running`); return 1; }
+  const items: any[] = qs.items ?? qs.queue ?? [];
+  if (items.length === 0) { console.log(`queue empty${qs.paused ? " (paused)" : ""}`); return 0; }
+  for (const it of items) console.log(`  ${c.b(String(it.id))}  ${String(it.state ?? "").padEnd(10)} ${String(it.text ?? "").replace(/\s+/g, " ").slice(0, 100)}`);
+  if (qs.paused) console.log(c.y("  (queue paused)"));
+  return 0;
+}
+
+async function cmdMode(rest: string[]): Promise<number> {
+  const [target, mode] = rest;
+  if (!target) { console.error("usage: joy mode <session> [<permission mode>]"); return 2; }
+  const rec = await resolveSession(target);
+  if (!rec) return 1;
+  if (!mode) { const ck = await checkState(rec.id); console.log(ck?.permissionMode ?? "unknown"); return 0; }
+  const r = await api("POST", `/sessions/${rec.id}/mode`, { mode }).catch(() => null);
+  const body = r ? await r.json().catch(() => ({})) as any : null;
+  if (!r || !r.ok || body?.ok === false) { console.error(`${bad} ${body?.error ?? "mode change failed"}`); return 1; }
+  console.log(`${ok} ${rec.id} mode → ${body?.mode ?? mode}`);
+  return 0;
+}
+
+async function cmdPane(rest: string[]): Promise<number> {
+  const color = takeBool(rest, "--color");
+  if (!rest[0]) { console.error("usage: joy pane <session> [--color]"); return 2; }
+  const rec = await resolveSession(rest[0]);
+  if (!rec) return 1;
+  const r = await api("GET", `/sessions/${rec.id}/pane${color ? "?color=1" : ""}`).catch(() => null);
+  const body = r ? await r.json().catch(() => null) as any : null;
+  if (!body?.ok) { console.error(`${bad} ${body?.error ?? "no pane (this agent has no terminal view)"}`); return 1; }
+  process.stdout.write(String(body.text ?? "").replace(/\s+$/, "") + "\n");
+  return 0;
+}
+
+// joy env ls | set KEY=value | unset KEY — the sealed store every new session inherits.
+async function cmdEnv(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub === "ls" || sub === "list" || sub === undefined) {
+    const r = await api("GET", "/env").catch(() => null);
+    const body = r ? await r.json().catch(() => null) as any : null;
+    if (!body) { console.error(`${bad} daemon not running`); return 1; }
+    if (body.error) { console.error(`${bad} ${body.error === "no_machine_key" ? "not paired (joy auth) — no machine key to seal with" : body.error}`); return 1; }
+    if (!body.names?.length) { console.log("no variables (joy env set KEY=value)"); return 0; }
+    for (const n of body.names) console.log(`  ${n}`);
+    return 0;
+  }
+  if (sub === "set") {
+    const kv = rest.slice(1).join(" ");
+    const eq = kv.indexOf("=");
+    if (eq <= 0) { console.error("usage: joy env set KEY=value"); return 2; }
+    const name = kv.slice(0, eq).trim();
+    const r = await api("POST", "/env", { name, value: kv.slice(eq + 1) }).catch(() => null);
+    const body = r ? await r.json().catch(() => ({})) as any : null;
+    if (!r || !r.ok) { console.error(`${bad} ${body?.error ?? "set failed"}`); return 1; }
+    console.log(`${ok} ${name} set — new sessions get it`);
+    return 0;
+  }
+  if (sub === "unset" || sub === "rm") {
+    const name = rest[1];
+    if (!name) { console.error("usage: joy env unset KEY"); return 2; }
+    const r = await api("DELETE", `/env/${encodeURIComponent(name)}`).catch(() => null);
+    const body = r ? await r.json().catch(() => ({})) as any : null;
+    if (!r || !r.ok) { console.error(`${bad} ${body?.error ?? "unset failed"}`); return 1; }
+    console.log(body?.existed ? `${ok} ${name} removed` : `${name} was not set`);
+    return 0;
+  }
+  console.error("usage: joy env [ls] | set KEY=value | unset KEY");
+  return 2;
+}
+
 async function cmdKill(rest: string[]): Promise<number> {
   const target = rest[0];
   if (!target) { console.error("usage: joy kill <session>"); return 2; }
@@ -935,22 +1183,31 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.b("stop")}         Stop the daemon (tmux sessions stay alive)
   ${c.b("restart")}      Restart the daemon (re-exec; running sessions survive)
   ${c.b("status")}       Show daemon status
-  ${c.b("list")}         List sessions the daemon is tracking
+  ${c.b("ls")}           List sessions: id, agent, state (idle / busy / needs input), title, cwd
+  ${c.b("about")}        Everything about one session:  joy about <session> [--json]
+  ${c.b("check")}        Can it be talked to right now?  joy check <session>  → exit 0 idle · 3 busy · 6 needs input · 1 gone
   ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
-
-  ${c.b("run")}          One-shot (ephemeral, like ${c.dim("claude -p")}): create → run prompt → print
-                 response → kill session + delete its log. joy run <prompt...>
-                 [--dir d] [--model m] [--read-only] [--timeout s] [--json]
-  ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--model m] [--effort e]
-                 [--read-only] [--continue|--resume <id>] [--json]  → prints session id
-  ${c.b("ask")}          Send + wait + print the response:  joy ask <session> <text...> [--timeout s] [--json]
-  ${c.b("send")}         Send without waiting:  joy send <session> <text...>
-  ${c.b("wait")}         Block until the session is idle:  joy wait <session> [--timeout s]
-  ${c.b("log")}          Recent conversation:  joy log <session> [-n 12]
+  ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--agent claude|codex|opencode|pi] [--model m]
+                 [--effort e] [--read-only] [--continue|--resume <id>] [--json]  → prints session id
+  ${c.b("run")}          One-shot (ephemeral, like claude -p): create → prompt → print response → kill session.
+                 joy run <prompt...> [--dir d] [--agent a] [--model m] [--read-only] [--timeout s] [--json]
+  ${c.b("ask")}          Send + wait + print:  joy ask <session> <text...> [--timeout s] [--json]
+                 --json → { state: answered | needs_input | timeout, text, question?, approval?, usage }
+  ${c.b("send")}         Send without waiting (queued behind a running turn):  joy send <session> <text...>
+                 [--no-queue: fail with exit 3 if busy] [--no-reply] [--json → turn id]
+  ${c.b("wait")}         Block until a turn ends:  joy wait <session> [--turn <id>] [--timeout s]
+  ${c.b("events")}       The session's records — text, tool calls, turn lifecycle, usage:
+                 joy events <session> [--follow] [--last N] [--json]
+  ${c.b("abort")}        Interrupt the running turn:  joy abort <session>
+  ${c.b("approvals")}    Held tool-call approvals (codex):  joy approvals <session> · joy approve|deny <session> [id]
+  ${c.b("queue")}        Queued messages:  joy queue <session> [cancel <id>]
+  ${c.b("mode")}         Show or set the permission mode:  joy mode <session> [<mode>]
+  ${c.b("pane")}         The terminal view as text:  joy pane <session> [--color]
   ${c.b("kill")}         End a session:  joy kill <session>
-               Scripting contract: sends error when the session is BUSY (exit 3) —
-               they never queue — and only yolo / read-only sessions are scriptable
-               (exit 5). Exit codes: 0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 mode.
+               Messages sent from inside a joy session carry <joy-message from="joy:<id>" reply-to=…> — the
+               daemon stamps it from JOY_SESSION_ID and the app shows who sent it. Exit codes:
+               0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 mode · 6 needs input.
+  ${c.b("env")}          Sealed provider keys every new session inherits:  joy env [ls] | set KEY=value | unset KEY
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
   ${c.b("auth")}         Show authentication status for the selected relay
                joy auth <relay...>: pair this machine with relays using your
@@ -969,13 +1226,23 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "status": code = await cmdStatus(); break;
     case "list": case "ls": code = await cmdList(); break;
+    case "about": code = await cmdAbout(rest); break;
+    case "check": code = await cmdCheck(rest); break;
+    case "events": code = await cmdEvents(rest); break;
+    case "abort": code = await cmdAbort(rest); break;
+    case "approvals": code = await cmdApprovals(rest); break;
+    case "approve": code = await cmdDecide(rest, "allow"); break;
+    case "deny": code = await cmdDecide(rest, "deny"); break;
+    case "queue": code = await cmdQueue(rest); break;
+    case "mode": code = await cmdMode(rest); break;
+    case "pane": code = await cmdPane(rest); break;
+    case "env": code = await cmdEnv(rest); break;
     case "jump": case "j": code = await cmdJump(rest); break;
     case "run": code = await cmdRun(rest); break;
     case "new": code = await cmdNew(rest); break;
     case "ask": code = await cmdAsk(rest); break;
     case "send": code = await cmdSend(rest); break;
     case "wait": code = await cmdWaitIdle(rest); break;
-    case "log": code = await cmdLogTail(rest); break;
     case "kill": code = await cmdKill(rest); break;
     case "start": code = await cmdStart(); break;
     case "stop": code = await cmdStop(); break;

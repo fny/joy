@@ -4,11 +4,11 @@ import { homedir } from "os";
 import { joyStateDir } from "../paths";
 
 // Mirrors joy-app's sources/sync/prompt/systemPrompt.ts. The joy app injects
-// this per-message via the SDK so Claude emits <options>…</options> blocks that
+// this per-message via the SDK so Claude emits <joy-options>…</joy-options> blocks that
 // the app renders as a tap-to-pick options card. A plain Claude Code terminal
 // can't receive a per-message system prompt, so we instead bake this into the
 // session at launch with `--append-system-prompt`.
-import { OPTIONS_SECTION, IMAGES_SECTION, FILES_SECTION, NOTIFY_SECTION, TITLE_SECTION } from "../domain/agentTagsPrompt";
+import { OPTIONS_SECTION, IMAGES_SECTION, FILES_SECTION, NOTIFY_SECTION, TITLE_SECTION, PEERS_SECTION } from "../domain/agentTagsPrompt";
 
 // Claude-only extras layered onto the shared tag sections (agentTagsPrompt.ts
 // is the single source of truth for the cross-agent wording).
@@ -18,7 +18,7 @@ When you are in the plan mode, you must use the options mode to give the user a 
 
 # Never use the AskUserQuestion tool
 
-Do NOT call the AskUserQuestion tool. It renders an interactive picker that the user CANNOT answer in this environment — it freezes the session. Whenever you would ask the user anything, write the question as plain text in your response and put the possible answers in an <options> block at the very end (as described above). This applies always, including in plan mode.
+Do NOT call the AskUserQuestion tool. It renders an interactive picker that the user CANNOT answer in this environment — it freezes the session. Whenever you would ask the user anything, write the question as plain text in your response and put the possible answers in an <joy-options> block at the very end (as described above). This applies always, including in plan mode.
 
 # Long-running background processes
 
@@ -35,6 +35,7 @@ export const OPTIONS_SYSTEM_PROMPT = [
   FILES_SECTION,
   NOTIFY_SECTION,
   TITLE_SECTION,
+  PEERS_SECTION,
 ].join("\n\n");
 
 // Persist the prompt and return a shell token that reads it at launch time —

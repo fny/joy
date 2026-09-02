@@ -19,6 +19,7 @@ import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 import { useJoyAction } from '@/hooks/useJoyAction';
+import { machineEnvList, machineEnvSet, machineEnvUnset } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
@@ -308,6 +309,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     );
                 })()}
 
+            <EnvironmentSection machineId={machineId} online={online} />
             <ItemGroup title="Slash commands" footer="Commands & skills joy-tmux found on this machine — personal, plugins, and every project it has scanned. They appear in the composer's / menu.">
                 <Item
                     title="Available"
@@ -383,5 +385,68 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                 />
             </ItemGroup>
         </ItemList>
+    );
+});
+
+/**
+ * The daemon's sealed environment store (provider keys every new session
+ * inherits). Names only travel to the app; values go DOWN the sealed tunnel
+ * once, when set. Applies to sessions spawned from now on.
+ */
+const EnvironmentSection = React.memo(({ machineId, online }: { machineId: string; online: boolean }) => {
+    const [names, setNames] = React.useState<string[] | null>(null);
+    const [error, setError] = React.useState<string | null>(null);
+    const reload = React.useCallback(async () => {
+        const ctx = sync.machineOnlyCtx(machineId);
+        if (!ctx) { setError('no_ctx'); return; }
+        const r = await machineEnvList(ctx);
+        if (r.data?.ok) { setNames(r.data.names ?? []); setError(null); }
+        else setError(r.data?.error ?? `http_${r.status}`);
+    }, [machineId]);
+    React.useEffect(() => { if (online) void reload(); }, [online, reload]);
+    const [adding, doAdd] = useJoyAction(React.useCallback(async () => {
+        const ctx = sync.machineOnlyCtx(machineId);
+        if (!ctx) return;
+        const name = (await Modal.prompt(t('machine.environmentAdd'), t('machine.environmentNamePrompt'), { placeholder: 'FIREWORKS_API_KEY' }))?.trim();
+        if (!name) return;
+        const value = await Modal.prompt(name, t('machine.environmentValuePrompt', { name }), { inputType: 'secure-text' });
+        if (value == null) return;
+        const r = await machineEnvSet(ctx, name, value);
+        if (!r.data?.ok) { Modal.alert(t('common.error'), r.data?.error ?? `http_${r.status}`); return; }
+        await reload();
+    }, [machineId, reload]));
+    const remove = React.useCallback((name: string) => {
+        Modal.alert(t('machine.environmentRemoveTitle'), t('machine.environmentRemoveMessage', { name }), [
+            { text: t('common.cancel'), style: 'cancel' },
+            { text: t('common.delete'), style: 'destructive', onPress: () => {
+                void (async () => {
+                    const ctx = sync.machineOnlyCtx(machineId);
+                    if (!ctx) return;
+                    await machineEnvUnset(ctx, name);
+                    await reload();
+                })();
+            } },
+        ]);
+    }, [machineId, reload]);
+    if (!online) return null;
+    return (
+        <ItemGroup title={t('machine.environment')} footer={t('machine.environmentFooter')}>
+            {error === 'no_machine_key' && (
+                <Item title={t('machine.environmentUnavailable')} icon={<Ionicons name="lock-closed-outline" size={29} color="#FF9500" />} showChevron={false} />
+            )}
+            {names?.map((n) => (
+                <Item key={n} title={n} detail="••••••" icon={<Ionicons name="key-outline" size={29} color="#5856D6" />} onPress={() => remove(n)} showChevron={false} />
+            ))}
+            {names && names.length === 0 && !error && (
+                <Item title={t('machine.environmentNone')} icon={<Ionicons name="key-outline" size={29} color="#8E8E93" />} showChevron={false} />
+            )}
+            <Item
+                title={t('machine.environmentAdd')}
+                subtitle={t('machine.environmentAddSubtitle')}
+                icon={adding ? <ActivityIndicator /> : <Ionicons name="add-circle-outline" size={29} color="#007AFF" />}
+                onPress={doAdd}
+                showChevron={false}
+            />
+        </ItemGroup>
     );
 });

@@ -58,7 +58,7 @@ describe("tmuxCommand — joins argv into one line", () => {
       .toBe("display-message -t joy:w -p '#{pane_pid}'");
   });
   test("a real claude launch line survives as one positional after --", () => {
-    const cmd = "JOY_SESSION_ID='abc' claude --append-system-prompt 'Use <options>.' --settings '/p/s.json' || claude";
+    const cmd = "JOY_SESSION_ID='abc' claude --append-system-prompt 'Use <joy-options>.' --settings '/p/s.json' || claude";
     const line = tmuxCommand(["send-keys", "-l", "-t", "joy:w", "--", cmd]);
     // round-trips: starts with the fixed prefix, the whole cmd is one single-quoted blob
     expect(line.startsWith("send-keys -l -t joy:w -- '")).toBe(true);

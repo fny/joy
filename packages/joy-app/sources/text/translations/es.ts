@@ -317,6 +317,7 @@ export const es: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `de ${from}`,
         inputPlaceholder: 'Escriba un mensaje ...',
         inactiveArchived: 'Esta sesión está inactiva.',
         resumeFromTerminal: 'Para reanudarla desde la terminal:',
@@ -872,6 +873,16 @@ export const es: TranslationStructure = {
     },
 
     machine: {
+        environment: 'Entorno',
+        environmentFooter: 'Claves de proveedores (FIREWORKS_API_KEY, …) que hereda cada sesión nueva en esta máquina. Se guardan cifradas en la máquina; los valores nunca vuelven a la app.',
+        environmentAdd: 'Añadir variable',
+        environmentAddSubtitle: 'Nombre y luego valor — se aplica a las sesiones iniciadas a partir de ahora',
+        environmentNamePrompt: 'Nombre de la variable',
+        environmentValuePrompt: ({ name }: { name: string }) => `Valor de ${name}`,
+        environmentRemoveTitle: 'Quitar variable',
+        environmentRemoveMessage: ({ name }: { name: string }) => `¿Quitar ${name} de esta máquina? Las sesiones en curso la conservan hasta reiniciarse.`,
+        environmentNone: 'Aún no hay variables',
+        environmentUnavailable: 'Empareja esta máquina primero (joy auth) para desbloquear el almacén',
         offlineUnableToSpawn: 'El lanzador está deshabilitado mientras la máquina está desconectada',
         offlineHelp: '• Asegúrate de que tu computadora esté en línea\n• Ejecuta `joy status` para diagnosticar',
         launchNewSessionInDirectory: 'Iniciar nueva sesión en directorio',

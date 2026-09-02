@@ -140,16 +140,16 @@ export function parseMarkdownBlock(markdown: string) {
         }
 
         // Options block
-        if (trimmed.startsWith('<options>')) {
+        if (trimmed.startsWith('<joy-options>')) {
             let items: string[] = [];
             while (index < lines.length) {
                 const nextLine = lines[index];
-                if (nextLine.trim() === '</options>') {
+                if (nextLine.trim() === '</joy-options>') {
                     index++;
                     break;
                 }
-                // Extract content from <option> tags
-                const optionMatch = nextLine.match(/<option>(.*?)<\/option>/);
+                // Extract content from <joy-option> tags
+                const optionMatch = nextLine.match(/<joy-option>(.*?)<\/joy-option>/);
                 if (optionMatch) {
                     items.push(optionMatch[1]);
                 }

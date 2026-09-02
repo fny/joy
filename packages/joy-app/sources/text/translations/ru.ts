@@ -444,6 +444,7 @@ export const ru: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `от ${from}`,
         inputPlaceholder: 'Введите сообщение...',
         inactiveArchived: 'Эта сессия неактивна.',
         resumeFromTerminal: 'Чтобы возобновить её из терминала:',
@@ -876,6 +877,16 @@ export const ru: TranslationStructure = {
     },
 
     machine: {
+        environment: 'Окружение',
+        environmentFooter: 'Ключи провайдеров (FIREWORKS_API_KEY, …), которые получает каждая новая сессия на этой машине. Хранятся на машине в зашифрованном виде; значения в приложение не возвращаются.',
+        environmentAdd: 'Добавить переменную',
+        environmentAddSubtitle: 'Имя, затем значение — действует для сессий, запущенных с этого момента',
+        environmentNamePrompt: 'Имя переменной',
+        environmentValuePrompt: ({ name }: { name: string }) => `Значение для ${name}`,
+        environmentRemoveTitle: 'Удалить переменную',
+        environmentRemoveMessage: ({ name }: { name: string }) => `Удалить ${name} с этой машины? Запущенные сессии сохранят её до перезапуска.`,
+        environmentNone: 'Переменных пока нет',
+        environmentUnavailable: 'Сначала привяжите машину (joy auth), чтобы открыть хранилище',
         offlineUnableToSpawn: 'Запуск отключен: машина offline',
         offlineHelp: '• Убедитесь, что компьютер online\n• Выполните `joy status` для диагностики',
         launchNewSessionInDirectory: 'Запустить новую сессию в папке',

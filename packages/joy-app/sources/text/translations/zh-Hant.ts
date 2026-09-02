@@ -317,6 +317,7 @@ export const zhHant: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `來自 ${from}`,
         inputPlaceholder: '輸入訊息...',
         inactiveArchived: '此會話處於非活動狀態。',
         resumeFromTerminal: '若要從終端恢復它：',
@@ -872,6 +873,16 @@ export const zhHant: TranslationStructure = {
     },
 
     machine: {
+        environment: '環境變數',
+        environmentFooter: '此機器上每個新工作階段都會繼承的供應商金鑰（FIREWORKS_API_KEY 等）。以加密形式保存在機器上；值不會傳回應用程式。',
+        environmentAdd: '新增變數',
+        environmentAddSubtitle: '先輸入名稱，再輸入值 — 對之後啟動的工作階段生效',
+        environmentNamePrompt: '變數名稱',
+        environmentValuePrompt: ({ name }: { name: string }) => `${name} 的值`,
+        environmentRemoveTitle: '移除變數',
+        environmentRemoveMessage: ({ name }: { name: string }) => `從此機器移除 ${name}？執行中的工作階段在重新啟動前仍保留它。`,
+        environmentNone: '尚無變數',
+        environmentUnavailable: '請先配對此機器（joy auth）以啟用儲存區',
         launchNewSessionInDirectory: '在目錄中啟動新工作階段',
         offlineUnableToSpawn: '裝置離線時無法啟動',
         offlineHelp: '• 確保您的電腦在線上\n• 執行 `joy status` 進行診斷',

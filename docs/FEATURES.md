@@ -58,6 +58,17 @@ every relay; machines register per account.
   running → completed), thinking/turn lifecycle and per-turn usage arrive as
   sealed adapter records from the daemon for claude, codex, opencode and pi;
   a prompt typed straight into the terminal pane shows up as a user bubble too.
+- **Agents talk to agents (CLI)**: `joy ls` (agent, state, title), `joy check`
+  (exit code = idle / busy / needs input), `joy send` queues behind a running
+  turn and returns the turn id, `joy wait --turn` blocks on it, `joy ask`
+  returns a typed outcome, `joy events --follow` streams the session's
+  records, plus `abort`, `approvals`/`approve`/`deny`, `queue`, `mode`, `pane`,
+  `about`. A message sent from inside a joy session is wrapped by the daemon in
+  `<joy-message from="joy:<id>" reply-to="joy:<id>">` and shown in the chat as
+  coming from that session (peer bubble); no `reply-to` means no answer expected.
+- **Machine environment**: the machine page lists the sealed provider keys
+  (`~/.joy/env.sealed`) and can add/remove them over the tunnel; every new
+  session on that machine inherits them. `joy env ls|set|unset` from a shell.
 - **Sends never vanish**: v2 has no optimistic row and no outbox — the user
   bubble is the relay's `turn.queued` event. A send the relay did not accept
   (offline, unbound session, refused upload) puts the text and pictures back
@@ -71,7 +82,7 @@ every relay; machines register per account.
 - Code diffs render with a `Diff +N −M` toggle row (Edit/Write/MultiEdit).
 - Compaction summaries arrive as a collapsed "Compaction summary" card
   (previously dropped entirely).
-- `<options>` blocks become tap-to-answer pickers; `<joy-img>`/`<joy-file>`
+- `<joy-options>` blocks become tap-to-answer pickers; `<joy-img>`/`<joy-file>`
   render inline; `<joy-title>` retitles (user `/title` locks); `<joy-notify>`
   becomes a push.
 - Cmd/Ctrl+F in-session search with match cycling.

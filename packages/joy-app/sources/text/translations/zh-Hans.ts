@@ -318,6 +318,7 @@ export const zhHans: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `来自 ${from}`,
         inputPlaceholder: '输入消息...',
         inactiveArchived: '此会话处于非活动状态。',
         resumeFromTerminal: '要从终端恢复它：',
@@ -873,6 +874,16 @@ export const zhHans: TranslationStructure = {
     },
 
     machine: {
+        environment: '环境变量',
+        environmentFooter: '此机器上每个新会话都会继承的提供商密钥（FIREWORKS_API_KEY 等）。以加密形式保存在机器上；值不会返回到应用。',
+        environmentAdd: '添加变量',
+        environmentAddSubtitle: '先输入名称，再输入值 — 对之后启动的会话生效',
+        environmentNamePrompt: '变量名',
+        environmentValuePrompt: ({ name }: { name: string }) => `${name} 的值`,
+        environmentRemoveTitle: '移除变量',
+        environmentRemoveMessage: ({ name }: { name: string }) => `从此机器移除 ${name}？运行中的会话在重启前仍保留它。`,
+        environmentNone: '暂无变量',
+        environmentUnavailable: '请先配对此机器（joy auth）以启用存储',
         launchNewSessionInDirectory: '在目录中启动新会话',
         offlineUnableToSpawn: '设备离线时无法启动',
         offlineHelp: '• 确保您的计算机在线\n• 运行 `joy status` 进行诊断',
