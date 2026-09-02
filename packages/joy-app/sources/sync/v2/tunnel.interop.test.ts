@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import _sodium from 'libsodium-wrappers';
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 
 vi.mock('@/encryption/libsodium.lib', async () => { await _sodium.ready; return { default: _sodium }; });
 vi.mock('@/encryption/hmac_sha512', () => ({
@@ -26,7 +26,7 @@ function daemonStreamKey(tunnelKey: Uint8Array, streamId: Uint8Array): Buffer {
     return hmac512(tunnelKey, Buffer.concat([Buffer.from('stream'), Buffer.from(streamId)])).subarray(0, 32);
 }
 function nonceFor(counter: bigint): Buffer {
-    const n = Buffer.alloc(12); n.writeBigUInt64BE(counter, 4); return n;
+    const n = Buffer.alloc(24); n.writeBigUInt64BE(counter, 16); return n;
 }
 /** Daemon seals a response stream (head + body). */
 function daemonSealResponse(tunnelKey: Uint8Array, head: unknown, body: Uint8Array): Uint8Array {
@@ -35,9 +35,9 @@ function daemonSealResponse(tunnelKey: Uint8Array, head: unknown, body: Uint8Arr
     const parts: Buffer[] = [Buffer.from(streamId)];
     let counter = 0n;
     const push = (plain: Uint8Array, final: boolean) => {
-        const c = createCipheriv('chacha20-poly1305', key, nonceFor(counter), { authTagLength: 16 });
         const tagged = Buffer.concat([Buffer.from([final ? 1 : 0]), Buffer.from(plain)]);
-        const ct = Buffer.concat([c.update(tagged), c.final(), c.getAuthTag()]);
+        // the daemon's sealedStream.ts: libsodium-wrappers crypto_secretbox_easy
+        const ct = Buffer.from(_sodium.crypto_secretbox_easy(tagged, nonceFor(counter), key));
         counter += 1n;
         const f = Buffer.alloc(4 + ct.length); f.writeUInt32BE(ct.length, 0); ct.copy(f, 4);
         parts.push(f);
@@ -55,9 +55,7 @@ function daemonOpenRequest(tunnelKey: Uint8Array, wire: Uint8Array): { head: any
     while (off + 4 <= wire.length) {
         const len = Buffer.from(wire.buffer, wire.byteOffset + off, 4).readUInt32BE(0); off += 4;
         const ct = Buffer.from(wire.subarray(off, off + len)); off += len;
-        const d = createDecipheriv('chacha20-poly1305', key, nonceFor(counter), { authTagLength: 16 });
-        d.setAuthTag(ct.subarray(ct.length - 16));
-        const plain = Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
+        const plain = Buffer.from(_sodium.crypto_secretbox_open_easy(ct, nonceFor(counter), key));
         counter += 1n;
         const final = plain[0] === 1; const chunk = plain.subarray(1);
         if (head === null) head = JSON.parse(chunk.toString('utf8')); else body.push(chunk);

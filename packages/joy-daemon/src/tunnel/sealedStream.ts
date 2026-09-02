@@ -2,16 +2,18 @@
 // (app/CLI) and a daemon, THROUGH a relay that must stay blind.
 //
 //   wire   = streamId(16) || frame*
-//   frame  = len u32 BE || ciphertext || authTag(16)
-//   AEAD   = IETF ChaCha20-Poly1305 (node:crypto native — tweetnacl's pure-JS
-//            secretbox measured <1MB/s here, disqualifying for file streaming;
-//            the app side pairs with libsodium crypto_aead_chacha20poly1305_ietf,
-//            the same construction)
+//   frame  = len u32 BE || secretbox(tagged)   (= mac(16) || ciphertext)
+//   AEAD   = libsodium crypto_secretbox_easy (XSalsa20-Poly1305). Chosen
+//            because it is the one AEAD the app's NATIVE libsodium module
+//            (@more-tech/react-native-libsodium) actually ships — its IETF
+//            ChaCha20-Poly1305 was "undefined is not a function" on phones.
+//            Here it runs on tweetnacl (pure JS; 40–60MB/s measured on V8 —
+//            a 1MB tunnel body costs ~20ms, fine for a machine plane).
 //   key    = per-STREAM subkey: HMAC-SHA512(tunnelKey, "stream" || streamId)[0..32]
-//            — the 12-byte IETF nonce is then just the chunk counter, and
-//            counter nonces can never collide across streams because no two
-//            streams share a key (the same shape secretstream uses internally)
-//   nonce  = u32(0) || counter u64 BE
+//            — the 24-byte nonce is then just the chunk counter, and counter
+//            nonces can never collide across streams because no two streams
+//            share a key (the same shape secretstream uses internally)
+//   nonce  = zeros(16) || counter u64 BE
 //   plaintext frame = tag(1: 0x00 MESSAGE | 0x01 FINAL) || chunk
 //
 // Properties (each carried by a test):
@@ -22,7 +24,8 @@
 // The tunnel key never touches the relay: both ends derive it —
 // deriveTunnelKey(master, machineId) — the same zero-distribution trick as
 // the relay perimeter key (pairing.ts).
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
+import tweetnacl from "tweetnacl";
 
 export const CHUNK_MAX = 128 * 1024; // plaintext bytes per frame
 const TAG_LEN = 16;
@@ -64,8 +67,8 @@ function streamKey(tunnelKey: Uint8Array, streamId: Uint8Array): Buffer {
 }
 
 function nonceFor(counter: bigint): Buffer {
-  const n = Buffer.alloc(12);
-  n.writeBigUInt64BE(counter, 4);
+  const n = Buffer.alloc(24);
+  n.writeBigUInt64BE(counter, 16);
   return n;
 }
 
@@ -96,9 +99,8 @@ export class SealedWriter {
     if (!this.#headerSent) throw new Error("emit header() first");
     if (this.#finished) throw new Error("stream already finalized");
     if (plaintext.length > CHUNK_MAX) throw new Error(`chunk exceeds ${CHUNK_MAX}`);
-    const cipher = createCipheriv("chacha20-poly1305", this.#key, nonceFor(this.#counter), { authTagLength: TAG_LEN });
     const tagged = Buffer.concat([Buffer.from([final ? TAG_FINAL : TAG_MESSAGE]), plaintext]);
-    const ct = Buffer.concat([cipher.update(tagged), cipher.final(), cipher.getAuthTag()]);
+    const ct = Buffer.from(tweetnacl.secretbox(new Uint8Array(tagged), new Uint8Array(nonceFor(this.#counter)), new Uint8Array(this.#key)));
     this.#counter += 1n;
     if (final) this.#finished = true;
     const frame = Buffer.alloc(4 + ct.length);
@@ -154,17 +156,11 @@ export class SealedReader {
       if (len < TAG_LEN + 1 || len > CHUNK_MAX + TAG_LEN + 1) throw new TamperError("implausible frame length");
       if (this.#buf.length < 4 + len) return out;
       if (this.#finished) throw new TamperError("frame after FINAL");
-      const ct = this.#buf.subarray(4, 4 + len - TAG_LEN);
-      const authTag = this.#buf.subarray(4 + len - TAG_LEN, 4 + len);
+      const ct = this.#buf.subarray(4, 4 + len);
       this.#buf = this.#buf.subarray(4 + len);
-      let opened: Buffer;
-      try {
-        const d = createDecipheriv("chacha20-poly1305", this.#key, nonceFor(this.#counter), { authTagLength: TAG_LEN });
-        d.setAuthTag(authTag);
-        opened = Buffer.concat([d.update(ct), d.final()]);
-      } catch {
-        throw new TamperError(`frame ${this.#counter} failed authentication`);
-      }
+      const openedRaw = tweetnacl.secretbox.open(new Uint8Array(ct), new Uint8Array(nonceFor(this.#counter)), new Uint8Array(this.#key));
+      if (!openedRaw) throw new TamperError(`frame ${this.#counter} failed authentication`);
+      const opened = Buffer.from(openedRaw);
       this.#counter += 1n;
       const tag = opened[0];
       if (tag !== TAG_MESSAGE && tag !== TAG_FINAL) throw new TamperError("unknown frame tag");

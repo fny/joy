@@ -65,7 +65,6 @@
     "@shopify/flash-list": "~2.3.0",
     "@shopify/react-native-skia": "~2.5.3",
     "@stablelib/blake2s": "^2.0.1",
-    "@stablelib/chacha20poly1305": "^2.0.1",
     "@tauri-apps/api": "2.9.1",
     "@tauri-apps/cli": "^2.8.1",
     "@tauri-apps/plugin-http": "^2.5.2",
