@@ -144,6 +144,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/voice"
+                options={{
+                    headerTitle: t('settings.voice'),
+                }}
+            />
+            <Stack.Screen
                 name="settings/raw"
                 options={{
                     headerTitle: 'Raw Settings',

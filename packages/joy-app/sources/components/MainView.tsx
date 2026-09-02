@@ -16,6 +16,7 @@ import { HeaderLogo } from './HeaderLogo';
 import { StatusDot } from './StatusDot';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Typography } from '@/constants/Typography';
+import { VoiceAssistantStatusBar } from './VoiceAssistantStatusBar';
 import { t } from '@/text';
 import { isUsingCustomServer } from '@/sync/serverConfig';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
@@ -296,6 +297,7 @@ export const MainView = React.memo(({ variant }: MainViewProps) => {
                         headerShadowVisible={false}
                         headerTransparent={true}
                     />
+                    {!isTablet && <VoiceAssistantStatusBar variant="full" />}
                 </View>
                 {renderTabContent()}
             </View>

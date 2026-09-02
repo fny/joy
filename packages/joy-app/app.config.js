@@ -65,6 +65,7 @@ export default {
                 usesNonExemptEncryption: false
             },
             infoPlist: {
+                NSMicrophoneUsageDescription: "Allow $(PRODUCT_NAME) to access your microphone for voice conversations with your coding sessions.",
                 NSLocalNetworkUsageDescription: "Allow $(PRODUCT_NAME) to find and connect to local devices on your network.",
                 NSBonjourServices: ["_http._tcp", "_https._tcp"],
                 // ATS:
@@ -90,6 +91,8 @@ export default {
             permissions: [
                 "android.permission.ACCESS_NETWORK_STATE",
                 "android.permission.POST_NOTIFICATIONS",
+                "android.permission.RECORD_AUDIO",
+                "android.permission.MODIFY_AUDIO_SETTINGS",
             ],
             blockedPermissions: [
                 "android.permission.ACTIVITY_RECOGNITION",
@@ -121,11 +124,23 @@ export default {
             "expo-secure-store",
             "expo-web-browser",
             "@more-tech/react-native-libsodium",
+            // Voice (ElevenLabs over LiveKit/WebRTC). Native modules — a change
+            // here needs a new native build, not an OTA.
+            "react-native-audio-api",
+            "@livekit/react-native-expo-plugin",
+            "@config-plugins/react-native-webrtc",
+            [
+                "expo-audio",
+                {
+                    microphonePermission: "Allow $(PRODUCT_NAME) to access your microphone for voice conversations."
+                }
+            ],
             [
                 "expo-camera",
                 {
                     cameraPermission: "Allow $(PRODUCT_NAME) to access your camera to scan QR codes and share photos with AI.",
-                    recordAudioAndroid: false
+                    microphonePermission: "Allow $(PRODUCT_NAME) to access your microphone for voice conversations.",
+                    recordAudioAndroid: true
                 }
             ],
             [

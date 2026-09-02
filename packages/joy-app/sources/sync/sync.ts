@@ -30,6 +30,8 @@ import type { AttachmentPreview } from './attachmentTypes';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { isDemoSession } from './demoSession';
+import { voiceHooks } from '@/realtime/hooks/voiceHooks';
+import type { Message } from './typesMessage';
 
 // Sentinel used as `before_seq` for the very first backward fetch of a
 // session. It must exceed any real `seq` value the server can produce; the
@@ -45,7 +47,7 @@ export const MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_MB * 1024 * 1024;
 class AttachmentRejected extends Error {}
 
 type SendMessageOptions = {
-    source?: 'chat' | 'new_session' | 'option' | 'question';
+    source?: 'chat' | 'new_session' | 'option' | 'question' | 'voice';
     /** Optional image attachments to send before the text message. */
     attachments?: AttachmentPreview[];
     /** Caller-supplied localId — the draft-release path passes a persisted,
@@ -282,6 +284,9 @@ class Sync {
         // Mark this session most-recently-viewed; unloads stale background
         // sessions' messages when limitSessionMemory is on (memory).
         storage.getState().noteSessionVisible(sessionId);
+
+        // Voice: the focused session is where spoken requests go.
+        voiceHooks.onSessionFocus(sessionId);
 
         // Also invalidate git status sync for this session
         gitStatusSync.getSync(sessionId).invalidate();
@@ -1262,13 +1267,33 @@ class Sync {
             messages = messages.filter(m => (m as { __fromV2?: boolean }).__fromV2 === true);
             if (messages.length === 0) return;
         }
-        storage.getState().applyMessages(sessionId, messages);
+        const result = storage.getState().applyMessages(sessionId, messages);
+        // Voice: changed rows feed the agent (text, tool use, held approvals,
+        // <joy-options> questions).
+        if (result.changed.length > 0 && storage.getState().voiceArmedSessionId !== null) {
+            const map = storage.getState().sessionMessages[sessionId]?.messagesMap;
+            const changed: Message[] = [];
+            for (const id of result.changed) {
+                const m = map?.[id];
+                if (m) changed.push(m);
+            }
+            if (changed.length > 0) voiceHooks.onMessages(sessionId, changed);
+        }
     }
 
     private applySessions = (sessions: (Omit<Session, "presence"> & {
         presence?: "online" | number;
     })[]) => {
+        // Voice: a working → idle transition is "the turn ended".
+        const before = storage.getState().sessions;
+        const finished: string[] = [];
+        if (storage.getState().voiceArmedSessionId !== null) {
+            for (const s of sessions) {
+                if (before[s.id]?.thinking === true && s.thinking === false) finished.push(s.id);
+            }
+        }
         storage.getState().applySessions(sessions);
+        for (const id of finished) voiceHooks.onReady(id);
     }
 
 }

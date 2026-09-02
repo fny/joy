@@ -15,6 +15,7 @@ import { SidebarNavigator } from '@/components/SidebarNavigator';
 import sodium from '@/encryption/libsodium.lib';
 import { View, Platform, AppState } from 'react-native';
 import { ModalProvider } from '@/modal';
+import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { AppLockGate } from '@/components/AppLockGate';
 import { installRelayKeyFetchInterceptor } from '@/sync/serverConfig';
 import { syncRestore } from '@/sync/sync';
@@ -418,9 +419,11 @@ export default function RootLayout() {
                             <ModalProvider>
                                 <BrowserNavigationShortcuts />
                                 <CommandPaletteProvider>
-                                    <HorizontalSafeAreaWrapper>
-                                        <SidebarNavigator />
-                                    </HorizontalSafeAreaWrapper>
+                                    <RealtimeProvider>
+                                        <HorizontalSafeAreaWrapper>
+                                            <SidebarNavigator />
+                                        </HorizontalSafeAreaWrapper>
+                                    </RealtimeProvider>
                                 </CommandPaletteProvider>
                             </ModalProvider>
                             <AppLockGate />

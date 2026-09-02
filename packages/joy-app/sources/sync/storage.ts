@@ -177,6 +177,9 @@ export type SessionListViewItem =
 // Legacy type for backward compatibility - to be removed
 export type SessionListItem = string | Session;
 
+const REALTIME_MODE_DEBOUNCE_MS = 150;
+let realtimeModeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
 interface StorageState {
     settings: Settings;
     settingsVersion: number | null;
@@ -198,6 +201,18 @@ interface StorageState {
     socketLastDisconnectedAt: number | null;
     isDataReady: boolean;
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
+    // Voice (see realtime/RealtimeSession.ts): connection status of the
+    // ElevenLabs conversation, who is talking, a remount counter for the SDK
+    // provider, and which session voice is ARMED for (null = off).
+    realtimeStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+    realtimeMode: 'idle' | 'agent-speaking' | 'user-speaking';
+    voiceSessionGeneration: number;
+    voiceArmedSessionId: string | null;
+    setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
+    setRealtimeMode: (mode: 'idle' | 'agent-speaking' | 'user-speaking', immediate?: boolean) => void;
+    clearRealtimeModeDebounce: () => void;
+    incrementVoiceSessionGeneration: () => void;
+    setVoiceArmedSessionId: (sessionId: string | null) => void;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     deleteMachine: (machineId: string) => void;
@@ -473,6 +488,28 @@ export const storage = create<StorageState>()((set, get) => {
         socketLastDisconnectedAt: null,
         isDataReady: false,
         nativeUpdateStatus: null,
+        realtimeStatus: 'disconnected',
+        realtimeMode: 'idle',
+        voiceSessionGeneration: 0,
+        voiceArmedSessionId: null,
+        setRealtimeStatus: (status) => set((state) => ({ ...state, realtimeStatus: status })),
+        setRealtimeMode: (mode, immediate) => {
+            if (realtimeModeDebounceTimer) { clearTimeout(realtimeModeDebounceTimer); realtimeModeDebounceTimer = null; }
+            if (immediate) {
+                set((state) => ({ ...state, realtimeMode: mode }));
+            } else {
+                // Debounce so a brief pause between words does not flicker the bars.
+                realtimeModeDebounceTimer = setTimeout(() => {
+                    realtimeModeDebounceTimer = null;
+                    set((state) => ({ ...state, realtimeMode: mode }));
+                }, REALTIME_MODE_DEBOUNCE_MS);
+            }
+        },
+        clearRealtimeModeDebounce: () => {
+            if (realtimeModeDebounceTimer) { clearTimeout(realtimeModeDebounceTimer); realtimeModeDebounceTimer = null; }
+        },
+        incrementVoiceSessionGeneration: () => set((state) => ({ ...state, voiceSessionGeneration: state.voiceSessionGeneration + 1 })),
+        setVoiceArmedSessionId: (sessionId) => set((state) => ({ ...state, voiceArmedSessionId: sessionId })),
         unreadSessionIds: new Set<string>(),
         currentViewingSessionId: null,
         isMutableToolCall: (sessionId: string, callId: string) => {
@@ -1593,6 +1630,22 @@ export function useSessionExpandedDirs(sessionId: string): string[] {
 
 export function useSessionFileCache(sessionId: string, filePath: string) {
     return storage(useShallow((state) => state.sessionFileCache[sessionId]?.[filePath] ?? null));
+}
+
+export function useRealtimeStatus(): 'disconnected' | 'connecting' | 'connected' | 'error' {
+    return storage(useShallow((state) => state.realtimeStatus));
+}
+
+export function useRealtimeMode(): 'idle' | 'agent-speaking' | 'user-speaking' {
+    return storage(useShallow((state) => state.realtimeMode));
+}
+
+export function useVoiceSessionGeneration(): number {
+    return storage(useShallow((state) => state.voiceSessionGeneration));
+}
+
+export function useVoiceArmedSessionId(): string | null {
+    return storage(useShallow((state) => state.voiceArmedSessionId));
 }
 
 export function useIsDataReady(): boolean {

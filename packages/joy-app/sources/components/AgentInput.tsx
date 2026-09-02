@@ -41,6 +41,10 @@ interface AgentInputProps {
     sessionId?: string;
     onSend: () => void;
     sendIcon?: React.ReactNode;
+    /** Voice: shown in the send slot while the box is empty (hidden while a
+     *  voice conversation is live or standing by — the status bar owns it). */
+    onMicPress?: () => void;
+    isMicActive?: boolean;
     permissionMode?: PermissionMode | null;
     availableModes?: PermissionMode[];
     onPermissionModeChange?: (mode: PermissionMode) => void;
@@ -577,9 +581,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     // never blocks the next character from landing in the textarea.
     const [hasText, setHasText] = React.useState(() => props.initialValue.trim().length > 0);
     const hasImages = (props.selectedImages?.length ?? 0) > 0;
+    const showMic = !!props.onMicPress && !props.isMicActive;
     const canPressSendButton = !props.isSending
         && !props.isSendDisabled
-        && (hasText || hasImages);
+        && (isSendBlocked ? (hasText || hasImages) : (hasText || hasImages || showMic));
 
     // ABORT takes over the send slot while a turn is processing and the box is
     // empty; any typed text flips it back to send so mid-turn queueing/steering
@@ -853,8 +858,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         const liveHasText = (inputRef.current?.getText() ?? '').trim().length > 0;
         if (liveHasText || hasImages) {
             props.onSend();
+        } else if (showMic) {
+            props.onMicPress?.();
         }
-    }, [handleBlockedSendAttempt, hasImages, isSendBlocked, props.isSendDisabled, props.isSending, props.onSend]);
+    }, [handleBlockedSendAttempt, hasImages, isSendBlocked, props.isSendDisabled, props.isSending, props.onSend, props.onMicPress, showMic]);
 
     // Handle keyboard navigation
     const handleKeyPress = React.useCallback((event: KeyPressEvent): boolean => {
@@ -1394,7 +1401,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     style={[
                                         styles.sendButton,
                                         isSendBlocked ? styles.sendButtonLocked :
-                                        (abortMode || hasText || props.isSending)
+                                        (abortMode || hasText || props.isSending || showMic)
                                             ? styles.sendButtonActive
                                             : styles.sendButtonInactive
                                     ]}
@@ -1446,6 +1453,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                     styles.sendButtonIcon,
                                                     { marginTop: Platform.OS === 'web' ? 2 : 0 }
                                                 ]}
+                                            />
+                                        ) : showMic ? (
+                                            <Image
+                                                source={require('@/assets/images/icon-voice-white.png')}
+                                                style={{ width: 24, height: 24 }}
+                                                tintColor={theme.colors.button.primary.tint}
                                             />
                                         ) : (
                                             <Octicons
