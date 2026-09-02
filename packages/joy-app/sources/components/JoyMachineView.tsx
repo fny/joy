@@ -90,14 +90,27 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
             return;
         }
         let cancelled = false;
-        const sctx = sync.machineOnlyCtx(machineId);
-        if (!sctx) { setFailed(true); return; }
-        Promise.race([
-            machineStatusOnly(sctx).then(r => r.data as unknown as JoyStatus),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-        ]).then(s => { if (!cancelled) setStatus(s); })
-            .catch(() => { if (!cancelled) setFailed(true); });
-        return () => { cancelled = true; };
+        let retry: ReturnType<typeof setTimeout> | null = null;
+        // The machine record can come from the local cache (so `online` is
+        // already true) before fetchMachines has decrypted this machine's data
+        // key — machineOnlyCtx is null for that window. Wait for the key rather
+        // than latching "unreachable" for the life of the page.
+        const attempt = (triesLeft: number) => {
+            if (cancelled) return;
+            const sctx = sync.machineOnlyCtx(machineId);
+            if (!sctx) {
+                if (triesLeft > 0) retry = setTimeout(() => attempt(triesLeft - 1), 500);
+                else setFailed(true);
+                return;
+            }
+            Promise.race([
+                machineStatusOnly(sctx).then(r => r.data as unknown as JoyStatus),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+            ]).then(s => { if (!cancelled) { setStatus(s); setFailed(false); } })
+                .catch(() => { if (!cancelled) setFailed(true); });
+        };
+        attempt(20);
+        return () => { cancelled = true; if (retry) clearTimeout(retry); };
     }, [machineId, online]);
 
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || 'machine';

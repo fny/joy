@@ -28,6 +28,12 @@ export function AuthProvider({ children, initialCredentials }: { children: React
         const newCredentials: AuthCredentials = { token, secret };
         const success = await TokenStorage.setCredentials(newCredentials);
         if (success) {
+            // Publish the credentials to the non-React global BEFORE the sync
+            // engine boots: syncCreate awaits the first settings/profile
+            // fetches, and every /joy/v2 call reads its bearer from
+            // getCurrentAuth(). The effect below only runs after setCredentials,
+            // which would be after this await — a deadlock (not_logged_in loop).
+            setCurrentAuth({ isAuthenticated: true, credentials: newCredentials, login, logout });
             await syncCreate(newCredentials);
             setCredentials(newCredentials);
             setIsAuthenticated(true);
