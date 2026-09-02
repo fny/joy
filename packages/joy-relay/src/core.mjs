@@ -235,6 +235,13 @@ export function createCore(db, notify) {
     if (body.encryptedMetadata !== undefined && typeof body.encryptedMetadata !== 'string') {
       throw new ApiError(400, 'bad_metadata');
     }
+    // The owning daemon may re-envelope the session key (the account's
+    // content key rotated, e.g. a key-label change): clients read the key
+    // from THIS column, so a re-stamp that only touched the card would leave
+    // every existing session unreadable.
+    if (body.sessionKeyEnvelope !== undefined && typeof body.sessionKeyEnvelope !== 'string') {
+      throw new ApiError(400, 'bad_envelope');
+    }
     const accountId = await db.tx(async (t) => {
       const lease = await fencedLease(t, leaseRef.id, leaseRef.token_hash, leaseRef.epoch);
       const s = await loadSession(t, sessionId, null);
@@ -243,9 +250,10 @@ export function createCore(db, notify) {
         `UPDATE native_sessions SET
            encrypted_metadata = COALESCE($2, encrypted_metadata),
            state = COALESCE($3, state),
+           session_key_envelope = COALESCE($4, session_key_envelope),
            revision = revision + 1, updated_at = now()
          WHERE id = $1`,
-        [sessionId, body.encryptedMetadata ?? null, body.state ?? null]);
+        [sessionId, body.encryptedMetadata ?? null, body.state ?? null, body.sessionKeyEnvelope ?? null]);
       return s.account_id;
     });
     notify.pokeAccount(accountId, sessionId, ['state']);
