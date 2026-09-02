@@ -749,14 +749,19 @@ export class RelaySession {
   stop(): void {}
 
   /**
-   * Transcript-mirror sink. The v1 message lane (per-row encrypted appends)
-   * is gone: the app reads the conversation from the agent's own transcript
-   * via the machine plane and from the v2 output facts the nucleus lane emits
-   * per assistant message. The agent normalizers still produce WireRecords
-   * (their tests pin the shapes), so this stays as the one place they land —
-   * a no-op today, the seam if a mirror lane ever returns.
+   * Transcript-mirror sink. Every adapter normalizer (claude tailer, codex
+   * app-server events, opencode SSE, pi) lands its WireRecords here — text,
+   * tool-call start/end, turn start/end with usage, terminal-typed user
+   * prompts. The nucleus lane registers itself as the record sink and posts
+   * each one, sealed under the session's v2 content key, as a durable
+   * `output` fact (turn-scoped while a relay turn runs, session-scoped
+   * otherwise) — the SAME record shape the app's normalizer rendered on the
+   * old socket lane, so tool cards, thinking and usage light up unchanged.
+   * `localId` is the adapter's stable dedupe key (becomes the runtimeEventId).
    */
-  send(_wire: WireRecord, _localId?: string): void {}
+  send(wire: WireRecord, localId?: string): void {
+    recordSink?.(this.relaySessionId, wire, localId);
+  }
 
   private receiptSink: ((r: { uuid: string; turn: string }) => void) | null = null;
   private pendingReceipts: { uuid: string; turn: string }[] = [];
@@ -907,6 +912,13 @@ export function initRelay(): RelayClient | null {
   log(`initialized → ${creds.serverUrl}`);
   return client;
 }
+
+/** Where RelaySession.send delivers records. One sink per process (the
+ *  nucleus lane); null while no lane is running — records are then dropped,
+ *  exactly as before the lane existed. */
+export type RecordSink = (localSessionId: string, wire: WireRecord, localId?: string) => void;
+let recordSink: RecordSink | null = null;
+export function setRecordSink(sink: RecordSink | null): void { recordSink = sink; }
 
 /** Build the session card holder for a local session. Purely local: the
  *  relay-side v2 session row is created by the nucleus lane at spawn/bind,

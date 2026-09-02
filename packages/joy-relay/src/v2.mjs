@@ -435,6 +435,8 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   // render the session list from v2 alone.
   route('PATCH', '/daemon/sessions/([\\w-]+)', { auth: false },
     withLeaseHeaders((lease, m, body) => core.updateSessionCard(m[1], lease, body).then(() => ({ ok: true }))));
+  route('POST', '/daemon/sessions/([\\w-]+)/facts', { auth: false, summary: 'Daemon output outside a turn (sealed adapter record); lease-fenced' },
+    withLeaseHeaders((lease, m, body) => core.sessionFact(m[1], lease, body ?? {})));
   route('POST', '/daemon/sessions/([\\w-]+)/spawn-failed', { auth: false },
     withLeaseHeaders((lease, m, body) => core.spawnFailed(m[1], lease, body.reason ?? 'spawn_failed')));
   route('POST', '/daemon/turns/([\\w-]+)/submitted', { auth: false },

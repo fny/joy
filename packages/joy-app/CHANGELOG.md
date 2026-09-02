@@ -1,3 +1,7 @@
+# Sep 2 (4) — Tool cards are back
+
+- **The chat shows the whole turn again.** Since the move to the relay, sessions showed only your prompts and the agent's replies. Tool-call cards, thinking, turn lifecycle and per-turn token usage now flow from the daemon as sealed records for every agent (Claude, Codex, OpenCode, pi), rendered exactly as before. Prompts typed directly into the terminal pane appear as user bubbles as well. *Needs the updated daemon and relay.*
+
 # Sep 2 (3) — Sends that fail come back
 
 - **A message the relay did not accept is no longer lost.** Offline, a session still binding, a refused upload: the text and the pictures go back into the composer and you are told, instead of disappearing with nothing but a console line.

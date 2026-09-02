@@ -54,6 +54,10 @@ every relay; machines register per account.
   Session files up to 400KB travel inline over the tunnel, larger via
   encrypted blobs both directions (readFile spills to blob). The 10MB per-file
   cap is enforced on the bytes actually read (web paste/drop included).
+- **Full chat on the relay path**: assistant text, tool-call cards (start →
+  running → completed), thinking/turn lifecycle and per-turn usage arrive as
+  sealed adapter records from the daemon for claude, codex, opencode and pi;
+  a prompt typed straight into the terminal pane shows up as a user bubble too.
 - **Sends never vanish**: v2 has no optimistic row and no outbox — the user
   bubble is the relay's `turn.queued` event. A send the relay did not accept
   (offline, unbound session, refused upload) puts the text and pictures back

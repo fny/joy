@@ -272,6 +272,28 @@ describe('v2 send idempotency', () => {
   });
 });
 
+describe('v2 session-scoped output facts', () => {
+  it('lease-fenced, replay-idempotent, visible in the event log with no turn', async () => {
+    const d = makeDaemon('mach-sfact');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    await d.bind(sessionId, { localSessionId: 'w1', sessionKeyEnvelope: 'wrapped-key' });
+    const post = (body, headers = d.headers()) => call('POST', `/joy/v2/daemon/sessions/${sessionId}/facts`, { body, headers });
+    const a = await post({ type: 'output', ciphertext: 'rec-1', runtimeEventId: 'rec:1' });
+    expect(a.status).toBe(200);
+    const again = await post({ type: 'output', ciphertext: 'rec-1', runtimeEventId: 'rec:1' });
+    expect(again.json.replay).toBe(true);
+    expect((await post({ type: 'terminal' })).status).toBe(400);
+    const other = makeDaemon('mach-other'); await other.acquire();
+    expect((await post({ type: 'output', ciphertext: 'x' }, other.headers())).status).toBe(403);
+    const ev = (await call('GET', `/joy/v2/sessions/${sessionId}/events?after=0&limit=50`)).json.messages;
+    const out = ev.filter((e) => e.kind === 'output');
+    expect(out.length).toBe(1);
+    expect(out[0].turnId).toBeNull();
+    expect(out[0].content.ciphertext).toBe('rec-1');
+  });
+});
+
 describe('v2 retry (orphaned only)', () => {
   it('lease death orphans the turn; message reads failed+mayHaveDelivered; retry requeues and re-offers', async () => {
     const d = makeDaemon('mach-orphan');
