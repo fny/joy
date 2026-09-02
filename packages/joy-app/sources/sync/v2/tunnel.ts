@@ -91,7 +91,10 @@ async function sealRequest(tunnelKey: Uint8Array, head: unknown, body: Uint8Arra
 /** Open a complete response stream: returns the head JSON and the body. */
 async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise<{ head: T; body: Uint8Array }> {
     if (wire.length < 16) throw new TunnelError(502, 'short_stream');
-    const streamId = wire.subarray(0, 16);
+    // .slice(), never .subarray(): the native libsodium module hands each
+    // argument's WHOLE underlying ArrayBuffer to JSI, so a view into the wire
+    // buffer decrypts the wrong bytes on iOS/Android (web copies views).
+    const streamId = wire.slice(0, 16);
     const key = await streamKey(tunnelKey, streamId);
     let off = 16;
     let counter = 0n;
@@ -103,7 +106,7 @@ async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise
         const len = new DataView(wire.buffer, wire.byteOffset + off, 4).getUint32(0, false);
         off += 4;
         if (off + len > wire.length) throw new TunnelError(502, 'truncated_frame');
-        const ct = wire.subarray(off, off + len);
+        const ct = wire.slice(off, off + len);
         off += len;
         let plain: Uint8Array;
         try {

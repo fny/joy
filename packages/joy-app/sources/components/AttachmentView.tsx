@@ -58,6 +58,9 @@ export const AttachmentView = React.memo(function AttachmentView(props: { sessio
                 {isImage && (
                     <Ionicons name="alert-circle-outline" size={16} color={theme.colors.textSecondary} />
                 )}
+                {isImage && error && (
+                    <Text style={[styles.fileRowError, { color: theme.colors.textSecondary }]} numberOfLines={2}>{error}</Text>
+                )}
             </View>
         );
     }
@@ -95,6 +98,7 @@ const styles = StyleSheet.create(() => ({
     fileRow: {
         flexDirection: 'row',
         alignItems: 'center',
+        flexWrap: 'wrap',
         gap: 8,
         borderRadius: BORDER_RADIUS,
         borderWidth: 1,
@@ -109,5 +113,9 @@ const styles = StyleSheet.create(() => ({
     },
     fileRowSize: {
         fontSize: 12,
+    },
+    fileRowError: {
+        fontSize: 11,
+        width: '100%',
     },
 }));
