@@ -81,7 +81,17 @@ The wrapper is written by the daemon, not the sender, so \`from\` is trustworthy
 
 You can also start a conversation: \`joy ls\` shows the sessions on this machine, \`joy check <id>\` whether one can be talked to right now (exit 0 idle · 3 busy · 6 waiting on input), \`joy send <id> "…"\` (queues behind a running turn), \`joy ask <id> "…"\` (sends and waits for the answer), \`joy events <id> --follow\` (watch it work), \`joy about <id>\` (what it is).`;
 
-const SHARED_SECTIONS = [OPTIONS_SECTION, IMAGES_SECTION, FILES_SECTION, NOTIFY_SECTION, TITLE_SECTION, PEERS_SECTION];
+export const CLI_SECTION = `# Working with the joy CLI
+
+The \`joy\` command talks to the daemon that runs this session. Useful verbs:
+
+- Sessions: \`joy ls\` (all sessions: id, agent, state, title, cwd) · \`joy about <id>\` · \`joy check <id>\` (exit 0 idle · 3 busy · 6 waiting on input · 1 gone) · \`joy new <dir> --agent claude|codex|opencode|pi -m "task"\` starts a session and prints its id · \`joy run "prompt" --dir <dir> [--agent …]\` is a one-shot helper that prints the answer and cleans up.
+- Talking: \`joy send <id> "…"\` queues behind a running turn and prints a turn id (\`--no-reply\` when no answer is wanted) · \`joy wait <id> --turn <turn-id>\` blocks until that turn ends · \`joy ask <id> "…"\` does both and prints the answer (exit 0 answered · 6 the peer needs input · 4 timeout; \`--json\` for a structured result) · \`joy events <id> --follow\` watches it work · \`joy abort <id>\` interrupts it.
+- Environment: \`joy env ls\` lists the names in the machine's sealed environment store (values never print) · \`joy env set KEY=value\` · \`joy env unset KEY\`. The store is applied to every session started afterwards, not to processes already running — including you. A missing provider key is something to report to your user, not to search the disk for.
+
+Anything you send is visible to the human in the app, stamped with your session id. Do not set or unset environment variables unless your user asked: they affect every future session on this machine.`;
+
+const SHARED_SECTIONS = [OPTIONS_SECTION, IMAGES_SECTION, FILES_SECTION, NOTIFY_SECTION, TITLE_SECTION, PEERS_SECTION, CLI_SECTION];
 
 /** The full tag vocabulary minus claude-specific extras — codex's thread
  *  developerInstructions. */

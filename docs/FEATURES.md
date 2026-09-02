@@ -44,6 +44,9 @@ every relay; machines register per account.
 - **Slash commands** the daemon owns: `/title`, `/steer`, `/btw`,
   `/login-code`, `/joy-prompt` (re-inject current instructions — the fix for
   long sessions forgetting the tag vocabulary; also the only way pi gets it).
+  Shared sections: options, images, files, notify, title, peers
+  (`<joy-message>`), and the joy CLI (sessions/talking/env verbs, with the
+  rule not to touch env vars unasked) — `domain/agentTagsPrompt.ts`.
 - **Attachments**: images from library/file/paste (up to 20 per message, 10MB
   each); **drawing pad** (full-screen finger sketch → PNG, five pens, two
   papers, four widths). Bytes are sealed with the session key and stored on
