@@ -197,6 +197,7 @@ describe('settings', () => {
                 voiceAgents: [],
                 voiceActiveAgentId: null,
                 voiceWakeOnEvents: true,
+                voiceWakeOnSound: true,
                 voiceIdleTimeoutSec: 45,
                 joy__tmuxServerUrl: null,
                 reviewPromptAnswered: false,
