@@ -242,8 +242,6 @@ export const zhHant: TranslationStructure = {
         disableAnalytics: '停用分析',
         analyticsDisabled: '所有追蹤和遙測已停用',
         analyticsEnabled: '匿名使用分析已啟用',
-        imageUpload: '圖片上傳',
-        imageUploadSubtitle: '將圖片附加到訊息中讓 Claude 分析',
         limitSessionMemory: '限制記憶體中的工作階段數',
         limitSessionMemorySubtitle: '記憶體中保留的最近工作階段數上限；較舊的會卸載，重新開啟時再載入',
         limitSessionMemoryMessage: '記憶體中保留的最近工作階段數上限。留空則全部保留。',
@@ -252,6 +250,8 @@ export const zhHant: TranslationStructure = {
     },
 
     errors: {
+        sendFailedTitle: '訊息未傳送',
+        sendFailedMessage: '無法傳送訊息。已將其放回輸入框，您可以重試。',
         networkError: '發生網路錯誤',
         serverError: '發生伺服器錯誤',
         unknownError: '發生未知錯誤',
@@ -389,11 +389,6 @@ export const zhHant: TranslationStructure = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: '傳送中…',
-        waitingForConnection: '正在等待連線…',
-        notDeliveredRetry: '未送達 · 點按重試',
-    },
 
     commandPalette: {
         placeholder: '輸入命令或搜尋...',
@@ -978,12 +973,11 @@ export const zhHant: TranslationStructure = {
         draw: '繪圖',
         pasteNoImageTitle: '沒有圖片',
         pasteNoImageMessage: '剪貼簿中沒有圖片。',
-        permissionTitle: '存取照片圖庫',
-        permissionMessage: '允許存取您的照片圖庫以在訊息中附加圖片。',
         limitTitle: '已達到圖片限制',
         limitMessage: ({ max }: { max: number }) => `每則訊息最多可附加 ${max} 張圖片。`,
         fileTooLargeTitle: '檔案太大',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}"超過了 ${maxMb}MB 的限制，未能新增。`,
+        emptyFileMessage: ({ name }: { name: string }) => `"${name}" 為空，未傳送。`,
         uploadFailedTitle: '上傳失敗',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? '附件上傳失敗，訊息未傳送。'

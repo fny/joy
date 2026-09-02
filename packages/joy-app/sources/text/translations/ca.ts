@@ -242,8 +242,6 @@ export const ca: TranslationStructure = {
         disableAnalytics: 'Desactivar analítica',
         analyticsDisabled: 'Tot el seguiment i telemetria desactivats',
         analyticsEnabled: 'Analítica anònima d\'ús activa',
-        imageUpload: 'Pujada d\'imatges',
-        imageUploadSubtitle: 'Adjunta imatges als missatges perquè Claude les analitzi',
         limitSessionMemory: 'Limita les sessions en memòria',
         limitSessionMemorySubtitle: 'Màxim de sessions recents en memòria; les més antigues es descarreguen i es tornen a carregar en tornar-hi',
         limitSessionMemoryMessage: 'Màxim de sessions recents en memòria. Buit = conserva-les totes.',
@@ -252,6 +250,8 @@ export const ca: TranslationStructure = {
     },
 
     errors: {
+        sendFailedTitle: 'Missatge no enviat',
+        sendFailedMessage: 'No s\'ha pogut enviar el missatge. S\'ha tornat al quadre de text perquè ho puguis tornar a provar.',
         networkError: 'Error de connexió',
         serverError: 'Error del servidor',
         unknownError: 'Error desconegut',
@@ -389,11 +389,6 @@ export const ca: TranslationStructure = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: 'Enviant…',
-        waitingForConnection: 'Esperant connexió…',
-        notDeliveredRetry: 'No enviat · Toca per reintentar',
-    },
 
     commandPalette: {
         placeholder: 'Escriu una comanda o cerca...',
@@ -978,12 +973,11 @@ export const ca: TranslationStructure = {
         draw: 'Dibuixa',
         pasteNoImageTitle: 'Cap imatge',
         pasteNoImageMessage: 'El porta-retalls no conté cap imatge.',
-        permissionTitle: 'Accés a la biblioteca de fotos',
-        permissionMessage: "Permet l'accés a la teva biblioteca de fotos per adjuntar imatges als missatges.",
         limitTitle: "Límit d'imatges assolit",
         limitMessage: ({ max }: { max: number }) => `Pots adjuntar fins a ${max} imatges per missatge.`,
         fileTooLargeTitle: 'Fitxer massa gran',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" supera el límit de ${maxMb}MB i no s'ha afegit.`,
+        emptyFileMessage: ({ name }: { name: string }) => `"${name}" és buit i no s'ha enviat.`,
         uploadFailedTitle: 'Error en la càrrega',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? 'No s\'ha pogut pujar el fitxer adjunt. El missatge no s\'ha enviat.'

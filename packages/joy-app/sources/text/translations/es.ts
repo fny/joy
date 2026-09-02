@@ -242,8 +242,6 @@ export const es: TranslationStructure = {
         disableAnalytics: 'Desactivar analítica',
         analyticsDisabled: 'Todo el seguimiento y telemetría desactivados',
         analyticsEnabled: 'Analítica anónima de uso activa',
-        imageUpload: 'Subida de imágenes',
-        imageUploadSubtitle: 'Adjunta imágenes a los mensajes para que Claude las analice',
         limitSessionMemory: 'Limitar sesiones en memoria',
         limitSessionMemorySubtitle: 'Máximo de sesiones recientes en memoria; las más antiguas se descargan y se recargan al volver',
         limitSessionMemoryMessage: 'Máximo de sesiones recientes en memoria. Vacío = conservar todas.',
@@ -252,6 +250,8 @@ export const es: TranslationStructure = {
     },
 
     errors: {
+        sendFailedTitle: 'Mensaje no enviado',
+        sendFailedMessage: 'No se pudo enviar el mensaje. Se ha devuelto al cuadro de texto para que puedas intentarlo de nuevo.',
         networkError: 'Error de conexión',
         serverError: 'Error del servidor',
         unknownError: 'Error desconocido',
@@ -389,11 +389,6 @@ export const es: TranslationStructure = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: 'Enviando…',
-        waitingForConnection: 'Esperando conexión…',
-        notDeliveredRetry: 'No enviado · Toca para reintentar',
-    },
 
     commandPalette: {
         placeholder: 'Escriba un comando o busque...',
@@ -978,12 +973,11 @@ export const es: TranslationStructure = {
         draw: 'Dibujar',
         pasteNoImageTitle: 'Sin imagen',
         pasteNoImageMessage: 'El portapapeles no contiene ninguna imagen.',
-        permissionTitle: 'Acceso a la biblioteca de fotos',
-        permissionMessage: 'Permite el acceso a tu biblioteca de fotos para adjuntar imágenes a los mensajes.',
         limitTitle: 'Límite de imágenes alcanzado',
         limitMessage: ({ max }: { max: number }) => `Puedes adjuntar hasta ${max} imágenes por mensaje.`,
         fileTooLargeTitle: 'Archivo demasiado grande',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" supera el límite de ${maxMb}MB y no se añadió.`,
+        emptyFileMessage: ({ name }: { name: string }) => `"${name}" está vacío y no se envió.`,
         uploadFailedTitle: 'Error al subir',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? 'No se pudo subir el archivo adjunto. El mensaje no se envió.'

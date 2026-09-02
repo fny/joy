@@ -243,8 +243,6 @@ export const ja: TranslationStructure = {
         disableAnalytics: '分析を無効化',
         analyticsDisabled: 'すべてのトラッキングとテレメトリが無効',
         analyticsEnabled: '匿名の使用状況分析がアクティブ',
-        imageUpload: '画像アップロード',
-        imageUploadSubtitle: 'メッセージに画像を添付してClaudeに分析させる',
         limitSessionMemory: 'セッションのメモリ制限',
         limitSessionMemorySubtitle: 'メモリに保持する最近のセッション数の上限。古いものはアンロードされ、再表示時に再読み込みされます',
         limitSessionMemoryMessage: 'メモリに保持する最近のセッション数の上限。空欄ですべて保持します。',
@@ -253,6 +251,8 @@ export const ja: TranslationStructure = {
     },
 
     errors: {
+        sendFailedTitle: 'メッセージを送信できませんでした',
+        sendFailedMessage: 'メッセージを送信できませんでした。再試行できるよう入力欄に戻しました。',
         networkError: 'ネットワークエラーが発生しました',
         serverError: 'サーバーエラーが発生しました',
         unknownError: '不明なエラーが発生しました',
@@ -390,11 +390,6 @@ export const ja: TranslationStructure = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: '送信中…',
-        waitingForConnection: '接続を待っています…',
-        notDeliveredRetry: '未送信 · タップして再試行',
-    },
 
     commandPalette: {
         placeholder: 'コマンドを入力または検索...',
@@ -979,12 +974,11 @@ export const ja: TranslationStructure = {
         draw: '描く',
         pasteNoImageTitle: '画像がありません',
         pasteNoImageMessage: 'クリップボードに画像がありません。',
-        permissionTitle: 'フォトライブラリへのアクセス',
-        permissionMessage: 'メッセージに画像を添付するには、フォトライブラリへのアクセスを許可してください。',
         limitTitle: '画像の上限に達しました',
         limitMessage: ({ max }: { max: number }) => `1メッセージに添付できる画像は最大${max}枚です。`,
         fileTooLargeTitle: 'ファイルが大きすぎます',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}"は${maxMb}MBの制限を超えているため追加されませんでした。`,
+        emptyFileMessage: ({ name }: { name: string }) => `「${name}」は空のため送信されませんでした。`,
         uploadFailedTitle: 'アップロードに失敗しました',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? '添付ファイルをアップロードできませんでした。メッセージは送信されませんでした。'

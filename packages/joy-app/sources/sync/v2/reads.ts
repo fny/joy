@@ -36,7 +36,14 @@ export interface V2Row {
     __fromV2: true;
 }
 
-export interface V2Page { messages: V2Row[]; hasMore: boolean }
+export interface V2Page {
+    messages: V2Row[];
+    hasMore: boolean;
+    /** Highest RAW seq the page covered — lifecycle events that render as
+     *  nothing still advance it, so a caller paging forward never re-reads
+     *  (and never stalls on) a page with no renderable rows. */
+    cursor?: number;
+}
 
 interface RawV2Event {
     id: string; seq: string; kind: string;
@@ -113,7 +120,8 @@ export async function v2MessagesAfter(
     const base = opts.base ?? getV2BaseUrl();
     const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, opts.afterSeq, opts.limit ?? 100);
     const messages = events.map(e => toRow(e, opts.key)).filter((r): r is V2Row => r !== null);
-    return { messages, hasMore };
+    const cursor = events.length ? Number(events[events.length - 1].seq) : opts.afterSeq;
+    return { messages, hasMore, cursor };
 }
 
 /**

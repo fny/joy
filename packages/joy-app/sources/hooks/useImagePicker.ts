@@ -38,6 +38,16 @@ import type { AttachmentPreview } from '@/sync/attachmentTypes';
 // file, not an inline image). Transcode picked images to JPEG on iOS so they
 // upload + render as images. (Mirrors upstream's normalizePickedAssetForUpload.)
 const IOS_JPEG_QUALITY = 0.92;
+/** Web previews are `blob:` object URLs; nothing else ever revokes them, so
+ *  every discarded or sent attachment must pass through here or the bytes
+ *  stay pinned in memory for the life of the tab. No-op on native. */
+export function releaseAttachmentUris(items: ReadonlyArray<{ uri: string }>): void {
+    if (Platform.OS !== 'web' || typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') return;
+    for (const it of items) {
+        if (it.uri.startsWith('blob:')) { try { URL.revokeObjectURL(it.uri); } catch { /* already revoked */ } }
+    }
+}
+
 function withJpegExtension(name: string): string {
     return name.replace(/\.[^./\\]*$/, '') + '.jpg';
 }
@@ -239,9 +249,14 @@ export function useImagePicker(): UseImagePickerResult {
     }, [remainingOrAlert, append]);
 
     const removeImage = useCallback((id: string) => {
-        setSelectedImages(prev => prev.filter(img => img.id !== id));
+        setSelectedImages(prev => {
+            releaseAttachmentUris(prev.filter(img => img.id === id));
+            return prev.filter(img => img.id !== id);
+        });
     }, []);
 
+    /** Drop the picked set WITHOUT releasing the URIs — the caller is about
+     *  to read them (send) and releases them itself once the bytes are up. */
     const clearImages = useCallback(() => {
         setSelectedImages([]);
     }, []);

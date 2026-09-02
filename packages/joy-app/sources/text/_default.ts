@@ -268,8 +268,6 @@ export const en = {
         disableAnalytics: 'Disable Analytics',
         analyticsDisabled: 'All tracking and telemetry disabled',
         analyticsEnabled: 'Anonymous usage analytics active',
-        imageUpload: 'File Attachments',
-        imageUploadSubtitle: 'Attach files of any type to messages for Claude',
         limitSessionMemory: 'Limit session memory',
         limitSessionMemorySubtitle: 'Max recent sessions kept in memory; older ones unload + reload on revisit',
         limitSessionMemoryMessage: 'Max recent sessions to keep in memory. Empty = keep all.',
@@ -285,12 +283,11 @@ export const en = {
         draw: 'Draw',
         pasteNoImageTitle: 'No Image',
         pasteNoImageMessage: 'The clipboard does not contain an image.',
-        permissionTitle: 'Photo Library Access',
-        permissionMessage: 'Allow access to your photo library to attach images to messages.',
         limitTitle: 'Image Limit Reached',
         limitMessage: ({ max }: { max: number }) => `You can attach up to ${max} images per message.`,
         fileTooLargeTitle: 'File Too Large',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" exceeds the ${maxMb}MB limit and was not added.`,
+        emptyFileMessage: ({ name }: { name: string }) => `"${name}" is empty and was not sent.`,
         uploadFailedTitle: 'Upload Failed',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? 'The attachment could not be uploaded. The message was not sent.'
@@ -298,6 +295,8 @@ export const en = {
     },
 
     errors: {
+        sendFailedTitle: 'Message Not Sent',
+        sendFailedMessage: 'Your message could not be sent. It has been put back in the composer so you can try again.',
         networkError: 'Network error occurred',
         serverError: 'Server error occurred',
         unknownError: 'An unknown error occurred',
@@ -437,11 +436,6 @@ export const en = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: 'Sending…',
-        waitingForConnection: 'Waiting for connection…',
-        notDeliveredRetry: 'Not delivered · Tap to retry',
-    },
 
     commandPalette: {
         placeholder: 'Type a command or search...',

@@ -221,8 +221,6 @@ export const ru: TranslationStructure = {
         disableAnalytics: 'Отключить аналитику',
         analyticsDisabled: 'Вся аналитика и телеметрия отключены',
         analyticsEnabled: 'Анонимная аналитика использования активна',
-        imageUpload: 'Загрузка изображений',
-        imageUploadSubtitle: 'Прикрепляйте изображения к сообщениям для анализа Claude',
         limitSessionMemory: 'Лимит сессий в памяти',
         limitSessionMemorySubtitle: 'Максимум недавних сессий в памяти; старые выгружаются и загружаются заново при открытии',
         limitSessionMemoryMessage: 'Максимум недавних сессий в памяти. Пусто = хранить все.',
@@ -231,6 +229,8 @@ export const ru: TranslationStructure = {
     },
 
     errors: {
+        sendFailedTitle: 'Сообщение не отправлено',
+        sendFailedMessage: 'Не удалось отправить сообщение. Оно возвращено в поле ввода, чтобы вы могли попробовать снова.',
         networkError: 'Произошла ошибка сети',
         serverError: 'Произошла ошибка сервера',
         unknownError: 'Произошла неизвестная ошибка',
@@ -516,11 +516,6 @@ export const ru: TranslationStructure = {
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).
-    messageStatus: {
-        sending: 'Отправка…',
-        waitingForConnection: 'Ожидание подключения…',
-        notDeliveredRetry: 'Не доставлено · Нажмите, чтобы повторить',
-    },
 
     commandPalette: {
         placeholder: 'Введите команду или поиск...',
@@ -994,12 +989,11 @@ export const ru: TranslationStructure = {
         draw: 'Рисовать',
         pasteNoImageTitle: 'Нет изображения',
         pasteNoImageMessage: 'В буфере обмена нет изображения.',
-        permissionTitle: 'Доступ к библиотеке фото',
-        permissionMessage: 'Разрешите доступ к вашей библиотеке фото, чтобы прикреплять изображения к сообщениям.',
         limitTitle: 'Достигнут лимит изображений',
         limitMessage: ({ max }: { max: number }) => `Можно прикрепить не более ${max} изображений на сообщение.`,
         fileTooLargeTitle: 'Файл слишком большой',
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" превышает лимит ${maxMb}МБ и не был добавлен.`,
+        emptyFileMessage: ({ name }: { name: string }) => `«${name}» пустой и не был отправлен.`,
         uploadFailedTitle: 'Ошибка загрузки',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
             ? 'Не удалось загрузить вложение. Сообщение не отправлено.'

@@ -21,7 +21,7 @@ import { useSessionSearch } from '@/hooks/useSessionSearch';
 import { MachineResourceBanner } from '@/components/MachineResourceBanner';
 import { useDrawingResult } from '@/hooks/useDrawingResult';
 import { useEscapeAbort } from '@/hooks/useEscapeAbort';
-import { useImagePicker } from '@/hooks/useImagePicker';
+import { useImagePicker, releaseAttachmentUris } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
@@ -443,6 +443,9 @@ const AGENT_INPUT_AUTOCOMPLETE_PREFIXES = ['@', '/'];
 type ChatComposerHandle = {
     getMessage: () => string;
     clearMessage: () => void;
+    /** Put text back after a failed send: replaces an empty box, otherwise
+     *  goes above whatever the user typed meanwhile. */
+    restoreMessage: (text: string) => void;
 };
 
 type ChatComposerProps = Omit<
@@ -488,6 +491,12 @@ const ChatComposer = React.memo(function ChatComposer(props: ChatComposerProps) 
             inputHandleRef.current?.setTextAndSelection('', { start: 0, end: 0 });
             setMessage('');
             clearDraft();
+        },
+        restoreMessage: (text: string) => {
+            const current = inputHandleRef.current?.getText() ?? '';
+            const next = current.trim().length ? `${text}\n\n${current}` : text;
+            inputHandleRef.current?.setTextAndSelection(next, { start: next.length, end: next.length });
+            setMessage(next);
         },
     }), [clearDraft]);
 
@@ -847,10 +856,27 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             useDraftQueueStore.getState().add(sessionId, liveMessage, 'busy');
             return;
         }
+        // Clear immediately for a snappy composer, but the message is NOT
+        // gone until the relay has accepted it: v2 has no optimistic row and
+        // no outbox, so a failed send (offline, unbound session, refused
+        // upload) used to vanish with only a console line. On failure the
+        // text and the pictures go back into the composer and the user is
+        // told; the attachment URIs are released only once the bytes are up.
         composerHandleRef.current?.clearMessage();
         clearImages();
-        sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments });
-    }, [sessionId, isJoyDaemon, selectedImages, clearImages]);
+        void sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments }).then((res) => {
+            if (res.ok) {
+                releaseAttachmentUris(attachments);
+                return;
+            }
+            if (liveMessage.trim()) composerHandleRef.current?.restoreMessage(liveMessage);
+            if (attachments.length) addImages(attachments);
+            // Attachment refusals already showed their own, more specific modal.
+            if (!res.reason.startsWith('attachment upload failed')) {
+                Modal.alert(t('errors.sendFailedTitle'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
+            }
+        });
+    }, [sessionId, isJoyDaemon, selectedImages, clearImages, addImages]);
 
     // Stash the current input as an on-device draft (queued at the bottom of the
     // chat) and clear the box so the user can compose the next one. Drafts are

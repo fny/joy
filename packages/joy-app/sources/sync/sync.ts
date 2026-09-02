@@ -1,8 +1,7 @@
-import Constants from 'expo-constants';
 import { getCurrentAppState } from '@/sync/clientId';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
-import { decodeBase64, encodeBase64 } from '@/encryption/base64';
+import { decodeBase64 } from '@/encryption/base64';
 import { storage } from './storage';
 import { ensureDesktopNotificationPermission } from '@/notifications/desktopNotifications';
 import { ApiMessage } from './apiTypes';
@@ -11,41 +10,42 @@ import { InvalidateSync } from '@/utils/sync';
 import { randomUUID } from 'expo-crypto';
 import * as Crypto from 'expo-crypto';
 import { sealV2Content, sealV2Bytes, openV2Bytes, type V2Attachment } from './v2/crypto';
-import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, v2ActiveTurn, v2CancelTurn, connectV2Stream } from './v2/api';
+import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, connectV2Stream } from './v2/api';
 import { readFileBytes } from '@/utils/readFileBytes';
 import { encodeHex } from '@/encryption/hex';
 import { v2MessagesAfter, v2MessagesBefore } from './v2/reads';
 
-import * as Notifications from 'expo-notifications';
 import { syncCurrentPushToken } from './pushRegistration';
-import { Platform, AppState, type AppStateStatus } from 'react-native';
+import { Platform, AppState } from 'react-native';
 import { NormalizedMessage, normalizeRawMessage } from './typesRaw';
 import { Settings, settingsParse } from './settings';
-import { Profile, profileParse } from './profile';
+import { profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
 import { parseToken } from '@/utils/parseToken';
-import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
 import { getServerUrl } from './serverConfig';
-import { config } from '@/config';
 import { log } from '@/log';
 import { gitStatusSync } from './gitStatusSync';
 import { AsyncLock } from '@/utils/lock';
-import { EncryptionCache } from './encryption/encryptionCache';
 import type { AttachmentPreview } from './attachmentTypes';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { isDemoSession } from './demoSession';
 
 // Sentinel used as `before_seq` for the very first backward fetch of a
-// session. It must exceed any real `seq` value the server can produce.
-// `seq` is stored as Postgres int4 on the server, so the maximum is
-// 2_147_483_647. We use that exact upper bound to keep the request safely
-// within int4 while still being effectively "infinite" for any session.
+// session. It must exceed any real `seq` value the server can produce; the
+// relay stores `seq` as BIGINT, but a session would need two billion events
+// to reach this, so int32-max is "infinite" in practice and stays exact in JS.
 const SEQ_BACKWARD_INITIAL_SENTINEL = 2_147_483_647;
 
+/** Advertised per-file attachment cap (the picker's dialog quotes the MB). */
+export const MAX_ATTACHMENT_MB = 10;
+export const MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_MB * 1024 * 1024;
+/** A picked file we refuse to upload (too large / empty) — message is the
+ *  user-facing, already-localized reason. */
+class AttachmentRejected extends Error {}
+
 type SendMessageOptions = {
-    displayText?: string;
-    source?: 'chat' | 'new_session' | 'option' | 'question' | 'voice';
+    source?: 'chat' | 'new_session' | 'option' | 'question';
     /** Optional image attachments to send before the text message. */
     attachments?: AttachmentPreview[];
     /** Caller-supplied localId — the draft-release path passes a persisted,
@@ -53,10 +53,10 @@ type SendMessageOptions = {
     localId?: string;
 };
 
-/** sendMessage's success contract: ok only after the optimistic row is in the
- *  store AND the outbox row is enqueued (durable handoff to persist-and-retry).
- *  Early returns (missing encryption/session) report ok:false so callers like
- *  the draft-release lease can revert instead of losing the message. */
+/** sendMessage's success contract: ok only once the relay has ACCEPTED the
+ *  prompt (there is no optimistic row and no outbox on v2 — the user row
+ *  arrives from the relay log). Any ok:false must be handled by the caller:
+ *  the composer puts the message back, the draft-release lease reverts. */
 export type SendMessageResult = { ok: true; localId: string } | { ok: false; reason: string };
 
 /**
@@ -95,7 +95,6 @@ class Sync {
     private masterSecret: Uint8Array | null = null;
     setMasterSecret(secret: Uint8Array) { this.masterSecret = secret; }
     getMasterSecret(): Uint8Array | null { return this.masterSecret; }
-    public encryptionCache = new EncryptionCache();
     private sessionsSync: InvalidateSync;
     private messagesSync = new Map<string, InvalidateSync>();
     private sessionLastSeq = new Map<string, number>();
@@ -104,31 +103,19 @@ class Sync {
     // load older history. Set after the initial latest-page fetch and
     // advanced downward by loadOlderMessages.
     private sessionOldestSeq = new Map<string, number>();
-    private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
-    private sessionQueueProcessing = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
-    /** v2 session content keys (opened from each row's envelope at list time). */
-    private v2SessionKeys = new Map<string, Uint8Array>();
     private settingsSync: InvalidateSync;
     private profileSync: InvalidateSync;
-    private purchasesSync: InvalidateSync;
     private machinesSync: InvalidateSync;
     private pushTokenSync: InvalidateSync;
     private nativeUpdateSync: InvalidateSync;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
-    private appState: AppStateStatus = AppState.currentState;
-    revenueCatInitialized = false;
-
-    // Generic locking mechanism
-    private recalculationLockCount = 0;
-    private lastRecalculationTime = 0;
 
     constructor() {
         this.sessionsSync = new InvalidateSync(this.fetchSessions);
         this.settingsSync = new InvalidateSync(this.syncSettings);
         this.profileSync = new InvalidateSync(this.fetchProfile);
-        this.purchasesSync = new InvalidateSync(this.syncPurchases);
         this.machinesSync = new InvalidateSync(this.fetchMachines);
         this.nativeUpdateSync = new InvalidateSync(this.fetchNativeUpdate);
 
@@ -142,13 +129,10 @@ class Sync {
             void ensureDesktopNotificationPermission();
         }
 
-        // Listen for app state changes to refresh purchases
+        // Refresh the account-level syncs when the app returns to the foreground.
         AppState.addEventListener('change', (nextAppState) => {
-            this.appState = nextAppState;
-
             if (nextAppState === 'active') {
                 log.log('📱 App became active');
-                this.purchasesSync.invalidate();
                 this.profileSync.invalidate();
                 this.machinesSync.invalidate();
                 this.pushTokenSync.invalidate();
@@ -242,14 +226,10 @@ class Sync {
 
         // Await profile sync to have fresh profile
         await this.profileSync.awaitQueue();
-
-        // Await purchases sync to have fresh purchases
-        await this.purchasesSync.awaitQueue();
     }
 
     async restore(credentials: AuthCredentials, encryption: Encryption) {
         // NOTE: No awaiting anything here, we're restoring from a disk (ie app restarted)
-        // Purchases sync is invalidated in #init() and will complete asynchronously
         this.credentials = credentials;
         this.encryption = encryption;
         this.anonID = encryption.anonID;
@@ -276,7 +256,6 @@ class Sync {
         this.sessionsSync.invalidate();
         this.settingsSync.invalidate();
         this.profileSync.invalidate();
-        this.purchasesSync.invalidate();
         this.machinesSync.invalidate();
         this.pushTokenSync.invalidate();
         this.nativeUpdateSync.invalidate();
@@ -408,21 +387,6 @@ class Sync {
         return sync;
     }
 
-    private enqueueMessages(sessionId: string, messages: NormalizedMessage[]) {
-        if (messages.length === 0) {
-            return;
-        }
-
-        let queue = this.sessionMessageQueue.get(sessionId);
-        if (!queue) {
-            queue = [];
-            this.sessionMessageQueue.set(sessionId, queue);
-        }
-        queue.push(...messages);
-
-        this.scheduleQueuedMessagesProcessing(sessionId);
-    }
-
     private getSessionMessageLock(sessionId: string): AsyncLock {
         let lock = this.sessionMessageLocks.get(sessionId);
         if (!lock) {
@@ -430,43 +394,6 @@ class Sync {
             this.sessionMessageLocks.set(sessionId, lock);
         }
         return lock;
-    }
-
-    private scheduleQueuedMessagesProcessing(sessionId: string) {
-        if (this.sessionQueueProcessing.has(sessionId)) {
-            return;
-        }
-
-        this.sessionQueueProcessing.add(sessionId);
-        const lock = this.getSessionMessageLock(sessionId);
-        void lock.inLock(() => {
-            while (true) {
-                const pending = this.sessionMessageQueue.get(sessionId);
-                if (!pending || pending.length === 0) {
-                    break;
-                }
-                // Evicted store + surviving cursor: applying here would AUTO-CREATE
-                // a skeleton entry (hasMoreOlder:false, fresh reducer) holding only
-                // post-eviction rows — the evicted-store re-anchor in fetchMessages
-                // then never fires (it keys on the entry being absent) and all
-                // prior history becomes unreachable for the rest of the app run.
-                // Drop the batch and refetch instead (re-anchor pulls the newest
-                // page; these rows are on the server and come back with it).
-                if (!storage.getState().sessionMessages[sessionId] && this.sessionLastSeq.has(sessionId)) {
-                    this.sessionMessageQueue.delete(sessionId);
-                    this.getMessagesSync(sessionId).invalidate();
-                    break;
-                }
-                const batch = pending.splice(0, pending.length);
-                this.applyMessages(sessionId, batch);
-            }
-        }).finally(() => {
-            this.sessionQueueProcessing.delete(sessionId);
-            const pending = this.sessionMessageQueue.get(sessionId);
-            if (pending && pending.length > 0) {
-                this.scheduleQueuedMessagesProcessing(sessionId);
-            }
-        });
     }
 
     async sendMessage(sessionId: string, text: string, options?: SendMessageOptions): Promise<SendMessageResult> {
@@ -519,17 +446,10 @@ class Sync {
             // in the clear; the caller retries once the card completes.
             return { ok: false, reason: 'v2 session not bound yet — no content key to seal with' };
         }
-        // B2 (optimistic echo) is intentionally NOT done here — the daemon's
-        // mirror is the single source of the user row, so the message shows
-        // once the daemon echoes it (fast when online). A local optimistic
-        // row duplicates the mirror because the two use different id spaces
-        // AND the daemon's transcript re-echo suppression (received-receipts)
-        // does not currently cover the nucleus-lane path. Correct fix is
-        // daemon-side: have the lane record a received-receipt for the
-        // prompt so the transcript tailer suppresses the user-echo mirror,
-        // leaving the app's (future) optimistic row as the sole copy. See
-        // docs/v2-dual-path.md. displayText is a UI-only alias; the wire
-        // carries `text`, which is what the agent must receive.
+        // No optimistic echo: the relay's `turn.queued` event IS the user row
+        // (sync/v2/reads.ts), so the message appears once the relay accepts
+        // it. localId doubles as the relay clientIntentId — a retry with the
+        // same id (draft release) replays the first acceptance.
         const localId = options?.localId ?? randomUUID();
         // Attachments travel beside the text: bytes sealed under the same
         // session key and uploaded first, then cited (id + display facts)
@@ -544,8 +464,8 @@ class Sync {
             } catch (e) {
                 console.error('[v2] attachment upload failed', e);
                 Modal.alert(
-                    t('imageUpload.uploadFailedTitle'),
-                    t('imageUpload.uploadFailedMessage', { count: options.attachments.length }),
+                    e instanceof AttachmentRejected ? t('imageUpload.fileTooLargeTitle') : t('imageUpload.uploadFailedTitle'),
+                    e instanceof AttachmentRejected ? e.message : t('imageUpload.uploadFailedMessage', { count: options.attachments.length }),
                     [{ text: t('common.ok'), style: 'cancel' }],
                 );
                 return { ok: false, reason: `attachment upload failed: ${e instanceof Error ? e.message : e}` };
@@ -553,7 +473,7 @@ class Sync {
         }
         try {
             const ciphertext = sealV2Content(text, key, attachments);
-            await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext, attachments.map(a => a.id));
+            await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext, localId, attachments.map(a => a.id));
         } catch (e) {
             console.error('[v2] send failed', e);
             return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
@@ -572,6 +492,12 @@ class Sync {
         const out: V2Attachment[] = [];
         for (const a of picked) {
             const bytes = await readFileBytes(a.uri);
+            // The picker's pre-check trusts a self-reported size (0 when the
+            // platform gives none; web paste/drop skips it entirely) — the
+            // bytes we just read are the truth, and the relay would accept up
+            // to 32MB, so the advertised cap is enforced HERE.
+            if (bytes.length === 0) throw new AttachmentRejected(t('imageUpload.emptyFileMessage', { name: a.name }));
+            if (bytes.length > MAX_ATTACHMENT_BYTES) throw new AttachmentRejected(t('imageUpload.fileTooLargeMessage', { name: a.name, maxMb: MAX_ATTACHMENT_MB }));
             const sealed = sealV2Bytes(bytes, key);
             // `.slice()` materializes a standalone ArrayBuffer — the digest API
             // rejects views over a SharedArrayBuffer at the type level.
@@ -620,102 +546,8 @@ class Sync {
         this.settingsSync.invalidate();
     }
 
-    refreshPurchases = () => {
-        this.purchasesSync.invalidate();
-    }
-
     refreshProfile = async () => {
         await this.profileSync.invalidateAndAwait();
-    }
-
-    purchaseProduct = async (productId: string): Promise<{ success: boolean; error?: string }> => {
-        try {
-            // Check if RevenueCat is initialized
-            if (!this.revenueCatInitialized) {
-                return { success: false, error: 'RevenueCat not initialized' };
-            }
-
-            // Fetch the product
-            const products = await RevenueCat.getProducts([productId]);
-            if (products.length === 0) {
-                return { success: false, error: `Product '${productId}' not found` };
-            }
-
-            // Purchase the product
-            const product = products[0];
-            const { customerInfo } = await RevenueCat.purchaseStoreProduct(product);
-
-            // Update local purchases data
-            storage.getState().applyPurchases(customerInfo);
-
-            return { success: true };
-        } catch (error: any) {
-            // Check if user cancelled
-            if (error.userCancelled) {
-                return { success: false, error: 'Purchase cancelled' };
-            }
-
-            // Return the error message
-            return { success: false, error: error.message || 'Purchase failed' };
-        }
-    }
-
-    getOfferings = async (): Promise<{ success: boolean; offerings?: any; error?: string }> => {
-        try {
-            // Check if RevenueCat is initialized
-            if (!this.revenueCatInitialized) {
-                return { success: false, error: 'RevenueCat not initialized' };
-            }
-
-            // Fetch offerings
-            const offerings = await RevenueCat.getOfferings();
-
-            // Return the offerings data
-            return {
-                success: true,
-                offerings: {
-                    current: offerings.current,
-                    all: offerings.all
-                }
-            };
-        } catch (error: any) {
-            return { success: false, error: error.message || 'Failed to fetch offerings' };
-        }
-    }
-
-    presentPaywall = async (flow?: string): Promise<{ success: boolean; purchased?: boolean; error?: string }> => {
-        try {
-            // Check if RevenueCat is initialized
-            if (!this.revenueCatInitialized) {
-                return { success: false, error: 'RevenueCat not initialized' };
-            }
-
-            // Present the paywall (with flow custom variable if specified)
-            const result = await RevenueCat.presentPaywall(
-                flow ? { customVariables: { flow } } : undefined
-            );
-
-            // Handle the result
-            switch (result) {
-                case PaywallResult.PURCHASED:
-                    // Refresh customer info after purchase
-                    await this.syncPurchases();
-                    return { success: true, purchased: true };
-                case PaywallResult.RESTORED:
-                    // Refresh customer info after restore
-                    await this.syncPurchases();
-                    return { success: true, purchased: true };
-                case PaywallResult.CANCELLED:
-                    return { success: true, purchased: false };
-                case PaywallResult.NOT_PRESENTED:
-                    return { success: false, error: 'Paywall not available on this platform' };
-                case PaywallResult.ERROR:
-                default:
-                    return { success: false, error: 'Failed to present paywall' };
-            }
-        } catch (error: any) {
-            return { success: false, error: error.message || 'Failed to present paywall' };
-        }
     }
 
     //
@@ -746,7 +578,6 @@ class Sync {
         for (const row of rows) {
             // Session content key: envelope sealed to the account content key.
             const key = row.sessionKeyEnvelope ? this.encryption.openV2SessionKey(row.sessionKeyEnvelope) : null;
-            if (key) this.v2SessionKeys.set(row.sessionId, key);
 
             // The card IS the metadata. A session with no card yet (spawn still
             // provisioning, or a pre-card daemon) gets a minimal one carrying
@@ -944,57 +775,6 @@ class Sync {
     // store update to surface; keep the store slot cleared.
     private fetchNativeUpdate = async () => {
         storage.getState().applyNativeUpdateStatus(null);
-    }
-
-    private syncPurchases = async () => {
-        try {
-            // Initialize RevenueCat if not already done
-            if (!this.revenueCatInitialized) {
-                // Get the appropriate API key based on platform
-                let apiKey: string | undefined;
-
-                if (Platform.OS === 'ios') {
-                    apiKey = config.revenueCatAppleKey;
-                } else if (Platform.OS === 'android') {
-                    apiKey = config.revenueCatGoogleKey;
-                } else if (Platform.OS === 'web') {
-                    apiKey = config.revenueCatStripeKey;
-                }
-
-                if (!apiKey) {
-                    console.log(`RevenueCat: No API key found for platform ${Platform.OS}`);
-                    return;
-                }
-
-                // Configure RevenueCat
-                if (__DEV__) {
-                    RevenueCat.setLogLevel(LogLevel.DEBUG);
-                }
-
-                // Initialize with the public ID as user ID
-                RevenueCat.configure({
-                    apiKey,
-                    appUserID: this.serverID, // In server this is a CUID, which we can assume is globaly unique even between servers
-                    useAmazon: false,
-                });
-
-                this.revenueCatInitialized = true;
-                console.log('RevenueCat initialized successfully');
-            }
-
-            // Sync purchases
-            await RevenueCat.syncPurchases();
-
-            // Fetch customer info
-            const customerInfo = await RevenueCat.getCustomerInfo();
-
-            // Apply to storage (storage handles the transformation)
-            storage.getState().applyPurchases(customerInfo);
-
-        } catch (error) {
-            console.error('Failed to sync purchases:', error);
-            // Don't throw - purchases are optional
-        }
     }
 
     private fetchMessages = async (sessionId: string) => {
@@ -1212,7 +992,11 @@ class Sync {
 
             await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
 
-            let maxSeq = afterSeq;
+            // Advance by the page's RAW cursor, not by renderable rows: a page
+            // of lifecycle-only events (turn starts/terminals with no text)
+            // used to leave the cursor unmoved, trip the stall guard below, and
+            // park every later output behind the same page forever.
+            let maxSeq = Math.max(afterSeq, data.cursor ?? afterSeq);
             for (const message of messages) {
                 if (message.seq > maxSeq) maxSeq = message.seq;
             }
