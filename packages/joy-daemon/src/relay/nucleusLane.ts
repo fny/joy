@@ -22,7 +22,7 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import tweetnacl from "tweetnacl";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { registerV2CardPublisher, unregisterV2CardPublisher, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
@@ -527,8 +527,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // the turn (submitted → failed) instead of dispatching a truncated ask.
       let text = prompt.text;
       if (prompt.attachments.length) {
+        // The relay validated + pinned the OUTER id list (the offer); the
+        // sealed citations are what the sender meant. Only their intersection
+        // is trusted: a citation the relay never saw for this session is
+        // refused rather than fetched on account scope alone.
+        const authorized = new Set((offer.attachments ?? []).map((x) => x.id));
         const paths: string[] = [];
+        const written: string[] = [];
+        // Half-materialized prompts are worse than none — a failed turn must
+        // not leave files the agent never heard about in the cwd.
+        const fail = async (reason: string, a: PromptAttachment) => {
+          for (const abs of written) { try { unlinkSync(abs); } catch { /* already gone */ } }
+          await api("POST", `/daemon/turns/${turnId}/facts`, {
+            type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason, attachmentId: a.id },
+          }, leaseRef);
+          log(`turn ${turnId.slice(0, 8)}: ${reason} (${a.name}) → failed`);
+        };
         for (const a of prompt.attachments) {
+          if (!authorized.has(a.id)) return fail("attachment_not_authorized", a);
           let path: string | null = null;
           let reason = "attachment_fetch_failed";
           try {
@@ -539,15 +555,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           } catch (e) {
             log(`turn ${turnId.slice(0, 8)}: attachment ${a.id.slice(0, 8)} (${a.name}): ${(e as Error).message}`);
           }
-          if (!path) {
-            await api("POST", `/daemon/turns/${turnId}/facts`, {
-              type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason, attachmentId: a.id },
-            }, leaseRef);
-            log(`turn ${turnId.slice(0, 8)}: ${reason} (${a.name}) → failed`);
-            return;
-          }
+          if (!path) return fail(reason, a);
           paths.push(path);
+          written.push(join(session.cwd, path.slice(2)));
         }
+        const uncited = [...authorized].filter((id) => !prompt.attachments.some((a) => a.id === id));
+        if (uncited.length) log(`turn ${turnId.slice(0, 8)}: ${uncited.length} offered attachment(s) not cited in the sealed prompt — ignored`);
         text = `${text}\n${paths.join("\n")}`;
         log(`turn ${turnId.slice(0, 8)}: materialized ${paths.length} attachment(s) in ${session.cwd}`);
       }
