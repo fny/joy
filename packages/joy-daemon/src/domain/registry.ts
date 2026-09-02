@@ -294,10 +294,14 @@ export class SessionRegistry {
     // below via new-session; its control client attaches per handle. Legacy
     // (flag off) keeps the shared-server bootstrap.
     const sockLabel = PER_SESSION_TMUX ? tmuxServerLabel(id) : null;
+    // Codex attach-TUI windows still live on the SHARED server (see the
+    // per-session design doc's follow-up), so its bootstrap must run for them
+    // even when claude sessions get their own servers.
+    const needsSharedSession = !sockLabel || opts.agent === "codex";
     // BOOTSTRAP — spawn, never control: has-session gates creation, new-session creates
     // the very session the control client attaches to (chicken-and-egg), and this
     // set-hook runs only when there's no session yet (so the client can't be connected).
-    if (!sockLabel && !tmux.runSync("has-session", "-t", this.tmuxSession).ok) {
+    if (needsSharedSession && !tmux.runSync("has-session", "-t", this.tmuxSession).ok) {
       tmux.runSync("new-session", "-d", "-s", this.tmuxSession, "-c", cwd);
       // When a real terminal attaches, let it drive the window size (tmux's
       // default `latest` behavior). The app's resize-window flips windows to
