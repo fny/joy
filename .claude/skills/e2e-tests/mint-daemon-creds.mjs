@@ -9,9 +9,11 @@
 //     --home ~/.joy-test --machine v2-live-e2e
 //
 // Prints the bearer token on stdout (for driving the client side of tests
-// under the SAME account). NOTE: the encryption keys written are random —
-// the v2 nucleus lane needs only token+machineId; app-side decryption of this
-// daemon's sealed cards is not meaningful (fine for daemon/relay tests).
+// under the SAME account). The account CONTENT keypair is a fresh box keypair:
+// its public half goes into access.key (the daemon envelopes every session
+// key to it) and its secret half is written beside the creds as
+// e2e-content.secret so a test driver can open those envelopes and read the
+// daemon's sealed output the way the app would.
 import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -46,13 +48,15 @@ if (!token) { console.error('mint failed:', res.status); process.exit(1); }
 const u = new URL(RELAY);
 const relayKey = u.port ? `${u.hostname}_${u.port}` : u.hostname;
 const dir = join(HOME, 'relays', relayKey);
+const content = tweetnacl.box.keyPair();
 const accessKey = JSON.stringify({
   token,
-  encryption: { publicKey: b64(randomBytes(32)), machineKey: b64(randomBytes(32)) },
+  encryption: { publicKey: b64(content.publicKey), machineKey: b64(randomBytes(32)) },
 }, null, 2);
 const settings = JSON.stringify({ machineId: MACHINE, serverUrl: RELAY }, null, 2);
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, 'access.key'), accessKey);
 writeFileSync(join(dir, 'settings.json'), settings);
-console.error(`WROTE access.key + settings.json to ${dir} (machineId ${MACHINE})`);
+writeFileSync(join(dir, 'e2e-content.secret'), b64(content.secretKey) + '\n', { mode: 0o600 });
+console.error(`WROTE access.key + settings.json + e2e-content.secret to ${dir} (machineId ${MACHINE})`);
 console.log(token);

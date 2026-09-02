@@ -12,9 +12,11 @@ real answers back as durable v2 events. No scripted actor anywhere.
 2. Isolated daemon home + creds (NO browser needed):
    `TOKEN=$(node .claude/skills/e2e-tests/mint-daemon-creds.mjs --relay http://127.0.0.1:3105 --home $HOME/.joy-test --machine v2-live-e2e)`
    Save $TOKEN — the SAME account drives the client side.
-   (First `rm -rf $HOME/.joy-test`; the random encryption keys are fine —
-   the v2 lane needs only token+machineId; app-side decryption of this
-   throwaway account's cards is not meaningful.)
+   (First `rm -rf $HOME/.joy-test`. The mint writes a real account content
+   keypair: public half in access.key, secret half in
+   `relays/127.0.0.1_3105/e2e-content.secret` — the driver opens each
+   session's key envelope with it, so sealed output is asserted exactly as
+   the app would read it.)
 3. `mkdir -p /tmp/joy-test-tmux` FIRST — tmux will not create a missing
    $TMUX_TMPDIR and every per-session spawn fails at new-session until it
    exists (cost a live debugging round). Then start the daemon from source
@@ -35,11 +37,14 @@ For AGENT in claude codex pi:
 mkdir -p /tmp/v2-live-$AGENT
 node .claude/skills/e2e-tests/v2-live-e2e.mjs \
   --relay http://127.0.0.1:3105 --token "$TOKEN" \
-  --machine v2-live-e2e --agent $AGENT --cwd /tmp/v2-live-$AGENT
+  --machine v2-live-e2e --agent $AGENT --cwd /tmp/v2-live-$AGENT \
+  --home $HOME/.joy-test
 ```
 
-The driver asserts: spawn→bind (real agent boots in tmux), prompt 202,
-the REAL agent's marker answer arriving as durable v2 output events —
+The driver asserts: spawn→bind (real agent boots in tmux), the session-key
+envelope opens with the account content secret, prompt 202 (sealed with the
+session key), the REAL agent's marker answer arriving as durable v2 output
+events (sealed `v2e1:`, decrypted by the driver) —
 EXACTLY once — and turn terminal + message delivered. Evidence (the v2
 session) is KEPT for the artifact cross-checks; purge happens in teardown
 (`--purge` on a rerun cleans an individual session). Exit 0 = pass.
