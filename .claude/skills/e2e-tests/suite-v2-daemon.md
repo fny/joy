@@ -55,7 +55,7 @@ answer allows 240s (model latency). Do not shorten these.
 ### Artifact cross-checks after each run (before the next agent)
 
 - `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux tmux -L default ls 2>/dev/null; env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux tmux ls`
-  — a `j-<id>` window existed for the session (may be archived by teardown).
+  — a per-session tmux server `joy-<id>` (session `joy-<id>`, window `agent`) existed for the session (may be archived by teardown).
 - `/tmp/joy-test-daemon.log` — the lane logged `spawned <agent>`, `turn
   <id> started`, `turn <id> completed`, and no `error:` lines for the turn.
 - The marker text must NOT appear twice in the event log (exactly-once).

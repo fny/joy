@@ -27,10 +27,15 @@ A bloated session can be rotated (`joy restart`) without touching neighbors.
 ## Design
 
 ### 1. Socket naming & discovery
-- Socket label: `joy-<relayKey>-s-<sessionId>` (default relay: `joy-s-<sessionId>`).
+- Socket label: `joy-<sessionId>` (2026-09-02; was `joy-<relayKey>-s-<sessionId>` —
+  records with the old label keep resolving via `tmuxNamesFor` until they end).
+  Session name `joy-<sessionId>`, the agent in a window pinned to `agent`
+  (`automatic-rename off`), so `joy-<id>:agent` is a stable target and other
+  windows can live beside it. EVERY agent (claude, codex, opencode, pi) uses
+  this; the shared server is legacy-only (`JOY_TMUX_PER_SESSION=0`).
   Lives in the standard `/tmp/tmux-$UID/` (or `$TMUX_TMPDIR` — e2e private
   tmpdirs compose unchanged), so a human can attach with plain
-  `tmux -L joy-s-<id> attach`, no env required.
+  `tmux -L joy-<id> attach`, no env required.
 - `windowRecord` gains `socket: string | null` (null = legacy shared-server
   window). Discovery is record-driven, not server-driven: recovery no longer
   depends on one server knowing every window.
@@ -70,7 +75,7 @@ interact with another session's sizing.
   human client. Conservative: never touch sockets outside our label scheme.
 
 ### 4. Attach & operator UX
-- `joy attach <id>` (CLI) → `exec tmux -L joy-s-<id> attach` — becomes the
+- `joy attach <id>` (CLI) → `exec tmux -L joy-<id> attach` — becomes the
   documented front door; `joy ls` prints id → socket → attach hint.
 - The app's terminal view is unaffected (it rides the daemon's pane stream,
   which now reads through the session's own handle).
@@ -107,11 +112,9 @@ interact with another session's sizing.
 - `.claude/skills/e2e-tests/` — capture commands per socket.
 
 ## Open questions
-1. Should codex/opencode/pi sessions (API-driven; window is attach-only
-   convenience) get servers too, or stay on a shared "misc" server? Leak
-   pressure comes from claude/pi TUI redraw — uniform is simpler, shared
-   halves the server count. **Proposed: uniform** (simplicity wins; the
-   cost is MBs).
+1. ~~Should codex/opencode/pi sessions get servers too?~~ **Done 2026-09-02:
+   uniform.** codex's attach TUI moved onto its own server (it redraws like
+   any TUI); opencode/pi have no pane at all.
 2. Auto-rotation threshold (restart a session whose server RSS crosses N
    GB)? **Proposed: not in v1** — observe first via a `joy ls` RSS column.
 3. Does anything depend on cross-session tmux state (global options,

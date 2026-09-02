@@ -533,9 +533,11 @@ async function cmdJump(rest: string[]): Promise<number> {
     return 1;
   }
 
-  const win = String(matches[0].tmux_window);   // "joy:j-9214e0a2" (shared) or "j-9214e0a2" (own server)
+  // "joy-9214e0a2:agent" (own server), "j-9214e0a2" (older own-server
+  // scheme, session == target) or "joy:j-9214e0a2" (legacy shared server).
+  const win = String(matches[0].tmux_window);
   const perSessionSocket = matches[0].tmux_socket as string | null | undefined;
-  const tmuxSession = perSessionSocket ? win : win.split(":")[0];
+  const tmuxSession = win.split(":")[0];
   // Per-session servers (docs/per-session-tmux-design.md): the session lives
   // on its OWN -L socket; otherwise the per-relay (or default) server.
   const [tmuxBin, ...relaySock] = tmuxArgv();

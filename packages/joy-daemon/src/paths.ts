@@ -85,11 +85,26 @@ export function tmuxSocketArgs(): string[] {
 
 /** Per-SESSION tmux server label (docs/per-session-tmux-design.md): each
  *  agent session gets its own server so a tmux leak dies with the session
- *  (kill-server returns every byte to the OS). Relay-scoped so concurrent
- *  per-relay daemons can never collide on a session id. */
+ *  (kill-server returns every byte to the OS). `joy-<id>` — the session
+ *  inside carries the same name and the agent runs in a window pinned to
+ *  `agent`, so `tmux -L joy-<id> attach` is the whole incantation and other
+ *  windows can be added beside the agent's. (Older servers were labelled
+ *  `joy-<relayKey>-s-<id>` with session `j-<id>`; tmuxNamesFor() still
+ *  resolves those from their records until they end.) */
 export function tmuxServerLabel(sessionId: string): string {
-  return `joy-${joyRelayKey()}-s-${sessionId}`;
+  return `joy-${sessionId}`;
 }
+
+/** The tmux session name + agent-window target for a per-session server,
+ *  by label scheme. */
+export function tmuxNamesFor(socket: string, sessionId: string): { session: string; target: string } {
+  if (socket === `joy-${sessionId}`) return { session: socket, target: `${socket}:${TMUX_AGENT_WINDOW}` };
+  return { session: `j-${sessionId}`, target: `j-${sessionId}` }; // legacy per-session scheme
+}
+
+/** The one window the daemon manages on a per-session server. Pinned
+ *  (automatic-rename off) so the running command never renames it. */
+export const TMUX_AGENT_WINDOW = "agent";
 
 /** Test-only: drop the cached relay resolution so env overrides apply. */
 export function __resetRelaySelection(): void {
