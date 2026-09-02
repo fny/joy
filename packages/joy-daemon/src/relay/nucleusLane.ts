@@ -379,16 +379,23 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // bound before a field existed (e.g. localSessionId, which the app needs to
     // address the machine plane) would otherwise stay stale forever, since
     // setV2Link only ran at bind time.
+    const records = registry.listRecords();
     for (const s of r.sessions ?? []) {
       if (s.daemonId !== machineId || !s.localSessionId) continue;
+      // Archived/ended sessions have no live process but their window record
+      // (and its session key) is still on disk — their history must stay
+      // readable after a content-key rotation too, so the envelope re-stamp
+      // below does not require a live session; the card bits do.
       const sess = registry.get(s.localSessionId);
-      if (!sess) continue;
-      const rec = registry.listRecords().find((x) => x.id === s.localSessionId);
+      const rec = records.find((x) => x.id === s.localSessionId);
+      if (!sess && !rec?.v2SessionKey) continue;
       const envelope = rec?.v2SessionKey && opts.accountContentPublicKey
         ? sealSessionKey(new Uint8Array(Buffer.from(rec.v2SessionKey, "base64")), opts.accountContentPublicKey)
         : "v2:plaintext";
-      sess.setV2Link?.({ sessionId: s.sessionId, relay: relayUrl, keyEnvelope: envelope });
-      wireCardPublisher(s.localSessionId, s.sessionId);
+      if (sess) {
+        sess.setV2Link?.({ sessionId: s.sessionId, relay: relayUrl, keyEnvelope: envelope });
+        wireCardPublisher(s.localSessionId, s.sessionId);
+      }
       // The app takes the session key from the relay ROW, not the card, so
       // persist the fresh envelope there too. Without the account private
       // key the lane cannot tell whether the stored one is still openable,
