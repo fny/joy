@@ -100,7 +100,6 @@ export default {
                 "android.permission.READ_MEDIA_VIDEO",
             ],
             package: bundleId,
-            googleServicesFile: "./google-services.json",
             intentFilters: []
         },
         web: {
