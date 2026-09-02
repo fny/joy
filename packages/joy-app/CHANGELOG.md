@@ -1,3 +1,7 @@
+# Sep 2 (5) — Sending from the phone works again
+
+- **Messages send from iOS and Android.** Sealing a message used a text helper the native crypto module does not provide, so every send from a phone failed with "undefined is not a function" while reading worked. Desktop and web were unaffected.
+
 # Sep 2 (4) — Tool cards are back
 
 - **The chat shows the whole turn again.** Since the move to the relay, sessions showed only your prompts and the agent's replies. Tool-call cards, thinking, turn lifecycle and per-turn token usage now flow from the daemon as sealed records for every agent (Claude, Codex, OpenCode, pi), rendered exactly as before. Prompts typed directly into the terminal pane appear as user bubbles as well. *Needs the updated daemon and relay.*

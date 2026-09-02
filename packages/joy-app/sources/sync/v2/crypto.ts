@@ -15,6 +15,7 @@
  * with the key it minted at bind.
  */
 import sodium from '@/encryption/libsodium.lib';
+import { encodeUTF8, decodeUTF8 } from '@/encryption/text';
 
 /** An attachment as it travels inside a sealed message. `id` is the relay's
  *  attachment id (GET /joy/v2/attachments/:id); the rest is what the chat
@@ -39,7 +40,10 @@ export function sealV2Content(text: string, key: Uint8Array | null, attachments?
     const json = JSON.stringify({ v: 1, t: 'plain', text, ...(attachments?.length ? { attachments } : {}) });
     if (!key) return json;
     const nonce = sodium.randombytes_buf(24);
-    const ct = sodium.crypto_secretbox_easy(sodium.from_string(json), nonce, key);
+    // Not sodium.from_string: the native module (@more-tech/react-native-libsodium)
+    // exports to_string but no from_string — on iOS/Android that call was
+    // "undefined is not a function" and every send failed while reads worked.
+    const ct = sodium.crypto_secretbox_easy(encodeUTF8(json), nonce, key);
     const buf = new Uint8Array(nonce.length + ct.length);
     buf.set(nonce, 0); buf.set(ct, nonce.length);
     return 'v2e1:' + sodium.to_base64(buf, sodium.base64_variants.ORIGINAL);
@@ -81,7 +85,7 @@ export function openV2Payload(ciphertext: string | null | undefined, key: Uint8A
         try {
             const raw = sodium.from_base64(ciphertext.slice(5), sodium.base64_variants.ORIGINAL);
             const pt = sodium.crypto_secretbox_open_easy(raw.slice(24), raw.slice(0, 24), key);
-            p = JSON.parse(sodium.to_string(pt));
+            p = JSON.parse(decodeUTF8(pt));
         } catch { return null; }
     } else {
         try { p = JSON.parse(ciphertext); } catch { return null; }
