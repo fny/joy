@@ -38,7 +38,9 @@ describe("per-relay layout", () => {
         expect(p.joyRelayUrl()).toBe(p.DEFAULT_RELAY_URL);
         expect(p.isDefaultRelay()).toBe(true);
         expect(p.tmuxSocketArgs()).toEqual(["-L", "joy-joy.voltai.party_4997"]);
-        expect(p.tmuxServerLabel("abc")).toBe("joy-joy.voltai.party_4997-s-abc");
+        expect(p.tmuxServerLabel("abc")).toBe("joy-abc");
+        expect(p.tmuxNamesFor("joy-abc", "abc")).toEqual({ session: "joy-abc", target: "joy-abc:agent" });
+        expect(p.tmuxNamesFor("joy-joy.voltai.party_4997-s-abc", "abc")).toEqual({ session: "j-abc", target: "j-abc" });
         expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_4997", "state"));
     });
 

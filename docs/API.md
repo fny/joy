@@ -78,7 +78,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-send-keys` | POST /sessions/:id/keys | Raw key tokens into the pane (escape hatch, not primary interaction) |
 | `joy-set-mode` | POST /sessions/:id/mode | Permission/model/effort switches |
 | `joy-pane` | GET /sessions/:id/pane | ANSI pane capture (terminal view) |
-| `joy-resize` | POST /sessions/:id/resize | Drive tmux window cols/rows |
+| `joy-resize` | POST /sessions/:id/resize | Drive tmux window cols/rows (every agent runs on its own tmux server `joy-<id>`, session `joy-<id>`, window `agent`; `tmux_window` in session JSON is the target `joy-<id>:agent`) |
 | `joy-transcript` | GET /sessions/:id/transcript | Parsed transcript slice |
 | `joy-session-log` | GET /sessions/:id/log | Raw log tail |
 | `joy-list-logs` / `joy-read-log` | GET /logs, /logs/messages | Past-session transcript browser (per cwd) |
