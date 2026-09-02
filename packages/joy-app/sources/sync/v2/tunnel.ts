@@ -16,6 +16,7 @@
  *                  ever transmits it and the relay never holds it.
  */
 import sodium from '@/encryption/libsodium.lib';
+import { ChaCha20Poly1305 } from '@stablelib/chacha20poly1305';
 import { hmac_sha512 } from '@/encryption/hmac_sha512';
 import { deriveKey } from '@/encryption/deriveKey';
 
@@ -62,6 +63,7 @@ function concat(parts: Uint8Array[]): Uint8Array {
 async function sealRequest(tunnelKey: Uint8Array, head: unknown, body: Uint8Array): Promise<Uint8Array> {
     const streamId = sodium.randombytes_buf(16);
     const key = await streamKey(tunnelKey, streamId);
+    const aead = new ChaCha20Poly1305(key);
     const parts: Uint8Array[] = [streamId];
     let counter = 0n;
 
@@ -69,7 +71,11 @@ async function sealRequest(tunnelKey: Uint8Array, head: unknown, body: Uint8Arra
         const tagged = new Uint8Array(1 + plain.length);
         tagged[0] = final ? TAG_FINAL : TAG_MESSAGE;
         tagged.set(plain, 1);
-        const ct = sodium.crypto_aead_chacha20poly1305_ietf_encrypt(tagged, null, null, nonceFor(counter), key);
+        // Pure-JS ChaCha20-Poly1305 (IETF): the native libsodium module only
+        // ships the XChaCha variant, so sodium.crypto_aead_chacha20poly1305_ietf_*
+        // is "undefined is not a function" on iOS/Android. Same wire as the
+        // daemon's node:crypto 'chacha20-poly1305' (pinned by tunnel.interop.test).
+        const ct = aead.seal(nonceFor(counter), tagged);
         counter += 1n;
         const frame = new Uint8Array(4 + ct.length);
         new DataView(frame.buffer).setUint32(0, ct.length, false);
@@ -91,6 +97,7 @@ async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise
     if (wire.length < 16) throw new TunnelError(502, 'short_stream');
     const streamId = wire.subarray(0, 16);
     const key = await streamKey(tunnelKey, streamId);
+    const aead = new ChaCha20Poly1305(key);
     let off = 16;
     let counter = 0n;
     let head: T | null = null;
@@ -103,12 +110,8 @@ async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise
         if (off + len > wire.length) throw new TunnelError(502, 'truncated_frame');
         const ct = wire.subarray(off, off + len);
         off += len;
-        let plain: Uint8Array;
-        try {
-            plain = sodium.crypto_aead_chacha20poly1305_ietf_decrypt(null, ct, null, nonceFor(counter), key);
-        } catch {
-            throw new TunnelError(502, 'tamper');
-        }
+        const plain = aead.open(nonceFor(counter), ct);
+        if (!plain) throw new TunnelError(502, 'tamper');
         counter += 1n;
         const final = plain[0] === TAG_FINAL;
         const chunk = plain.subarray(1);
