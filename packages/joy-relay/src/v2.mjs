@@ -1,4 +1,4 @@
-// /joy/v2 — the durable-plane surface, mounted ADDITIVELY beside /joy/v1.
+// /joy/v2 — the relay's only surface: accounts, pairing, machines, push, sessions, attachments, tunnel.
 // v1 is untouched; both routers share core, db, notify and the same tunnel.
 // The surface splits by caller: client routes at the root (account auth),
 // daemon-process routes under /daemon (lease auth; acquire bootstraps on
@@ -81,7 +81,14 @@ const MSG_SELECT = `
 export function createV2Router({ core, auth, notify, db, tunnel, attachments, accounts }) {
   const routes = [];
   const route = (method, pattern, opts, handler) =>
-    routes.push({ method, regex: new RegExp(`^${pattern}$`), opts, handler });
+    routes.push({ method, pattern, regex: new RegExp(`^${pattern}$`), opts, handler });
+
+  // ── meta ──────────────────────────────────────────────────────────────────
+  route('GET', '/capabilities', { auth: false, summary: 'Relay flavor + protocol version (no auth); clients probe this before trusting a server URL' }, async () => ({
+    relay: 'joy-relay',
+    protocol: { major: 2, minor: 0 },
+    features: ['accounts', 'pairing', 'machines', 'push', 'sessions', 'messages', 'turns', 'cancellations', 'attachments', 'events', 'sse', 'tunnel'],
+  }));
 
   async function ownedSession(t, sessionId, accountId) {
     const { rows: [s] } = await t.query(`SELECT * FROM native_sessions WHERE id = $1`, [sessionId]);
@@ -162,15 +169,15 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     const clientIntentId = body.clientIntentId ?? intent('v2m');
     const ids = Array.isArray(body.attachments) ? body.attachments : [];
     const marker = `intent:${clientIntentId}`;
-    if (ids.length > 0) {
-      await db.tx((t) => attachments.reference(t, m[1], marker, ids));
-    }
+    // Reference + accept + claim commit together (see core.acceptPrompt):
+    // a retry that replays skips both hooks, so a re-uploaded duplicate blob
+    // simply stays unreferenced and ages out with the orphan sweep.
     const accepted = await core.acceptPrompt(ctx.accountId, ctx.actorId, m[1], {
       ciphertext: body.ciphertext, clientIntentId,
+    }, ids.length === 0 ? {} : {
+      beforeAccept: (t) => attachments.reference(t, m[1], marker, ids),
+      afterAccept: (t, acc) => attachments.claim(t, ids, marker, acc.commandId),
     });
-    if (ids.length > 0) {
-      await db.tx((t) => attachments.claim(t, ids, marker, accepted.commandId));
-    }
     return { status: 202, body: { messageId: accepted.commandId, turnId: accepted.turnId, seq: accepted.seq, disposition: accepted.disposition } };
   });
   route('GET', '/sessions/([\\w-]+)/messages/([\\w-]+)', {}, async (ctx, m) => {
@@ -533,5 +540,11 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     }
     return true;
   }
-  return { handle };
+  /** Method + path of every v2 route (feeds /openapi.json so the docs cannot
+   *  drift from dispatch). */
+  const routeTable = () => routes.map((r) => ({
+    method: r.method, pattern: `/joy/v2${r.pattern}`, auth: r.opts.auth !== false,
+    summary: r.opts.summary, params: [], sse: r.pattern === '/events/stream',
+  }));
+  return { handle, routeTable };
 }

@@ -24,7 +24,7 @@ relay_key() { $SSH "$HOST" 'grep -s "^JOY_RELAY_ACCESS_KEY=" ~/joy-relay.env | c
 probe() { # port
   local port="$1" hdr=()
   [[ -n "${RELAY_KEY:-}" ]] && hdr=(-H "x-joy-relay-key: $RELAY_KEY")
-  curl -fsS --max-time 10 "${hdr[@]}" "https://joy.voltai.party:$port/joy/v1/capabilities" | grep -q '"joy-relay"'
+  curl -fsS --max-time 10 "${hdr[@]}" "https://joy.voltai.party:$port/joy/v2/capabilities" | grep -q '"joy-relay"'
 }
 
 if [[ "$TARGET" == "dev" ]]; then

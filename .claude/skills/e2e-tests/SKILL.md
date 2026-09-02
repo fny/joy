@@ -3,7 +3,7 @@ name: e2e-tests
 description: Run the joy end-to-end suite as an agent — drive joy-app in a browser against a freshly-built joy-daemon, asserting session artifacts (Claude log, relay seq, tmux window, UI) stay consistent and in order.
 ---
 
-In `packages/joy-app` and `packages/joy-daemon` you'll find a React Native application and a tmux controller respectively. They communicate through `packages/joy-relay`, the one server: accounts, pairing, machines, push and the `/joy/v1` + `/joy/v2` session plane, all in one Node process on an embedded PGlite store.
+In `packages/joy-app` and `packages/joy-daemon` you'll find a React Native application and a tmux controller respectively. They communicate through `packages/joy-relay`, the one server: accounts, pairing, machines, push and the `/joy/v2` session plane, all in one Node process on an embedded PGlite store.
 
 You will test the EXACT prod topology, entirely on this box: `stack.sh` boots a local joy-relay, the app runs as a web build via `/chrome-cli` pointed at the relay, and a dedicated joy-daemon process is pinned to the relay's test port. No request leaves the machine; accounts are throwaway by construction (they live in the stack's own PGlite and die with `stack.sh reset`). Run the whole flow end to end.
 
@@ -79,7 +79,7 @@ If a previous run left state, kill/remove it first (see Setup).
 ## Setup (run once, fail-fast — do not start tests until all pass)
 
 1. **Build gate.** `pnpm install`, then `pnpm -C packages/joy-daemon typecheck && pnpm -C packages/joy-daemon test` and `pnpm -C packages/joy-app typecheck`. tsx ships TS errors as *runtime* crashes, so never e2e-test code that doesn't typecheck.
-1a. **Stack up.** `stack.sh start` and wait for "stack healthy". `stack.sh reset` first when you want a pristine database. Sanity: `curl -s http://127.0.0.1:3105/joy/v1/capabilities` and `curl -s http://127.0.0.1:3105/joy/v2/auth/request/status?publicKey=00` (→ 401 malformed key) both answer from the relay itself.
+1a. **Stack up.** `stack.sh start` and wait for "stack healthy". `stack.sh reset` first when you want a pristine database. Sanity: `curl -s http://127.0.0.1:3105/joy/v2/capabilities` and `curl -s http://127.0.0.1:3105/joy/v2/auth/request/status?publicKey=00` (→ 401 malformed key) both answer from the relay itself.
 2. **Purge stale state.** Kill any `joy-test` tmux session, any process on `:4999` and `:8082`; `rm -rf $HOME/.joy-test $HOME/joy-test`.
 3. **Fresh bundle.** Start Metro with `--clear` on `:8082`, with `EXPO_PUBLIC_JOY_SERVER_URL=http://127.0.0.1:3105` so the app targets the local relay (or set the custom server URL in the app UI). **Verify the served bundle is fresh** (Metro's file-watcher can silently serve a frozen bundle, and the browser caches modules) — grep the served bundle for a known-current string and hard-reload chrome (clear its cache) before trusting the UI.
 4. **Start the daemon from latest source** (pinned to the test relay): `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=/tmp/joy-test-tmux JOY_RELAY_URL=http://127.0.0.1:3105 PORT=4999 JOY_HOME_DIR=$HOME/.joy-test TMUX_SESSION=joy-test pnpm -C packages/joy-daemon start`. Confirm the process start-time is *after* HEAD's commit (a long-lived tsx daemon does NOT hot-reload).

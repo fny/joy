@@ -1,4 +1,4 @@
-// End-to-end tunnel test: the REAL relay router (routes.mjs + core.mjs +
+// End-to-end tunnel test: the REAL relay router (v2.mjs + core.mjs +
 // PGlite db + the native account plane), a REAL local HTTP target standing in
 // for the daemon surface, the real executor, the real client. Nothing stubbed.
 //
@@ -21,7 +21,6 @@ import { openDb } from "../../../joy-relay/src/db.mjs";
 import { createCore } from "../../../joy-relay/src/core.mjs";
 import { createNotify } from "../../../joy-relay/src/notify.mjs";
 import { createTestRelayAccounts } from "./testRelayAccounts";
-import { createRouter } from "../../../joy-relay/src/routes.mjs";
 import { createV2Router } from "../../../joy-relay/src/v2.mjs";
 import { createAttachments } from "../../../joy-relay/src/attachments.mjs";
 import { createTunnel } from "../../../joy-relay/src/tunnel.mjs";
@@ -50,7 +49,6 @@ beforeAll(async () => {
   const { auth, accounts } = acc;
   tokA = acc.tokA; tokB = acc.tokB;
   const tunnel = createTunnel({ notify });
-  const router = createRouter({ core, auth, notify, db, tunnel });
   // The executor and client both speak /joy/v2 now — mount it like server.mjs.
   const attachments = createAttachments(db);
   const v2router = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
@@ -58,7 +56,6 @@ beforeAll(async () => {
   relay = http.createServer((req, res) => {
     void (async () => {
       if (await v2router.handle(req, res)) return;
-      if (await router.handle(req, res)) return;
       res.writeHead(404); res.end();
     })();
   });
