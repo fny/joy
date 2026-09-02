@@ -15,6 +15,7 @@ vi.mock('@/encryption/libsodium.lib', async () => {
 let sealV2Content: typeof import('./crypto').sealV2Content;
 let openV2Content: typeof import('./crypto').openV2Content;
 let openV2Message: typeof import('./crypto').openV2Message;
+let openV2Payload: typeof import('./crypto').openV2Payload;
 let sealV2Bytes: typeof import('./crypto').sealV2Bytes;
 let openV2Bytes: typeof import('./crypto').openV2Bytes;
 beforeAll(async () => {
@@ -23,6 +24,7 @@ beforeAll(async () => {
     sealV2Content = mod.sealV2Content;
     openV2Content = mod.openV2Content;
     openV2Message = mod.openV2Message;
+    openV2Payload = mod.openV2Payload;
     sealV2Bytes = mod.sealV2Bytes;
     openV2Bytes = mod.openV2Bytes;
 });
@@ -82,5 +84,19 @@ describe('app v2 content codec', () => {
         // plaintext sessions pass bytes through untouched
         expect(sealV2Bytes(bytes, null)).toBe(bytes);
         expect(openV2Bytes(bytes, null)).toBe(bytes);
+    });
+
+    it('forwarded adapter records open as records, never as text', () => {
+        const key = _sodium.randombytes_buf(32);
+        const record = { role: 'session', content: { type: 'session', data: { id: 'e1', time: 5, role: 'agent', turn: 't', ev: { t: 'tool-call-start', call: 'c', name: 'Read', title: 'Read', description: '', args: {} } } }, meta: { sentFrom: 'joy' } };
+        const json = JSON.stringify({ v: 1, t: 'record', record });
+        const nonce = _sodium.randombytes_buf(24);
+        const ct = 'v2e1:' + _sodium.to_base64(new Uint8Array([...nonce, ..._sodium.crypto_secretbox_easy(_sodium.from_string(json), nonce, key)]), _sodium.base64_variants.ORIGINAL);
+        expect(openV2Payload(ct, key)).toEqual({ t: 'record', record });
+        expect(openV2Message(ct, key)).toBeNull();
+        expect(openV2Content(ct, key)).toBeNull();
+        expect(openV2Payload(ct, null)).toBeNull();
+        expect(openV2Payload(sealV2Content('plain', key), key)).toEqual({ t: 'plain', message: { text: 'plain', attachments: [] } });
+        expect(openV2Payload(JSON.stringify({ v: 1, t: 'record', record: { role: 'session' } }), null)).toBeNull();
     });
 });

@@ -4,7 +4,11 @@
 // a few seconds — the tests are bounded and deterministic.
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
-import { startNucleusLane, type NucleusLaneHandle } from "./nucleusLane";
+import { startNucleusLane, decodeRecord, type NucleusLaneHandle } from "./nucleusLane";
+import { RelaySession, encodeTextEvent, encodeToolCallStart } from "./relay";
+
+/** What an adapter holds: a RelaySession whose send() lands in the lane's record sink. */
+const adapterFor = (localId: string) => new RelaySession({ client: { creds: { machineId: "m" } } as any, relaySessionId: localId, metadata: {} });
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const enc = (t: string) => JSON.stringify({ v: 1, t: "plain", text: t });
@@ -89,7 +93,12 @@ describe("nucleusLane turn lifecycle", () => {
         await sleep(1200);
         session._pending = 0; session._busy = true;            // dispatched + running
         await sleep(1200);
-        chat = [{ id: "9", role: "assistant", content: "answer", session_id: "loc1" }]; // agent output
+        chat = [{ id: "9", role: "assistant", content: "answer", session_id: "loc1" }]; // agent activity (watermark only)
+        // The adapter's normalizer emits records; the lane forwards them as
+        // sealed output facts on the running turn, in order.
+        const adapter = adapterFor("loc1");
+        adapter.send(encodeToolCallStart({ call: "c1", name: "Read", input: { path: "x" }, turn: "t1" }), "loc1:c1:start");
+        adapter.send(encodeTextEvent("answer", { turn: "t1" }), "loc1:text:1");
         await sleep(1200);
         session._busy = false;                                  // turn goes idle
         await sleep(2500);                                      // 3 idle polls → terminal
@@ -99,10 +108,28 @@ describe("nucleusLane turn lifecycle", () => {
         expect(paths.some(p => p.includes("/turns/t1/submitted"))).toBe(true);
         expect(paths.some(p => p.includes("/turns/t1/start"))).toBe(true);
         const outputs = relay.calls.filter(c => c.path.includes("/turns/t1/facts") && c.body.type === "output");
-        expect(outputs.length).toBeGreaterThanOrEqual(1);
-        const terminal = relay.calls.find(c => c.path.includes("/turns/t1/facts") && c.body.type === "terminal");
-        expect(terminal?.body.terminalState).toBe("completed");
+        expect(outputs.length).toBe(2);
+        const evs = outputs.map(o => (decodeRecord(o.body.ciphertext) as any)?.content?.data?.ev);
+        expect(evs[0]).toMatchObject({ t: "tool-call-start", name: "Read", args: { path: "x" } });
+        expect(evs[1]).toMatchObject({ t: "text", text: "answer" });
+        expect(outputs.map(o => o.body.runtimeEventId)).toEqual(["rec:loc1:c1:start", "rec:loc1:text:1"]);
+        // The chat log is no longer re-posted as text: nothing but records.
+        expect(outputs.every(o => decodeRecord(o.body.ciphertext) !== null)).toBe(true);
+        const terminalIdx = relay.calls.findIndex(c => c.path.includes("/turns/t1/facts") && c.body.type === "terminal");
+        const lastOutputIdx = relay.calls.map(c => c.path.includes("/turns/t1/facts") && c.body.type === "output").lastIndexOf(true);
+        expect(lastOutputIdx).toBeLessThan(terminalIdx);       // drained before terminalizing
+        expect(relay.calls[terminalIdx].body.terminalState).toBe("completed");
         expect(session.enqueued).toContain("hi");
+
+        // Outside a turn (terminal-typed prompt, late output): session-scoped.
+        adapter.send(encodeTextEvent("later", { turn: "t2" }), "loc1:text:2");
+        await sleep(600);
+        const late = relay.calls.find(c => c.path.includes("/daemon/sessions/v2s1/facts"));
+        expect((decodeRecord(late?.body.ciphertext) as any)?.content?.data?.ev?.text).toBe("later");
+        // An unbound local session has nowhere to go: silently dropped.
+        adapterFor("nobody").send(encodeTextEvent("void", { turn: "t" }), "nobody:1");
+        await sleep(300);
+        expect(relay.calls.some(c => c.path.includes("/sessions/undefined"))).toBe(false);
     }, 20_000);
 
     it("cancel: aborts local work ONCE despite repeated control re-offers (dedup)", async () => {

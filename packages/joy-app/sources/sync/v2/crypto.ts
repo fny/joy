@@ -63,9 +63,17 @@ function parseAttachments(raw: unknown): V2Attachment[] {
     return out;
 }
 
-/** Open a message envelope: text + attachments. null when sealed content
- *  cannot be opened (missing/wrong key) or the payload is not ours. */
-export function openV2Message(ciphertext: string | null | undefined, key: Uint8Array | null): V2Message | null {
+/** An adapter record the daemon forwarded (text, tool call, turn lifecycle
+ *  with usage, terminal-typed user prompt) — the raw shape the normalizer
+ *  in sync/typesRaw understands (role 'session' | 'user' | 'agent'). */
+export interface V2Record { role: string; content: { type: string; [k: string]: unknown }; meta?: Record<string, unknown> }
+export type V2Payload = { t: 'plain'; message: V2Message } | { t: 'record'; record: V2Record };
+
+/** Open a sealed payload into whichever shape it is: a text message
+ *  ({v:1,t:'plain'}) or a forwarded adapter record ({v:1,t:'record'}). null
+ *  when sealed content cannot be opened (missing/wrong key) or the payload
+ *  is neither. */
+export function openV2Payload(ciphertext: string | null | undefined, key: Uint8Array | null): V2Payload | null {
     if (!ciphertext) return null;
     let p: any;
     if (ciphertext.startsWith('v2e1:')) {
@@ -78,8 +86,20 @@ export function openV2Message(ciphertext: string | null | undefined, key: Uint8A
     } else {
         try { p = JSON.parse(ciphertext); } catch { return null; }
     }
-    if (!p || typeof p.text !== 'string') return null;
-    return { text: p.text, attachments: parseAttachments(p.attachments) };
+    if (!p) return null;
+    if (p.t === 'record') {
+        const r = p.record;
+        if (!r || typeof r.role !== 'string' || !r.content || typeof r.content.type !== 'string') return null;
+        return { t: 'record', record: r as V2Record };
+    }
+    if (typeof p.text !== 'string') return null;
+    return { t: 'plain', message: { text: p.text, attachments: parseAttachments(p.attachments) } };
+}
+
+/** Open a text message envelope: text + attachments. null for records. */
+export function openV2Message(ciphertext: string | null | undefined, key: Uint8Array | null): V2Message | null {
+    const p = openV2Payload(ciphertext, key);
+    return p?.t === 'plain' ? p.message : null;
 }
 
 export function openV2Content(ciphertext: string | null | undefined, key: Uint8Array | null): string | null {

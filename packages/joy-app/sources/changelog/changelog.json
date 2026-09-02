@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 2 (4) — Tool cards are back",
+      "summary": "",
+      "markdown": "- **The chat shows the whole turn again.** Since the move to the relay, sessions showed only your prompts and the agent's replies. Tool-call cards, thinking, turn lifecycle and per-turn token usage now flow from the daemon as sealed records for every agent (Claude, Codex, OpenCode, pi), rendered exactly as before. Prompts typed directly into the terminal pane appear as user bubbles as well. *Needs the updated daemon and relay.*"
+    },
+    {
       "title": "Sep 2 (3) — Sends that fail come back",
       "summary": "",
       "markdown": "- **A message the relay did not accept is no longer lost.** Offline, a session still binding, a refused upload: the text and the pictures go back into the composer and you are told, instead of disappearing with nothing but a console line.\n- **A retried message can no longer arrive twice.** The queued-draft release reuses the message's own id when it retries, and the relay treats that id as the identity of the message — a lost acknowledgement now replays the first delivery rather than queueing a second turn for the agent.\n- **Long sessions no longer stall behind quiet pages.** Catching up after a reconnect could stop on a page of lifecycle-only events and never fetch what came after; the cursor now advances over them.\n- **Attachment limits hold everywhere.** The 10MB per-file cap is checked on the bytes actually read, so pasted or dropped files on web can no longer slip past it; empty files are refused up front. Only PNG, JPEG, GIF and WebP render inline — other files show as a name and size row. Web previews release their memory once sent.\n- **Removed from the app**: the never-shown \"Sending… / Not delivered\" line under messages and the long-press-to-fork gesture (neither could fire on the relay path), the subscription/RevenueCat code, the Claude.ai OAuth helper, the plaintext \"Relay v2 Mode\" developer screen, and a set of unused screens, hooks and native modules. Pairing a terminal now sends only the sealed data-key answer. *Needs the updated relay and daemon: `/joy/v1` is gone from the relay, the daemon refuses legacy (secret-based) pairings.*"
@@ -141,5 +146,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 2 (3) — Sends that fail come back"
+  "latestTitle": "Sep 2 (4) — Tool cards are back"
 }

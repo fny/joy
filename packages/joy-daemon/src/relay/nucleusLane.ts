@@ -28,6 +28,7 @@ import { registerV2CardPublisher, unregisterV2CardPublisher, cardStateFor, publi
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, joyStateDir } from "../paths";
+import { setRecordSink, type WireRecord } from "./relay";
 import { writeAttachmentToCwd } from "../domain/attachments";
 
 const RENEW_MS = 8_000;           // lease TTL is 20s server-side
@@ -177,6 +178,36 @@ export function encodeContent(text: string, key?: Uint8Array | null): string {
   return "v2e1:" + Buffer.concat([Buffer.from(nonce), Buffer.from(ct)]).toString("base64");
 }
 
+/** Seal an adapter record for the event log: {v:1,t:'record',record}
+ *  under the same session key as text. The app opens it and hands `record`
+ *  (role 'session' | 'user' | 'agent') straight to its normalizer. */
+export function encodeRecord(record: WireRecord, key?: Uint8Array | null): string {
+  const json = JSON.stringify({ v: 1, t: "record", record });
+  if (!key) return json;
+  const nonce = new Uint8Array(randomBytes(tweetnacl.secretbox.nonceLength));
+  const ct = tweetnacl.secretbox(new Uint8Array(Buffer.from(json, "utf8")), nonce, key);
+  return "v2e1:" + Buffer.concat([Buffer.from(nonce), Buffer.from(ct)]).toString("base64");
+}
+
+/** Test/driver counterpart of encodeRecord: the record, or null. */
+export function decodeRecord(ciphertext: string | null | undefined, key?: Uint8Array | null): WireRecord | null {
+  if (!ciphertext) return null;
+  let p: any;
+  if (ciphertext.startsWith("v2e1:")) {
+    if (!key) return null;
+    try {
+      const raw = Buffer.from(ciphertext.slice(5), "base64");
+      const n = tweetnacl.secretbox.nonceLength;
+      const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
+      if (!pt) return null;
+      p = JSON.parse(Buffer.from(pt).toString("utf8"));
+    } catch { return null; }
+  } else {
+    try { p = JSON.parse(ciphertext); } catch { return null; }
+  }
+  return p && p.t === "record" && p.record && typeof p.record.role === "string" ? p.record as WireRecord : null;
+}
+
 /** Envelope a fresh session key to the account: "v2sk1:" + b64(epk32 ‖ nonce24
  *  ‖ box(sessionKey, nonce, accountPub, ephemeralSecret)). The app opens it
  *  with its content keypair (crypto_box_open_easy). */
@@ -221,7 +252,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const cancelRequested = new Set<string>();
   // Executing turns: what cancel/cleanup needs to stop LOCAL work too —
   // terminalizing the relay alone leaves a queued prompt to fire later.
-  const activeTurns = new Map<string, { localId: string; queuedId: string | null }>();
+  const activeTurns = new Map<string, { localId: string; queuedId: string | null; lease: Lease }>();
+  // local session id → v2 session id (the inverse of `bound`), for the
+  // record sink, which only knows the local id.
+  const boundByLocal = new Map<string, string>();
   // Cancels already acted on, keyed by target turn. The relay re-offers an
   // outstanding cancel command every control claim until the turn
   // terminalizes — without this dedup the SAME abort fired dozens of times
@@ -269,6 +303,47 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     return json;
   }
 
+  // ── adapter record forwarding (the chat's tool cards / thinking / usage) ──
+  // RelaySession.send lands every adapter record here. Each becomes a sealed
+  // `output` fact: on the RUNNING relay turn for that session when there is
+  // one (fenced to that turn's lease), else session-scoped. Posts are
+  // serialized per session so the log keeps the adapter's order, and a turn
+  // drains its session's chain before terminalizing so no record of the
+  // turn lands after its terminal fact.
+  const recordChains = new Map<string, Promise<void>>();
+  const recordFailures = new Set<string>();
+  function forwardRecord(localId: string, wire: WireRecord, recLocalId?: string): void {
+    // The app's user row IS the relay's turn.queued event; lane-dispatched
+    // prompts enqueue with mirrorToRelay:false, and the claude tailer only
+    // mirrors what the app did NOT send — so a user record here is a prompt
+    // typed at the terminal, which the app has no other way to see.
+    const v2SessionId = boundByLocal.get(localId);
+    if (!v2SessionId) return; // not a v2-bound session (nothing to attach to)
+    const turnEntry = [...activeTurns.entries()].find(([, v]) => v.localId === localId);
+    const runtimeEventId = recLocalId ? `rec:${recLocalId}` : `rec:${bootNonce}:${randomUUID()}`;
+    const ciphertext = encodeRecord(wire, sessionKeys.get(v2SessionId));
+    const post = async () => {
+      try {
+        if (turnEntry) {
+          await api("POST", `/daemon/turns/${turnEntry[0]}/facts`, { type: "output", ciphertext, runtimeEventId }, turnEntry[1].lease);
+        } else {
+          if (!lease) return; // between leases: nothing durable to fence to
+          await api("POST", `/daemon/sessions/${v2SessionId}/facts`, { type: "output", ciphertext, runtimeEventId }, lease);
+        }
+        recordFailures.delete(localId);
+      } catch (e) {
+        if (!recordFailures.has(localId)) {
+          recordFailures.add(localId);
+          log(`record forward failed for ${localId}: ${(e as Error).message} (muted until the next success)`);
+        }
+      }
+    };
+    const chain = (recordChains.get(localId) ?? Promise.resolve()).then(post);
+    recordChains.set(localId, chain);
+  }
+  const drainRecords = (localId: string): Promise<void> => recordChains.get(localId) ?? Promise.resolve();
+  setRecordSink(forwardRecord);
+
   /** Raw attachment bytes from the relay store (sealed by the sender). */
   async function fetchAttachment(attachmentId: string): Promise<Uint8Array> {
     const res = await fetch(`${relayUrl}/joy/v2/attachments/${attachmentId}`, {
@@ -291,7 +366,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // map after a restart so prompt offers can find their local sessions.
     const r = await api("GET", "/sessions");
     for (const s of r.sessions ?? []) {
-      if (s.daemonId === machineId && s.localSessionId) bound.set(s.sessionId, s.localSessionId);
+      if (s.daemonId === machineId && s.localSessionId) { bound.set(s.sessionId, s.localSessionId); boundByLocal.set(s.localSessionId, s.sessionId); }
     }
     // Content keys ride the window records (same trust domain as transcripts).
     for (const rec of registry.listRecords()) {
@@ -461,7 +536,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         localSessionId: session.id,
         sessionKeyEnvelope: envelope,
       }, leaseRef);
-      bound.set(offer.sessionId, session.id);
+      bound.set(offer.sessionId, session.id); boundByLocal.set(session.id, offer.sessionId);
       // Stamp the session card with its v2 link so the app can address this
       // session — envelope included so the app needs no extra fetch to obtain
       // the content key.
@@ -570,8 +645,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const history = registry.chatHistory();
       let watermark = history.length ? Number(history[history.length - 1].id) : -1;
 
-      const queued = session.enqueue(text, { source: "rpc", visible: false });
-      activeTurns.set(turnId, { localId: session.id, queuedId: queued?.id ?? null });
+      const queued = session.enqueue(text, { source: "rpc", visible: false, mirrorToRelay: false });
+      activeTurns.set(turnId, { localId: session.id, queuedId: queued?.id ?? null, lease: leaseRef });
 
       /** Terminalize the relay AND stop the local work — a failed turn whose
        *  prompt stays queued locally would execute later anyway (and again
@@ -627,22 +702,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       }
       await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
 
-      // Observe: forward each new assistant chat message as a durable output
-      // fact (runtimeEventId = chat id → replay-idempotent), until the session
-      // has been idle for IDLE_DEBOUNCE_POLLS consecutive polls.
+      // Observe until the session has been idle for IDLE_DEBOUNCE_POLLS
+      // consecutive polls. The turn's CONTENT no longer comes from here: the
+      // adapter records (text, tool calls, turn lifecycle + usage) flow
+      // through forwardRecord as they are produced; the chat log is only the
+      // cross-adapter activity signal that keeps the watermark honest.
       const capDeadline = Date.now() + TURN_CAP_MS;
       let idlePolls = 0;
       for (;;) {
-        const hist = registry.chatHistory();
-        for (const m of hist) {
+        for (const m of registry.chatHistory()) {
           const id = Number(m.id);
-          if (id <= watermark) continue;
-          watermark = id;
-          if (!isOurs(m as { session_id?: string })) continue;
-          if (m.role !== "assistant" || !m.content) continue;
-          await api("POST", `/daemon/turns/${turnId}/facts`, {
-            type: "output", ciphertext: encodeContent(m.content, sessionKeys.get(offer.sessionId)), runtimeEventId: `chat:${bootNonce}:${m.id}`,
-          }, leaseRef);
+          if (id > watermark) watermark = id;
         }
         if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
         if (session.busy()) idlePolls = 0;
@@ -651,6 +721,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // Stop the REAL agent too — reporting interrupted while the agent
           // keeps burning would be a lie with a bill attached.
           try { await session.abort(); } catch { /* pane teardown */ }
+          await drainRecords(session.id);
           await api("POST", `/daemon/turns/${turnId}/facts`, {
             type: "terminal", terminalState: "interrupted", runtimeEventId: randomUUID(),
             meta: { reason: "turn_cap" },
@@ -662,6 +733,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       }
 
       const terminalState = cancelRequested.has(turnId) ? "cancelled" : "completed";
+      await drainRecords(session.id);
       await api("POST", `/daemon/turns/${turnId}/facts`, {
         type: "terminal", terminalState, runtimeEventId: randomUUID(),
       }, leaseRef);
@@ -792,6 +864,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     async stop() {
       stopped = true;
       lease = null;
+      setRecordSink(null);
     },
     // The tunnel executor BORROWS this lease rather than acquiring its own
     // (a second acquirer on the same machineId evicts the first).

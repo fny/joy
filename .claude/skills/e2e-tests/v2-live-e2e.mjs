@@ -67,9 +67,19 @@ const dec = (ct) => {
     const n = nacl.secretbox.nonceLength;
     const pt = nacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), sessionKey);
     if (!pt) return null;
-    try { return JSON.parse(Buffer.from(pt).toString('utf8')).text ?? null; } catch { return null; }
+    try { return textOf(JSON.parse(Buffer.from(pt).toString('utf8'))); } catch { return null; }
   }
-  try { return JSON.parse(ct).text ?? null; } catch { return null; }
+  try { return textOf(JSON.parse(ct)); } catch { return null; }
+};
+// Text of a payload: a plain message, or a forwarded adapter record whose
+// session envelope is a text event (tool calls / lifecycle records → null).
+const textOf = (p) => {
+  if (!p) return null;
+  if (p.t === 'record') {
+    const ev = p.record?.content?.data?.ev;
+    return ev?.t === 'text' && typeof ev.text === 'string' ? ev.text : null;
+  }
+  return typeof p.text === 'string' ? p.text : null;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;

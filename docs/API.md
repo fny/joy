@@ -20,7 +20,14 @@ joy-app ⇄ joy-relay (e.g. joy.voltai.party:4997, /joy/v2 over HTTPS + SSE)
 - All session/machine payloads between app and daemon are end-to-end encrypted
   (libsodium); the relay stores/forwards ciphertext. Message content is
   `v2e1:` + secretbox of `{v:1,t:'plain',text,attachments?:[{id,name,size,
-  mime?,width?,height?,thumbhash?}]}` under the per-session key; attachment
+  mime?,width?,height?,thumbhash?}]}` under the per-session key. Agent-side
+  `output` events carry `{v:1,t:'record',record}` instead: `record` is the
+  adapter's WireRecord (role `session` with `content.data.ev` = text /
+  tool-call-start / tool-call-end / turn-start / turn-end+usage, or role
+  `user` for a prompt typed at the terminal) — the daemon forwards every
+  normalizer record through the lane, so the chat shows tool cards, thinking
+  and usage for all four harnesses; the app hands `record` to the same
+  normalizer the old socket lane fed. Attachment
   bytes are sealed with the same key (nonce24 ‖ secretbox) before
   `POST /joy/v2/attachments` (`x-session`, `x-cipher-hash` = sha256 of the
   sealed body). The relay only sees the id list on the message body (for
@@ -140,7 +147,7 @@ EdDSA JWTs minted by the relay (`JOY_RELAY_TOKEN_SECRET`, issuers
 | Messages / turns | `GET/POST /sessions/:id/messages` · `GET/PATCH/DELETE …/messages/:id` · `POST …/messages/:id/retry` · `GET …/turns/:id` · `POST …/turns/:id/cancellations` | server-owned queue, real cancellation. `clientIntentId` is the message identity: a re-POST with the same id replays the first acceptance (same messageId/turnId) even though the re-sealed ciphertext differs — the app passes its localId, so a lost-ack retry never queues a second turn |
 | Attachments | `POST /attachments` (raw sealed body, `x-session`, `x-cipher-hash`) · `GET /attachments/:id` | ciphertext only, deduped per (session, hash), orphan-swept 24h, purged with the session; cited by id in `POST …/messages` `attachments:[]` — reference + accept + claim commit in ONE transaction (an unknown id 422s the whole send; a replayed retry references nothing). The daemon materializes only citations that are BOTH inside the sealed prompt and in the relay-validated offer list, and unlinks what it wrote if a later one fails |
 | Tunnel | `POST /machines/:id/http` | E2E-sealed request/response frames to the daemon's local HTTP server (≈1MB frame cap → the 400KB inline file threshold) |
-| Daemon lane | `POST /daemon/leases` · `PUT /daemon/leases/:id` · `…/claims/{work,control,tunnel}` · `…/deliveries/:id/received` · `…/sessions/:id/{bind,spawn-failed}` · `PATCH /daemon/sessions/:id` · `…/turns/:id/{submitted,start,facts,reconcile}` · `…/tunnel/:id/frames` | lease-token authenticated; presence = unexpired lease |
+| Daemon lane | `POST /daemon/leases` · `PUT /daemon/leases/:id` · `…/claims/{work,control,tunnel}` · `…/deliveries/:id/received` · `…/sessions/:id/{bind,spawn-failed,facts}` · `PATCH /daemon/sessions/:id` · `…/turns/:id/{submitted,start,facts,reconcile}` · `…/tunnel/:id/frames` | lease-token authenticated; presence = unexpired lease. Records produced while a relay turn runs post as that turn's `output` facts (fenced to its lease, drained before the terminal fact); records outside any turn post to `…/sessions/:id/facts` (output only, `turnId` null, same replay/budget rules) |
 
 A perimeter key (`JOY_RELAY_ACCESS_KEY`, header `x-joy-relay-key`) can gate
 the whole surface; unknown paths are 404 — there is no upstream.

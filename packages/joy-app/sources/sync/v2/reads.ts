@@ -18,7 +18,7 @@
  * path seals with), then handed over already-decrypted — v2 rows carry
  * `__v2Plain` so the sync layer skips content decryption.
  */
-import { openV2Content, openV2Message } from './crypto';
+import { openV2Content, openV2Message, openV2Payload } from './crypto';
 import { getV2BaseUrl } from './api';
 
 export interface V2Row {
@@ -55,11 +55,25 @@ interface RawV2Event {
 /** Translate one v2 event into an app row, or null when it is not renderable. */
 function toRow(e: RawV2Event, key: Uint8Array | null): V2Row | null {
     const seq = Number(e.seq);
-    const text = e.content ? openV2Content(e.content.ciphertext, key) : null;
-    if (e.content && text === null) {
+    const payload = e.content ? openV2Payload(e.content.ciphertext, key) : null;
+    const text = payload?.t === 'plain' ? payload.message.text : (e.content && !payload ? openV2Content(e.content.ciphertext, key) : null);
+    if (e.content && payload === null && text === null) {
         // Sealed content we could not open (missing/incorrect session key) —
         // loud, because it renders as an empty chat otherwise.
         console.warn(`[v2 reads] could not open ${e.kind} seq=${e.seq} (key=${key ? 'present' : 'MISSING'})`);
+    }
+
+    // A forwarded adapter record (tool call, text, turn lifecycle + usage,
+    // terminal-typed prompt): the daemon sealed the SAME wire shape its
+    // normalizers produced for the old socket lane, so it goes straight to
+    // the normalizer via __v2Plain — tool cards and thinking render as before.
+    if (payload?.t === 'record' && (e.kind === 'output' || e.kind === 'turn.terminal')) {
+        const data = (payload.record.content as { data?: { time?: unknown } }).data;
+        const createdAt = typeof data?.time === 'number' ? data.time : e.createdAt;
+        return {
+            id: e.id, seq, localId: null, createdAt, updatedAt: e.createdAt, content: { t: 'plain' }, __fromV2: true as const,
+            __v2Plain: payload.record,
+        };
     }
 
     if (e.kind === 'turn.queued') {

@@ -688,6 +688,32 @@ export function createCore(db, notify) {
     });
   }
 
+  /** Output the daemon produced OUTSIDE any relay turn (a prompt typed at
+   *  the terminal, an agent finishing after the lane's turn closed). Same
+   *  fence, budget and replay rules as a turn output fact; turnId is null. */
+  async function sessionFact(sessionId, leaseRef, body) {
+    if (body.type !== 'output') throw new ApiError(400, 'bad_fact_type');
+    if ((body.ciphertext?.length ?? 0) > MAX_CIPHERTEXT) throw new ApiError(413, 'ciphertext_too_large');
+    const out = await db.tx(async (t) => {
+      const lease = await fencedLease(t, leaseRef.id, leaseRef.token_hash, leaseRef.epoch);
+      const s = await loadSession(t, sessionId, null);
+      if (s.owner_daemon_id !== lease.daemon_id || s.account_id !== lease.account_id) throw new ApiError(403, 'not_owner_daemon');
+      if (body.runtimeEventId) {
+        const dupe = await one(t, `SELECT seq FROM session_events WHERE session_id = $1 AND runtime_event_id = $2`,
+          [s.id, body.runtimeEventId]);
+        if (dupe) return { ok: true, seq: String(dupe.seq), replay: true, accountId: s.account_id };
+      }
+      const { rows: [{ n }] } = await t.query(`SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [s.id]);
+      if (n >= MAX_EVENTS_PER_SESSION) throw new ApiError(429, 'session_event_budget_exhausted');
+      const { seq } = await nextSeq(t, s.id);
+      await appendEvent(t, s.id, seq, { kind: body.kind ?? 'output', turnId: null, runtimeEventId: body.runtimeEventId ?? null, ciphertext: body.ciphertext });
+      return { ok: true, seq, accountId: s.account_id };
+    });
+    notify.pokeAccount(out.accountId, sessionId, ['events']);
+    const { accountId: _a, ...rest } = out;
+    return rest;
+  }
+
   /** Post-restart resolution — ONLY for orphaned turns (the sweep or a fence
    *  violation put them there). `running` re-fences to the new epoch;
    *  `terminal` goes through the shared terminalization (cancel commands
@@ -861,7 +887,7 @@ export function createCore(db, notify) {
   return {
     createSession, bindSession, acceptPrompt, acceptCancellation,
     acquireLease, renewLease, claimWork, claimControl, deliveryReceived,
-    turnSubmitted, turnStarted, turnFact, reconcileTurn,
+    turnSubmitted, turnStarted, turnFact, sessionFact, reconcileTurn,
     listSessions, sessionState, sessionEvents, sweepExpiredLeases,
     fencedLease, hashToken, assertDaemonOwned, updateSessionCard,
     spawnFailed, retrySpawn,

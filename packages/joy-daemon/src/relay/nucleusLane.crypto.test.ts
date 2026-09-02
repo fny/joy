@@ -6,7 +6,7 @@
 // real daemon output keeps the shape that test assumes.)
 import { describe, it, expect } from "vitest";
 import nacl from "tweetnacl";
-import { encodeContent, decodeContent, decodePrompt, openAttachmentBytes, sealSessionKey, decodeSpawnSpec } from "./nucleusLane";
+import { encodeContent, decodeContent, decodePrompt, openAttachmentBytes, sealSessionKey, decodeSpawnSpec, encodeRecord, decodeRecord } from "./nucleusLane";
 
 describe("daemon v2 crypto (real shipped functions)", () => {
     it("content round-trips under a key", () => {
@@ -87,5 +87,17 @@ describe("daemon v2 crypto (real shipped functions)", () => {
         expect(openAttachmentBytes(new Uint8Array(sealed), nacl.randomBytes(32))).toBeNull();
         expect(openAttachmentBytes(new Uint8Array(3), key)).toBeNull();
         expect(openAttachmentBytes(bytes, null)).toBe(bytes);
+    });
+
+    it("adapter records seal as {t:'record'} and never read as text (or vice versa)", () => {
+        const key = nacl.randomBytes(32);
+        const record = { role: "session" as const, content: { type: "session", data: { id: "e1", time: 1, role: "agent", turn: "t1", ev: { t: "tool-call-start", call: "c1", name: "Read", title: "Read", description: "", args: { path: "x" } } } }, meta: { sentFrom: "joy" } };
+        const ct = encodeRecord(record, key);
+        expect(ct.startsWith("v2e1:")).toBe(true);
+        expect(decodeRecord(ct, key)).toEqual(record);
+        expect(decodeRecord(ct, null)).toBeNull();
+        expect(decodeContent(ct, key)).toBeNull();           // a record is not a text payload
+        expect(decodeRecord(encodeContent("hi", key), key)).toBeNull(); // and text is not a record
+        expect(decodeRecord(encodeRecord(record, null))).toEqual(record);
     });
 });
