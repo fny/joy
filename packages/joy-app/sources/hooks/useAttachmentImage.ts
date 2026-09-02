@@ -16,7 +16,7 @@ import { encodeBase64 } from '@/encryption/base64';
 const MAX_CACHE_BYTES = 48 * 1024 * 1024;
 const cache = new Map<string, string>();
 let cacheBytes = 0;
-const inFlight = new Map<string, Promise<string | null>>();
+const inFlight = new Map<string, Promise<string>>();
 
 function rememberInCache(id: string, dataUri: string) {
     const prev = cache.get(id);
@@ -57,21 +57,25 @@ function detectImageMime(bytes: Uint8Array): string | null {
     return null;
 }
 
-async function loadAttachmentDataUri(sessionId: string, id: string): Promise<string | null> {
+/** Throws with a human-readable reason; the view shows it under the file row
+ *  so a failure on a phone (no console) is diagnosable. */
+async function loadAttachmentDataUri(sessionId: string, id: string): Promise<string> {
     let bytes: Uint8Array;
     try {
         bytes = await sync.fetchAttachment(sessionId, id);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.warn(`[attachment-image] load failed for ${id}: ${message}`);
-        return null;
+        throw new Error(`fetch: ${message}`);
     }
     const mime = detectImageMime(bytes);
     if (!mime) {
-        console.warn(`[attachment-image] ${id}: bytes are not a renderable image`);
-        return null;
+        console.warn(`[attachment-image] ${id}: bytes are not a renderable image (${bytes.length} bytes, head ${Array.from(bytes.slice(0, 4)).join(',')})`);
+        throw new Error(`not an image (${bytes.length} bytes)`);
     }
-    return `data:${mime};base64,${encodeBase64(bytes)}`;
+    let b64: string;
+    try { b64 = encodeBase64(bytes); } catch (err) { throw new Error(`base64: ${err instanceof Error ? err.message : String(err)}`); }
+    return `data:${mime};base64,${b64}`;
 }
 
 export type AttachmentImageState = {
@@ -113,12 +117,8 @@ export function useAttachmentImage(sessionId: string, id: string | undefined): A
 
         promise.then((uri) => {
             if (cancelled) return;
-            if (uri) {
-                rememberInCache(id, uri);
-                setState({ uri, loading: false, error: null });
-            } else {
-                setState({ uri: null, loading: false, error: 'load_failed' });
-            }
+            rememberInCache(id, uri);
+            setState({ uri, loading: false, error: null });
         }).catch((err) => {
             if (cancelled) return;
             const message = err instanceof Error ? err.message : 'unknown';
