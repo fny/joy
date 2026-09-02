@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 2 (3) — Sends that fail come back",
+      "summary": "",
+      "markdown": "- **A message the relay did not accept is no longer lost.** Offline, a session still binding, a refused upload: the text and the pictures go back into the composer and you are told, instead of disappearing with nothing but a console line.\n- **A retried message can no longer arrive twice.** The queued-draft release reuses the message's own id when it retries, and the relay treats that id as the identity of the message — a lost acknowledgement now replays the first delivery rather than queueing a second turn for the agent.\n- **Long sessions no longer stall behind quiet pages.** Catching up after a reconnect could stop on a page of lifecycle-only events and never fetch what came after; the cursor now advances over them.\n- **Attachment limits hold everywhere.** The 10MB per-file cap is checked on the bytes actually read, so pasted or dropped files on web can no longer slip past it; empty files are refused up front. Only PNG, JPEG, GIF and WebP render inline — other files show as a name and size row. Web previews release their memory once sent.\n- **Removed from the app**: the never-shown \"Sending… / Not delivered\" line under messages and the long-press-to-fork gesture (neither could fire on the relay path), the subscription/RevenueCat code, the Claude.ai OAuth helper, the plaintext \"Relay v2 Mode\" developer screen, and a set of unused screens, hooks and native modules. Pairing a terminal now sends only the sealed data-key answer. *Needs the updated relay and daemon: `/joy/v1` is gone from the relay, the daemon refuses legacy (secret-based) pairings.*"
+    },
+    {
       "title": "Sep 2 (2) — Attachments on the relay",
       "summary": "",
       "markdown": "- **Images and files send again.** Attaching a photo, file, paste or drawing to a message uploads it sealed with the session's own key — the relay stores bytes it cannot read — and the daemon drops the file into the session's folder and points the agent at it, so \"look at this screenshot\" works on every agent. If an upload fails the message is held back and you are told, instead of the text going out without its picture.\n- **Attachments show in the chat.** Your sent images appear inline above the bubble (a blurred placeholder until the bytes load), other files as a name and size row, on every device signed in to the account.\n- **Re-pair after updating.** The keys that seal session content are now derived under Joy's own name rather than the old Happy labels. Sealed history written before this update cannot be opened by the new app, and terminals paired before it must be paired again. *Needs the updated daemon on the machine.*"
@@ -136,5 +141,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 2 (2) — Attachments on the relay"
+  "latestTitle": "Sep 2 (3) — Sends that fail come back"
 }

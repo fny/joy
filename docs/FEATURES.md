@@ -52,7 +52,13 @@ every relay; machines register per account.
   prompt. The chat renders images inline (thumbhash placeholder until the
   bytes are opened) and other files as a name + size row above the bubble.
   Session files up to 400KB travel inline over the tunnel, larger via
-  encrypted blobs both directions (readFile spills to blob).
+  encrypted blobs both directions (readFile spills to blob). The 10MB per-file
+  cap is enforced on the bytes actually read (web paste/drop included).
+- **Sends never vanish**: v2 has no optimistic row and no outbox — the user
+  bubble is the relay's `turn.queued` event. A send the relay did not accept
+  (offline, unbound session, refused upload) puts the text and pictures back
+  in the composer with a notice; the draft-release retry reuses its localId
+  as the relay `clientIntentId`, so a lost ack replays instead of duplicating.
 
 ## Chat rendering
 

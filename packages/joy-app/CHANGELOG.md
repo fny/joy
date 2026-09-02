@@ -1,3 +1,11 @@
+# Sep 2 (3) — Sends that fail come back
+
+- **A message the relay did not accept is no longer lost.** Offline, a session still binding, a refused upload: the text and the pictures go back into the composer and you are told, instead of disappearing with nothing but a console line.
+- **A retried message can no longer arrive twice.** The queued-draft release reuses the message's own id when it retries, and the relay treats that id as the identity of the message — a lost acknowledgement now replays the first delivery rather than queueing a second turn for the agent.
+- **Long sessions no longer stall behind quiet pages.** Catching up after a reconnect could stop on a page of lifecycle-only events and never fetch what came after; the cursor now advances over them.
+- **Attachment limits hold everywhere.** The 10MB per-file cap is checked on the bytes actually read, so pasted or dropped files on web can no longer slip past it; empty files are refused up front. Only PNG, JPEG, GIF and WebP render inline — other files show as a name and size row. Web previews release their memory once sent.
+- **Removed from the app**: the never-shown "Sending… / Not delivered" line under messages and the long-press-to-fork gesture (neither could fire on the relay path), the subscription/RevenueCat code, the Claude.ai OAuth helper, the plaintext "Relay v2 Mode" developer screen, and a set of unused screens, hooks and native modules. Pairing a terminal now sends only the sealed data-key answer. *Needs the updated relay and daemon: `/joy/v1` is gone from the relay, the daemon refuses legacy (secret-based) pairings.*
+
 # Sep 2 (2) — Attachments on the relay
 
 - **Images and files send again.** Attaching a photo, file, paste or drawing to a message uploads it sealed with the session's own key — the relay stores bytes it cannot read — and the daemon drops the file into the session's folder and points the agent at it, so "look at this screenshot" works on every agent. If an upload fails the message is held back and you are told, instead of the text going out without its picture.
