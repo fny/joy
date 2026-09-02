@@ -296,14 +296,24 @@ export function createCore(db, notify) {
 
   // ── Prompt acceptance ─────────────────────────────────────────────────────
 
-  async function acceptPrompt(accountId, actorId, sessionId, body) {
+  /** hooks.beforeAccept(t) / hooks.afterAccept(t, accepted) run INSIDE the
+   *  acceptance transaction, after the replay check — the attachment
+   *  reference + claim ride the same commit as the command, so a crash can
+   *  never leave an accepted prompt pointing at a sweepable attachment, and
+   *  a replayed retry never re-references anything. */
+  async function acceptPrompt(accountId, actorId, sessionId, body, hooks = {}) {
     if ((body.ciphertext?.length ?? 0) > MAX_CIPHERTEXT) throw new ApiError(413, 'ciphertext_too_large');
-    const hash = requestHash({ kind: 'prompt', clientIntentId: body.clientIntentId, ciphertext: body.ciphertext });
+    // The hash covers the INTENT, not the ciphertext: sealed content is
+    // re-nonced on every seal, so a retried send of the same message never
+    // reproduces the bytes — hashing them would turn every honest retry
+    // into idempotency_mismatch. The clientIntentId is the identity.
+    const hash = requestHash({ kind: 'prompt', clientIntentId: body.clientIntentId });
     let daemonId = null;
     const accepted = await db.tx(async (t) => {
       const s = await loadSession(t, sessionId, accountId);
       const replay = await findExistingIntent(t, sessionId, actorId, body.clientIntentId, hash);
       if (replay) return replay;
+      if (hooks.beforeAccept) await hooks.beforeAccept(t);
       // No prompts before the session key exists (spawned sessions bind
       // first) or after the session is dead.
       if (s.state === 'provisioning' || s.state === 'failed' || s.state === 'archived') {
@@ -332,10 +342,12 @@ export function createCore(db, notify) {
         [turnId, sessionId, commandId, seq],
       );
       daemonId = s.owner_daemon_id;
-      return {
+      const out = {
         clientIntentId: body.clientIntentId, requestHash: hash, commandId, eventId,
         seq, turnId, disposition: 'queued',
       };
+      if (hooks.afterAccept) await hooks.afterAccept(t, out);
+      return out;
     });
     if (daemonId) notify.wakeDaemon(daemonId, 'work');
     notify.pokeAccount(accountId, sessionId, ['events', 'state']);

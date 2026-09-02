@@ -3,7 +3,7 @@
 #
 #   joy-app (web :8082) ─┐
 #   joy-daemon ──────────┼──▶ joy-relay :3105 (PGlite: accounts, machines,
-#   joy CLI / actors ────┘                     push, /joy/v1 + /joy/v2 plane)
+#   joy CLI / actors ────┘                     push, /joy/v2 plane)
 #
 # The relay is the only server. Nothing here touches the live daemon on this
 # box (different ports, homes, tmux sockets) and nothing reaches any remote
@@ -32,7 +32,7 @@ start_relay() {
 
 wait_healthy() {
   for i in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:$RELAY_PORT/joy/v1/capabilities" >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:$RELAY_PORT/joy/v2/capabilities" >/dev/null 2>&1; then
       echo "stack healthy: relay answering on :$RELAY_PORT"
       return 0
     fi

@@ -13,7 +13,6 @@ import { createNotify } from './src/notify.mjs';
 import { createAuth } from './src/auth.mjs';
 import { createTokenAuthority } from './src/tokens.mjs';
 import { createAccounts } from './src/accounts.mjs';
-import { createRouter } from './src/routes.mjs';
 import { createGate } from './src/gate.mjs';
 import { createTunnel } from './src/tunnel.mjs';
 import { createV2Router } from './src/v2.mjs';
@@ -44,7 +43,6 @@ const tokens = await createTokenAuthority({ secret: tokenSecret(), issuers: ISSU
 const accounts = createAccounts(db, tokens);
 const auth = createAuth({ tokens, accounts });
 const tunnel = createTunnel({ notify });
-const router = createRouter({ core, auth, notify, db, tunnel });
 const attachments = createAttachments(db);
 const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
 
@@ -66,9 +64,8 @@ const server = http.createServer(async (req, res) => {
     if (await v2.handle(req, res)) return;
   }
   if (!gate.allows(req)) return gate.rejectHttp(res);
-  if (handleDocs(req, res, { version: '0.2.0', routeTable: { routes: router.routeTable(), served: true } })) return;
+  if (handleDocs(req, res, { version: '0.2.0', routeTable: { routes: v2.routeTable(), served: true } })) return;
   if (await v2.handle(req, res)) return;
-  if (await router.handle(req, res)) return;
   res.writeHead(404, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ error: 'not_found', relay: 'joy-relay' }));
 });

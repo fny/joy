@@ -1,15 +1,13 @@
 // Browsable JOY relay API docs: GET /openapi.json + GET /docs (Redoc) on both
-// entrypoints. Documents the /joy/v1 surface ONLY, generated from the live
-// route table (routes.mjs routeTable()) so it cannot drift from dispatch.
-// /joy/v2 (accounts, sessions, tunnel) is documented in docs/API.md; the
-// generated table below covers the /joy/v1 nucleus routes.
+// entrypoints. The path table is generated from the live /joy/v2 route
+// table (v2.mjs routeTable()) so it cannot drift from dispatch; the
+// narrative for each surface lives in docs/API.md.
 // The perimeter gate wraps these like everything else once it's flipped.
 
 const P = { type: 'object', additionalProperties: true };
 
-/** /joy/v1 paths generated from the router's own table (routes.mjs
- *  routeTable() incl. per-route doc blocks) — docs cannot drift from
- *  dispatch, and every operation renders full request/response fields. */
+/** Paths generated from the router's own table — docs cannot drift from
+ *  dispatch. Per-route `doc` blocks (body/result/errors) are optional. */
 function nativePaths(routeTable) {
   const paths = {};
   for (const r of routeTable) {
@@ -36,7 +34,7 @@ function nativePaths(routeTable) {
     (paths[path] ??= {})[r.method.toLowerCase()] = {
       summary: r.summary,
       ...(doc.description ? { description: doc.description } : {}),
-      tags: [doc.tag ?? 'joy/v1'],
+      tags: [doc.tag ?? 'joy/v2'],
       ...(r.auth ? {} : { security: [] }),
       ...(r.sse ? { 'x-sse': true } : {}),
       parameters,
@@ -66,19 +64,19 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
         '- Daemon surface: the lease token (`x-joy-lease-token`, plus `x-joy-lease-id` / `x-joy-lease-epoch` on lifecycle writes) — never the bearer.',
         '- When the perimeter gate is enabled, EVERY request additionally carries `x-joy-relay-key` (or `?joyRelayKey=`), derived from the account secret.',
         '',
-        'Machine-level operations (queue, pane, usage, limits, agent config…) are the joy-daemon\'s API — see its local /docs on each machine. The /joy/v2 account, session and tunnel surface is described in docs/API.md; there is no upstream — unknown paths are 404.',
+        'Machine-level operations (queue, pane, usage, limits, agent config…) are the joy-daemon\'s API — see its local /docs on each machine. The /joy/v2 account, session, attachment and tunnel surface is described in docs/API.md; there is no upstream — unknown paths are 404.',
       ].join('\n'),
     },
     servers: [{ url: host }],
-    ...(routeTable?.served === false ? { 'x-note': 'On this instance /joy/v1 requests are currently served by the dev relay (:14997); the API below is identical.' } : {}),
     components: {
       securitySchemes: {
-        bearer: { type: 'http', scheme: 'bearer', description: 'Account/machine token from /v1/auth' },
+        bearer: { type: 'http', scheme: 'bearer', description: 'Account token from POST /joy/v2/auth' },
         relayKey: { type: 'apiKey', in: 'header', name: 'x-joy-relay-key', description: 'Perimeter key (only when the gate is enabled; derived from the account secret)' },
       },
     },
     security: [{ bearer: [] }],
     tags: [
+      { name: 'joy/v2', description: 'Every route the relay serves. Client surface uses the account bearer; daemon-surface routes (/daemon/*) use the lease token.' },
       { name: 'Meta', description: 'Protocol discovery.' },
       { name: 'Sessions', description: 'Durable sessions: the relay-owned record of each agent conversation. Clients create, list, snapshot, and page the append-only event log; the SSE stream pushes change pokes. Content is E2E ciphertext throughout.' },
       { name: 'Turns', description: 'The durable prompt queue. A turn is one prompt\'s lifecycle: queued → dispatching → running → terminal (completed | failed | cancelled | interrupted). Cancel-before-start is airtight; cancel-while-running rides the control lane.' },
@@ -86,8 +84,8 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
       { name: 'Daemon lifecycle', description: 'Fenced write-backs from the executing daemon: ack deliveries, bind spawned sessions, flip turns through submitted/started, stream facts (receipt / output / terminal), and reconcile orphans after a restart. All fenced by the x-joy-lease-* header triplet inside each transaction.' },
     ],
     'x-tagGroups': [
-      { name: 'Client surface', tags: ['Meta', 'Sessions', 'Turns'] },
-      { name: 'Daemon surface', tags: ['Daemon leases', 'Daemon lifecycle'] },
+      { name: 'Routes', tags: ['joy/v2'] },
+      { name: 'Concepts', tags: ['Meta', 'Sessions', 'Turns', 'Daemon leases', 'Daemon lifecycle'] },
     ],
     paths: nativePaths(routeTable?.routes ?? []),
   };

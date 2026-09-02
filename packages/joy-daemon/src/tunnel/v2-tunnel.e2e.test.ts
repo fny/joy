@@ -22,7 +22,6 @@ import { openDb } from "../../../joy-relay/src/db.mjs";
 import { createCore } from "../../../joy-relay/src/core.mjs";
 import { createNotify } from "../../../joy-relay/src/notify.mjs";
 import { createTestRelayAccounts } from "./testRelayAccounts";
-import { createRouter } from "../../../joy-relay/src/routes.mjs";
 import { createV2Router } from "../../../joy-relay/src/v2.mjs";
 import { createTunnel } from "../../../joy-relay/src/tunnel.mjs";
 import { createAttachments } from "../../../joy-relay/src/attachments.mjs";
@@ -60,19 +59,17 @@ beforeAll(async () => {
   tokA = acc.tokA; tokB = acc.tokB;
   const tunnel = createTunnel({ notify });
   const attachments = createAttachments(db);
-  const v1 = createRouter({ core, auth, notify, db, tunnel });
   const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
   relay = http.createServer((req, res) => {
     void (async () => {
       if (await v2.handle(req, res)) return;
-      if (await v1.handle(req, res)) return;
       res.writeHead(404); res.end();
     })();
   });
   await new Promise<void>((r) => relay.listen(0, "127.0.0.1", r));
   relayUrl = `http://127.0.0.1:${(relay.address() as any).port}`;
 
-  // The REAL daemon HTTP server (v1 catalog + v2 plane) over a stub registry.
+  // The REAL daemon HTTP server (v2 plane) over a stub registry.
   const fakeSession = {
     id: "abcd1234", agentFlavor: "claude", cwd: repo,
     toJSON: () => ({ id: "abcd1234", cwd: repo, agent: "claude" }),
@@ -153,13 +150,6 @@ test("typed grep through the tunnel", async () => {
   const body = JSON.parse(Buffer.from(r.body).toString());
   expect(body.success).toBe(true);
   expect(body.stdout).toContain("remote.txt");
-});
-
-test("both entries route to the same tunnel: v1 entry serves v2 paths too", async () => {
-  const r = await call({ entryBase: "/joy/v1/daemons", path: "/v2/harnesses" });
-  expect(r.status).toBe(200);
-  const body = JSON.parse(Buffer.from(r.body).toString());
-  expect(body.harnesses.map((h: any) => h.id)).toEqual(["claude", "codex", "opencode", "pi"]);
 });
 
 test("v2 entry enforces machine ownership before the tunnel", async () => {

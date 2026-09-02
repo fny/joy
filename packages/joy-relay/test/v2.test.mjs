@@ -7,7 +7,6 @@ import { randomUUID, createHash } from 'node:crypto';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import { createNotify } from '../src/notify.mjs';
-import { createRouter } from '../src/routes.mjs';
 import { createV2Router } from '../src/v2.mjs';
 import { createTunnel } from '../src/tunnel.mjs';
 import { createAttachments } from '../src/attachments.mjs';
@@ -23,11 +22,9 @@ beforeAll(async () => {
   const auth = { verifyToken: async (t) => TOKENS.get(t) ?? null };
   const tunnel = createTunnel({ notify });
   const attachments = createAttachments(db);
-  const v1 = createRouter({ core, auth, notify, db, tunnel });
   const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments });
   server = http.createServer(async (req, res) => {
     if (await v2.handle(req, res)) return;
-    if (await v1.handle(req, res)) return;
     res.writeHead(599); res.end('would-passthrough');
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -228,6 +225,50 @@ describe('v2 sessions + messages lifecycle', () => {
     const right = await call('POST', `/joy/v2/sessions/${sessionId}/turns/${m1.turnId}/cancellations`, { body: {} });
     expect(right.status).toBe(200);
     expect(right.json.disposition).toBe('cancellation_requested');
+  });
+});
+
+describe('v2 send idempotency', () => {
+  it('capabilities probe answers without auth', async () => {
+    const r = await fetch(`${base}/joy/v2/capabilities`);
+    expect(r.status).toBe(200);
+    expect((await r.json()).relay).toBe('joy-relay');
+  });
+
+  it('same clientIntentId replays the first acceptance even when the (re-sealed) ciphertext differs', async () => {
+    const d = makeDaemon('mach-idem');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    await d.bind(sessionId, { localSessionId: 'w1', sessionKeyEnvelope: 'wrapped-key' });
+    const clientIntentId = randomUUID();
+    const first = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { clientIntentId, ciphertext: 'v2e1:nonceA' } });
+    expect(first.status).toBe(202);
+    // A retry re-seals under a fresh nonce: different bytes, same intent —
+    // the relay must answer with the SAME message, never a second turn.
+    const retry = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { clientIntentId, ciphertext: 'v2e1:nonceB' } });
+    expect(retry.status).toBe(202);
+    expect(retry.json.messageId).toBe(first.json.messageId);
+    expect(retry.json.turnId).toBe(first.json.turnId);
+    const list = await call('GET', `/joy/v2/sessions/${sessionId}/messages`);
+    expect(list.json.messages.filter((m) => m.id === first.json.messageId).length).toBe(1);
+    expect(list.json.messages.length).toBe(1);
+    // A retry that ALSO re-uploaded its attachment cites a different id; the
+    // replay ignores the outer list (nothing to reference twice).
+    const bytes = Buffer.from('sealed-bytes-retry');
+    const up = await call('POST', '/joy/v2/attachments', { raw: bytes, headers: { 'x-session': sessionId } });
+    const again = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { clientIntentId, ciphertext: 'v2e1:nonceC', attachments: [up.json.attachmentId] } });
+    expect(again.status).toBe(202);
+    expect(again.json.messageId).toBe(first.json.messageId);
+  });
+
+  it('attachment reference + claim commit with the message: an unknown id rejects the whole send', async () => {
+    const d = makeDaemon('mach-atomic');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    await d.bind(sessionId, { localSessionId: 'w1', sessionKeyEnvelope: 'wrapped-key' });
+    const bad = await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'x', attachments: [randomUUID()] } });
+    expect(bad.status).toBe(422);
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}/messages`)).json.messages.length).toBe(0);
   });
 });
 
@@ -484,23 +525,6 @@ describe('v2 spawn dir-missing → client retry', () => {
   });
 });
 
-describe('v2 does not disturb v1', () => {
-  it('v1 paths still answer on the same server', async () => {
-    const caps = await call('GET', '/joy/v1/capabilities', { token: null });
-    expect(caps.status).toBe(200);
-    expect(caps.json.protocol.major).toBe(1);
-    const v1sessions = await call('GET', '/joy/v1/sessions');
-    expect(v1sessions.status).toBe(200);
-  });
-
-  it('a session created via v2 is visible via v1 and vice versa (same store)', async () => {
-    const d = makeDaemon('mach-shared');
-    await d.acquire();
-    const sessionId = await makeSession(d);
-    const v1 = await call('GET', '/joy/v1/sessions');
-    expect(v1.json.sessions.some((s) => s.sessionId === sessionId)).toBe(true);
-  });
-});
 
 describe('review fixes: regression coverage', () => {
   it('retry refuses an orphan with a pending cancellation', async () => {
@@ -596,7 +620,7 @@ describe('review fixes: regression coverage', () => {
     });
     expect(ok.status).toBe(202);
     // Age everything past the TTL; the referenced row must survive the sweep.
-    await db.query(`UPDATE attachments SET created_at = now() - interval '2 days'`);
+    await db.query(`UPDATE attachments SET created_at = now() - interval '2 days' WHERE session_id = $1`, [sessionId]);
     const swept = await att.sweepOrphans();
     expect(swept).toBe(1);
     expect((await call('GET', `/joy/v2/attachments/${orphan}`)).status).toBe(404);

@@ -122,7 +122,7 @@ export default function ServerConfigScreen() {
             
             // joy-relay answers its unauthenticated capabilities probe with
             // `relay: 'joy-relay'`; anything else is not a relay we can talk to.
-            const response = await fetch(`${url.replace(/\/+$/, '')}/joy/v1/capabilities`, {
+            const response = await fetch(`${url.replace(/\/+$/, '')}/joy/v2/capabilities`, {
                 method: 'GET',
                 headers: {
                     'Accept': 'application/json'
