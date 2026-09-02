@@ -1,8 +1,8 @@
 // PGlite-backed store for the native protocol. One embedded postgres, one
 // process, one writer — every mutation runs inside tx(), which PGlite
 // serializes by construction, so "lock the session row" is structural rather
-// than something we can get wrong. The reserved postgres quadlet stays
-// available if this ever needs to move to a real server; the SQL is plain.
+// than something we can get wrong. The SQL is plain, so moving to a real
+// postgres server later is a driver swap, not a rewrite.
 import { PGlite } from '@electric-sql/pglite';
 
 /** Ordered, append-only migrations. Tracked in _migrations by index. */
