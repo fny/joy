@@ -82,7 +82,7 @@ const IMMEDIATE_COMMANDS = new Set([
     'model', 'effort',
     'btw', 'goal', 'stop', 'mcp', 'skills', 'hooks', 'loops', 'color',
     'doctor', 'version', 'focus', 'brief', 'daemon',
-    'steer', 'title', 'login-code',
+    'steer', 'title', 'login-code', 'joy-prompt',
 ]);
 
 export const SessionView = React.memo((props: { id: string }) => {

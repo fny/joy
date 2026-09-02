@@ -62,6 +62,7 @@ const DEFAULT_COMMANDS: CommandItem[] = [
     { command: 'steer', description: 'Send straight to the agent now, bypassing the queue' },
     { command: 'btw', description: 'Ask a quick side question without interrupting the main conversation' },
     { command: 'title', description: 'Set the conversation title' },
+    { command: 'joy-prompt', description: 'Re-send the current joy instructions to the agent' },
 ];
 
 // Command descriptions for known tools/commands
