@@ -1,3 +1,10 @@
+# Sep 3 — Sessions can talk to each other
+
+- **Messages from another session are marked.** When a joy session (or a script at a shell) sends a message into one of your sessions through the daemon, the chat shows a "from ‹session›" line above it and a quieter bubble, so you can tell a peer's message from your own. The agent sees the same provenance and knows where to reply.
+- **Machine page: Environment.** Provider keys every new session on a machine should inherit (a Fireworks key for pi, for example) can now be added and removed from the machine page; they travel down the sealed tunnel once and are stored encrypted on the machine. Existing `~/.joy/env` files are sealed into the store automatically.
+- **Pickers use `<joy-options>`.** The agent tag for tap-to-answer questions was renamed to match the rest of the joy tags; sessions pick it up on their next start or `/joy-prompt`.
+- *Needs the updated daemon.* The `joy` CLI grew a matching set of verbs (`ls`, `check`, `about`, `ask`, `send`, `wait`, `events`, `abort`, `approvals`, `queue`, `mode`, `pane`, `env`).
+
 # Sep 2 (5) — Sending from the phone works again
 
 - **Messages send from iOS and Android.** Sealing a message used a text helper the native crypto module does not provide, so every send from a phone failed with "undefined is not a function" while reading worked. Desktop and web were unaffected.

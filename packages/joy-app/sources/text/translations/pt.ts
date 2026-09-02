@@ -316,6 +316,7 @@ export const pt: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `de ${from}`,
         inputPlaceholder: 'Digite uma mensagem ...',
         inactiveArchived: 'Esta sessão está inativa.',
         resumeFromTerminal: 'Para retomá-la pelo terminal:',
@@ -871,6 +872,16 @@ export const pt: TranslationStructure = {
     },
 
     machine: {
+        environment: 'Ambiente',
+        environmentFooter: 'Chaves de provedores (FIREWORKS_API_KEY, …) que toda nova sessão nesta máquina herda. Guardadas cifradas na máquina; os valores nunca voltam ao app.',
+        environmentAdd: 'Adicionar variável',
+        environmentAddSubtitle: 'Nome e depois valor — vale para sessões iniciadas a partir de agora',
+        environmentNamePrompt: 'Nome da variável',
+        environmentValuePrompt: ({ name }: { name: string }) => `Valor de ${name}`,
+        environmentRemoveTitle: 'Remover variável',
+        environmentRemoveMessage: ({ name }: { name: string }) => `Remover ${name} desta máquina? Sessões em andamento a mantêm até reiniciar.`,
+        environmentNone: 'Nenhuma variável ainda',
+        environmentUnavailable: 'Pareie esta máquina primeiro (joy auth) para liberar o armazenamento',
         offlineUnableToSpawn: 'Inicializador desativado enquanto a máquina está offline',
         offlineHelp: '• Verifique se seu computador está online\n• Execute `joy status` para diagnosticar',
         launchNewSessionInDirectory: 'Iniciar nova sessão no diretório',

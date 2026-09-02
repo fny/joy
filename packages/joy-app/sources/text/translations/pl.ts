@@ -334,6 +334,7 @@ export const pl: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `od ${from}`,
         inputPlaceholder: 'Wpisz wiadomość...',
         inactiveArchived: 'Ta sesja jest nieaktywna.',
         resumeFromTerminal: 'Aby wznowić ją z terminala:',
@@ -888,6 +889,16 @@ export const pl: TranslationStructure = {
     },
 
     machine: {
+        environment: 'Środowisko',
+        environmentFooter: 'Klucze dostawców (FIREWORKS_API_KEY, …), które dziedziczy każda nowa sesja na tej maszynie. Przechowywane na maszynie w postaci zaszyfrowanej; wartości nie wracają do aplikacji.',
+        environmentAdd: 'Dodaj zmienną',
+        environmentAddSubtitle: 'Nazwa, potem wartość — obowiązuje dla sesji uruchomionych od teraz',
+        environmentNamePrompt: 'Nazwa zmiennej',
+        environmentValuePrompt: ({ name }: { name: string }) => `Wartość dla ${name}`,
+        environmentRemoveTitle: 'Usuń zmienną',
+        environmentRemoveMessage: ({ name }: { name: string }) => `Usunąć ${name} z tej maszyny? Działające sesje zachowają ją do restartu.`,
+        environmentNone: 'Brak zmiennych',
+        environmentUnavailable: 'Najpierw sparuj maszynę (joy auth), aby odblokować magazyn',
         offlineUnableToSpawn: 'Launcher wyłączony, gdy maszyna jest offline',
         offlineHelp: '• Upewnij się, że komputer jest online\n• Uruchom `joy status`, aby zdiagnozować',
         launchNewSessionInDirectory: 'Uruchom nową sesję w katalogu',

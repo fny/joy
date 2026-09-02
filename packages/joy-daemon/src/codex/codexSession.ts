@@ -510,6 +510,12 @@ export class CodexSession implements AgentSession {
     void this.#relay?.updateCodexApproval(head ? head.info : null);
   }
 
+  /** Every approval codex is holding, oldest first (joy approvals / check). */
+  listApprovals(): Array<{ requestId: string; kind: string; title: string; detail?: string; since: number }> {
+    return [...this.#pendingApprovals.values()].map((p) => ({
+      requestId: p.info.requestId, kind: p.info.kind, title: p.info.title, detail: p.info.detail, since: p.info.since,
+    }));
+  }
   /** The app answers the head approval (POST /v2/sessions/:id/approvals over
    *  the tunnel — transports/v2.ts). */
   answerApproval(params: Record<string, unknown> | undefined): { ok: boolean } {

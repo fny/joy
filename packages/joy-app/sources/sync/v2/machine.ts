@@ -154,3 +154,11 @@ export const machineSlashCommandsAll = (ctx: MachineOnlyCtx, refresh = false) =>
     jm<{ slashCommands: string[] }>(ctx, 'GET', `/v2/slash-commands${refresh ? '?refresh=1' : ''}`);
 
 export { TunnelError, tunnelFetch };
+
+// ── sealed environment store (provider keys every new session inherits) ────
+export const machineEnvList = (ctx: MachineOnlyCtx) =>
+    jm<{ ok?: boolean; names?: string[]; error?: string }>(ctx, 'GET', '/v2/env');
+export const machineEnvSet = (ctx: MachineOnlyCtx, name: string, value: string) =>
+    jm<{ ok?: boolean; error?: string }>(ctx, 'POST', '/v2/env', { name, value });
+export const machineEnvUnset = (ctx: MachineOnlyCtx, name: string) =>
+    jm<{ ok?: boolean; existed?: boolean; error?: string }>(ctx, 'DELETE', `/v2/env/${encodeURIComponent(name)}`);

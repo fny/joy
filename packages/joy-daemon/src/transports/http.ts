@@ -11,6 +11,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
+import { sessionRecords, latestRecordSeq, subscribeRecords } from "../relay/relay";
 import { buildOpenApiSpec } from "./openapi";
 import { handleV2 } from "./v2";
 
@@ -183,6 +184,27 @@ export function startHttpServer(opts: {
     if (method === "GET" && /^\/session\/[^/]+$/.test(url.pathname)) return html("session.html");
     if (method === "GET" && /^\/session\/[^/]+\/screenshot$/.test(url.pathname)) return html("screenshot.html");
 
+    // Per-session record stream (joy events / wait / ask): NDJSON, history
+    // first (?after=<seq> or ?last=<n>), then live records while ?follow=1.
+    // Each line: { seq, at, record, localId? }; the first line is
+    // { hello: true, seq } so a follower knows where history ended.
+    const evm = method === "GET" ? url.pathname.match(/^\/sessions\/([^/]+)\/events$/) : null;
+    if (evm) {
+      const sid = decodeURIComponent(evm[1]);
+      if (!registry.get(sid)) return json({ error: "session_not_found" }, 404);
+      const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : undefined;
+      const last = url.searchParams.has("last") ? Number(url.searchParams.get("last")) : undefined;
+      const follow = url.searchParams.get("follow") === "1";
+      res.writeHead(200, { ...corsHeaders, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
+      const history = sessionRecords(sid, { after, last });
+      const upTo = latestRecordSeq(sid);
+      res.write(JSON.stringify({ hello: true, seq: upTo }) + "\n");
+      for (const r of history) res.write(JSON.stringify(r) + "\n");
+      if (!follow) return res.end();
+      const unsubscribe = subscribeRecords(sid, (r) => { res.write(JSON.stringify(r) + "\n"); });
+      res.on("close", unsubscribe);
+      return;
+    }
     if (method === "GET" && url.pathname === "/events") {
       res.writeHead(200, {
         ...corsHeaders,

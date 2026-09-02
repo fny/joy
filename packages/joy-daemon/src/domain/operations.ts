@@ -13,6 +13,8 @@
 // unwrapped 201, kill's 404) are expressed via the optional httpShape.
 
 import type { Session } from "../claude/session";
+import { sessionRecords } from "../relay/relay";
+import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic } from "./fileOps";
@@ -195,6 +197,38 @@ export interface SessionOp {
 export type Op = MachineOp | SessionOp;
 
 // ── Machine-scoped operations ───────────────────────────────────────────────
+
+
+/** "Can I talk to this session right now?" — the one computation behind
+ *  `joy check`, `joy wait`, and the app's needs-input state. needs_input
+ *  = a held approval, or the last assistant text ended in a <joy-options>
+ *  block (a question with answers offered). */
+export function checkSession(registry: SessionRegistry, id: string): Record<string, unknown> {
+  const session = registry.get(id);
+  if (!session) return { error: "session_not_found", state: "ended" };
+  const permissionMode = session.detectPermissionMode();
+  if (session.status === "ended") return { state: "ended", reason: session.endReason ?? null, permissionMode };
+  const approvals = session.listApprovals?.() ?? [];
+  const qs = session.queueState() as { pendingCount?: number; paused?: boolean };
+  const queue = qs.pendingCount ?? 0;
+  if (approvals.length > 0) return { state: "needs_input", approvals, queue, permissionMode };
+  if (session.busy()) {
+    const started = sessionRecords(id).filter((r) => (r.record.content as { data?: { ev?: { t?: string } } }).data?.ev?.t === "turn-start").pop();
+    return { state: "busy", busySince: started?.at ?? null, queue, paused: qs.paused === true, permissionMode };
+  }
+  // Question offered as options: the last text record ends with a joy-options block.
+  const lastText = [...sessionRecords(id)].reverse().find((r) => {
+    const ev = (r.record.content as { data?: { ev?: { t?: string; text?: string } } }).data?.ev;
+    return ev?.t === "text" && typeof ev.text === "string";
+  });
+  const text = ((lastText?.record.content as { data?: { ev?: { text?: string } } })?.data?.ev?.text ?? "").trim();
+  if (/<\/joy-options>\s*$/.test(text)) {
+    const question = text.replace(/<joy-options>[\s\S]*$/, "").trim().split("\n").slice(-3).join("\n");
+    const options = [...text.matchAll(/<joy-option>([\s\S]*?)<\/joy-option>/g)].map((m) => m[1].trim());
+    return { state: "needs_input", question, options, queue, permissionMode };
+  }
+  return { state: "idle", queue, permissionMode, lastActiveAt: (session as { lastActiveAt?: number }).lastActiveAt ?? null };
+}
 
 export const machineOps: MachineOp[] = [
   {
@@ -463,20 +497,23 @@ export const machineOps: MachineOp[] = [
     name: "send",
     scope: "machine",
     rpcName: "joy-send",
-    summary: "Deliver text to a session (queue-routed)",
+    summary: "Deliver text to a session (queue-routed); optional provenance stamp for agent-to-agent messages",
     params: {
       type: "object",
       required: ["id", "text"],
       properties: {
         id: { type: "string", description: "joy session id" },
         text: { type: "string", description: "Message text; /steer, /title, /joy-prompt etc. are intercepted daemon-side" },
+        from: { type: "string", description: "Sender identity: joy:<session id> (must exist here), cli, app, or cron:<name>. The daemon wraps the text in <joy-message from=… reply-to=…> — never trust a caller-written wrapper." },
+        replyTo: { type: "string", description: "Where the callee should answer (joy:<id>); omit for no-reply-expected. Defaults to `from` when that is a joy session." },
+        exclusive: { type: "boolean", description: "Scripting contract: refuse (busy) instead of queueing when work is in flight, and only drive yolo/read-only sessions" },
       },
     },
-    result: { type: "object", properties: { ok: { type: "boolean" }, queued: { type: "object" }, error: { type: "string" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, chat_id: { type: "string" }, queued_id: { type: "string" }, error: { type: "string" } } },
     http: { method: "POST", path: "/send" },
     handler: (registry, params, meta) => {
-      const text = typeof params.text === "string" ? params.text : "";
-      if (!text.trim()) return { error: "empty" };
+      const rawText = typeof params.text === "string" ? params.text : "";
+      if (!rawText.trim()) return { error: "empty" };
       const session = params.session_id ? registry.get(String(params.session_id)) : undefined;
       if (!session) return { error: "session_not_found" };
       // exclusive: the scripting contract (joy CLI / other programs). Refuse
@@ -491,7 +528,20 @@ export const machineOps: MachineOp[] = [
           return { error: "mode_not_scriptable", mode: mode ?? "unknown" };
         }
       }
-      const trimmed = text.trim();
+      // Provenance: the DAEMON writes the wrapper. A joy:<id> sender must be a
+      // session this daemon knows (an agent cannot claim to be another one
+      // that does not exist here); a caller-supplied wrapper in the text is
+      // stripped so it cannot forge the attribute.
+      let text = rawText.trim().replace(/^<joy-message\b[^>]*>\s*/i, "").replace(/\s*<\/joy-message>\s*$/i, "");
+      const from = typeof params.from === "string" ? params.from.trim() : "";
+      if (from) {
+        const okFrom = /^joy:[0-9a-f]{8}$/.test(from) ? !!registry.get(from.slice(4)) : /^(cli|app|cron:[A-Za-z0-9_.-]{1,64})$/.test(from);
+        if (!okFrom) return { error: "bad_from", from };
+        const replyTo = typeof params.replyTo === "string" ? params.replyTo.trim() : (from.startsWith("joy:") ? from : "");
+        if (replyTo && !/^joy:[0-9a-f]{8}$/.test(replyTo)) return { error: "bad_reply_to", replyTo };
+        text = `<joy-message from="${from}"${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${text}\n</joy-message>`;
+      }
+      const trimmed = text;
       const source = meta.via === "http" ? "web" as const : "rpc" as const;
       const chat_id = registry.nextChatId();
       registry.addChatMessage({ role: "user", content: trimmed, source, chat_id, session_id: session.claudeSessionId });
@@ -501,8 +551,8 @@ export const machineOps: MachineOp[] = [
       // true — unlike a relay app-send, a /send has NO chat bubble until dispatch
       // mirrors it, so showing it as a queued chip is real "not sent yet" state,
       // not a duplicate. mirrorToRelay so it reaches the app's history on dispatch.
-      session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true });
-      return { ok: true, chat_id };
+      const queued = session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true });
+      return { ok: true, chat_id, queued_id: queued?.id ?? null };
     },
     httpShape: (result) => {
       const r = result as { error?: string };
@@ -710,6 +760,84 @@ export const machineOps: MachineOp[] = [
       (result as { error?: string }).error
         ? { status: 404, body: result }
         : { status: 200, body: result },
+  },
+  {
+    name: "check",
+    scope: "machine",
+    rpcName: "joy-check",
+    summary: "Can this session be talked to right now? idle | busy | needs_input, with what it is waiting on",
+    params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+    result: { type: "object", properties: { state: { type: "string", enum: ["idle", "busy", "needs_input", "ended"] }, busySince: { type: "number" }, queue: { type: "number" }, approvals: { type: "array" }, question: { type: "string" } } },
+    http: { method: "GET", path: "/sessions/:id/check" },
+    handler: (registry, params) => checkSession(registry, String(params.id ?? params.session_id ?? "")),
+    httpShape: (result) => (result as { error?: string }).error === "session_not_found" ? { status: 404, body: result } : { status: 200, body: result },
+  },
+  {
+    name: "approvalsList",
+    scope: "machine",
+    rpcName: "joy-approvals",
+    summary: "Tool-call approvals the harness is holding for a human (codex); empty for agents without the concept",
+    params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, approvals: { type: "array" } } },
+    http: { method: "GET", path: "/sessions/:id/approvals" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      return { ok: true, approvals: session.listApprovals?.() ?? [] };
+    },
+    httpShape: (result) => (result as { error?: string }).error ? { status: 404, body: result } : { status: 200, body: result },
+  },
+  {
+    name: "approvalsAnswer",
+    scope: "machine",
+    rpcName: "joy-approvals-answer",
+    summary: "Answer a held approval: { requestId, decision: 'allow' | 'deny' }",
+    params: { type: "object", required: ["id", "requestId", "decision"], properties: { id: { type: "string" }, requestId: { type: "string" }, decision: { type: "string", enum: ["allow", "deny"] } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, error: { type: "string" } } },
+    http: { method: "POST", path: "/sessions/:id/approvals" },
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      if (!session.answerApproval) return { error: "approvals_unsupported" };
+      return session.answerApproval({ requestId: params.requestId, decision: params.decision === "allow" });
+    },
+    httpShape: (result) => (result as { error?: string }).error ? { status: 400, body: result } : { status: 200, body: result },
+  },
+  {
+    name: "envList",
+    scope: "machine",
+    rpcName: "joy-env-list",
+    summary: "Names in the sealed environment store (~/.joy/env.sealed) — values never leave the daemon",
+    result: { type: "object", properties: { ok: { type: "boolean" }, names: { type: "array", items: { type: "string" } }, error: { type: "string" } } },
+    http: { method: "GET", path: "/env" },
+    handler: () => listEnvVars(),
+  },
+  {
+    name: "envSet",
+    scope: "machine",
+    rpcName: "joy-env-set",
+    summary: "Set a variable in the sealed store; reaches every agent spawned from now on",
+    params: { type: "object", required: ["name", "value"], properties: { name: { type: "string" }, value: { type: "string" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, error: { type: "string" } } },
+    http: { method: "POST", path: "/env" },
+    handler: (_registry, params) => {
+      const name = typeof params.name === "string" ? params.name.trim() : "";
+      if (!isValidEnvName(name)) return { error: "bad_name" };
+      if (typeof params.value !== "string") return { error: "bad_value" };
+      return setEnvVar(name, params.value);
+    },
+    httpShape: (result) => (result as { error?: string }).error ? { status: 400, body: result } : { status: 200, body: result },
+  },
+  {
+    name: "envUnset",
+    scope: "machine",
+    rpcName: "joy-env-unset",
+    summary: "Remove a variable from the sealed store",
+    params: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, existed: { type: "boolean" }, error: { type: "string" } } },
+    http: { method: "DELETE", path: "/env/:name" },
+    handler: (_registry, params) => unsetEnvVar(String(params.name ?? "")),
+    httpShape: (result) => (result as { error?: string }).error ? { status: 400, body: result } : { status: 200, body: result },
   },
   {
     name: "status",

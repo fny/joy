@@ -760,6 +760,14 @@ export class RelaySession {
    * `localId` is the adapter's stable dedupe key (becomes the runtimeEventId).
    */
   send(wire: WireRecord, localId?: string): void {
+    // A joy-message wrapper on a user row carries provenance the daemon
+    // stamped (operations joy-send): surface it as structured meta so the app
+    // renders "from joy:<id>" without parsing XML.
+    if (wire.role === "user") {
+      const from = joyMessageFrom((wire.content as { text?: unknown }).text);
+      if (from) wire.meta = { ...(wire.meta ?? {}), from };
+    }
+    appendRecord(this.relaySessionId, wire, localId);
     recordSink?.(this.relaySessionId, wire, localId);
   }
 
@@ -912,6 +920,51 @@ export function initRelay(): RelayClient | null {
   log(`initialized → ${creds.serverUrl}`);
   return client;
 }
+
+/** Provenance attribute of a daemon-stamped <joy-message from="…"> wrapper. */
+export function joyMessageFrom(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const m = /^\s*<joy-message\b[^>]*\bfrom="([^"]+)"/.exec(text);
+  return m ? m[1] : null;
+}
+
+// ── per-session record log (joy events / check / ask) ──────────────────────
+// Every record an adapter hands to RelaySession.send, in order, with a seq —
+// the machine-local twin of the relay's sealed output log. Bounded per
+// session; a reader that wants more history has the relay.
+export interface LoggedRecord { seq: number; at: number; record: WireRecord; localId?: string }
+const RECORD_LOG_MAX = 2000;
+const recordLogs = new Map<string, LoggedRecord[]>();
+const recordSeqs = new Map<string, number>();
+const recordSubs = new Map<string, Set<(r: LoggedRecord) => void>>();
+
+function appendRecord(localSessionId: string, record: WireRecord, localId?: string): void {
+  const seq = (recordSeqs.get(localSessionId) ?? 0) + 1;
+  recordSeqs.set(localSessionId, seq);
+  const entry: LoggedRecord = { seq, at: Date.now(), record, localId };
+  let log = recordLogs.get(localSessionId);
+  if (!log) { log = []; recordLogs.set(localSessionId, log); }
+  log.push(entry);
+  if (log.length > RECORD_LOG_MAX) log.splice(0, log.length - RECORD_LOG_MAX);
+  const subs = recordSubs.get(localSessionId);
+  if (subs) for (const fn of subs) { try { fn(entry); } catch { /* subscriber's problem */ } }
+}
+
+/** Records for a session: everything after `after` (seq), or the last `last`. */
+export function sessionRecords(localSessionId: string, opts: { after?: number; last?: number } = {}): LoggedRecord[] {
+  const log = recordLogs.get(localSessionId) ?? [];
+  let out = opts.after !== undefined ? log.filter((r) => r.seq > opts.after!) : log;
+  if (opts.last !== undefined) out = out.slice(-opts.last);
+  return out;
+}
+export function latestRecordSeq(localSessionId: string): number { return recordSeqs.get(localSessionId) ?? 0; }
+export function subscribeRecords(localSessionId: string, fn: (r: LoggedRecord) => void): () => void {
+  let subs = recordSubs.get(localSessionId);
+  if (!subs) { subs = new Set(); recordSubs.set(localSessionId, subs); }
+  subs.add(fn);
+  return () => { subs!.delete(fn); };
+}
+export function forgetRecords(localSessionId: string): void { recordLogs.delete(localSessionId); recordSeqs.delete(localSessionId); recordSubs.delete(localSessionId); }
 
 /** Where RelaySession.send delivers records. One sink per process (the
  *  nucleus lane); null while no lane is running — records are then dropped,

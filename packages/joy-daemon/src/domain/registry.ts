@@ -10,6 +10,7 @@ import { homedir } from "os";
 import { run } from "../tmux/shell";
 import { tmux, tmuxHandleFor, disposeTmuxHandle, type TmuxDriver } from "../tmux/driver";
 import { tmuxServerLabel, tmuxNamesFor, TMUX_AGENT_WINDOW } from "../paths";
+import { applyEnvStore } from "./envStore";
 import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
@@ -290,6 +291,10 @@ export class SessionRegistry {
         throw new DirectoryCreationApprovalRequired(cwd);
       }
     }
+    // Provider keys from the sealed store, refreshed at EVERY spawn so a key
+    // set from the app since boot reaches this session (every agent's process
+    // — tmux server, app-server, pi — inherits process.env).
+    applyEnvStore();
 
     // Per-session server: this session's own tmux server (-L label), created
     // below via new-session; its control client attaches per handle. Legacy
@@ -395,7 +400,7 @@ export class SessionRegistry {
     // Flag list builder, parameterized on whether --continue is included.
     const buildFlags = (withContinue: boolean): string[] => {
       const f: string[] = [];
-      // Teach Claude the <options> convention the app renders as a picker (the
+      // Teach Claude the <joy-options> convention the app renders as a picker (the
       // the app SDK injected this per-message; a tmux pane can't, so bake it in).
       f.push("--append-system-prompt", optionsPromptArg());
       if (claudeSettings) f.push("--settings", `'${claudeSettings}'`);
@@ -617,8 +622,13 @@ export class SessionRegistry {
       else throw new DirectoryCreationApprovalRequired(cwd);
     }
     const requested = PI_MODELS.find((m) => m.spec === opts.model) ?? defaultPiModel();
+    // pi persists sessions itself (~/.pi/agent/sessions/<cwd>/…): a fresh
+    // session gets an id we choose (--session-id), so the record can resume
+    // it; --resume <id> reuses one; --continue takes pi's newest for the cwd.
+    const piSessionId = opts.resume_id ?? (opts.continue ? undefined : crypto.randomUUID());
     const session = new PiSession({
       id, cwd, model: requested.spec, status: "starting", startedAt: Date.now(),
+      piSessionId, continueLast: opts.continue === true && !opts.resume_id,
     }, this.#sessionDeps());
     this.#sessions.set(id, session);
     saveWindowRecord(id, { launchCwd: cwd, agent: "pi" });

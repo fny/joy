@@ -362,6 +362,7 @@ export const en = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `from ${from}`,
         inputPlaceholder: 'Type a message ...',
         inactiveArchived: 'This session is inactive.',
         resumeFromTerminal: 'To resume it from the terminal:',
@@ -919,6 +920,16 @@ export const en = {
     },
 
     machine: {
+        environment: 'Environment',
+        environmentFooter: 'Provider keys (FIREWORKS_API_KEY, …) every new session on this machine inherits. Stored sealed on the machine; values never come back to the app.',
+        environmentAdd: 'Add variable',
+        environmentAddSubtitle: 'Name, then value — applies to sessions started from now on',
+        environmentNamePrompt: 'Variable name',
+        environmentValuePrompt: ({ name }: { name: string }) => `Value for ${name}`,
+        environmentRemoveTitle: 'Remove variable',
+        environmentRemoveMessage: ({ name }: { name: string }) => `Remove ${name} from this machine? Running sessions keep it until they restart.`,
+        environmentNone: 'No variables yet',
+        environmentUnavailable: 'Pair this machine first (joy auth) to unlock the store',
         launchNewSessionInDirectory: 'Launch New Session in Directory',
         offlineUnableToSpawn: 'Launcher disabled while machine is offline',
         offlineHelp: '• Make sure your computer is online\n• Run `joy status` to diagnose',

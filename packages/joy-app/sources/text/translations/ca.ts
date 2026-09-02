@@ -317,6 +317,7 @@ export const ca: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `de ${from}`,
         inputPlaceholder: 'Escriu un missatge...',
         inactiveArchived: 'Aquesta sessió està inactiva.',
         resumeFromTerminal: 'Per reprendre-la des del terminal:',
@@ -872,6 +873,16 @@ export const ca: TranslationStructure = {
     },
 
     machine: {
+        environment: 'Entorn',
+        environmentFooter: 'Claus de proveïdors (FIREWORKS_API_KEY, …) que hereta cada sessió nova en aquesta màquina. Es desen xifrades a la màquina; els valors mai tornen a l\'app.',
+        environmentAdd: 'Afegeix una variable',
+        environmentAddSubtitle: 'Nom i després valor — s\'aplica a les sessions iniciades a partir d\'ara',
+        environmentNamePrompt: 'Nom de la variable',
+        environmentValuePrompt: ({ name }: { name: string }) => `Valor de ${name}`,
+        environmentRemoveTitle: 'Elimina la variable',
+        environmentRemoveMessage: ({ name }: { name: string }) => `Vols eliminar ${name} d'aquesta màquina? Les sessions en curs la conserven fins que es reiniciïn.`,
+        environmentNone: 'Encara no hi ha variables',
+        environmentUnavailable: 'Aparella aquesta màquina primer (joy auth) per desbloquejar el magatzem',
         offlineUnableToSpawn: 'El llançador està desactivat mentre la màquina està fora de línia',
         offlineHelp: '• Assegura\'t que l\'ordinador estigui en línia\n• Executa `joy status` per diagnosticar',
         launchNewSessionInDirectory: 'Inicia una nova sessió al directori',

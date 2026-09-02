@@ -318,6 +318,7 @@ export const ja: TranslationStructure = {
     },
 
     session: {
+        messageFrom: ({ from }: { from: string }) => `${from} から`,
         inputPlaceholder: 'メッセージを入力...',
         inactiveArchived: 'このセッションは非アクティブです。',
         resumeFromTerminal: 'ターミナルから再開するには:',
@@ -873,6 +874,16 @@ export const ja: TranslationStructure = {
     },
 
     machine: {
+        environment: '環境変数',
+        environmentFooter: 'このマシンで新しく起動する各セッションが引き継ぐプロバイダーのキー（FIREWORKS_API_KEY など）。マシン上に暗号化して保存され、値がアプリに戻ることはありません。',
+        environmentAdd: '変数を追加',
+        environmentAddSubtitle: '名前、次に値 — 以後に起動するセッションに適用されます',
+        environmentNamePrompt: '変数名',
+        environmentValuePrompt: ({ name }: { name: string }) => `${name} の値`,
+        environmentRemoveTitle: '変数を削除',
+        environmentRemoveMessage: ({ name }: { name: string }) => `${name} をこのマシンから削除しますか？実行中のセッションは再起動まで保持します。`,
+        environmentNone: '変数はまだありません',
+        environmentUnavailable: 'ストアを使うには先にこのマシンをペアリングしてください（joy auth）',
         launchNewSessionInDirectory: 'ディレクトリで新しいセッションを起動',
         offlineUnableToSpawn: 'マシンがオフラインのためランチャーは無効です',
         offlineHelp: '• コンピューターがオンラインであることを確認してください\n• `joy status`を実行して診断してください',

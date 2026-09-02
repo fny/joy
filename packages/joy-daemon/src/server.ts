@@ -19,29 +19,19 @@ import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
 import { mkdirSync, writeFileSync, readFileSync } from "fs";
 import { initRelay, loadCredentials } from "./relay/relay.ts";
+import { migrateLegacyEnvFile, applyEnvStore } from "./domain/envStore";
 import { startNucleusLane } from "./relay/nucleusLane.ts";
 import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
 import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
 
-// ~/.joy/env: optional KEY=value lines loaded into the daemon's environment at
-// boot (never overriding real env). This is how provider API keys (e.g.
-// FIREWORKS_API_KEY for the pi flavor) reach spawned agent processes on every
-// platform — one file instead of per-platform systemd drop-ins / launchd
-// plist edits. Lines starting with # are comments; `export ` prefixes are
-// tolerated so a shell-style file works as-is.
-try {
-  const envFile = readFileSync(join(joyHomeDir(), "env"), "utf8");
-  for (const raw of envFile.split("\n")) {
-    const line = raw.trim().replace(/^export\s+/, "");
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    const value = line.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
-    if (key && !(key in process.env)) process.env[key] = value;
-  }
-} catch { /* no ~/.joy/env — fine */ }
+// Provider keys for spawned agents live in the sealed store (~/.joy/env.sealed,
+// domain/envStore.ts — set from the app or `joy env set`). A plaintext
+// ~/.joy/env from before is sealed into it here and removed. applyEnvStore
+// runs again before every spawn, so a key added later reaches the next
+// session without a restart.
+migrateLegacyEnvFile((line) => process.stderr.write(line + "\n"));
+applyEnvStore();
 import { SessionRegistry } from "./domain/registry";
 import { startHttpServer } from "./transports/http";
 import { computeUsage, periodToRange } from "./claude/usage";

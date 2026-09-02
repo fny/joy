@@ -112,7 +112,12 @@ function UserTextBlock(props: {
   // chips, no echo-hiding — that design was removed, see parseLocalCommandMessage).
   // Harness-injected pseudo-XML blocks (task notifications, system reminders,
   // unknown tags) — render as cards/chips or strip, so raw XML never shows.
-  const rawText = props.message.displayText || props.message.text;
+  // A message another joy session (or a shell, or a cron) sent through the
+  // daemon arrives wrapped in <joy-message from=… reply-to=…>; the daemon
+  // also stamps meta.from. Show the sender, hide the wrapper.
+  const wrapped = /^\s*<joy-message\b([^>]*)>([\s\S]*?)<\/joy-message>\s*$/.exec(props.message.text);
+  const from = props.message.meta?.from ?? (wrapped ? /\bfrom="([^"]+)"/.exec(wrapped[1])?.[1] : undefined);
+  const rawText = props.message.displayText || (wrapped ? wrapped[2].trim() : props.message.text);
   // Post-compaction summary: a wall of machine-generated context, not a user
   // message — render as a collapsed toggle row (like tool calls), not a bubble.
   if (props.message.isCompactSummary) {
@@ -159,7 +164,13 @@ function UserTextBlock(props: {
           {attachments.map((a) => <AttachmentView key={a.id} sessionId={props.sessionId} attachment={a} />)}
         </View>
       )}
-      {bodyText.trim().length > 0 && <View style={styles.userMessageBubble}>
+      {from && (
+        <View style={styles.fromRow}>
+          <Ionicons name={from.startsWith('joy:') ? 'git-network-outline' : from.startsWith('cron:') ? 'time-outline' : 'terminal-outline'} size={12} style={styles.fromIcon} />
+          <Text style={styles.fromText}>{t('session.messageFrom', { from: from.replace(/^joy:/, '') })}</Text>
+        </View>
+      )}
+      {bodyText.trim().length > 0 && <View style={[styles.userMessageBubble, from ? styles.peerMessageBubble : null]}>
         {isMonoCommand
           ? <Text style={[styles.monoMessageText, scaledBubbleText]} selectable>{bodyText}</Text>
           : slashMatch
@@ -426,6 +437,28 @@ const styles = StyleSheet.create((theme) => ({
     gap: 6,
     marginBottom: 12,
     maxWidth: '100%',
+  },
+  // Peer messages (from another joy session / a shell) — same shape, a
+  // quieter tint plus the sender line above.
+  peerMessageBubble: {
+    backgroundColor: theme.colors.surfaceHigh,
+    borderWidth: 1,
+    borderColor: theme.colors.divider,
+  },
+  fromRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 4,
+    paddingHorizontal: 2,
+  },
+  fromIcon: {
+    color: theme.colors.textSecondary,
+  },
+  fromText: {
+    fontSize: 11,
+    color: theme.colors.textSecondary,
+    ...Typography.default('semiBold'),
   },
   userMessageBubble: {
     backgroundColor: theme.colors.userMessageBackground,

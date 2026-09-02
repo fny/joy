@@ -314,6 +314,15 @@ route("POST", "/v2/sessions/:id/queue/:qid/move", withSession(async (ctx, _s, p,
 route("POST", "/v2/sessions/:id/queue/resume", withSession(async (ctx, _s, p) =>
   ok(await mcall("queueResume", ctx.registry, { id: p.id }))));
 
+// ── environment store (sealed provider keys; names only leave the daemon) ──
+route("GET", "/v2/env", async (ctx) => ok(await mcall("envList", ctx.registry, {})));
+route("POST", "/v2/env", async (ctx, _p, body) => ok(await mcall("envSet", ctx.registry, body)));
+route("DELETE", "/v2/env/:name", async (ctx, p) => ok(await mcall("envUnset", ctx.registry, { name: p.name })));
+
+// ── talk-ability + held approvals (joy check / joy approvals) ──────────────
+route("GET", "/v2/sessions/:id/check", async (ctx, p) => ok(await mcall("check", ctx.registry, { id: p.id })));
+route("GET", "/v2/sessions/:id/approvals", async (ctx, p) => ok(await mcall("approvalsList", ctx.registry, { id: p.id })));
+
 // ── approvals (codex holds tool calls for a human decision) ─────────────────
 route("POST", "/v2/sessions/:id/approvals", withSession(async (_ctx, session, _p, body) => {
   const answer = (session as { answerApproval?: (p: Record<string, unknown>) => { ok: boolean } }).answerApproval;
