@@ -326,7 +326,7 @@ async function cmdNotify(args: string[]): Promise<number> {
 // removes (two daemons, two accounts, one very long debugging session).
 function serviceName(): string { return "joy-daemon"; }
 function systemdUnitPath(): string { return join(homedir(), ".config", "systemd", "user", `${serviceName()}.service`); }
-const LAUNCHD_LABEL = "vip.voltai.joy-daemon";
+const LAUNCHD_LABEL = "vip.faraz.joy-daemon";
 function launchdLabel(): string { return LAUNCHD_LABEL; } // one agent per machine, as with systemd
 function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`); }
 // Historical service names (joy-tmux until 2026-08-13, joy-server for a few
@@ -334,7 +334,7 @@ function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchA
 // removeService() tears these down too, so a re-install MIGRATES the old unit
 // away instead of leaving two daemons supervising the same tmux server.
 const LEGACY_SERVICE_BASES = ["joy-tmux", "joy-server", "joy-daemon"];
-const LEGACY_LAUNCHD_LABELS = ["vip.voltai.joy-tmux", "party.voltai.joy-tmux", "vip.voltai.joy-server"];
+const LEGACY_LAUNCHD_LABELS = ["vip.voltai.joy-tmux", "party.voltai.joy-tmux", "vip.voltai.joy-server", "vip.voltai.joy-daemon"];
 
 // Every systemd unit name that may exist on this machine: the current name,
 // plus each legacy base BOTH bare and with the per-relay suffix the old naming
