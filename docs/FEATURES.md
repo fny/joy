@@ -158,6 +158,31 @@ ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
 - Dev tools: always-on developer pages, OTA identity + manual update check,
   in-app changelog (What's New), 10-tap dev mode.
 
+## Voice (bring-your-own ElevenLabs agent)
+
+- Settings → Voice holds a list of agents: name + agent id (public agent), or
+  name + agent id + API key (private agent, authentication on). One is "in
+  use". The key lives in synced settings (end-to-end encrypted) and is used
+  only on the device to mint single-use WebRTC conversation tokens; no server
+  is involved (`sources/realtime/elevenLabs.ts`).
+- The composer mic arms voice for the open session and connects. States
+  (`sources/realtime/RealtimeSession.ts`): ARMED (no connection, nothing
+  billed) ↔ LIVE (conversation open). Idle hang-up after
+  `voiceIdleTimeoutSec` of silence; session events (turn ended, held
+  approval, `<joy-options>` question) wake an armed voice when
+  `voiceWakeOnEvents` is on. The spoken transcript survives hang-ups and is
+  replayed on reconnect (continuation prompt); × on the voice bar disarms.
+- Context feed (`realtime/hooks/voiceHooks.ts`): focus changes and new
+  messages are silent contextual updates; turn end, approvals and questions
+  are prompts the agent speaks. Client tools the agent must declare:
+  `sendMessageToSession(sessionId, message)` and
+  `processPermissionRequest(requestId, decision)`. The system prompt and
+  first message are overridden on every connect (dashboard overrides must be
+  enabled).
+- Native modules: `@elevenlabs/react-native` over LiveKit/WebRTC (pinned to
+  the versions in the July 3 native build; `@elevenlabs/react` on web).
+  `patches/fix-livekit-room-reuse.cjs` forces the `/rtc` v0 path.
+
 ## Cross-cutting invariants
 
 - Three packages, no upstream: joy-app, joy-daemon, joy-relay. There is no

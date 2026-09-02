@@ -12,6 +12,9 @@ import {
 import { getSuggestions } from '@/components/autocomplete/suggestions';
 import { ChatHeaderView } from '@/components/ChatHeaderView';
 import { ChatList, type ChatListHandle } from '@/components/ChatList';
+import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
+import { startVoice } from '@/realtime/RealtimeSession';
+import { useRealtimeStatus, useVoiceArmedSessionId } from '@/sync/storage';
 import { SessionSearchBar } from './SessionSearchBar';
 import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
@@ -93,6 +96,9 @@ export const SessionView = React.memo((props: { id: string }) => {
     const deviceType = useDeviceType();
     const headerHeight = useHeaderHeight();
     const isTablet = useIsTablet();
+    const realtimeStatus = useRealtimeStatus();
+    const voiceArmedSessionId = useVoiceArmedSessionId();
+    const voiceBarVisible = realtimeStatus !== 'disconnected' || voiceArmedSessionId !== null;
     const { width: windowWidth } = useWindowDimensions();
     const fileDiffsSidebarEnabled = useSetting('fileDiffsSidebar');
     const zenMode = useLocalSetting('zenMode');
@@ -333,11 +339,15 @@ export const SessionView = React.memo((props: { id: string }) => {
                         onBackPress={() => router.back()}
                     />
                     <MachineResourceBanner machineId={session?.metadata?.machineId} />
+                    {/* Voice status bar below header - not on tablet (shown in sidebar) */}
+                    {!isTablet && voiceBarVisible && (
+                        <VoiceAssistantStatusBar variant="full" />
+                    )}
                 </View>
             )}
 
             {/* Content based on state */}
-            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight : 0 }}>
+            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && voiceBarVisible ? 32 : 0) : 0 }}>
                 {!isDataReady ? (
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
@@ -1006,6 +1016,16 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         </>
     ) : null;
 
+    // Voice: the mic in the send slot arms voice for this session and opens
+    // the conversation. While live or standing by the status bar owns the
+    // controls and the slot goes back to send.
+    const voiceStatus = useRealtimeStatus();
+    const voiceArmed = useVoiceArmedSessionId() !== null;
+    const handleMicrophonePress = React.useCallback(() => {
+        void startVoice(sessionId);
+    }, [sessionId]);
+    const isMicActive = voiceStatus !== 'disconnected' || voiceArmed;
+
     const composer = (
         <>
         {isJoyDaemon && (
@@ -1038,6 +1058,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             connectionStatus={connectionStatus}
             blockSend={false}
             onSend={handleSend}
+            onMicPress={isDisconnected ? undefined : handleMicrophonePress}
+            isMicActive={isMicActive}
             onSaveDraft={handleSaveDraft}
             onAbort={isDisconnected ? undefined : handleAbort}
             showAbortButton={sessionStatus.state === 'thinking'}

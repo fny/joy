@@ -20,6 +20,8 @@
     "pnpm": {
         "overrides": {
             "whatwg-url": "14.2.0",
+            "@livekit/components-react": "2.9.19",
+            "@livekit/components-core": "0.12.12",
             "parse-path": "7.0.3",
             "@types/parse-path": "7.0.3"
         },

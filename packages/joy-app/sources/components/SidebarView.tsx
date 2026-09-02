@@ -9,6 +9,7 @@ import { t } from '@/text';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Typography } from '@/constants/Typography';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
+import { VoiceAssistantStatusBar } from './VoiceAssistantStatusBar';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -82,6 +83,9 @@ export const SidebarView = React.memo(() => {
                 <Ionicons name="create-outline" size={16} color={stylesheet.newSessionText.color} />
                 <Text style={styles.newSessionText}>{t('sidebar.newSession')}</Text>
             </Pressable>
+
+            {/* Voice status (renders nothing while voice is off) */}
+            <VoiceAssistantStatusBar variant="sidebar" />
 
             {/* Sessions list */}
             <MainView variant="sidebar" />

@@ -45,6 +45,18 @@ export const SettingsSchema = z.object({
     joy__doubleTapEnabled: z.boolean().describe('Mod 06: require double tap to commit AskUserQuestion option/submit selections'),
     joy__tmuxServerUrl: z.string().nullable().describe('URL of the joy-tmux server for session management'),
     joy__newSessionDefault: z.boolean().describe('Joy: New session buttons open the joy-tmux create page instead of /new'),
+    // Voice (ElevenLabs Conversational AI, bring-your-own agent). Synced
+    // end-to-end encrypted like every other setting; the API key never goes
+    // anywhere but api.elevenlabs.io from the device.
+    voiceAgents: z.array(z.object({
+        id: z.string(),
+        name: z.string(),
+        agentId: z.string(),
+        apiKey: z.string().nullish(),
+    })).describe('Voice agents the user added: a public agent id alone, or a private one with its API key'),
+    voiceActiveAgentId: z.string().nullable().describe('Which voice agent to use (id from voiceAgents)'),
+    voiceWakeOnEvents: z.boolean().describe('While voice is armed, session events (turn ended, approval, question) reconnect and speak'),
+    voiceIdleTimeoutSec: z.number().describe('Seconds of silence before an open voice conversation hangs up (stays armed); 0 = never'),
     dismissedCLIWarnings: z.object({
         perMachine: z.record(z.string(), z.object({
             claude: z.boolean().optional(),
@@ -110,6 +122,10 @@ export const settingsDefaults: Settings = {
     joy__doubleTapEnabled: false,
     joy__tmuxServerUrl: null,
     joy__newSessionDefault: false,
+    voiceAgents: [],
+    voiceActiveAgentId: null,
+    voiceWakeOnEvents: true,
+    voiceIdleTimeoutSec: 45,
     agentDefaultOverrides: {},
     dismissedCLIWarnings: { perMachine: {}, global: {} },
 };

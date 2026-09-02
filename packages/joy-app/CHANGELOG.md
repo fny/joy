@@ -1,3 +1,9 @@
+# Sep 3 (2) — Voice is back, bring your own agent
+
+- **Talk to your sessions.** The mic in the composer opens a voice conversation with your own ElevenLabs Conversational AI agent. It hears what the focused session is doing, can send a message into any session, answer a held tool approval, and read out a `<joy-options>` question so you can pick by voice. Works on phone, desktop and web.
+- **Standing by costs nothing.** After a stretch of silence (45 seconds by default, Settings → Voice) the conversation hangs up but stays *armed*: when a turn ends, an approval is held or a question is asked, it reconnects and speaks. The spoken transcript carries over, so it picks up where you left off. The × on the voice bar ends it for good.
+- **Bring your own agent.** Settings → Voice: add an agent by name and agent id (public agent), or with an API key (private agent with authentication on). The key lives in your encrypted settings and is only used to mint conversation tokens on your device; no server is involved.
+
 # Sep 3 — Sessions can talk to each other
 
 - **Messages from another session are marked.** When a joy session (or a script at a shell) sends a message into one of your sessions through the daemon, the chat shows a "from ‹session›" line above it and a quieter bubble, so you can tell a peer's message from your own. The agent sees the same provenance and knows where to reply.
