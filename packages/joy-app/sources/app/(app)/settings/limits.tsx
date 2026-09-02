@@ -17,15 +17,36 @@ import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
 import { machineLimitsOnly } from '@/sync/v2/machine';
 
-interface Bucket { utilization?: number; resets_at?: string }
-interface CodexWindow { used_percent?: number; window_minutes?: number; resets_in_seconds?: number; resets_at?: number }
-interface LimitsReply {
+// Normalized shape the daemon's tunnel route returns per harness
+// (`GET /v2/harnesses/:harness/limits`): one row per quota window.
+interface LimitRow {
+    id: string;
+    usedPercent: number;
+    /** ISO string; codex rows may carry unix seconds instead. */
+    resetsAt?: string | number | null;
+    windowMinutes?: number;
+    scope?: string;
+}
+interface HarnessLimits {
     ok?: boolean;
-    claude?: { ok: true; limits: Record<string, Bucket | null | undefined> } | { ok: false; error: string };
-    codex?: { ok: true; limits: { primary?: CodexWindow | null; secondary?: CodexWindow | null; observedAt?: string } } | { ok: false; error: string };
+    harness?: string;
+    limits?: LimitRow[];
+    status?: { state?: string };
+    error?: { code?: string; message?: string };
+    observedAt?: number;
+}
+interface LimitsReply {
+    claude?: HarnessLimits;
+    codex?: HarnessLimits;
 }
 
 const HOT = 80;
+
+function toDate(at: string | number | null | undefined): Date | null {
+    if (at == null) return null;
+    if (typeof at === 'number') return new Date(at < 1e12 ? at * 1000 : at);
+    return new Date(at);
+}
 
 function resetLabel(at: Date | null): string | null {
     if (!at || isNaN(at.getTime())) return null;
@@ -44,12 +65,43 @@ function windowName(minutes: number | undefined, fallback: string): string {
     return `${Math.round(minutes / 1440)}-day window`;
 }
 
-const CLAUDE_BUCKETS: Array<{ key: string; label: string }> = [
-    { key: 'five_hour', label: '5-hour window' },
-    { key: 'seven_day', label: 'Weekly window' },
-    { key: 'seven_day_opus', label: 'Weekly · Opus' },
-    { key: 'seven_day_sonnet', label: 'Weekly · Sonnet' },
-];
+const KNOWN_WINDOWS: Record<string, string> = {
+    five_hour: '5-hour window',
+    seven_day: 'Weekly window',
+    seven_day_opus: 'Weekly · Opus',
+    seven_day_sonnet: 'Weekly · Sonnet',
+};
+
+function rowLabel(row: LimitRow, index: number): string {
+    if (KNOWN_WINDOWS[row.id]) return KNOWN_WINDOWS[row.id];
+    if (row.id === 'primary' || row.id === 'secondary') {
+        return windowName(row.windowMinutes, index === 0 ? 'Primary window' : 'Secondary window');
+    }
+    return row.windowMinutes != null ? windowName(row.windowMinutes, row.id) : row.id;
+}
+
+function HarnessSection(props: { title: string; data: HarnessLimits | undefined; emptyText: string }) {
+    const { data } = props;
+    let body: React.ReactNode;
+    if (!data) {
+        body = <Text style={styles.errorText}>unavailable</Text>;
+    } else if (data.error?.message) {
+        body = <Text style={styles.errorText}>{data.error.message}</Text>;
+    } else {
+        const rows = (data.limits ?? []).filter(r => typeof r.usedPercent === 'number');
+        body = rows.length === 0
+            ? <Text style={styles.errorText}>{props.emptyText}</Text>
+            : rows.map((r, i) => (
+                <LimitBar key={r.id} label={rowLabel(r, i)} percent={r.usedPercent} sub={resetLabel(toDate(r.resetsAt))} />
+            ));
+    }
+    return (
+        <>
+            <Text style={styles.sectionTitle}>{props.title}</Text>
+            {body}
+        </>
+    );
+}
 
 function LimitBar(props: { label: string; percent: number; sub?: string | null }) {
     const { theme } = useUnistyles();
@@ -83,7 +135,7 @@ function MachineLimits(props: { machineId: string; name: string }) {
                         // v2: per-harness limits from the daemon over the tunnel,
                         // merged into the legacy {claude, codex} reply shape.
                         ? Promise.all([machineLimitsOnly(c, 'claude'), machineLimitsOnly(c, 'codex')])
-                            .then(([cl, cx]) => ({ ok: true, claude: cl.data, codex: cx.data }) as unknown as LimitsReply)
+                            .then(([cl, cx]) => ({ claude: cl.data as HarnessLimits | undefined, codex: cx.data as HarnessLimits | undefined }) as LimitsReply)
                         : Promise.reject(new Error('no machine context')); })(),
                     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('daemon did not respond — joy update needed?')), 30000)),
                 ]);
@@ -107,31 +159,8 @@ function MachineLimits(props: { machineId: string; name: string }) {
             {state.phase === 'error' && <Text style={styles.errorText}>{state.message}</Text>}
             {state.phase === 'done' && (
                 <>
-                    <Text style={styles.sectionTitle}>Claude</Text>
-                    {state.reply.claude?.ok ? (
-                        CLAUDE_BUCKETS.flatMap(({ key, label }) => {
-                            const b = (state.reply.claude as { limits: Record<string, Bucket | null | undefined> }).limits[key];
-                            if (!b || b.utilization == null) return [];
-                            return [<LimitBar key={key} label={label} percent={b.utilization} sub={resetLabel(b.resets_at ? new Date(b.resets_at) : null)} />];
-                        })
-                    ) : (
-                        <Text style={styles.errorText}>{state.reply.claude?.ok === false ? state.reply.claude.error : 'unavailable'}</Text>
-                    )}
-                    <Text style={styles.sectionTitle}>Codex</Text>
-                    {state.reply.codex?.ok ? (
-                        (() => {
-                            const l = (state.reply.codex as { limits: { primary?: CodexWindow | null; secondary?: CodexWindow | null } }).limits;
-                            const rows = [l.primary, l.secondary].filter((w): w is CodexWindow => !!w && w.used_percent != null);
-                            if (rows.length === 0) return <Text style={styles.errorText}>no recent codex activity</Text>;
-                            return rows.map((w, i) => {
-                                const resetAt = w.resets_at != null ? new Date(w.resets_at * 1000)
-                                    : w.resets_in_seconds != null ? new Date(Date.now() + w.resets_in_seconds * 1000) : null;
-                                return <LimitBar key={i} label={windowName(w.window_minutes, i === 0 ? 'Primary window' : 'Secondary window')} percent={w.used_percent ?? 0} sub={resetLabel(resetAt)} />;
-                            });
-                        })()
-                    ) : (
-                        <Text style={styles.errorText}>{state.reply.codex?.ok === false ? state.reply.codex.error : 'unavailable'}</Text>
-                    )}
+                    <HarnessSection title="Claude" data={state.reply.claude} emptyText="no limits reported" />
+                    <HarnessSection title="Codex" data={state.reply.codex} emptyText="no recent codex activity" />
                 </>
             )}
         </View>
