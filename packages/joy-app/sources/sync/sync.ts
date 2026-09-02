@@ -1497,6 +1497,15 @@ export const sync = new Sync();
 if (typeof globalThis !== 'undefined') {
     (globalThis as { __joyV2?: unknown }).__joyV2 = {
         machineCtx: (sid: string) => sync.machineCtx(sid),
+        // Machine-scoped (no session) probe: mirrors the machine page's
+        // joy-status health check so the harness can see WHY it fails.
+        machineStatus: async (machineId: string) => {
+            const ctx = sync.machineOnlyCtx(machineId);
+            if (!ctx) return { error: 'no machineOnlyCtx (no token or machine data key yet)' };
+            const { machineStatusOnly } = await import('./v2/machine');
+            try { return await machineStatusOnly(ctx); }
+            catch (e) { return { error: `ERR ${(e as Error).name}: ${(e as Error).message}` }; }
+        },
         cardProbe: async (v2id: string) => {
             const { v2 } = await import('./v2/api');
             const { openCard } = await import('./v2/card');
