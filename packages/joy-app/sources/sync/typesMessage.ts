@@ -1,4 +1,4 @@
-import { AgentEvent } from "./typesRaw";
+import { AgentEvent, MessageAttachment } from "./typesRaw";
 import { MessageMeta } from "./typesMessageMeta";
 
 export type ToolCall = {
@@ -45,6 +45,8 @@ export type UserTextMessage = {
     claudeUuid?: string;
     /** Post-compaction summary — rendered as a collapsed block, not a bubble. */
     isCompactSummary?: boolean;
+    /** Files sent with this prompt; bytes are fetched on demand by id. */
+    attachments?: MessageAttachment[];
 }
 
 export type ModeSwitchMessage = {

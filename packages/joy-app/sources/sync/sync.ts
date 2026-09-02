@@ -9,8 +9,11 @@ import { ApiMessage } from './apiTypes';
 import { Session, Machine } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
 import { randomUUID } from 'expo-crypto';
-import { sealV2Content } from './v2/crypto';
-import { v2, v2SendCiphertext, v2ActiveTurn, v2CancelTurn, connectV2Stream } from './v2/api';
+import * as Crypto from 'expo-crypto';
+import { sealV2Content, sealV2Bytes, openV2Bytes, type V2Attachment } from './v2/crypto';
+import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, v2ActiveTurn, v2CancelTurn, connectV2Stream } from './v2/api';
+import { readFileBytes } from '@/utils/readFileBytes';
+import { encodeHex } from '@/encryption/hex';
 import { v2MessagesAfter, v2MessagesBefore } from './v2/reads';
 
 import * as Notifications from 'expo-notifications';
@@ -499,16 +502,6 @@ class Sync {
         if (!v2link?.sessionId) {
             return { ok: false, reason: 'session has no v2 link' };
         }
-        // B5: attachments are not yet carried on the v2 path. Block loudly
-        // rather than silently dropping the image — the user must know.
-        if (options?.attachments?.length) {
-            Modal.alert(
-                t('imageUpload.notSupportedTitle'),
-                t('imageUpload.notSupportedMessage'),
-                [{ text: t('common.ok'), style: 'cancel' }],
-            );
-            return { ok: false, reason: 'attachments not supported on v2 path' };
-        }
         // B1 (security): a session stamped with a key envelope MUST seal.
         // If the envelope is present but the key will not open (wrong
         // account, corruption), REFUSE — never fall back to plaintext,
@@ -538,9 +531,29 @@ class Sync {
         // docs/v2-dual-path.md. displayText is a UI-only alias; the wire
         // carries `text`, which is what the agent must receive.
         const localId = options?.localId ?? randomUUID();
+        // Attachments travel beside the text: bytes sealed under the same
+        // session key and uploaded first, then cited (id + display facts)
+        // INSIDE the sealed message so every device and the daemon can
+        // resolve them while the relay sees only opaque blobs. Any upload
+        // failure drops the whole send — a prompt about a screenshot that
+        // silently lost the screenshot is worse than no send.
+        let attachments: V2Attachment[] = [];
+        if (options?.attachments?.length) {
+            try {
+                attachments = await this.uploadV2Attachments(v2link.relay, v2link.sessionId, key, options.attachments);
+            } catch (e) {
+                console.error('[v2] attachment upload failed', e);
+                Modal.alert(
+                    t('imageUpload.uploadFailedTitle'),
+                    t('imageUpload.uploadFailedMessage', { count: options.attachments.length }),
+                    [{ text: t('common.ok'), style: 'cancel' }],
+                );
+                return { ok: false, reason: `attachment upload failed: ${e instanceof Error ? e.message : e}` };
+            }
+        }
         try {
-            const ciphertext = sealV2Content(text, key);
-            await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext);
+            const ciphertext = sealV2Content(text, key, attachments);
+            await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext, attachments.map(a => a.id));
         } catch (e) {
             console.error('[v2] send failed', e);
             return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
@@ -551,6 +564,29 @@ class Sync {
             notifyOutboxAcked(sessionId, [localId]);
         });
         return { ok: true, localId };
+    }
+
+    /** Read, seal and upload each picked file; returns the citations to embed
+     *  in the message. Throws on the first failure (the caller drops the send). */
+    private async uploadV2Attachments(relay: string, v2SessionId: string, key: Uint8Array | null, picked: AttachmentPreview[]): Promise<V2Attachment[]> {
+        const out: V2Attachment[] = [];
+        for (const a of picked) {
+            const bytes = await readFileBytes(a.uri);
+            const sealed = sealV2Bytes(bytes, key);
+            // `.slice()` materializes a standalone ArrayBuffer — the digest API
+            // rejects views over a SharedArrayBuffer at the type level.
+            const hash = await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, sealed.slice().buffer as ArrayBuffer);
+            const { attachmentId } = await v2UploadAttachment(relay, v2SessionId, sealed, encodeHex(new Uint8Array(hash)).toLowerCase());
+            out.push({
+                id: attachmentId,
+                name: a.name,
+                size: bytes.length,
+                ...(a.mimeType ? { mime: a.mimeType } : {}),
+                ...(a.width > 0 && a.height > 0 ? { width: a.width, height: a.height } : {}),
+                ...(a.thumbhash ? { thumbhash: a.thumbhash } : {}),
+            });
+        }
+        return out;
     }
 
     applySettings = (delta: Partial<Settings>) => {
@@ -1346,6 +1382,18 @@ class Sync {
     /** v2 read context for a session, or null when it is not a v2 session.
      *  Returns the relay base, the v2 session id, and the unsealed content key
      *  so pages can be fetched and opened from the v2 event log. */
+    /** Fetch and open one attachment cited by a message in this session.
+     *  Throws when the session is not v2 / not readable, when the relay
+     *  refuses, or when the bytes do not open under the session key. */
+    async fetchAttachment(sessionId: string, attachmentId: string): Promise<Uint8Array> {
+        const ctx = this.v2ReadCtx(sessionId);
+        if (!ctx) throw new Error('session has no readable v2 link');
+        const sealed = await v2FetchAttachment(ctx.base, attachmentId);
+        const bytes = openV2Bytes(sealed, ctx.key);
+        if (!bytes) throw new Error('attachment does not open under the session key');
+        return bytes;
+    }
+
     private v2ReadCtx(sessionId: string): { base: string; v2SessionId: string; key: Uint8Array | null; token: string } | null {
         const session = storage.getState().sessions[sessionId];
         const link = session?.metadata?.v2;

@@ -14,22 +14,18 @@ export class Encryption {
 
     static async create(masterSecret: Uint8Array) {
 
-        // The 'Happy …' HKDF labels below are WIRE CONSTANTS: the daemon
-        // derives the same keys from the same labels, and every existing
-        // account's data is sealed under them. Renaming would silently
-        // orphan every session — leave them exactly as they are.
+        // The HKDF labels below are WIRE CONSTANTS shared with the daemon
+        // (pairing.ts derives the same content key from "Joy Content Master
+        // Seed"); every account's keys derive from them.
 
         // Derive content data key to open session and machine records
-        const contentDataKey = await deriveKey(masterSecret, 'Happy EnCoder', ['content']);
+        const contentDataKey = await deriveKey(masterSecret, 'Joy Content', ['content']);
 
         // Derive content data key keypair
         const contentKeyPair = sodium.crypto_box_seed_keypair(contentDataKey);
 
         // Derive anonymous ID
-        const anonID = encodeHex((await deriveKey(masterSecret, 'Happy Coder', ['analytics', 'id']))).slice(0, 16).toLowerCase();
-
-        // Derive master blob key for legacy sessions (those with no per-session dataKey)
-        const masterBlobKey = await deriveKey(masterSecret, 'Happy Blobs', ['master']);
+        const anonID = encodeHex((await deriveKey(masterSecret, 'Joy Analytics', ['analytics', 'id']))).slice(0, 16).toLowerCase();
 
         // Relay perimeter key (joy-relay gate): derived from the SAME account
         // secret every device already holds, so nothing new is distributed —
@@ -38,26 +34,23 @@ export class Encryption {
         setDerivedRelayPerimeterKey(encodeHex(await deriveKey(masterSecret, 'Joy Relay', ['perimeter'])).toLowerCase());
 
         // Create encryption
-        return new Encryption(anonID, masterSecret, contentKeyPair, masterBlobKey);
+        return new Encryption(anonID, masterSecret, contentKeyPair);
     }
 
     private readonly legacyEncryption: SecretBoxEncryption;
     private readonly contentKeyPair: sodium.KeyPair;
-    private readonly masterBlobKey: Uint8Array;
     readonly anonID: string;
     readonly contentDataKey: Uint8Array;
 
     // Session and machine encryption management
     private sessionEncryptions = new Map<string, SessionEncryption>();
     private machineEncryptions = new Map<string, MachineEncryption>();
-    private sessionBlobKeys = new Map<string, Uint8Array>();
     private cache: EncryptionCache;
 
-    private constructor(anonID: string, masterSecret: Uint8Array, contentKeyPair: sodium.KeyPair, masterBlobKey: Uint8Array) {
+    private constructor(anonID: string, masterSecret: Uint8Array, contentKeyPair: sodium.KeyPair) {
         this.anonID = anonID;
         this.contentKeyPair = contentKeyPair;
         this.legacyEncryption = new SecretBoxEncryption(masterSecret);
-        this.masterBlobKey = masterBlobKey;
         this.cache = new EncryptionCache();
         this.contentDataKey = contentKeyPair.publicKey;
     }
@@ -119,15 +112,6 @@ export class Encryption {
                 this.cache
             );
             this.sessionEncryptions.set(sessionId, sessionEnc);
-
-            // Derive blob key for this session.
-            // Legacy sessions (null dataKey) use the master blob key.
-            // Newer sessions derive a subkey from their own dataKey so blobs
-            // are cryptographically isolated from message encryption.
-            const blobKey = dataKey
-                ? await deriveKey(dataKey, 'Happy Blobs', ['session'])
-                : this.masterBlobKey;
-            this.sessionBlobKeys.set(sessionId, blobKey);
         }
     }
 
@@ -144,19 +128,8 @@ export class Encryption {
      */
     removeSessionEncryption(sessionId: string): void {
         this.sessionEncryptions.delete(sessionId);
-        this.sessionBlobKeys.delete(sessionId);
         // Also clear any cached data for this session
         this.cache.clearSessionCache(sessionId);
-    }
-
-    /**
-     * Get the 32-byte NaCl secretbox key for encrypting binary blobs
-     * (image attachments) in a session. Distinct from the message encryption
-     * key to maintain cryptographic separation.
-     * Returns null if the session has not been initialized.
-     */
-    getSessionBlobKey(sessionId: string): Uint8Array | null {
-        return this.sessionBlobKeys.get(sessionId) ?? null;
     }
 
     //

@@ -251,9 +251,42 @@ async function v2fetchAt(base: string, method: string, path: string, body?: unkn
     return json;
 }
 
-/** Send a PRE-SEALED ciphertext (the dual-path seam encrypts before calling). */
-export function v2SendCiphertext(base: string, v2SessionId: string, ciphertext: string): Promise<{ messageId: string; turnId: string }> {
-    return v2fetchAt(base, 'POST', `/sessions/${v2SessionId}/messages`, { ciphertext, clientIntentId: randomUUID() });
+/** Send a PRE-SEALED ciphertext (the dual-path seam encrypts before calling).
+ *  `attachments` are the relay ids the sealed content cites — the relay
+ *  validates they exist for this session and pins them to the message. */
+export function v2SendCiphertext(base: string, v2SessionId: string, ciphertext: string, attachments?: string[]): Promise<{ messageId: string; turnId: string }> {
+    return v2fetchAt(base, 'POST', `/sessions/${v2SessionId}/messages`, {
+        ciphertext, clientIntentId: randomUUID(),
+        ...(attachments?.length ? { attachments } : {}),
+    });
+}
+
+/** Upload PRE-SEALED attachment bytes for a session. `cipherHash` is the
+ *  sha256 hex of exactly these bytes (the relay rejects a mismatch, and
+ *  dedupes a retried upload to the same id). */
+export async function v2UploadAttachment(base: string, v2SessionId: string, bytes: Uint8Array, cipherHash: string): Promise<{ attachmentId: string; size: number }> {
+    const res = await fetch(`${base}/joy/v2/attachments`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${token()}`,
+            'Content-Type': 'application/octet-stream',
+            'X-Session': v2SessionId,
+            'X-Cipher-Hash': cipherHash,
+        },
+        body: bytes as unknown as BodyInit,
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) throw new V2ApiError(res.status, (json as any)?.error ?? `http_${res.status}`, json);
+    return json as { attachmentId: string; size: number };
+}
+
+/** Download the sealed bytes of an attachment (opened by the caller). */
+export async function v2FetchAttachment(base: string, attachmentId: string): Promise<Uint8Array> {
+    const res = await fetch(`${base}/joy/v2/attachments/${attachmentId}`, {
+        headers: { 'Authorization': `Bearer ${token()}` },
+    });
+    if (!res.ok) throw new V2ApiError(res.status, `http_${res.status}`, null);
+    return new Uint8Array(await res.arrayBuffer());
 }
 
 /** The currently executing turn id, or null. */

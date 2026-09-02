@@ -44,9 +44,15 @@ every relay; machines register per account.
 - **Slash commands** the daemon owns: `/title`, `/steer`, `/btw`,
   `/login-code`, `/joy-prompt` (re-inject current instructions — the fix for
   long sessions forgetting the tag vocabulary; also the only way pi gets it).
-- **Attachments**: images from library/file/paste; **drawing pad** (full-screen
-  finger sketch → PNG, five pens, two papers, four widths); files up to 400KB
-  inline, larger via encrypted blobs both directions (readFile spills to blob).
+- **Attachments**: images from library/file/paste (up to 20 per message, 10MB
+  each); **drawing pad** (full-screen finger sketch → PNG, five pens, two
+  papers, four widths). Bytes are sealed with the session key and stored on
+  the relay; the daemon materializes each into the session cwd (images as
+  `paste-*.ext`, other files under their own name) and cites the path in the
+  prompt. The chat renders images inline (thumbhash placeholder until the
+  bytes are opened) and other files as a name + size row above the bubble.
+  Session files up to 400KB travel inline over the tunnel, larger via
+  encrypted blobs both directions (readFile spills to blob).
 
 ## Chat rendering
 

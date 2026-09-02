@@ -1,3 +1,9 @@
+# Sep 2 (2) — Attachments on the relay
+
+- **Images and files send again.** Attaching a photo, file, paste or drawing to a message uploads it sealed with the session's own key — the relay stores bytes it cannot read — and the daemon drops the file into the session's folder and points the agent at it, so "look at this screenshot" works on every agent. If an upload fails the message is held back and you are told, instead of the text going out without its picture.
+- **Attachments show in the chat.** Your sent images appear inline above the bubble (a blurred placeholder until the bytes load), other files as a name and size row, on every device signed in to the account.
+- **Re-pair after updating.** The keys that seal session content are now derived under Joy's own name rather than the old Happy labels. Sealed history written before this update cannot be opened by the new app, and terminals paired before it must be paired again. *Needs the updated daemon on the machine.*
+
 # Sep 2 — Joy only
 
 - **The Happy Cloud relay is gone.** Server Configuration lists Joy Relay only, it is the default for new installs, and the server check now confirms it is talking to a joy-relay rather than looking for the old server's welcome banner. Custom relay URLs still work. Existing logins and caches on Joy Relay carry over unchanged.

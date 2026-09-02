@@ -57,9 +57,9 @@ function hmac512(key: Uint8Array, data: Uint8Array): Uint8Array {
   return new Uint8Array(createHmac("sha512", key).update(data).digest());
 }
 
-// The app's HMAC-SHA512 key tree (["content"] path). The "Happy EnCoder"
-// seed string below is a WIRE CONSTANT: every existing account's content key
-// derives from it, so it stays verbatim even though nothing else is "happy".
+// The app's HMAC-SHA512 key tree — the seed strings below are WIRE CONSTANTS
+// shared with the app's deriveKey(masterSecret, '<label>', [...]) (which
+// appends " Master Seed"); every account's keys derive from them.
 /** Relay perimeter key, hex — the SAME key tree as the app's
  *  deriveKey(masterSecret, 'Joy Relay', ['perimeter']) (see encryption.ts),
  *  so every client of the account derives the identical value and the relay
@@ -72,7 +72,7 @@ export function deriveRelayPerimeterKey(master: Uint8Array): string {
 }
 
 function deriveContentSeed(master: Uint8Array): Uint8Array {
-  let I = hmac512(new TextEncoder().encode("Happy EnCoder Master Seed"), master);
+  let I = hmac512(new TextEncoder().encode("Joy Content Master Seed"), master);
   let key = I.slice(0, 32);
   let chain = I.slice(32);
   for (const index of ["content"]) {

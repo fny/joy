@@ -18,7 +18,7 @@
  * path seals with), then handed over already-decrypted — v2 rows carry
  * `__v2Plain` so the sync layer skips content decryption.
  */
-import { openV2Content } from './crypto';
+import { openV2Content, openV2Message } from './crypto';
 import { getV2BaseUrl } from './api';
 
 export interface V2Row {
@@ -56,10 +56,14 @@ function toRow(e: RawV2Event, key: Uint8Array | null): V2Row | null {
     }
 
     if (e.kind === 'turn.queued') {
-        if (text === null) return null;
+        // The prompt carries its attachment citations inside the sealed
+        // payload; surface them on the user row so the bubble can render
+        // them (bytes are fetched lazily by AttachmentView).
+        const msg = openV2Message(e.content?.ciphertext, key);
+        if (!msg) return null;
         return {
             id: e.id, seq, localId: e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' }, __fromV2: true as const,
-            __v2Plain: { role: 'user', content: { type: 'text', text } },
+            __v2Plain: { role: 'user', content: { type: 'text', text: msg.text, ...(msg.attachments.length ? { attachments: msg.attachments } : {}) } },
         };
     }
     if (e.kind === 'output' || (e.kind === 'turn.terminal' && text !== null)) {

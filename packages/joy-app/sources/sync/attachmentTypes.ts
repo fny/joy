@@ -16,13 +16,3 @@ export type AttachmentPreview = {
     name: string;
     thumbhash?: string;
 };
-
-/** Result of a successful attachment upload — ready to build a file event. */
-export type UploadedAttachment = {
-    ref: string;
-    name: string;
-    size: number;
-    width: number;
-    height: number;
-    thumbhash?: string;
-};

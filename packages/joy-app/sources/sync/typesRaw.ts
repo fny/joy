@@ -56,20 +56,18 @@ const sessionToolCallEndEventSchema = z.object({
     call: z.string(),
 });
 
-const sessionFileEventSchema = z.object({
-    t: z.literal('file'),
-    ref: z.string(),
+/** An attachment cited by a user message — the relay attachment id plus
+ *  the display facts the sender embedded (see sync/v2/crypto V2Attachment). */
+export const MessageAttachmentSchema = z.object({
+    id: z.string(),
     name: z.string(),
     size: z.number(),
-    image: z.object({
-        width: z.number(),
-        height: z.number(),
-        // Optional — native iOS image-picker has no Canvas to compute it.
-        // FileView falls back to no blurry placeholder; the real picture
-        // is decrypted on render anyway.
-        thumbhash: z.string().optional(),
-    }).optional(),
+    mime: z.string().optional(),
+    width: z.number().optional(),
+    height: z.number().optional(),
+    thumbhash: z.string().optional(),
 });
+export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 
 const sessionTurnStartEventSchema = z.object({
     t: z.literal('turn-start'),
@@ -95,7 +93,6 @@ const sessionEventSchema = z.discriminatedUnion('t', [
     sessionServiceMessageEventSchema,
     sessionToolCallStartEventSchema,
     sessionToolCallEndEventSchema,
-    sessionFileEventSchema,
     sessionTurnStartEventSchema,
     sessionStartEventSchema,
     sessionTurnEndEventSchema,
@@ -441,7 +438,8 @@ const rawRecordSchema = z.preprocess(
             role: z.literal('user'),
             content: z.object({
                 type: z.literal('text'),
-                text: z.string()
+                text: z.string(),
+                attachments: z.array(MessageAttachmentSchema).optional(),
             }),
             meta: MessageMetaSchema.optional()
         }),
@@ -513,6 +511,8 @@ export type NormalizedMessage = ({
     content: {
         type: 'text';
         text: string;
+        /** Files sent with the prompt (v2 sealed citations). */
+        attachments?: MessageAttachment[];
         /** True for the synthetic post-compaction summary message — rendered
          *  as a collapsed block, not a normal user bubble. */
         isCompactSummary?: boolean;
@@ -685,59 +685,6 @@ function normalizeSessionEnvelope(
                 uuid: contentUUID,
                 parentUUID
             }],
-            meta
-        } satisfies NormalizedMessage;
-    }
-
-    if (envelope.ev.t === 'file') {
-        const maybeImageMetadata = envelope.ev.image
-            ? {
-                image: {
-                    width: envelope.ev.image.width,
-                    height: envelope.ev.image.height,
-                    thumbhash: envelope.ev.image.thumbhash
-                }
-            }
-            : {};
-
-        // File events carry no separate "completed" wire signal — the upload
-        // is already finished by the time the event is sent. Emit the
-        // tool-call AND a paired tool-result in the same message so the
-        // reducer's Phase 2 + Phase 3 see both halves and the tool flips
-        // straight to "completed". Without this the chat bubble shows a
-        // forever-spinning indicator next to the attachment.
-        return {
-            id: messageId,
-            localId,
-            createdAt: messageCreatedAt,
-            role: 'agent',
-            isSidechain,
-            content: [
-                {
-                    type: 'tool-call',
-                    id: messageId,
-                    name: 'file',
-                    input: {
-                        ref: envelope.ev.ref,
-                        name: envelope.ev.name,
-                        size: envelope.ev.size,
-                        ...maybeImageMetadata
-                    },
-                    description: envelope.ev.image
-                        ? `Attached image: ${envelope.ev.name} (${envelope.ev.image.width}x${envelope.ev.image.height})`
-                        : `Attached file: ${envelope.ev.name}`,
-                    uuid: contentUUID,
-                    parentUUID
-                },
-                {
-                    type: 'tool-result',
-                    tool_use_id: messageId,
-                    content: null,
-                    is_error: false,
-                    uuid: `${contentUUID}:result`,
-                    parentUUID: contentUUID
-                }
-            ],
             meta
         } satisfies NormalizedMessage;
     }

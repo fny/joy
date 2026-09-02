@@ -28,6 +28,7 @@ import { registerV2CardPublisher, unregisterV2CardPublisher, cardStateFor, publi
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, joyStateDir } from "../paths";
+import { writeAttachmentToCwd } from "../domain/attachments";
 
 const RENEW_MS = 8_000;           // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
@@ -86,6 +87,50 @@ export function decodeContent(ciphertext: string | null | undefined, key?: Uint8
     return null;
   } catch { return null; }
 }
+/** An attachment cited inside a sealed prompt (mirrors app V2Attachment).
+ *  `id` is the relay attachment id; `name` is the sender's filename. */
+export interface PromptAttachment { id: string; name: string; size: number; mime?: string }
+export interface DecodedPrompt { text: string; attachments: PromptAttachment[] }
+
+/** decodeContent, plus the attachment citations the app embeds beside the
+ *  text (sealed together, so the relay's `attachments` id list is only its
+ *  GC/validation view — the names live here). */
+export function decodePrompt(ciphertext: string | null | undefined, key?: Uint8Array | null): DecodedPrompt | null {
+  if (!ciphertext) return null;
+  let p: any;
+  if (ciphertext.startsWith("v2e1:")) {
+    if (!key) return null;
+    try {
+      const raw = Buffer.from(ciphertext.slice(5), "base64");
+      const n = tweetnacl.secretbox.nonceLength;
+      const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
+      if (!pt) return null;
+      p = JSON.parse(Buffer.from(pt).toString("utf8"));
+    } catch { return null; }
+  } else {
+    try { p = JSON.parse(ciphertext); } catch { return null; }
+  }
+  if (!p || typeof p.text !== "string") return null;
+  const attachments: PromptAttachment[] = [];
+  if (Array.isArray(p.attachments)) {
+    for (const a of p.attachments) {
+      if (!a || typeof a.id !== "string" || typeof a.name !== "string") continue;
+      attachments.push({ id: a.id, name: a.name, size: typeof a.size === "number" ? a.size : 0, ...(typeof a.mime === "string" ? { mime: a.mime } : {}) });
+    }
+  }
+  return { text: p.text, attachments };
+}
+
+/** Attachment bytes: nonce24 ‖ secretbox(bytes) under the SESSION key (the
+ *  app's sealV2Bytes); raw bytes on a plaintext session. null = tampered,
+ *  wrong key, or truncated. */
+export function openAttachmentBytes(bytes: Uint8Array, key?: Uint8Array | null): Uint8Array | null {
+  if (!key) return bytes;
+  const n = tweetnacl.secretbox.nonceLength;
+  if (bytes.length < n + tweetnacl.secretbox.overheadLength) return null;
+  return tweetnacl.secretbox.open(bytes.subarray(n), bytes.subarray(0, n), key);
+}
+
 /** The client's spawn options, carried on the durable command. Mirrors the
  *  option set the v1 `joy-create-session` RPC accepted — the new-session screen
  *  is v2-only now, so anything missing here is an option the user cannot set. */
@@ -222,6 +267,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       throw err;
     }
     return json;
+  }
+
+  /** Raw attachment bytes from the relay store (sealed by the sender). */
+  async function fetchAttachment(attachmentId: string): Promise<Uint8Array> {
+    const res = await fetch(`${relayUrl}/joy/v2/attachments/${attachmentId}`, {
+      headers: { ...baseHeaders(), Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`GET /attachments/${attachmentId.slice(0, 8)} -> ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
   }
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -456,8 +510,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }
         return;
       }
-      const text = decodeContent(offer.ciphertext, sessionKeys.get(offer.sessionId));
-      if (text === null) {
+      const prompt = decodePrompt(offer.ciphertext, sessionKeys.get(offer.sessionId));
+      if (prompt === null) {
         if (!notedSkips.has(turnId)) {
           notedSkips.add(turnId);
           log(`turn ${turnId.slice(0, 8)}: undecodable prompt — left queued`);
@@ -465,8 +519,37 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         return;
       }
       await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
-      if (offer.attachments?.length) {
-        log(`turn ${turnId.slice(0, 8)}: ${offer.attachments.length} attachment(s) cited (machine-side materialization TODO)`);
+
+      // Materialize the cited attachments into the session's cwd BEFORE the
+      // prompt goes in: each becomes a bare `./name` line the agent resolves
+      // against its cwd. A prompt about a screenshot that lost the screenshot
+      // is worse than an honest failure, so any fetch/open/write miss fails
+      // the turn (submitted → failed) instead of dispatching a truncated ask.
+      let text = prompt.text;
+      if (prompt.attachments.length) {
+        const paths: string[] = [];
+        for (const a of prompt.attachments) {
+          let path: string | null = null;
+          let reason = "attachment_fetch_failed";
+          try {
+            const sealed = await fetchAttachment(a.id);
+            const bytes = openAttachmentBytes(sealed, sessionKeys.get(offer.sessionId));
+            if (bytes) { reason = "attachment_write_failed"; path = writeAttachmentToCwd(session.cwd, bytes, a.name); }
+            else reason = "attachment_open_failed";
+          } catch (e) {
+            log(`turn ${turnId.slice(0, 8)}: attachment ${a.id.slice(0, 8)} (${a.name}): ${(e as Error).message}`);
+          }
+          if (!path) {
+            await api("POST", `/daemon/turns/${turnId}/facts`, {
+              type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason, attachmentId: a.id },
+            }, leaseRef);
+            log(`turn ${turnId.slice(0, 8)}: ${reason} (${a.name}) → failed`);
+            return;
+          }
+          paths.push(path);
+        }
+        text = `${text}\n${paths.join("\n")}`;
+        log(`turn ${turnId.slice(0, 8)}: materialized ${paths.length} attachment(s) in ${session.cwd}`);
       }
 
       // Watermark the chat log BEFORE dispatch: everything the session's
