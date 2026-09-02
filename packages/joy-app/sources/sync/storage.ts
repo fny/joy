@@ -16,14 +16,11 @@ import { createReducer, reducer, reconcileSentSeqs, ReducerState } from "./reduc
 import { reconcileMachineMetadata } from "./machineReconcile";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
-import { isMachineOnline } from '@/utils/machineUtils';
 import { getSessionName, getSessionSubtitle, getSessionAvatarId, type SessionState } from '@/utils/sessionUtils';
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
-import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionEffortLevels, saveSessionEffortLevels, loadCachedMachines, saveCachedMachines } from "./persistence";
-import type { CustomerInfo } from './revenueCat/types';
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionEffortLevels, saveSessionEffortLevels, loadCachedMachines, saveCachedMachines } from "./persistence";
 import React from "react";
 import { sync } from "./sync";
 import { isMutableTool } from "@/components/tools/knownTools";
@@ -31,7 +28,6 @@ import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./message
 import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
 export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
-const REALTIME_MODE_DEBOUNCE_MS = 150;
 
 /**
  * Centralized session online state resolver
@@ -185,7 +181,6 @@ interface StorageState {
     settings: Settings;
     settingsVersion: number | null;
     localSettings: LocalSettings;
-    purchases: Purchases;
     profile: Profile;
     sessions: Record<string, Session>;
     sessionsData: SessionListItem[] | null;  // Legacy - to be removed
@@ -230,7 +225,6 @@ interface StorageState {
     // keys removed by the raw editor are actually dropped instead of preserved.
     applySettingsRaw: (settings: Settings) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
-    applyPurchases: (customerInfo: CustomerInfo) => void;
     applyProfile: (profile: Profile) => void;
     applyGitStatus: (pathKey: string, status: GitStatus | null) => void;
     applyGitStatusFiles: (pathKey: string, files: GitStatusFiles | null) => void;
@@ -451,7 +445,6 @@ function pruneFileCache(cache: FileCacheBySession, cap: number): FileCacheBySess
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
     let localSettings = loadLocalSettings();
-    let purchases = loadPurchases();
     let profile = loadProfile();
     let sessionDrafts = loadSessionDrafts();
     let sessionPermissionModes = loadSessionPermissionModes();
@@ -461,7 +454,6 @@ export const storage = create<StorageState>()((set, get) => {
         settings,
         settingsVersion: version,
         localSettings,
-        purchases,
         profile,
         sessions: {},
         // Hydrate machines from the on-disk cache so pickers show real names
@@ -1068,17 +1060,6 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 localSettings: updatedLocalSettings
-            };
-        }),
-        applyPurchases: (customerInfo: CustomerInfo) => set((state) => {
-            // Transform CustomerInfo to our Purchases format
-            const purchases = customerInfoToPurchases(customerInfo);
-
-            // Always save and update - no need for version checks
-            savePurchases(purchases);
-            return {
-                ...state,
-                purchases
             };
         }),
         applyProfile: (profile: Profile) => set((state) => {

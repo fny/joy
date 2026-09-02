@@ -1,7 +1,7 @@
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
-import { RawRecord } from '../typesRaw';
+
 import { ApiMessage } from '../apiTypes';
-import { DecryptedMessage, Metadata, MetadataSchema, AgentState, AgentStateSchema } from '../storageTypes';
+import { DecryptedMessage, Metadata, MetadataSchema } from '../storageTypes';
 import { EncryptionCache } from './encryptionCache';
 import { Decryptor, Encryptor } from './encryptor';
 
@@ -106,46 +106,6 @@ export class SessionEncryption {
     }
 
     /**
-     * Single message convenience method
-     */
-    async decryptMessage(message: ApiMessage | null | undefined): Promise<DecryptedMessage | null> {
-        if (!message) {
-            return null;
-        }
-        const results = await this.decryptMessages([message]);
-        return results[0];
-    }
-
-    /**
-     * Encrypt a raw record
-     */
-    async encryptRawRecord(record: RawRecord): Promise<string> {
-        const encrypted = await this.encryptor.encrypt([record]);
-        return encodeBase64(encrypted[0], 'base64');
-    }
-
-    /**
-     * Encrypt raw data using session-specific encryption
-     */
-    async encryptRaw(data: any): Promise<string> {
-        const encrypted = await this.encryptor.encrypt([data]);
-        return encodeBase64(encrypted[0], 'base64');
-    }
-
-    /**
-     * Decrypt raw data using session-specific encryption
-     */
-    async decryptRaw(encrypted: string): Promise<any | null> {
-        try {
-            const encryptedData = decodeBase64(encrypted, 'base64');
-            const decrypted = await this.encryptor.decrypt([encryptedData]);
-            return decrypted[0] || null;
-        } catch (error) {
-            return null;
-        }
-    }
-
-    /**
      * Encrypt metadata using session-specific encryption
      */
     async encryptMetadata(metadata: Metadata): Promise<string> {
@@ -179,41 +139,4 @@ export class SessionEncryption {
         return parsed.data;
     }
 
-    /**
-     * Encrypt agent state using session-specific encryption
-     */
-    async encryptAgentState(state: AgentState): Promise<string> {
-        const encrypted = await this.encryptor.encrypt([state]);
-        return encodeBase64(encrypted[0], 'base64');
-    }
-
-    /**
-     * Decrypt agent state using session-specific encryption
-     */
-    async decryptAgentState(version: number, encrypted: string | null | undefined): Promise<AgentState> {
-        if (!encrypted) {
-            return {};
-        }
-
-        // Check cache first
-        const cached = this.cache.getCachedAgentState(this.sessionId, version);
-        if (cached) {
-            return cached;
-        }
-
-        // Decrypt if not cached
-        const encryptedData = decodeBase64(encrypted, 'base64');
-        const decrypted = await this.encryptor.decrypt([encryptedData]);
-        if (!decrypted[0]) {
-            return {};
-        }
-        const parsed = AgentStateSchema.safeParse(decrypted[0]);
-        if (!parsed.success) {
-            return {};
-        }
-
-        // Cache the result
-        this.cache.setCachedAgentState(this.sessionId, version, parsed.data);
-        return parsed.data;
-    }
 }
