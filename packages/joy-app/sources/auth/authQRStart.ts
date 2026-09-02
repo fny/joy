@@ -3,7 +3,7 @@ import sodium from '@/encryption/libsodium.lib';
 import axios from 'axios';
 import { encodeBase64 } from '../encryption/base64';
 import { getServerUrl } from '@/sync/serverConfig';
-import { getHappyClientId } from '@/sync/apiSocket';
+import { getJoyClientId } from '@/sync/clientId';
 
 export interface QRAuthKeyPair {
     publicKey: Uint8Array;
@@ -31,7 +31,7 @@ export async function authQRStart(keypair: QRAuthKeyPair): Promise<boolean> {
             publicKey: encodeBase64(keypair.publicKey),
         }, {
             headers: {
-                'X-Happy-Client': getHappyClientId(),
+                'X-Joy-Client': getJoyClientId(),
             }
         });
 

@@ -1,5 +1,5 @@
 // Dev screen (no i18n): Relay v2 Mode home — every session driven purely by
-// the native /joy/v2 surface, no happy socket involved. See sync/v2/api.ts.
+// the native /joy/v2 surface. See sync/v2/api.ts.
 import * as React from 'react';
 import { View, Text } from 'react-native';
 import { useRouter } from 'expo-router';
@@ -47,7 +47,7 @@ export default React.memo(function V2ModeScreen() {
 
     return (
         <ItemList>
-            <ItemGroup title="Mode" footer="Everything on this screen tree speaks the native /joy/v2 surface directly — sessions, messages with delivery states, events, SSE, attachments. The happy socket is not involved.">
+            <ItemGroup title="Mode" footer="Everything on this screen tree speaks the native /joy/v2 surface directly — sessions, messages with delivery states, events, SSE, attachments.">
                 <Item title="v2 base URL" subtitle={getV2BaseUrl() + (isV2UrlOverridden() ? ' (override)' : ' (main server URL)')} onPress={editBaseUrl} />
                 <Item title="Auth" detail={isAuthenticated ? 'bearer token present' : 'NOT LOGGED IN'} />
                 {error ? <Item title="Last error" subtitle={error} titleStyle={styles.errorText as any} /> : null}

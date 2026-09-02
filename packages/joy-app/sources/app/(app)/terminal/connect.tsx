@@ -40,8 +40,8 @@ export default function TerminalConnectScreen() {
 
     const handleConnect = async () => {
         if (publicKey) {
-            // Convert the hash key format to the expected happy:// URL format
-            const authUrl = `happy://terminal?${publicKey}`;
+            // Convert the hash key format to the expected joy:// URL format
+            const authUrl = `joy://terminal?${publicKey}`;
             await processAuthUrl(authUrl);
         }
     };

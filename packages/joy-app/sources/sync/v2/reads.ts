@@ -1,6 +1,6 @@
 /**
  * v2 read adapter — serves the app's existing message-fetch engine from the
- * relay's v2 event log instead of happy-server's /v3 message pages.
+ * relay's v2 event log.
  *
  * Why an adapter rather than a new pipeline: the v1 read engine (paging,
  * forward/backward cursors, the ORDER-DEPENDENT reducer, eviction re-anchor)
@@ -16,7 +16,7 @@
  *
  * Content is UNSEALED here with the session's v2 key (the same key the send
  * path seals with), then handed over already-decrypted — v2 rows carry
- * `__v2Plain` so the sync layer skips its happy-side decryption.
+ * `__v2Plain` so the sync layer skips content decryption.
  */
 import { openV2Content } from './crypto';
 import { getV2BaseUrl } from './api';
@@ -28,11 +28,11 @@ export interface V2Row {
     createdAt: number;
     updatedAt: number;
     /** Placeholder so code that touches `content` (shape-compatible with the
-     *  happy row) never faults; the real payload is __v2Plain. */
+     *  legacy row) never faults; the real payload is __v2Plain. */
     content: { t: 'plain' };
     /** Already-decrypted content in the app's RawRecord shape. */
     __v2Plain: unknown;
-    /** Marks rows that came from the v2 event log (vs the happy mirror). */
+    /** Marks rows that came from the v2 event log (the only source). */
     __fromV2: true;
 }
 

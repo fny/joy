@@ -42,7 +42,7 @@ export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFil
 
         // v2 sessions read git state from the daemon's machine plane over the
         // sealed tunnel: one parsed status call plus two numstat calls, instead
-        // of shelling out through the happy socket.
+        // of shelling out through a realtime socket.
         const mctx = await sync.awaitMachineCtx(sessionId);
         if (mctx) {
             const { status, data } = await machineGitStatus(mctx);

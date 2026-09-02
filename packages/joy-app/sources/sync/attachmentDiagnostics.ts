@@ -5,7 +5,7 @@ export type AttachmentDiagnosticLeg =
     | 'blob-download'
     | 'decrypt-render';
 
-export type AttachmentTransferTarget = 'happy-api' | 'external-storage' | 'unknown';
+export type AttachmentTransferTarget = 'relay-api' | 'external-storage' | 'unknown';
 
 export type AttachmentDiagnosticMethod = 'GET' | 'POST' | 'PUT';
 
@@ -35,7 +35,7 @@ const attachmentDiagnosticMethods = new Set<AttachmentDiagnosticMethod>([
 ]);
 
 const attachmentTransferTargets = new Set<AttachmentTransferTarget>([
-    'happy-api',
+    'relay-api',
     'external-storage',
     'unknown',
 ]);
@@ -86,7 +86,7 @@ export function classifyAttachmentTransferTarget(
     if (!host || !serverHost) {
         return 'unknown';
     }
-    return host === serverHost ? 'happy-api' : 'external-storage';
+    return host === serverHost ? 'relay-api' : 'external-storage';
 }
 
 export function errorMessageFromUnknown(error: unknown): string {
@@ -195,7 +195,7 @@ function sanitizeDiagnosticText(value: string | undefined): string | undefined {
         .replace(/\bref(?:\s*[=:]\s*|\s+)\/?[A-Za-z0-9._~@-]+(?:\/[A-Za-z0-9._~@-]+)+(?:\?[^\s"'<>]*)?/gi, 'ref=[attachment-ref]')
         .replace(/\b(?:X-Amz-[A-Za-z0-9-]+|AWSAccessKeyId|policy|token|access_token|signature)=[^\s"'<>]+/gi, '[redacted-query]')
         .replace(/(^|[\s(["'=])\/(?:Users|home|var|tmp|private|Volumes|data\/user\/0|data\/data|storage\/emulated\/0|sdcard)\/[^"')\],}]+/g, '$1[local-file]')
-        .replace(/(^|[\s(["'])\/?(?:happy|sessions)\/[A-Za-z0-9._~@-]+(?:\/[A-Za-z0-9._~@-]+)+(?:\?[^\s"'<>]*)?/gi, '$1[attachment-ref]');
+        .replace(/(^|[\s(["'])\/?(?:joy|sessions)\/[A-Za-z0-9._~@-]+(?:\/[A-Za-z0-9._~@-]+)+(?:\?[^\s"'<>]*)?/gi, '$1[attachment-ref]');
 }
 
 function withoutUndefined<T extends Record<string, unknown>>(value: T): T {

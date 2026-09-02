@@ -136,7 +136,7 @@ This function handles validation, transformation, and normalization in a single 
 * Bullet item with [Markdown click target](https://example.com/markdown-click-target)
 + Bullet item with bare URL https://example.com/bare-markdown-url
 
-Inline code now renders as \`happy render\` without a background highlight.
+Inline code now renders as \`joy render\` without a background highlight.
 
 ![Markdown renderable image](${MARKDOWN_RENDERER_TEST_IMAGE})`
     },

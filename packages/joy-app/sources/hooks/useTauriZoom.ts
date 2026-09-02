@@ -7,7 +7,7 @@ export const BROWSER_APP_ZOOM = 1.0;
 
 const MIN_APP_ZOOM = 0.5;
 const MAX_APP_ZOOM = 2.5;
-const WEB_ZOOM_CLASS = 'happy-app-zoomed';
+const WEB_ZOOM_CLASS = 'joy-app-zoomed';
 
 const clampZoom = (zoom: number) => Math.max(MIN_APP_ZOOM, Math.min(MAX_APP_ZOOM, zoom));
 
@@ -27,16 +27,16 @@ export function useTauriZoom() {
         const root = document.documentElement;
 
         if (!inTauri) {
-            root.style.setProperty('--happy-app-zoom', getBrowserAppZoomValue());
+            root.style.setProperty('--joy-app-zoom', getBrowserAppZoomValue());
             root.classList.add(WEB_ZOOM_CLASS);
             return () => {
                 root.classList.remove(WEB_ZOOM_CLASS);
-                root.style.removeProperty('--happy-app-zoom');
+                root.style.removeProperty('--joy-app-zoom');
             };
         }
 
         root.classList.remove(WEB_ZOOM_CLASS);
-        root.style.removeProperty('--happy-app-zoom');
+        root.style.removeProperty('--joy-app-zoom');
 
         let zoom = DEFAULT_APP_ZOOM;
         let webview: { setZoom: (z: number) => Promise<void> } | null = null;

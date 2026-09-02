@@ -15,13 +15,12 @@ import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
-import { useHappyAction } from '@/hooks/useHappyAction';
-import { HappyError } from '@/utils/errors';
+import { useJoyAction } from '@/hooks/useJoyAction';
+import { JoyError } from '@/utils/errors';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
 import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { sessionKill } from '@/sync/ops';
 import { isWorktreePath, getRepoPath, getWorktreeName } from '@/utils/worktree';
-import { useNewSessionDraft } from '@/hooks/useNewSessionDraft';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 import { isTouchWeb } from '@/utils/isTouchWeb';
 import { useRouter } from 'expo-router';
@@ -70,7 +69,6 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const router = useRouter();
-    const draft = useNewSessionDraft();
 
     const sessionPath = session.path || '';
     const isWorktree = isWorktreePath(sessionPath);
@@ -89,23 +87,12 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
     const handleAdd = React.useCallback(() => {
         const machineId = session.machineId;
         const pathToSet = formatPathRelativeToHome(repoPath, session.homeDir ?? undefined);
-        // /joy/new doesn't read the /new draft store — it takes the prefill
-        // as route params instead.
-        if (newSessionRoute === '/joy/new') {
-            router.navigate({
-                pathname: '/joy/new',
-                params: { ...(machineId ? { machineId } : {}), path: pathToSet },
-            });
-            return;
-        }
-        if (machineId) {
-            draft.setMachineId(machineId);
-        }
-        draft.setPath(pathToSet);
-        draft.setSessionType(isWorktree ? 'worktree' : 'simple');
-        draft.setWorktreeKey(isWorktree ? sessionPath : null);
-        router.navigate('/new');
-    }, [session.machineId, session.homeDir, repoPath, isWorktree, sessionPath, draft, router, newSessionRoute]);
+        // The create page takes the prefill as route params.
+        router.navigate({
+            pathname: newSessionRoute,
+            params: { ...(machineId ? { machineId } : {}), path: pathToSet },
+        });
+    }, [session.machineId, session.homeDir, repoPath, router, newSessionRoute]);
 
     const [isHovered, setIsHovered] = React.useState(false);
     // Identicon size — Appearance → Identicons (clamped on read; default 16).
@@ -344,10 +331,10 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
     const swipeEnabled = Platform.OS !== 'web';
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
 
-    const [archivingSession, performArchive] = useHappyAction(async () => {
+    const [archivingSession, performArchive] = useJoyAction(async () => {
         const result = await sessionKill(session.id);
         if (!result.success) {
-            throw new HappyError(result.message || t('sessionInfo.failedToArchiveSession'), false);
+            throw new JoyError(result.message || t('sessionInfo.failedToArchiveSession'), false);
         }
     });
 

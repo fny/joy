@@ -187,30 +187,12 @@ export const ru: TranslationStructure = {
         chatFontSizePreviewAgent: 'Вот так — настройте кнопками + и −.',
     },
 
-    settingsMods: {
-        enabled: 'Включено',
-        mod01Title: '01 · Audio',
-        mod01Description: 'Показывает кнопку микрофона для голосового ввода. Также включает права доступа к микрофону macOS в сборке Tauri.',
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: 'Добавляет уровень усилий xhigh между high и max для Claude.',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: 'Показывает только Plan и Yolo в выборе режима разрешений.',
-        mod05Title: '05 · Лимит истории чата',
-        mod05Description: 'Ограничивает количество сообщений, отображаемых в каждом разговоре. Полезно для длинных чатов на медленных устройствах.',
-        chatHistoryLimit: 'Лимит сообщений',
-        chatHistoryLimitDescription: 'Показывать только последние сообщения в каждом разговоре',
-        chatHistoryLimitPlaceholder: 'например, 50',
-        chatHistoryLimitOff: 'Выкл',
+    settingsUpdates: {
         jsUpdate: 'JS-обновление',
         jsUpdateDescription: 'Какой JavaScript-бандл запущен (меняется при OTA-обновлениях)',
         checkForUpdate: 'Проверить обновления',
         upToDate: 'У вас уже последняя версия',
         updating: 'Обновление загружено — перезапуск…',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `Последние ${count} сообщений`,
-        mod06Title: '06 · Двойное нажатие',
-        mod06Description: 'Требует повторного нажатия в течение 2 секунд для подтверждения выбора варианта ответа от ассистента. Помогает избежать случайных выборов.',
-        mod07Title: '07 · Открыть файл из Read',
-        mod07Description: 'Показывает кнопку «Открыть файл» при вызовах инструмента Read. Кнопка использует встроенный просмотрщик файлов Joy, который загружает файл с хоста Claude — работает независимо от того, находятся ли приложение и Claude на одной машине.',
     },
 
     settingsFeatures: {
@@ -265,7 +247,6 @@ export const ru: TranslationStructure = {
         voiceServiceUnavailable: 'Голосовой сервис временно недоступен',
         voiceLimitReachedTitle: 'Лимит голоса достигнут',
         voiceHardLimitReached: ({ hours }: { hours: number }) => `Вы использовали ${hours}+ часов голосового общения в этом месяце. Это максимально допустимый лимит. Вы можете настроить собственного агента ElevenLabs в настройках голоса, чтобы использовать свою квоту.`,
-        voiceConversationLimitReached: 'Вы достигли максимального количества голосовых разговоров в этом месяце. Возможно, в будущем мы добавим голосовое использование по запросу — пожалуйста, создайте заявку на github.com/nicepkg/happy/issues, если вы столкнулись с этим ограничением.',
         oauthInitializationFailed: 'Не удалось инициализировать процесс OAuth',
         tokenStorageFailed: 'Не удалось сохранить токены аутентификации',
         oauthStateMismatch: 'Ошибка проверки безопасности. Попробуйте снова',
@@ -326,7 +307,7 @@ export const ru: TranslationStructure = {
         relayLoginFailed: 'Не удалось войти на это реле. Проверьте ключ и попробуйте снова.',
         relayApplyKeyAll: 'Использовать этот ключ на всех реле',
         relayAccessKeyLabel: 'Ключ доступа к релею',
-        relayAccessKeyFooter: 'Периметровый ключ этого релея (шлюз joy-relay). Отправляется с каждым запросом; оставьте пустым для открытых релеев вроде Happy Cloud. Переподключение после сохранения.',
+        relayAccessKeyFooter: 'Периметровый ключ этого релея (шлюз joy-relay). Отправляется с каждым запросом; оставьте пустым для открытых релеев. Переподключение после сохранения.',
         relayAccessKeySaved: 'Ключ релея сохранён',
         relayCopyDerivedKey: 'Скопировать производный ключ релея',
         relayApplyKeyAllMessage: 'Войти на все известные реле с текущим ключом аккаунта? Это заменит любые другие аккаунты, сохранённые для этих реле на устройстве.',
@@ -334,7 +315,7 @@ export const ru: TranslationStructure = {
         relayApplyKeyAllSuccess: 'Все реле теперь используют этот ключ.',
         relayApplyKeyAllPartial: 'Не удалось настроить:',
         enterServerUrl: 'Пожалуйста, введите URL сервера',
-        notValidHappyServer: 'Это не валидный сервер Joy',
+        notValidJoyServer: 'Это не валидный сервер Joy',
         changeServer: 'Изменить сервер',
         continueWithServer: 'Продолжить с этим сервером?',
         resetToDefault: 'Сбросить по умолчанию',
@@ -354,9 +335,7 @@ export const ru: TranslationStructure = {
         killSessionConfirm: 'Вы уверены, что хотите завершить эту сессию?',
         archiveSession: 'Архивировать сессию',
         archiveSessionConfirm: 'Вы уверены, что хотите архивировать эту сессию?',
-        happySessionIdCopied: 'ID сессии Joy скопирован в буфер обмена',
         failedToCopySessionId: 'Не удалось скопировать ID сессии Joy',
-        happySessionId: 'ID сессии Joy',
         claudeCodeSessionId: 'ID сессии Claude Code',
         claudeCodeSessionIdCopied: 'ID сессии Claude Code скопирован в буфер обмена',
         codexThreadId: 'ID треда Codex',
@@ -379,7 +358,6 @@ export const ru: TranslationStructure = {
         resumeSessionSubtitle: 'Resume this session on the same machine',
         resumeSessionSameMachineOnly: 'This session can only be resumed on the same machine it started on.',
         resumeSessionMachineOffline: 'This machine is offline. Resume is only available while it is online.',
-        resumeSessionNeedsHappyAgent: 'Resume is unavailable on this machine. Run `happy-agent auth login` to enable it.',
         resumeSessionMissingMachine: 'This session is missing its machine metadata, so it cannot be resumed.',
         resumeSessionMissingBackendId: 'This session does not have a resumable Claude or Codex identifier.',
         resumeSessionUnexpectedDirectoryPrompt: 'Resume cannot create directories. Start the session manually from its original path.',
@@ -393,7 +371,6 @@ export const ru: TranslationStructure = {
         path: 'Путь',
         operatingSystem: 'Операционная система',
         processId: 'ID процесса',
-        happyHome: 'Домашний каталог Joy',
         copyMetadata: 'Копировать метаданные',
         agentState: 'Состояние агента',
         controlledByUser: 'Управляется пользователем',
@@ -405,7 +382,6 @@ export const ru: TranslationStructure = {
         cliVersionOutdated: 'Требуется обновление CLI',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `Установлена версия ${currentVersion}. Обновите до ${requiredVersion} или новее`,
-        updateCliInstructions: 'Пожалуйста, выполните npm install -g happy@latest',
         deleteSession: 'Удалить сессию',
         deleteSessionSubtitle: 'Удалить эту сессию навсегда',
         deleteSessionConfirm: 'Удалить сессию навсегда?',
@@ -769,37 +745,6 @@ export const ru: TranslationStructure = {
         overwrite: 'Перезаписать',
     },
 
-    settingsVoice: {
-        // Voice settings screen
-        languageTitle: 'Язык',
-        languageDescription: 'Выберите предпочтительный язык для взаимодействия с голосовым помощником. Эта настройка синхронизируется на всех ваших устройствах.',
-        preferredLanguage: 'Предпочтительный язык',
-        preferredLanguageSubtitle: 'Язык, используемый для ответов голосового помощника',
-        language: {
-            searchPlaceholder: 'Поиск языков...',
-            title: 'Языки',
-            footer: ({ count }: { count: number }) => `Доступно ${count} ${plural({ count, one: 'язык', few: 'языка', many: 'языков' })}`,
-            autoDetect: 'Автоопределение',
-        },
-        // Bring your own agent
-        byoTitle: 'Используйте своего агента',
-        byoDescription: 'Используйте собственного агента ElevenLabs вместо стандартного Joy. Подписка не требуется — подключайтесь напрямую через свой аккаунт ElevenLabs. Ваш агент должен определить два клиентских инструмента: messageClaudeCode (отправляет текст агенту кодирования) и processPermissionRequest (разрешает или запрещает использование инструментов). Контекст сессии передаётся через динамическую переменную {{initialConversationContext}}.',
-        customAgentId: 'ElevenLabs Agent ID',
-        customAgentIdNotSet: 'Не настроено',
-        customAgentIdDescription: 'Введите ваш ElevenLabs Agent ID. Оставьте пустым, чтобы использовать стандартный Joy.',
-        customAgentIdPlaceholder: 'e.g. abc123def456',
-        bypassToken: 'Прямое подключение',
-        bypassTokenSubtitle: 'Пропустить сервер Joy, подключиться напрямую к ElevenLabs',
-        promptGuideTitle: 'Руководство по промптам агента',
-        promptGuideDescription: 'Вашему агенту ElevenLabs необходимы:\n\n• Инструмент: messageClaudeCode — параметр: message (string). Отправляет сообщение в активную сессию кодирования.\n• Инструмент: processPermissionRequest — параметр: decision ("allow" или "deny"). Одобряет или отклоняет ожидающее разрешение на использование инструмента.\n• Динамическая переменная: {{initialConversationContext}} — получает историю и контекст сессии при запуске.\n\nАгент выступает голосовым мостом между пользователем и агентами кодирования. Он должен быть кратким, отвечать только при обращении и сообщать, когда агент кодирования завершает работу.',
-        usageTitle: 'Использование (последние 30 дней)',
-        usageFooter: 'Время голосового общения за последние 30 дней. Бесплатный тариф: 20 мин. С подпиской: 5 часов. Макс. 100 разговоров в месяц.',
-        usageLabel: 'Голосовое время',
-        conversationsLabel: 'Разговоры',
-        usageUsed: ({ used, limit }: { used: string; limit: string }) => `${used} использовано из ${limit}`,
-        supportTitle: 'Улучшить голос',
-        supportSubtitle: 'Больше голосового времени и поддержка разработки',
-    },
 
     settingsAccount: {
         // Account settings screen
@@ -937,7 +882,7 @@ export const ru: TranslationStructure = {
 
     machine: {
         offlineUnableToSpawn: 'Запуск отключен: машина offline',
-        offlineHelp: '• Убедитесь, что компьютер online\n• Выполните `happy daemon status` для диагностики\n• Используете последнюю версию CLI? Обновите командой `npm install -g happy@latest`',
+        offlineHelp: '• Убедитесь, что компьютер online\n• Выполните `joy status` для диагностики',
         launchNewSessionInDirectory: 'Запустить новую сессию в папке',
         daemon: 'Daemon',
         status: 'Статус',
@@ -1039,59 +984,7 @@ export const ru: TranslationStructure = {
         mermaidRenderFailed: 'Не удалось отобразить диаграмму mermaid',
     },
 
-    artifacts: {
-        // Artifacts feature
-        title: 'Артефакты',
-        countSingular: '1 артефакт',
-        countPlural: ({ count }: { count: number }) => {
-            const n = Math.abs(count);
-            const n10 = n % 10;
-            const n100 = n % 100;
-            
-            if (n10 === 1 && n100 !== 11) {
-                return `${count} артефакт`;
-            }
-            if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) {
-                return `${count} артефакта`;
-            }
-            return `${count} артефактов`;
-        },
-        empty: 'Артефактов пока нет',
-        emptyDescription: 'Создайте первый артефакт, чтобы начать',
-        new: 'Новый артефакт',
-        edit: 'Редактировать артефакт',
-        delete: 'Удалить',
-        updateError: 'Не удалось обновить артефакт. Пожалуйста, попробуйте еще раз.',
-        notFound: 'Артефакт не найден',
-        discardChanges: 'Отменить изменения?',
-        discardChangesDescription: 'У вас есть несохраненные изменения. Вы уверены, что хотите их отменить?',
-        deleteConfirm: 'Удалить артефакт?',
-        deleteConfirmDescription: 'Это действие нельзя отменить',
-        titleLabel: 'ЗАГОЛОВОК',
-        titlePlaceholder: 'Введите заголовок для вашего артефакта',
-        bodyLabel: 'СОДЕРЖИМОЕ',
-        bodyPlaceholder: 'Напишите ваш контент здесь...',
-        emptyFieldsError: 'Пожалуйста, введите заголовок или содержимое',
-        createError: 'Не удалось создать артефакт. Пожалуйста, попробуйте снова.',
-        save: 'Сохранить',
-        saving: 'Сохранение...',
-        loading: 'Загрузка артефактов...',
-        error: 'Не удалось загрузить артефакт',
-    },
 
-    usage: {
-        // Usage panel strings
-        today: 'Сегодня',
-        last7Days: 'Последние 7 дней',
-        last30Days: 'Последние 30 дней',
-        totalTokens: 'Всего токенов',
-        totalCost: 'Общая стоимость',
-        tokens: 'Токены',
-        cost: 'Стоимость',
-        usageOverTime: 'Использование во времени',
-        byModel: 'По модели',
-        noData: 'Данные об использовании недоступны',
-    },
 
     imageUpload: {
         attachTitle: 'Прикрепить',

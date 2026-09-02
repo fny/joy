@@ -1,24 +1,20 @@
 import * as React from 'react';
-import { useHappyAction } from '@/hooks/useHappyAction';
+import { useJoyAction } from '@/hooks/useJoyAction';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
-import { machineResumeSession, sessionArchive, sessionDelete, sessionKill, forkAndSpawn, type ForkSource } from '@/sync/ops';
-import { maybeCleanupWorktree } from '@/hooks/useWorktreeCleanup';
-import { storage, useLocalSetting, useMachine, useSetting } from '@/sync/storage';
-import { Machine, Session, isJoyDaemonSource } from '@/sync/storageTypes';
+import { sessionDelete, sessionKill } from '@/sync/ops';
+import { useLocalSetting, useMachine } from '@/sync/storage';
+import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { v2SpawnAndWait } from '@/sync/v2/spawn';
 import { machineRestartSessionFor } from '@/sync/v2/machine';
-import { resolveMessageModeMeta } from '@/sync/messageMeta';
 import { t } from '@/text';
-import { HappyError } from '@/utils/errors';
+import { JoyError } from '@/utils/errors';
 import { copySessionMetadataToClipboard, copySessionMetadataAndLogsToClipboard } from '@/utils/copySessionMetadataToClipboard';
 import { useSessionStatus } from '@/utils/sessionUtils';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { useRouter } from 'expo-router';
 import { useSession } from '@/sync/storage';
-import { DuplicateSheet } from '@/components/DuplicateSheet';
-import { machineRestartSession } from '@/sync/v2/machine';
 
 export interface SessionActionItem {
     id: string;
@@ -32,72 +28,6 @@ interface UseSessionQuickActionsOptions {
     onAfterArchive?: () => void;
     onAfterDelete?: () => void;
     onAfterCopySessionMetadata?: () => void;
-}
-
-type ResumeAvailability = {
-    canResume: boolean;
-    canShowResume: boolean;
-    subtitle: string;
-    message: string;
-};
-
-function getResumeAvailability(session: Session, machine: Machine | null | undefined, isConnected: boolean): ResumeAvailability {
-    if (isConnected) {
-        return {
-            canResume: false,
-            canShowResume: false,
-            subtitle: '',
-            message: '',
-        };
-    }
-
-    const machineId = session.metadata?.machineId;
-    if (!machineId) {
-        const message = t('sessionInfo.resumeSessionMissingMachine');
-        return {
-            canResume: false,
-            canShowResume: true,
-            subtitle: message,
-            message,
-        };
-    }
-
-    const hasBackendResumeId = Boolean(session.metadata?.claudeSessionId || session.metadata?.codexThreadId);
-    if (!hasBackendResumeId) {
-        const message = t('sessionInfo.resumeSessionMissingBackendId');
-        return {
-            canResume: false,
-            canShowResume: true,
-            subtitle: message,
-            message,
-        };
-    }
-
-    if (!machine) {
-        const message = t('sessionInfo.resumeSessionSameMachineOnly');
-        return {
-            canResume: false,
-            canShowResume: true,
-            subtitle: message,
-            message,
-        };
-    }
-
-    if (!isMachineOnline(machine)) {
-        return {
-            canResume: false,
-            canShowResume: true,
-            subtitle: t('sessionInfo.resumeSessionMachineOffline'),
-            message: t('sessionInfo.resumeSessionMachineOffline'),
-        };
-    }
-
-    return {
-        canResume: true,
-        canShowResume: true,
-        subtitle: t('sessionInfo.resumeSessionSubtitle'),
-        message: t('sessionInfo.resumeSessionSubtitle'),
-    };
 }
 
 export function useSessionQuickActions(
@@ -115,45 +45,24 @@ export function useSessionQuickActions(
     const machineId = session.metadata?.machineId ?? '';
     const machine = useMachine(machineId);
     const devModeEnabled = useLocalSetting('devModeEnabled');
-    const expResumeSession = useSetting('expResumeSession');
-
-    // joy-tmux sessions get their own restart flow (below) instead of the
-    // happy-cli resume/fork paths, which spawn through the happy daemon and
-    // don't exist for joy sessions.
-    const isJoy = isJoyDaemonSource(session.metadata?.joy__source);
     const joySessionId = session.metadata?.joy__sessionId;
+    const machineOnline = Boolean(machineId && machine && isMachineOnline(machine));
 
-    const resumeAvailability = React.useMemo(
-        () => (expResumeSession && !isJoy) ? getResumeAvailability(session, machine, sessionStatus.isConnected) : { canResume: false, canShowResume: false, subtitle: '', message: '' },
-        [machine, session, sessionStatus.isConnected, expResumeSession, isJoy],
-    );
-
-    // Fork eligibility — separate from resume because fork works on both
-    // active AND inactive Claude sessions (the on-disk JSONL exists either
-    // way; copyFile is atomic). The user-facing toggle is the same
-    // expResumeSession experiment so all three flows (resume / fork /
-    // duplicate) ride a single switch on settings/features.
-    const claudeFlavor = !session.metadata?.flavor || session.metadata.flavor === 'claude';
+    // Fork: any claude session with a known conversation id on an online
+    // machine. Works on active AND inactive sessions — the daemon launches
+    // `claude --resume <id> --fork-session`, no transcript copy needed.
     const claudeSessionId = session.metadata?.claudeSessionId;
-    // Joy-native fork: any joy claude session with a known conversation id on
-    // an online machine. No experiment gate — it's a core action.
-    const canForkJoy = Boolean(
-        isJoy
-        && (!session.metadata?.flavor || session.metadata.flavor === 'claude')
-        && session.metadata?.claudeSessionId
-        && machineId && machine && isMachineOnline(machine),
-    );
     const canFork = Boolean(
-        expResumeSession
-        && !isJoy
-        && claudeFlavor
+        (!session.metadata?.flavor || session.metadata.flavor === 'claude')
         && claudeSessionId
-        && machineId
-        && machine
-        && isMachineOnline(machine),
+        && machineOnline,
     );
 
-    const canRestart = Boolean(isJoy && joySessionId && machineId && machine && isMachineOnline(machine));
+    // Restart: the daemon kills the tmux window and starts a fresh agent in
+    // the same cwd resuming the same conversation. This is also how a
+    // disconnected session gets resumed.
+    const canRestart = Boolean(joySessionId && machineOnline);
+    const canResume = canRestart && !sessionStatus.isConnected;
 
     const openDetails = React.useCallback(() => {
         router.push(`/session/${session.id}/info`);
@@ -177,53 +86,12 @@ export function useSessionQuickActions(
         })();
     }, [onAfterCopySessionMetadata, session]);
 
-    const [resumingSession, performResume] = useHappyAction(async () => {
-        if (!resumeAvailability.canResume) {
-            throw new HappyError(resumeAvailability.message, false);
-        }
-
-        if (!machineId) {
-            throw new HappyError(t('sessionInfo.resumeSessionMissingMachine'), false);
-        }
-
-        const modeMeta = resolveMessageModeMeta(session, storage.getState().settings);
-        const result = await machineResumeSession({
-            machineId,
-            sessionId: session.id,
-            model: modeMeta.model ?? undefined,
-            permissionMode: modeMeta.permissionMode,
-        });
-
-        switch (result.type) {
-            case 'success': {
-                // Session reconnects to the same ID, so messages are preserved.
-                // Refresh to pick up the updated session state.
-                await sync.refreshSessions();
-
-                if (session.permissionMode) {
-                    storage.getState().updateSessionPermissionMode(result.sessionId, session.permissionMode);
-                }
-                if (session.modelMode) {
-                    storage.getState().updateSessionModelMode(result.sessionId, session.modelMode);
-                }
-
-                navigateToSession(result.sessionId);
-                return;
-            }
-            case 'requestToApproveDirectoryCreation':
-                throw new HappyError(t('sessionInfo.resumeSessionUnexpectedDirectoryPrompt'), false);
-            case 'error':
-                throw new HappyError(result.errorMessage, false);
-        }
-    });
-
-    const [archivingSession, performArchive] = useHappyAction(async () => {
-        await maybeCleanupWorktree(session.id, session.metadata?.path, session.metadata?.machineId);
-
-        // Try to kill the CLI process; if it's already dead, force-archive via server
+    // Archive = end the live agent; the daemon marks the session ended and
+    // the relay keeps the record (it lingers in history).
+    const [archivingSession, performArchive] = useJoyAction(async () => {
         const killResult = await sessionKill(session.id);
         if (!killResult.success) {
-            await sessionArchive(session.id);
+            throw new JoyError(killResult.message || 'Failed to end session', false);
         }
         onAfterArchive?.();
     });
@@ -235,18 +103,17 @@ export function useSessionQuickActions(
     // Permanent hard-delete (vs archive, which just deactivates and lingers in
     // history). Confirms first; ends the live session so the daemon/CLI doesn't
     // re-create the record, then DELETEs it server-side.
-    const [deletingSession, performDelete] = useHappyAction(async () => {
+    const [deletingSession, performDelete] = useJoyAction(async () => {
         const ok = await Modal.confirm(
             'Delete session?',
             'Permanently deletes this session and its messages. This cannot be undone.',
             { confirmText: 'Delete', destructive: true },
         );
         if (!ok) return;
-        await maybeCleanupWorktree(session.id, session.metadata?.path, session.metadata?.machineId);
         await sessionKill(session.id).catch(() => { });
         const result = await sessionDelete(session.id);
         if (!result.success) {
-            throw new HappyError(result.message || 'Failed to delete session', false);
+            throw new JoyError(result.message || 'Failed to delete session', false);
         }
         onAfterDelete?.();
     });
@@ -255,67 +122,42 @@ export function useSessionQuickActions(
         performDelete();
     }, [performDelete]);
 
-    const resumeSession = React.useCallback(() => {
-        performResume();
-    }, [performResume]);
-
-    // Fork the session (no truncation) — copies the on-disk Claude JSONL
-    // and spawns a fresh Happy session on the same machine. Works for
-    // both active and inactive sessions; the source row stays untouched.
-    //
-    // Joy sessions use a different mechanism: the daemon's create op with
-    // resume_id + forkSession, which launches `claude --resume <id>
-    // --fork-session` — the conversation continues under a NEW session id,
-    // no JSONL copy needed (works on LIVE sessions too; the daemon's
+    // Fork: the daemon's create op with resume_id + forkSession launches
+    // `claude --resume <id> --fork-session` — the conversation continues
+    // under a NEW session id (works on LIVE sessions too; the daemon's
     // resume-collision guard exempts forks).
-    const [forking, performFork] = useHappyAction(async () => {
+    const [forking, performFork] = useJoyAction(async () => {
         const directory = session.metadata?.path;
-        if (isJoy) {
-            if (!canForkJoy || !machineId || !directory || !claudeSessionId) {
-                throw new HappyError(t('session.forkErrorMissingMetadata'), false);
-            }
-            const forked = await v2SpawnAndWait(machineId, {
-                cwd: directory, resume_id: claudeSessionId, forkSession: true,
-            });
-            if (!forked) return; // user declined the directory prompt
-            try { await sync.refreshSessions(); } catch { /* broadcast will hydrate */ }
-            navigateToSession(forked);
-            return;
+        if (!canFork || !machineId || !directory || !claudeSessionId) {
+            throw new JoyError(t('session.forkErrorMissingMetadata'), false);
         }
-        if (!canFork) {
-            throw new HappyError(t('session.forkErrorMissingMetadata'), false);
-        }
-        if (!machineId || !directory || !claudeSessionId) {
-            throw new HappyError(t('session.forkErrorMissingMetadata'), false);
-        }
-        const source: ForkSource = { sessionId: session.id, machineId, directory, claudeSessionId };
-        const result = await forkAndSpawn(source);
-        if (result.type !== 'success') {
-            throw new HappyError(result.type === 'error' ? result.errorMessage : t('session.forkErrorGeneric'), false);
-        }
-        navigateToSession(result.sessionId);
+        const forked = await v2SpawnAndWait(machineId, {
+            cwd: directory, resume_id: claudeSessionId, forkSession: true,
+        });
+        if (!forked) return; // user declined the directory prompt
+        try { await sync.refreshSessions(); } catch { /* broadcast will hydrate */ }
+        navigateToSession(forked);
     });
 
     const forkSession = React.useCallback(() => {
         performFork();
     }, [performFork]);
 
-    // Restart a joy-tmux session: the daemon kills the tmux window and starts
-    // a fresh claude in the same cwd resuming the same conversation. A new
-    // relay session comes back — navigate there.
-    const [restarting, performRestart] = useHappyAction(async () => {
+    // Restart: the daemon kills the tmux window and starts a fresh agent in
+    // the same cwd resuming the same conversation.
+    const [restarting, performRestart] = useJoyAction(async () => {
         if (!canRestart) {
-            throw new HappyError('joy-tmux machine is offline', false);
+            throw new JoyError(t('sessionInfo.resumeSessionMachineOffline'), false);
         }
         type RestartResult = { ok?: boolean; relaySessionId?: string; error?: string };
         const rctx = sync.machineOnlyCtx(machineId!);
-        if (!rctx) throw new HappyError('No machine context for this session', false);
+        if (!rctx) throw new JoyError('No machine context for this session', false);
         const result = await Promise.race([
             machineRestartSessionFor(rctx, joySessionId!, { cwd: session.metadata?.path }).then(r => r.data as unknown as RestartResult),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond within 30s')), 30000)),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('The daemon did not respond within 30s')), 30000)),
         ]);
         if (!result?.ok) {
-            throw new HappyError(result?.error || 'Failed to restart session', false);
+            throw new JoyError(result?.error || 'Failed to restart session', false);
         }
         // The restarted session keeps its v2 identity (the window record's
         // binding survives restart), so the card we're on stays correct.
@@ -327,14 +169,6 @@ export function useSessionQuickActions(
         performRestart();
     }, [performRestart]);
 
-    const openDuplicateSheet = React.useCallback(() => {
-        if (!canFork) return;
-        Modal.show({
-            component: DuplicateSheet,
-            props: { sessionId: session.id },
-        } as any);
-    }, [canFork, session.id]);
-
     const canCopySessionMetadata = __DEV__ || devModeEnabled;
 
     const actionItems = React.useMemo<SessionActionItem[]>(() => {
@@ -342,19 +176,14 @@ export function useSessionQuickActions(
             { id: 'details', icon: 'information-circle-outline', label: t('profile.details'), onPress: openDetails },
         ];
 
-        if (canRestart) {
+        if (canResume) {
+            items.push({ id: 'resume', icon: 'play-circle-outline', label: t('sessionInfo.resumeSession'), onPress: restartSession });
+        } else if (canRestart) {
             items.push({ id: 'restart', icon: 'refresh-outline', label: 'Restart session', onPress: restartSession });
         }
 
-        if (resumeAvailability.canShowResume) {
-            items.push({ id: 'resume', icon: 'play-circle-outline', label: t('sessionInfo.resumeSession'), onPress: resumeSession });
-        }
-
-        if (canFork || canForkJoy) {
-            items.push({ id: 'fork', icon: 'git-branch-outline', label: t('session.forkAction'), onPress: forkSession });
-        }
         if (canFork) {
-            items.push({ id: 'duplicate', icon: 'time-outline', label: t('session.duplicateAction'), onPress: openDuplicateSheet });
+            items.push({ id: 'fork', icon: 'git-branch-outline', label: t('session.forkAction'), onPress: forkSession });
         }
 
         if (canCopySessionMetadata) {
@@ -372,14 +201,12 @@ export function useSessionQuickActions(
         canCopySessionMetadata,
         canFork,
         canRestart,
+        canResume,
         copySessionMetadata,
         copySessionMetadataAndLogs,
         forkSession,
         openDetails,
-        openDuplicateSheet,
         restartSession,
-        resumeAvailability.canShowResume,
-        resumeSession,
     ]);
 
     const showActionAlert = React.useCallback(() => {
@@ -401,22 +228,16 @@ export function useSessionQuickActions(
         deletingSession,
         canArchive: true,
         canCopySessionMetadata,
-        canResume: resumeAvailability.canResume,
-        canShowResume: resumeAvailability.canShowResume,
+        canResume,
         canFork,
         canRestart,
         copySessionMetadata,
         copySessionMetadataAndLogs,
         forkSession,
         forking,
-        isJoy,
         openDetails,
-        openDuplicateSheet,
         restartSession,
         restarting,
-        resumeSession,
-        resumeSessionSubtitle: resumeAvailability.subtitle,
-        resumingSession,
     };
 }
 

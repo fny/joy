@@ -1,8 +1,8 @@
-// Info page for joy-tmux sessions — replaces the stock happy info page for
+// Info page for joy-daemon sessions — the info page for
 // sessions with isJoyDaemonSource(metadata.joy__source) (the route file branches
 // here). Built around what a joy session actually is: a tmux window driven
 // by the joy-tmux daemon, with a live record fetched over joy-get-session.
-// Happy-cli concerns (CLI version warnings, sandbox, worktrees, resume/fork)
+// Legacy CLI concerns (CLI version warnings, sandbox, worktrees, resume/fork)
 // don't apply and don't appear.
 //
 // Personal-build dev page — plain strings, no i18n (matches the /joy pages).
@@ -18,13 +18,13 @@ import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
 import { useSessionStatus, formatPathRelativeToHome, getSessionName, getSessionAvatarId, getResumeCommand } from '@/utils/sessionUtils';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
-import { useHappyAction } from '@/hooks/useHappyAction';
+import { useJoyAction } from '@/hooks/useJoyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { machineSessionInfoFor, machineSessionLog } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
 import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
-import { HappyError } from '@/utils/errors';
+import { JoyError } from '@/utils/errors';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import type { JoySessionRecord } from '@/joy/types';
@@ -125,7 +125,7 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         return () => { cancelled = true; };
     }, [joySessionId, machineId]);
 
-    const [deletingSession, performDelete] = useHappyAction(async () => {
+    const [deletingSession, performDelete] = useJoyAction(async () => {
         router.back();
         router.back();
         if (sessionStatus.isConnected || session.active) {
@@ -133,24 +133,24 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         }
         const result = await sessionDelete(session.id);
         if (!result.success) {
-            throw new HappyError(result.message || 'Failed to delete session', false);
+            throw new JoyError(result.message || 'Failed to delete session', false);
         }
     });
 
     // Download the transcript JSONL via joy-session-log. Web-only: native
     // file saving isn't wired up and this is a debugging affordance.
-    const [downloadingLog, performDownloadLog] = useHappyAction(async () => {
-        if (!machineId || !joySessionId) throw new HappyError('No machine or joy session id on this session', false);
-        if (Platform.OS !== 'web') throw new HappyError('Download is web-only for now', false);
+    const [downloadingLog, performDownloadLog] = useJoyAction(async () => {
+        if (!machineId || !joySessionId) throw new JoyError('No machine or joy session id on this session', false);
+        if (Platform.OS !== 'web') throw new JoyError('Download is web-only for now', false);
         type LogResult = { ok?: boolean; filename?: string; contentBase64?: string; error?: string };
         const lctx = sync.machineOnlyCtx(machineId);
-        if (!lctx) throw new HappyError('No machine context for this session', false);
+        if (!lctx) throw new JoyError('No machine context for this session', false);
         const result = await Promise.race([
             machineSessionLog(lctx, joySessionId).then(r => r.data as unknown as LogResult),
             new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond')), 60000)),
         ]);
         if (!result.ok || !result.contentBase64) {
-            throw new HappyError(result.error || 'Failed to fetch session log', false);
+            throw new JoyError(result.error || 'Failed to fetch session log', false);
         }
         const bytes = Uint8Array.from(atob(result.contentBase64), c => c.charCodeAt(0));
         const url = URL.createObjectURL(new Blob([bytes], { type: 'application/x-ndjson' }));
@@ -175,7 +175,7 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
     const claudeSessionId = live?.claude_session_id ?? session.metadata?.claudeSessionId;
     const sessionPath = live?.cwd ?? session.metadata?.path;
     const resumeCommand = getResumeCommand(session)
-        ?? (claudeSessionId && sessionPath ? `cd '${sessionPath}' && happy claude --resume ${claudeSessionId}` : null);
+        ?? (claudeSessionId && sessionPath ? `cd '${sessionPath}' && joy new . --resume ${claudeSessionId}` : null);
 
     return (
         <ItemList>

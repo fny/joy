@@ -1,6 +1,6 @@
 /**
  * Git status parser for porcelain output
- * Based on simple-git implementation with enhancements for the Happy codebase
+ * Based on simple-git implementation with enhancements for the Joy codebase
  */
 
 import { LineParser } from './LineParser';

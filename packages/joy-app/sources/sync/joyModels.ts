@@ -19,8 +19,8 @@ export const JOY_CLAUDE_MODELS: ModelMode[] = [
 // available): bypass → auto → default → acceptEdits → plan. Matching the
 // order means browser Shift+Tab cycling (AgentInput) visits modes in the
 // same sequence as terminal Shift+Tab. Notably:
-//   - includes 'auto' (real cycle member missing from happy's list)
-//   - excludes 'dontAsk' (in happy's list but NOT in the interactive cycle —
+//   - includes 'auto' (real cycle member missing from the stock list)
+//   - excludes 'dontAsk' (in the stock list but NOT in the interactive cycle —
 //     joy-set-mode can't reach it and would error)
 export const JOY_CLAUDE_PERMISSION_MODES: PermissionMode[] = [
     { key: 'bypassPermissions', name: 'yolo', description: null },

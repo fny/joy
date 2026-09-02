@@ -14,6 +14,11 @@ export class Encryption {
 
     static async create(masterSecret: Uint8Array) {
 
+        // The 'Happy …' HKDF labels below are WIRE CONSTANTS: the daemon
+        // derives the same keys from the same labels, and every existing
+        // account's data is sealed under them. Renaming would silently
+        // orphan every session — leave them exactly as they are.
+
         // Derive content data key to open session and machine records
         const contentDataKey = await deriveKey(masterSecret, 'Happy EnCoder', ['content']);
 

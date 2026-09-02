@@ -15,7 +15,7 @@ import { useLocalSettingMutable } from '@/sync/storage';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { Switch } from '@/components/Switch';
 import { Modal } from '@/modal';
-import { useHappyAction } from '@/hooks/useHappyAction';
+import { useJoyAction } from '@/hooks/useJoyAction';
 import { useMultiClick } from '@/hooks/useMultiClick';
 import { JoyLogoType } from '@/components/JoyLogotype';
 import { useJoyMachines } from '@/hooks/useJoyMachines';
@@ -111,14 +111,14 @@ export const SettingsView = React.memo(function SettingsView() {
     // Manual OTA pull: check → download → apply NOW (reloadAsync), replacing
     // the "force-quit twice and hope" dance — and unlike the silent automatic
     // check, every outcome is surfaced (up to date / restarting / real error).
-    const [checkingUpdate, checkForUpdate] = useHappyAction(React.useCallback(async () => {
+    const [checkingUpdate, checkForUpdate] = useJoyAction(React.useCallback(async () => {
         const res = await Updates.checkForUpdateAsync();
         if (!res.isAvailable) {
-            Modal.alert(t('settingsMods.jsUpdate'), t('settingsMods.upToDate'));
+            Modal.alert(t('settingsUpdates.jsUpdate'), t('settingsUpdates.upToDate'));
             return;
         }
         await Updates.fetchUpdateAsync();
-        Modal.alert(t('settingsMods.jsUpdate'), t('settingsMods.updating'));
+        Modal.alert(t('settingsUpdates.jsUpdate'), t('settingsUpdates.updating'));
         await Updates.reloadAsync();
     }, []));
     const appVersion = Constants.expoConfig?.version || '1.0.0';
@@ -264,12 +264,6 @@ export const SettingsView = React.memo(function SettingsView() {
                     onPress={() => router.push('/settings/notifications' as any)}
                 />
                 <Item
-                    title={t('settings.voiceAssistant')}
-                    subtitle={t('settings.voiceAssistantSubtitle')}
-                    icon={<Ionicons name="mic-outline" size={29} color={theme.colors.accents.green} />}
-                    onPress={() => router.push('/settings/voice')}
-                />
-                <Item
                     title="Agent Defaults"
                     subtitle="Default model, effort, and permissions"
                     icon={<Ionicons name="options-outline" size={29} color={theme.colors.accents.blue} />}
@@ -350,8 +344,8 @@ export const SettingsView = React.memo(function SettingsView() {
                     onPress={handleGitHub}
                 />
                 <Item
-                    title={t('settingsMods.jsUpdate')}
-                    subtitle={t('settingsMods.jsUpdateDescription')}
+                    title={t('settingsUpdates.jsUpdate')}
+                    subtitle={t('settingsUpdates.jsUpdateDescription')}
                     detail={otaDetail()}
                     icon={<Ionicons name="cloud-download-outline" size={29} color={theme.colors.textSecondary} />}
                     showChevron={false}
@@ -365,7 +359,7 @@ export const SettingsView = React.memo(function SettingsView() {
                     }}
                 />
                 <Item
-                    title={t('settingsMods.checkForUpdate')}
+                    title={t('settingsUpdates.checkForUpdate')}
                     icon={<Ionicons name="refresh-outline" size={29} color={theme.colors.textSecondary} />}
                     loading={checkingUpdate}
                     onPress={checkingUpdate ? undefined : checkForUpdate}

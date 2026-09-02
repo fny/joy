@@ -9,15 +9,12 @@ import { useHeaderHeight } from '@/utils/responsive';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessageView } from './MessageView';
 import { AgentWorkGroupView, ToolGroupView } from './ToolGroupView';
-import { DuplicateSheet } from './DuplicateSheet';
 import { Metadata, Session } from '@/sync/storageTypes';
 import { ChatFooter } from './ChatFooter';
 import { Message } from '@/sync/typesMessage';
 import { DisplayItem, ToolGroupItem, useGroupedMessages } from '@/hooks/useGroupedMessages';
 import Octicons from '@expo/vector-icons/Octicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Modal } from '@/modal';
-import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 
 const SCROLL_THRESHOLD = 300;
 // "Live" (pinned to the newest message) is a SEPARATE, much tighter band than
@@ -358,25 +355,6 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
 
     const keyExtractor = useCallback((item: DisplayItem) => item.id, []);
 
-    // Long-press → fork-from-this-message. Uses the same canFork gate as
-    // the rest of the fork affordances: ridden by the expResumeSession
-    // experiments toggle, requires a Claude session with claudeSessionId
-    // and a machine that's online. Active OR inactive — fork works either
-    // way (the on-disk JSONL exists in both cases).
-    const { canFork } = useSessionQuickActions(session!, {});
-
-    // joy keeps the original claudeUuid-based fork (the upstream rewind/fork
-    // rework — initialRewindPointId/MessageText — is a separate feature not ported).
-    const handleForkFromMessage = useCallback((_messageId: string, claudeUuid: string) => {
-        Modal.show({
-            component: DuplicateSheet,
-            props: {
-                sessionId: props.sessionId,
-                initialClaudeUuid: claudeUuid,
-            },
-        } as any);
-    }, [props.sessionId]);
-
     const renderItem = useCallback(({ item }: { item: DisplayItem }) => {
         if (item.type === 'tool-group') {
             return (
@@ -405,10 +383,9 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 message={item.message}
                 metadata={props.metadata}
                 sessionId={props.sessionId}
-                onForkFromUserMessage={canFork ? handleForkFromMessage : undefined}
             />
         );
-    }, [props.metadata, props.sessionId, canFork, handleForkFromMessage, handleToggleGroup]);
+    }, [props.metadata, props.sessionId, handleToggleGroup]);
 
     // Non-inverted list: the newest messages sit at the visual bottom. Show the
     // scroll-to-bottom button once the user has scrolled UP far enough from the

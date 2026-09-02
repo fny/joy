@@ -1,7 +1,7 @@
 // Machine view for joy-tmux: the daemon's live status (version, PID, uptime,
 // OS, claude CLI) fetched over joy-status, plus links into the joy surfaces
 // for this machine. This IS the /machine/[id] page now — the joy build has no
-// separate happy-daemon machine view.
+// separate stock machine view.
 //
 // Personal-build dev page — mostly plain strings (matches the /joy pages);
 // shared bits (System group, copy toast) go through i18n.
@@ -18,7 +18,7 @@ import { formatOSPlatform } from '@/utils/sessionUtils';
 import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
-import { useHappyAction } from '@/hooks/useHappyAction';
+import { useJoyAction } from '@/hooks/useJoyAction';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
@@ -119,11 +119,11 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         }
     }, [machine]);
 
-    const [restarting, doRestartDaemon] = useHappyAction(React.useCallback(async () => {
+    const [restarting, doRestartDaemon] = useJoyAction(React.useCallback(async () => {
         await joyRestartDaemon(machineId);
     }, [machineId]));
 
-    const [killing, doKillAll] = useHappyAction(React.useCallback(async () => {
+    const [killing, doKillAll] = useJoyAction(React.useCallback(async () => {
         const ok = await Modal.confirm(
             'Kill all sessions?',
             'Closes every session and the tmux session on this machine. Running Claude sessions are terminated.',
@@ -138,7 +138,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     // live ones first so their tmux windows aren't re-adopted and re-created
     // after deletion. Works even on orphaned records the daemon no longer tracks,
     // since we delete from the app's own synced session list.
-    const [purging, doPurgeAll] = useHappyAction(React.useCallback(async () => {
+    const [purging, doPurgeAll] = useJoyAction(React.useCallback(async () => {
         const ok = await Modal.confirm(
             'Purge all sessions?',
             'Permanently DELETES every joy-tmux session record for this machine — they vanish from history and cannot be recovered. (Unlike "Kill all", which only ends them.) Live sessions are killed first.',
@@ -161,7 +161,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
     // Force the daemon to re-scan commands/skills/plugins now. It pushes the
     // refreshed list into machine metadata, so machine.metadata.slashCommands
     // updates without a separate fetch.
-    const [refreshingCommands, doRefreshCommands] = useHappyAction(React.useCallback(async () => {
+    const [refreshingCommands, doRefreshCommands] = useJoyAction(React.useCallback(async () => {
         const c0 = sync.machineOnlyCtx(machineId);
         if (!c0) throw new Error('no machine context');
         await machineSlashCommandsAll(c0, true);
@@ -235,6 +235,12 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                     />
                     <Item title="Host" subtitle={machine.metadata.host} icon={<Ionicons name="server-outline" size={29} color="#5856D6" />} showChevron={false} />
                     <Item title="Home" subtitle={machine.metadata.homeDir} icon={<Ionicons name="home-outline" size={29} color="#5856D6" />} showChevron={false} />
+                    {machine.metadata.joyDaemonVersion && (
+                        <Item title="Daemon" subtitle={machine.metadata.joyDaemonVersion} icon={<Ionicons name="cube-outline" size={29} color="#5856D6" />} showChevron={false} />
+                    )}
+                    {machine.metadata.joyHomeDir && (
+                        <Item title="Joy Home" subtitle={machine.metadata.joyHomeDir} icon={<Ionicons name="folder-outline" size={29} color="#5856D6" />} showChevron={false} />
+                    )}
                     <Item
                         title="Machine ID"
                         subtitle={machineId}

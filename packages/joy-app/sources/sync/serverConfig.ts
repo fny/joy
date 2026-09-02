@@ -5,16 +5,14 @@ const serverConfigStorage = new MMKV({ id: 'server-config' });
 
 const SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
-export const DEFAULT_SERVER_URL = 'https://api.cluster-fluster.com';
+export const DEFAULT_SERVER_URL = 'https://joy.voltai.party:4997';
 
 /** The known relays, in preference order. joy.voltai.party's :14997 (dev
- *  joy-relay) and :24997 (direct happy-server) doors still exist on the box
- *  but were dropped from the picker 2026-08-16 — they're the same universe as
- *  :4997 and only ever caused machine-list confusion. A custom URL can still
- *  reach them. */
+ *  joy-relay) door still exists on the box but was dropped from the picker
+ *  2026-08-16 — it's the same universe as :4997 and only ever caused
+ *  machine-list confusion. A custom URL can still reach it. */
 export const KNOWN_RELAYS = [
-    { key: 'happy', name: 'Happy Cloud', url: DEFAULT_SERVER_URL },
-    { key: 'joy', name: 'Joy Relay', url: 'https://joy.voltai.party:4997' },
+    { key: 'joy', name: 'Joy Relay', url: DEFAULT_SERVER_URL },
 ] as const;
 
 /** Stable per-relay identifier: host, or host_port for non-default ports —
@@ -29,14 +27,12 @@ export function relayKeyForUrl(url: string): string {
     }
 }
 
-/** MMKV store scoped to the active relay. The default relay keeps the legacy
- *  default instance (existing installs keep their data); every other relay
- *  gets its own store, so switching relays never bleeds one account's caches
- *  (sessions, machines, drafts, push registration) into another. */
+/** MMKV store scoped to the active relay. Every relay (the default one
+ *  included) gets its own store, so switching relays never bleeds one
+ *  account's caches (sessions, machines, drafts, push registration) into
+ *  another. */
 export function relayScopedMMKV(): MMKV {
-    const url = getServerUrl();
-    if (url === DEFAULT_SERVER_URL) return new MMKV();
-    return new MMKV({ id: `relay.${relayKeyForUrl(url)}` });
+    return new MMKV({ id: `relay.${relayKeyForUrl(getServerUrl())}` });
 }
 
 /** Display name for a relay URL: the known-relay name, else the hostname. */
@@ -52,8 +48,8 @@ export function relayNameForUrl(url: string): string {
 
 export function getServerUrl(): string {
     return serverConfigStorage.getString(SERVER_KEY) ||
-           (globalThis as any).__HAPPY_CONFIG__?.serverUrl ||
-           process.env.EXPO_PUBLIC_HAPPY_SERVER_URL ||
+           (globalThis as any).__JOY_CONFIG__?.serverUrl ||
+           process.env.EXPO_PUBLIC_JOY_SERVER_URL ||
            DEFAULT_SERVER_URL;
 }
 
@@ -67,11 +63,10 @@ export function setServerUrl(url: string | null): void {
 
 // ── relay perimeter key ──────────────────────────────────────────────────────
 // joy-relay's gate requires a shared key on EVERY request before anything
-// reaches happy-server (accounts can't even be created without it). Stored
-// per relay (keyed by relayKeyForUrl) in the same logout-surviving MMKV.
-// Sent as the X-Joy-Relay-Key header on all fetches to the relay origin (via
-// installRelayKeyFetchInterceptor below) and as ?joyRelayKey= on the
-// socket.io handshake (browsers can't set custom WebSocket headers).
+// reaches the relay's routes (accounts can't even be created without it).
+// Stored per relay (keyed by relayKeyForUrl) in the same logout-surviving
+// MMKV. Sent as the X-Joy-Relay-Key header on all fetches to the relay origin
+// (via installRelayKeyFetchInterceptor below).
 
 const RELAY_ACCESS_KEY_PREFIX = 'relay-access-key:';
 

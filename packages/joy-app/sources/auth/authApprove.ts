@@ -2,7 +2,7 @@
 import axios from 'axios';
 import { encodeBase64 } from "../encryption/base64";
 import { getServerUrl } from "@/sync/serverConfig";
-import { getHappyClientId } from "@/sync/apiSocket";
+import { getJoyClientId } from '@/sync/clientId';
 
 interface AuthRequestStatus {
     status: 'not_found' | 'pending' | 'authorized';
@@ -21,7 +21,7 @@ export async function authApprove(token: string, publicKey: Uint8Array, answerV1
                 publicKey: publicKeyBase64
             },
             headers: {
-                'X-Happy-Client': getHappyClientId(),
+                'X-Joy-Client': getJoyClientId(),
             }
         }
     );
@@ -49,7 +49,7 @@ export async function authApprove(token: string, publicKey: Uint8Array, answerV1
         }, {
             headers: {
                 'Authorization': `Bearer ${token}`,
-                'X-Happy-Client': getHappyClientId(),
+                'X-Joy-Client': getJoyClientId(),
             }
         });
     }

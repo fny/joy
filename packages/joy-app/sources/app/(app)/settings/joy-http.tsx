@@ -8,7 +8,7 @@ import { ItemList } from '@/components/ItemList';
 import { useSettingMutable } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { t } from '@/text';
-import { useHappyAction } from '@/hooks/useHappyAction';
+import { useJoyAction } from '@/hooks/useJoyAction';
 import { useJoyTmuxSessions } from '@/hooks/useJoyTmuxSessions';
 import type { JoySession } from '@/joy/types';
 import { StyleSheet } from 'react-native-unistyles';
@@ -32,7 +32,7 @@ export default React.memo(function JoyHttpScreen() {
         if (value?.trim()) setServerUrl(value.trim());
     }, [url, setServerUrl]);
 
-    const [createLoading, doCreate] = useHappyAction(React.useCallback(async () => {
+    const [createLoading, doCreate] = useJoyAction(React.useCallback(async () => {
         const cwd = await Modal.prompt(
             t('settingsSessions.newSession'),
             t('settingsSessions.workingDirectory'),
@@ -42,13 +42,13 @@ export default React.memo(function JoyHttpScreen() {
         await createSession(cwd.trim());
     }, [createSession]));
 
-    const [, doKill] = useHappyAction(React.useCallback(async () => {
+    const [, doKill] = useJoyAction(React.useCallback(async () => {
         const id = killingIdRef.current;
         if (!id) return;
         await killSession(id);
     }, [killSession]));
 
-    const [screenshotLoading, doScreenshot] = useHappyAction(React.useCallback(async () => {
+    const [screenshotLoading, doScreenshot] = useJoyAction(React.useCallback(async () => {
         const id = screenshotIdRef.current;
         if (!id) return;
         const text = await fetchPane(id);

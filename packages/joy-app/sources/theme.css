@@ -11,25 +11,25 @@ html, body {
     font-synthesis: none;
 }
 
-html.happy-app-zoomed {
+html.joy-app-zoomed {
     overflow: hidden;
 }
 
-html.happy-app-zoomed body {
-    width: calc(100vw / var(--happy-app-zoom));
-    height: calc(100vh / var(--happy-app-zoom));
+html.joy-app-zoomed body {
+    width: calc(100vw / var(--joy-app-zoom));
+    height: calc(100vh / var(--joy-app-zoom));
     transform-origin: top left;
 }
 
 @supports (zoom: 1) {
-    html.happy-app-zoomed body {
-        zoom: var(--happy-app-zoom);
+    html.joy-app-zoomed body {
+        zoom: var(--joy-app-zoom);
     }
 }
 
 @supports not (zoom: 1) {
-    html.happy-app-zoomed body {
-        transform: scale(var(--happy-app-zoom));
+    html.joy-app-zoomed body {
+        transform: scale(var(--joy-app-zoom));
     }
 }
 

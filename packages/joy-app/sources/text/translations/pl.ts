@@ -225,30 +225,12 @@ export const pl: TranslationStructure = {
         chatFontSizePreviewAgent: 'Tak — dostosuj go przyciskami + i −.',
     },
 
-    settingsMods: {
-        enabled: 'Włączono',
-        mod01Title: '01 · Audio',
-        mod01Description: 'Pokazuje przycisk mikrofonu do wprowadzania głosowego. Włącza też uprawnienia do mikrofonu macOS w kompilacji Tauri.',
-        mod02Title: '02 · xhigh Effort',
-        mod02Description: 'Dodaje poziom wysiłku xhigh między high i max dla Claude.',
-        mod04Title: '04 · Simplified Modes',
-        mod04Description: 'Pokazuje tylko Plan i Yolo w selektorze trybu uprawnień.',
-        mod05Title: '05 · Limit historii czatu',
-        mod05Description: 'Ogranicza liczbę wiadomości wyświetlanych w każdej rozmowie. Przydatne w długich czatach na wolniejszych urządzeniach.',
-        chatHistoryLimit: 'Limit wiadomości',
-        chatHistoryLimitDescription: 'Pokazuj tylko najnowsze wiadomości w każdej rozmowie',
-        chatHistoryLimitPlaceholder: 'np. 50',
-        chatHistoryLimitOff: 'Wył.',
+    settingsUpdates: {
         jsUpdate: 'Aktualizacja JS',
         jsUpdateDescription: 'Który pakiet JavaScript jest uruchomiony (zmienia się przy aktualizacjach OTA)',
         checkForUpdate: 'Sprawdź aktualizacje',
         upToDate: 'Masz już najnowszą wersję',
         updating: 'Pobrano aktualizację — ponowne uruchamianie…',
-        chatHistoryLimitValue: ({ count }: { count: number }) => `Ostatnie ${count} wiadomości`,
-        mod06Title: '06 · Podwójne dotknięcie',
-        mod06Description: 'Wymaga drugiego dotknięcia w ciągu 2 sekund, aby zatwierdzić wybór odpowiedzi z listy od asystenta. Pomaga zapobiegać przypadkowym wyborom.',
-        mod07Title: '07 · Otwórz plik z Read',
-        mod07Description: 'Wyświetla przycisk „Otwórz plik" przy wywołaniach narzędzia Read. Przycisk korzysta z wbudowanej przeglądarki plików Joy, która pobiera plik z hosta Claude — działa niezależnie od tego, czy aplikacja i Claude są na tej samej maszynie.',
     },
 
     settingsFeatures: {
@@ -303,7 +285,6 @@ export const pl: TranslationStructure = {
         voiceServiceUnavailable: 'Usługa głosowa jest tymczasowo niedostępna',
         voiceLimitReachedTitle: 'Osiągnięto limit głosu',
         voiceHardLimitReached: ({ hours }: { hours: number }) => `Wykorzystałeś ${hours}+ godzin głosu w tym miesiącu. To jest maksymalny dozwolony limit. Możesz skonfigurować własnego agenta ElevenLabs w ustawieniach głosu, aby korzystać z własnego limitu.`,
-        voiceConversationLimitReached: 'Osiągnąłeś maksymalną liczbę rozmów głosowych w tym miesiącu. Możliwe, że w przyszłości dodamy głosowe korzystanie na żądanie — prosimy o zgłoszenie na github.com/nicepkg/happy/issues, jeśli napotkasz ten limit.',
         oauthInitializationFailed: 'Nie udało się zainicjować przepływu OAuth',
         tokenStorageFailed: 'Nie udało się zapisać tokenów uwierzytelniania',
         oauthStateMismatch: 'Weryfikacja bezpieczeństwa nie powiodła się. Spróbuj ponownie',
@@ -447,7 +428,7 @@ export const pl: TranslationStructure = {
         relayLoginFailed: 'Nie udało się zalogować do tego serwera. Sprawdź klucz i spróbuj ponownie.',
         relayApplyKeyAll: 'Użyj tego klucza na wszystkich serwerach',
         relayAccessKeyLabel: 'Klucz dostępu do relay',
-        relayAccessKeyFooter: 'Klucz obwodowy dla tego relay (brama joy-relay). Wysyłany z każdym żądaniem; zostaw puste dla otwartych relay jak Happy Cloud. Ponowne połączenie po zapisaniu.',
+        relayAccessKeyFooter: 'Klucz obwodowy dla tego relay (brama joy-relay). Wysyłany z każdym żądaniem; zostaw puste dla otwartych relay. Ponowne połączenie po zapisaniu.',
         relayAccessKeySaved: 'Zapisano klucz relay',
         relayCopyDerivedKey: 'Kopiuj wyprowadzony klucz relay',
         relayApplyKeyAllMessage: 'Zalogować się na wszystkie znane serwery obecnym kluczem konta? Zastąpi to inne konta zapisane dla tych serwerów na tym urządzeniu.',
@@ -455,7 +436,7 @@ export const pl: TranslationStructure = {
         relayApplyKeyAllSuccess: 'Wszystkie serwery używają teraz tego klucza.',
         relayApplyKeyAllPartial: 'Nie udało się skonfigurować:',
         enterServerUrl: 'Proszę wprowadzić URL serwera',
-        notValidHappyServer: 'To nie jest prawidłowy serwer Joy',
+        notValidJoyServer: 'To nie jest prawidłowy serwer Joy',
         changeServer: 'Zmień serwer',
         continueWithServer: 'Kontynuować z tym serwerem?',
         resetToDefault: 'Resetuj do domyślnego',
@@ -475,9 +456,7 @@ export const pl: TranslationStructure = {
         killSessionConfirm: 'Czy na pewno chcesz zakończyć tę sesję?',
         archiveSession: 'Zarchiwizuj sesję',
         archiveSessionConfirm: 'Czy na pewno chcesz zarchiwizować tę sesję?',
-        happySessionIdCopied: 'ID sesji Joy skopiowane do schowka',
         failedToCopySessionId: 'Nie udało się skopiować ID sesji Joy',
-        happySessionId: 'ID sesji Joy',
         claudeCodeSessionId: 'ID sesji Claude Code',
         claudeCodeSessionIdCopied: 'ID sesji Claude Code skopiowane do schowka',
         codexThreadId: 'ID wątku Codex',
@@ -500,7 +479,6 @@ export const pl: TranslationStructure = {
         resumeSessionSubtitle: 'Resume this session on the same machine',
         resumeSessionSameMachineOnly: 'This session can only be resumed on the same machine it started on.',
         resumeSessionMachineOffline: 'This machine is offline. Resume is only available while it is online.',
-        resumeSessionNeedsHappyAgent: 'Resume is unavailable on this machine. Run `happy-agent auth login` to enable it.',
         resumeSessionMissingMachine: 'This session is missing its machine metadata, so it cannot be resumed.',
         resumeSessionMissingBackendId: 'This session does not have a resumable Claude or Codex identifier.',
         resumeSessionUnexpectedDirectoryPrompt: 'Resume cannot create directories. Start the session manually from its original path.',
@@ -514,7 +492,6 @@ export const pl: TranslationStructure = {
         path: 'Ścieżka',
         operatingSystem: 'System operacyjny',
         processId: 'ID procesu',
-        happyHome: 'Katalog domowy Joy',
         copyMetadata: 'Kopiuj metadane',
         agentState: 'Stan agenta',
         controlledByUser: 'Kontrolowany przez użytkownika',
@@ -526,7 +503,6 @@ export const pl: TranslationStructure = {
         cliVersionOutdated: 'Wymagana aktualizacja CLI',
         cliVersionOutdatedMessage: ({ currentVersion, requiredVersion }: { currentVersion: string; requiredVersion: string }) =>
             `Zainstalowana wersja ${currentVersion}. Zaktualizuj do ${requiredVersion} lub nowszej`,
-        updateCliInstructions: 'Proszę uruchomić npm install -g happy@latest',
         deleteSession: 'Usuń sesję',
         deleteSessionSubtitle: 'Trwale usuń tę sesję',
         deleteSessionConfirm: 'Usunąć sesję na stałe?',
@@ -769,37 +745,6 @@ export const pl: TranslationStructure = {
         overwrite: 'Nadpisz',
     },
 
-    settingsVoice: {
-        // Voice settings screen
-        languageTitle: 'Język',
-        languageDescription: 'Wybierz preferowany język dla interakcji z asystentem głosowym. To ustawienie synchronizuje się na wszystkich Twoich urządzeniach.',
-        preferredLanguage: 'Preferowany język',
-        preferredLanguageSubtitle: 'Język używany do odpowiedzi asystenta głosowego',
-        language: {
-            searchPlaceholder: 'Wyszukaj języki...',
-            title: 'Języki',
-            footer: ({ count }: { count: number }) => `Dostępnych ${count} ${plural({ count, one: 'język', few: 'języki', many: 'języków' })}`,
-            autoDetect: 'Automatyczne wykrywanie',
-        },
-        // Bring your own agent
-        byoTitle: 'Użyj własnego agenta',
-        byoDescription: 'Użyj własnego agenta ElevenLabs zamiast domyślnego Joy. Subskrypcja nie jest wymagana — połącz się bezpośrednio ze swoim kontem ElevenLabs. Twój agent musi definiować dwa narzędzia klienckie: messageClaudeCode (wysyła tekst do agenta kodującego) i processPermissionRequest (zezwala lub odmawia użycia narzędzi). Otrzymuje kontekst sesji przez zmienną dynamiczną {{initialConversationContext}}.',
-        customAgentId: 'ElevenLabs Agent ID',
-        customAgentIdNotSet: 'Nie skonfigurowano',
-        customAgentIdDescription: 'Wprowadź swój ElevenLabs Agent ID. Pozostaw puste, aby użyć domyślnego Joy.',
-        customAgentIdPlaceholder: 'e.g. abc123def456',
-        bypassToken: 'Połączenie bezpośrednie',
-        bypassTokenSubtitle: 'Pomiń serwer Joy, połącz się bezpośrednio z ElevenLabs',
-        promptGuideTitle: 'Przewodnik po promptach agenta',
-        promptGuideDescription: 'Twój agent ElevenLabs potrzebuje:\n\n• Narzędzie: messageClaudeCode — parametr: message (string). Wysyła wiadomość do aktywnej sesji kodowania.\n• Narzędzie: processPermissionRequest — parametr: decision ("allow" lub "deny"). Zatwierdza lub odrzuca oczekujące uprawnienie narzędzia.\n• Zmienna dynamiczna: {{initialConversationContext}} — otrzymuje historię sesji i kontekst przy uruchomieniu.\n\nAgent działa jako most głosowy między użytkownikiem a agentami kodującymi. Powinien być zwięzły, odpowiadać tylko gdy jest adresowany i raportować, gdy agent kodujący zakończy pracę.',
-        usageTitle: 'Użycie (ostatnie 30 dni)',
-        usageFooter: 'Czas głosowy wykorzystany w ostatnich 30 dniach. Darmowy plan: 20 min. Z subskrypcją: 5 godzin. Maks. 100 rozmów miesięcznie.',
-        usageLabel: 'Czas głosowy',
-        conversationsLabel: 'Rozmowy',
-        usageUsed: ({ used, limit }: { used: string; limit: string }) => `${used} wykorzystano z ${limit}`,
-        supportTitle: 'Ulepsz głos',
-        supportSubtitle: 'Więcej czasu głosowego i wsparcie rozwoju',
-    },
 
     settingsAccount: {
         // Account settings screen
@@ -949,7 +894,7 @@ export const pl: TranslationStructure = {
 
     machine: {
         offlineUnableToSpawn: 'Launcher wyłączony, gdy maszyna jest offline',
-        offlineHelp: '• Upewnij się, że komputer jest online\n• Uruchom `happy daemon status`, aby zdiagnozować\n• Czy używasz najnowszej wersji CLI? Zaktualizuj poleceniem `npm install -g happy@latest`',
+        offlineHelp: '• Upewnij się, że komputer jest online\n• Uruchom `joy status`, aby zdiagnozować',
         launchNewSessionInDirectory: 'Uruchom nową sesję w katalogu',
         daemon: 'Daemon',
         status: 'Status',
@@ -1039,60 +984,7 @@ export const pl: TranslationStructure = {
         mermaidRenderFailed: 'Nie udało się wyświetlić diagramu mermaid',
     },
 
-    artifacts: {
-        // Artifacts feature
-        title: 'Artefakty',
-        countSingular: '1 artefakt',
-        countPlural: ({ count }: { count: number }) => {
-            const n = Math.abs(count);
-            const n10 = n % 10;
-            const n100 = n % 100;
-            
-            // Polish plural rules: 1 (singular), 2-4 (few), 5+ (many)
-            if (n === 1) {
-                return `${count} artefakt`;
-            }
-            if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) {
-                return `${count} artefakty`;
-            }
-            return `${count} artefaktów`;
-        },
-        empty: 'Brak artefaktów',
-        emptyDescription: 'Utwórz pierwszy artefakt, aby rozpocząć',
-        new: 'Nowy artefakt',
-        edit: 'Edytuj artefakt',
-        delete: 'Usuń',
-        updateError: 'Nie udało się zaktualizować artefaktu. Spróbuj ponownie.',
-        notFound: 'Artefakt nie został znaleziony',
-        discardChanges: 'Odrzucić zmiany?',
-        discardChangesDescription: 'Masz niezapisane zmiany. Czy na pewno chcesz je odrzucić?',
-        deleteConfirm: 'Usunąć artefakt?',
-        deleteConfirmDescription: 'Tej operacji nie można cofnąć',
-        titleLabel: 'TYTUŁ',
-        titlePlaceholder: 'Wprowadź tytuł dla swojego artefaktu',
-        bodyLabel: 'TREŚĆ',
-        bodyPlaceholder: 'Napisz swoją treść tutaj...',
-        emptyFieldsError: 'Proszę wprowadzić tytuł lub treść',
-        createError: 'Nie udało się utworzyć artefaktu. Spróbuj ponownie.',
-        save: 'Zapisz',
-        saving: 'Zapisywanie...',
-        loading: 'Ładowanie artefaktów...',
-        error: 'Nie udało się załadować artefaktu',
-    },
 
-    usage: {
-        // Usage panel strings
-        today: 'Dzisiaj',
-        last7Days: 'Ostatnie 7 dni',
-        last30Days: 'Ostatnie 30 dni',
-        totalTokens: 'Łącznie tokenów',
-        totalCost: 'Całkowity koszt',
-        tokens: 'Tokeny',
-        cost: 'Koszt',
-        usageOverTime: 'Użycie w czasie',
-        byModel: 'Według modelu',
-        noData: 'Brak danych o użyciu',
-    },
 
     imageUpload: {
         attachTitle: 'Załącz',

@@ -3,7 +3,7 @@
 // Tauri auto-generates a default macOS app menu when no menu is set. There is
 // no clean API in Tauri 2.x to inject a single item into that default menu,
 // so this mod builds a replacement menu that mirrors the standard macOS
-// conventions (Happy / Edit / Window submenus via `PredefinedMenuItem`) and
+// conventions (Joy / Edit / Window submenus via `PredefinedMenuItem`) and
 // inserts a `CheckMenuItem` "Keep on Top" inside the Window submenu.
 //
 // The toggle state is persisted to `joy.json` via `tauri-plugin-store` and
@@ -51,7 +51,7 @@ pub fn run() {
                 .checked(keep_on_top)
                 .build(app)?;
 
-            let app_submenu = SubmenuBuilder::new(app, "Happy")
+            let app_submenu = SubmenuBuilder::new(app, "Joy")
                 .about(None)
                 .separator()
                 .services()

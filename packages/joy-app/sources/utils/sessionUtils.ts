@@ -202,7 +202,7 @@ export function getSessionAvatarId(session: Session): string {
 
 /**
  * Returns the CLI command to resume a disconnected session, or null if not resumable.
- * Uses flavor-specific commands which work without happy-agent auth.
+ * Built from the session's agent ids (claude session / codex thread).
  */
 export function getResumeCommand(session: Session): string | null {
     return buildResumeCommand(session.metadata ?? {});

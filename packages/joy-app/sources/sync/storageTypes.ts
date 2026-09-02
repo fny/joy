@@ -57,7 +57,6 @@ export const MetadataSchema = z.object({
     mcpServers: z.array(z.object({ name: z.string(), status: z.string() })).optional(),
     skills: z.array(z.string()).optional(),
     homeDir: z.string().optional(), // User's home directory on the machine
-    happyHomeDir: z.string().optional(), // Happy configuration directory 
     startedFromDaemon: z.boolean().optional(),
     hostPid: z.number().optional(), // Process ID of the session
     startedBy: z.enum(['daemon', 'terminal']).optional(),
@@ -70,7 +69,7 @@ export const MetadataSchema = z.object({
     archiveReason: z.string().optional(),
     /**
      * Lineage for sessions created via the fork / duplicate flow.
-     * `parentSessionId` is the Happy session this one was branched from.
+     * `parentSessionId` is the session this one was branched from.
      * `forkedFromMessageId` is the in-app message id used as the rewind
      * point (only set for "duplicate from message", not for plain fork).
      * Both ride inside encrypted metadata so the server stays oblivious.
@@ -250,9 +249,12 @@ export interface DecryptedMessage {
 export const MachineMetadataSchema = z.object({
     host: z.string(),
     platform: z.string(),
-    happyCliVersion: z.string(),
-    happyHomeDir: z.string(), // Directory for Happy auth, settings, logs (usually .happy/ or .happy-dev/)
-    homeDir: z.string(), // User's home directory (matches CLI field name)
+    // Sent by joy-daemon (server.ts machineMetadata). All optional so machines
+    // registered by a not-yet-updated daemon still parse and list.
+    joyDaemonVersion: z.string().optional(),
+    homeDir: z.string().optional(), // User's home directory
+    joyHomeDir: z.string().optional(), // The daemon's relay credentials dir (~/.joy/relays/<relay>/)
+    joyLibDir: z.string().optional(), // Where the running daemon's code lives
     // Optional fields that may be added in future versions
     username: z.string().optional(),
     arch: z.string().optional(),
@@ -271,7 +273,7 @@ export const MachineMetadataSchema = z.object({
     daemonLastKnownStatus: z.enum(['running', 'shutting-down']).optional(),
     daemonLastKnownPid: z.number().optional(),
     shutdownRequestedAt: z.number().optional(),
-    shutdownSource: z.enum(['happy-app', 'happy-cli', 'os-signal', 'unknown']).optional(),
+    shutdownSource: z.enum(['joy-app', 'joy-daemon', 'os-signal', 'unknown']).optional(),
     cliAvailability: z.object({
         claude: z.boolean(),
         codex: z.boolean(),
@@ -279,13 +281,6 @@ export const MachineMetadataSchema = z.object({
         openclaw: z.boolean(),
         opencode: z.boolean().optional(),
         pi: z.boolean().optional(),
-        detectedAt: z.number(),
-    }).optional(),
-    resumeSupport: z.object({
-        rpcAvailable: z.boolean(),
-        requiresSameMachine: z.boolean(),
-        requiresHappyAgentAuth: z.boolean(),
-        happyAgentAuthenticated: z.boolean(),
         detectedAt: z.number(),
     }).optional(),
 });

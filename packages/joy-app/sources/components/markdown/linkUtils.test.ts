@@ -12,6 +12,6 @@ describe('isHttpMarkdownLink', () => {
         expect(isHttpMarkdownLink('mailto:test@example.com')).toBe(false);
         expect(isHttpMarkdownLink('data:text/plain,hello')).toBe(false);
         expect(isHttpMarkdownLink('/Users/me/project/file.ts')).toBe(false);
-        expect(isHttpMarkdownLink('packages/happy-app/index.tsx')).toBe(false);
+        expect(isHttpMarkdownLink('packages/joy-app/index.tsx')).toBe(false);
     });
 });
