@@ -28,15 +28,13 @@ import tweetnacl from 'tweetnacl';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-export type EncryptionVariant = 'legacy' | 'dataKey';
-
 export interface Credentials {
   token: string;
   serverUrl: string;
   machineId: string;
-  encryption:
-    | { type: 'dataKey'; publicKey: Uint8Array; machineKey: Uint8Array }
-    | { type: 'legacy'; secret: Uint8Array };
+  /** Account content public key + this machine's data key (the only pairing
+   *  shape joy has ever written; pair-relay.mjs / `joy auth`). */
+  encryption: { type: 'dataKey'; publicKey: Uint8Array; machineKey: Uint8Array };
 }
 
 /** A transcript-mirror record (user text / agent session event). Produced by
@@ -59,24 +57,6 @@ function b64decode(s: string): Uint8Array {
 
 function randomBytesU8(n: number): Uint8Array {
   return new Uint8Array(randomBytes(n));
-}
-
-function encryptLegacy(data: unknown, key: Uint8Array): Uint8Array {
-  const nonce = randomBytesU8(tweetnacl.secretbox.nonceLength);
-  const pt = new TextEncoder().encode(JSON.stringify(data));
-  const ct = tweetnacl.secretbox(pt, nonce, key);
-  const out = new Uint8Array(nonce.length + ct.length);
-  out.set(nonce);
-  out.set(ct, nonce.length);
-  return out;
-}
-
-function decryptLegacy(buf: Uint8Array, key: Uint8Array): unknown | null {
-  const n = tweetnacl.secretbox.nonceLength;
-  if (buf.length < n) return null;
-  const pt = tweetnacl.secretbox.open(buf.slice(n), buf.slice(0, n), key);
-  if (!pt) return null;
-  try { return JSON.parse(new TextDecoder().decode(pt)); } catch { return null; }
 }
 
 function encryptDataKey(data: unknown, key: Uint8Array): Uint8Array {
@@ -105,14 +85,14 @@ function decryptDataKey(buf: Uint8Array, key: Uint8Array): unknown | null {
   } catch { return null; }
 }
 
-/** Machine-blob sealing (metadata + daemonState). The app opens the dataKey
- *  variant with the machine key it unwraps from `dataEncryptionKey`. */
-function encryptWire(variant: EncryptionVariant, key: Uint8Array, data: unknown): Uint8Array {
-  return variant === 'legacy' ? encryptLegacy(data, key) : encryptDataKey(data, key);
+/** Machine-blob sealing (metadata + daemonState). The app opens it with the
+ *  machine key it unwraps from `dataEncryptionKey`. */
+function encryptWire(key: Uint8Array, data: unknown): Uint8Array {
+  return encryptDataKey(data, key);
 }
 
-function decryptWire(variant: EncryptionVariant, key: Uint8Array, buf: Uint8Array): unknown | null {
-  return variant === 'legacy' ? decryptLegacy(buf, key) : decryptDataKey(buf, key);
+function decryptWire(key: Uint8Array, buf: Uint8Array): unknown | null {
+  return decryptDataKey(buf, key);
 }
 
 function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint8Array): Uint8Array {
@@ -158,17 +138,12 @@ export function loadCredentials(): Credentials | null {
       machineId = crypto.randomUUID();
     }
 
-    let encryption: Credentials['encryption'] | null = null;
-    if (ak.encryption?.publicKey) {
-      encryption = {
-        type: 'dataKey',
-        publicKey: b64decode(ak.encryption.publicKey),
-        machineKey: ak.encryption.machineKey ? b64decode(ak.encryption.machineKey) : new Uint8Array(),
-      };
-    } else if (ak.encryption?.secret) {
-      encryption = { type: 'legacy', secret: b64decode(ak.encryption.secret) };
-    }
-    if (!encryption) return null;
+    if (!ak.encryption?.publicKey) return null;
+    const encryption: Credentials['encryption'] = {
+      type: 'dataKey',
+      publicKey: b64decode(ak.encryption.publicKey),
+      machineKey: ak.encryption.machineKey ? b64decode(ak.encryption.machineKey) : new Uint8Array(),
+    };
 
     return { token: ak.token, serverUrl, machineId, encryption };
   } catch { return null; }
@@ -220,11 +195,9 @@ export class RelayClient {
     return h;
   }
 
-  /** Machine encryption variant + key, matching getOrCreateMachine's metadata. */
-  private machineCrypto(): { variant: EncryptionVariant; key: Uint8Array } {
-    return this.creds.encryption.type === 'dataKey'
-      ? { variant: 'dataKey', key: this.creds.encryption.machineKey }
-      : { variant: 'legacy', key: this.creds.encryption.secret };
+  /** The machine data key — what getOrCreateMachine published as `dataEncryptionKey`. */
+  private machineKey(): Uint8Array {
+    return this.creds.encryption.machineKey;
   }
 
   /** CPU busy % since the last sample (delta of idle vs total ticks across all
@@ -290,8 +263,8 @@ export class RelayClient {
       diskFree = Number(s.bavail) * Number(s.bsize);
       diskTotal = Number(s.blocks) * Number(s.bsize);
     } catch { /* leave 0 — app shows cpu/ram regardless */ }
-    const { variant, key } = this.machineCrypto();
-    return b64encode(encryptWire(variant, key, {
+    const key = this.machineKey();
+    return b64encode(encryptWire(key, {
       cpu, ram, time: Date.now(),
       // Detail for the machine page (bytes + cpu info); the sidebar still uses cpu/ram %.
       cpuCount: list.length,
@@ -342,8 +315,8 @@ export class RelayClient {
       if (!res.ok) return null;
       const body = await res.json() as { machine?: { metadata?: string } };
       if (!body?.machine?.metadata) return null;
-      const { variant, key } = this.machineCrypto();
-      return decryptWire(variant, key, b64decode(body.machine.metadata)) as Record<string, unknown> | null;
+      const key = this.machineKey();
+      return decryptWire(key, b64decode(body.machine.metadata)) as Record<string, unknown> | null;
     } catch { return null; }
   }
 
@@ -378,31 +351,21 @@ export class RelayClient {
       if (this.#displayNameCache.name) blob.displayName = this.#displayNameCache.name;
     }
     try {
-      let encryptionKey: Uint8Array;
-      let variant: EncryptionVariant;
-      let dataEncryptionKeyB64: string | undefined;
-
-      if (this.creds.encryption.type === 'dataKey') {
-        variant = 'dataKey';
-        encryptionKey = this.creds.encryption.machineKey;
-        // Envelope [0x00][box(machineKey → account publicKey)] so the relay can
-        // hand the machine key to authorized clients.
-        const encryptedKey = libsodiumEncryptForPublicKey(encryptionKey, this.creds.encryption.publicKey);
-        const bundle = new Uint8Array(1 + encryptedKey.length);
-        bundle.set([0], 0);
-        bundle.set(encryptedKey, 1);
-        dataEncryptionKeyB64 = b64encode(bundle);
-      } else {
-        variant = 'legacy';
-        encryptionKey = this.creds.encryption.secret;
-      }
+      const encryptionKey = this.creds.encryption.machineKey;
+      // Envelope [0x00][box(machineKey → account publicKey)] so the relay can
+      // hand the machine key to authorized clients.
+      const encryptedKey = libsodiumEncryptForPublicKey(encryptionKey, this.creds.encryption.publicKey);
+      const bundle = new Uint8Array(1 + encryptedKey.length);
+      bundle.set([0], 0);
+      bundle.set(encryptedKey, 1);
+      const dataEncryptionKeyB64 = b64encode(bundle);
 
       const r = await fetch(this.url('/machines'), {
         method: 'POST',
         headers: this.headers(),
         body: JSON.stringify({
           id: this.creds.machineId,
-          metadata: b64encode(encryptWire(variant, encryptionKey, blob)),
+          metadata: b64encode(encryptWire(encryptionKey, blob)),
           dataEncryptionKey: dataEncryptionKeyB64,
         }),
       });
