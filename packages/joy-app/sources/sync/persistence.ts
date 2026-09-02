@@ -1,7 +1,6 @@
 import { Settings, settingsDefaults, settingsParse, settingsToSyncPayload, SettingsSchema } from './settings';
 import { relayScopedMMKV } from './serverConfig';
 import { LocalSettings, localSettingsDefaults, localSettingsParse } from './localSettings';
-import { Purchases, purchasesDefaults, purchasesParse } from './purchases';
 import { Profile, profileDefaults, profileParse } from './profile';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { Machine } from './storageTypes';
@@ -133,24 +132,6 @@ export function loadPaletteState(): { themePalette: string; themePaletteDark: st
         }
     }
     return { themePalette: localSettingsDefaults.themePalette, themePaletteDark: localSettingsDefaults.themePaletteDark, customPalette: localSettingsDefaults.customPalette, accentOverrides: localSettingsDefaults.accentOverrides, fontOverride: localSettingsDefaults.fontOverride };
-}
-
-export function loadPurchases(): Purchases {
-    const purchases = mmkv.getString('purchases');
-    if (purchases) {
-        try {
-            const parsed = JSON.parse(purchases);
-            return purchasesParse(parsed);
-        } catch (e) {
-            console.error('Failed to parse purchases', e);
-            return { ...purchasesDefaults };
-        }
-    }
-    return { ...purchasesDefaults };
-}
-
-export function savePurchases(purchases: Purchases) {
-    mmkv.set('purchases', JSON.stringify(purchases));
 }
 
 export function loadSessionDrafts(): Record<string, string> {

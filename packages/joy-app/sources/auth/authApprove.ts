@@ -6,10 +6,11 @@ import { getJoyClientId } from '@/sync/clientId';
 
 interface AuthRequestStatus {
     status: 'not_found' | 'pending' | 'authorized';
-    supportsV2: boolean;
 }
 
-export async function authApprove(token: string, publicKey: Uint8Array, answerV1: Uint8Array, answerV2: Uint8Array) {
+/** Answer a terminal's pairing request with the sealed content data key
+ *  (the only answer shape the daemon has ever accepted from joy). */
+export async function authApprove(token: string, publicKey: Uint8Array, answer: Uint8Array) {
     const API_ENDPOINT = getServerUrl();
     const publicKeyBase64 = encodeBase64(publicKey);
     
@@ -26,7 +27,7 @@ export async function authApprove(token: string, publicKey: Uint8Array, answerV1
         }
     );
     
-    const { status, supportsV2 } = statusResponse.data;
+    const { status } = statusResponse.data;
     
     // Handle different status cases
     if (status === 'not_found') {
@@ -45,7 +46,7 @@ export async function authApprove(token: string, publicKey: Uint8Array, answerV1
     if (status === 'pending') {
         await axios.post(`${API_ENDPOINT}/joy/v2/auth/response`, {
             publicKey: publicKeyBase64,
-            response: supportsV2 ? encodeBase64(answerV2) : encodeBase64(answerV1)
+            response: encodeBase64(answer)
         }, {
             headers: {
                 'Authorization': `Bearer ${token}`,

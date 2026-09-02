@@ -5,8 +5,7 @@ import { MarkdownView } from "./markdown/MarkdownView";
 import { t } from '@/text';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
-import { storage, useSocketStatus } from "@/sync/storage";
-import { useActiveInterval } from '@/hooks/useActiveInterval';
+import { storage } from "@/sync/storage";
 import { Typography } from '@/constants/Typography';
 import { hasJoyTags, splitJoySegments } from "@/utils/joyImg";
 import { JoyFileChip } from "@/components/JoyFileChip";
@@ -30,11 +29,6 @@ export const MessageView = React.memo((props: {
   metadata: Metadata | null;
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
-  /**
-   * Long-press handler for user-text bubbles. Wired by ChatList from
-   * the active session screen and used by the fork-from-message flow.
-   */
-  onForkFromUserMessage?: (messageId: string, claudeUuid: string) => void;
 }) => {
   return (
     <View
@@ -47,7 +41,6 @@ export const MessageView = React.memo((props: {
           metadata={props.metadata}
           sessionId={props.sessionId}
           getMessageById={props.getMessageById}
-          onForkFromUserMessage={props.onForkFromUserMessage}
         />
       </View>
     </View>
@@ -60,7 +53,6 @@ function RenderBlock(props: {
   metadata: Metadata | null;
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
-  onForkFromUserMessage?: (messageId: string, claudeUuid: string) => void;
 }): React.ReactElement {
   switch (props.message.kind) {
     case 'user-text':
@@ -69,7 +61,6 @@ function RenderBlock(props: {
           message={props.message}
           metadata={props.metadata}
           sessionId={props.sessionId}
-          onForkFromUserMessage={props.onForkFromUserMessage}
         />
       );
 
@@ -99,7 +90,6 @@ function UserTextBlock(props: {
   message: UserTextMessage;
   metadata: Metadata | null;
   sessionId: string;
-  onForkFromUserMessage?: (messageId: string, claudeUuid: string) => void;
 }) {
   const handleOptionPress = React.useCallback((option: Option) => {
     sync.sendMessage(props.sessionId, option.title, { source: 'option' });
@@ -111,14 +101,6 @@ function UserTextBlock(props: {
   const scaledBubbleText = chatFontScale !== 1
     ? { fontSize: 16 * chatFontScale, lineHeight: 24 * chatFontScale }
     : null;
-
-  const claudeUuid = props.message.claudeUuid;
-  const canFork = Boolean(claudeUuid) && Boolean(props.onForkFromUserMessage);
-  const handleLongPress = React.useCallback(() => {
-    if (claudeUuid && props.onForkFromUserMessage) {
-      props.onForkFromUserMessage(props.message.id, claudeUuid);
-    }
-  }, [claudeUuid, props.message.id, props.onForkFromUserMessage]);
 
   // Claude Agent SDK emits synthetic user messages wrapped in tags like
   // <local-command-caveat>…</local-command-caveat> and
@@ -177,11 +159,7 @@ function UserTextBlock(props: {
           {attachments.map((a) => <AttachmentView key={a.id} sessionId={props.sessionId} attachment={a} />)}
         </View>
       )}
-      {bodyText.trim().length > 0 && <Pressable
-        onLongPress={canFork ? handleLongPress : undefined}
-        delayLongPress={400}
-        style={styles.userMessageBubble}
-      >
+      {bodyText.trim().length > 0 && <View style={styles.userMessageBubble}>
         {isMonoCommand
           ? <Text style={[styles.monoMessageText, scaledBubbleText]} selectable>{bodyText}</Text>
           : slashMatch
@@ -190,73 +168,10 @@ function UserTextBlock(props: {
                 {slashMatch[2]}
               </Text>
             : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} />}
-      </Pressable>}
-      {/* iMessage/WhatsApp-style delivery status: only for a still-unacked send
-          (seq == null). Mounted only while pending, so acked messages carry no
-          hook/interval overhead. */}
-      {props.message.seq == null && (
-        <MessageDeliveryStatus sessionId={props.sessionId} message={props.message} />
-      )}
+      </View>}
     </View>
   );
 }
-
-// A message is "pending" until the server acks it (seq flips non-null). We don't
-// divert offline sends anymore — they ride the durable outbox, which auto-retries
-// and re-flushes on reconnect — so this is purely a STATUS on the optimistically-
-// shown message:
-//   - fast online send (< a few seconds): nothing (avoid flicker on every msg)
-//   - online but slow: "Sending…"
-//   - offline: "Waiting for connection…" (known immediately from socketStatus)
-//   - unacked for 2 min: "Not delivered · Tap to retry" (resend, same localId)
-// The status clears itself the moment the outbox delivers and seq flips.
-const PENDING_AFTER_MS = 4_000;
-const FAILED_AFTER_MS = 2 * 60_000;
-
-const MessageDeliveryStatus = React.memo(function MessageDeliveryStatus(props: { sessionId: string; message: UserTextMessage }) {
-  const { theme } = useUnistyles();
-  const [, setTick] = React.useState(0);
-  // Re-render on an interval so the age-based state advances even without any
-  // other render (focused + foregrounded only — see useActiveInterval).
-  useActiveInterval(() => setTick((n) => n + 1), 5_000, true);
-  const { status } = useSocketStatus();
-  const online = status === 'connected';
-  const age = Date.now() - props.message.createdAt;
-
-  const kind: 'sending' | 'waiting' | 'failed' =
-    age >= FAILED_AFTER_MS ? 'failed'
-      : (!online || age >= PENDING_AFTER_MS) ? 'waiting'
-        : 'sending';
-
-  const onRetry = React.useCallback(() => {
-    if (props.message.localId) {
-      sync.sendMessage(props.sessionId, props.message.text, { localId: props.message.localId, source: 'chat' });
-    }
-  }, [props.sessionId, props.message.localId, props.message.text]);
-
-  if (kind === 'sending') return null;
-
-  // Match the draft/save-draft button tint so the status reads as the same
-  // family of muted app-side affordances.
-  const tint = theme.colors.button.secondary.tint;
-
-  if (kind === 'failed') {
-    return (
-      <Pressable onPress={onRetry} hitSlop={6} style={({ pressed }) => [styles.deliveryRow, pressed && { opacity: 0.6 }]}>
-        <Ionicons name="refresh-outline" size={12} color={tint} />
-        <Text style={[styles.deliveryText, { color: tint }]}>{t('messageStatus.notDeliveredRetry')}</Text>
-      </Pressable>
-    );
-  }
-  return (
-    <View style={styles.deliveryRow}>
-      <Ionicons name="time-outline" size={12} color={tint} />
-      <Text style={[styles.deliveryText, { color: tint }]}>
-        {online ? t('messageStatus.sending') : t('messageStatus.waitingForConnection')}
-      </Text>
-    </View>
-  );
-});
 
 // A harness block rendered in the same visual language as tool calls: a
 // rounded surface box with an icon, a title (+ inline status), and a subtitle.
@@ -519,19 +434,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '100%',
-  },
-  // Delivery-status line tucked just under the bubble (bubble has marginBottom 12).
-  deliveryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginTop: -10,
-    marginBottom: 8,
-    paddingHorizontal: 2,
-  },
-  deliveryText: {
-    fontSize: 11,
-    ...Typography.default(),
   },
   // `!`/`&`-prefixed messages (bash / background) read as monospace in chat,
   // matching how the composer renders them.

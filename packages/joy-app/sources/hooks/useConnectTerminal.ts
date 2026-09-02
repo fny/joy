@@ -30,12 +30,11 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
         try {
             const tail = url.slice('joy://terminal?'.length);
             const publicKey = decodeBase64(tail, 'base64url');
-            const responseV1 = encryptBox(decodeBase64(auth.credentials!.secret, 'base64url'), publicKey);
             let responseV2Bundle = new Uint8Array(sync.encryption.contentDataKey.length + 1);
             responseV2Bundle[0] = 0;
             responseV2Bundle.set(sync.encryption.contentDataKey, 1);
             const responseV2 = encryptBox(responseV2Bundle, publicKey);
-            await authApprove(auth.credentials!.token, publicKey, responseV1, responseV2);
+            await authApprove(auth.credentials!.token, publicKey, responseV2);
             
             Modal.alert(t('common.success'), t('modals.terminalConnectedSuccessfully'), [
                 { 
