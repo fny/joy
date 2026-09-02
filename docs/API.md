@@ -18,9 +18,17 @@ joy-app ⇄ joy-relay (e.g. joy.voltai.party:4997, /joy/v2 over HTTPS + SSE)
   challenge signature); one backup code works on every relay (machines
   register per-account-per-relay).
 - All session/machine payloads between app and daemon are end-to-end encrypted
-  (libsodium); the relay stores/forwards ciphertext. Attachment blobs are
-  encrypted client-side with `deriveKey(sessionKey, 'Happy Blobs', ['session'])`
-  (the label is a wire constant — renaming it would orphan every existing blob).
+  (libsodium); the relay stores/forwards ciphertext. Message content is
+  `v2e1:` + secretbox of `{v:1,t:'plain',text,attachments?:[{id,name,size,
+  mime?,width?,height?,thumbhash?}]}` under the per-session key; attachment
+  bytes are sealed with the same key (nonce24 ‖ secretbox) before
+  `POST /joy/v2/attachments` (`x-session`, `x-cipher-hash` = sha256 of the
+  sealed body). The relay only sees the id list on the message body (for
+  validation + GC); names and display facts live inside the sealed text.
+  The daemon fetches, opens and writes each file into the session cwd, then
+  appends its `./name` on its own line to the prompt — any miss fails the
+  turn (`attachment_{fetch,open,write}_failed`) rather than dispatching a
+  truncated prompt.
 - The daemon also runs a **local HTTP server** (`~/.joy/daemon.json` carries
   port + bearer token) exposing the same ops over REST — that is what the
   `joy` CLI and hooks use. Wire identifiers: `joy__source: "joy-daemon"`, tag
@@ -129,7 +137,7 @@ EdDSA JWTs minted by the relay (`JOY_RELAY_TOKEN_SECRET`, issuers
 | Push | `POST/GET /push-tokens` · `DELETE /push-tokens/:token` · `POST /push {title, body?, data?}` | relay delivers via Expo; dead tokens dropped |
 | Sessions | `GET/POST /sessions` · `GET/DELETE /sessions/:id` · `GET /sessions/:id/events` · `GET /events/stream` (SSE) · `POST /sessions/:id/spawn/retry` | sealed session cards; durable queue |
 | Messages / turns | `GET/POST /sessions/:id/messages` · `GET/PATCH/DELETE …/messages/:id` · `POST …/messages/:id/retry` · `GET …/turns/:id` · `POST …/turns/:id/cancellations` | server-owned queue, real cancellation |
-| Attachments | `POST /attachments` · `GET /attachments/:id` | ciphertext only, deduped per session, orphan-swept |
+| Attachments | `POST /attachments` (raw sealed body, `x-session`, `x-cipher-hash`) · `GET /attachments/:id` | ciphertext only, deduped per (session, hash), orphan-swept 24h, purged with the session; cited by id in `POST …/messages` `attachments:[]` |
 | Tunnel | `POST /machines/:id/http` | E2E-sealed request/response frames to the daemon's local HTTP server (≈1MB frame cap → the 400KB inline file threshold) |
 | Daemon lane | `POST /daemon/leases` · `PUT /daemon/leases/:id` · `…/claims/{work,control,tunnel}` · `…/deliveries/:id/received` · `…/sessions/:id/{bind,spawn-failed}` · `PATCH /daemon/sessions/:id` · `…/turns/:id/{submitted,start,facts,reconcile}` · `…/tunnel/:id/frames` | lease-token authenticated; presence = unexpired lease |
 

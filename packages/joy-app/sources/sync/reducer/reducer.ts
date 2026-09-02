@@ -111,7 +111,7 @@
  */
 
 import { Message, ToolCall } from "../typesMessage";
-import { AgentEvent, NormalizedMessage, UsageData } from "../typesRaw";
+import { AgentEvent, MessageAttachment, NormalizedMessage, UsageData } from "../typesRaw";
 import { createTracer, traceMessages, TracerState } from "./reducerTracer";
 import { AgentState, TodoItem, TodoItemsSchema } from "../storageTypes";
 import { MessageMeta } from "../typesMessageMeta";
@@ -130,6 +130,7 @@ type ReducerMessage = {
     meta?: MessageMeta;
     claudeUuid?: string;
     isCompactSummary?: boolean;
+    attachments?: MessageAttachment[];
 }
 
 type StoredPermission = {
@@ -758,6 +759,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 meta: msg.meta,
                 claudeUuid: msg.claudeUuid,
                 ...(msg.content.isCompactSummary ? { isCompactSummary: true } : {}),
+                ...(msg.content.attachments?.length ? { attachments: msg.content.attachments } : {}),
             });
 
             // Track both localId and messageId
@@ -1280,6 +1282,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             ...(reducerMsg.meta?.displayText && { displayText: reducerMsg.meta.displayText }),
             ...(reducerMsg.claudeUuid && { claudeUuid: reducerMsg.claudeUuid }),
             ...(reducerMsg.isCompactSummary && { isCompactSummary: true }),
+            ...(reducerMsg.attachments?.length ? { attachments: reducerMsg.attachments } : {}),
             meta: reducerMsg.meta
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.text !== null) {

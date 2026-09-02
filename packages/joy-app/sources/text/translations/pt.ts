@@ -985,10 +985,8 @@ export const pt: TranslationStructure = {
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" excede o limite de ${maxMb}MB e não foi adicionado.`,
         uploadFailedTitle: 'Falha no envio',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
-            ? 'Não foi possível enviar uma imagem e não foi enviada.'
-            : `Não foi possível enviar ${count} imagens e não foram enviadas.`,
-        notSupportedTitle: 'Imagens não suportadas',
-        notSupportedMessage: 'Este agente não suporta anexos de imagem. Apenas o texto foi enviado.',
+            ? 'Não foi possível enviar o anexo. A mensagem não foi enviada.'
+            : `Não foi possível enviar ${count} anexos. A mensagem não foi enviada.`,
     },
 
     settingsSessions: {

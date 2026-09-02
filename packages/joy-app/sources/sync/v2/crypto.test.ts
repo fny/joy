@@ -14,11 +14,17 @@ vi.mock('@/encryption/libsodium.lib', async () => {
 
 let sealV2Content: typeof import('./crypto').sealV2Content;
 let openV2Content: typeof import('./crypto').openV2Content;
+let openV2Message: typeof import('./crypto').openV2Message;
+let sealV2Bytes: typeof import('./crypto').sealV2Bytes;
+let openV2Bytes: typeof import('./crypto').openV2Bytes;
 beforeAll(async () => {
     await _sodium.ready;
     const mod = await import('./crypto');
     sealV2Content = mod.sealV2Content;
     openV2Content = mod.openV2Content;
+    openV2Message = mod.openV2Message;
+    sealV2Bytes = mod.sealV2Bytes;
+    openV2Bytes = mod.openV2Bytes;
 });
 
 describe('app v2 content codec', () => {
@@ -50,5 +56,31 @@ describe('app v2 content codec', () => {
     it('foreign/garbage ciphertext → a marker, never a crash', () => {
         expect(openV2Content('not-our-format', null)).toContain('payload');
         expect(openV2Content(null, null)).toBeNull();
+    });
+
+    it('attachment citations ride inside the sealed message', () => {
+        const key = _sodium.randombytes_buf(32);
+        const atts = [{ id: 'att-1', name: 'paste.png', size: 12, mime: 'image/png', width: 4, height: 3, thumbhash: 'abc' }];
+        const ct = sealV2Content('look', key, atts);
+        expect(openV2Message(ct, key)).toEqual({ text: 'look', attachments: atts });
+        // text-only reads still work, and a message without attachments has none
+        expect(openV2Content(ct, key)).toBe('look');
+        expect(openV2Message(sealV2Content('bare', key), key)).toEqual({ text: 'bare', attachments: [] });
+        // malformed entries are dropped, never thrown on
+        expect(openV2Message(JSON.stringify({ v: 1, t: 'plain', text: 'x', attachments: [{ id: 1 }, { id: 'ok', name: 'n' }] }), null))
+            .toEqual({ text: 'x', attachments: [{ id: 'ok', name: 'n', size: 0 }] });
+    });
+
+    it('attachment bytes round-trip under the session key and refuse the wrong one', () => {
+        const key = _sodium.randombytes_buf(32);
+        const bytes = _sodium.randombytes_buf(1000);
+        const sealed = sealV2Bytes(bytes, key);
+        expect(sealed.length).toBe(bytes.length + 24 + 16);
+        expect(openV2Bytes(sealed, key)).toEqual(bytes);
+        expect(openV2Bytes(sealed, _sodium.randombytes_buf(32))).toBeNull();
+        expect(openV2Bytes(new Uint8Array(5), key)).toBeNull();
+        // plaintext sessions pass bytes through untouched
+        expect(sealV2Bytes(bytes, null)).toBe(bytes);
+        expect(openV2Bytes(bytes, null)).toBe(bytes);
     });
 });

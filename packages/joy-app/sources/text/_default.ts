@@ -293,10 +293,8 @@ export const en = {
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" exceeds the ${maxMb}MB limit and was not added.`,
         uploadFailedTitle: 'Upload Failed',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
-            ? 'One image could not be uploaded and was not sent.'
-            : `${count} images could not be uploaded and were not sent.`,
-        notSupportedTitle: 'Images Not Supported',
-        notSupportedMessage: 'This agent does not support image attachments. Only the text was sent.',
+            ? 'The attachment could not be uploaded. The message was not sent.'
+            : `${count} attachments could not be uploaded. The message was not sent.`,
     },
 
     errors: {

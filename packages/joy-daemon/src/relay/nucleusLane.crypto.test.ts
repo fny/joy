@@ -6,7 +6,7 @@
 // real daemon output keeps the shape that test assumes.)
 import { describe, it, expect } from "vitest";
 import nacl from "tweetnacl";
-import { encodeContent, decodeContent, sealSessionKey, decodeSpawnSpec } from "./nucleusLane";
+import { encodeContent, decodeContent, decodePrompt, openAttachmentBytes, sealSessionKey, decodeSpawnSpec } from "./nucleusLane";
 
 describe("daemon v2 crypto (real shipped functions)", () => {
     it("content round-trips under a key", () => {
@@ -59,5 +59,33 @@ describe("daemon v2 crypto (real shipped functions)", () => {
         expect(decodeSpawnSpec(JSON.stringify({ v: 1, t: "plain", text: "hi" }))).toBeNull();
         expect(decodeSpawnSpec(null)).toBeNull();
         expect(decodeSpawnSpec("garbage")).toBeNull();
+    });
+
+    it("decodePrompt surfaces the attachment citations the app seals beside the text", () => {
+        const key = nacl.randomBytes(32);
+        // The app's sealV2Content wire shape: {v:1,t:'plain',text,attachments}.
+        const seal = (obj: unknown) => {
+            const nonce = nacl.randomBytes(24);
+            const ct = nacl.secretbox(new Uint8Array(Buffer.from(JSON.stringify(obj), "utf8")), nonce, key);
+            return "v2e1:" + Buffer.concat([Buffer.from(nonce), Buffer.from(ct)]).toString("base64");
+        };
+        const ct = seal({ v: 1, t: "plain", text: "look", attachments: [{ id: "att-1", name: "shot.png", size: 9, mime: "image/png", width: 3, height: 2 }] });
+        expect(decodePrompt(ct, key)).toEqual({ text: "look", attachments: [{ id: "att-1", name: "shot.png", size: 9, mime: "image/png" }] });
+        expect(decodePrompt(encodeContent("bare", key), key)).toEqual({ text: "bare", attachments: [] });
+        expect(decodePrompt(ct, null)).toBeNull();
+        // malformed citations are dropped, plaintext sessions parse the JSON as-is
+        expect(decodePrompt(JSON.stringify({ v: 1, t: "plain", text: "p", attachments: [{ id: 5 }, { id: "ok", name: "f" }] })))
+            .toEqual({ text: "p", attachments: [{ id: "ok", name: "f", size: 0 }] });
+    });
+
+    it("attachment bytes open under the session key (app sealV2Bytes layout) and refuse otherwise", () => {
+        const key = nacl.randomBytes(32);
+        const bytes = nacl.randomBytes(500);
+        const nonce = nacl.randomBytes(24);
+        const sealed = Buffer.concat([Buffer.from(nonce), Buffer.from(nacl.secretbox(bytes, nonce, key))]);
+        expect(Buffer.from(openAttachmentBytes(new Uint8Array(sealed), key)!)).toEqual(Buffer.from(bytes));
+        expect(openAttachmentBytes(new Uint8Array(sealed), nacl.randomBytes(32))).toBeNull();
+        expect(openAttachmentBytes(new Uint8Array(3), key)).toBeNull();
+        expect(openAttachmentBytes(bytes, null)).toBe(bytes);
     });
 });

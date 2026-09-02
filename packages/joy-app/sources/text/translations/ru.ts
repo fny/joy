@@ -1002,10 +1002,8 @@ export const ru: TranslationStructure = {
         fileTooLargeMessage: ({ name, maxMb }: { name: string; maxMb: number }) => `"${name}" превышает лимит ${maxMb}МБ и не был добавлен.`,
         uploadFailedTitle: 'Ошибка загрузки',
         uploadFailedMessage: ({ count }: { count: number }) => count === 1
-            ? 'Одно изображение не удалось загрузить — оно не было отправлено.'
-            : `${count} изображений не удалось загрузить — они не были отправлены.`,
-        notSupportedTitle: 'Изображения не поддерживаются',
-        notSupportedMessage: 'Этот агент не поддерживает изображения. Отправлен только текст.',
+            ? 'Не удалось загрузить вложение. Сообщение не отправлено.'
+            : `Не удалось загрузить вложения (${count}). Сообщение не отправлено.`,
     },
 
     settingsSessions: {

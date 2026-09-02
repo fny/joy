@@ -11,6 +11,7 @@ import { Typography } from '@/constants/Typography';
 import { hasJoyTags, splitJoySegments } from "@/utils/joyImg";
 import { JoyFileChip } from "@/components/JoyFileChip";
 import { JoyImage } from "./JoyImage";
+import { AttachmentView } from "./AttachmentView";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync } from '@/sync/sync';
@@ -142,9 +143,10 @@ function UserTextBlock(props: {
   if (harness.kind === 'unknown-block') {
     return <GenericBlockChip tag={harness.tag} />;
   }
+  const attachments = props.message.attachments ?? [];
   // After stripping system-reminders, an empty message was pure machine
   // context — hide it.
-  if (harness.text.length === 0 && rawText.trim().length > 0) {
+  if (harness.text.length === 0 && rawText.trim().length > 0 && attachments.length === 0) {
     return null;
   }
   const cleanedText = harness.text;
@@ -168,7 +170,14 @@ function UserTextBlock(props: {
 
   return (
     <View style={styles.userMessageContainer}>
-      <Pressable
+      {/* Attachments sit above the bubble, right-aligned like it; a picture-
+          only send has no bubble at all. */}
+      {attachments.length > 0 && (
+        <View style={styles.userAttachments}>
+          {attachments.map((a) => <AttachmentView key={a.id} sessionId={props.sessionId} attachment={a} />)}
+        </View>
+      )}
+      {bodyText.trim().length > 0 && <Pressable
         onLongPress={canFork ? handleLongPress : undefined}
         delayLongPress={400}
         style={styles.userMessageBubble}
@@ -181,7 +190,7 @@ function UserTextBlock(props: {
                 {slashMatch[2]}
               </Text>
             : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} />}
-      </Pressable>
+      </Pressable>}
       {/* iMessage/WhatsApp-style delivery status: only for a still-unacked send
           (seq == null). Mounted only while pending, so acked messages carry no
           hook/interval overhead. */}
@@ -496,6 +505,12 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'flex-end',
     justifyContent: 'flex-end',
     paddingHorizontal: 16,
+  },
+  userAttachments: {
+    alignItems: 'flex-end',
+    gap: 6,
+    marginBottom: 12,
+    maxWidth: '100%',
   },
   userMessageBubble: {
     backgroundColor: theme.colors.userMessageBackground,

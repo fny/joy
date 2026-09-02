@@ -1,22 +1,22 @@
 /**
- * Loads, decrypts and exposes a chat attachment as a data URI for inline
- * rendering in chat bubbles. Decrypted blobs are kept in a module-level LRU
- * (max 50 entries) so scrolling back through the chat does not re-decrypt
- * every image. In-flight requests are de-duplicated per ref.
+ * Loads, opens and exposes a chat attachment as a data URI for inline
+ * rendering in chat bubbles. The bytes come from the relay's attachment
+ * store sealed under the session's v2 content key (sync.fetchAttachment
+ * opens them). Opened images are kept in a module-level LRU (max 50
+ * entries) so scrolling back through the chat does not re-fetch every
+ * image. In-flight requests are de-duplicated per attachment id.
  */
 import * as React from 'react';
 import { sync } from '@/sync/sync';
-import { downloadEncryptedAttachment } from '@/sync/apiAttachments';
-import { decryptBlob } from '@/encryption/blob';
 import { encodeBase64 } from '@/encryption/base64';
 
 const MAX_CACHE_ENTRIES = 50;
 const cache = new Map<string, string>();
 const inFlight = new Map<string, Promise<string | null>>();
 
-function rememberInCache(ref: string, dataUri: string) {
-    if (cache.has(ref)) cache.delete(ref);
-    cache.set(ref, dataUri);
+function rememberInCache(id: string, dataUri: string) {
+    if (cache.has(id)) cache.delete(id);
+    cache.set(id, dataUri);
     while (cache.size > MAX_CACHE_ENTRIES) {
         const oldest = cache.keys().next().value;
         if (oldest === undefined) break;
@@ -24,7 +24,7 @@ function rememberInCache(ref: string, dataUri: string) {
     }
 }
 
-function detectImageMime(bytes: Uint8Array): string {
+export function detectImageMime(bytes: Uint8Array): string {
     if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
         return 'image/png';
     }
@@ -44,36 +44,16 @@ function detectImageMime(bytes: Uint8Array): string {
     return 'image/png';
 }
 
-async function loadAttachmentDataUri(sessionId: string, ref: string): Promise<string | null> {
-    const credentials = sync.getCredentials();
-    if (!credentials) {
-        console.warn(`[attachment-image] no credentials for ${ref}`);
-        return null;
-    }
-    const blobKey = sync.encryption.getSessionBlobKey(sessionId);
-    if (!blobKey) {
-        console.warn(`[attachment-image] no blobKey for session ${sessionId} (ref=${ref})`);
-        return null;
-    }
-    if (blobKey.length !== 32) {
-        console.warn(`[attachment-image] blobKey wrong length: ${blobKey.length} (ref=${ref})`);
-        return null;
-    }
-    let encrypted: Uint8Array;
+async function loadAttachmentDataUri(sessionId: string, id: string): Promise<string | null> {
+    let bytes: Uint8Array;
     try {
-        encrypted = await downloadEncryptedAttachment(credentials, sessionId, ref);
+        bytes = await sync.fetchAttachment(sessionId, id);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.warn(`[attachment-image] download failed for ${ref}: ${message}`);
+        console.warn(`[attachment-image] load failed for ${id}: ${message}`);
         return null;
     }
-    const decrypted = decryptBlob(encrypted, blobKey);
-    if (!decrypted) {
-        console.warn(`[attachment-image] decrypt returned null for ${ref} (encrypted.length=${encrypted.length})`);
-        return null;
-    }
-    const mime = detectImageMime(decrypted);
-    return `data:${mime};base64,${encodeBase64(decrypted)}`;
+    return `data:${detectImageMime(bytes)};base64,${encodeBase64(bytes)}`;
 }
 
 export type AttachmentImageState = {
@@ -82,44 +62,44 @@ export type AttachmentImageState = {
     error: string | null;
 };
 
-export function useAttachmentImage(sessionId: string, ref: string | undefined): AttachmentImageState {
+export function useAttachmentImage(sessionId: string, id: string | undefined): AttachmentImageState {
     const [state, setState] = React.useState<AttachmentImageState>(() => {
-        if (!ref) return { uri: null, loading: false, error: null };
-        const cached = cache.get(ref);
+        if (!id) return { uri: null, loading: false, error: null };
+        const cached = cache.get(id);
         return cached
             ? { uri: cached, loading: false, error: null }
             : { uri: null, loading: true, error: null };
     });
 
     React.useEffect(() => {
-        if (!ref) {
+        if (!id) {
             setState({ uri: null, loading: false, error: null });
             return;
         }
-        const cached = cache.get(ref);
+        const cached = cache.get(id);
         if (cached) {
-            cache.delete(ref);
-            cache.set(ref, cached);
+            cache.delete(id);
+            cache.set(id, cached);
             setState({ uri: cached, loading: false, error: null });
             return;
         }
         let cancelled = false;
         setState({ uri: null, loading: true, error: null });
 
-        let promise = inFlight.get(ref);
+        let promise = inFlight.get(id);
         if (!promise) {
-            promise = loadAttachmentDataUri(sessionId, ref)
-                .finally(() => { inFlight.delete(ref); });
-            inFlight.set(ref, promise);
+            promise = loadAttachmentDataUri(sessionId, id)
+                .finally(() => { inFlight.delete(id); });
+            inFlight.set(id, promise);
         }
 
         promise.then((uri) => {
             if (cancelled) return;
             if (uri) {
-                rememberInCache(ref, uri);
+                rememberInCache(id, uri);
                 setState({ uri, loading: false, error: null });
             } else {
-                setState({ uri: null, loading: false, error: 'decrypt_failed' });
+                setState({ uri: null, loading: false, error: 'load_failed' });
             }
         }).catch((err) => {
             if (cancelled) return;
@@ -128,7 +108,7 @@ export function useAttachmentImage(sessionId: string, ref: string | undefined): 
         });
 
         return () => { cancelled = true; };
-    }, [sessionId, ref]);
+    }, [sessionId, id]);
 
     return state;
 }

@@ -6,7 +6,11 @@
 //
 //   node v2-live-e2e.mjs --relay http://127.0.0.1:3105 --token <bearer> \
 //     --machine v2-live-e2e --agent claude --cwd /tmp/v2-live-<agent> \
-//     --home ~/.joy-test [--marker pong-claude] [--purge]
+//     --home ~/.joy-test [--marker pong-claude] [--attach] [--purge]
+//
+// --attach: instead of a plain marker prompt, upload a sealed text file whose
+// body is the marker and ask the agent to read the attached file — proving
+// the daemon fetched, opened and materialized the attachment into the cwd.
 //
 // --home is the daemon's JOY_HOME_DIR from mint-daemon-creds.mjs: the account
 // content secret it wrote there opens the per-session key envelope, so the
@@ -48,8 +52,8 @@ const openEnvelope = (envelope) => {
   const key = nacl.box.open(new Uint8Array(raw.subarray(56)), new Uint8Array(raw.subarray(32, 56)), new Uint8Array(raw.subarray(0, 32)), contentSecret);
   return key ?? null;
 };
-const enc = (t) => {
-  const json = JSON.stringify({ v: 1, t: 'plain', text: t });
+const enc = (t, attachments) => {
+  const json = JSON.stringify({ v: 1, t: 'plain', text: t, ...(attachments?.length ? { attachments } : {}) });
   if (!sessionKey) return json;
   const nonce = new Uint8Array(randomBytes(nacl.secretbox.nonceLength));
   const ct = nacl.secretbox(new Uint8Array(Buffer.from(json, 'utf8')), nonce, sessionKey);
@@ -119,9 +123,30 @@ if (envelope && envelope !== 'v2:plaintext') {
 }
 
 // 3. Send a marker prompt; the REAL agent must echo the marker back through
-// durable v2 output events.
-const prompt = `Reply with exactly this text and nothing else: ${MARKER}`;
-const m = await api('POST', `/sessions/${sid}/messages`, { ciphertext: enc(prompt), clientIntentId: randomUUID() });
+// durable v2 output events. With --attach the marker travels ONLY inside a
+// sealed attachment (app sealV2Bytes layout: nonce24 ‖ secretbox(bytes)).
+let prompt = `Reply with exactly this text and nothing else: ${MARKER}`;
+let attachments = [];
+if (has('attach')) {
+  const { createHash } = await import('node:crypto');
+  const name = `secret-${Math.random().toString(36).slice(2, 7)}.txt`;
+  const plain = new Uint8Array(Buffer.from(`${MARKER}\n`, 'utf8'));
+  let body = plain;
+  if (sessionKey) {
+    const nonce = new Uint8Array(randomBytes(nacl.secretbox.nonceLength));
+    body = new Uint8Array(Buffer.concat([Buffer.from(nonce), Buffer.from(nacl.secretbox(plain, nonce, sessionKey))]));
+  }
+  const up = await fetch(`${RELAY}/joy/v2/attachments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'content-type': 'application/octet-stream', 'x-session': sid, 'x-cipher-hash': createHash('sha256').update(body).digest('hex') },
+    body,
+  });
+  const upJson = await up.json().catch(() => null);
+  if (!step(up.status === 201 && upJson?.attachmentId, 'sealed attachment uploaded', `status ${up.status}`)) process.exit(1);
+  attachments = [{ id: upJson.attachmentId, name, size: plain.length, mime: 'text/plain' }];
+  prompt = `A text file is attached below (its path is on the last line, relative to your cwd). Read it and reply with exactly its contents, trimmed, and nothing else.`;
+}
+const m = await api('POST', `/sessions/${sid}/messages`, { ciphertext: enc(prompt, attachments), clientIntentId: randomUUID(), ...(attachments.length ? { attachments: attachments.map((a) => a.id) } : {}) });
 if (!step(m.status === 202, 'prompt accepted 202', `status ${m.status}`)) { console.log(`FAIL ${AGENT} (send rejected)`); process.exit(1); }
 
 const answered = await until(async () => {
@@ -129,7 +154,14 @@ const answered = await until(async () => {
   const hit = ev.find((e) => e.kind !== 'turn.queued' && dec(e.content?.ciphertext ?? null)?.includes(MARKER));
   return hit ?? null;
 }, 240_000, 3000);
-step(!!answered, `real ${AGENT} answered with the marker via v2 output events`, answered ? `event #${answered.seq}` : 'no marker within 240s');
+step(!!answered, `real ${AGENT} answered with the marker via v2 output events${attachments.length ? ' (read from the attachment)' : ''}`, answered ? `event #${answered.seq}` : 'no marker within 240s');
+
+// The daemon must have materialized the file into the cwd under the name
+// the sealed citation carried (non-images keep their sanitized name).
+if (attachments.length) {
+  const onDisk = existsSync(join(CWD, attachments[0].name)) && readFileSync(join(CWD, attachments[0].name), 'utf8').includes(MARKER);
+  step(onDisk, 'attachment materialized in the session cwd with its plaintext contents', `${CWD}/${attachments[0].name}`);
+}
 
 // Exactly-once: after the turn settles, the marker must appear in EXACTLY
 // one non-queued event (a find() would pass duplicates silently).

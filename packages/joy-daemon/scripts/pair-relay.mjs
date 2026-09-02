@@ -70,7 +70,7 @@ const termKp = nacl.box.keyPair();
 await post("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
 
 // ── 3. approve as the account (the app's responseV2 bundle) ──
-const contentSeed = deriveKey(accountSecret, "Happy EnCoder", ["content"]);
+const contentSeed = deriveKey(accountSecret, "Joy Content", ["content"]);
 const contentPub = boxSeedKeypair(contentSeed).publicKey;
 const bundle = new Uint8Array([0x00, ...contentPub]);
 await post("/joy/v2/auth/response", { publicKey: b64(termKp.publicKey), response: b64(encryptBox(bundle, termKp.publicKey)) }, accountToken);

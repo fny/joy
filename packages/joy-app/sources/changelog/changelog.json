@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 2 (2) — Attachments on the relay",
+      "summary": "",
+      "markdown": "- **Images and files send again.** Attaching a photo, file, paste or drawing to a message uploads it sealed with the session's own key — the relay stores bytes it cannot read — and the daemon drops the file into the session's folder and points the agent at it, so \"look at this screenshot\" works on every agent. If an upload fails the message is held back and you are told, instead of the text going out without its picture.\n- **Attachments show in the chat.** Your sent images appear inline above the bubble (a blurred placeholder until the bytes load), other files as a name and size row, on every device signed in to the account.\n- **Re-pair after updating.** The keys that seal session content are now derived under Joy's own name rather than the old Happy labels. Sealed history written before this update cannot be opened by the new app, and terminals paired before it must be paired again. *Needs the updated daemon on the machine.*"
+    },
+    {
       "title": "Sep 2 — Joy only",
       "summary": "",
       "markdown": "- **The Happy Cloud relay is gone.** Server Configuration lists Joy Relay only, it is the default for new installs, and the server check now confirms it is talking to a joy-relay rather than looking for the old server's welcome banner. Custom relay URLs still work. Existing logins and caches on Joy Relay carry over unchanged.\n- **Links are `joy://`.** The terminal-pairing and account-restore QR codes and the \"paste URL\" flows now use `joy://…` instead of `happy://…`; the app registers the `joy` scheme on iOS and Android. Old `happy://` links no longer open.\n- **Voice, GitHub connect, artifacts, usage dashboards and connected services are removed.** None of them had a backend on the joy relay, so they could only fail; their settings pages, the microphone permission and the audio/voice libraries are gone with them.\n- **Settings are per device.** Preferences no longer try to sync to an account-settings store the relay never had.\n- **Machine page shows the daemon.** Version and Joy home directory appear alongside host and home; machines registered by an older daemon still list fine.\n- **Renamed under the hood** — nothing to do: the resume snippet is now `joy new . --resume <id>`, the offline hint says `joy status`, the CLI install hint points at `@fny/joy-daemon`, and the desktop app calls itself Joy in its menu and window titles."
@@ -131,5 +136,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 2 — Joy only"
+  "latestTitle": "Sep 2 (2) — Attachments on the relay"
 }
