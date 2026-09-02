@@ -7,12 +7,11 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Modal } from '@/modal';
 import { t } from '@/text';
-import { useHappyAction } from '@/hooks/useHappyAction';
+import { useJoyAction } from '@/hooks/useJoyAction';
 import { useJoyRpcSessions } from '@/hooks/useJoyRpcSessions';
 import type { JoySession } from '@/joy/types';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
-import { apiSocket } from '@/sync/apiSocket';
 import { StyleSheet } from 'react-native-unistyles';
 import { sync } from '@/sync/sync';
 import { machineStatusOnly } from '@/sync/v2/machine';
@@ -33,7 +32,7 @@ export default React.memo(function JoySessionsScreen() {
     // null = first-ever probe in flight; afterwards the set of machine ids
     // that answered a joy-list-sessions probe within 3s. Online machines
     // without joy-tmux never respond (machineRPC has no timeout), hence the
-    // per-probe race. Results are cached module-level: the happy machine
+    // per-probe race. Results are cached module-level: the machine
     // list renders instantly from synced storage, and without the cache this
     // page ate a 3s live-probe on every visit. Cached results render
     // immediately; a background re-probe refreshes them.
@@ -85,7 +84,7 @@ export default React.memo(function JoySessionsScreen() {
     const killingIdRef = React.useRef<string | null>(null);
     const screenshotIdRef = React.useRef<string | null>(null);
 
-    const [createLoading, doCreate] = useHappyAction(React.useCallback(async () => {
+    const [createLoading, doCreate] = useJoyAction(React.useCallback(async () => {
         const cwd = await Modal.prompt(
             t('settingsSessions.newSession'),
             t('settingsSessions.workingDirectory'),
@@ -95,13 +94,13 @@ export default React.memo(function JoySessionsScreen() {
         await createSession(cwd.trim());
     }, [createSession]));
 
-    const [, doKill] = useHappyAction(React.useCallback(async () => {
+    const [, doKill] = useJoyAction(React.useCallback(async () => {
         const id = killingIdRef.current;
         if (!id) return;
         await killSession(id);
     }, [killSession]));
 
-    const [screenshotLoading, doScreenshot] = useHappyAction(React.useCallback(async () => {
+    const [screenshotLoading, doScreenshot] = useJoyAction(React.useCallback(async () => {
         const id = screenshotIdRef.current;
         if (!id) return;
         const text = await fetchPane(id);
@@ -133,7 +132,7 @@ export default React.memo(function JoySessionsScreen() {
         );
     }, [doKill]);
 
-    // Only machines that actually run joy-tmux are listed — an online happy
+    // Only machines that actually run joy-tmux are listed — an online
     // machine without the daemon can't serve any of the RPCs this page uses.
     const visibleMachines = joyMachineIds === null
         ? []

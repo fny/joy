@@ -75,7 +75,7 @@ function findAction(input) {
 }
 
 function printAvailableOptions() {
-  console.error("Available happy-app release options:");
+  console.error("Available joy-app release options:");
   for (const action of actions) {
     console.error(`- ${action.id}: ${action.description}`);
   }
@@ -99,7 +99,7 @@ function runScript(scriptName) {
 
 async function promptForAction() {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.error("Interactive happy-app release selection requires a TTY.");
+    console.error("Interactive joy-app release selection requires a TTY.");
     printAvailableOptions();
     console.error("Run `pnpm release -- <option>` in non-interactive mode.");
     process.exit(1);
@@ -111,13 +111,13 @@ async function promptForAction() {
   } catch (error) {
     console.error("Missing interactive prompt dependency: `@inquirer/prompts`.");
     console.error(
-      "Run `pnpm install` from repository root, then run `pnpm --filter happy-app release` again."
+      "Run `pnpm install` from repository root, then run `pnpm --filter joy-app release` again."
     );
     process.exit(1);
   }
 
   const actionId = await select({
-    message: "What should be released for happy-app?",
+    message: "What should be released for joy-app?",
     pageSize: 10,
     choices: actions.map((action) => ({
       name: action.label,
@@ -139,7 +139,7 @@ async function main() {
 
   let action = input ? findAction(input) : null;
   if (input && !action) {
-    console.error(`Unknown happy-app release option: ${input}`);
+    console.error(`Unknown joy-app release option: ${input}`);
     printAvailableOptions();
     process.exit(1);
   }
@@ -148,7 +148,7 @@ async function main() {
     action = await promptForAction();
   }
 
-  console.log(`Running happy-app release option: ${action.label}`);
+  console.log(`Running joy-app release option: ${action.label}`);
   for (const scriptName of action.scripts) {
     runScript(scriptName);
   }

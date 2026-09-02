@@ -15,7 +15,6 @@ import { ChatList, type ChatListHandle } from '@/components/ChatList';
 import { SessionSearchBar } from './SessionSearchBar';
 import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
-import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { useDraft } from '@/hooks/useDraft';
 import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
 import { useSessionSearch } from '@/hooks/useSessionSearch';
@@ -24,16 +23,13 @@ import { useDrawingResult } from '@/hooks/useDrawingResult';
 import { useEscapeAbort } from '@/hooks/useEscapeAbort';
 import { useImagePicker } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
-import { voiceHooks } from '@/realtime/hooks/voiceHooks';
-import { getCurrentVoiceConversationId, getCurrentVoiceSessionDurationSeconds, startRealtimeSession, stopRealtimeSession } from '@/realtime/RealtimeSession';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
-import { getVoiceMessageCount, getVoiceOnboardingPromptLoadCount } from '@/sync/persistence';
 import { isRunningOnMac } from '@/utils/platform';
 import { useDeviceType, useHeaderHeight, useIsLandscape, useIsTablet } from '@/utils/responsive';
 import { FilesSidebar, SidebarMode } from '@/components/FilesSidebar';
@@ -96,7 +92,6 @@ export const SessionView = React.memo((props: { id: string }) => {
     const isLandscape = useIsLandscape();
     const deviceType = useDeviceType();
     const headerHeight = useHeaderHeight();
-    const realtimeStatus = useRealtimeStatus();
     const isTablet = useIsTablet();
     const { width: windowWidth } = useWindowDimensions();
     const fileDiffsSidebarEnabled = useSetting('fileDiffsSidebar');
@@ -337,16 +332,12 @@ export const SessionView = React.memo((props: { id: string }) => {
                         onTitlePress={session ? () => router.push(`/session/${sessionId}/info`) : undefined}
                         onBackPress={() => router.back()}
                     />
-                    {/* Voice status bar below header - not on tablet (shown in sidebar) */}
-                    {!isTablet && realtimeStatus !== 'disconnected' && (
-                        <VoiceAssistantStatusBar variant="full" />
-                    )}
                     <MachineResourceBanner machineId={session?.metadata?.machineId} />
                 </View>
             )}
 
             {/* Content based on state */}
-            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight + (!isTablet && realtimeStatus !== 'disconnected' ? 32 : 0) : 0 }}>
+            <View style={{ flex: 1, paddingTop: !(isLandscape && deviceType === 'phone' && Platform.OS !== 'web') ? safeArea.top + headerHeight : 0 }}>
                 {!isDataReady ? (
                     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
@@ -518,7 +509,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const isLandscape = useIsLandscape();
     const deviceType = useDeviceType();
     const isTablet = useIsTablet();
-    const realtimeStatus = useRealtimeStatus();
     const { messages, isLoaded } = useSessionMessages(sessionId);
     // Newest user-sent message timestamp — drives the backstop's "recently sent"
     // trigger (messages are sorted newest-first, so the first user-text wins).
@@ -609,7 +599,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const availableModes = React.useMemo(() => {
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
-        // cycling matches). happy's list has dontAsk (unreachable) and lacks
+        // cycling matches). the stock list has dontAsk (unreachable) and lacks
         // auto. CODEX joy sessions use codex's OWN modes — the claude modes
         // (esp. `auto`) silently escalate to full access on codex (finding #1).
         const modes = isJoyDaemon
@@ -659,8 +649,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const joyQueue = useJoyQueue(machineId, joySessionId, session.metadata?.joy__queue);
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
-    const expResumeSession = useSetting('expResumeSession');
-    const { canResume, resumeSession, resumingSession } = useSessionQuickActions(session);
+    const { canResume, restartSession, restarting } = useSessionQuickActions(session);
     const isDisconnected = !sessionStatus.isConnected;
     const resumeCommandBlock = getResumeCommandBlock(session);
 
@@ -915,33 +904,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [sessionUsage, session.latestUsage]);
 
 
-    // Handle microphone button press - memoized to prevent button flashing
-    const handleMicrophonePress = React.useCallback(async () => {
-        if (realtimeStatus === 'connecting') {
-            return; // Prevent actions during transitions
-        }
-        if (realtimeStatus === 'disconnected' || realtimeStatus === 'error') {
-            try {
-                const initialPrompt = voiceHooks.onVoiceStarted(sessionId);
-                await startRealtimeSession(sessionId, initialPrompt);
-            } catch (error) {
-                console.error('Failed to start realtime session:', error);
-                Modal.alert(t('common.error'), t('errors.voiceSessionFailed'));
-            }
-        } else if (realtimeStatus === 'connected') {
-            await stopRealtimeSession();
-
-            // Notify voice assistant about voice session stop
-            voiceHooks.onVoiceStopped();
-        }
-    }, [realtimeStatus, sessionId]);
-
-    // Memoize mic button state to prevent flashing during chat transitions
-    const micButtonState = useMemo(() => ({
-        onMicPress: handleMicrophonePress,
-        isMicActive: realtimeStatus === 'connected' || realtimeStatus === 'connecting'
-    }), [handleMicrophonePress, realtimeStatus]);
-
     // Trigger session visibility and initialize git status sync
     React.useLayoutEffect(() => {
 
@@ -964,7 +926,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                 storage.getState().setCurrentViewingSession(null);
             }
         };
-    }, [sessionId, realtimeStatus]);
+    }, [sessionId]);
 
     // Staleness backstop for the open chat: a missed live update (zombie
     // socket, silently dropped frame) froze the conversation until the user
@@ -1051,8 +1013,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             blockSend={false}
             onSend={handleSend}
             onSaveDraft={handleSaveDraft}
-            onMicPress={isDisconnected ? undefined : micButtonState.onMicPress}
-            isMicActive={isDisconnected ? false : micButtonState.isMicActive}
             onAbort={isDisconnected ? undefined : handleAbort}
             showAbortButton={sessionStatus.state === 'thinking'}
             onFileViewerPress={!isTablet ? handleFileViewerPress : undefined}
@@ -1071,19 +1031,17 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     );
 
     // Disconnected sessions get the full Resume affordance regardless of
-    // whether they were explicitly archived or just lost their CLI (e.g.
-    // Ctrl-C in terminal — lifecycleState stays 'running', server flips
-    // active=false). InactiveArchivedHint handles both cases: shows the
-    // Resume button when canResume is true, falls back to the
-    // copy-this-command hint when the experiments toggle is off or the
-    // machine isn't reachable.
+    // whether they were explicitly archived or just lost their agent (e.g.
+    // Ctrl-C in terminal). InactiveArchivedHint shows the Resume button (the
+    // daemon restarts the agent on the same conversation) when the machine
+    // is reachable, and falls back to the copy-this-command hint otherwise.
     const inactiveHint = isDisconnected ? (
         <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
             <InactiveArchivedHint
-                resumeCommandBlock={expResumeSession ? resumeCommandBlock : null}
+                resumeCommandBlock={resumeCommandBlock}
                 canResume={canResume}
-                resuming={resumingSession}
-                onResume={resumeSession}
+                resuming={restarting}
+                onResume={restartSession}
             />
         </CenteredInputWidth>
     ) : null;

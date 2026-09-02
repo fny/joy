@@ -25,8 +25,8 @@ export async function loginToRelay(url: string, secretB64url: string): Promise<v
     }
 }
 
-/** Switch the active relay and reload the app. apiSocket binds endpoint and
- *  token once at syncInit, so a relay change only takes effect through a full
+/** Switch the active relay and reload the app. The sync engine binds endpoint
+ *  and token once at syncInit, so a relay change only takes effect through a full
  *  reload — the same pattern logout uses. After the reload, bootstrap picks up
  *  the new relay's own credentials (or none, landing on the pairing screen). */
 export async function switchRelayAndReload(url: string | null): Promise<void> {

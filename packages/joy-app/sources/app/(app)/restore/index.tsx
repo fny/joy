@@ -150,7 +150,7 @@ export default function Restore() {
                 )}
                 {authReady && (
                     <QRCode
-                        data={'happy:///account?' + encodeBase64(keypair.publicKey, 'base64url')}
+                        data={'joy:///account?' + encodeBase64(keypair.publicKey, 'base64url')}
                         size={300}
                         foregroundColor={'black'}
                         backgroundColor={'white'}

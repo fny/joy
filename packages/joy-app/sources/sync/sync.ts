@@ -1,28 +1,23 @@
 import Constants from 'expo-constants';
-import { apiSocket, getCurrentAppState, getHappyClientId } from '@/sync/apiSocket';
-import { notifyUnreadMessage } from '@/sync/webTabTitle';
+import { getCurrentAppState } from '@/sync/clientId';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { storage } from './storage';
-import { showDesktopNotification, isWindowFocused, ensureDesktopNotificationPermission } from '@/notifications/desktopNotifications';
-import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
-import type { ApiEphemeralActivityUpdate } from './apiTypes';
+import { ensureDesktopNotificationPermission } from '@/notifications/desktopNotifications';
+import { ApiMessage } from './apiTypes';
 import { Session, Machine } from './storageTypes';
 import { InvalidateSync } from '@/utils/sync';
-import { ActivityUpdateAccumulator } from './reducer/activityUpdateAccumulator';
 import { randomUUID } from 'expo-crypto';
 import { sealV2Content } from './v2/crypto';
-import { v2SendCiphertext, v2ActiveTurn, v2CancelTurn } from './v2/api';
+import { v2, v2SendCiphertext, v2ActiveTurn, v2CancelTurn, connectV2Stream } from './v2/api';
 import { v2MessagesAfter, v2MessagesBefore } from './v2/reads';
-import { connectV2Stream } from './v2/api';
 
 import * as Notifications from 'expo-notifications';
 import { syncCurrentPushToken } from './pushRegistration';
 import { Platform, AppState, type AppStateStatus } from 'react-native';
-import { isRunningOnMac } from '@/utils/platform';
-import { NormalizedMessage, normalizeRawMessage, RawRecord } from './typesRaw';
-import { applySettings, Settings, settingsDefaults, settingsParse, settingsToSyncPayload, SUPPORTED_SCHEMA_VERSION } from './settings';
+import { NormalizedMessage, normalizeRawMessage } from './typesRaw';
+import { Settings, settingsParse } from './settings';
 import { Profile, profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
 import { parseToken } from '@/utils/parseToken';
@@ -32,26 +27,11 @@ import { config } from '@/config';
 import { log } from '@/log';
 import { gitStatusSync } from './gitStatusSync';
 import { AsyncLock } from '@/utils/lock';
-import { voiceHooks } from '@/realtime/hooks/voiceHooks';
-import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { systemPrompt } from './prompt/systemPrompt';
-import { fetchArtifact, fetchArtifacts, createArtifact, updateArtifact } from './apiArtifacts';
-import { DecryptedArtifact, Artifact, ArtifactCreateRequest, ArtifactUpdateRequest } from './artifactTypes';
-import { ArtifactEncryption } from './encryption/artifactEncryption';
-import { resolveMessageModeMeta } from './messageMeta';
-import type { AttachmentPreview, UploadedAttachment } from './attachmentTypes';
-import { requestAttachmentUpload, uploadEncryptedBlob } from './apiAttachments';
-import { encryptBlob } from '@/encryption/blob';
-import { readFileBytes } from '@/utils/readFileBytes';
+import type { AttachmentPreview } from './attachmentTypes';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { isDemoSession } from './demoSession';
-
-type V3GetSessionMessagesResponse = {
-    messages: ApiMessage[];
-    hasMore: boolean;
-};
 
 // Sentinel used as `before_seq` for the very first backward fetch of a
 // session. It must exceed any real `seq` value the server can produce.
@@ -59,26 +39,6 @@ type V3GetSessionMessagesResponse = {
 // 2_147_483_647. We use that exact upper bound to keep the request safely
 // within int4 while still being effectively "infinite" for any session.
 const SEQ_BACKWARD_INITIAL_SENTINEL = 2_147_483_647;
-
-type V3PostSessionMessagesResponse = {
-    messages: Array<{
-        id: string;
-        seq: number;
-        localId: string | null;
-        createdAt: number;
-        updatedAt: number;
-    }>;
-};
-
-type OutboxMessage = {
-    localId: string;
-    content: string;
-    // Wall-clock time this message entered the outbox. The background-send
-    // watchdog fails a message only once ITS OWN age crosses the timeout — never
-    // a shared/global clock, so a freshly-submitted message can't be declared
-    // "failed" the instant an unrelated stale timer is consulted.
-    enqueuedAt: number;
-};
 
 type SendMessageOptions = {
     displayText?: string;
@@ -123,7 +83,6 @@ function deriveThinkingFromContent(content: unknown): boolean | null {
 }
 
 class Sync {
-    private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
     encryption!: Encryption;
     serverID!: string;
     anonID!: string;
@@ -136,43 +95,26 @@ class Sync {
     public encryptionCache = new EncryptionCache();
     private sessionsSync: InvalidateSync;
     private messagesSync = new Map<string, InvalidateSync>();
-    private sendSync = new Map<string, InvalidateSync>();
-    private sendAbortControllers = new Map<string, AbortController>();
-    // localIds currently being POSTed for a session (the in-flight batch). These
-    // are still in pendingOutbox but must NOT be treated as failed — the POST
-    // decides their fate. Excluding them from the overdue check is what keeps a
-    // delivered-but-slow-to-ack send from being falsely failed.
-    private inFlightOutbox = new Map<string, Set<string>>();
     private sessionLastSeq = new Map<string, number>();
     // Lowest seq value we have already fetched and applied for a session.
     // Used as the cursor for backward pagination when the user scrolls up to
     // load older history. Set after the initial latest-page fetch and
     // advanced downward by loadOlderMessages.
     private sessionOldestSeq = new Map<string, number>();
-    private pendingOutbox = new Map<string, OutboxMessage[]>();
     private sessionMessageQueue = new Map<string, NormalizedMessage[]>();
     private sessionQueueProcessing = new Set<string>();
     private sessionMessageLocks = new Map<string, AsyncLock>();
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     /** v2 session content keys (opened from each row's envelope at list time). */
     private v2SessionKeys = new Map<string, Uint8Array>();
-    private artifactDataKeys = new Map<string, Uint8Array>(); // Store artifact data encryption keys internally
     private settingsSync: InvalidateSync;
     private profileSync: InvalidateSync;
     private purchasesSync: InvalidateSync;
     private machinesSync: InvalidateSync;
     private pushTokenSync: InvalidateSync;
     private nativeUpdateSync: InvalidateSync;
-    private artifactsSync: InvalidateSync;
-    private activityAccumulator: ActivityUpdateAccumulator;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
     private appState: AppStateStatus = AppState.currentState;
-    private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
-    private backgroundSendNotificationId: string | null = null;
-    // True once the "message still sending" notification fired for the current
-    // background episode — gates the watchdog so retries don't re-notify every
-    // 30s. Reset on app resume and when the outbox fully drains.
-    private backgroundSendEpisodeNotified = false;
     revenueCatInitialized = false;
 
     // Generic locking mechanism
@@ -186,13 +128,11 @@ class Sync {
         this.purchasesSync = new InvalidateSync(this.syncPurchases);
         this.machinesSync = new InvalidateSync(this.fetchMachines);
         this.nativeUpdateSync = new InvalidateSync(this.fetchNativeUpdate);
-        this.artifactsSync = new InvalidateSync(this.fetchArtifactsList);
 
         const registerPushToken = async () => {
             await this.registerPushToken();
         }
         this.pushTokenSync = new InvalidateSync(registerPushToken);
-        this.activityAccumulator = new ActivityUpdateAccumulator(this.flushActivityUpdates.bind(this), 2000);
 
         // Request desktop-notification permission once (web/desktop app), if enabled.
         if (Platform.OS === 'web' && storage.getState().settings.notificationsDesktop) {
@@ -203,29 +143,7 @@ class Sync {
         AppState.addEventListener('change', (nextAppState) => {
             this.appState = nextAppState;
 
-            // Notify server of focus state for push notification routing.
-            // Mobile: AppState.currentState reflects fg/bg directly.
-            // Web/desktop: visibilitychange/focus listeners below drive this same path
-            // by updating this.appState too — re-derive via getCurrentAppState() so
-            // the wire value matches what the server uses for suppression.
-            apiSocket.sendAppState(getCurrentAppState());
-
             if (nextAppState === 'active') {
-                // Resume = the moment we REGAIN the ability to deliver — retry,
-                // never fail. The v3 POST dedupes by localId, so re-sending a
-                // message whose ack was lost to app suspension (the common
-                // "failure") resolves into a plain ack, not a duplicate. The old
-                // behavior failed + discarded overdue messages right here, which
-                // both lost the user's text and usually lied (the send had
-                // landed; only the ack was lost).
-                void this.cancelBackgroundSendTimeoutNotification();
-                this.clearBackgroundSendWatchdog();
-                this.backgroundSendEpisodeNotified = false;
-                for (const [sessionId, pending] of this.pendingOutbox) {
-                    if (pending.length > 0) {
-                        this.getSendSync(sessionId).invalidate();
-                    }
-                }
                 log.log('📱 App became active');
                 this.purchasesSync.invalidate();
                 this.profileSync.invalidate();
@@ -233,8 +151,6 @@ class Sync {
                 this.pushTokenSync.invalidate();
                 this.sessionsSync.invalidate();
                 this.nativeUpdateSync.invalidate();
-                log.log('📱 App became active: Invalidating artifacts sync');
-                this.artifactsSync.invalidate();
                 // Refetch the session the user is looking at. sessionsSync above
                 // restores metadata but NOT messages (and it preserves thinking),
                 // so a chat that missed `update`/`ephemeral` events while the app
@@ -242,21 +158,16 @@ class Sync {
                 this.refetchViewedSession();
             } else {
                 log.log(`📱 App state changed to: ${nextAppState}`);
-                this.maybeStartBackgroundSendWatchdog();
             }
         });
 
         // Web/desktop: AppState alone doesn't capture tab focus/visibility.
-        // Notify server when the tab becomes hidden, regains visibility,
-        // or window focus changes — so push routing can suppress only when
-        // the user is actually looking at this client.
         if (Platform.OS === 'web' && typeof document !== 'undefined') {
             const broadcast = () => {
-                apiSocket.sendAppState(getCurrentAppState());
                 // On web, RN AppState doesn't reliably fire 'active' on tab/window
                 // refocus, so the became-active refetch above can be skipped. When
                 // we regain focus, pull the viewed session so a chat that missed
-                // socket events while the tab was hidden catches up automatically.
+                // live pokes while the tab was hidden catches up automatically.
                 if (getCurrentAppState() === 'active') {
                     this.refetchViewedSession();
                 }
@@ -268,7 +179,7 @@ class Sync {
     }
 
     // Refetch messages + git status for the session the user is currently viewing,
-    // independent of the socket. Used as a self-heal on reconnect / app-foreground
+    // independent of the live stream. Used as a self-heal on reconnect / app-foreground
     // so a missed `update`/`ephemeral` event doesn't leave the open chat frozen
     // until it's manually remounted. Cheap when already up to date (forward sync
     // from the last seq returns nothing).
@@ -280,8 +191,8 @@ class Sync {
     }
 
     /** Staleness probe for the OPEN chat: one-row fetch after the local cursor.
-     *  Anything there means we missed a live update (zombie socket, dropped
-     *  frame — cause immaterial) → invalidate and let the normal fetch heal.
+     *  Anything there means we missed a live update (dead SSE stream, dropped
+     *  poke — cause immaterial) → invalidate and let the normal fetch heal.
      *  Runs on a short interval from SessionView; a single tiny query per tick
      *  for one session, and a no-op result costs one empty page. This is the
      *  backstop for the "response doesn't show until I switch away and back"
@@ -292,11 +203,11 @@ class Sync {
         if (!sessionId) return;
         const cursor = this.sessionLastSeq.get(sessionId);
         if (cursor === undefined) return; // initial load not done — it fetches anyway
+        const ctx = this.v2ReadCtx(sessionId);
+        if (!ctx) return;
         try {
-            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${cursor}&limit=1`);
-            if (!response.ok) return;
-            const data = await response.json() as { messages?: unknown[] };
-            if ((data.messages?.length ?? 0) > 0) {
+            const data = await v2MessagesAfter({ ...ctx, afterSeq: cursor, limit: 1 });
+            if (data.messages.length > 0) {
                 log.log(`🩹 Staleness probe: rows beyond cursor ${cursor} for ${sessionId} — healing`);
                 this.getMessagesSync(sessionId).invalidate();
             }
@@ -357,9 +268,6 @@ class Sync {
                 this.sendMessage(sessionId, text, { source: 'chat', localId }));
         });
 
-        // Subscribe to updates
-        this.subscribeToUpdates();
-
         // Invalidate sync
         log.log('🔄 #init: Invalidating all syncs');
         this.sessionsSync.invalidate();
@@ -369,8 +277,6 @@ class Sync {
         this.machinesSync.invalidate();
         this.pushTokenSync.invalidate();
         this.nativeUpdateSync.invalidate();
-        this.artifactsSync.invalidate();
-        log.log('🔄 #init: All syncs invalidated, including artifacts');
 
         // Mark UI ready as soon as sessions load. Machines sync may hang
         // when encryption keys are unavailable (e.g. V1 auth fallback) —
@@ -397,21 +303,15 @@ class Sync {
 
         // Also invalidate git status sync for this session
         gitStatusSync.getSync(sessionId).invalidate();
-
-        // Notify voice assistant about session visibility
-        const session = storage.getState().sessions[sessionId];
-        if (session) {
-            voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
-        }
     }
 
     // Forward-sync for the open-session backstop repair loop. Refreshes BOTH the
-    // messages AND the session-list metadata, since a dropped socket event can
+    // messages AND the session-list metadata, since a dropped live poke can
     // strand either: messages (no streamed reply) or metadata (title stuck on
     // "New chat", stale joy__state). No single-session GET exists, so the title
     // refresh piggybacks on the global sessions fetch — InvalidateSync coalesces
-    // it and it only runs while the user watches a live turn. No git/voice (too
-    // heavy for a ~10–15s loop).
+    // it and it only runs while the user watches a live turn. No git (too heavy
+    // for a ~10–15s loop).
     backstopSyncSession = (sessionId: string) => {
         if (isDemoSession(sessionId)) return;
         this.getMessagesSync(sessionId).invalidate();
@@ -428,15 +328,14 @@ class Sync {
     }
 
     // ── v2 live driver ────────────────────────────────────────────────────
-    // v1 gets live updates from the happy socket. v2 sessions instead ride the
-    // relay's SSE doorbell (content-free pokes) with a poll fallback, both of
-    // which simply invalidate the message sync — the same entry point the
-    // socket path uses, so the fetch/reducer pipeline is identical.
+    // Sessions ride the relay's SSE doorbell (content-free pokes) with a poll
+    // fallback, both of which simply invalidate the message sync — so the
+    // fetch/reducer pipeline is the same whichever signal fires.
     private v2StreamStop: (() => void) | null = null;
     private v2PollTimer: ReturnType<typeof setInterval> | null = null;
 
     private v2SessionIdIndex(): Map<string, string> {
-        const idx = new Map<string, string>(); // v2SessionId → happy sessionId
+        const idx = new Map<string, string>(); // v2SessionId → local session id
         for (const [sid, s] of Object.entries(storage.getState().sessions)) {
             const v2 = (s as { metadata?: { v2?: { sessionId?: string } } }).metadata?.v2?.sessionId;
             if (v2) idx.set(v2, sid);
@@ -506,15 +405,6 @@ class Sync {
         return sync;
     }
 
-    private getSendSync(sessionId: string): InvalidateSync {
-        let sync = this.sendSync.get(sessionId);
-        if (!sync) {
-            sync = new InvalidateSync(() => this.flushOutbox(sessionId));
-            this.sendSync.set(sessionId, sync);
-        }
-        return sync;
-    }
-
     private enqueueMessages(sessionId: string, messages: NormalizedMessage[]) {
         if (messages.length === 0) {
             return;
@@ -576,195 +466,6 @@ class Sync {
         });
     }
 
-    private hasPendingOutboxMessages() {
-        if (this.sendAbortControllers.size > 0) {
-            return true;
-        }
-        for (const messages of this.pendingOutbox.values()) {
-            if (messages.length > 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // A message is "overdue" only once IT SPECIFICALLY has sat in the outbox past
-    // the timeout WITHOUT being in flight. Two guarantees fall out of this:
-    //  - per-message age (not a shared clock) → a just-submitted message (age ~0)
-    //    is never failed, even if a stale watchdog timestamp is still around.
-    //  - in-flight messages are skipped → a delivered-but-slow-to-ack POST isn't
-    //    failed out from under itself; the POST's success/failure decides its fate.
-    private hasOverdueOutboxMessages(now = Date.now()) {
-        for (const [sessionId, messages] of this.pendingOutbox) {
-            const inFlight = this.inFlightOutbox.get(sessionId);
-            for (const m of messages) {
-                if (inFlight?.has(m.localId)) {
-                    continue;
-                }
-                if (now - m.enqueuedAt >= Sync.BACKGROUND_SEND_TIMEOUT_MS) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private maybeStartBackgroundSendWatchdog() {
-        if (Platform.OS === 'web' || this.appState === 'active') {
-            return;
-        }
-        // One notification per background episode: flushOutbox failure re-calls
-        // this after every retry, and without the gate a background-alive JS
-        // runtime would re-schedule a fresh notification every 30s for as long
-        // as the send stays pending. Reset on resume and on outbox drain.
-        if (this.backgroundSendEpisodeNotified) {
-            return;
-        }
-        if (!this.hasPendingOutboxMessages() || this.backgroundSendTimeout) {
-            return;
-        }
-
-        log.log('📨 Pending messages detected in background. Starting 30s send watchdog.');
-        this.backgroundSendTimeout = setTimeout(() => {
-            this.backgroundSendTimeout = null;
-            void this.handleBackgroundSendTimeout();
-        }, Sync.BACKGROUND_SEND_TIMEOUT_MS);
-        void this.scheduleBackgroundSendTimeoutNotification();
-    }
-
-    private clearBackgroundSendWatchdog() {
-        if (this.backgroundSendTimeout) {
-            clearTimeout(this.backgroundSendTimeout);
-            this.backgroundSendTimeout = null;
-        }
-    }
-
-    private async scheduleBackgroundSendTimeoutNotification() {
-        if (Platform.OS === 'web' || this.backgroundSendNotificationId) {
-            return;
-        }
-        try {
-            this.backgroundSendNotificationId = await Notifications.scheduleNotificationAsync({
-                content: {
-                    title: 'Message still sending',
-                    body: "A message hasn't been delivered yet. Open Joy to let it retry.",
-                    sound: true
-                },
-                trigger: {
-                    type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-                    seconds: Math.ceil(Sync.BACKGROUND_SEND_TIMEOUT_MS / 1000)
-                }
-            });
-        } catch (error) {
-            log.log(`Failed to schedule background send timeout notification: ${error}`);
-        }
-    }
-
-    private async cancelBackgroundSendTimeoutNotification() {
-        if (!this.backgroundSendNotificationId) {
-            return;
-        }
-        try {
-            await Notifications.cancelScheduledNotificationAsync(this.backgroundSendNotificationId);
-        } catch (error) {
-            log.log(`Failed to cancel background send timeout notification: ${error}`);
-        } finally {
-            this.backgroundSendNotificationId = null;
-        }
-    }
-
-    private async notifyMessageStillSending() {
-        if (Platform.OS === 'web') {
-            return;
-        }
-        try {
-            await Notifications.scheduleNotificationAsync({
-                content: {
-                    title: 'Message still sending',
-                    body: "A message hasn't been delivered yet. Open Joy to let it retry.",
-                    sound: true
-                },
-                trigger: null
-            });
-        } catch (error) {
-            log.log(`Failed to schedule message still-sending notification: ${error}`);
-        }
-    }
-
-    // Overdue messages are NEVER failed or discarded anymore. The v3 POST
-    // dedupes by localId, so keeping a message in the outbox and retrying on
-    // resume/reconnect is always safe: a genuinely-undelivered send goes
-    // through late, and a delivered-but-unacked send (ack lost to iOS
-    // suspension — the common "failure") resolves into a plain ack. The old
-    // fail-after-30s path deleted the outbox copy (user's text gone, "Please
-    // retry" with nothing to retry) and injected a permanent local "failed"
-    // row into the chat — usually a false accusation. The 30s deadline's only
-    // remaining job is the once-per-episode notification below.
-    private async handleBackgroundSendTimeout() {
-        await this.cancelBackgroundSendTimeoutNotification();
-        if (this.hasOverdueOutboxMessages()) {
-            await this.notifyMessageStillSending();
-            this.backgroundSendEpisodeNotified = true;
-        } else {
-            // Messages still pending but not yet overdue keep their own
-            // deadline — re-arm so the watchdog fires when the next one comes due.
-            this.maybeStartBackgroundSendWatchdog();
-        }
-    }
-
-    /**
-     * Upload image attachments for a session: read bytes → encrypt → upload to server.
-     * Returns UploadedAttachment records to embed as file events before the text message.
-     * Failures are logged and skipped rather than aborting the whole message send.
-     */
-    private async uploadAttachmentsForSession(
-        sessionId: string,
-        attachments: AttachmentPreview[],
-    ): Promise<{ uploaded: UploadedAttachment[]; failed: number }> {
-        if (!this.credentials) return { uploaded: [], failed: attachments.length };
-
-        const blobKey = this.encryption.getSessionBlobKey(sessionId);
-        if (!blobKey) {
-            console.error(`[attachments] No blob key for session ${sessionId}`);
-            return { uploaded: [], failed: attachments.length };
-        }
-
-        const uploaded: UploadedAttachment[] = [];
-        let failed = 0;
-
-        for (const attachment of attachments) {
-            try {
-                const bytes = await readFileBytes(attachment.uri);
-                const encrypted = encryptBlob(bytes, blobKey);
-
-                const upload = await requestAttachmentUpload(
-                    this.credentials,
-                    sessionId,
-                    attachment.name,
-                    encrypted.length,
-                );
-
-                await uploadEncryptedBlob(upload, encrypted, this.credentials);
-                const { ref } = upload;
-
-                uploaded.push({
-                    ref,
-                    name: attachment.name,
-                    size: attachment.size,
-                    width: attachment.width,
-                    height: attachment.height,
-                    thumbhash: attachment.thumbhash,
-                });
-            } catch (err) {
-                console.error(`[attachments] Failed to upload ${attachment.name}:`, err);
-                failed++;
-                // Skip this attachment; do not abort the whole message send.
-            }
-        }
-
-        return { uploaded, failed };
-    }
-
     async sendMessage(sessionId: string, text: string, options?: SendMessageOptions): Promise<SendMessageResult> {
 
         // Get encryption — may not be ready yet if sessions are still syncing
@@ -790,221 +491,66 @@ class Sync {
             }
         }
 
-        // ── v2 dual path: a session stamped with a v2 link routes its WRITES
-        // over the relay's durable queue. Reads stay on the happy mirror (the
-        // daemon echoes the conversation onto this card), so display, history
-        // and every other feature are untouched — only the send travels v2.
+        // Every session is a v2 session: the send travels the relay's durable
+        // queue, sealed with the session content key. The daemon echoes the
+        // conversation (including this prompt) back onto the card, so display
+        // and history come from the read path — the send is write-only.
         const v2link = session.metadata?.v2;
-        if (v2link?.sessionId) {
-            // B5: attachments are not yet carried on the v2 path. Block loudly
-            // rather than silently dropping the image — the user must know.
-            if (options?.attachments?.length) {
-                Modal.alert(
-                    'Not supported yet',
-                    'Sending images over the v2 relay path is not available yet. Send text only, or use a non-v2 session for images.',
-                    [{ text: t('common.ok'), style: 'cancel' }],
-                );
-                return { ok: false, reason: 'attachments not supported on v2 path' };
-            }
-            // B1 (security): a session stamped with a key envelope MUST seal.
-            // If the envelope is present but the key will not open (wrong
-            // account, corruption), REFUSE — never fall back to plaintext,
-            // which would leak readable content to the relay.
-            let key: Uint8Array | null = null;
-            if (v2link.keyEnvelope && v2link.keyEnvelope !== 'v2:plaintext') {
-                key = this.encryption.openV2SessionKey(v2link.keyEnvelope);
-                if (!key) {
-                    console.error('[v2] session key envelope present but unopenable — refusing plaintext send');
-                    return { ok: false, reason: 'v2 content key unavailable (cannot seal) — refusing to send in the clear' };
-                }
-            } else if (v2link.keyEnvelope !== 'v2:plaintext') {
-                // No envelope at all — the session has not BOUND yet (the
-                // envelope arrives with the bind). Refuse rather than sending
-                // in the clear; the caller retries once the card completes.
-                return { ok: false, reason: 'v2 session not bound yet — no content key to seal with' };
-            }
-            // B3: honor displayText (what the user sees) vs the sent text, and
-            // carry the source tag. The v2 wire only moves the actual text;
-            // displayText rides the optimistic echo so slash-commands read
-            // right locally.
-            // B2 (optimistic echo) is intentionally NOT done here — the daemon's
-            // mirror is the single source of the user row, so the message shows
-            // once the daemon echoes it (fast when online). A local optimistic
-            // row duplicates the mirror because the two use different id spaces
-            // AND the daemon's transcript re-echo suppression (received-receipts)
-            // does not currently cover the nucleus-lane path. Correct fix is
-            // daemon-side: have the lane record a received-receipt for the
-            // prompt so the transcript tailer suppresses the user-echo mirror,
-            // leaving the app's (future) optimistic row as the sole copy. See
-            // docs/v2-dual-path.md. displayText is a UI-only alias; the wire
-            // carries `text`, which is what the agent must receive.
-            const v2localId = options?.localId ?? randomUUID();
-            try {
-                // The relay stores the SENT text; displayText is a UI-only alias
-                // and does not change what the agent receives, so seal `text`.
-                const ciphertext = sealV2Content(text, key);
-                await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext);
-                return { ok: true, localId: v2localId };
-            } catch (e) {
-                console.error('[v2] send failed', e);
-                return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
-            }
+        if (!v2link?.sessionId) {
+            return { ok: false, reason: 'session has no v2 link' };
         }
-
-        const modeMeta = resolveMessageModeMeta(session, storage.getState().settings);
-        const { displayText, source = 'chat', attachments } = options ?? {};
-
-        // Image attachments are wired into the Claude pipeline only; Codex /
-        // Gemini / OpenClaw runners read message.content.text and ignore
-        // file events, so dropping attachments silently would leave the user
-        // wondering why the image was skipped. Warn and send text only.
-        const flavor = session.metadata?.flavor;
-        const supportsAttachments = !flavor || flavor === 'claude';
-        const effectiveAttachments = supportsAttachments ? attachments : undefined;
-
-        if (attachments && attachments.length > 0 && !supportsAttachments) {
+        // B5: attachments are not yet carried on the v2 path. Block loudly
+        // rather than silently dropping the image — the user must know.
+        if (options?.attachments?.length) {
             Modal.alert(
                 t('imageUpload.notSupportedTitle'),
                 t('imageUpload.notSupportedMessage'),
                 [{ text: t('common.ok'), style: 'cancel' }],
             );
+            return { ok: false, reason: 'attachments not supported on v2 path' };
         }
-
-        // Upload attachments and queue file events before the text message.
-        if (effectiveAttachments && effectiveAttachments.length > 0) {
-            const { uploaded, failed } = await this.uploadAttachmentsForSession(sessionId, effectiveAttachments);
-
-            if (failed > 0) {
-                Modal.alert(
-                    t('imageUpload.uploadFailedTitle'),
-                    t('imageUpload.uploadFailedMessage', { count: failed }),
-                    [{ text: t('common.ok'), style: 'cancel' }],
-                );
+        // B1 (security): a session stamped with a key envelope MUST seal.
+        // If the envelope is present but the key will not open (wrong
+        // account, corruption), REFUSE — never fall back to plaintext,
+        // which would leak readable content to the relay.
+        let key: Uint8Array | null = null;
+        if (v2link.keyEnvelope && v2link.keyEnvelope !== 'v2:plaintext') {
+            key = this.encryption.openV2SessionKey(v2link.keyEnvelope);
+            if (!key) {
+                console.error('[v2] session key envelope present but unopenable — refusing plaintext send');
+                return { ok: false, reason: 'v2 content key unavailable (cannot seal) — refusing to send in the clear' };
             }
-
-            if (uploaded.length > 0) {
-                for (const att of uploaded) {
-                    const fileRecord: RawRecord = {
-                        role: 'session',
-                        content: {
-                            type: 'session',
-                            data: {
-                                id: randomUUID(),
-                                time: Date.now(),
-                                role: 'user',
-                                ev: {
-                                    t: 'file',
-                                    ref: att.ref,
-                                    name: att.name,
-                                    size: att.size,
-                                    // Include image metadata when we have dimensions; thumbhash is
-                                    // optional. The native iOS picker can't generate a thumbhash
-                                    // without Canvas, so requiring it here would reduce the chat
-                                    // bubble to a compact filename row instead of an inline picture.
-                                    // FileView only needs w/h to size the inline render — placeholder
-                                    // is absent, but the real image is decrypted on mount.
-                                    ...(att.width > 0 && att.height > 0
-                                        ? {
-                                            image: {
-                                                width: att.width,
-                                                height: att.height,
-                                                ...(att.thumbhash ? { thumbhash: att.thumbhash } : {}),
-                                            },
-                                        }
-                                        : {}),
-                                },
-                            },
-                        },
-                    };
-                    const encryptedFileRecord = await encryption.encryptRawRecord(fileRecord);
-                    const fileLocalId = randomUUID();
-                    const fileNormalized = normalizeRawMessage(fileLocalId, fileLocalId, Date.now(), fileRecord);
-                    if (fileNormalized) {
-                        this.enqueueMessages(sessionId, [fileNormalized]);
-                    }
-                    // Re-read the CURRENT map entry after the encrypt await: a
-                    // concurrent flushOutbox ack REPLACES the array in the map
-                    // (removeFromOutbox), so a reference captured before the loop
-                    // went stale — records pushed into it were never POSTed
-                    // (silent ghost attachments).
-                    const cur = this.pendingOutbox.get(sessionId);
-                    if (cur) {
-                        cur.push({ localId: fileLocalId, content: encryptedFileRecord, enqueuedAt: Date.now() });
-                    } else {
-                        this.pendingOutbox.set(sessionId, [{ localId: fileLocalId, content: encryptedFileRecord, enqueuedAt: Date.now() }]);
-                    }
-                }
-            }
+        } else if (v2link.keyEnvelope !== 'v2:plaintext') {
+            // No envelope at all — the session has not BOUND yet (the
+            // envelope arrives with the bind). Refuse rather than sending
+            // in the clear; the caller retries once the card completes.
+            return { ok: false, reason: 'v2 session not bound yet — no content key to seal with' };
         }
-
-        // Local ID: caller-supplied (stable across draft-release retries) or fresh.
+        // B2 (optimistic echo) is intentionally NOT done here — the daemon's
+        // mirror is the single source of the user row, so the message shows
+        // once the daemon echoes it (fast when online). A local optimistic
+        // row duplicates the mirror because the two use different id spaces
+        // AND the daemon's transcript re-echo suppression (received-receipts)
+        // does not currently cover the nucleus-lane path. Correct fix is
+        // daemon-side: have the lane record a received-receipt for the
+        // prompt so the transcript tailer suppresses the user-echo mirror,
+        // leaving the app's (future) optimistic row as the sole copy. See
+        // docs/v2-dual-path.md. displayText is a UI-only alias; the wire
+        // carries `text`, which is what the agent must receive.
         const localId = options?.localId ?? randomUUID();
-
-        // Determine sentFrom based on platform
-        let sentFrom: string;
-        if (Platform.OS === 'web') {
-            sentFrom = 'web';
-        } else if (Platform.OS === 'android') {
-            sentFrom = 'android';
-        } else if (Platform.OS === 'ios') {
-            // Check if running on Mac (Catalyst or Designed for iPad on Mac)
-            if (isRunningOnMac()) {
-                sentFrom = 'mac';
-            } else {
-                sentFrom = 'ios';
-            }
-        } else {
-            sentFrom = 'web'; // fallback
+        try {
+            const ciphertext = sealV2Content(text, key);
+            await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext);
+        } catch (e) {
+            console.error('[v2] send failed', e);
+            return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
         }
-
-        // Create user message content with metadata
-        const content: RawRecord = {
-            role: 'user',
-            content: {
-                type: 'text',
-                text
-            },
-            meta: {
-                sentFrom,
-                appendSystemPrompt: systemPrompt,
-                ...(modeMeta.permissionMode !== undefined ? { permissionMode: modeMeta.permissionMode } : {}),
-                ...(modeMeta.model !== undefined ? { model: modeMeta.model } : {}),
-                ...(modeMeta.effort !== undefined ? { effort: modeMeta.effort } : {}),
-                ...(displayText && { displayText }) // Add displayText if provided
-            }
-        };
-        const encryptedRawRecord = await encryption.encryptRawRecord(content);
-
-        // Add to messages - normalize the raw record
-        const createdAt = Date.now();
-        const normalizedMessage = normalizeRawMessage(localId, localId, createdAt, content);
-        if (normalizedMessage) {
-            this.enqueueMessages(sessionId, [normalizedMessage]);
-        }
-
-        let pending = this.pendingOutbox.get(sessionId);
-        if (!pending) {
-            pending = [];
-            this.pendingOutbox.set(sessionId, pending);
-        }
-        pending.push({
-            localId,
-            content: encryptedRawRecord,
-            enqueuedAt: createdAt
+        // The relay's accepted response IS the durable ack: a draft released
+        // with this localId may now leave the draft queue.
+        void import('@/-session/draftQueueRelease').then(({ notifyOutboxAcked }) => {
+            notifyOutboxAcked(sessionId, [localId]);
         });
-
-        this.getSendSync(sessionId).invalidate();
-        this.maybeStartBackgroundSendWatchdog();
-        // Durable handoff complete: optimistic row applied + outbox row queued.
         return { ok: true, localId };
-    }
-
-    /** Server sent us settings — merge any pending local changes on top, then apply as one update. */
-    private applyServerSettings = (serverSettings: Settings, version: number) => {
-        const merged = Object.keys(this.pendingSettings).length > 0
-            ? applySettings(serverSettings, this.pendingSettings)
-            : serverSettings;
-        storage.getState().applySettings(merged, version);
     }
 
     applySettings = (delta: Partial<Settings>) => {
@@ -1146,7 +692,7 @@ class Sync {
         // Sessions come ENTIRELY from the v2 relay: the daemon publishes each
         // session's sealed CARD (metadata under the session content key) and
         // the relay merges presence from lease liveness — the same authority
-        // its own work queue trusts. No happy mirror, no /v1.
+        // its own work queue trusts.
         const { v2 } = await import('./v2/api');
         const { openCard } = await import('./v2/card');
         const { v2ActiveAt } = await import('./v2/liveness');
@@ -1225,286 +771,6 @@ class Sync {
 
     public getCredentials() {
         return this.credentials;
-    }
-
-    // Artifact methods
-    public fetchArtifactsList = async (): Promise<void> => {
-        log.log('📦 fetchArtifactsList: Starting artifact sync');
-        if (!this.credentials) {
-            log.log('📦 fetchArtifactsList: No credentials, skipping');
-            return;
-        }
-
-        try {
-            log.log('📦 fetchArtifactsList: Fetching artifacts from server');
-            const artifacts = await fetchArtifacts(this.credentials);
-            log.log(`📦 fetchArtifactsList: Received ${artifacts.length} artifacts from server`);
-            const decryptedArtifacts: DecryptedArtifact[] = [];
-
-            for (const artifact of artifacts) {
-                try {
-                    // Decrypt the data encryption key
-                    const decryptedKey = await this.encryption.decryptEncryptionKey(artifact.dataEncryptionKey);
-                    if (!decryptedKey) {
-                        console.error(`Failed to decrypt key for artifact ${artifact.id}`);
-                        continue;
-                    }
-
-                    // Store the decrypted key in memory
-                    this.artifactDataKeys.set(artifact.id, decryptedKey);
-
-                    // Create artifact encryption instance
-                    const artifactEncryption = new ArtifactEncryption(decryptedKey);
-
-                    // Decrypt header
-                    const header = await artifactEncryption.decryptHeader(artifact.header);
-                    
-                    decryptedArtifacts.push({
-                        id: artifact.id,
-                        title: header?.title || null,
-                        sessions: header?.sessions,  // Include sessions from header
-                        draft: header?.draft,        // Include draft flag from header
-                        body: undefined, // Body not loaded in list
-                        headerVersion: artifact.headerVersion,
-                        bodyVersion: artifact.bodyVersion,
-                        seq: artifact.seq,
-                        createdAt: artifact.createdAt,
-                        updatedAt: artifact.updatedAt,
-                        isDecrypted: !!header,
-                    });
-                } catch (err) {
-                    console.error(`Failed to decrypt artifact ${artifact.id}:`, err);
-                    // Add with decryption failed flag
-                    decryptedArtifacts.push({
-                        id: artifact.id,
-                        title: null,
-                        body: undefined,
-                        headerVersion: artifact.headerVersion,
-                        seq: artifact.seq,
-                        createdAt: artifact.createdAt,
-                        updatedAt: artifact.updatedAt,
-                        isDecrypted: false,
-                    });
-                }
-            }
-
-            log.log(`📦 fetchArtifactsList: Successfully decrypted ${decryptedArtifacts.length} artifacts`);
-            storage.getState().applyArtifacts(decryptedArtifacts);
-            log.log('📦 fetchArtifactsList: Artifacts applied to storage');
-        } catch (error) {
-            log.log(`📦 fetchArtifactsList: Error fetching artifacts: ${error}`);
-            console.error('Failed to fetch artifacts:', error);
-            throw error;
-        }
-    }
-
-    public async fetchArtifactWithBody(artifactId: string): Promise<DecryptedArtifact | null> {
-        if (!this.credentials) return null;
-
-        try {
-            const artifact = await fetchArtifact(this.credentials, artifactId);
-
-            // Decrypt the data encryption key
-            const decryptedKey = await this.encryption.decryptEncryptionKey(artifact.dataEncryptionKey);
-            if (!decryptedKey) {
-                console.error(`Failed to decrypt key for artifact ${artifactId}`);
-                return null;
-            }
-
-            // Store the decrypted key in memory
-            this.artifactDataKeys.set(artifact.id, decryptedKey);
-
-            // Create artifact encryption instance
-            const artifactEncryption = new ArtifactEncryption(decryptedKey);
-
-            // Decrypt header and body
-            const header = await artifactEncryption.decryptHeader(artifact.header);
-            const body = artifact.body ? await artifactEncryption.decryptBody(artifact.body) : null;
-
-            return {
-                id: artifact.id,
-                title: header?.title || null,
-                sessions: header?.sessions,  // Include sessions from header
-                draft: header?.draft,        // Include draft flag from header
-                body: body?.body || null,
-                headerVersion: artifact.headerVersion,
-                bodyVersion: artifact.bodyVersion,
-                seq: artifact.seq,
-                createdAt: artifact.createdAt,
-                updatedAt: artifact.updatedAt,
-                isDecrypted: !!header,
-            };
-        } catch (error) {
-            console.error(`Failed to fetch artifact ${artifactId}:`, error);
-            return null;
-        }
-    }
-
-    public async createArtifact(
-        title: string | null, 
-        body: string | null,
-        sessions?: string[],
-        draft?: boolean
-    ): Promise<string> {
-        if (!this.credentials) {
-            throw new Error('Not authenticated');
-        }
-
-        try {
-            // Generate unique artifact ID
-            const artifactId = this.encryption.generateId();
-
-            // Generate data encryption key
-            const dataEncryptionKey = ArtifactEncryption.generateDataEncryptionKey();
-            
-            // Store the decrypted key in memory
-            this.artifactDataKeys.set(artifactId, dataEncryptionKey);
-            
-            // Encrypt the data encryption key with user's key
-            const encryptedKey = await this.encryption.encryptEncryptionKey(dataEncryptionKey);
-            
-            // Create artifact encryption instance
-            const artifactEncryption = new ArtifactEncryption(dataEncryptionKey);
-            
-            // Encrypt header and body
-            const encryptedHeader = await artifactEncryption.encryptHeader({ title, sessions, draft });
-            const encryptedBody = await artifactEncryption.encryptBody({ body });
-            
-            // Create the request
-            const request: ArtifactCreateRequest = {
-                id: artifactId,
-                header: encryptedHeader,
-                body: encryptedBody,
-                dataEncryptionKey: encodeBase64(encryptedKey, 'base64'),
-            };
-            
-            // Send to server
-            const artifact = await createArtifact(this.credentials, request);
-            
-            // Add to local storage
-            const decryptedArtifact: DecryptedArtifact = {
-                id: artifact.id,
-                title,
-                sessions,
-                draft,
-                body,
-                headerVersion: artifact.headerVersion,
-                bodyVersion: artifact.bodyVersion,
-                seq: artifact.seq,
-                createdAt: artifact.createdAt,
-                updatedAt: artifact.updatedAt,
-                isDecrypted: true,
-            };
-            
-            storage.getState().addArtifact(decryptedArtifact);
-            
-            return artifactId;
-        } catch (error) {
-            console.error('Failed to create artifact:', error);
-            throw error;
-        }
-    }
-
-    public async updateArtifact(
-        artifactId: string, 
-        title: string | null, 
-        body: string | null,
-        sessions?: string[],
-        draft?: boolean
-    ): Promise<void> {
-        if (!this.credentials) {
-            throw new Error('Not authenticated');
-        }
-
-        try {
-            // Get current artifact to get versions and encryption key
-            const currentArtifact = storage.getState().artifacts[artifactId];
-            if (!currentArtifact) {
-                throw new Error('Artifact not found');
-            }
-
-            // Get the data encryption key from memory or fetch it
-            let dataEncryptionKey = this.artifactDataKeys.get(artifactId);
-            
-            // Fetch full artifact if we don't have version info or encryption key
-            let headerVersion = currentArtifact.headerVersion;
-            let bodyVersion = currentArtifact.bodyVersion;
-            
-            if (headerVersion === undefined || bodyVersion === undefined || !dataEncryptionKey) {
-                const fullArtifact = await fetchArtifact(this.credentials, artifactId);
-                headerVersion = fullArtifact.headerVersion;
-                bodyVersion = fullArtifact.bodyVersion;
-                
-                // Decrypt and store the data encryption key if we don't have it
-                if (!dataEncryptionKey) {
-                    const decryptedKey = await this.encryption.decryptEncryptionKey(fullArtifact.dataEncryptionKey);
-                    if (!decryptedKey) {
-                        throw new Error('Failed to decrypt encryption key');
-                    }
-                    this.artifactDataKeys.set(artifactId, decryptedKey);
-                    dataEncryptionKey = decryptedKey;
-                }
-            }
-
-            // Create artifact encryption instance
-            const artifactEncryption = new ArtifactEncryption(dataEncryptionKey);
-
-            // Prepare update request
-            const updateRequest: ArtifactUpdateRequest = {};
-            
-            // Check if header needs updating (title, sessions, or draft changed)
-            if (title !== currentArtifact.title || 
-                JSON.stringify(sessions) !== JSON.stringify(currentArtifact.sessions) ||
-                draft !== currentArtifact.draft) {
-                const encryptedHeader = await artifactEncryption.encryptHeader({ 
-                    title, 
-                    sessions, 
-                    draft 
-                });
-                updateRequest.header = encryptedHeader;
-                updateRequest.expectedHeaderVersion = headerVersion;
-            }
-
-            // Only update body if it changed
-            if (body !== currentArtifact.body) {
-                const encryptedBody = await artifactEncryption.encryptBody({ body });
-                updateRequest.body = encryptedBody;
-                updateRequest.expectedBodyVersion = bodyVersion;
-            }
-
-            // Skip if no changes
-            if (Object.keys(updateRequest).length === 0) {
-                return;
-            }
-
-            // Send update to server
-            const response = await updateArtifact(this.credentials, artifactId, updateRequest);
-            
-            if (!response.success) {
-                // Handle version mismatch
-                if (response.error === 'version-mismatch') {
-                    throw new Error('Artifact was modified by another client. Please refresh and try again.');
-                }
-                throw new Error('Failed to update artifact');
-            }
-
-            // Update local storage
-            const updatedArtifact: DecryptedArtifact = {
-                ...currentArtifact,
-                title,
-                sessions,
-                draft,
-                body,
-                headerVersion: response.headerVersion !== undefined ? response.headerVersion : headerVersion,
-                bodyVersion: response.bodyVersion !== undefined ? response.bodyVersion : bodyVersion,
-                updatedAt: Date.now(),
-            };
-            
-            storage.getState().updateArtifact(updatedArtifact);
-        } catch (error) {
-            console.error('Failed to update artifact:', error);
-            throw error;
-        }
     }
 
     private fetchMachines = async () => {
@@ -1610,136 +876,19 @@ class Sync {
         log.log(`🖥️ fetchMachines completed - processed ${decryptedMachines.length} machines`);
     }
 
+    // Settings are device-local: joy-relay has no account-settings store, so
+    // "sync" just retires the pending delta — applySettingsLocal/applySettingsRaw
+    // already persisted the merged settings on this device.
     private syncSettings = async () => {
-        if (!this.credentials) return;
-
-        const API_ENDPOINT = getServerUrl();
-        const maxRetries = 3;
-        let retryCount = 0;
-
-        // Apply pending settings
-        if (Object.keys(this.pendingSettings).length > 0) {
-
-            while (retryCount < maxRetries) {
-                // Snapshot what we're about to send so we can detect concurrent changes
-                const sentPending = { ...this.pendingSettings };
-                let version = storage.getState().settingsVersion;
-                let settings = applySettings(storage.getState().settings, this.pendingSettings);
-                const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        settings: await this.encryption.encryptRaw(settingsToSyncPayload(settings)),
-                        expectedVersion: version ?? 0
-                    }),
-                    headers: {
-                        'Authorization': `Bearer ${this.credentials.token}`,
-                        'Content-Type': 'application/json',
-                        'X-Happy-Client': getHappyClientId(),
-                    }
-                });
-                const data = await response.json() as {
-                    success: false,
-                    error: string,
-                    currentVersion: number,
-                    currentSettings: string | null
-                } | {
-                    success: true
-                };
-                if (data.success) {
-                    // Only clear keys we actually sent — preserve any settings
-                    // added by applySettings() calls during the POST roundtrip
-                    const newPending: Partial<Settings> = {};
-                    for (const key of Object.keys(this.pendingSettings) as (keyof Settings)[]) {
-                        if (!(key in sentPending) || this.pendingSettings[key] !== sentPending[key]) {
-                            (newPending as any)[key] = this.pendingSettings[key];
-                        }
-                    }
-                    this.pendingSettings = newPending;
-                    savePendingSettings(this.pendingSettings);
-                    break;
-                }
-                if (data.error === 'version-mismatch') {
-                    // Parse server settings
-                    const serverSettings = data.currentSettings
-                        ? settingsParse(await this.encryption.decryptRaw(data.currentSettings))
-                        : { ...settingsDefaults };
-
-                    // Merge: server base + our pending changes (our changes win)
-                    const mergedSettings = applySettings(serverSettings, this.pendingSettings);
-
-                    // Update local storage with merged result at server's version
-                    this.applyServerSettings(mergedSettings, data.currentVersion);
-
-                    // Log and retry
-                    console.log('settings version-mismatch, retrying', {
-                        serverVersion: data.currentVersion,
-                        retry: retryCount + 1,
-                        pendingKeys: Object.keys(this.pendingSettings)
-                    });
-                    retryCount++;
-                    continue;
-                } else {
-                    throw new Error(`Failed to sync settings: ${data.error}`);
-                }
-            }
-        }
-
-        // If exhausted retries, throw to trigger outer backoff delay
-        if (retryCount >= maxRetries) {
-            throw new Error(`Settings sync failed after ${maxRetries} retries due to version conflicts`);
-        }
-
-        // Run request
-        const response = await fetch(`${API_ENDPOINT}/v1/account/settings`, {
-            headers: {
-                'Authorization': `Bearer ${this.credentials.token}`,
-                'Content-Type': 'application/json',
-                'X-Happy-Client': getHappyClientId(),
-            }
-        });
-        if (!response.ok) {
-            throw new Error(`Failed to fetch settings: ${response.status}`);
-        }
-        const data = await response.json() as {
-            settings: string | null,
-            settingsVersion: number
-        };
-
-        // Parse response
-        let parsedSettings: Settings;
-        if (data.settings) {
-            parsedSettings = settingsParse(await this.encryption.decryptRaw(data.settings));
-        } else {
-            parsedSettings = { ...settingsDefaults };
-        }
-
-        // Log
-        console.log('settings', JSON.stringify({
-            settings: parsedSettings,
-            version: data.settingsVersion
-        }));
-
-        // Apply settings to storage, re-layering any pending local changes on top
-        this.applyServerSettings(parsedSettings, data.settingsVersion);
+        if (Object.keys(this.pendingSettings).length === 0) return;
+        this.pendingSettings = {};
+        savePendingSettings(this.pendingSettings);
     }
 
     private fetchProfile = async () => {
         if (!this.credentials) return;
 
-        const API_ENDPOINT = getServerUrl();
-        const response = await fetch(`${API_ENDPOINT}/v1/account/profile`, {
-            headers: {
-                'Authorization': `Bearer ${this.credentials.token}`,
-                'Content-Type': 'application/json',
-                'X-Happy-Client': getHappyClientId(),
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error(`Failed to fetch profile: ${response.status}`);
-        }
-
-        const data = await response.json();
+        const data = await v2.accountProfile();
         const parsedProfile = profileParse(data);
 
         // Log profile data for debugging
@@ -1749,69 +898,16 @@ class Sync {
             firstName: parsedProfile.firstName,
             lastName: parsedProfile.lastName,
             hasAvatar: !!parsedProfile.avatar,
-            hasGitHub: !!parsedProfile.github
         }));
 
         // Apply profile to storage
         storage.getState().applyProfile(parsedProfile);
     }
 
+    // joy-relay has no native-version endpoint, so there is never a forced
+    // store update to surface; keep the store slot cleared.
     private fetchNativeUpdate = async () => {
-        try {
-            // Skip in development
-            if ((Platform.OS !== 'android' && Platform.OS !== 'ios') || !Constants.expoConfig?.version) {
-                return;
-            }
-            if (Platform.OS === 'ios' && !Constants.expoConfig?.ios?.bundleIdentifier) {
-                return;
-            }
-            if (Platform.OS === 'android' && !Constants.expoConfig?.android?.package) {
-                return;
-            }
-
-            const serverUrl = getServerUrl();
-
-            // Get platform and app identifiers
-            const platform = Platform.OS;
-            const version = Constants.expoConfig?.version!;
-            const appId = (Platform.OS === 'ios' ? Constants.expoConfig?.ios?.bundleIdentifier! : Constants.expoConfig?.android?.package!);
-
-            const response = await fetch(`${serverUrl}/v1/version`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Happy-Client': getHappyClientId(),
-                },
-                body: JSON.stringify({
-                    platform,
-                    version,
-                    app_id: appId,
-                }),
-            });
-
-            if (!response.ok) {
-                console.log(`[fetchNativeUpdate] Request failed: ${response.status}`);
-                return;
-            }
-
-            const data = await response.json();
-            console.log('[fetchNativeUpdate] Data:', data);
-
-            // Apply update status to storage
-            if (data.update_required && data.update_url) {
-                storage.getState().applyNativeUpdateStatus({
-                    available: true,
-                    updateUrl: data.update_url
-                });
-            } else {
-                storage.getState().applyNativeUpdateStatus({
-                    available: false
-                });
-            }
-        } catch (error) {
-            console.log('[fetchNativeUpdate] Error:', error);
-            storage.getState().applyNativeUpdateStatus(null);
-        }
+        storage.getState().applyNativeUpdateStatus(null);
     }
 
     private syncPurchases = async () => {
@@ -1865,145 +961,6 @@ class Sync {
         }
     }
 
-    // Remove specific messages (by localId) from a session's outbox. Operates on
-    // the CURRENT map entry, never a captured array reference, and only clears the
-    // key when nothing is left — so it stays correct even if the array was replaced
-    // concurrently (e.g. by a newly enqueued send).
-    private removeFromOutbox(sessionId: string, localIds: Set<string>) {
-        const current = this.pendingOutbox.get(sessionId);
-        if (!current) {
-            return;
-        }
-        const left = current.filter((m) => !localIds.has(m.localId));
-        if (left.length > 0) {
-            this.pendingOutbox.set(sessionId, left);
-        } else {
-            this.pendingOutbox.delete(sessionId);
-        }
-    }
-
-    private flushOutbox = async (sessionId: string) => {
-        const pending = this.pendingOutbox.get(sessionId);
-        if (!pending || pending.length === 0) {
-            if (!this.hasPendingOutboxMessages()) {
-                this.clearBackgroundSendWatchdog();
-                this.backgroundSendEpisodeNotified = false; // episode over — outbox drained
-                await this.cancelBackgroundSendTimeoutNotification();
-            }
-            return;
-        }
-
-        const batch = pending.slice();
-        const batchIds = new Set(batch.map((m) => m.localId));
-        const controller = new AbortController();
-        this.sendAbortControllers.set(sessionId, controller);
-        // Mark the batch in flight so the watchdog won't fail it mid-POST. We
-        // deliberately do NOT arm a client-side request timeout here: aborting an
-        // in-flight POST clears this flag, which on a delayed/suspended-timer
-        // resume opens a window for the overdue check to fail a message that
-        // actually delivered. Since the POST ack is the ONLY delivery signal the
-        // sender ever gets (the live stream never echoes the sender's own rows),
-        // it's safer to let the request settle on its own — a still-in-flight
-        // message is never failed — and accept that a (rare) truly-hung POST just
-        // keeps showing "sending" until it resolves rather than risk a false fail.
-        this.inFlightOutbox.set(sessionId, batchIds);
-        try {
-            const response = await apiSocket.request(`/v3/sessions/${sessionId}/messages`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    messages: batch.map((message) => ({
-                        localId: message.localId,
-                        content: message.content
-                    }))
-                }),
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                signal: controller.signal
-            });
-            if (!response.ok) {
-                throw new Error(`Failed to send messages for ${sessionId}: ${response.status}`);
-            }
-
-            const data = await response.json() as V3PostSessionMessagesResponse;
-            // Remove exactly what we sent, by localId, from the current outbox
-            // (which may have been replaced/extended while the POST was in flight).
-            this.removeFromOutbox(sessionId, batchIds);
-            // Server ack: releasing drafts for these localIds may now be
-            // removed (they persist until THIS moment — 5.6-sol audit #3).
-            void import('@/-session/draftQueueRelease').then(({ notifyOutboxAcked }) => {
-                notifyOutboxAcked(sessionId, batchIds);
-            });
-            if (Array.isArray(data.messages) && data.messages.length > 0) {
-                const currentLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                let maxSeq = currentLastSeq;
-                let minSeq = Number.POSITIVE_INFINITY;
-                for (const message of data.messages) {
-                    if (message.seq > maxSeq) {
-                        maxSeq = message.seq;
-                    }
-                    if (message.seq < minSeq) {
-                        minSeq = message.seq;
-                    }
-                }
-                // No currentLastSeq > 0 guard: an EMPTY session's cursor is 0
-                // (fetchInitialLatestPage stores 0 for a no-message page), and rows
-                // written between that fetch and our send (daemon init turns) are a
-                // gap above cursor 0 like any other — advancing over them made
-                // seqs 1..N permanently unfetchable (oldestSeq unset blocks
-                // backward paging too).
-                if (minSeq > currentLastSeq + 1) {
-                    // Interior gap: rows we haven't seen yet (in-flight socket lag
-                    // during a hot turn — routine — or a genuinely missed agent turn)
-                    // sit between our cursor and our own acked rows. Advancing the
-                    // cursor over them would make the gap permanently unfetchable.
-                    //
-                    // Do NOT reset the store (healInteriorGap): this fires on any
-                    // send that races live activity, and nuking + replaying rebuilt
-                    // the entire chat — THE "list jumps when I send a message" bug.
-                    // Instead leave the cursor where it is and kick the messages
-                    // sync: forward sync pulls the gap rows AND our own acked rows
-                    // in seq order (the HTTP fetch includes the sender's rows, unlike
-                    // the socket broadcast), the reducer upgrades our optimistic rows
-                    // by localId when their fetched copies arrive (see
-                    // messageOrdering.spec "upgrades an optimistic send"), and a
-                    // pathologically huge gap is bounded by the forward-catchup
-                    // re-anchor. No reset, no rebuild, no jump. Skipping
-                    // reconcileSentMessages here is deliberate: assigning our rows
-                    // their (higher) seqs before the gap rows arrive would hand the
-                    // order-dependent reducer older-than-processed rows.
-                    this.getMessagesSync(sessionId).invalidate();
-                } else {
-                    this.sessionLastSeq.set(sessionId, maxSeq);
-                    // The POST ack is the ONLY place a sender learns the authoritative
-                    // seq of its own messages — the live socket broadcast never echoes
-                    // the sender's own rows back. Feed them to the reducer so optimistic
-                    // sends settle into server-log order instead of floating to "now".
-                    storage.getState().reconcileSentMessages(sessionId, data.messages.map((m) => ({
-                        id: m.id,
-                        seq: m.seq,
-                        localId: m.localId
-                    })));
-                }
-            }
-        } catch (error) {
-            this.maybeStartBackgroundSendWatchdog();
-            throw error;
-        } finally {
-            this.sendAbortControllers.delete(sessionId);
-            this.inFlightOutbox.delete(sessionId);
-        }
-
-        if (!this.hasPendingOutboxMessages()) {
-            this.clearBackgroundSendWatchdog();
-            this.backgroundSendEpisodeNotified = false; // episode over — outbox drained
-            await this.cancelBackgroundSendTimeoutNotification();
-        } else if (this.appState !== 'active') {
-            this.maybeStartBackgroundSendWatchdog();
-        }
-    }
-
-
     private fetchMessages = async (sessionId: string) => {
         log.log(`💬 fetchMessages starting for session ${sessionId} - acquiring lock`);
         const lock = this.getSessionMessageLock(sessionId);
@@ -2054,7 +1011,7 @@ class Sync {
                 // background pages stream in without blocking either the
                 // surrounding lock or the UI. loadOlderMessages takes the
                 // same lock internally, so the loop naturally serialises
-                // with on-scroll triggers and live socket updates.
+                // with on-scroll triggers and live-stream pokes.
                 void this.prefetchOlderMessagesInBackground(sessionId);
             }
         });
@@ -2129,18 +1086,16 @@ class Sync {
         let minSeq = Number.POSITIVE_INFINITY;
         let hasMore = false;
         const collected: ApiMessage[] = [];
+        const v2ctx = this.v2ReadCtx(sessionId);
+        if (!v2ctx) throw new Error(`Failed to fetch initial page for ${sessionId}: no v2 link`);
         for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
-            const v2ctx = this.v2ReadCtx(sessionId);
-            const response = v2ctx
-                ? { ok: true, status: 200, json: async () => await v2MessagesBefore({ base: v2ctx.base, token: v2ctx.token, v2SessionId: v2ctx.v2SessionId, key: v2ctx.key, beforeSeq }) } as Response
-                : await apiSocket.request(
-                    `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
-                );
-            if (!response.ok) {
-                if (page === 0) throw new Error(`Failed to fetch initial page for ${sessionId}: ${response.status}`);
+            let data: { messages: ApiMessage[]; hasMore: boolean };
+            try {
+                data = await v2MessagesBefore({ ...v2ctx, beforeSeq });
+            } catch (e) {
+                if (page === 0) throw e;
                 break; // keep what we have — older pages are a bonus
             }
-            const data = await response.json() as V3GetSessionMessagesResponse;
             const messages = Array.isArray(data.messages) ? data.messages : [];
             hasMore = !!data.hasMore && messages.length > 0;
             collected.push(...messages);
@@ -2212,17 +1167,11 @@ class Sync {
     ) => {
         let afterSeq = fromSeq;
         let pages = 0;
+        const v2ctx = this.v2ReadCtx(sessionId);
+        if (!v2ctx) throw new Error(`Failed to forward-sync ${sessionId}: no v2 link`);
         while (true) {
-            // v2 sessions read from the relay's event log (same seq semantics),
-            // v1 sessions from happy-server's message pages.
-            const v2ctx = this.v2ReadCtx(sessionId);
-            const response = v2ctx
-                ? { ok: true, json: async () => await v2MessagesAfter({ base: v2ctx.base, token: v2ctx.token, v2SessionId: v2ctx.v2SessionId, key: v2ctx.key, afterSeq }) } as Response
-                : await apiSocket.request(`/v3/sessions/${sessionId}/messages?after_seq=${afterSeq}&limit=100`);
-            if (!response.ok) {
-                throw new Error(`Failed to forward-sync ${sessionId}: ${response.status}`);
-            }
-            const data = await response.json() as V3GetSessionMessagesResponse;
+            // Read from the relay's event log (seq-ordered, forward-paged).
+            const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
             const messages = Array.isArray(data.messages) ? data.messages : [];
 
             await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
@@ -2241,19 +1190,6 @@ class Sync {
 
             pages += 1;
             if (pages >= Sync.MAX_FORWARD_CATCHUP_PAGES) {
-                // Re-anchor — but never while this session has un-acked local
-                // sends: their optimistic rows live only in the store until the
-                // POST ack reconciles a seq, and the reset below would eat them
-                // (the lost-send bug family). A pending outbox means the user
-                // just sent something, so the gap is about to matter anyway —
-                // keep replaying in that (rare) case.
-                const hasPendingSends = (this.pendingOutbox.get(sessionId) ?? []).length > 0
-                    || this.inFlightOutbox.has(sessionId);
-                if (hasPendingSends) {
-                    log.log(`💬 fetchForwardSince: gap exceeds ${Sync.MAX_FORWARD_CATCHUP_PAGES} pages for ${sessionId} but sends are pending — continuing replay`);
-                    afterSeq = maxSeq; // MUST advance — continue skips the loop-tail assignment (was a tight same-page refetch loop)
-                    continue;
-                }
                 // Re-anchor at the latest page WITHOUT nuking the store. The
                 // old code called resetSessionMessages here, which erased every
                 // loaded message — including history the user had scrolled up to
@@ -2298,8 +1234,7 @@ class Sync {
                 // Carry the authoritative server log order onto the message so
                 // the display sort can use it instead of the (skew-prone) createdAt.
                 normalized.seq = decrypted.seq;
-                // Carry the v2 provenance tag: for a v2 session only event-log
-                // rows are applied (the daemon's happy mirror would double it).
+                // Carry the v2 provenance tag: only event-log rows are applied.
                 if ((messages[i] as { __fromV2?: boolean })?.__fromV2) {
                     (normalized as { __fromV2?: boolean }).__fromV2 = true;
                 }
@@ -2352,22 +1287,15 @@ class Sync {
                     log.log(`💬 loadOlderMessages: encryption not ready for ${sessionId}`);
                     return;
                 }
-                // Re-read the cursor inside the lock. A concurrent
-                // socket-pushed update or reload could have changed it.
+                // Re-read the cursor inside the lock. A concurrent live
+                // refetch or reload could have changed it.
                 const beforeSeq = this.sessionOldestSeq.get(sessionId);
                 if (beforeSeq === undefined || beforeSeq <= 1) {
                     return;
                 }
                 const v2ctxOlder = this.v2ReadCtx(sessionId);
-                const response = v2ctxOlder
-                    ? { ok: true, status: 200, json: async () => await v2MessagesBefore({ base: v2ctxOlder.base, token: v2ctxOlder.token, v2SessionId: v2ctxOlder.v2SessionId, key: v2ctxOlder.key, beforeSeq }) } as Response
-                    : await apiSocket.request(
-                        `/v3/sessions/${sessionId}/messages?before_seq=${beforeSeq}&limit=100`
-                    );
-                if (!response.ok) {
-                    throw new Error(`Failed to load older messages for ${sessionId}: ${response.status}`);
-                }
-                const data = await response.json() as V3GetSessionMessagesResponse;
+                if (!v2ctxOlder) throw new Error(`Failed to load older messages for ${sessionId}: no v2 link`);
+                const data = await v2MessagesBefore({ ...v2ctxOlder, beforeSeq });
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
                 await this.applyFetchedMessages(sessionId, encryption, messages);
@@ -2411,582 +1339,6 @@ class Sync {
         }
     }
 
-    private subscribeToUpdates = () => {
-        // Subscribe to message updates
-        apiSocket.onMessage('update', this.handleUpdate.bind(this));
-        apiSocket.onMessage('ephemeral', this.handleEphemeralUpdate.bind(this));
-
-        // Subscribe to connection state changes
-        apiSocket.onReconnected(() => {
-            log.log('🔌 Socket reconnected');
-
-            // Send current focus state on reconnect so the server's
-            // suppression rules pick up where we left off (handshake.auth.appState
-            // covers the very first connect; this covers reconnects).
-            apiSocket.sendAppState(getCurrentAppState());
-
-            this.sessionsSync.invalidate();
-            this.machinesSync.invalidate();
-            log.log('🔌 Socket reconnected: Invalidating artifacts sync');
-            this.artifactsSync.invalidate();
-            // Session metadata + agentState (including permission requests) are
-            // refreshed by sessionsSync.invalidate() above. Messages are normally
-            // fetched lazily per-session via onSessionVisible (SessionView's effect
-            // keyed on realtimeStatus) — but a fast socket.io transport reconnect
-            // that never flipped our stored realtimeStatus to 'disconnected' would
-            // skip that, leaving the open chat stale (it missed every `update` /
-            // `ephemeral` while the socket was down) until the user navigates away
-            // and back. Refetch the viewed session explicitly so it self-heals.
-            this.refetchViewedSession();
-            for (const sync of this.sendSync.values()) {
-                sync.invalidate();
-            }
-        });
-    }
-
-    private handleUpdate = async (update: unknown) => {
-        const validatedUpdate = ApiUpdateContainerSchema.safeParse(update);
-        if (!validatedUpdate.success) {
-            console.log('❌ Sync: Invalid update received:', validatedUpdate.error);
-            console.error('❌ Sync: Invalid update data:', update);
-            return;
-        }
-        const updateData = validatedUpdate.data;
-        console.log(`🔄 Sync: Validated update type: ${updateData.body.t}`);
-
-        if (updateData.body.t === 'new-message') {
-
-            // Get encryption — may not be ready if sessions are still syncing
-            let encryption = this.encryption.getSessionEncryption(updateData.body.sid);
-            if (!encryption) {
-                await this.sessionsSync.awaitQueue();
-                encryption = this.encryption.getSessionEncryption(updateData.body.sid);
-                if (!encryption) {
-                    console.error(`Session ${updateData.body.sid} not found after sync`);
-                    this.fetchSessions();
-                    return;
-                }
-            }
-
-            // Decrypt message
-            let lastMessage: NormalizedMessage | null = null;
-            let appliedFastPath = false;
-            if (updateData.body.message) {
-                const decrypted = await encryption.decryptMessage(updateData.body.message);
-                if (decrypted) {
-                    lastMessage = normalizeRawMessage(decrypted.id, decrypted.localId, decrypted.createdAt, decrypted.content);
-                    if (lastMessage) {
-                        lastMessage.seq = decrypted.seq;
-                    }
-
-                    // Task lifecycle events embedded in the message stream update
-                    // the thinking state even if the volatile activity ephemerals
-                    // were lost. Shared with the HTTP refetch path via
-                    // deriveThinkingFromContent so reconnect/focus refetches also
-                    // correct a missed transition instead of waiting for the next
-                    // ~20s heartbeat.
-                    const lifecycleThinking = deriveThinkingFromContent(decrypted.content);
-
-                    // Update session
-                    const session = storage.getState().sessions[updateData.body.sid];
-                    if (session) {
-                        this.applySessions([{
-                            ...session,
-                            updatedAt: updateData.createdAt,
-                            seq: updateData.seq,
-                            ...(lifecycleThinking !== null ? { thinking: lifecycleThinking } : {})
-                        }])
-                    } else {
-                        // Fetch sessions again if we don't have this session
-                        this.fetchSessions();
-                    }
-
-                    // Fast-path on consecutive seq — advance the cursor whether or
-                    // not this message RENDERS. joy interleaves lifecycle envelopes
-                    // (turn-start, start/stop, usage) that normalizeRawMessage
-                    // returns null for; the old `lastMessage && …` guard skipped
-                    // advancing over those, so the very next real message read as
-                    // non-consecutive and every subsequent one fell to the coalesced
-                    // slow-path heal — the "responses only appear after I navigate
-                    // away and back" bug (the per-message onSessionVisible heal that
-                    // used to mask it was removed in 70555f16). Decouple "seq
-                    // consumed" from "message displayed": we're inside the
-                    // decrypt-SUCCESS branch, so a decrypt failure still correctly
-                    // falls to the slow-path fetch; enqueue only when there's
-                    // something to render.
-                    const currentLastSeq = this.sessionLastSeq.get(updateData.body.sid);
-                    const incomingSeq = updateData.body.message.seq;
-                    if (currentLastSeq !== undefined && incomingSeq === currentLastSeq + 1) {
-                        if (lastMessage) {
-                            this.enqueueMessages(updateData.body.sid, [lastMessage]);
-                        }
-                        this.sessionLastSeq.set(updateData.body.sid, incomingSeq);
-                        appliedFastPath = true;
-                        let hasMutableTool = false;
-                        if (lastMessage && lastMessage.role === 'agent' && lastMessage.content[0] && lastMessage.content[0].type === 'tool-result') {
-                            hasMutableTool = storage.getState().isMutableToolCall(updateData.body.sid, lastMessage.content[0].tool_use_id);
-                        }
-                        if (hasMutableTool) {
-                            gitStatusSync.invalidate(updateData.body.sid);
-                        }
-                    }
-                }
-            }
-
-            // Slow-path heal: a non-consecutive seq (or a message we couldn't
-            // decrypt/normalize) means we may have missed messages — refetch
-            // from the server, and refresh git status via the DEBOUNCED
-            // invalidate since a missed message could have run a mutable tool.
-            // The fast path already applied the message, advanced the cursor,
-            // and invalidated git status for mutable tools, so it skips this.
-            // (Previously every streamed message pinged onSessionVisible here,
-            // causing a no-op HTTP GET plus undebounced git RPC churn per
-            // message. Visibility side effects — noteSessionVisible, voice
-            // focus — belong to navigation (SessionView mount / app resume),
-            // not message receipt.)
-            if (!appliedFastPath) {
-                this.getMessagesSync(updateData.body.sid).invalidate();
-                gitStatusSync.invalidate(updateData.body.sid);
-            }
-
-        } else if (updateData.body.t === 'new-session') {
-            log.log('🆕 New session update received');
-            this.sessionsSync.invalidate();
-        } else if (updateData.body.t === 'delete-session') {
-            log.log('🗑️ Delete session update received');
-            const sessionId = updateData.body.sid;
-
-            // Remove session from storage
-            storage.getState().deleteSession(sessionId);
-
-            // Remove encryption keys from memory
-            this.encryption.removeSessionEncryption(sessionId);
-
-            // Clear any cached git status
-            gitStatusSync.clearForSession(sessionId);
-            this.messagesSync.delete(sessionId);
-            this.sendSync.delete(sessionId);
-            this.pendingOutbox.delete(sessionId);
-            this.inFlightOutbox.delete(sessionId);
-            this.sessionLastSeq.delete(sessionId);
-            this.sessionOldestSeq.delete(sessionId);
-            this.sessionMessageLocks.delete(sessionId);
-            this.sessionMessageQueue.delete(sessionId);
-            this.sessionQueueProcessing.delete(sessionId);
-
-            log.log(`🗑️ Session ${sessionId} deleted from local storage`);
-        } else if (updateData.body.t === 'update-session') {
-            // Session + encryption may not be initialized yet if sessions are
-            // still syncing on startup. Mirror the new-message path: await the
-            // sessions sync queue and re-check before giving up — dropping here
-            // silently loses the metadata update that carries the chat title
-            // (#1251: every chat stuck on "New chat" after the lazy-load change).
-            let session = storage.getState().sessions[updateData.body.id];
-            let sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
-            if (!session || !sessionEncryption) {
-                await this.sessionsSync.awaitQueue();
-                session = storage.getState().sessions[updateData.body.id];
-                sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
-            }
-            if (session) {
-                if (!sessionEncryption) {
-                    console.error(`Session encryption not found for ${updateData.body.id} after sync`);
-                    this.fetchSessions();
-                    return;
-                }
-
-                const agentState = updateData.body.agentState && sessionEncryption
-                    ? await sessionEncryption.decryptAgentState(updateData.body.agentState.version, updateData.body.agentState.value)
-                    : session.agentState;
-                const metadata = updateData.body.metadata && sessionEncryption
-                    ? await sessionEncryption.decryptMetadata(updateData.body.metadata.version, updateData.body.metadata.value)
-                    : session.metadata;
-
-                this.applySessions([{
-                    ...session,
-                    agentState,
-                    agentStateVersion: updateData.body.agentState
-                        ? updateData.body.agentState.version
-                        : session.agentStateVersion,
-                    metadata,
-                    metadataVersion: updateData.body.metadata
-                        ? updateData.body.metadata.version
-                        : session.metadataVersion,
-                    updatedAt: updateData.createdAt,
-                    seq: updateData.seq
-                }]);
-
-                // Invalidate git status when agent state changes (files may have been modified)
-                if (updateData.body.agentState) {
-                    gitStatusSync.invalidate(updateData.body.id);
-
-                    // Check for new permission requests and notify voice assistant
-                    if (agentState?.requests && Object.keys(agentState.requests).length > 0) {
-                        const requestIds = Object.keys(agentState.requests);
-                        const firstRequest = agentState.requests[requestIds[0]];
-                        const toolName = firstRequest?.tool;
-                        voiceHooks.onPermissionRequested(updateData.body.id, requestIds[0], toolName, firstRequest?.arguments);
-                    }
-
-                    // Re-fetch messages when control returns to mobile (local -> remote mode switch)
-                    // This catches up on any messages that were exchanged while desktop had control
-                    const wasControlledByUser = session.agentState?.controlledByUser;
-                    const isNowControlledByUser = agentState?.controlledByUser;
-                    if (!wasControlledByUser && isNowControlledByUser) {
-                        log.log(`🔄 Control returned to mobile for session ${updateData.body.id}, re-fetching messages`);
-                        this.onSessionVisible(updateData.body.id);
-                    }
-                }
-            }
-        } else if (updateData.body.t === 'update-account') {
-            const accountUpdate = updateData.body;
-            const currentProfile = storage.getState().profile;
-
-            // Build updated profile with new data
-            const updatedProfile: Profile = {
-                ...currentProfile,
-                firstName: accountUpdate.firstName !== undefined ? accountUpdate.firstName : currentProfile.firstName,
-                lastName: accountUpdate.lastName !== undefined ? accountUpdate.lastName : currentProfile.lastName,
-                avatar: accountUpdate.avatar !== undefined ? accountUpdate.avatar : currentProfile.avatar,
-                github: accountUpdate.github !== undefined ? accountUpdate.github : currentProfile.github,
-                timestamp: updateData.createdAt // Update timestamp to latest
-            };
-
-            // Apply the updated profile to storage
-            storage.getState().applyProfile(updatedProfile);
-
-
-            // Handle settings updates (new for profile sync)
-            if (accountUpdate.settings?.value) {
-                try {
-                    const decryptedSettings = await this.encryption.decryptRaw(accountUpdate.settings.value);
-                    const parsedSettings = settingsParse(decryptedSettings);
-
-                    // Version compatibility check
-                    const settingsSchemaVersion = parsedSettings.schemaVersion ?? 1;
-                    if (settingsSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
-                        console.warn(
-                            `⚠️ Received settings schema v${settingsSchemaVersion}, ` +
-                            `we support v${SUPPORTED_SCHEMA_VERSION}. Update app for full functionality.`
-                        );
-                    }
-
-                    this.applyServerSettings(parsedSettings, accountUpdate.settings.version);
-                    log.log(`📋 Settings synced from server (schema v${settingsSchemaVersion}, version ${accountUpdate.settings.version})`);
-                } catch (error) {
-                    console.error('❌ Failed to process settings update:', error);
-                    // Don't crash on settings sync errors, just log
-                }
-            }
-        } else if (updateData.body.t === 'new-machine') {
-            const machineUpdate = updateData.body;
-            const machineId = machineUpdate.machineId;
-
-            // Brand-new machines (cold onboarding) are delivered via 'new-machine'
-            // before any fetchMachines has seen them, so their per-machine
-            // encryption isn't initialized yet. The update carries the data
-            // encryption key — register it here (mirroring fetchMachines) or every
-            // later decrypt for this machine fails and it never lands in storage,
-            // leaving the new-session screen unable to start a session until an app
-            // restart / socket reconnect triggers a full machine refetch.
-            const machineKeysMap = new Map<string, Uint8Array | null>();
-            if (machineUpdate.dataEncryptionKey) {
-                const decryptedKey = await this.encryption.decryptEncryptionKey(machineUpdate.dataEncryptionKey);
-                if (decryptedKey) {
-                    machineKeysMap.set(machineId, decryptedKey);
-                    this.machineDataKeys.set(machineId, decryptedKey);
-                } else {
-                    console.error(`Failed to decrypt data encryption key for new machine ${machineId}`);
-                    machineKeysMap.set(machineId, null);
-                }
-            } else {
-                machineKeysMap.set(machineId, null);
-            }
-            await this.encryption.initializeMachines(machineKeysMap);
-
-            const machineEncryption = this.encryption.getMachineEncryption(machineId);
-            if (!machineEncryption) {
-                console.error(`Machine encryption not found for ${machineId} after init - cannot apply new-machine`);
-                return;
-            }
-
-            // Preserve an existing createdAt if we somehow already know this machine.
-            const existing = storage.getState().machines[machineId];
-            const newMachine: Machine = {
-                id: machineId,
-                seq: machineUpdate.seq,
-                createdAt: existing?.createdAt ?? machineUpdate.createdAt,
-                updatedAt: machineUpdate.updatedAt,
-                active: machineUpdate.active,
-                activeAt: machineUpdate.activeAt,
-                metadata: null,
-                metadataVersion: machineUpdate.metadataVersion,
-                daemonState: null,
-                daemonStateVersion: machineUpdate.daemonStateVersion
-            };
-
-            // Decrypt best-effort; still apply the machine on failure so it stays
-            // visible/usable (matches fetchMachines' fallback behavior).
-            try {
-                newMachine.metadata = machineUpdate.metadata
-                    ? await machineEncryption.decryptMetadata(machineUpdate.metadataVersion, machineUpdate.metadata)
-                    : null;
-                newMachine.daemonState = machineUpdate.daemonState
-                    ? await machineEncryption.decryptDaemonState(machineUpdate.daemonStateVersion, machineUpdate.daemonState)
-                    : null;
-            } catch (error) {
-                console.error(`Failed to decrypt new machine ${machineId}:`, error);
-            }
-
-            storage.getState().applyMachines([newMachine]);
-        } else if (updateData.body.t === 'update-machine') {
-            const machineUpdate = updateData.body;
-            const machineId = machineUpdate.machineId;  // Changed from .id to .machineId
-            const machine = storage.getState().machines[machineId];
-
-            // Create or update machine with all required fields
-            const updatedMachine: Machine = {
-                id: machineId,
-                seq: updateData.seq,
-                createdAt: machine?.createdAt ?? updateData.createdAt,
-                updatedAt: updateData.createdAt,
-                active: machineUpdate.active ?? true,
-                activeAt: machineUpdate.activeAt ?? updateData.createdAt,
-                metadata: machine?.metadata ?? null,
-                metadataVersion: machine?.metadataVersion ?? 0,
-                daemonState: machine?.daemonState ?? null,
-                daemonStateVersion: machine?.daemonStateVersion ?? 0
-            };
-
-            // Get machine-specific encryption (might not exist if machine wasn't initialized)
-            const machineEncryption = this.encryption.getMachineEncryption(machineId);
-            if (!machineEncryption) {
-                console.error(`Machine encryption not found for ${machineId} - cannot decrypt updates`);
-                return;
-            }
-
-            // If metadata is provided, decrypt and update it
-            const metadataUpdate = machineUpdate.metadata;
-            if (metadataUpdate) {
-                try {
-                    const metadata = await machineEncryption.decryptMetadata(metadataUpdate.version, metadataUpdate.value);
-                    updatedMachine.metadata = metadata;
-                    updatedMachine.metadataVersion = metadataUpdate.version;
-                } catch (error) {
-                    console.error(`Failed to decrypt machine metadata for ${machineId}:`, error);
-                }
-            }
-
-            // If daemonState is provided, decrypt and update it
-            const daemonStateUpdate = machineUpdate.daemonState;
-            if (daemonStateUpdate) {
-                try {
-                    const daemonState = await machineEncryption.decryptDaemonState(daemonStateUpdate.version, daemonStateUpdate.value);
-                    updatedMachine.daemonState = daemonState;
-                    updatedMachine.daemonStateVersion = daemonStateUpdate.version;
-                } catch (error) {
-                    console.error(`Failed to decrypt machine daemonState for ${machineId}:`, error);
-                }
-            }
-
-            // Update storage using applyMachines which rebuilds sessionListViewData
-            storage.getState().applyMachines([updatedMachine]);
-        } else if (updateData.body.t === 'delete-machine') {
-            const machineId = updateData.body.machineId;
-            log.log(`🗑️ Delete machine update received for ${machineId}`);
-            if (!storage.getState().machines[machineId]) {
-                log.log(`Machine ${machineId} not in storage, skipping delete`);
-            } else {
-                storage.getState().deleteMachine(machineId);
-                this.encryption.removeMachineEncryption(machineId);
-                this.machineDataKeys.delete(machineId);
-            }
-        } else if (updateData.body.t === 'new-artifact') {
-            log.log('📦 Received new-artifact update');
-            const artifactUpdate = updateData.body;
-            const artifactId = artifactUpdate.artifactId;
-            
-            try {
-                // Decrypt the data encryption key
-                const decryptedKey = await this.encryption.decryptEncryptionKey(artifactUpdate.dataEncryptionKey);
-                if (!decryptedKey) {
-                    console.error(`Failed to decrypt key for new artifact ${artifactId}`);
-                    return;
-                }
-                
-                // Store the decrypted key in memory
-                this.artifactDataKeys.set(artifactId, decryptedKey);
-                
-                // Create artifact encryption instance
-                const artifactEncryption = new ArtifactEncryption(decryptedKey);
-                
-                // Decrypt header
-                const header = await artifactEncryption.decryptHeader(artifactUpdate.header);
-                
-                // Decrypt body if provided
-                let decryptedBody: string | null | undefined = undefined;
-                if (artifactUpdate.body && artifactUpdate.bodyVersion !== undefined) {
-                    const body = await artifactEncryption.decryptBody(artifactUpdate.body);
-                    decryptedBody = body?.body || null;
-                }
-                
-                // Add to storage
-                const decryptedArtifact: DecryptedArtifact = {
-                    id: artifactId,
-                    title: header?.title || null,
-                    body: decryptedBody,
-                    headerVersion: artifactUpdate.headerVersion,
-                    bodyVersion: artifactUpdate.bodyVersion,
-                    seq: artifactUpdate.seq,
-                    createdAt: artifactUpdate.createdAt,
-                    updatedAt: artifactUpdate.updatedAt,
-                    isDecrypted: !!header,
-                };
-                
-                storage.getState().addArtifact(decryptedArtifact);
-                log.log(`📦 Added new artifact ${artifactId} to storage`);
-            } catch (error) {
-                console.error(`Failed to process new artifact ${artifactId}:`, error);
-            }
-        } else if (updateData.body.t === 'update-artifact') {
-            log.log('📦 Received update-artifact update');
-            const artifactUpdate = updateData.body;
-            const artifactId = artifactUpdate.artifactId;
-            
-            // Get existing artifact
-            const existingArtifact = storage.getState().artifacts[artifactId];
-            if (!existingArtifact) {
-                console.error(`Artifact ${artifactId} not found in storage`);
-                // Fetch all artifacts to sync
-                this.artifactsSync.invalidate();
-                return;
-            }
-            
-            try {
-                // Get the data encryption key from memory
-                let dataEncryptionKey = this.artifactDataKeys.get(artifactId);
-                if (!dataEncryptionKey) {
-                    console.error(`Encryption key not found for artifact ${artifactId}, fetching artifacts`);
-                    this.artifactsSync.invalidate();
-                    return;
-                }
-                
-                // Create artifact encryption instance
-                const artifactEncryption = new ArtifactEncryption(dataEncryptionKey);
-                
-                // Update artifact with new data  
-                const updatedArtifact: DecryptedArtifact = {
-                    ...existingArtifact,
-                    seq: updateData.seq,
-                    updatedAt: updateData.createdAt,
-                };
-                
-                // Decrypt and update header if provided
-                if (artifactUpdate.header) {
-                    const header = await artifactEncryption.decryptHeader(artifactUpdate.header.value);
-                    updatedArtifact.title = header?.title || null;
-                    updatedArtifact.sessions = header?.sessions;
-                    updatedArtifact.draft = header?.draft;
-                    updatedArtifact.headerVersion = artifactUpdate.header.version;
-                }
-                
-                // Decrypt and update body if provided
-                if (artifactUpdate.body) {
-                    const body = await artifactEncryption.decryptBody(artifactUpdate.body.value);
-                    updatedArtifact.body = body?.body || null;
-                    updatedArtifact.bodyVersion = artifactUpdate.body.version;
-                }
-                
-                storage.getState().updateArtifact(updatedArtifact);
-                log.log(`📦 Updated artifact ${artifactId} in storage`);
-            } catch (error) {
-                console.error(`Failed to process artifact update ${artifactId}:`, error);
-            }
-        } else if (updateData.body.t === 'delete-artifact') {
-            log.log('📦 Received delete-artifact update');
-            const artifactUpdate = updateData.body;
-            const artifactId = artifactUpdate.artifactId;
-            
-            // Remove from storage
-            storage.getState().deleteArtifact(artifactId);
-            
-            // Remove encryption key from memory
-            this.artifactDataKeys.delete(artifactId);
-        }
-    }
-
-    private flushActivityUpdates = (updates: Map<string, ApiEphemeralActivityUpdate>) => {
-        // log.log(`🔄 Flushing activity updates for ${updates.size} sessions - acquiring lock`);
-
-
-        const sessions: Session[] = [];
-
-        for (const [sessionId, update] of updates) {
-            const session = storage.getState().sessions[sessionId];
-            if (session) {
-                sessions.push({
-                    ...session,
-                    active: update.active,
-                    activeAt: update.activeAt,
-                    thinking: update.thinking ?? false,
-                    thinkingAt: update.activeAt // Always use activeAt for consistency
-                });
-            }
-        }
-
-        if (sessions.length > 0) {
-            // console.log('flushing activity updates ' + sessions.length);
-            this.applySessions(sessions);
-            // log.log(`🔄 Activity updates flushed - updated ${sessions.length} sessions`);
-        }
-    }
-
-    private handleEphemeralUpdate = (update: unknown) => {
-        const validatedUpdate = ApiEphemeralUpdateSchema.safeParse(update);
-        if (!validatedUpdate.success) {
-            console.log('Invalid ephemeral update received:', validatedUpdate.error);
-            console.error('Invalid ephemeral update received:', update);
-            return;
-        } else {
-            // console.log('Ephemeral update received:', update);
-        }
-        const updateData = validatedUpdate.data;
-
-        // Process activity updates through smart debounce accumulator
-        if (updateData.type === 'activity') {
-            // console.log('adding activity update ' + updateData.id);
-            this.activityAccumulator.addUpdate(updateData);
-        }
-
-        // Handle machine activity updates
-        if (updateData.type === 'machine-activity') {
-            // Update machine's active status and lastActiveAt
-            const machine = storage.getState().machines[updateData.id];
-            if (machine) {
-                const updatedMachine: Machine = {
-                    ...machine,
-                    active: updateData.active,
-                    activeAt: updateData.activeAt
-                };
-                storage.getState().applyMachines([updatedMachine]);
-            }
-        }
-
-        // Session-level lifecycle event (Claude finished, needs permission, asks question).
-        // This is the same signal that triggers the mobile push — bump browser-tab
-        // unread counter on these only, ignore the noisy per-message stream.
-        if (updateData.type === 'session-event') {
-            notifyUnreadMessage();
-            // Desktop notification — only if enabled and the window isn't focused
-            // (same "active client" suppression idea as the mobile push).
-            if (storage.getState().settings.notificationsDesktop && !isWindowFocused()) {
-                void showDesktopNotification(updateData.title, updateData.body, { sessionId: updateData.sessionId });
-            }
-        }
-
-        // daemon-status ephemeral updates are deprecated, machine status is handled via machine-activity
-    }
-
     //
     // Apply store
     //
@@ -3019,10 +1371,9 @@ class Sync {
         // account master, and per-machine scoping limits the blast radius.
         const machineKey = this.machineDataKeys.get(machineId);
         if (!token || !machineKey) {
-            // A v2 session whose machine key is unknown CANNOT use the machine
-            // plane. Say so loudly rather than quietly falling back to the
-            // happy socket — a silent dual path hides exactly the breakage
-            // this migration is meant to surface.
+            // A session whose machine key is unknown CANNOT use the machine
+            // plane. Say so loudly — a silent fallback hides exactly the
+            // breakage this is meant to surface.
             console.error(`[v2] machine plane unavailable for session ${sessionId}: ${!token ? 'no token' : `no key for machine ${machineId}`}`);
             return null;
         }
@@ -3046,7 +1397,7 @@ class Sync {
         }
     }
 
-    /** Machine-plane context addressed by MACHINE (not happy session) — for
+    /** Machine-plane context addressed by MACHINE (not relay session) — for
      *  screens that already hold machineId + the daemon-local session id
      *  (terminal, machine view). Returns null when the machine's key or a v2
      *  relay for it is unknown. */
@@ -3073,52 +1424,19 @@ class Sync {
     }
 
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
-        // v2 sessions read their history from the v2 EVENT LOG. The daemon
-        // also mirrors the conversation onto the happy card (dual-stack), so
-        // socket-delivered rows would render a SECOND copy of every message.
-        // Drop them: for a v2 session the event log is the single source.
+        // Sessions read their history from the v2 EVENT LOG; only rows tagged
+        // as coming from it are applied so nothing can render twice.
         if (messages.length > 0 && storage.getState().sessions[sessionId]?.metadata?.v2?.sessionId) {
             messages = messages.filter(m => (m as { __fromV2?: boolean }).__fromV2 === true);
             if (messages.length === 0) return;
         }
-        const result = storage.getState().applyMessages(sessionId, messages);
-        let m: Message[] = [];
-        for (let messageId of result.changed) {
-            const message = storage.getState().sessionMessages[sessionId].messagesMap[messageId];
-            if (message) {
-                m.push(message);
-            }
-        }
-        if (m.length > 0) {
-            voiceHooks.onMessages(sessionId, m);
-        }
-        if (result.hasReadyEvent) {
-            voiceHooks.onReady(sessionId);
-        }
+        storage.getState().applyMessages(sessionId, messages);
     }
 
     private applySessions = (sessions: (Omit<Session, "presence"> & {
         presence?: "online" | number;
     })[]) => {
-        const active = storage.getState().getActiveSessions();
         storage.getState().applySessions(sessions);
-        const newActive = storage.getState().getActiveSessions();
-        this.applySessionDiff(active, newActive);
-    }
-
-    private applySessionDiff = (active: Session[], newActive: Session[]) => {
-        let wasActive = new Set(active.map(s => s.id));
-        let isActive = new Set(newActive.map(s => s.id));
-        for (let s of active) {
-            if (!isActive.has(s.id)) {
-                voiceHooks.onSessionOffline(s.id, s.metadata ?? undefined);
-            }
-        }
-        for (let s of newActive) {
-            if (!wasActive.has(s.id)) {
-                voiceHooks.onSessionOnline(s.id, s.metadata ?? undefined);
-            }
-        }
     }
 
 }
@@ -3224,8 +1542,8 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
     const encryption = await Encryption.create(secretKey);
     sync.setMasterSecret(secretKey);
 
-    // No happy socket: the app's realtime is the v2 SSE doorbell (plus the
-    // poll fallback). Connection status is wired inside startV2Live.
+    // The app's realtime is the v2 SSE doorbell (plus the poll fallback).
+    // Connection status is wired inside startV2Live.
 
     // Initialize sessions engine
     if (restore) {
@@ -3234,7 +1552,6 @@ async function syncInit(credentials: AuthCredentials, restore: boolean) {
         await sync.create(credentials, encryption);
     }
 
-    // v2 sessions get their live updates from the relay (SSE doorbell + poll
-    // fallback) rather than the happy socket.
+    // Live updates come from the relay (SSE doorbell + poll fallback).
     sync.startV2Live();
 }

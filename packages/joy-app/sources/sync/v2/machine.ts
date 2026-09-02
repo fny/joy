@@ -1,6 +1,6 @@
 /**
  * Machine-plane client — the app's calls to a session's DAEMON over the
- * sealed tunnel (/v2/* on the daemon). Replaces the happy-socket RPCs for
+ * sealed tunnel (/v2/* on the daemon). Replaces the old socket RPCs for
  * v2 sessions: files, git, terminal, usage, harness config, history.
  *
  * Every call needs (a) the machine id the session runs on and (b) the

@@ -167,13 +167,13 @@ describe('pathUtils', () => {
 
         it('should not resolve sibling directory paths that start with metadata path', () => {
             const metadata = {
-                path: '/Users/steve/Develop/slopus/happy',
+                path: '/Users/steve/Develop/fny/joy',
                 host: 'localhost',
                 homeDir: '/Users/steve'
             };
             // This should NOT be resolved as it's a sibling directory, not within the metadata path
-            expect(resolvePath('/Users/steve/Develop/slopus/happy-server/sources/types/index.ts', metadata))
-                .toBe('/Users/steve/Develop/slopus/happy-server/sources/types/index.ts');
+            expect(resolvePath('/Users/steve/Develop/fny/joy-relay/sources/types/index.ts', metadata))
+                .toBe('/Users/steve/Develop/fny/joy-relay/sources/types/index.ts');
         });
 
         it('should handle edge case where metadata path is a substring of another path', () => {
@@ -194,21 +194,21 @@ describe('pathUtils', () => {
         it('should work with typical macOS home directories', () => {
             const homeDir = '/Users/developer';
             expect(resolveAbsolutePath('~', homeDir)).toBe('/Users/developer');
-            expect(resolveAbsolutePath('~/Projects/happy', homeDir)).toBe('/Users/developer/Projects/happy');
+            expect(resolveAbsolutePath('~/Projects/joy', homeDir)).toBe('/Users/developer/Projects/joy');
             expect(resolveAbsolutePath('~/Desktop/file.txt', homeDir)).toBe('/Users/developer/Desktop/file.txt');
         });
 
         it('should work with typical Linux home directories', () => {
             const homeDir = '/home/developer';
             expect(resolveAbsolutePath('~', homeDir)).toBe('/home/developer');
-            expect(resolveAbsolutePath('~/projects/happy', homeDir)).toBe('/home/developer/projects/happy');
+            expect(resolveAbsolutePath('~/projects/joy', homeDir)).toBe('/home/developer/projects/joy');
             expect(resolveAbsolutePath('~/documents/file.txt', homeDir)).toBe('/home/developer/documents/file.txt');
         });
 
         it('should work with typical Windows home directories', () => {
             const homeDir = 'C:\\Users\\developer';
             expect(resolveAbsolutePath('~', homeDir)).toBe('C:\\Users\\developer');
-            expect(resolveAbsolutePath('~/Projects/happy', homeDir)).toBe('C:\\Users\\developer\\Projects/happy');
+            expect(resolveAbsolutePath('~/Projects/joy', homeDir)).toBe('C:\\Users\\developer\\Projects/joy');
             expect(resolveAbsolutePath('~/Desktop/file.txt', homeDir)).toBe('C:\\Users\\developer\\Desktop/file.txt');
         });
 

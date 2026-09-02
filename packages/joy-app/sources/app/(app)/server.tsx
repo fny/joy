@@ -120,10 +120,12 @@ export default function ServerConfigScreen() {
             setIsValidating(true);
             setError(null);
             
-            const response = await fetch(url, {
+            // joy-relay answers its unauthenticated capabilities probe with
+            // `relay: 'joy-relay'`; anything else is not a relay we can talk to.
+            const response = await fetch(`${url.replace(/\/+$/, '')}/joy/v1/capabilities`, {
                 method: 'GET',
                 headers: {
-                    'Accept': 'text/plain'
+                    'Accept': 'application/json'
                 }
             });
             
@@ -132,9 +134,9 @@ export default function ServerConfigScreen() {
                 return false;
             }
             
-            const text = await response.text();
-            if (!text.includes('Welcome to Happy Server!')) {
-                setError(t('server.notValidHappyServer'));
+            const caps = await response.json().catch(() => null) as { relay?: string } | null;
+            if (caps?.relay !== 'joy-relay') {
+                setError(t('server.notValidJoyServer'));
                 return false;
             }
             

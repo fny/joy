@@ -2,7 +2,7 @@
 // screen, fork, the joy-sessions list) goes through here: v2.createSession puts
 // a durable spawn command on the relay queue, the daemon's nucleus lane claims
 // it and launches the agent, then binds the resulting card. We poll for that
-// bound card so callers get back a navigable happy session id.
+// bound card so callers get back a navigable session id.
 //
 // There is deliberately NO v1 RPC fallback. A spawn that fails must surface as
 // a failure — a silent reroute would hide exactly the breakage we need to see.
@@ -27,7 +27,7 @@ const POLL_MS = 2000;
  * spawn (create-if-missing is OFF by default), and we offer to create it and
  * retry — the durable-queue analog of v1's "Create directory?" prompt.
  *
- * Returns the happy session id, or null if the user declined the directory
+ * Returns the session id, or null if the user declined the directory
  * prompt (already cleaned up — the caller should just bail quietly).
  * Throws on a spawn that never binds.
  */

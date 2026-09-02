@@ -1,5 +1,5 @@
 // The machine page is joy-tmux only in this build — render the joy machine
-// view (daemon status, version, PID, OS) instead of the stock happy-daemon
+// view (daemon status, version, PID, OS) instead of the stock
 // page.
 import * as React from 'react';
 import { useLocalSearchParams, Stack } from 'expo-router';

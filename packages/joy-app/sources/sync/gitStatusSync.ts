@@ -184,7 +184,7 @@ export class GitStatusSync {
 
             // v2 sessions read git state from the DAEMON's machine plane over
             // the sealed tunnel — one parsed call instead of four shell
-            // round-trips, and no happy socket involved.
+            // round-trips, and no realtime socket involved.
             const mctx = await sync.awaitMachineCtx(sessionId);
             if (mctx) {
                 const { status, data } = await machineGitStatus(mctx);

@@ -22,10 +22,10 @@ export function SessionActionsNativeMenu({
         deleteSession,
         canArchive,
         canCopySessionMetadata,
-        canShowResume,
+        canResume,
         copySessionMetadata,
         openDetails,
-        resumeSession,
+        restartSession,
     } = useSessionQuickActions(session, {
         onAfterArchive,
         onAfterDelete,
@@ -47,8 +47,8 @@ export function SessionActionsNativeMenu({
                         <DropdownMenuItem.Text>Archive</DropdownMenuItem.Text>
                     </DropdownMenuItem>
                 )}
-                {canShowResume && (
-                    <DropdownMenuItem onClick={resumeSession}>
+                {canResume && (
+                    <DropdownMenuItem onClick={restartSession}>
                         <DropdownMenuItem.Text>Resume</DropdownMenuItem.Text>
                     </DropdownMenuItem>
                 )}

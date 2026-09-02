@@ -43,7 +43,7 @@ beforeAll(() => {
   writeFileSync(join(proj, "sess-1.jsonl"), [
     entry({ type: "user", timestamp: "2026-06-01T10:00:00Z", message: { role: "user", content: "do the thing" } }),
     assistant({ ts: "2026-06-01T10:00:01Z", msgId: "msg-1", out: 500, tool: "Bash" }),
-    assistant({ ts: "2026-06-01T10:00:02Z", msgId: "msg-1", out: 1000, tool: "mcp__happy__send" }),
+    assistant({ ts: "2026-06-01T10:00:02Z", msgId: "msg-1", out: 1000, tool: "mcp__joy__send" }),
     entry({ type: "user", timestamp: "2026-06-01T10:00:03Z", message: { role: "user", content: [{ type: "tool_result", content: "ok" }] } }),
     assistant({ ts: "2026-06-02T09:00:00Z", msgId: "msg-2", out: 2000, cacheRead: 1_000_000 }),
   ].join(""));
@@ -102,7 +102,7 @@ test("dedup, pricing, subagent rollup, turns, tools", async () => {
   // msg-1 entries contribute one Bash and one MCP call. MCP is grouped by
   // server name.
   expect(r.tools.find(t => t.name === "Bash")!.calls).toBe(1);
-  expect(r.mcpServers.find(t => t.name === "happy")!.calls).toBe(1);
+  expect(r.mcpServers.find(t => t.name === "joy")!.calls).toBe(1);
 
   // Projects
   expect(r.projects.length).toBe(2);

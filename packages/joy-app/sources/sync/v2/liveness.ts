@@ -2,7 +2,7 @@
 //
 // Everything downstream (presence resolver, sidebar grouping, useSessionStatus)
 // asks ONE question: "have we heard from this session within
-// SESSION_STALE_AFTER_MS?" — answered from `activeAt`. Under happy the daemon's
+// SESSION_STALE_AFTER_MS?" — answered from `activeAt`. Previously the daemon's
 // 30s keepalive kept that timestamp moving; under v2 the relay only bumps a
 // row's timestamps on TURN events, so an idle-but-alive session went "stale"
 // 90s after its last turn and fell out of the active group (or vanished).

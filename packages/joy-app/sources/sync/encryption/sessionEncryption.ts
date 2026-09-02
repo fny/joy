@@ -26,7 +26,7 @@ export class SessionEncryption {
     async decryptMessages(messages: ApiMessage[]): Promise<(DecryptedMessage | null)[]> {
         // Check cache for all messages first
         const results: (DecryptedMessage | null)[] = new Array(messages.length);
-        const toDecrypt: { index: number; message: ApiMessage }[] = [];
+        const toDecrypt: { index: number; message: ApiMessage; ciphertext: string }[] = [];
 
         for (let i = 0; i < messages.length; i++) {
             const message = messages[i];
@@ -52,7 +52,7 @@ export class SessionEncryption {
                 };
                 this.cache.setCachedMessage(message.id, results[i]!);
             } else if (message.content?.t === 'encrypted') {
-                toDecrypt.push({ index: i, message });
+                toDecrypt.push({ index: i, message, ciphertext: message.content.c });
             } else {
                 // Not encrypted or invalid
                 results[i] = {
@@ -69,7 +69,7 @@ export class SessionEncryption {
         // Batch decrypt uncached messages
         if (toDecrypt.length > 0) {
             const encrypted = toDecrypt.map(item =>
-                decodeBase64(item.message.content.c, 'base64')
+                decodeBase64(item.ciphertext, 'base64')
             );
             
             const decrypted = await this.encryptor.decrypt(encrypted);

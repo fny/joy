@@ -1,11 +1,11 @@
 /**
  * Relay v2 client — the native /joy/v2 durable plane, spoken directly.
  *
- * TESTING MODE ONLY (dev "Relay v2 Mode" screens): this bypasses the happy
- * socket sync engine entirely and drives sessions through the v2 REST + SSE
- * surface. Content rides the relay as an opaque "ciphertext" string; this
- * mode uses a readable JSON envelope (encodeContent/decodeContent) instead of
- * real sealing — the encryption seam is those two functions.
+ * This is the app's ONLY transport: sessions are driven through the v2 REST +
+ * SSE surface. Content rides the relay as an opaque "ciphertext" string; the
+ * dev "Relay v2 Mode" screens use a readable JSON envelope
+ * (encodeContent/decodeContent) instead of real sealing — the encryption seam
+ * is those two functions.
  *
  * The relay must be running the v2-mounted server.mjs (the dev relay
  * entrypoint). The base URL is overridable per install (setV2BaseUrl) so the
@@ -160,6 +160,14 @@ export interface V2Event {
 export const v2 = {
     listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
     listMachines: (): Promise<{ machines: V2Machine[] }> => v2fetch('GET', '/machines'),
+    deleteMachine: (id: string) => v2fetch('DELETE', `/machines/${id}`),
+    /** CAS update of the sealed machine metadata; `version-mismatch` returns the current record. */
+    patchMachine: (id: string, body: { metadata: string; expectedMetadataVersion: number }): Promise<{
+        result: 'success' | 'version-mismatch' | 'error';
+        metadataVersion?: number;
+        metadata?: string;
+        error?: string;
+    }> => v2fetch('PATCH', `/machines/${id}`, body),
     accountProfile: (): Promise<Record<string, unknown>> => v2fetch('GET', '/account/profile'),
     registerPushToken: (token: string) => v2fetch('POST', '/push-tokens', { token }),
     sessionState: (id: string): Promise<V2SessionState> => v2fetch('GET', `/sessions/${id}`),

@@ -18,7 +18,6 @@ import { ModalProvider } from '@/modal';
 import { AppLockGate } from '@/components/AppLockGate';
 import { installRelayKeyFetchInterceptor } from '@/sync/serverConfig';
 import { syncRestore } from '@/sync/sync';
-import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
 import { CommandPaletteProvider } from '@/components/CommandPalette/CommandPaletteProvider';
 import { StatusBarProvider } from '@/components/StatusBarProvider';
@@ -30,7 +29,6 @@ import { useUnistyles } from 'react-native-unistyles';
 import { AsyncLock } from '@/utils/lock';
 import { getSessionRouteFromNotificationResponse } from '@/utils/notificationRouting';
 import { navigateToSession, PathnameTracker } from '@/hooks/useNavigateToSession';
-import { applyVoiceUpsellOverride } from '@/realtime/voiceExperiment';
 import { useTauriZoom } from '@/hooks/useTauriZoom';
 import { BrowserNavigationShortcuts } from '@/hooks/useBrowserNavigationShortcuts';
 import { useTauriDrag } from '@/hooks/useTauriDrag';
@@ -393,17 +391,9 @@ export default function RootLayout() {
     // Sync console output toggle from Dev screen
     const consoleLoggingEnabled = useLocalSetting('consoleLoggingEnabled');
     const devModeEnabled = __DEV__ || useLocalSetting('devModeEnabled');
-    const voiceUpsellOverride = useLocalSetting('voiceUpsellOverride');
     React.useEffect(() => {
         setConsoleOutputEnabled(consoleLoggingEnabled);
     }, [consoleLoggingEnabled]);
-
-    React.useEffect(() => {
-        if (!devModeEnabled || !voiceUpsellOverride) {
-            return;
-        }
-        applyVoiceUpsellOverride(voiceUpsellOverride);
-    }, [devModeEnabled, voiceUpsellOverride]);
 
     //
     // Not inited
@@ -428,11 +418,9 @@ export default function RootLayout() {
                             <ModalProvider>
                                 <BrowserNavigationShortcuts />
                                 <CommandPaletteProvider>
-                                    <RealtimeProvider>
-                                        <HorizontalSafeAreaWrapper>
-                                            <SidebarNavigator />
-                                        </HorizontalSafeAreaWrapper>
-                                    </RealtimeProvider>
+                                    <HorizontalSafeAreaWrapper>
+                                        <SidebarNavigator />
+                                    </HorizontalSafeAreaWrapper>
                                 </CommandPaletteProvider>
                             </ModalProvider>
                             <AppLockGate />

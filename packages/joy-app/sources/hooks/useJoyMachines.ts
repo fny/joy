@@ -6,7 +6,7 @@ import { machineStatusOnly } from '@/sync/v2/machine';
 import type { Machine } from '@/sync/storageTypes';
 
 // Machines that answer a joy-tmux `joy-status` probe — i.e. the boxes actually
-// running the joy daemon, not every Happy machine. Probes online machines in
+// running the joy daemon, not every registered machine. Probes online machines in
 // parallel with a per-probe timeout (machineRPC has none, so a box without
 // joy-tmux never resolves). Result is cached module-level so revisits render
 // instantly while a background re-probe refreshes it. Mirrors the pattern in

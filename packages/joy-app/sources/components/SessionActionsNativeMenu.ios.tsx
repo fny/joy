@@ -25,10 +25,10 @@ export function SessionActionsNativeMenu({
         deleteSession,
         canArchive,
         canCopySessionMetadata,
-        canShowResume,
+        canResume,
         copySessionMetadata,
         openDetails,
-        resumeSession,
+        restartSession,
     } = useSessionQuickActions(session, {
         onAfterArchive,
         onAfterDelete,
@@ -45,8 +45,8 @@ export function SessionActionsNativeMenu({
                     {canArchive && (
                         <Button onPress={archiveSession} systemImage={iosSymbol('archivebox')} label="Archive" />
                     )}
-                    {canShowResume && (
-                        <Button onPress={resumeSession} systemImage={iosSymbol('play.circle')} label="Resume" />
+                    {canResume && (
+                        <Button onPress={restartSession} systemImage={iosSymbol('play.circle')} label="Resume" />
                     )}
                     {canCopySessionMetadata && (
                         <Button onPress={copySessionMetadata} systemImage={iosSymbol('ladybug')} label={t('sessionInfo.copyMetadata')} />

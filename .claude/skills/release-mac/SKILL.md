@@ -60,8 +60,10 @@ open /Applications/Joy.app
 
 ## Other variants (rarely needed)
 
-- `pnpm tauri:build:dev` / `:preview` / `:production` — the Happy-flavored
-  shells (`Happy`, `Happy (preview)`) that bundle `../dist` via expo export.
-  Not the Joy app; only touch these when explicitly asked.
+- `pnpm tauri:build:dev` / `:preview` / `:production` — the dist-bundling
+  shells (`Joy (dev)`, `Joy (preview)`, `Joy` with bundle ids
+  `vip.faraz.joy[.dev|.preview]`) that package `../dist` via expo export
+  instead of loading the hosted web app. Only touch these when explicitly
+  asked.
 - `pnpm tauri:joy` — dev-mode Joy shell with hot reload against
   `http://localhost:8081` (`pnpm web` running separately).

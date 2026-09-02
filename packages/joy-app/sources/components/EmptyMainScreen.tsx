@@ -96,10 +96,10 @@ export function EmptyMainScreen() {
             <Text style={styles.title}>{t('components.emptyMainScreen.readyToCode')}</Text>
             <View style={styles.terminalBlock}>
                 <Text style={[styles.terminalText, styles.terminalTextFirst]}>
-                    $ npm i -g happy
+                    $ pnpm add -g @fny/joy-daemon
                 </Text>
                 <Text style={styles.terminalText}>
-                    $ happy
+                    $ joy auth joy
                 </Text>
             </View>
 
@@ -151,7 +151,7 @@ export function EmptyMainScreen() {
                                         t('modals.authenticateTerminal'),
                                         t('modals.pasteUrlFromTerminal'),
                                         {
-                                            placeholder: 'happy://terminal?...',
+                                            placeholder: 'joy://terminal?...',
                                             cancelText: t('common.cancel'),
                                             confirmText: t('common.authenticate')
                                         }

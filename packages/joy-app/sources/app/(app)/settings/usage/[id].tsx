@@ -13,7 +13,6 @@ import { Stack, useLocalSearchParams } from 'expo-router';
 import { layout } from '@/components/layout';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
-import { apiSocket } from '@/sync/apiSocket';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
 import { machineUsageOnly, machineSessionUsageAll, machineStatusOnly } from '@/sync/v2/machine';

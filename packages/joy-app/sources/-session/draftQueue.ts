@@ -5,7 +5,7 @@ import { relayScopedMMKV } from '@/sync/serverConfig';
 // sent — they live ONLY in the app (never propagated to joy-tmux) until the user
 // sends one, at which point it goes through the normal send path like any other
 // message. Persisted to MMKV (same manual hydrate/persist idiom as
-// useNewSessionDraft), so queued drafts survive a reload / app restart.
+// the old new-session draft did), so queued drafts survive a reload / app restart.
 
 // Why an item is in the queue — this is what separates a deliberate DRAFT from
 // a pending QUEUE ITEM (user model, 2026-07-25):

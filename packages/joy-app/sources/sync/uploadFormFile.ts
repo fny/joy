@@ -19,7 +19,7 @@ export async function appendFormFile(
     if (!cacheDirectory) {
         throw new Error('cacheDirectory unavailable on this platform');
     }
-    const tempUri = `${cacheDirectory}happy-upload-${randomUUID()}`;
+    const tempUri = `${cacheDirectory}joy-upload-${randomUUID()}`;
     await writeAsStringAsync(tempUri, encodeBase64(bytes), { encoding: EncodingType.Base64 });
     // RN typings don't know about the {uri, type, name} form, but the runtime does.
     formData.append(field, { uri: tempUri, type: contentType, name: filename } as unknown as Blob);

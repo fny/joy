@@ -158,9 +158,9 @@ function NewJoyTmuxSessionScreen() {
     // responds within 3s. Mirrors the pattern in settings/joy-sessions.
     // Without this, we'd auto-select the first online machine — which usually
     // doesn't run joy-tmux — and the create RPC would hang silently.
-    // The per-probe timeout is critical: apiSocket.machineRPC has no built-in
-    // timeout, so a machine without joy-tmux installed never resolves; without
-    // racing with a timer, Promise.allSettled would wait forever.
+    // The per-probe timeout is critical: a tunnel call to a machine that is
+    // not running joy-daemon can hang; without racing each probe against a
+    // timer, Promise.allSettled would wait forever.
     const probedRef = React.useRef(false);
     React.useEffect(() => {
         if (probedRef.current || selectedMachineId) return;
@@ -414,7 +414,7 @@ function NewJoyTmuxSessionScreen() {
             // the daemon's nucleus lane executes it, and the session card
             // arrives via normal sync stamped with its v2 link. We wait for
             // that card so we can navigate straight into the session.
-            const happySessionId = await v2SpawnAndWait(selectedMachineId, {
+            const sessionId = await v2SpawnAndWait(selectedMachineId, {
                 cwd,
                 agent: selectedAgent,
                 // Codex/opencode carry their own model ids from their catalogs;
@@ -430,7 +430,7 @@ function NewJoyTmuxSessionScreen() {
                 forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
                 extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' ? (extraArgs.trim() || undefined) : undefined,
             });
-            if (!happySessionId) return; // user declined the directory prompt
+            if (!sessionId) return; // user declined the directory prompt
 
             // Remember this machine+folder so the next new-session pre-selects it.
             // Store the tilde-relative form (~/…) so it stays portable across machines.
@@ -442,13 +442,13 @@ function NewJoyTmuxSessionScreen() {
 
             const trimmedPrompt = prompt.trim();
             if (trimmedPrompt) {
-                const sendRes = await sync.sendMessage(happySessionId, trimmedPrompt, { source: 'new_session' });
+                const sendRes = await sync.sendMessage(sessionId, trimmedPrompt, { source: 'new_session' });
                 // A failed initial send must be VISIBLE — it was silently eaten
                 // once (the bind race) and read as "messages go into the void".
                 if (!sendRes.ok) Modal.alert(t('common.error'), `Initial message not sent: ${sendRes.reason ?? 'unknown'}`);
             }
             router.back();
-            setTimeout(() => router.push(`/session/${happySessionId}` as never), 100);
+            setTimeout(() => router.push(`/session/${sessionId}` as never), 100);
         } catch (error) {
             const msg = error instanceof Error ? error.message : 'Failed to start joy-tmux session';
             Modal.alert(t('common.error'), msg);

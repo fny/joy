@@ -1,3 +1,12 @@
+# Sep 2 — Joy only
+
+- **The Happy Cloud relay is gone.** Server Configuration lists Joy Relay only, it is the default for new installs, and the server check now confirms it is talking to a joy-relay rather than looking for the old server's welcome banner. Custom relay URLs still work. Existing logins and caches on Joy Relay carry over unchanged.
+- **Links are `joy://`.** The terminal-pairing and account-restore QR codes and the "paste URL" flows now use `joy://…` instead of `happy://…`; the app registers the `joy` scheme on iOS and Android. Old `happy://` links no longer open.
+- **Voice, GitHub connect, artifacts, usage dashboards and connected services are removed.** None of them had a backend on the joy relay, so they could only fail; their settings pages, the microphone permission and the audio/voice libraries are gone with them.
+- **Settings are per device.** Preferences no longer try to sync to an account-settings store the relay never had.
+- **Machine page shows the daemon.** Version and Joy home directory appear alongside host and home; machines registered by an older daemon still list fine.
+- **Renamed under the hood** — nothing to do: the resume snippet is now `joy new . --resume <id>`, the offline hint says `joy status`, the CLI install hint points at `@fny/joy-daemon`, and the desktop app calls itself Joy in its menu and window titles.
+
 # Sep 1 (2) — Idle sessions stay in the sidebar
 
 - **A live session no longer vanishes 90 seconds after its last reply.** The app judged "still alive" by the time of the last turn, which under v2 nothing refreshed while you weren't talking — so a freshly created session dropped out of the active list (or off the sidebar entirely) as soon as it sat idle. Liveness now follows the daemon's relay lease, the same signal that decides whether a message would be delivered: online means active, however long it's been quiet, and a daemon that dies shows offline within about 20 seconds.

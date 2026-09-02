@@ -1,14 +1,13 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
-import { getServerUrl, DEFAULT_SERVER_URL, relayKeyForUrl } from '@/sync/serverConfig';
+import { getServerUrl, relayKeyForUrl } from '@/sync/serverConfig';
 
 const AUTH_KEY = 'auth_credentials';
 
-/** Credentials are stored per relay. The default relay keeps the legacy bare
- *  key so existing logins survive; every other relay gets its own key suffixed
- *  with host[_port] — mirroring the daemon's ~/.joy/relays/<host[_port]>/. */
+/** Credentials are stored per relay: every relay (the default one included)
+ *  gets its own key suffixed with host[_port] — mirroring the daemon's
+ *  ~/.joy/relays/<host[_port]>/. */
 function authKeyForUrl(serverUrl: string): string {
-    if (serverUrl === DEFAULT_SERVER_URL) return AUTH_KEY;
     return `${AUTH_KEY}.${relayKeyForUrl(serverUrl)}`;
 }
 
