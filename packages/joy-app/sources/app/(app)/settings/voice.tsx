@@ -23,6 +23,7 @@ export default React.memo(function VoiceSettingsScreen() {
     const [agents, setAgents] = useSettingMutable('voiceAgents');
     const [activeAgentId, setActiveAgentId] = useSettingMutable('voiceActiveAgentId');
     const [wakeOnEvents, setWakeOnEvents] = useSettingMutable('voiceWakeOnEvents');
+    const [wakeOnSound, setWakeOnSound] = useSettingMutable('voiceWakeOnSound');
     const [idleTimeoutSec, setIdleTimeoutSec] = useSettingMutable('voiceIdleTimeoutSec');
 
     const activeId = agents.find(a => a.id === activeAgentId)?.id ?? agents[0]?.id ?? null;
@@ -133,6 +134,14 @@ export default React.memo(function VoiceSettingsScreen() {
                     subtitleLines={0}
                     icon={<Ionicons name="notifications-outline" size={29} color={theme.colors.accents.orange} />}
                     rightElement={<Switch value={wakeOnEvents} onValueChange={setWakeOnEvents} />}
+                    showChevron={false}
+                />
+                <Item
+                    title={t('settingsVoice.wakeOnSound')}
+                    subtitle={t('settingsVoice.wakeOnSoundSubtitle')}
+                    subtitleLines={0}
+                    icon={<Ionicons name="ear-outline" size={29} color={theme.colors.accents.green} />}
+                    rightElement={<Switch value={wakeOnSound} onValueChange={setWakeOnSound} />}
                     showChevron={false}
                 />
                 <Item

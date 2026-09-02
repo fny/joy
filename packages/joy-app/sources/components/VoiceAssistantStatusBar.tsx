@@ -5,7 +5,7 @@
  */
 import * as React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
-import { useRealtimeStatus, useRealtimeMode, useVoiceArmedSessionId } from '@/sync/storage';
+import { useRealtimeStatus, useRealtimeMode, useVoiceArmedSessionId, useSetting } from '@/sync/storage';
 import { StatusDot } from './StatusDot';
 import { Typography } from '@/constants/Typography';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -24,6 +24,7 @@ export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style }: 
     const realtimeStatus = useRealtimeStatus();
     const realtimeMode = useRealtimeMode();
     const armedSessionId = useVoiceArmedSessionId();
+    const wakeOnSound = useSetting('voiceWakeOnSound');
 
     if (realtimeStatus === 'disconnected' && armedSessionId === null) {
         return null;
@@ -50,7 +51,7 @@ export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style }: 
             break;
         default:
             color = theme.colors.status.default;
-            text = t('voice.statusArmed'); hint = t('voice.tapToTalk');
+            text = t('voice.statusArmed'); hint = wakeOnSound ? t('voice.listeningHint') : t('voice.tapToTalk');
     }
 
     const handlePress = () => {

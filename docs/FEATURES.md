@@ -170,7 +170,10 @@ ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
   billed) ↔ LIVE (conversation open). Idle hang-up after
   `voiceIdleTimeoutSec` of silence; session events (turn ended, held
   approval, `<joy-options>` question) wake an armed voice when
-  `voiceWakeOnEvents` is on. The spoken transcript survives hang-ups and is
+  `voiceWakeOnEvents` is on; a local sound-level detector
+  (`realtime/soundWake.ts`, expo-audio metering natively / AnalyserNode on
+  web, foreground only) reconnects on speech-like sound when
+  `voiceWakeOnSound` is on. The spoken transcript survives hang-ups and is
   replayed on reconnect (continuation prompt); × on the voice bar disarms.
 - Context feed (`realtime/hooks/voiceHooks.ts`): focus changes and new
   messages are silent contextual updates; turn end, approvals and questions

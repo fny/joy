@@ -56,6 +56,7 @@ export const SettingsSchema = z.object({
     })).describe('Voice agents the user added: a public agent id alone, or a private one with its API key'),
     voiceActiveAgentId: z.string().nullable().describe('Which voice agent to use (id from voiceAgents)'),
     voiceWakeOnEvents: z.boolean().describe('While voice is armed, session events (turn ended, approval, question) reconnect and speak'),
+    voiceWakeOnSound: z.boolean().describe('While voice is idle and the app is in the foreground, listen locally and reconnect when speech-like sound is heard'),
     voiceIdleTimeoutSec: z.number().describe('Seconds of silence before an open voice conversation hangs up (stays armed); 0 = never'),
     dismissedCLIWarnings: z.object({
         perMachine: z.record(z.string(), z.object({
@@ -125,6 +126,7 @@ export const settingsDefaults: Settings = {
     voiceAgents: [],
     voiceActiveAgentId: null,
     voiceWakeOnEvents: true,
+    voiceWakeOnSound: true,
     voiceIdleTimeoutSec: 45,
     agentDefaultOverrides: {},
     dismissedCLIWarnings: { perMachine: {}, global: {} },

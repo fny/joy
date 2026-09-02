@@ -39,10 +39,13 @@ export function buildVoiceSystemPrompt(options: {
     return sections.join('\n\n');
 }
 
-export function buildVoiceFirstMessage(options: { isContinuation: boolean; silentWake: boolean }): string {
+export function buildVoiceFirstMessage(options: { isContinuation: boolean; silentWake: boolean; soundWake: boolean }): string {
     // An event-driven wake must not greet: the pending update is sent as a
     // user message right after connect and the agent answers THAT.
     if (options.silentWake) return '';
+    // Woken by the user's voice: the first second of what they said was
+    // lost to the connect, so ask for it briefly.
+    if (options.soundWake) return 'Yes?';
     if (options.isContinuation) return 'Go on.';
     return 'Hi, Joy here.';
 }

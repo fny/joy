@@ -9,6 +9,10 @@
 //             hang-up and is replayed on the next connect, so the agent keeps
 //             the thread.
 //
+//   IDLE listening — while ARMED and in the foreground, a local sound
+//             detector (soundWake.ts) reopens the conversation when it hears
+//             speech-like sound, so no tap is needed.
+//
 // Ending voice from the status bar disarms: clears the transcript, no wakes.
 import type { VoiceSession } from './types';
 import { Modal } from '@/modal';
@@ -19,6 +23,8 @@ import { buildVoiceFirstMessage, buildVoiceSystemPrompt } from './voiceSystemPro
 import { clearVoiceTranscript, getRecentVoiceTranscript, hasVoiceTranscript } from './voiceTranscript';
 import { activeVoiceAgent, mintConversationToken } from './elevenLabs';
 import { flushPendingPrompts, hasPendingPrompts, voiceHooks } from './hooks/voiceHooks';
+import { startSoundWake, stopSoundWake } from './soundWake';
+import { AppState } from 'react-native';
 
 let voiceSession: VoiceSession | null = null;
 let currentSessionId: string | null = null;
@@ -77,7 +83,7 @@ function onIdleTimer(): void {
     void hangUp();
 }
 
-type ConnectOptions = { silentWake?: boolean };
+type ConnectOptions = { silentWake?: boolean; soundWake?: boolean };
 
 /**
  * Arm voice for `sessionId` and open a conversation. `silentWake` is the
@@ -102,6 +108,8 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
     intentionalStop = false;
     connecting = true;
     storage.getState().setRealtimeStatus('connecting');
+    // The SDK needs the microphone to itself.
+    await stopSoundWake();
 
     try {
         const perm = await requestMicrophonePermission();
@@ -117,7 +125,7 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
             isContinuation,
             voiceTranscript: isContinuation ? getRecentVoiceTranscript() : null,
         });
-        const firstMessage = buildVoiceFirstMessage({ isContinuation, silentWake: silent });
+        const firstMessage = buildVoiceFirstMessage({ isContinuation, silentWake: silent, soundWake: opts.soundWake === true });
 
         let conversationToken: string | undefined;
         if (agent.apiKey) {
@@ -136,11 +144,33 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
         if (!silent) {
             Modal.alert(t('common.error'), t('voice.startFailed', { reason: error instanceof Error ? error.message : String(error) }));
         }
+        maybeListenWhileIdle();
         return false;
     } finally {
         connecting = false;
     }
 }
+
+/** While armed, hung up and in the foreground, listen locally for speech and
+ *  reconnect on it. No-op when the setting is off or a connection is up. */
+export function maybeListenWhileIdle(): void {
+    const s = storage.getState();
+    if (s.voiceArmedSessionId === null || !s.settings.voiceWakeOnSound) return;
+    if (connecting || status() !== 'disconnected') return;
+    if (AppState.currentState !== 'active') return;
+    void startSoundWake(() => {
+        const sid = currentSessionId ?? storage.getState().voiceArmedSessionId;
+        if (!sid || isVoiceConnected() || connecting) return;
+        console.log('[voice] sound wake');
+        void startVoice(sid, { soundWake: true });
+    });
+}
+
+// Foreground/background: the mic is only ours while the app is up front.
+AppState.addEventListener('change', (state) => {
+    if (state === 'active') maybeListenWhileIdle();
+    else if (!isVoiceConnected()) void stopSoundWake();
+});
 
 /** Close the conversation but stay armed: events keep waking it. */
 export async function hangUp(): Promise<void> {
@@ -148,15 +178,18 @@ export async function hangUp(): Promise<void> {
     clearReconnectTimer();
     clearIdleTimer();
     reconnectAttempts = 0;
-    if (!voiceSession) return;
-    try { await voiceSession.endSession(); } catch (e) { console.error('[voice] hang up failed:', e); }
+    if (voiceSession) {
+        try { await voiceSession.endSession(); } catch (e) { console.error('[voice] hang up failed:', e); }
+    }
     connectedAt = null;
+    maybeListenWhileIdle();
 }
 
 /** Turn voice off: disconnect, disarm, forget the transcript. */
 export async function endVoice(): Promise<void> {
-    await hangUp();
     storage.getState().setVoiceArmedSessionId(null);
+    await hangUp();
+    await stopSoundWake();
     clearVoiceTranscript();
     voiceHooks.onVoiceStopped();
     currentSessionId = null;
@@ -191,9 +224,10 @@ export function notifyVoiceUnexpectedDisconnect(): void {
     const sessionId = currentSessionId;
     if (!sessionId) return;
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.warn('[voice] reconnect budget exhausted — staying armed, waiting for the next event or tap');
+        console.warn('[voice] reconnect budget exhausted — staying armed, waiting for sound, an event or a tap');
         clearReconnectTimer();
         reconnectAttempts = 0;
+        maybeListenWhileIdle();
         return;
     }
     const attempt = reconnectAttempts++;
