@@ -69,9 +69,6 @@ importers:
       '@stablelib/blake2s':
         specifier: ^2.0.1
         version: 2.0.1
-      '@stablelib/chacha20poly1305':
-        specifier: ^2.0.1
-        version: 2.0.1
       '@tauri-apps/api':
         specifier: 2.9.1
         version: 2.9.1
@@ -2149,23 +2146,11 @@ packages:
   '@sinonjs/fake-timers@10.3.0':
     resolution: {integrity: sha512-V4BG07kuYSUkTCSBHG8G8TNhM+F19jXFWnQtzj+we8DrkpSBCee9Z3Ms8yiGer/dlmhe35/Xdgyo3/0rQKg7YA==}
 
-  '@stablelib/aead@2.0.0':
-    resolution: {integrity: sha512-U/RMANRxbT/ahIpYsPSiFwDFNjADHdnCFfmo09MO1ai2XmerPAOPtMl0qmX7XVvygnACC6ijKDyHBoT2rGyElg==}
-
   '@stablelib/binary@2.0.1':
     resolution: {integrity: sha512-U9iAO8lXgEDONsA0zPPSgcf3HUBNAqHiJmSHgZz62OvC3Hi2Bhc5kTnQ3S1/L+sthDTHtCMhcEiklmIly6uQ3w==}
 
   '@stablelib/blake2s@2.0.1':
     resolution: {integrity: sha512-tEIp6yEq/3Ue7D21xy8+zhv/6G3gruZOCctgtVeVYCuqRDFWFRIDZH+8Pb0f4Wk/VwfkDlG1V4yaB6WjkzrdRw==}
-
-  '@stablelib/chacha20poly1305@2.0.1':
-    resolution: {integrity: sha512-kOoBsXbDPVRlelzXl+5WViycgM19lD7lF3Bc3KWI+DzId0Stc2HlxAfSc+Xpn3RgqSCl1ZNTXr33LegqBhBBaw==}
-
-  '@stablelib/chacha@2.0.1':
-    resolution: {integrity: sha512-lS1FqtNqofxe2vLkRsLli2m3x/XanUyAYRphLhdHumKeIsLbjbCXdCq3Pf/eWiO7G3QlSG5ViqnoVjktzfLWMg==}
-
-  '@stablelib/constant-time@2.0.1':
-    resolution: {integrity: sha512-0NWPogffRm+UWBH0+iM5otZmNrVe5OHFIvyoNIVankMAYOQzMwcdVALOVPrB5Ho0dST+Oc3H8/hPh65Z8R/uew==}
 
   '@stablelib/hash@2.0.0':
     resolution: {integrity: sha512-u3WPSqGido8lwJuMcrBgM5K54LrPGhkWAdtsyccf7dGsLixAZUds77zOAbu7bvKPwQlmoByH0txBi5rTmEKuHg==}
@@ -2175,9 +2160,6 @@ packages:
 
   '@stablelib/int@2.0.1':
     resolution: {integrity: sha512-Ht63fQp3wz/F8U4AlXEPb7hfJOIILs8Lq55jgtD7KueWtyjhVuzcsGLSTAWtZs3XJDZYdF1WcSKn+kBtbzupww==}
-
-  '@stablelib/poly1305@2.0.1':
-    resolution: {integrity: sha512-D8xfZcL/5zeVARJ9I2fZOUCnZvsJx8G4JDQvD+ecsnaCildPtqZDwqqjtOc4cfHAdScrMjOzUVsssjXUTBw3YQ==}
 
   '@stablelib/wipe@2.0.1':
     resolution: {integrity: sha512-1eU2K9EgOcV4qc9jcP6G72xxZxEm5PfeI5H55l08W95b4oRJaqhmlWRc4xZAm6IVSKhVNxMi66V67hCzzuMTAg==}
@@ -8488,8 +8470,6 @@ snapshots:
     dependencies:
       '@sinonjs/commons': 3.0.1
 
-  '@stablelib/aead@2.0.0': {}
-
   '@stablelib/binary@2.0.1':
     dependencies:
       '@stablelib/int': 2.0.1
@@ -8500,32 +8480,11 @@ snapshots:
       '@stablelib/hash': 2.0.0
       '@stablelib/wipe': 2.0.1
 
-  '@stablelib/chacha20poly1305@2.0.1':
-    dependencies:
-      '@stablelib/aead': 2.0.0
-      '@stablelib/binary': 2.0.1
-      '@stablelib/chacha': 2.0.1
-      '@stablelib/constant-time': 2.0.1
-      '@stablelib/poly1305': 2.0.1
-      '@stablelib/wipe': 2.0.1
-
-  '@stablelib/chacha@2.0.1':
-    dependencies:
-      '@stablelib/binary': 2.0.1
-      '@stablelib/wipe': 2.0.1
-
-  '@stablelib/constant-time@2.0.1': {}
-
   '@stablelib/hash@2.0.0': {}
 
   '@stablelib/hex@2.0.1': {}
 
   '@stablelib/int@2.0.1': {}
-
-  '@stablelib/poly1305@2.0.1':
-    dependencies:
-      '@stablelib/constant-time': 2.0.1
-      '@stablelib/wipe': 2.0.1
 
   '@stablelib/wipe@2.0.1': {}
 

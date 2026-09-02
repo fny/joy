@@ -1,8 +1,8 @@
 // Client half of the tunnel: seal an HTTP request, POST it to the relay's
 // /joy/v2/machines/{machineId}/http, unseal the streamed response. This is
 // what `joy --machine <id>` will use, and the reference implementation for
-// the app's version (libsodium crypto_aead_chacha20poly1305_ietf pairs with
-// the node:crypto AEAD in sealedStream.ts).
+// the app's version (libsodium crypto_secretbox_easy on both ends — see
+// sealedStream.ts for why secretbox).
 import { deriveTunnelKey } from "./sealedStream";
 import { sealRequest, StreamingOpen, concatAll, type ResponseHead } from "./wire";
 

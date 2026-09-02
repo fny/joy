@@ -1,7 +1,7 @@
 # Sep 2 (5) — Sending from the phone works again
 
 - **Messages send from iOS and Android.** Sealing a message used a text helper the native crypto module does not provide, so every send from a phone failed with "undefined is not a function" while reading worked. Desktop and web were unaffected.
-- **Terminal, usage, files and git work from the phone.** The sealed tunnel to your machine used a cipher the native crypto module only ships in a different variant, so those screens failed the same way on iOS and Android. The tunnel now uses a portable implementation of the same cipher; nothing changes on the wire or on the daemon.
+- **Terminal, usage, files and git work from the phone.** The sealed tunnel to your machine used a cipher the native crypto module does not ship, so those screens failed the same way on iOS and Android. The tunnel now seals frames with libsodium's secretbox, which is native on the phone. *Needs the updated daemon: old and new tunnels cannot talk to each other.*
 
 # Sep 2 (4) — Tool cards are back
 

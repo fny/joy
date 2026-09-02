@@ -4,19 +4,20 @@
  * through the relay, which forwards opaque frames and can read nothing.
  *
  * Wire protocol mirrors packages/joy-daemon/src/tunnel/{sealedStream,wire}.ts:
- *   stream       : streamId(16) ‖ frames[ len(u32 BE) ‖ ciphertext+tag16 ]
+ *   stream       : streamId(16) ‖ frames[ len(u32 BE) ‖ secretbox(plain) ]
  *   frame plain  : tagByte(0=MSG,1=FINAL) ‖ chunk           (chunk ≤ 128KB)
  *   request      : frame0 = JSON { m, p, h }, then body frames
  *   response     : frame0 = JSON { s, h }, then body frames
- *   AEAD         : ChaCha20-Poly1305 (IETF, 12-byte nonce = counter u64 BE
- *                  in the low 8 bytes) under a per-stream subkey
- *                  HMAC-SHA512(tunnelKey, "stream" ‖ streamId)[0..32]
+ *   AEAD         : libsodium secretbox (XSalsa20-Poly1305, 24-byte nonce =
+ *                  counter u64 BE in the low 8 bytes) under a per-stream
+ *                  subkey HMAC-SHA512(tunnelKey, "stream" ‖ streamId)[0..32].
+ *                  secretbox because it is what the NATIVE libsodium module
+ *                  ships on iOS/Android (no IETF ChaCha20-Poly1305 there).
  *   tunnel key   : deriveKey(masterSecret, 'Joy Tunnel', [machineId]) — the
  *                  SAME key-tree shape the daemon computes, so neither end
  *                  ever transmits it and the relay never holds it.
  */
 import sodium from '@/encryption/libsodium.lib';
-import { ChaCha20Poly1305 } from '@stablelib/chacha20poly1305';
 import { hmac_sha512 } from '@/encryption/hmac_sha512';
 import { deriveKey } from '@/encryption/deriveKey';
 
@@ -47,8 +48,8 @@ async function streamKey(tunnelKey: Uint8Array, streamId: Uint8Array): Promise<U
 }
 
 function nonceFor(counter: bigint): Uint8Array {
-    const n = new Uint8Array(12);
-    new DataView(n.buffer).setBigUint64(4, counter, false); // big-endian, low 8 bytes
+    const n = new Uint8Array(24);
+    new DataView(n.buffer).setBigUint64(16, counter, false); // big-endian, low 8 bytes
     return n;
 }
 
@@ -63,7 +64,6 @@ function concat(parts: Uint8Array[]): Uint8Array {
 async function sealRequest(tunnelKey: Uint8Array, head: unknown, body: Uint8Array): Promise<Uint8Array> {
     const streamId = sodium.randombytes_buf(16);
     const key = await streamKey(tunnelKey, streamId);
-    const aead = new ChaCha20Poly1305(key);
     const parts: Uint8Array[] = [streamId];
     let counter = 0n;
 
@@ -71,11 +71,7 @@ async function sealRequest(tunnelKey: Uint8Array, head: unknown, body: Uint8Arra
         const tagged = new Uint8Array(1 + plain.length);
         tagged[0] = final ? TAG_FINAL : TAG_MESSAGE;
         tagged.set(plain, 1);
-        // Pure-JS ChaCha20-Poly1305 (IETF): the native libsodium module only
-        // ships the XChaCha variant, so sodium.crypto_aead_chacha20poly1305_ietf_*
-        // is "undefined is not a function" on iOS/Android. Same wire as the
-        // daemon's node:crypto 'chacha20-poly1305' (pinned by tunnel.interop.test).
-        const ct = aead.seal(nonceFor(counter), tagged);
+        const ct = sodium.crypto_secretbox_easy(tagged, nonceFor(counter), key);
         counter += 1n;
         const frame = new Uint8Array(4 + ct.length);
         new DataView(frame.buffer).setUint32(0, ct.length, false);
@@ -97,7 +93,6 @@ async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise
     if (wire.length < 16) throw new TunnelError(502, 'short_stream');
     const streamId = wire.subarray(0, 16);
     const key = await streamKey(tunnelKey, streamId);
-    const aead = new ChaCha20Poly1305(key);
     let off = 16;
     let counter = 0n;
     let head: T | null = null;
@@ -110,8 +105,12 @@ async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise
         if (off + len > wire.length) throw new TunnelError(502, 'truncated_frame');
         const ct = wire.subarray(off, off + len);
         off += len;
-        const plain = aead.open(nonceFor(counter), ct);
-        if (!plain) throw new TunnelError(502, 'tamper');
+        let plain: Uint8Array;
+        try {
+            plain = sodium.crypto_secretbox_open_easy(ct, nonceFor(counter), key);
+        } catch {
+            throw new TunnelError(502, 'tamper');
+        }
         counter += 1n;
         const final = plain[0] === TAG_FINAL;
         const chunk = plain.subarray(1);
