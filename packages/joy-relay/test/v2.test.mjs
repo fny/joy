@@ -272,6 +272,22 @@ describe('v2 send idempotency', () => {
   });
 });
 
+describe('v2 session key re-envelope', () => {
+  it('the owning daemon can replace sessionKeyEnvelope via PATCH; others cannot', async () => {
+    const d = makeDaemon('mach-reenv');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    await d.bind(sessionId, { localSessionId: 'w1', sessionKeyEnvelope: 'v2sk1:old' });
+    const r = await call('PATCH', `/joy/v2/daemon/sessions/${sessionId}`, { body: { sessionKeyEnvelope: 'v2sk1:new' }, headers: d.headers() });
+    expect(r.status).toBe(200);
+    const row = (await call('GET', '/joy/v2/sessions')).json.sessions.find((s) => s.sessionId === sessionId);
+    expect(row.sessionKeyEnvelope).toBe('v2sk1:new');
+    const other = makeDaemon('mach-reenv-other'); await other.acquire();
+    expect((await call('PATCH', `/joy/v2/daemon/sessions/${sessionId}`, { body: { sessionKeyEnvelope: 'v2sk1:evil' }, headers: other.headers() })).status).toBe(403);
+    expect((await call('PATCH', `/joy/v2/daemon/sessions/${sessionId}`, { body: { sessionKeyEnvelope: 5 }, headers: d.headers() })).status).toBe(400);
+  });
+});
+
 describe('v2 session-scoped output facts', () => {
   it('lease-fenced, replay-idempotent, visible in the event log with no turn', async () => {
     const d = makeDaemon('mach-sfact');

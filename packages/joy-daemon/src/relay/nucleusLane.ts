@@ -389,6 +389,19 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         : "v2:plaintext";
       sess.setV2Link?.({ sessionId: s.sessionId, relay: relayUrl, keyEnvelope: envelope });
       wireCardPublisher(s.localSessionId, s.sessionId);
+      // The app takes the session key from the relay ROW, not the card, so
+      // persist the fresh envelope there too. Without the account private
+      // key the lane cannot tell whether the stored one is still openable,
+      // so it re-stamps every bound session once per boot — idempotent, and
+      // the only thing that keeps existing sessions readable after the
+      // account content key rotates.
+      if (envelope.startsWith("v2sk1:") && lease) {
+        try {
+          await api("PATCH", `/daemon/sessions/${s.sessionId}`, { sessionKeyEnvelope: envelope }, lease);
+        } catch (e) {
+          log(`re-envelope ${s.sessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
+        }
+      }
     }
 
     await reconcileOrphans(r.sessions ?? []);
