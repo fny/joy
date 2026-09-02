@@ -75,8 +75,6 @@ to another session is visible in the app.
 - [x] **Gating with attribution:** any session may receive a `joy-message`
       (the human sees who sent it); answering approvals for a session you
       don't drive stays gated.
-- [ ] **Remote sessions** later: `joy --machine <id> …` over the relay
-      tunnel (`client.ts` already speaks it).
 
 ## Environment store (replaces plaintext ~/.joy/env)
 
