@@ -106,3 +106,47 @@ describe('parseMarkdownBlock - table parsing', () => {
         expect(textBlocks).toHaveLength(1);
     });
 });
+
+describe('parseMarkdownBlock - joy tags', () => {
+
+    it('parses an options block into tappable option items', () => {
+        const md = [
+            'Pick one.',
+            '',
+            '<joy-options>',
+            '<joy-option>Alpha</joy-option>',
+            '<joy-option>Beta</joy-option>',
+            '</joy-options>',
+        ].join('\n');
+
+        const blocks = parseMarkdown(md);
+        const options = blocks.filter(b => b.type === 'options');
+        expect(options).toHaveLength(1);
+        expect(options[0]).toEqual({ type: 'options', items: ['Alpha', 'Beta'] });
+        // No raw tag text survives as a paragraph.
+        expect(JSON.stringify(blocks)).not.toContain('joy-option>');
+    });
+
+    it('parses an options block that follows another joy control tag', () => {
+        const md = [
+            'Done.',
+            '',
+            '<joy-title value="Some work" />',
+            '',
+            '<joy-options>',
+            '<joy-option>Ship it</joy-option>',
+            '</joy-options>',
+        ].join('\n');
+
+        const blocks = parseMarkdown(md);
+        expect(blocks.filter(b => b.type === 'options')).toEqual([
+            { type: 'options', items: ['Ship it'] },
+        ]);
+    });
+
+    it('still drops other joy control tags on their own line', () => {
+        const md = 'Started.\n\n<joy-bg id="abc" long-running label="Dev server" />\n\nWatching.';
+        const blocks = parseMarkdown(md);
+        expect(JSON.stringify(blocks)).not.toContain('joy-bg');
+    });
+});
