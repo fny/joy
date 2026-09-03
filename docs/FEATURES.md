@@ -83,6 +83,15 @@ every relay; machines register per account.
 - Markdown + tool cards; tool cards collapse individually (chevron) and
   globally (header top-left collapse-all button, `useToolsCollapsed`).
 - Code diffs render with a `Diff +N −M` toggle row (Edit/Write/MultiEdit).
+- Background task counters (`joy__tasks`/`joy__agents`) age out a launch with no
+  completion after `BG_LAUNCH_TTL_MS` (6h) — a lost `<task-notification>` used
+  to pin the count forever AND suppress the session's turn-done push.
+- One "done" push per turn id (`#notifiedTurns`); a re-read transcript entry
+  used to fire the notification again.
+- A CLI slash command (`/effort`, `/model`, …) takes no thinking lease
+  (`takesThinkingLease`) and a visible dialog clears it outright — both kept
+  `busy()` true for a prompt that never generates, holding the relay turn open
+  and queueing everything behind it.
 - Compaction summaries arrive as a collapsed "Compaction summary" card
   (previously dropped entirely). The daemon flags the mirrored transcript entry
   with `isCompactSummary`; without the flag it renders as a plain user bubble.
@@ -117,6 +126,10 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 - Session info → **Reload Chat** drops one session's local messages, reducer
   state and cursors and refetches (`sync.resetSessionChatState`); use it when
   history renders empty.
+- The connection indicator reflects the RELAY POLL (`noteRelayReadOk` off the
+  `fetchSessions` request), not the SSE doorbell — SSE needs a streaming fetch
+  body React Native does not have, so on phones it never opens and the dot read
+  "connecting" forever. SSE remains a pure latency win on web/desktop.
 
 ## Usage & limits
 

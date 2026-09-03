@@ -169,6 +169,22 @@ const JOY_COMMANDS = new Set(["steer", "btw", "title", "login-code", "joy-prompt
  * (`/compact`, project commands, …) returns null and passes straight through to Claude
  * untouched. Returns the lowercased name + remaining args, or null.
  */
+/**
+ * Does a submitted prompt earn the thinking LEASE (the window in which the
+ * pane's "not generating" read is not allowed to clear thinking)?
+ *
+ * The lease exists for one failure: a long PRE-OUTPUT think, where a broken
+ * pane matcher read idle six seconds into a minutes-long turn. A CLI slash
+ * command is never that — /effort and /model open a picker, /status and
+ * /context print and return — and none of them generate. Holding the pane off
+ * for the full lease pinned busy() true, so the lane's Phase C never saw an
+ * idle poll and the relay turn stayed open with every later message queued
+ * behind it (`/effort high` wedged a session for 60s, 2026-09-03).
+ */
+export function takesThinkingLease(prompt: string | null | undefined): boolean {
+  return !(prompt ?? "").trimStart().startsWith("/");
+}
+
 export function parseJoyCommand(text: string): { name: string; args: string } | null {
   const m = /^\/([a-zA-Z][\w-]*)[ \t]*([\s\S]*)$/.exec(text);
   if (!m) return null;
@@ -369,10 +385,37 @@ export function joyBgLongRunningIds(entry: any): string[] {
  * front, so a launch is classified correctly even when its tag lands later.
  */
 export interface BgGroup { outstanding: Set<string>; total: number; done: number; }
+
+/** A launch (optionally timestamped) or a completion. */
+export type BgEvent =
+  | { kind: "launch"; id: string; source: "agent" | "shell"; atMs?: number }
+  | { kind: "complete"; id: string };
+
+/**
+ * How long a launch may sit with no completion before it stops being counted.
+ * A background agent or shell that has been "running" for six hours is not
+ * running: its completion notification was lost (a compaction that dropped the
+ * <task-notification>, a daemon restart mid-flight, an interrupted turn). The
+ * derivation reads the WHOLE transcript, so without a bound one lost
+ * notification pins the counter for the life of the session — and a stuck
+ * count also suppresses the turn-done push ("done push skipped (bgTasks=1)").
+ * One such launch from 2026-09-02 held a session at "agents 0/1" for 30 hours.
+ */
+export const BG_LAUNCH_TTL_MS = 6 * 60 * 60_000;
+
 export function classifyBgTasks(
-  events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }>,
+  events: BgEvent[],
   lrIds: Set<string>,
+  nowMs: number = Date.now(),
 ): { shell: BgGroup; agent: BgGroup; longRunning: Set<string>; outstanding: Set<string>; total: number; done: number } {
+  // Drop launches that aged out with no completion BEFORE classifying, so the
+  // per-group batch accounting in step() never sees them. Un-timestamped
+  // launches (live-tail events from before this ran) never age out.
+  const completed = new Set(events.filter((e) => e.kind === "complete").map((e) => e.id));
+  events = events.filter((e) => !(
+    e.kind === "launch" && e.atMs !== undefined
+    && !completed.has(e.id) && nowMs - e.atMs > BG_LAUNCH_TTL_MS
+  ));
   const shell: BgGroup = { outstanding: new Set(), total: 0, done: 0 };
   const agent: BgGroup = { outstanding: new Set(), total: 0, done: 0 };
   const longRunning = new Set<string>();
@@ -536,7 +579,7 @@ export class Session {
   // #deriveBgTasks for semantics (append-only parse from a byte offset).
   #scan: {
     path: string; offset: number;
-    events: Array<{ kind: "launch"; id: string; source: "agent" | "shell" } | { kind: "complete"; id: string }>;
+    events: BgEvent[];
     lrIds: Set<string>;
     lastGoal: { condition: string; met: boolean; atMs: number } | null;
   } | null = null;
@@ -551,6 +594,9 @@ export class Session {
   // Last pushed {tasks, longRunning} as a string key — dedups reconcile pushes by
   // DESIRED state (not this.metadata, which can lag a pending write and drop a clear).
   #lastBgKey: string | null = null;
+  // Turn ids that already fired a "done" push — one notification per turn, no
+  // matter how many times its transcript entry is re-read (replay, backfill).
+  #notifiedTurns = new Set<string>();
   // Coalesces task-count pushes (see #scheduleTaskReconcile). Transcript backfill on recovery
   // replays a whole batch's launches+completions in milliseconds — pushing each
   // (0/3,1/3,2/3,null) as a separate metadata RPC let an intermediate value win
@@ -2696,7 +2742,11 @@ export class Session {
               let entry: unknown;
               try { entry = JSON.parse(line); } catch { continue; }
               const ev = bgTaskEvent(entry);
-              if (ev) scan.events.push(ev);
+              // Stamp launches so a completion that never arrives can age out
+              // (see classifyBgTasks) instead of pinning the counter forever.
+              if (ev) scan.events.push(ev.kind === "launch"
+                ? { ...ev, atMs: Date.parse(String((entry as { timestamp?: string }).timestamp || "")) || Date.now() }
+                : ev);
               for (const id of joyBgLongRunningIds(entry)) scan.lrIds.add(id);
               const g = goalStatusFromEntry(entry);
               if (g) {
@@ -2836,9 +2886,11 @@ export class Session {
         // dispatch confirms delivery outright — no echo-timeout heuristics,
         // no confirm-on-foreign-turn races.
         this.#setThinking(true);
-        this.#thinkingLeaseUntil = Date.now() + Session.#THINKING_LEASE_MS; // trusted edge — pane can't clear
-        this.#idlePolls = 0;
         const prompt = str("prompt");
+        // Trusted edge — the pane can't clear it. See takesThinkingLease for
+        // why a slash command is exempt.
+        this.#thinkingLeaseUntil = takesThinkingLease(prompt) ? Date.now() + Session.#THINKING_LEASE_MS : 0;
+        this.#idlePolls = 0;
         if (prompt && this.#dispatchInFlight
           && flattenForMatch(prompt) === flattenForMatch(this.#dispatchInFlight.text)) {
           process.stderr.write(`[hook] ${this.id} UserPromptSubmit confirmed dispatch\n`);
@@ -2989,6 +3041,18 @@ export class Session {
 
   #reconcileDialog(paneText: string): void {
     const dialog = dialogFromPane(paneText);
+    if (dialog) {
+      // A dialog on screen is PROOF Claude is waiting for input, not
+      // generating — the strongest negative edge the pane can give. Without
+      // this the submit's thinking lease (170s, pane may not clear it) kept
+      // busy() true for a command that never generates anything, the lane's
+      // Phase C never saw an idle poll, and the relay turn stayed open with
+      // every later message queued behind it. `/effort high` wedged a session
+      // for a full minute — rescued only by Claude's 60s "waiting for your
+      // input" hook — and `/model` did the same (2026-09-03).
+      this.#thinkingLeaseUntil = 0;
+      if (this.#thinking) this.#setThinking(false);
+    }
     if (!dialog) {
       this.#dialogPendingKey = null;
       this.#dialogObservedKey = null;
@@ -3579,6 +3643,7 @@ export class Session {
         // normal completion; tool_use = more tool calls pending (no turn-end yet).
         const stopReason = String(msg.stop_reason || "");
         if (stopReason === "end_turn" || stopReason === "max_tokens") {
+          const endedTurnId = this.#turn.turnId;
           this.#errorNotedThisTurn = false;
           this.#closeOpenTools(entryTimeMs); // safety: any tool without a result
           this.#relay.send(encodeTurnEnd("completed", { turn: this.#turn.turnId, time: entryTimeMs, usage: this.#turnUsage ?? undefined }));
@@ -3624,7 +3689,20 @@ export class Session {
                 if (line) { snippet = line.trim().slice(0, 140); break; }
               }
             }
-            this.#relay?.notify("done", snippet);
+            // ONE done push per turn. The phone was buzzing two and three times
+            // for a single turn end (fny journal, 2026-09-03: three identical
+            // "push done sent for 8f7c8f88" inside the same second) — a
+            // transcript entry re-read on a replay/backfill re-runs this whole
+            // branch, and nothing downstream deduped it.
+            if (this.#notifiedTurns.has(endedTurnId)) {
+              process.stderr.write(`[notify] ${this.id}: done push already sent for turn ${endedTurnId.slice(0, 8)}\n`);
+            } else {
+              this.#notifiedTurns.add(endedTurnId);
+              if (this.#notifiedTurns.size > 200) {
+                for (const t of this.#notifiedTurns) { this.#notifiedTurns.delete(t); if (this.#notifiedTurns.size <= 150) break; }
+              }
+              this.#relay?.notify("done", snippet);
+            }
           } else {
             // Diagnosable, not silent: "why didn't I get a push" was previously
             // unanswerable from logs.

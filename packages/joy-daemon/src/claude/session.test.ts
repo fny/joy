@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, trustPromptKeys } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, takesThinkingLease, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -1295,4 +1295,48 @@ test("trustPromptKeys: numbered menus select by digit", () => {
 test("trustPromptKeys: null until the options paint (never guesses)", () => {
   expect(trustPromptKeys(" Quick safety check: Is this a project you trust?")).toBeNull();
   expect(trustPromptKeys("")).toBeNull();
+});
+
+test("takesThinkingLease: real prompts hold the pane off, slash commands do not", () => {
+  expect(takesThinkingLease("write me a function")).toBe(true);
+  expect(takesThinkingLease("  think hard about /effort")).toBe(true); // a / mid-prompt is not a command
+  // These generate nothing — a 170s lease pins busy() and holds the relay turn.
+  expect(takesThinkingLease("/effort high")).toBe(false);
+  expect(takesThinkingLease("/model opus")).toBe(false);
+  expect(takesThinkingLease("  /status")).toBe(false);
+  // No prompt on the hook: keep the old, safe behaviour and take the lease —
+  // an unknown submit is far more likely a real turn than a slash command.
+  expect(takesThinkingLease(null)).toBe(true);
+  expect(takesThinkingLease(undefined)).toBe(true);
+});
+
+test("classifyBgTasks: a launch that never completed ages out of the counter", () => {
+  const now = Date.now();
+  const stale = now - BG_LAUNCH_TTL_MS - 60_000;
+  const events: any[] = [
+    { kind: "launch", id: "agent-lost", source: "agent", atMs: stale }, // notification never arrived
+    { kind: "launch", id: "agent-live", source: "agent", atMs: now - 30_000 },
+  ];
+  const r = classifyBgTasks(events, new Set(), now);
+  expect([...r.agent.outstanding]).toEqual(["agent-live"]);
+  expect(r.agent.total).toBe(1);
+  expect(r.outstanding.size).toBe(1);
+});
+
+test("classifyBgTasks: an OLD launch that did complete still counts as done", () => {
+  const now = Date.now();
+  const stale = now - BG_LAUNCH_TTL_MS - 60_000;
+  const r = classifyBgTasks([
+    { kind: "launch", id: "bg-1", source: "shell", atMs: stale },
+    { kind: "complete", id: "bg-1" },
+  ], new Set(), now);
+  expect(r.shell.done).toBe(1);
+  expect(r.shell.total).toBe(1);
+  expect(r.outstanding.size).toBe(0);
+});
+
+test("classifyBgTasks: un-timestamped launches never age out", () => {
+  const now = Date.now();
+  const r = classifyBgTasks([{ kind: "launch", id: "bg-x", source: "shell" }], new Set(), now);
+  expect(r.outstanding.has("bg-x")).toBe(true);
 });

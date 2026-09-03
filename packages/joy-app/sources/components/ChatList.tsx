@@ -117,13 +117,18 @@ const ListHeader = React.memo((props: { isLoadingOlder: boolean }) => {
     // Rendered at the visual top (ListHeaderComponent on the non-inverted
     // FlashList) — exactly where the "loading older messages" spinner belongs.
     // The spacer below keeps the nav header from clipping the oldest message.
+    //
+    // The spinner's slot is ALWAYS rendered, only its opacity changes. Mounting
+    // and unmounting it grew and shrank the header by its own height, and the
+    // header sits exactly where the user is heading when they scroll up — so
+    // every older page shifted the whole list down and back up again, once per
+    // fetch. That was the "scrolling jumps up and down as I scroll up" report
+    // (2026-09-03). A constant-height header cannot move the content below it.
     return (
         <View>
-            {props.isLoadingOlder && (
-                <View style={{ paddingVertical: 12, alignItems: 'center', justifyContent: 'center' }}>
-                    <ActivityIndicator size="small" />
-                </View>
-            )}
+            <View style={styles.loadingOlderSlot}>
+                <ActivityIndicator size="small" style={{ opacity: props.isLoadingOlder ? 1 : 0 }} />
+            </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', height: headerHeight + safeArea.top + 32 }} />
         </View>
     );
@@ -354,6 +359,17 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     }, []);
 
     const keyExtractor = useCallback((item: DisplayItem) => item.id, []);
+
+    // Recycling pools. Without this every row shape — a one-line user bubble, a
+    // long markdown answer, a tool group — shares ONE pool, so a recycled cell
+    // mounts at the previous row's height and corrects only after measuring.
+    // That correction is visible as jitter while scrolling. Splitting text rows
+    // by ROLE as well as by item type matters most: user bubbles and agent
+    // answers are the two extremes of the height range and recycled into each
+    // other constantly.
+    const getItemType = useCallback((item: DisplayItem) => (
+        item.type === 'message' ? `message:${item.message.kind === 'user-text' ? 'user' : 'agent'}` : item.type
+    ), []);
 
     const renderItem = useCallback(({ item }: { item: DisplayItem }) => {
         if (item.type === 'tool-group') {
@@ -692,6 +708,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 ref={flatListRef}
                 data={orderedItems}
                 keyExtractor={keyExtractor}
+                getItemType={getItemType}
                 maintainVisibleContentPosition={{
                     // startRenderingFromBottom: first paint starts at the bottom
                     // (newest) — the fast path; FlashList only mounts the visible
@@ -772,6 +789,12 @@ function isCollapsibleDisplayItem(item: DisplayItem): item is ToolGroupItem | Ex
 }
 
 const styles = StyleSheet.create((theme) => ({
+    // Constant height whether or not the spinner is showing — see ListHeader.
+    loadingOlderSlot: {
+        height: 36,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     scrollButtonContainer: {
         position: 'absolute',
         right: 12,

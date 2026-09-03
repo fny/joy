@@ -1,3 +1,11 @@
+# Sep 3 (6) — Scrolling, stuck states and the connection dot
+
+- **Scrolling up no longer jumps.** The "loading older messages" spinner was mounted and unmounted at the very top of the list, growing and shrinking the header by its own height once per page fetched — so the chat lurched down and back up exactly where you were scrolling. The spinner's slot is now always there. Rows are also recycled by type, which removes the jitter underneath.
+- **The connection dot tells the truth on phones.** It reported the state of a live stream that cannot open on iOS or Android at all, so it pulsed "connecting" forever while everything worked. It now reflects whether the app is actually reaching your machines.
+- **`/effort` and `/model` no longer wedge a session.** Sending a CLI command that opens a picker left the session marked busy for up to three minutes, with anything you sent after it queued behind. *Needs the updated daemon.*
+- **Background task counters unstick themselves.** A background agent whose completion was never recorded pinned the counter at "0/1" indefinitely — which also silently suppressed every turn-done notification for that session. Launches with no completion now age out. *Needs the updated daemon.*
+- **One notification per turn.** A single turn end could buzz your phone two or three times. *Needs the updated daemon.*
+
 # Sep 3 (5) — Notifications open the right session
 
 - **Tapping a notification opens the session again.** Every session push carried the daemon's own internal id instead of the relay id the app addresses sessions by, so every tap landed on "Session has been deleted". Pushes now deep-link correctly; a session the daemon has not finished binding sends no link at all rather than one that breaks. *Needs the updated daemon.*
