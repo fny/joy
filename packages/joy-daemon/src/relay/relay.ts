@@ -906,8 +906,18 @@ export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts
 
 // joyTime carries Claude's transcript timestamp so a replay burst keeps user
 // and agent rows on one clock (the app orders joy user messages by it).
-export function encodeUserMessage(text: string, timeMs?: number): WireRecord {
-  return { role: 'user', content: { type: 'text', text }, meta: { sentFrom: 'joy', joyTime: timeMs } };
+export function encodeUserMessage(
+  text: string,
+  timeMs?: number,
+  opts?: { isCompactSummary?: boolean },
+): WireRecord {
+  const content: { type: string; [k: string]: unknown } = { type: 'text', text };
+  // Post-compaction summary: Claude writes its continuation summary as a user
+  // transcript entry, and mirroring it plainly drops a wall of machine text into
+  // the chat as a user bubble. The flag makes the app render its collapsed
+  // "Compaction summary" card instead.
+  if (opts?.isCompactSummary) content.isCompactSummary = true;
+  return { role: 'user', content, meta: { sentFrom: 'joy', joyTime: timeMs } };
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────

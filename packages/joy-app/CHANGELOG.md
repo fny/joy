@@ -1,3 +1,8 @@
+# Sep 3 (4) — Compaction reads like a boundary, not a wall of text
+
+- **The post-compaction summary is a card, not a giant message.** When a Claude session runs out of context it writes a long continuation summary; the chat had been showing that whole thing as if you had typed it. It now collapses into a "Compaction summary" row you can open when you want it.
+- **The chat marks where compaction happened.** A quiet divider shows what triggered it, how long it took, and how much context came back — "Context compacted · 3m 3s · 385k → 17k" — so the gap in the conversation is explained instead of unexplained. *Needs the updated daemon.*
+
 # Sep 3 (3) — Tap-to-answer options work again
 
 - **Option chips render again.** A question with `<joy-options>` had been showing its raw tags as text since Jul 1 — a later change that hides joy control tags swallowed the opening tag, so the block was never recognised. Options are tappable chips again.

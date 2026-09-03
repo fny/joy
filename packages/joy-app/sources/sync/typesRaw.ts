@@ -440,6 +440,10 @@ const rawRecordSchema = z.preprocess(
                 type: z.literal('text'),
                 text: z.string(),
                 attachments: z.array(MessageAttachmentSchema).optional(),
+                // Post-compaction summary the daemon mirrors from the transcript.
+                // Without this field zod strips the flag and the summary renders
+                // as a wall-of-text user bubble instead of the collapsed card.
+                isCompactSummary: z.boolean().optional(),
             }),
             meta: MessageMetaSchema.optional()
         }),

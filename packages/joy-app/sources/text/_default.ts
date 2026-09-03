@@ -1034,6 +1034,7 @@ export const en = {
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Switched to ${mode} mode`,
         compactionSummary: 'Compaction summary',
+        contextCompacted: 'Context compacted',
         unknownEvent: 'Unknown event',
         usageLimitUntil: ({ time }: { time: string }) => `Usage limit reached until ${time}`,
         unknownTime: 'unknown time',

@@ -3235,6 +3235,22 @@ export class Session {
     // the authoritative COMPLETION signal). Clear the "compacting" status the
     // PreCompact hook set when it started.
     if (entryType === "system" && entry.subtype === "compact_boundary") {
+      // The boundary carries the only interesting facts about a compaction —
+      // what triggered it, how long it took, and how much context it recovered.
+      // Emit them as a marker the app renders as a divider; without it the only
+      // trace in the chat is the summary card, which says nothing about the run.
+      const cm = (entry.compactMetadata ?? {}) as Record<string, unknown>;
+      const num = (k: string) => (typeof cm[k] === "number" ? (cm[k] as number) : undefined);
+      const marker: Record<string, unknown> = {
+        trigger: cm.trigger === "manual" ? "manual" : "auto",
+        durationMs: num("durationMs"),
+        preTokens: num("preTokens"),
+        postTokens: num("postTokens"),
+      };
+      for (const k of Object.keys(marker)) if (marker[k] === undefined) delete marker[k];
+      if (this.#shouldEmitNote(entry, entryTimeMs)) {
+        this.#emitAgentNote(`<joy-compacted>${JSON.stringify(marker)}</joy-compacted>`, entryTimeMs, sid);
+      }
       this.#clearCompacting();
       return;
     }
@@ -3312,6 +3328,12 @@ export class Session {
         this.#maybeDrainQueue();
         return;
       }
+      // Post-compaction summary. Claude writes its continuation summary as a
+      // user entry, so without this it mirrors as a giant user bubble. Flag it
+      // and the app renders the collapsed "Compaction summary" card instead.
+      // It is machine text, never a prompt — so it must not become the 5xx
+      // retry text either (re-sending the whole summary as a prompt).
+      const isCompactSummary = entry.isCompactSummary === true;
       if (typeof content !== "string") {
         // (Background-task launches are handled by the coalesced re-derive
         // scheduled at the top of onTranscriptEntry.)
@@ -3456,12 +3478,12 @@ export class Session {
             // entry is never a corrupted app send (that's why there's no longer a
             // dispatch_mismatch suppress+pause here). Any in-flight dispatch is left
             // untouched: its own clean echo matches later, or the dispatch echo timeout re-queues it.
-            this.#relay!.send(encodeUserMessage(content, entryTimeMs));
+            this.#relay!.send(encodeUserMessage(content, entryTimeMs, isCompactSummary ? { isCompactSummary: true } : undefined));
             this.#relay!.stampReceiptOnLastQueued({ uuid, turn: "" });
           }
         }
       }
-      this.#lastUserText = content; // the prompt to re-send if this turn 5xx-fails
+      if (!isCompactSummary) this.#lastUserText = content; // the prompt to re-send if this turn 5xx-fails
       this.#deps.addChatMessage({ role: "user", content, source: "cli", session_id: sid });
 
     } else if (role === "assistant") {

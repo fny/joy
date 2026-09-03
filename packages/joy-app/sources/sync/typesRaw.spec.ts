@@ -1895,4 +1895,29 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             expect(normalized).toBeNull();
         });
     });
+
+    describe('Compaction summary flag', () => {
+        it('carries isCompactSummary through a mirrored user message', () => {
+            const normalized = normalizeRawMessage('cs-1', null, 100, {
+                role: 'user',
+                content: { type: 'text', text: 'This session is being continued…', isCompactSummary: true },
+                meta: { sentFrom: 'joy', joyTime: 42 },
+            } as any);
+
+            expect(normalized).toMatchObject({
+                role: 'user',
+                createdAt: 42,
+                content: { type: 'text', isCompactSummary: true },
+            });
+        });
+
+        it('leaves the flag off an ordinary user message', () => {
+            const normalized = normalizeRawMessage('cs-2', null, 100, {
+                role: 'user',
+                content: { type: 'text', text: 'hello' },
+            } as any);
+
+            expect((normalized as any)?.content?.isCompactSummary).toBeUndefined();
+        });
+    });
 });

@@ -1003,6 +1003,7 @@ export const pl: TranslationStructure = {
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Przełączono na tryb ${mode}`,
         compactionSummary: 'Podsumowanie kompaktowania',
+        contextCompacted: 'Kontekst skompaktowany',
         unknownEvent: 'Nieznane zdarzenie',
         usageLimitUntil: ({ time }: { time: string }) => `Osiągnięto limit użycia do ${time}`,
         unknownTime: 'nieznany czas',
