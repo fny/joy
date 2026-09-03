@@ -1,3 +1,8 @@
+# Sep 3 (10) — Waiting and Drafts are the same stack
+
+- **Messages waiting to send look and behave exactly like drafts.** The two strips above the composer were separate things — different rows, different controls, one clipping at a fixed height and the other growing without limit. They're now one component: the same header with a count and collapse, the same inline-editable rows, the same × to remove. A draft keeps its ↑ to send now; a waiting message shows ↻ instead when its send keeps failing (it sends itself otherwise).
+- **Long queues stop taking over the screen.** Either stack shows three rows and scrolls past that, with "+N more" in the header.
+
 # Sep 3 (9) — Copy and Reuse on every message
 
 - **Copy gives you the original markdown.** Selecting text in a message only ever copied what was rendered — bullets, headers and code fences were lost. Each message now has a Copy action that copies the message exactly as it was written. On desktop it appears when you hover the message; on the phone it sits quietly under it.

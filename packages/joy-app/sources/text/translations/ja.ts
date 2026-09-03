@@ -392,6 +392,13 @@ export const ja: TranslationStructure = {
         retry: '再試行',
         sendRetrying: ({ reason }: { reason: string }) => `送信できませんでした — ${reason}。再試行しています…`,
         sendParked: ({ reason }: { reason: string }) => `送信できませんでした — ${reason}。↻ をタップして再試行してください。`,
+        draftsTitle: '下書き',
+        pendingTitle: '送信待ち',
+        draftPlaceholder: '下書き…',
+        sendNow: '送信',
+        expand: '展開',
+        collapse: '折りたたむ',
+        moreItems: ({ count }: { count: number }) => `他 ${count} 件`,
         offlineBanner: '接続がありません — キュー内のメッセージはオンラインに戻ると送信されます',
     },
 

@@ -391,6 +391,13 @@ export const zhHant: TranslationStructure = {
         retry: '重試',
         sendRetrying: ({ reason }: { reason: string }) => `無法傳送 — ${reason}。正在重試…`,
         sendParked: ({ reason }: { reason: string }) => `無法傳送 — ${reason}。點一下 ↻ 重試。`,
+        draftsTitle: '草稿',
+        pendingTitle: '等待傳送',
+        draftPlaceholder: '草稿…',
+        sendNow: '傳送',
+        expand: '展開',
+        collapse: '收合',
+        moreItems: ({ count }: { count: number }) => `還有 ${count} 則`,
         offlineBanner: '無連線 — 佇列中的訊息將在恢復連線後傳送',
     },
 

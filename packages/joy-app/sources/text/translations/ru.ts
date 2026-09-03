@@ -518,6 +518,13 @@ export const ru: TranslationStructure = {
         retry: 'Повторить',
         sendRetrying: ({ reason }: { reason: string }) => `Не удалось отправить — ${reason}. Повторяем…`,
         sendParked: ({ reason }: { reason: string }) => `Не удалось отправить — ${reason}. Нажмите ↻, чтобы повторить.`,
+        draftsTitle: 'Черновики',
+        pendingTitle: 'Ожидают отправки',
+        draftPlaceholder: 'Черновик…',
+        sendNow: 'Отправить',
+        expand: 'Развернуть',
+        collapse: 'Свернуть',
+        moreItems: ({ count }: { count: number }) => `ещё ${count}`,
         offlineBanner: 'Нет подключения — сообщения из очереди отправятся, когда вы снова будете в сети',
     },
 

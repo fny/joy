@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 3 (10) — Waiting and Drafts are the same stack",
+      "summary": "",
+      "markdown": "- **Messages waiting to send look and behave exactly like drafts.** The two strips above the composer were separate things — different rows, different controls, one clipping at a fixed height and the other growing without limit. They're now one component: the same header with a count and collapse, the same inline-editable rows, the same × to remove. A draft keeps its ↑ to send now; a waiting message shows ↻ instead when its send keeps failing (it sends itself otherwise).\n- **Long queues stop taking over the screen.** Either stack shows three rows and scrolls past that, with \"+N more\" in the header."
+    },
+    {
       "title": "Sep 3 (9) — Copy and Reuse on every message",
       "summary": "",
       "markdown": "- **Copy gives you the original markdown.** Selecting text in a message only ever copied what was rendered — bullets, headers and code fences were lost. Each message now has a Copy action that copies the message exactly as it was written. On desktop it appears when you hover the message; on the phone it sits quietly under it.\n- **Reuse puts a message back in the composer.** Next to Copy. Tap it on anything you sent — or anything the agent said — and its text lands in the input, ready to edit and send. If you were already typing, it goes below your draft rather than replacing it."
@@ -196,5 +201,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 3 (9) — Copy and Reuse on every message"
+  "latestTitle": "Sep 3 (10) — Waiting and Drafts are the same stack"
 }

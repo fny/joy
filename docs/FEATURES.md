@@ -100,6 +100,12 @@ every relay; machines register per account.
 - `<joy-options>` blocks become tap-to-answer pickers; `<joy-img>`/`<joy-file>`
   render inline; `<joy-title>` retitles (user `/title` locks); `<joy-notify>`
   becomes a push.
+- Above the composer, `PendingQueueStrip` (busy-held) and `DraftQueueStrip`
+  (deliberate drafts) both render through ONE `QueueStack`: same header
+  (title · count, collapsible), same inline-editable rows, capped at 3 rows
+  then scrolls with "+N more" in the header. Drafts get ↑ send-now; a
+  pending item whose release keeps failing gets ↻ + the error line.
+  `JoyQueueStrip` (the daemon's own queue) is separate and unchanged.
 - Every user and agent text message carries a **Copy · Reuse** row
   (`MessageActions` in MessageView): Copy puts the ORIGINAL markdown on the
   clipboard; Reuse inserts it into the composer via `composerBridge`

@@ -391,6 +391,13 @@ export const ca: TranslationStructure = {
         retry: 'Reintenta',
         sendRetrying: ({ reason }: { reason: string }) => `No s'ha pogut enviar — ${reason}. S'està reintentant…`,
         sendParked: ({ reason }: { reason: string }) => `No s'ha pogut enviar — ${reason}. Toca ↻ per reintentar.`,
+        draftsTitle: 'Esborranys',
+        pendingTitle: 'Pendents d\'enviar',
+        draftPlaceholder: 'Esborrany…',
+        sendNow: 'Envia',
+        expand: 'Desplega',
+        collapse: 'Replega',
+        moreItems: ({ count }: { count: number }) => `+${count} més`,
         offlineBanner: 'Sense connexió — els missatges en cua s\'enviaran quan tornis a estar en línia',
     },
 
