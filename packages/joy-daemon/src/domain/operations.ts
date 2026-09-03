@@ -17,7 +17,7 @@ import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
-import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic } from "./fileOps";
+import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
@@ -1146,7 +1146,7 @@ export const sessionOps: SessionOp[] = [
       }
       // Always inline: both transports (local HTTP, v2 tunnel) carry the
       // response as one HTTP body with no per-message size cap.
-      return handleReadFile(session.cwd, effective, [joySessionDir(session.id)]);
+      return handleReadFile(session.cwd, effective, readRoots([joySessionDir(session.id)]));
     },
   },
   {
@@ -1171,7 +1171,7 @@ export const sessionOps: SessionOp[] = [
     rpcName: "listDirectory",
     summary: "List a directory",
     http: { method: "POST", path: "/sessions/:id/listDirectory" },
-    handler: (session, params) => handleListDirectory(session.cwd, params as unknown as Parameters<typeof handleListDirectory>[1]),
+    handler: (session, params) => handleListDirectory(session.cwd, params as unknown as Parameters<typeof handleListDirectory>[1], readRoots()),
   },
   {
     name: "getDirectoryTree",
@@ -1179,7 +1179,7 @@ export const sessionOps: SessionOp[] = [
     rpcName: "getDirectoryTree",
     summary: "Directory tree for the file browser",
     http: { method: "POST", path: "/sessions/:id/getDirectoryTree" },
-    handler: (session, params) => handleGetDirectoryTree(session.cwd, params as unknown as Parameters<typeof handleGetDirectoryTree>[1]),
+    handler: (session, params) => handleGetDirectoryTree(session.cwd, params as unknown as Parameters<typeof handleGetDirectoryTree>[1], readRoots()),
   },
   {
     name: "ripgrep",
@@ -1187,7 +1187,7 @@ export const sessionOps: SessionOp[] = [
     rpcName: "ripgrep",
     summary: "Search files with ripgrep",
     http: { method: "POST", path: "/sessions/:id/ripgrep" },
-    handler: (session, params) => handleRipgrep(session.cwd, params as unknown as Parameters<typeof handleRipgrep>[1]),
+    handler: (session, params) => handleRipgrep(session.cwd, params as unknown as Parameters<typeof handleRipgrep>[1], readRoots()),
   },
   {
     name: "difftastic",

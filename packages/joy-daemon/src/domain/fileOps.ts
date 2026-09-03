@@ -13,7 +13,7 @@ import { promisify } from "util";
 import { existsSync, realpathSync, lstatSync } from "fs";
 import { readFile, writeFile, readdir, stat, lstat, unlink } from "fs/promises";
 import { join, resolve, sep, dirname, basename } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 
 const execAsync = promisify(exec);
 
@@ -117,6 +117,21 @@ export function validatePath(targetPath: string, workingDirectory: string, extra
   // can fetch joy-img media — each session reaches ONLY its own folder).
   if (!within(workingDirectory) && !extraRoots.some(within)) return denied;
   return { valid: true, resolvedPath: realTarget, lexicalPath: resolvedTarget };
+}
+
+/** Roots the app may READ from in every session, beyond the session cwd: the
+ *  machine's temp dir(s). Agents drop reports, renders and exports in /tmp and
+ *  hand the app a <joy-file> link to them; until 2026-09-03 every such tap was
+ *  refused as "outside the working directory". /tmp is shared by every process
+ *  on the box, so this is a real widening — deliberately READ-ONLY (view,
+ *  download, list, grep): write and delete stay jailed to the cwd. Both the
+ *  literal /tmp and os.tmpdir() are listed because macOS agents write to
+ *  $TMPDIR (/var/folders/…), not /tmp. */
+export const TEMP_ROOTS: string[] = [...new Set(["/tmp", tmpdir()])];
+
+/** Extra roots for a read-side op: the caller's per-session roots plus the temp dirs. */
+export function readRoots(sessionRoots: string[] = []): string[] {
+  return [...sessionRoots, ...TEMP_ROOTS];
 }
 
 export async function handleBash(workingDirectory: string, data: BashRequest): Promise<BashResponse> {
@@ -243,8 +258,8 @@ export async function handleDeleteFile(workingDirectory: string, data: DeleteFil
   }
 }
 
-export async function handleListDirectory(workingDirectory: string, data: ListDirectoryRequest): Promise<ListDirectoryResponse> {
-  const validation = validatePath(data.path, workingDirectory);
+export async function handleListDirectory(workingDirectory: string, data: ListDirectoryRequest, extraRoots: string[] = []): Promise<ListDirectoryResponse> {
+  const validation = validatePath(data.path, workingDirectory, extraRoots);
   if (!validation.valid) return { success: false, error: validation.error };
   try {
     const directoryPath = validation.resolvedPath!;
@@ -277,8 +292,8 @@ export async function handleListDirectory(workingDirectory: string, data: ListDi
   }
 }
 
-export async function handleGetDirectoryTree(workingDirectory: string, data: GetDirectoryTreeRequest): Promise<GetDirectoryTreeResponse> {
-  const validation = validatePath(data.path, workingDirectory);
+export async function handleGetDirectoryTree(workingDirectory: string, data: GetDirectoryTreeRequest, extraRoots: string[] = []): Promise<GetDirectoryTreeResponse> {
+  const validation = validatePath(data.path, workingDirectory, extraRoots);
   if (!validation.valid) return { success: false, error: validation.error };
   if (data.maxDepth < 0) return { success: false, error: "maxDepth must be non-negative" };
 
@@ -349,10 +364,10 @@ function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record
   });
 }
 
-export async function handleRipgrep(workingDirectory: string, data: RipgrepRequest): Promise<RipgrepResponse> {
+export async function handleRipgrep(workingDirectory: string, data: RipgrepRequest, extraRoots: string[] = []): Promise<RipgrepResponse> {
   let cwd = data.cwd;
   if (cwd) {
-    const validation = validatePath(cwd, workingDirectory);
+    const validation = validatePath(cwd, workingDirectory, extraRoots);
     if (!validation.valid) return { success: false, error: validation.error };
     cwd = validation.resolvedPath;
   }

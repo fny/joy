@@ -5,7 +5,7 @@
 // answer on the same server.
 import { test, expect, beforeAll, afterAll, describe } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, unlinkSync } from "fs";
-import { tmpdir } from "os";
+import { tmpdir, homedir } from "os";
 import { join } from "path";
 import { execFileSync } from "child_process";
 import { startHttpServer } from "./http";
@@ -276,7 +276,10 @@ describe("review fixes: regression coverage", () => {
   });
 
   test("a symlink out of the repo is refused end to end (read, write, grep)", async () => {
-    const outside = mkdtempSync(join(tmpdir(), "joy-v2-outside-"));
+    // Under HOME, not tmpdir(): the temp dirs are a READ root now (see
+    // fileOps.TEMP_ROOTS), so an escape into them is no longer the case this
+    // test is about. The jail still has to hold for everywhere else.
+    const outside = mkdtempSync(join(homedir(), ".joy-v2-outside-"));
     writeFileSync(join(outside, "passwd"), "root:x:0:0\n");
     symlinkSync(outside, join(repo, "evil"));
     try {
@@ -293,6 +296,24 @@ describe("review fixes: regression coverage", () => {
     } finally {
       unlinkSync(join(repo, "evil"));
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlink INTO the temp dir is readable but still not writable", async () => {
+    const tmpTarget = mkdtempSync(join(tmpdir(), "joy-v2-tmp-"));
+    writeFileSync(join(tmpTarget, "report.txt"), "agent output\n");
+    symlinkSync(tmpTarget, join(repo, "tmplink"));
+    try {
+      const read = await call("GET", "/v2/sessions/abcd1234/files/content?path=tmplink/report.txt");
+      expect(read.json.success).toBe(true);
+      const write = await call("PUT", "/v2/sessions/abcd1234/files/content", {
+        body: { path: "tmplink/planted.txt", content: "x" },
+      });
+      expect(write.status).toBe(400);
+      expect(existsSync(join(tmpTarget, "planted.txt"))).toBe(false);
+    } finally {
+      unlinkSync(join(repo, "tmplink"));
+      rmSync(tmpTarget, { recursive: true, force: true });
     }
   });
 
