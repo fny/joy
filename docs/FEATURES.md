@@ -115,11 +115,11 @@ every relay; machines register per account.
   then scrolls with "+N more" in the header. Drafts get ↑ send-now; a
   pending item whose release keeps failing gets ↻ + the error line.
   `JoyQueueStrip` (the daemon's own queue) is separate and unchanged.
-- Every user and agent text message carries a **Copy · Reuse** row
-  (`MessageActions` in MessageView): Copy puts the ORIGINAL markdown on the
-  clipboard; Reuse inserts it into the composer via `composerBridge`
-  (appends below an existing draft, then focuses). Hover-revealed on web,
-  always visible on touch.
+- **Copy · Reuse** live in the text-selection screen (`/text-selection`,
+  opened by long-press with `markdownCopyV2` on): Copy puts the ORIGINAL
+  markdown on the clipboard; Reuse inserts it into the session's composer via
+  `composerBridge` (appends below an existing draft, focuses) and returns to
+  the chat. MarkdownView passes `sessionId` on the route. No per-message row.
 - Cmd/Ctrl+F in-session search with match cycling.
 - Composer info line: agent · model · reasoning · permissions.
 

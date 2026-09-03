@@ -22,8 +22,6 @@ import { stripAnsi } from '@/utils/ansi';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useUnistyles } from 'react-native-unistyles';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
-import * as Clipboard from 'expo-clipboard';
-import { insertIntoComposer } from '@/-session/composerBridge';
 
 
 export const MessageView = React.memo((props: {
@@ -157,13 +155,12 @@ function UserTextBlock(props: {
   // monospace (the whole-bubble mono read as code for what is chat-adjacent).
   const slashMatch = !isMonoCommand ? /^(\/[a-zA-Z][\w:-]*)([\s\S]*)$/.exec(bodyText) : null;
 
-  const [hovered, hoverProps] = useHoverReveal();
   // Optimistic send: 70% in the chat → 80% relay → 90% machine → 100% agent.
   // Absent stage (history, other devices) is fully delivered.
   const stage = props.message.deliveryStage;
   const opacity = stage === 'local' ? 0.7 : stage === 'relay' ? 0.8 : stage === 'daemon' ? 0.9 : 1;
   return (
-    <View style={[styles.userMessageContainer, opacity < 1 ? { opacity } : null]} {...hoverProps}>
+    <View style={[styles.userMessageContainer, opacity < 1 ? { opacity } : null]}>
       {/* Attachments sit above the bubble, right-aligned like it; a picture-
           only send has no bubble at all. */}
       {attachments.length > 0 && (
@@ -187,55 +184,6 @@ function UserTextBlock(props: {
               </Text>
             : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} />}
       </View>}
-      {bodyText.trim().length > 0 && <MessageActions sessionId={props.sessionId} markdown={bodyText} align="right" visible={hovered} />}
-    </View>
-  );
-}
-
-// Per-message actions: Copy takes the ORIGINAL markdown (native selection only
-// ever yielded the rendered text — bullets, headers and code fences lost), and
-// Reuse drops the same markdown into the composer to edit and send again.
-// Quiet on purpose: hover-revealed on web, always present but dim on touch,
-// where there is no hover. `align` mirrors the bubble it belongs to.
-// Web has hover; touch does not. Same approach as RenderCodeBlock's copy
-// button: React state off mouse enter/leave on the message container (no
-// global CSS in this app), and the actions row reads it as `visible`.
-function useHoverReveal(): [boolean, Record<string, unknown>] {
-  const [hovered, setHovered] = React.useState(false);
-  const handlers = React.useMemo(() => Platform.OS === 'web'
-    ? { onMouseEnter: () => setHovered(true), onMouseLeave: () => setHovered(false) }
-    : {}, []);
-  return [hovered, handlers];
-}
-
-function MessageActions({ sessionId, markdown, align, visible }: { sessionId: string; markdown: string; align: 'left' | 'right'; visible: boolean }) {
-  const { theme } = useUnistyles();
-  const [copied, setCopied] = React.useState(false);
-  const copy = React.useCallback(async () => {
-    try {
-      await Clipboard.setStringAsync(markdown);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch (e) {
-      console.error('[message] copy failed', e);
-    }
-  }, [markdown]);
-  const reuse = React.useCallback(() => { insertIntoComposer(sessionId, markdown); }, [sessionId, markdown]);
-  const dim = theme.colors.textSecondary;
-  return (
-    <View style={[
-      styles.messageActions,
-      align === 'right' ? styles.messageActionsRight : null,
-      { opacity: Platform.OS === 'web' ? (visible ? 1 : 0) : 0.7 },
-    ]}>
-      <Pressable onPress={copy} style={({ pressed }) => [styles.messageAction, pressed && styles.messageActionPressed]} hitSlop={6} accessibilityRole="button" accessibilityLabel={t('common.copy')}>
-        <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={13} color={copied ? '#30D158' : dim} />
-        <Text style={[styles.messageActionText, copied && { color: '#30D158' }]}>{copied ? t('common.copied') : t('common.copy')}</Text>
-      </Pressable>
-      <Pressable onPress={reuse} style={({ pressed }) => [styles.messageAction, pressed && styles.messageActionPressed]} hitSlop={6} accessibilityRole="button" accessibilityLabel={t('message.reuse')}>
-        <Ionicons name="create-outline" size={13} color={dim} />
-        <Text style={styles.messageActionText}>{t('message.reuse')}</Text>
-      </Pressable>
     </View>
   );
 }
@@ -381,8 +329,6 @@ function AgentTextBlock(props: {
     sync.sendMessage(props.sessionId, option.title, { source: 'option' });
   }, [props.sessionId]);
 
-  const [hovered, hoverProps] = useHoverReveal();
-
   // Hide thinking messages
   if (props.message.isThinking) {
     return null;
@@ -407,21 +353,19 @@ function AgentTextBlock(props: {
   if (hasJoyTags(text)) {
     const segments = splitJoySegments(text);
     return (
-      <View style={styles.agentMessageContainer} {...hoverProps}>
+      <View style={styles.agentMessageContainer}>
         {segments.map((seg, i) => seg.kind === 'md'
           ? <MarkdownView key={i} markdown={seg.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
           : seg.kind === 'img'
             ? <JoyImage key={i} sessionId={props.sessionId} src={seg.src} width={seg.width} height={seg.height} alt={seg.alt} />
             : <JoyFileChip key={i} sessionId={props.sessionId} path={seg.path} line={seg.line} name={seg.name} />)}
-        <MessageActions sessionId={props.sessionId} markdown={text} align="left" visible={hovered} />
       </View>
     );
   }
 
   return (
-    <View style={styles.agentMessageContainer} {...hoverProps}>
+    <View style={styles.agentMessageContainer}>
       <MarkdownView markdown={text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
-      {text.trim().length > 0 && <MessageActions sessionId={props.sessionId} markdown={text} align="left" visible={hovered} />}
     </View>
   );
 }
@@ -704,28 +648,6 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: 8,
     maxWidth: '100%',
     overflow: 'hidden',
-  },
-  messageActions: {
-    flexDirection: 'row',
-    gap: 14,
-    marginTop: 4,
-    paddingHorizontal: 4,
-  },
-  messageActionsRight: {
-    justifyContent: 'flex-end',
-  },
-  messageAction: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingVertical: 2,
-  },
-  messageActionPressed: {
-    opacity: 0.5,
-  },
-  messageActionText: {
-    color: theme.colors.textSecondary,
-    fontSize: 12,
   },
   compactedDivider: {
     flexDirection: 'row',

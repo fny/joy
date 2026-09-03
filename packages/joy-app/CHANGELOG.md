@@ -1,3 +1,7 @@
+# Sep 3 (12) — Copy and Reuse move to the text view
+
+- **Copy and Reuse live in the text view now, not under every message.** Long-press a message (with the long-press copy mode on in Settings → Features) to open it in full; the header has Copy — the original markdown — and Reuse, which puts the text into the composer and takes you back to the chat. The per-message row is gone.
+
 # Sep 3 (11) — Sends show up instantly
 
 - **Your message appears the moment you send it.** It used to show only once the relay had accepted it and the app had polled it back — a visible lag on every send, and the reason tap-to-answer felt broken. Now it's in the chat immediately.

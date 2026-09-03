@@ -9,11 +9,12 @@ import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { insertIntoComposer } from '@/-session/composerBridge';
 
 export default function TextSelectionScreen() {
     const router = useRouter();
     const navigation = useNavigation();
-    const { textId } = useLocalSearchParams<{ textId: string }>();
+    const { textId, sessionId } = useLocalSearchParams<{ textId: string; sessionId?: string }>();
     const { theme } = useUnistyles();
     const insets = useSafeAreaInsets();
     const [fullText, setFullText] = React.useState<string>('');
@@ -34,27 +35,47 @@ export default function TextSelectionScreen() {
         }
     }, [fullText]);
 
-    // Set up header right button
+    // Reuse: put the ORIGINAL markdown (this screen holds it verbatim) back
+    // into the session's composer and return to the chat. Only offered when
+    // the screen was opened from a session whose composer is mounted.
+    const handleReuse = React.useCallback(() => {
+        if (!sessionId || !fullText) return;
+        if (insertIntoComposer(sessionId, fullText)) router.back();
+    }, [sessionId, fullText, router]);
+
+    // Header: Reuse (when it can work) then Copy — the two actions this screen
+    // exists for, where the whole message is in view rather than under every
+    // bubble in the chat.
     React.useLayoutEffect(() => {
+        const disabled = loading || !fullText;
+        const tint = disabled ? theme.colors.textSecondary : theme.colors.header.tint;
         navigation.setOptions({
             headerRight: () => (
-                <Pressable
-                    onPress={handleCopyAll}
-                    style={({ pressed }) => [
-                        styles.copyButton,
-                        { opacity: pressed ? 0.7 : 1 }
-                    ]}
-                    disabled={loading || !fullText}
-                >
-                    <Ionicons 
-                        name="copy-outline" 
-                        size={24} 
-                        color={loading || !fullText ? theme.colors.textSecondary : theme.colors.header.tint} 
-                    />
-                </Pressable>
+                <View style={styles.headerActions}>
+                    {!!sessionId && (
+                        <Pressable
+                            onPress={handleReuse}
+                            style={({ pressed }) => [styles.copyButton, { opacity: pressed ? 0.7 : 1 }]}
+                            disabled={disabled}
+                            accessibilityRole="button"
+                            accessibilityLabel={t('message.reuse')}
+                        >
+                            <Ionicons name="create-outline" size={24} color={tint} />
+                        </Pressable>
+                    )}
+                    <Pressable
+                        onPress={handleCopyAll}
+                        style={({ pressed }) => [styles.copyButton, { opacity: pressed ? 0.7 : 1 }]}
+                        disabled={disabled}
+                        accessibilityRole="button"
+                        accessibilityLabel={t('common.copy')}
+                    >
+                        <Ionicons name="copy-outline" size={24} color={tint} />
+                    </Pressable>
+                </View>
             ),
         });
-    }, [navigation, handleCopyAll, loading, fullText, theme]);
+    }, [navigation, handleCopyAll, handleReuse, sessionId, loading, fullText, theme]);
 
     React.useEffect(() => {
         if (!textId) {
@@ -112,6 +133,11 @@ export default function TextSelectionScreen() {
 }
 
 const styles = StyleSheet.create((theme) => ({
+    headerActions: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+    },
     container: {
         flex: 1,
         backgroundColor: theme.colors.surface,

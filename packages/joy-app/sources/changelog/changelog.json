@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 3 (12) — Copy and Reuse move to the text view",
+      "summary": "",
+      "markdown": "- **Copy and Reuse live in the text view now, not under every message.** Long-press a message (with the long-press copy mode on in Settings → Features) to open it in full; the header has Copy — the original markdown — and Reuse, which puts the text into the composer and takes you back to the chat. The per-message row is gone."
+    },
+    {
       "title": "Sep 3 (11) — Sends show up instantly",
       "summary": "",
       "markdown": "- **Your message appears the moment you send it.** It used to show only once the relay had accepted it and the app had polled it back — a visible lag on every send, and the reason tap-to-answer felt broken. Now it's in the chat immediately.\n- **And it brightens as it travels.** 70% while it's only in your chat, 80% once the relay has accepted it, 90% once your machine has picked it up, 100% once the agent has it. A send that fails disappears and its text returns to the composer, as before."
@@ -206,5 +211,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 3 (11) — Sends show up instantly"
+  "latestTitle": "Sep 3 (12) — Copy and Reuse move to the text view"
 }
