@@ -110,7 +110,7 @@
  * - Updated internal state for future processing
  */
 
-import { Message, ToolCall } from "../typesMessage";
+import { Message, ToolCall, DeliveryStage } from "../typesMessage";
 import { AgentEvent, MessageAttachment, NormalizedMessage, UsageData } from "../typesRaw";
 import { createTracer, traceMessages, TracerState } from "./reducerTracer";
 import { AgentState, TodoItem, TodoItemsSchema } from "../storageTypes";
@@ -131,6 +131,10 @@ type ReducerMessage = {
     claudeUuid?: string;
     isCompactSummary?: boolean;
     attachments?: MessageAttachment[];
+    /** Optimistic-send progress; only set on rows this client inserted. */
+    deliveryStage?: DeliveryStage;
+    /** Relay turn the prompt opened — how lifecycle events find this row. */
+    turnId?: string;
 }
 
 type StoredPermission = {
@@ -151,6 +155,7 @@ export type ReducerState = {
     permissions: Map<string, StoredPermission>; // Store permission details by ID for quick lookup
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
+    turnIds: Map<string, string>; // relay turnId -> internalId (user prompts only)
     messages: Map<string, ReducerMessage>;
     sidechains: Map<string, ReducerMessage[]>;
     tracerState: TracerState; // Tracer state for sidechain processing
@@ -178,6 +183,7 @@ export function createReducer(): ReducerState {
         messages: new Map(),
         localIds: new Map(),
         messageIds: new Map(),
+        turnIds: new Map(),
         sidechains: new Map(),
         tracerState: createTracer()
     }
@@ -298,6 +304,25 @@ function reconcileSeq(state: ReducerState, changed: Set<string>, msg: Normalized
         state.messageIds.set(msg.id, internalId);
         changed.add(internalId);
     }
+    // The relay's own row for an optimistic send: learn the turn it opened
+    // (lifecycle events key on it), take the attachment citations the
+    // optimistic row could not have had (ids exist only after upload), and
+    // the echo itself is proof the relay accepted it.
+    const turnId = msg.meta?.turnId;
+    if (turnId && existing.turnId !== turnId) {
+        existing.turnId = turnId;
+        state.turnIds.set(turnId, internalId);
+        changed.add(internalId);
+    }
+    const incomingAttachments = (msg.content as { attachments?: MessageAttachment[] } | undefined)?.attachments;
+    if (incomingAttachments?.length && !existing.attachments?.length) {
+        existing.attachments = incomingAttachments;
+        changed.add(internalId);
+    }
+    if (existing.deliveryStage && STAGE_ORDER[existing.deliveryStage] < STAGE_ORDER.relay) {
+        existing.deliveryStage = 'relay';
+        changed.add(internalId);
+    }
 }
 
 /**
@@ -332,6 +357,61 @@ export function reconcileSentSeqs(
         if (converted) result.push(converted);
     }
     return result;
+}
+
+const STAGE_ORDER: Record<DeliveryStage, number> = { local: 0, relay: 1, daemon: 2, agent: 3 };
+
+/** Learn which relay turn an optimistic send opened (the POST ack carries it
+ *  before any event does). Returns the changed message, if any. */
+export function bindTurnToLocal(state: ReducerState, localId: string, turnId: string): Message[] {
+    const internalId = state.localIds.get(localId);
+    const m = internalId ? state.messages.get(internalId) : undefined;
+    if (!internalId || !m) return [];
+    state.turnIds.set(turnId, internalId);
+    if (m.turnId === turnId) return [];
+    m.turnId = turnId;
+    const converted = convertReducerMessageToMessage(m, state);
+    return converted ? [converted] : [];
+}
+
+/** Advance an optimistic send's delivery stage — by localId (our own ack) or
+ *  by turnId (relay lifecycle events). Monotonic: a late, lower stage never
+ *  regresses the row. Rows with NO stage (history, other devices) are left
+ *  alone — they are already rendered as delivered. */
+export function advanceDeliveryStage(
+    state: ReducerState,
+    ref: { localId?: string; turnId?: string },
+    stage: DeliveryStage,
+): Message[] {
+    const internalId = (ref.localId ? state.localIds.get(ref.localId) : undefined)
+        ?? (ref.turnId ? state.turnIds.get(ref.turnId) : undefined);
+    const m = internalId ? state.messages.get(internalId) : undefined;
+    if (!internalId || !m || !m.deliveryStage) return [];
+    if (STAGE_ORDER[m.deliveryStage] >= STAGE_ORDER[stage]) return [];
+    m.deliveryStage = stage;
+    const converted = convertReducerMessageToMessage(m, state);
+    return converted ? [converted] : [];
+}
+
+/** Drop an optimistic row whose send failed — maps included, so a retry with
+ *  the same localId creates a fresh row instead of reconciling into a ghost. */
+export function forgetLocalMessage(state: ReducerState, localId: string): string | null {
+    const internalId = state.localIds.get(localId);
+    if (!internalId) return null;
+    const m = state.messages.get(internalId);
+    state.localIds.delete(localId);
+    // The tracer dedupes by id BEFORE the reducer sees a message — leave it
+    // remembered and the retry is silently swallowed upstream of everything.
+    state.tracerState.processedIds.delete(localId);
+    if (m) {
+        if (m.realID) {
+            state.messageIds.delete(m.realID);
+            state.tracerState.processedIds.delete(m.realID);
+        }
+        if (m.turnId) state.turnIds.delete(m.turnId);
+    }
+    state.messages.delete(internalId);
+    return internalId;
 }
 
 export function reducer(state: ReducerState, messages: NormalizedMessage[], agentState?: AgentState | null): ReducerResult {
@@ -760,6 +840,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 claudeUuid: msg.claudeUuid,
                 ...(msg.content.isCompactSummary ? { isCompactSummary: true } : {}),
                 ...(msg.content.attachments?.length ? { attachments: msg.content.attachments } : {}),
+                ...(msg.meta?.deliveryStage ? { deliveryStage: msg.meta.deliveryStage } : {}),
+                ...(msg.meta?.turnId ? { turnId: msg.meta.turnId } : {}),
             });
 
             // Track both localId and messageId
@@ -767,6 +849,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 state.localIds.set(msg.localId, mid);
             }
             state.messageIds.set(msg.id, mid);
+            if (msg.meta?.turnId) state.turnIds.set(msg.meta.turnId, mid);
 
             changed.add(mid);
         } else if (msg.role === 'agent') {
@@ -1283,6 +1366,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             ...(reducerMsg.claudeUuid && { claudeUuid: reducerMsg.claudeUuid }),
             ...(reducerMsg.isCompactSummary && { isCompactSummary: true }),
             ...(reducerMsg.attachments?.length ? { attachments: reducerMsg.attachments } : {}),
+            ...(reducerMsg.deliveryStage ? { deliveryStage: reducerMsg.deliveryStage } : {}),
             meta: reducerMsg.meta
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.text !== null) {

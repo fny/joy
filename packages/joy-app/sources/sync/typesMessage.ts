@@ -22,6 +22,8 @@ export type ToolCall = {
 }
 
 // Flattened message types - each message represents a single block
+export type DeliveryStage = 'local' | 'relay' | 'daemon' | 'agent';
+
 export type UserTextMessage = {
     kind: 'user-text';
     id: string;
@@ -45,6 +47,13 @@ export type UserTextMessage = {
     claudeUuid?: string;
     /** Post-compaction summary — rendered as a collapsed block, not a bubble. */
     isCompactSummary?: boolean;
+    /** How far a message THIS client sent has travelled. Absent for anything
+     *  read back from history or sent elsewhere (renders as fully delivered).
+     *    local  — in the chat, not yet accepted by the relay      (70%)
+     *    relay  — the relay accepted it (POST ok / turn.queued)    (80%)
+     *    daemon — the machine has it (turn.receipted)              (90%)
+     *    agent  — typed into the agent and confirmed (turn.started)(100%) */
+    deliveryStage?: DeliveryStage;
     /** Files sent with this prompt; bytes are fetched on demand by id. */
     attachments?: MessageAttachment[];
 }

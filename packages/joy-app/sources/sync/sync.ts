@@ -13,7 +13,7 @@ import { sealV2Content, sealV2Bytes, openV2Bytes, type V2Attachment } from './v2
 import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, connectV2Stream, V2ApiError } from './v2/api';
 import { readFileBytes } from '@/utils/readFileBytes';
 import { encodeHex } from '@/encryption/hex';
-import { v2MessagesAfter, v2MessagesBefore } from './v2/reads';
+import { v2MessagesAfter, v2MessagesBefore, type V2Lifecycle } from './v2/reads';
 
 /** Relay poll cadence: the baseline live channel everywhere, and the ONLY one
  *  on native (SSE needs a streaming fetch body React Native lacks). */
@@ -479,11 +479,26 @@ class Sync {
             // in the clear; the caller retries once the card completes.
             return { ok: false, reason: 'v2 session not bound yet — no content key to seal with' };
         }
-        // No optimistic echo: the relay's `turn.queued` event IS the user row
-        // (sync/v2/reads.ts), so the message appears once the relay accepts
-        // it. localId doubles as the relay clientIntentId — a retry with the
-        // same id (draft release) replays the first acceptance.
+        // OPTIMISTIC: the row appears the instant you send, at 70%, and
+        // brightens as it travels — 80% when the relay accepts it, 90% when the
+        // machine has it (turn.receipted), 100% once the agent has it
+        // (turn.started). Before this the row only appeared when the relay's
+        // turn.queued came back through the 2.5s poll, which read as a lag on
+        // every send and made tap-to-answer feel broken. localId doubles as the
+        // relay clientIntentId: the relay's own row carries it back
+        // (origin.clientIntentId → reads.ts) and reconciles INTO this row
+        // rather than duplicating it, and a retry with the same id (draft
+        // release) replays the first acceptance.
         const localId = options?.localId ?? randomUUID();
+        storage.getState().applyMessages(sessionId, [{
+            id: localId,
+            localId,
+            createdAt: Date.now(),
+            role: 'user',
+            isSidechain: false,
+            content: { type: 'text', text },
+            meta: { sentFrom: 'app', deliveryStage: 'local' },
+        } as NormalizedMessage]);
         // Attachments travel beside the text: bytes sealed under the same
         // session key and uploaded first, then cited (id + display facts)
         // INSIDE the sealed message so every device and the daemon can
@@ -511,14 +526,22 @@ class Sync {
                         : `${t('imageUpload.uploadFailedMessage', { count: options.attachments.length })}\n\n${detail}`,
                     [{ text: t('common.ok'), style: 'cancel' }],
                 );
+                storage.getState().dismissLocalMessage(sessionId, localId);
                 return { ok: false, reason: `attachment upload failed: ${e instanceof Error ? e.message : e}` };
             }
         }
         try {
             const ciphertext = sealV2Content(text, key, attachments);
-            await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext, localId, attachments.map(a => a.id));
+            const ack = await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext, localId, attachments.map(a => a.id));
+            // Accepted: 80%, and the ack names the turn — bind it now so the
+            // receipted/started events can find this row even before the
+            // relay's own turn.queued row has been read back.
+            storage.getState().bindTurnToLocal(sessionId, localId, ack.turnId);
+            storage.getState().applyDeliveryStage(sessionId, { localId }, 'relay');
         } catch (e) {
             console.error('[v2] send failed', e);
+            // The text goes back to the composer (caller); the ghost row must go.
+            storage.getState().dismissLocalMessage(sessionId, localId);
             return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
         }
         // The relay's accepted response IS the durable ack: a draft released
@@ -959,10 +982,11 @@ class Sync {
         let minSeq = Number.POSITIVE_INFINITY;
         let hasMore = false;
         const collected: ApiMessage[] = [];
+        const lifecycle: V2Lifecycle[] = [];
         const v2ctx = this.v2ReadCtx(sessionId);
         if (!v2ctx) throw new Error(`Failed to fetch initial page for ${sessionId}: no v2 link`);
         for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
-            let data: { messages: ApiMessage[]; hasMore: boolean };
+            let data: { messages: ApiMessage[]; hasMore: boolean; lifecycle: V2Lifecycle[] };
             try {
                 data = await v2MessagesBefore({ ...v2ctx, beforeSeq });
             } catch (e) {
@@ -972,6 +996,7 @@ class Sync {
             const messages = Array.isArray(data.messages) ? data.messages : [];
             hasMore = !!data.hasMore && messages.length > 0;
             collected.push(...messages);
+            lifecycle.push(...data.lifecycle);
 
             let pageMin = Number.POSITIVE_INFINITY;
             for (const message of messages) {
@@ -1021,6 +1046,7 @@ class Sync {
         // store grew. `collected > 0` with no growth is the reducer dropping
         // them — the order-dependent apply racing rows the live stream already
         // wrote — and that line is the whole diagnosis next time.
+        this.applyLifecycle(sessionId, lifecycle);
         const storeAfter = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
         log.log(`💬 initial history ${sessionId}: collected=${collected.length} seq=${anyMessages ? `${minSeq}..${maxSeq}` : '-'} store ${storeBefore}→${storeAfter} hasMore=${hasMore}`);
         if (collected.length > 0 && storeAfter === storeBefore) {
@@ -1061,6 +1087,7 @@ class Sync {
             const messages = Array.isArray(data.messages) ? data.messages : [];
 
             await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
+            this.applyLifecycle(sessionId, data.lifecycle);
 
             // Advance by the page's RAW cursor, not by renderable rows: a page
             // of lifecycle-only events (turn starts/terminals with no text)
@@ -1098,6 +1125,14 @@ class Sync {
                 return;
             }
             afterSeq = maxSeq;
+        }
+    }
+
+    /** Turn lifecycle → delivery stage on the optimistic row that opened the
+     *  turn. No-op for rows without a stage (history, other devices). */
+    private applyLifecycle(sessionId: string, lifecycle: V2Lifecycle[]) {
+        for (const l of lifecycle) {
+            storage.getState().applyDeliveryStage(sessionId, { turnId: l.turnId }, l.kind === 'receipted' ? 'daemon' : 'agent');
         }
     }
 

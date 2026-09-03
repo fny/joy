@@ -158,8 +158,12 @@ function UserTextBlock(props: {
   const slashMatch = !isMonoCommand ? /^(\/[a-zA-Z][\w:-]*)([\s\S]*)$/.exec(bodyText) : null;
 
   const [hovered, hoverProps] = useHoverReveal();
+  // Optimistic send: 70% in the chat → 80% relay → 90% machine → 100% agent.
+  // Absent stage (history, other devices) is fully delivered.
+  const stage = props.message.deliveryStage;
+  const opacity = stage === 'local' ? 0.7 : stage === 'relay' ? 0.8 : stage === 'daemon' ? 0.9 : 1;
   return (
-    <View style={styles.userMessageContainer} {...hoverProps}>
+    <View style={[styles.userMessageContainer, opacity < 1 ? { opacity } : null]} {...hoverProps}>
       {/* Attachments sit above the bubble, right-aligned like it; a picture-
           only send has no bubble at all. */}
       {attachments.length > 0 && (
