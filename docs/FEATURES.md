@@ -119,12 +119,13 @@ every relay; machines register per account.
   Stages are monotonic (`advanceDeliveryStage`); rows with no stage (history,
   other devices) render at 100%. A failed send is forgotten
   (`dismissLocalMessage`) and its text goes back to the composer.
-- Above the composer, `PendingQueueStrip` (busy-held) and `DraftQueueStrip`
-  (deliberate drafts) both render through ONE `QueueStack`: same header
-  (title · count, collapsible), same inline-editable rows, capped at 3 rows
-  then scrolls with "+N more" in the header. Drafts get ↑ send-now; a
-  pending item whose release keeps failing gets ↻ + the error line.
-  `JoyQueueStrip` (the daemon's own queue) is separate and unchanged.
+- Above the composer: **Waiting** (`WaitingStack`) and **Drafts**
+  (`DraftQueueStrip`), both rendered by ONE `QueueStack` — same header
+  (title · count, collapsible, +N more), same inline-editable rows, × remove,
+  capped at 3 rows then scrolls. Waiting MERGES the app-held busy items and
+  the daemon's dispatch queue (`joy__queue`: visible + hidden items, edit via
+  PATCH on commit, cancel, ⇡ steer) plus the paused-queue banner; Drafts get
+  ↑ send-now. There is no separate "queued" strip any more.
 - **Copy · Reuse** live in the text-selection screen (`/text-selection`,
   opened by long-press with `markdownCopyV2` on): Copy puts the ORIGINAL
   markdown on the clipboard; Reuse inserts it into the session's composer via
