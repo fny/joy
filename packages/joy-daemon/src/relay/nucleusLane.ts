@@ -667,6 +667,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
 
       const queued = session.enqueue(text, { source: "rpc", visible: false, mirrorToRelay: false });
       activeTurns.set(turnId, { localId: session.id, queuedId: queued?.id ?? null, lease: leaseRef });
+      // Every later line for this turn names the session AND the local queue
+      // item, so "turn X completed" can be tied to the message it carried.
+      const tag = `turn ${turnId.slice(0, 8)} [${session.id}/${queued?.id ?? "?"}]`;
+      log(`${tag}: prompt staged (chars=${text.length})`);
 
       /** Terminalize the relay AND stop the local work — a failed turn whose
        *  prompt stays queued locally would execute later anyway (and again
@@ -680,7 +684,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason },
         }, leaseRef);
-        log(`turn ${turnId.slice(0, 8)}: ${reason} → failed`);
+        log(`${tag}: ${reason} → failed`);
       };
       // Chat rows carry session_id = the LOCAL id for codex/opencode/pi but
       // the CLAUDE TRANSCRIPT UUID for claude (and that uuid can change on
@@ -715,7 +719,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // false-instant-complete the review caught).
       const startDeadline = Date.now() + 180_000;
       for (;;) {
-        if (session.busy() || activitySince()) break;
+        // NB: for claude busy() is true from ENQUEUE onward, so this gate can
+        // pass on a previous turn's flag — log which signal released it, since
+        // that is the difference between "running" and "still queued".
+        if (session.busy()) { log(`${tag}: started (busy)`); break; }
+        if (activitySince()) { log(`${tag}: started (agent output)`); break; }
         if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
         if (Date.now() > startDeadline) return failTurn("no_agent_activity");
         await sleep(POLL_MS);
@@ -746,7 +754,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             type: "terminal", terminalState: "interrupted", runtimeEventId: randomUUID(),
             meta: { reason: "turn_cap" },
           }, leaseRef);
-          log(`turn ${turnId.slice(0, 8)}: 30min cap → interrupted (agent aborted)`);
+          log(`${tag}: 30min cap → interrupted (agent aborted)`);
           return;
         }
         await sleep(POLL_MS);
@@ -757,7 +765,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       await api("POST", `/daemon/turns/${turnId}/facts`, {
         type: "terminal", terminalState, runtimeEventId: randomUUID(),
       }, leaseRef);
-      log(`turn ${turnId.slice(0, 8)} ${terminalState}`);
+      log(`${tag} ${terminalState}`);
     } catch (e) {
       log(`turn ${turnId.slice(0, 8)} error: ${String(e)}`);
       // Best-effort: leave the relay a terminal instead of a forever-running

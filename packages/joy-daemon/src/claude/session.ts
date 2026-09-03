@@ -652,6 +652,8 @@ export class Session {
   // causal guard for dialog-based delivery confirmation.
   #dispatchSubmittedAt: number | null = null;
   #drainRetry: ReturnType<typeof setTimeout> | null = null;
+  // Last #noteHold line (throttle clock) — see #noteHold.
+  #holdLoggedAt = 0;
   // A human-typed draft captured from the input box right before a dispatch-
   // driven clear wiped it (drain gate / steer). Restored — typed back, never
   // submitted — once the queue is idle again, so text someone typed directly
@@ -1185,6 +1187,7 @@ export class Session {
       this.#broadcastQueue();
       throw new Error("queue spool write failed — message not durably staged");
     }
+    this.#dlog(`queued ${item.id} (src=${item.source} chars=${item.text.length}${item.seq != null ? ` seq=${item.seq}` : ""}) queue=${this.#queue.length} gate: ${this.#holdReason()}`);
     this.#maybeDrainQueue(); // drains immediately if Claude is idle
     return { id: item.id, text: item.text, createdAt: item.createdAt };
   }
@@ -1542,6 +1545,39 @@ export class Session {
     this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, ms);
   }
 
+  // ── Dispatch tracing ────────────────────────────────────────────────────────
+  // The dispatch path used to log only failures, so a message that reached the
+  // relay, was staged, and then sat behind a gate left NO trace at all — the
+  // 2026-09-03 "queued but never sent" reports were undiagnosable after the
+  // fact. These lines cover the whole lifecycle (queued → typed → submitted →
+  // confirmed) plus a throttled line naming the gate whenever a staged message
+  // waits. Text is never logged, only its length.
+  #dlog(msg: string): void {
+    process.stderr.write(`[dispatch] ${this.id} ${msg}\n`);
+  }
+
+  /** Which gate is currently holding the queue (for #noteHold). */
+  #holdReason(): string {
+    if (this.status === "ended") return "session ended";
+    if (this.#queuePaused) return `queue paused (${this.#pauseReason ?? "?"})`;
+    if (this.#dispatchInFlight) return `dispatch ${this.#dispatchInFlight.id} still in flight`;
+    if (this.#turn) return "turn running";
+    return "clear to send";
+  }
+
+  /** Log a held head item at most every 30s, and only once it has waited 10s —
+   *  a drain retries twice a second, so an unthrottled line would be noise. */
+  #noteHold(reason: string): void {
+    const head = this.#queue[0];
+    if (!head) return;
+    const waited = Date.now() - head.createdAt;
+    if (waited < 10_000) return;
+    const now = Date.now();
+    if (now - this.#holdLoggedAt < 30_000) return;
+    this.#holdLoggedAt = now;
+    this.#dlog(`held ${head.id} ${Math.round(waited / 1000)}s — ${reason}`);
+  }
+
   /**
    * Drain the queue's head IF Claude is genuinely idle AND the input box is empty.
    * The gate AWAITS a FRESH pane capture (control mode) where a stale read would
@@ -1588,19 +1624,20 @@ export class Session {
    */
   async #drainOnce(): Promise<void> {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
-    if (!this.#canDrain()) return;
+    if (!this.#canDrain()) { this.#noteHold(this.#holdReason()); return; }
 
     const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     if (!this.#canDrain()) return; // re-check after the await
     if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
+      this.#noteHold(!pane.ok ? "pane capture failed" : "pane busy or not at the prompt");
       this.#armDrainRetry(500);
       return;
     }
 
     const box = paneInputText(pane.out);
     if (box !== "") {
-      if (box === null) { this.#clearAttempts = 0; this.#armDrainRetry(500); return; } // not-ready, not empty
+      if (box === null) { this.#clearAttempts = 0; this.#noteHold("no input box on screen"); this.#armDrainRetry(500); return; } // not-ready, not empty
       // Stuck text → run a verified clear episode. Only a FAILED episode ("dirty":
       // keys went out but the box still holds text) counts toward the pause;
       // "skipped" means state changed under us (turn started / not ready), which
@@ -1610,6 +1647,7 @@ export class Session {
       const res = await this.#clearInputIfDirty(true);
       if (res === "cleared") { this.#clearAttempts = 0; this.#armDrainRetry(200); return; }
       if (res === "skipped") { this.#clearAttempts = 0; this.#armDrainRetry(500); return; }
+      this.#noteHold("input box holds text we could not clear");
       this.#clearAttempts += 1;
       if (this.#clearAttempts >= 2) {
         process.stderr.write(`[queue] input box dirty + unclearable for ${this.id} — paused\n`);
@@ -1640,6 +1678,8 @@ export class Session {
       process.stderr.write(`[queue] dispatch send failed for ${this.id}: ${e}\n`);
       return;
     }
+    this.#holdLoggedAt = 0; // the hold is over — the next one logs promptly
+    this.#dlog(`typed ${next.id} (chars=${next.text.length}) — Enter pending`);
     // Arm the echo-confirmation timeout: a successful dispatch produces a new turn.
     // If none appears, the message didn't land.
     this.#dispatchExtends = 0;
@@ -1665,6 +1705,7 @@ export class Session {
     // dialog is up — no ready prompt), but a pre-existing dialog that raced
     // the gate's capture must not confirm a command it didn't come from.
     if (dialogSince < (this.#dispatchSubmittedAt ?? Number.POSITIVE_INFINITY)) return;
+    this.#dlog(`confirmed ${inflight.id} by dialog`);
     this.#dispatchExtends = 0;
     this.#dispatchInFlight = null;
     this.#clearSubmitTimer();
@@ -1685,6 +1726,7 @@ export class Session {
     // the open turn and the transcript user-echo (text-matched) confirms it —
     // or the dispatch echo timeout requeues it. Never confirm on turn-start alone.
     if (this.#submitTimer) return;
+    this.#dlog(`confirmed ${this.#dispatchInFlight.id} by transcript echo`);
     this.#dispatchInFlight = null;
     this.#dispatchExtends = 0;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
@@ -2328,6 +2370,7 @@ export class Session {
       const st: string = this.status; // re-read: it may have flipped to "ended" during the await
       if (st === "ended" || this.#turn || !target || this.#dispatchInFlight !== target) return;
       this.#dispatchSubmittedAt = Date.now(); // Enter is out — dialogs after this are ours
+      this.#dlog(`submitted ${target.id}`);
       if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
       this.#setThinking(true);
       this.#thinkingLeaseUntil = Date.now() + Session.#THINKING_LEASE_MS; // trusted edge — pane can't clear
