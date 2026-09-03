@@ -389,6 +389,9 @@ export const ja: TranslationStructure = {
         pendingHeader: ({ count }: { count: number }) => `${count} 件送信待ち`,
         waitingForNetwork: '接続を待っています…',
         sendFailedOffline: '送信できませんでした — 接続がありません',
+        retry: '再試行',
+        sendRetrying: ({ reason }: { reason: string }) => `送信できませんでした — ${reason}。再試行しています…`,
+        sendParked: ({ reason }: { reason: string }) => `送信できませんでした — ${reason}。↻ をタップして再試行してください。`,
         offlineBanner: '接続がありません — キュー内のメッセージはオンラインに戻ると送信されます',
     },
 

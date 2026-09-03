@@ -435,6 +435,9 @@ export const en = {
         pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 waiting to send' : `${count} waiting to send`,
         waitingForNetwork: 'Waiting for connection…',
         sendFailedOffline: 'Couldn’t send — no connection',
+        retry: 'Retry',
+        sendRetrying: ({ reason }: { reason: string }) => `Couldn’t send — ${reason}. Trying again…`,
+        sendParked: ({ reason }: { reason: string }) => `Couldn’t send — ${reason}. Tap ↻ to try again.`,
         offlineBanner: 'No connection — queued messages will send when you’re back online',
     },
 

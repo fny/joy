@@ -388,6 +388,9 @@ export const zhHant: TranslationStructure = {
         pendingHeader: ({ count }: { count: number }) => `${count} 則待傳送`,
         waitingForNetwork: '正在等待連線…',
         sendFailedOffline: '無法傳送 — 無連線',
+        retry: '重試',
+        sendRetrying: ({ reason }: { reason: string }) => `無法傳送 — ${reason}。正在重試…`,
+        sendParked: ({ reason }: { reason: string }) => `無法傳送 — ${reason}。點一下 ↻ 重試。`,
         offlineBanner: '無連線 — 佇列中的訊息將在恢復連線後傳送',
     },
 

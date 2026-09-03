@@ -515,6 +515,9 @@ export const ru: TranslationStructure = {
         pendingHeader: ({ count }: { count: number }) => plural({ count, one: '1 сообщение ждёт отправки', few: `${count} сообщения ждут отправки`, many: `${count} сообщений ждут отправки` }),
         waitingForNetwork: 'Ожидание подключения…',
         sendFailedOffline: 'Не удалось отправить — нет подключения',
+        retry: 'Повторить',
+        sendRetrying: ({ reason }: { reason: string }) => `Не удалось отправить — ${reason}. Повторяем…`,
+        sendParked: ({ reason }: { reason: string }) => `Не удалось отправить — ${reason}. Нажмите ↻, чтобы повторить.`,
         offlineBanner: 'Нет подключения — сообщения из очереди отправятся, когда вы снова будете в сети',
     },
 

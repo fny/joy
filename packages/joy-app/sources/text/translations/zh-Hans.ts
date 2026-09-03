@@ -389,6 +389,9 @@ export const zhHans: TranslationStructure = {
         pendingHeader: ({ count }: { count: number }) => `${count} 条待发送`,
         waitingForNetwork: '正在等待连接…',
         sendFailedOffline: '无法发送 — 无连接',
+        retry: '重试',
+        sendRetrying: ({ reason }: { reason: string }) => `无法发送 — ${reason}。正在重试…`,
+        sendParked: ({ reason }: { reason: string }) => `无法发送 — ${reason}。点按 ↻ 重试。`,
         offlineBanner: '无连接 — 队列中的消息将在恢复联网后发送',
     },
 

@@ -7,6 +7,7 @@ import { Typography } from '@/constants/Typography';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useDrafts, useDraftQueueStore, draftReason, type QueuedDraft } from './draftQueue';
+import { MAX_AUTO_ATTEMPTS } from './draftQueueRelease';
 
 // App-side QUEUE ITEMS — messages auto-held because a turn is processing ahead
 // ('busy'). Distinct from deliberate drafts (DraftQueueStrip) and from the
@@ -34,33 +35,60 @@ const PendingRow = React.memo(function PendingRow({ sessionId, item }: { session
     const { theme } = useUnistyles();
     const update = useDraftQueueStore((s) => s.update);
     const remove = useDraftQueueStore((s) => s.remove);
+    const retryRelease = useDraftQueueStore((s) => s.retryRelease);
 
     const onEdit = React.useCallback(async () => {
         const next = await Modal.prompt(t('joyQueue.editTitle'), '', { defaultValue: item.text });
         if (next != null && next.trim() && next.trim() !== item.text) update(sessionId, item.id, next.trim());
     }, [sessionId, item.id, item.text, update]);
 
+    // A release that keeps failing used to leave the row looking exactly like a
+    // message politely waiting its turn — and after MAX_AUTO_ATTEMPTS the app
+    // stopped retrying without saying so, which reads as "queued forever".
+    // Show the reason, and give the parked state a retry.
+    const parked = (item.attempt ?? 0) >= MAX_AUTO_ATTEMPTS;
+
     return (
-        <View style={styles.row}>
-            <Text style={styles.text} numberOfLines={1}>{item.text}</Text>
-            <Pressable
-                onPress={onEdit}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel={t('common.edit')}
-                style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
-            >
-                <Ionicons name="pencil-outline" size={18} color={theme.colors.text} />
-            </Pressable>
-            <Pressable
-                onPress={() => remove(sessionId, item.id)}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel={t('common.delete')}
-                style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
-            >
-                <Ionicons name="close" size={19} color={theme.colors.text} />
-            </Pressable>
+        <View style={styles.rowWrap}>
+            <View style={styles.row}>
+                <Text style={styles.text} numberOfLines={1}>{item.text}</Text>
+                {item.lastError != null && (
+                    <Pressable
+                        onPress={() => retryRelease(sessionId, item.id)}
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel={t('joyQueue.retry')}
+                        style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
+                    >
+                        <Ionicons name="refresh" size={18} color={theme.colors.text} />
+                    </Pressable>
+                )}
+                <Pressable
+                    onPress={onEdit}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel={t('common.edit')}
+                    style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
+                >
+                    <Ionicons name="pencil-outline" size={18} color={theme.colors.text} />
+                </Pressable>
+                <Pressable
+                    onPress={() => remove(sessionId, item.id)}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel={t('common.delete')}
+                    style={(p) => [styles.action, { opacity: p.pressed ? 0.5 : 1 }]}
+                >
+                    <Ionicons name="close" size={19} color={theme.colors.text} />
+                </Pressable>
+            </View>
+            {item.lastError != null && (
+                <Text style={styles.error} numberOfLines={2}>
+                    {parked
+                        ? t('joyQueue.sendParked', { reason: item.lastError })
+                        : t('joyQueue.sendRetrying', { reason: item.lastError })}
+                </Text>
+            )}
         </View>
     );
 });
@@ -89,14 +117,23 @@ const styles = StyleSheet.create((theme) => ({
         color: theme.colors.textSecondary,
         ...Typography.default('semiBold'),
     },
+    rowWrap: {
+        borderTopWidth: StyleSheet.hairlineWidth,
+        borderTopColor: theme.colors.divider,
+    },
     row: {
         flexDirection: 'row',
         alignItems: 'center',
         gap: 6,
         paddingHorizontal: 12,
         paddingVertical: 7,
-        borderTopWidth: StyleSheet.hairlineWidth,
-        borderTopColor: theme.colors.divider,
+    },
+    error: {
+        paddingHorizontal: 12,
+        paddingBottom: 7,
+        fontSize: 12,
+        color: theme.colors.textDestructive,
+        ...Typography.default(),
     },
     text: {
         flex: 1,

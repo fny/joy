@@ -388,6 +388,9 @@ export const ca: TranslationStructure = {
         pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 pendent d\'enviar' : `${count} pendents d\'enviar`,
         waitingForNetwork: 'Esperant connexió…',
         sendFailedOffline: 'No s\'ha pogut enviar — sense connexió',
+        retry: 'Reintenta',
+        sendRetrying: ({ reason }: { reason: string }) => `No s'ha pogut enviar — ${reason}. S'està reintentant…`,
+        sendParked: ({ reason }: { reason: string }) => `No s'ha pogut enviar — ${reason}. Toca ↻ per reintentar.`,
         offlineBanner: 'Sense connexió — els missatges en cua s\'enviaran quan tornis a estar en línia',
     },
 

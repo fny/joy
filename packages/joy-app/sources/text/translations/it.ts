@@ -386,6 +386,9 @@ export const it: TranslationStructure = {
         pendingHeader: ({ count }: { count: number }) => count === 1 ? '1 in attesa di invio' : `${count} in attesa di invio`,
         waitingForNetwork: 'In attesa di connessione…',
         sendFailedOffline: 'Impossibile inviare — nessuna connessione',
+        retry: 'Riprova',
+        sendRetrying: ({ reason }: { reason: string }) => `Impossibile inviare — ${reason}. Nuovo tentativo…`,
+        sendParked: ({ reason }: { reason: string }) => `Impossibile inviare — ${reason}. Tocca ↻ per riprovare.`,
         offlineBanner: 'Nessuna connessione — i messaggi in coda verranno inviati quando tornerai online',
     },
 

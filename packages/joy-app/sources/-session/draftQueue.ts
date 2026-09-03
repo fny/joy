@@ -47,6 +47,9 @@ interface DraftQueueState {
     /** Send failed/lease action: back to 'queued' with attempt+1 and the error
      *  recorded — draft stays visible and editable, never silently lost. */
     revertRelease: (sessionId: string, id: string, error: string) => void;
+    /** Manual retry of an item the auto-release parked after MAX_AUTO_ATTEMPTS:
+     *  clears the attempt count and the error so the next sweep picks it up. */
+    retryRelease: (sessionId: string, id: string) => void;
 }
 
 const mmkv = relayScopedMMKV();
@@ -153,6 +156,17 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
                 ...s.bySession,
                 [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
                     ? { ...d, state: 'queued' as const, leaseUntil: undefined, attempt: (d.attempt ?? 0) + 1, lastError: error.slice(0, 200) }
+                    : d)),
+            },
+        }));
+        persist(get().bySession);
+    },
+    retryRelease: (sessionId, id) => {
+        set((s) => ({
+            bySession: {
+                ...s.bySession,
+                [sessionId]: (s.bySession[sessionId] ?? []).map((d) => (d.id === id
+                    ? { ...d, state: 'queued' as const, leaseUntil: undefined, attempt: 0, lastError: undefined }
                     : d)),
             },
         }));
