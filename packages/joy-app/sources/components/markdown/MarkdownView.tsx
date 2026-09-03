@@ -51,7 +51,10 @@ export const MarkdownView = React.memo((props: {
     const handleLongPress = React.useCallback(() => {
         try {
             const textId = storeTempText(props.markdown);
-            router.push(`/text-selection?textId=${textId}`);
+            // sessionId lets the selection screen's Reuse put the text back
+            // into THIS session's composer.
+            const sid = props.sessionId ? `&sessionId=${encodeURIComponent(props.sessionId)}` : '';
+            router.push(`/text-selection?textId=${textId}${sid}`);
         } catch (error) {
             console.error('Error storing text for selection:', error);
             Modal.alert('Error', 'Failed to open text selection. Please try again.');
