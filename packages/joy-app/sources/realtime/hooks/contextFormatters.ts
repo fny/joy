@@ -10,6 +10,7 @@ function agentLabel(session: Session | undefined): string {
         case 'codex': return 'Codex';
         case 'opencode': return 'OpenCode';
         case 'pi': return 'pi';
+        case 'agy': return 'Antigravity';
         case 'claude': return 'Claude Code';
         default: return 'The agent';
     }

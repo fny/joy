@@ -1,6 +1,6 @@
 import * as z from 'zod';
 
-export const agentKeys = ['claude', 'codex', 'gemini', 'openclaw', 'opencode', 'pi'] as const;
+export const agentKeys = ['claude', 'codex', 'gemini', 'openclaw', 'opencode', 'pi', 'agy'] as const;
 export type AgentKey = typeof agentKeys[number];
 
 export const AgentDefaultOverrideSchema = z.object({
@@ -16,6 +16,7 @@ export const AgentDefaultOverridesSchema = z.object({
     openclaw: AgentDefaultOverrideSchema.optional(),
     opencode: AgentDefaultOverrideSchema.optional(),
     pi: AgentDefaultOverrideSchema.optional(),
+    agy: AgentDefaultOverrideSchema.optional(),
 }).passthrough().default({});
 
 export type AgentDefaultOverride = z.infer<typeof AgentDefaultOverrideSchema>;
@@ -42,10 +43,12 @@ const codeAgentDefaults: Record<AgentKey, AgentDefaultConfig> = {
     opencode: { permissionMode: 'default', modelMode: 'accounts/fireworks/models/kimi-k3', effortLevel: null },
     // pi (bare v1): daemon default is fireworks kimi-k3; no permission surface.
     pi: { permissionMode: 'default', modelMode: 'default', effortLevel: null },
+    // Antigravity (agy): headless with permissions skipped; model is the CLI's own default.
+    agy: { permissionMode: 'bypassPermissions', modelMode: 'default', effortLevel: null },
 };
 
 export function normalizeAgentKey(flavor: string | null | undefined): AgentKey {
-    if (flavor === 'codex' || flavor === 'gemini' || flavor === 'openclaw' || flavor === 'opencode' || flavor === 'pi') {
+    if (flavor === 'codex' || flavor === 'gemini' || flavor === 'openclaw' || flavor === 'opencode' || flavor === 'pi' || flavor === 'agy') {
         return flavor;
     }
     return 'claude';

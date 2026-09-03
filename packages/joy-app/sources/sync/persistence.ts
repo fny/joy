@@ -11,7 +11,7 @@ const MAX_CACHED_MACHINES = 50;
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
 const REGISTERED_PUSH_TOKEN_KEY = 'registered-push-token-v1';
 
-export type NewSessionAgentType = 'claude' | 'codex' | 'gemini' | 'openclaw' | 'opencode' | 'pi';
+export type NewSessionAgentType = 'claude' | 'codex' | 'gemini' | 'openclaw' | 'opencode' | 'pi' | 'agy';
 export type NewSessionSessionType = 'simple' | 'worktree';
 
 export interface NewSessionDraft {
@@ -165,7 +165,7 @@ export function loadNewSessionDraft(): NewSessionDraft | null {
         const input = typeof parsed.input === 'string' ? parsed.input : '';
         const selectedMachineId = typeof parsed.selectedMachineId === 'string' ? parsed.selectedMachineId : null;
         const selectedPath = typeof parsed.selectedPath === 'string' ? parsed.selectedPath : null;
-        const agentType: NewSessionAgentType = parsed.agentType === 'codex' || parsed.agentType === 'gemini' || parsed.agentType === 'openclaw' || parsed.agentType === 'opencode' || parsed.agentType === 'pi'
+        const agentType: NewSessionAgentType = parsed.agentType === 'codex' || parsed.agentType === 'gemini' || parsed.agentType === 'openclaw' || parsed.agentType === 'opencode' || parsed.agentType === 'pi' || parsed.agentType === 'agy'
             ? parsed.agentType
             : 'claude';
         const permissionMode: PermissionModeKey = typeof parsed.permissionMode === 'string'

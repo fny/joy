@@ -119,7 +119,7 @@ function NewJoyTmuxSessionScreen() {
     // repo's machine + path when this page is the default New session).
     const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string; mode?: string }>();
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
-    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode' | 'pi'>('claude');
+    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode' | 'pi' | 'agy'>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
     const [modelIndex, setModelIndex] = React.useState(0);
     const [effortIndex, setEffortIndex] = React.useState(0);
@@ -289,6 +289,27 @@ function NewJoyTmuxSessionScreen() {
     }, [selectedAgent, selectedMachineId]);
     const ocModel = ocModels[ocModelIndex];
     const cycleOcModel = React.useCallback(() => { setOcModelIndex(i => ocModels.length ? (i + 1) % ocModels.length : 0); }, [ocModels.length]);
+    // Antigravity model catalog: `agy models` display names via the daemon
+    // (joy-agy-models); the display name is what `agy --model` takes.
+    const [agyModels, setAgyModels] = React.useState<{ id: string; displayName: string; isDefault?: boolean }[]>([]);
+    const [agyModelIndex, setAgyModelIndex] = React.useState(0);
+    React.useEffect(() => {
+        if (selectedAgent !== 'agy' || !selectedMachineId) return;
+        let cancelled = false;
+        const actx = sync.machineOnlyCtx(selectedMachineId);
+        if (!actx) return;
+        machineHarnessModels(actx, 'agy').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof agyModels | undefined }))
+            .then((res) => {
+                if (cancelled || !res.models?.length) return;
+                setAgyModels(res.models);
+                const def = res.models.findIndex((m) => m.isDefault);
+                setAgyModelIndex(def >= 0 ? def : 0);
+            })
+            .catch(() => { /* agy op absent (old daemon) — chip stays empty */ });
+        return () => { cancelled = true; };
+    }, [selectedAgent, selectedMachineId]);
+    const agyModel = agyModels[agyModelIndex];
+    const cycleAgyModel = React.useCallback(() => { setAgyModelIndex(i => agyModels.length ? (i + 1) % agyModels.length : 0); }, [agyModels.length]);
     // Past-sessions picker: on-demand list of opencode sessions recorded for
     // the chosen directory (daemon boots a short-lived server, so first load
     // takes a few seconds).
@@ -419,16 +440,16 @@ function NewJoyTmuxSessionScreen() {
                 agent: selectedAgent,
                 // Codex/opencode carry their own model ids from their catalogs;
                 // claude sends its key. Effort is claude/codex only.
-                model: selectedAgent === 'codex' ? codexModel?.model : selectedAgent === 'opencode' ? ocModel?.id : selectedAgent === 'pi' ? undefined : currentModel?.key,
+                model: selectedAgent === 'codex' ? codexModel?.model : selectedAgent === 'opencode' ? ocModel?.id : selectedAgent === 'agy' ? agyModel?.id : selectedAgent === 'pi' ? undefined : currentModel?.key,
                 effort: selectedAgent === 'codex' ? codexEffort : selectedAgent === 'claude' && currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
                 // resume by id wins over --continue (most recent); never both.
                 resume_id: resumeId.trim() || undefined,
                 continue: (continueLast && !resumeId.trim()) || undefined,
                 resumeLimitMb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
-                permissionMode: selectedAgent !== 'opencode' && selectedAgent !== 'pi' ? currentMode.key : undefined,
+                permissionMode: selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' ? currentMode.key : undefined,
                 fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
                 forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
-                extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' ? (extraArgs.trim() || undefined) : undefined,
+                extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' ? (extraArgs.trim() || undefined) : undefined,
             });
             if (!sessionId) return; // user declined the directory prompt
 
@@ -528,8 +549,8 @@ function NewJoyTmuxSessionScreen() {
                             {/* Agent badge (tap to toggle claude ↔ codex) + model + effort */}
                             <View style={styles.configRow}>
                                 <Ionicons name="terminal-outline" size={15} color={theme.colors.textSecondary} />
-                                <Pressable onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : a === 'opencode' ? 'pi' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : selectedAgent === 'opencode' ? 'opencode' : selectedAgent === 'pi' ? 'pi' : 'claude code'}</Text>
+                                <Pressable onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : a === 'opencode' ? 'pi' : a === 'pi' ? 'agy' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : selectedAgent === 'opencode' ? 'opencode' : selectedAgent === 'pi' ? 'pi' : selectedAgent === 'agy' ? 'antigravity' : 'claude code'}</Text>
                                 </Pressable>
                                 {selectedAgent === 'codex' && codexModel && (
                                     <>
@@ -552,6 +573,14 @@ function NewJoyTmuxSessionScreen() {
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
                                         <Pressable onPress={cycleOcModel} style={(p) => [p.pressed && styles.configRowPressed]}>
                                             <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{ocModel.displayName}</Text>
+                                        </Pressable>
+                                    </>
+                                )}
+                                {selectedAgent === 'agy' && agyModel && (
+                                    <>
+                                        <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
+                                        <Pressable onPress={cycleAgyModel} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{agyModel.displayName}</Text>
                                         </Pressable>
                                     </>
                                 )}
@@ -582,7 +611,7 @@ function NewJoyTmuxSessionScreen() {
                                 claude's Shift+Tab. yolo (bypassPermissions) is the default.
                                 Hidden for opencode: v1 has no permission surface (approvals
                                 land as chat prompts). */}
-                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && (
+                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' && (
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={cycleMode}
@@ -769,7 +798,7 @@ function NewJoyTmuxSessionScreen() {
                             {/* Extra arguments — claude: CLI args appended verbatim;
                                 codex: -c config overrides (key=value …). opencode has
                                 no extra-args surface. */}
-                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && (
+                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' && (
                             <View style={styles.configRow}>
                                 <Ionicons name="options-outline" size={15} color={theme.colors.textSecondary} />
                                 <TextInput

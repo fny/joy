@@ -18,6 +18,7 @@ const AGENTS = [
     { key: 'codex', name: 'Codex', file: '~/.codex/config.toml' },
     { key: 'opencode', name: 'OpenCode', file: '~/.config/opencode/opencode.json' },
     { key: 'pi', name: 'Pi', file: '~/.pi/agent/settings.json' },
+    { key: 'agy', name: 'Antigravity', file: '~/.gemini/antigravity-cli/settings.json' },
 ] as const;
 
 export default React.memo(function AgentConfigMenuScreen() {

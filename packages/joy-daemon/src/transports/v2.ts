@@ -21,7 +21,7 @@ import { validatePath } from "../domain/fileOps";
 import { readAgentConfig, writeAgentConfigRaw, applyAgentConfigAssignments, fetchAgentSchema, agentConfigSpec } from "../domain/agentConfig";
 import { fetchClaudeLimits, readCodexLimits, claudeLimitRows } from "../domain/limits";
 
-const HARNESSES = ["claude", "codex", "opencode", "pi"] as const;
+const HARNESSES = ["claude", "codex", "opencode", "pi", "agy"] as const;
 type Harness = (typeof HARNESSES)[number];
 
 const mops = new Map(machineOps.map(o => [o.name, o]));
@@ -192,6 +192,7 @@ route("GET", "/v2/harnesses/:harness/models", async (ctx, p) => {
   switch (p.harness) {
     case "codex": return ok(await mcall("codexModels", ctx.registry, {}));
     case "opencode": return ok(await mcall("opencodeModels", ctx.registry, {}));
+    case "agy": return ok(await mcall("agyModels", ctx.registry, {}));
     case "claude":
     case "pi":
       // No machine-side catalog for these: the CLI owns model choice.

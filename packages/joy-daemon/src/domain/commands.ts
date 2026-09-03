@@ -50,7 +50,7 @@ export type CmdTag =
   | "opencode:command" | "opencode:skill"
   | "agents:skill";
 
-export type AgentFlavor = "claude" | "codex" | "opencode" | "pi";
+export type AgentFlavor = "claude" | "codex" | "opencode" | "pi" | "agy";
 
 /** What each session flavor's palette should offer = what its harness loads. */
 const FLAVOR_TAGS: Record<AgentFlavor, ReadonlySet<CmdTag>> = {
@@ -60,6 +60,8 @@ const FLAVOR_TAGS: Record<AgentFlavor, ReadonlySet<CmdTag>> = {
   // pi discovers skills itself from its own conventions; project claude/agents
   // skills are the useful cross-agent surface to advertise in the palette.
   pi: new Set<CmdTag>(["claude:skill", "agents:skill"]),
+  // agy has plugins of its own; project claude/agents skills are the shared surface.
+  agy: new Set<CmdTag>(["claude:skill", "agents:skill"]),
 };
 
 /** A discovered slash command: its (possibly namespaced) name, the

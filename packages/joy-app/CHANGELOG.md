@@ -1,3 +1,7 @@
+# Sep 3 (17) — Antigravity sessions
+
+- **New agent: Antigravity.** Google's `agy` CLI joins Claude Code, Codex, OpenCode and pi. Pick "antigravity" on the new-session page, choose from the models `agy models` offers, and chat as with any other session — tool calls show as cards with their output. It runs headless: one `agy` process per turn against a persistent conversation, so a session survives daemon restarts and the queue (edit, reorder, cancel, steer) is the daemon's own. Permissions are skipped, as with the daemon's default mode; there is no terminal pane. *Needs the updated daemon, and `agy` installed and signed in on the machine.*
+
 # Sep 3 (16) — One "Queue" list
 
 - **"Queued" and "Waiting to send" are gone; there is one list, Queue.** Everything you've sent that hasn't reached the agent yet — held in the app because a turn was running, or lined up on your machine — is one stack above the composer — the very same component as Drafts, no icons, always collapsible from its header however long the entries get: edit in place, × to remove, ⇡ to steer into the running turn, ↻ when a send keeps failing. A paused queue shows as a banner at the top of the same list.

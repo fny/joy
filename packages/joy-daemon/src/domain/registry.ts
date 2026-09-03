@@ -19,6 +19,7 @@ import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
 import { PiSession } from "../pi/piSession";
+import { AgySession } from "../agy/agySession";
 import { PI_MODELS, defaultPiModel } from "../pi/models";
 import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
@@ -31,7 +32,7 @@ export interface CreateSessionOpts {
   cwd: string;
   /** Agent type. Absent/'claude' → the claude CLI path; 'codex' → the codex
    *  app-server adapter (CodexSession). */
-  agent?: "claude" | "codex" | "opencode" | "pi";
+  agent?: "claude" | "codex" | "opencode" | "pi" | "agy";
   /** Reuse a specific joy session id (and thus the same relay tag/card) instead
    *  of minting a fresh one — used when restarting a daemon-forgotten session so
    *  it reattaches to its existing app card rather than spawning a duplicate. */
@@ -324,6 +325,9 @@ export class SessionRegistry {
     }
     if (opts.agent === "pi") {
       return await this.#createPiSession(opts, id, cwd);
+    }
+    if (opts.agent === "agy") {
+      return await this.#createAgySession(opts, id, cwd);
     }
 
     // Validate user-supplied fields to prevent shell injection via send-keys
@@ -639,6 +643,33 @@ export class SessionRegistry {
         session.attachRelay(rs);
       } catch (e) {
         process.stderr.write(`[relay] failed to create pi session for ${id}: ${e}\n`);
+      }
+    }
+    session.beginWatching();
+    return session;
+  }
+
+  async #createAgySession(opts: CreateSessionOpts, id: string, cwd: string): Promise<AgentSession> {
+    if (!existsSync(cwd)) {
+      if (opts.createDir) mkdirSync(cwd, { recursive: true });
+      else throw new DirectoryCreationApprovalRequired(cwd);
+    }
+    // Model is a display name from `agy models` (validated loosely: no shell
+    // is involved, it goes to spawn argv). Absent → the CLI's own default.
+    if (opts.model && !/^[\w .()+-]{1,64}$/.test(opts.model)) throw new Error("invalid model");
+    const session = new AgySession({
+      id, cwd, model: opts.model, status: "starting", startedAt: Date.now(),
+      conversationId: opts.resume_id, continueLast: opts.continue === true && !opts.resume_id,
+    }, this.#sessionDeps());
+    this.#sessions.set(id, session);
+    saveWindowRecord(id, { launchCwd: cwd, agent: "agy" });
+    this.broadcast("session_update", session.toJSON());
+    if (this.relayClient) {
+      try {
+        const rs = createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id, flavor: "agy" });
+        session.attachRelay(rs);
+      } catch (e) {
+        process.stderr.write(`[relay] failed to create agy session for ${id}: ${e}\n`);
       }
     }
     session.beginWatching();
@@ -1040,6 +1071,22 @@ export class SessionRegistry {
       this.#sessions.set(rec.id, session);
       this.#attachRelayAsync(session, () => session.beginWatching());
       process.stderr.write(`[recover] opencode ${rec.id} respawn+resume session=${rec.opencodeSessionId}\n`);
+    }
+    // Antigravity: headless, one process per turn, so there is nothing that
+    // can have died — a record with a conversation id IS the session. Recreate
+    // it live; the next prompt resumes the conversation.
+    for (const rec of listWindowRecords()) {
+      if (rec.agent !== "agy" || !rec.id || this.#sessions.has(rec.id)) continue;
+      if (!existsSync(rec.launchCwd)) continue;
+      const session = new AgySession({
+        id: rec.id, cwd: rec.launchCwd,
+        model: rec.agySettings?.model,
+        conversationId: rec.agySettings?.conversationId,
+        status: "active", startedAt: Date.now(),
+      }, this.#sessionDeps());
+      this.#sessions.set(rec.id, session);
+      this.#attachRelayAsync(session, () => session.beginWatching());
+      process.stderr.write(`[recover] agy ${rec.id} resumed conversation=${rec.agySettings?.conversationId ?? "(none yet)"}\n`);
     }
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "codex" || !rec.id || this.#sessions.has(rec.id)) continue;

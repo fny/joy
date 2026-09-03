@@ -97,6 +97,17 @@ every relay; machines register per account.
   (`takesThinkingLease`) and a visible dialog clears it outright — both kept
   `busy()` true for a prompt that never generates, holding the relay turn open
   and queueing everything behind it.
+- **Antigravity (`agy`) sessions** — `packages/joy-daemon/src/agy/`. Headless:
+  one `agy --print --output-format stream-json --dangerously-skip-permissions
+  --add-dir <cwd> [--conversation <id>] [--model <display name>]` process per
+  turn; `init` yields the conversation id (persisted as
+  `agySettings.conversationId`), `step_update` mirrors text (per-step deltas,
+  emitted at DONE) and tool calls (start with parameters, end with output),
+  `result` closes the turn with usage. No resident process, so recovery is
+  just re-creating the session from its record. Daemon-owned FIFO queue with
+  real edit/cancel/reorder. `--add-dir` is required or writes land in agy's
+  scratch dir. Models: `joy-agy-models` (`agy models` display names; the name
+  IS the `--model` id). Config: `~/.gemini/antigravity-cli/settings.json`.
 - File ops from the app are jailed to the session cwd (`validatePath`,
   realpath-resolved) plus explicit extra roots. READ-side ops — view/download
   (`readFile`), `listDirectory`, `getDirectoryTree`, `ripgrep` — also get
