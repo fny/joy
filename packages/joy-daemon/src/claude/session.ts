@@ -434,6 +434,14 @@ export interface QueuedItem extends QueuedMessage {
   visible: boolean;
 }
 
+/** Delivery outcome of ONE queued item, by id. The v2 lane needs proof that
+ *  THIS prompt reached the agent; `busy()` cannot give it (for claude busy() is
+ *  true from enqueue onward, so a turn could report started AND completed off a
+ *  previous turn's flag while its own prompt was never typed — silent loss,
+ *  observed live 2026-09-03). "unknown" = no record (e.g. after a restart), and
+ *  the caller falls back to its heuristic. */
+export type QueueItemState = "pending" | "delivered" | "cancelled" | "unknown";
+
 export interface QueueState {
   queue: QueuedMessage[];
   /** ALL undelivered items (visible chips + hidden app-sends + the in-flight
@@ -654,6 +662,10 @@ export class Session {
   #drainRetry: ReturnType<typeof setTimeout> | null = null;
   // Last #noteHold line (throttle clock) — see #noteHold.
   #holdLoggedAt = 0;
+  // Per-item delivery outcome, so a caller can ask about ITS message rather
+  // than infer from the session-wide busy flag. Bounded — only the recent tail
+  // matters (a caller asks while its turn is alive).
+  #itemOutcome = new Map<string, "delivered" | "cancelled">();
   // A human-typed draft captured from the input box right before a dispatch-
   // driven clear wiped it (drain gate / steer). Restored — typed back, never
   // submitted — once the queue is idle again, so text someone typed directly
@@ -1088,6 +1100,23 @@ export class Session {
       || this.#queue.length > 0;
   }
 
+  #recordOutcome(id: string, outcome: "delivered" | "cancelled"): void {
+    this.#itemOutcome.set(id, outcome);
+    if (this.#itemOutcome.size > 200) {
+      for (const k of this.#itemOutcome.keys()) {
+        this.#itemOutcome.delete(k);
+        if (this.#itemOutcome.size <= 150) break;
+      }
+    }
+  }
+
+  /** Delivery state of one queued item — see QueueItemState. */
+  queueItemState(id: string): QueueItemState {
+    if (this.#dispatchInFlight?.id === id) return "pending";
+    if (this.#queue.some((q) => q.id === id)) return "pending";
+    return this.#itemOutcome.get(id) ?? "unknown";
+  }
+
   queueState(): QueueState {
     // Only VISIBLE items are user-facing chips. Hidden (relay/send/retry) items
     // already have a chat bubble, so showing them as editable chips would be a
@@ -1301,6 +1330,7 @@ export class Session {
     const i = this.#queue.findIndex(q => q.id === id);
     if (i < 0) return false;
     this.#queue.splice(i, 1);
+    this.#recordOutcome(id, "cancelled");
     this.#broadcastQueue();
     return true;
   }
@@ -1706,6 +1736,7 @@ export class Session {
     // the gate's capture must not confirm a command it didn't come from.
     if (dialogSince < (this.#dispatchSubmittedAt ?? Number.POSITIVE_INFINITY)) return;
     this.#dlog(`confirmed ${inflight.id} by dialog`);
+    this.#recordOutcome(inflight.id, "delivered");
     this.#dispatchExtends = 0;
     this.#dispatchInFlight = null;
     this.#clearSubmitTimer();
@@ -1727,6 +1758,7 @@ export class Session {
     // or the dispatch echo timeout requeues it. Never confirm on turn-start alone.
     if (this.#submitTimer) return;
     this.#dlog(`confirmed ${this.#dispatchInFlight.id} by transcript echo`);
+    this.#recordOutcome(this.#dispatchInFlight.id, "delivered");
     this.#dispatchInFlight = null;
     this.#dispatchExtends = 0;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }

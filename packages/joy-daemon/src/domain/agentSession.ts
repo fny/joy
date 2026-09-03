@@ -11,7 +11,7 @@
 
 import type { RelaySession } from "../relay/relay";
 import type { DeliverySource } from "./receipts";
-import type { SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
+import type { SessionStatus, SessionRecord, QueuedMessage, QueueState, QueueItemState } from "../claude/session";
 
 export interface AgentSession {
   /** Which harness runs this session — drives per-flavor projections
@@ -46,6 +46,11 @@ export interface AgentSession {
   busy(): boolean;
   enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage;
   queueState(): QueueState;
+  /** Delivery state of ONE queued item, when the adapter can track it (claude).
+   *  Callers that need proof a SPECIFIC prompt landed must prefer this over the
+   *  session-wide busy() flag; adapters without it return nothing and the caller
+   *  falls back. */
+  queueItemState?(id: string): QueueItemState;
   resumeQueue(): void;
   editQueued(id: string, text: string): boolean;
   cancelQueued(id: string): boolean;
