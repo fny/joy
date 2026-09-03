@@ -915,15 +915,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     while (!stopped) {
       await sleep(RENEW_MS);
       if (!lease) continue;
-      // Orphan sweep on a slow cadence as well as on acquire: a turn can be
-      // orphaned by a fence violation while we still hold the lease, and the
-      // symptom (queue wedged, nothing logged) is invisible otherwise.
-      if (++ticks % 15 === 0) {
-        try {
-          const r = await api("GET", "/sessions");
-          await reconcileOrphanedTurns(r.sessions ?? []);
-        } catch { /* next tick */ }
-      }
+      // Orphan sweep. The boot-time pass in refreshBindings runs BEFORE the
+      // relay has orphaned the turn a restart interrupted — the old lease
+      // takes up to its 20s TTL to expire first — so that pass finds nothing,
+      // and with only the 15-tick (2 min) sweep after it every restart wedged
+      // the mid-turn session for two minutes with the user's sends queued
+      // behind it (this box, b52bf522, three times on 2026-09-03). Now every
+      // tick reads the (cheap, single-request) session list and checks any
+      // row that LOOKS wedged — work queued, nothing executing — which is
+      // exactly what an orphaned turn looks like from the list; the full
+      // per-session sweep stays on the slow cadence for the silent cases
+      // (a fence violation with nothing queued).
+      ticks += 1;
+      try {
+        const r = await api("GET", "/sessions");
+        const rows = (r.sessions ?? []) as Array<{ sessionId: string; daemonId: string; localSessionId?: string | null; queuedTurns?: number; executing?: string | null }>;
+        const suspects = ticks % 15 === 0 ? rows : rows.filter((s) => (s.queuedTurns ?? 0) > 0 && !s.executing);
+        if (suspects.length) await reconcileOrphanedTurns(suspects);
+      } catch { /* next tick */ }
       try {
         const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${lease.leaseId}`, {
           method: "PUT",
