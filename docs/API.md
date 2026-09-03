@@ -23,7 +23,7 @@ joy-app ⇄ joy-relay (e.g. joy.voltai.party:4997, /joy/v2 over HTTPS + SSE)
   mime?,width?,height?,thumbhash?}]}` under the per-session key. Agent-side
   `output` events carry `{v:1,t:'record',record}` instead: `record` is the
   adapter's WireRecord (role `session` with `content.data.ev` = text /
-  tool-call-start / tool-call-end / turn-start / turn-end+usage, or role
+  tool-call-start / tool-call-end (+`result`: clamped tool output, `isError`) / turn-start / turn-end+usage, or role
   `user` for a prompt typed at the terminal) — the daemon forwards every
   normalizer record through the lane, so the chat shows tool cards, thinking
   and usage for all four harnesses; the app hands `record` to the same

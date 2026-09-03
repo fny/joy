@@ -1,3 +1,7 @@
+# Sep 3 (14) — Tool output in the cards
+
+- **Claude's tool cards show what the tool printed.** A Bash call, a file read, a grep — the card now carries the output, and a call that failed is marked as failed. Until now a Claude card showed the command and that it had finished, and a command that exited with an error looked identical to one that succeeded. Very long output is trimmed to its beginning and end. *Needs the updated daemon.*
+
 # Sep 3 (13) — Right-click a message on desktop
 
 - **Right-click any message on desktop to open it in the text view** — the same one long-press opens on the phone — with Copy (the original markdown) and Reuse in its header. Right-clicking text you've already selected still gives you the browser's own menu.

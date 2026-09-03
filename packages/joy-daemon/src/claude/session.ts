@@ -185,6 +185,31 @@ export function takesThinkingLease(prompt: string | null | undefined): boolean {
   return !(prompt ?? "").trimStart().startsWith("/");
 }
 
+/** Bytes of tool output forwarded to the app per call. The relay accepts 256KB
+ *  of base64 per sealed row; a card wants far less than that, and a `find`
+ *  over a repo can be megabytes. Head + tail so both the command's start and
+ *  its exit line survive the cut. */
+export const TOOL_RESULT_MAX_CHARS = 48_000;
+
+/** The text of a Claude `tool_result` — a string, or content blocks whose text
+ *  parts are joined — clamped for the wire. undefined when there is nothing
+ *  textual (an image-only result), so the record stays as it was. */
+export function toolResultText(content: unknown): string | undefined {
+  let text: string;
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content)) {
+    text = (content as Array<Record<string, unknown>>)
+      .map((b) => (b && typeof b.text === "string" ? b.text : ""))
+      .filter(Boolean)
+      .join("\n");
+  } else return undefined;
+  if (!text) return undefined;
+  if (text.length <= TOOL_RESULT_MAX_CHARS) return text;
+  const keep = Math.floor(TOOL_RESULT_MAX_CHARS / 2);
+  const dropped = text.length - keep * 2;
+  return `${text.slice(0, keep)}\n\n… [${dropped.toLocaleString("en-US")} characters truncated] …\n\n${text.slice(-keep)}`;
+}
+
 export function parseJoyCommand(text: string): { name: string; args: string } | null {
   const m = /^\/([a-zA-Z][\w-]*)[ \t]*([\s\S]*)$/.exec(text);
   if (!m) return null;
@@ -3417,7 +3442,11 @@ export class Session {
               // 2026-07-09). Ends for never-forwarded starts are harmless: the
               // app ignores results with no matching call.
               const turn = this.#openTools.get(id) ?? this.#turn?.turnId ?? "";
-              this.#relay.send(encodeToolCallEnd(id, { turn, time: entryTimeMs }));
+              this.#relay.send(encodeToolCallEnd(id, {
+                turn, time: entryTimeMs,
+                result: toolResultText(item.content),
+                isError: item.is_error === true,
+              }));
               this.#openTools.delete(id);
             }
           }

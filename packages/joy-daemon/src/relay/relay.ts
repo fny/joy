@@ -900,8 +900,19 @@ export function encodeToolCallStart(opts: {
   }, opts);
 }
 
-export function encodeToolCallEnd(call: string, opts: { turn: string; claudeUuid?: string; time?: number }): WireRecord {
-  return sessionEnvelope({ t: 'tool-call-end', call }, opts);
+export function encodeToolCallEnd(
+  call: string,
+  opts: { turn: string; claudeUuid?: string; time?: number; result?: string; isError?: boolean },
+): WireRecord {
+  // Carry the tool's OUTPUT and whether it failed. Until 2026-09-03 this record
+  // was the call id alone, so every Claude tool card in the app showed the
+  // command and that it finished — never what it printed, and a Bash call
+  // that exited 1 rendered exactly like one that succeeded. The output was
+  // in the very transcript entry being mirrored; it was simply dropped.
+  const ev: Record<string, unknown> = { t: 'tool-call-end', call };
+  if (opts.result !== undefined) ev.result = opts.result;
+  if (opts.isError) ev.isError = true;
+  return sessionEnvelope(ev, opts);
 }
 
 export function encodeTurnEnd(status: 'completed' | 'failed' | 'cancelled', opts: { turn: string; time?: number; usage?: unknown }): WireRecord {
