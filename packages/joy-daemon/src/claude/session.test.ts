@@ -190,6 +190,17 @@ test("ready + empty box: agent-name label in the top border (58-col live capture
   expect(paneShowsEmptyReadyPrompt(pane)).toBe(true);
 });
 
+// Same bug, second visit: on a WIDE pane the label lands with a single trailing
+// rule char (`────… Joy ─`). The 2026-07-04 fix demanded two, so the gate went
+// blind again — live 2026-09-03, dispatch held >1h on an idle session.
+const LABELED_RULE_ONE_TRAIL = "─".repeat(120) + " Joy ─";
+
+test("ready + empty box: label with a SINGLE trailing rule char (wide-pane capture)", () => {
+  const pane = [LABELED_RULE_ONE_TRAIL, "❯ ", PLAIN_RULE].join("\n");
+  expect(paneShowsReadyPrompt(pane)).toBe(true);
+  expect(paneInputText(pane)).toBe("");
+});
+
 test("input text: typed content under a labeled border", () => {
   const pane = [LABELED_RULE, "❯ hello from the app", PLAIN_RULE].join("\n");
   expect(paneInputText(pane)).toBe("hello from the app");

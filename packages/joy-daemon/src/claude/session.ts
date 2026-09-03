@@ -3761,10 +3761,16 @@ function numberedPickerFromPane(lines: string[]): PaneDialog | null {
  * `──────────────── Joy ──`. A pure-rule regex made every parser below blind to
  * such a box (paneInputText → null forever → dispatch silently retried for the
  * session's whole life — the "app messages never arrive" bug of 2026-07-04), so
- * accept an optional non-rule label segment that ends with at least 2 rule chars.
+ * accept an optional non-rule label segment followed by rule chars.
+ *
+ * ONE rule char after the label is enough: how many trail the name depends on
+ * the pane width, and requiring two brought the same bug straight back — caught
+ * live 2026-09-03 on a full-width pane whose border ended `──────── Joy ─`, with
+ * the dispatch gate reporting "pane busy or not at the prompt" for over an hour
+ * while the session sat idle.
  */
 function isBoxRule(s: string | undefined): boolean {
-  return /^[─━]{3,}(?:[^─━]{1,80}[─━]{2,})?$/.test((s ?? "").trim());
+  return /^[─━]{3,}(?:[^─━]{1,80}[─━]+)?$/.test((s ?? "").trim());
 }
 
 export function paneShowsReadyPrompt(text: string): boolean {
