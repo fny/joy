@@ -412,6 +412,46 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
 
     await reconcileOrphans(r.sessions ?? []);
+    await reconcileOrphanedTurns(r.sessions ?? []);
+  }
+
+  // An ORPHANED TURN wedges its session's queue on the relay, permanently.
+  // claimWork refuses to offer a prompt for any session with a turn in
+  // dispatching/running/cancelling/orphaned, and the relay's sweep marks a
+  // turn orphaned whenever the daemon generation running it dies (a restart
+  // mid-turn, a fence violation). Nothing then resolves it — the daemon never
+  // called the reconcile route — so every later message is ACCEPTED by the
+  // relay (it appears in the chat) and NEVER offered: no dispatch, no local
+  // queue, no log line anywhere, and only the tmux pane still reaches the
+  // agent. Observed live 2026-09-03: session 1e81457c sat behind an orphaned
+  // turn from a killed daemon with SEVEN queued turns behind it.
+  //
+  // We cannot resume such a turn — the local dispatch state died with the
+  // process — so terminalize it as `interrupted`, which is what actually
+  // happened, and let the queue behind it flow.
+  async function reconcileOrphanedTurns(
+    rows: Array<{ sessionId: string; daemonId: string; localSessionId?: string | null }>,
+  ): Promise<void> {
+    const l = lease;
+    if (!l) return;
+    for (const s of rows) {
+      if (s.daemonId !== machineId || !s.localSessionId) continue;
+      if (!registry.get(s.localSessionId)) continue; // dead session — reconcileOrphans archives it
+      try {
+        const st = await api("GET", `/sessions/${s.sessionId}`);
+        const ex = st?.execution as { state?: string; turnId?: string } | undefined;
+        if (ex?.state !== "orphaned" || !ex.turnId) continue;
+        await api("POST", `/daemon/turns/${ex.turnId}/reconcile`, {
+          resolution: "terminal",
+          terminalState: "interrupted",
+          meta: { reason: "daemon_restart" },
+        }, l);
+        const queued = (st?.queue as { queuedTurns?: number } | undefined)?.queuedTurns ?? 0;
+        log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned → interrupted (${queued} turn(s) were stuck behind it)`);
+      } catch (e) {
+        log(`reconcile: turn check on ${s.sessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
   }
 
   // Sessions the relay still lists as live for THIS daemon but that no local
@@ -817,9 +857,19 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     /lease_unknown|lease_expired|lease_epoch_stale/.test(String(e));
 
   async function renewLoop(): Promise<void> {
+    let ticks = 0;
     while (!stopped) {
       await sleep(RENEW_MS);
       if (!lease) continue;
+      // Orphan sweep on a slow cadence as well as on acquire: a turn can be
+      // orphaned by a fence violation while we still hold the lease, and the
+      // symptom (queue wedged, nothing logged) is invisible otherwise.
+      if (++ticks % 15 === 0) {
+        try {
+          const r = await api("GET", "/sessions");
+          await reconcileOrphanedTurns(r.sessions ?? []);
+        } catch { /* next tick */ }
+      }
       try {
         const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${lease.leaseId}`, {
           method: "PUT",
