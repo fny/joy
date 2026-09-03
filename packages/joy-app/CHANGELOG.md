@@ -1,3 +1,7 @@
+# Sep 3 (8) — Attachments upload from the phone
+
+- **Pictures and files send from iOS and Android again.** Hashing the sealed upload handed the native digest a raw buffer where it requires a typed array, so every attachment from a phone failed with "Upload Failed" before it ever reached the relay. Desktop and web were unaffected.
+
 # Sep 3 (7) — Failed uploads say why
 
 - **"Upload Failed" now names the reason.** An attachment that would not upload showed a generic message with the real error going only to the console — invisible on a phone. The alert now carries the failure itself (a status code, or the error), so a broken upload can be diagnosed from the device instead of guessed at.

@@ -542,9 +542,13 @@ class Sync {
             if (bytes.length === 0) throw new AttachmentRejected(t('imageUpload.emptyFileMessage', { name: a.name }));
             if (bytes.length > MAX_ATTACHMENT_BYTES) throw new AttachmentRejected(t('imageUpload.fileTooLargeMessage', { name: a.name, maxMb: MAX_ATTACHMENT_MB }));
             const sealed = sealV2Bytes(bytes, key);
-            // `.slice()` materializes a standalone ArrayBuffer — the digest API
-            // rejects views over a SharedArrayBuffer at the type level.
-            const hash = await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, sealed.slice().buffer as ArrayBuffer);
+            // Pass a TypedArray, NOT `.buffer`. expo-crypto's native digest casts
+            // its data argument to TypedArray and throws on a bare ArrayBuffer —
+            // "The 3rd argument cannot be cast to type TypedArray" — so every
+            // upload from iOS/Android failed here while web, whose digest accepts
+            // either, worked (2026-09-03). `.slice()` still gives a standalone
+            // Uint8Array<ArrayBuffer>, which is what the type wanted all along.
+            const hash = await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, sealed.slice());
             const { attachmentId } = await v2UploadAttachment(relay, v2SessionId, sealed, encodeHex(new Uint8Array(hash)).toLowerCase());
             out.push({
                 id: attachmentId,
