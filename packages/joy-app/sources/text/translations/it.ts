@@ -389,6 +389,13 @@ export const it: TranslationStructure = {
         retry: 'Riprova',
         sendRetrying: ({ reason }: { reason: string }) => `Impossibile inviare — ${reason}. Nuovo tentativo…`,
         sendParked: ({ reason }: { reason: string }) => `Impossibile inviare — ${reason}. Tocca ↻ per riprovare.`,
+        draftsTitle: 'Bozze',
+        pendingTitle: 'In attesa di invio',
+        draftPlaceholder: 'Bozza…',
+        sendNow: 'Invia',
+        expand: 'Espandi',
+        collapse: 'Comprimi',
+        moreItems: ({ count }: { count: number }) => `+${count} altri`,
         offlineBanner: 'Nessuna connessione — i messaggi in coda verranno inviati quando tornerai online',
     },
 

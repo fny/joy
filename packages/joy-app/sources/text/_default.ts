@@ -438,6 +438,13 @@ export const en = {
         retry: 'Retry',
         sendRetrying: ({ reason }: { reason: string }) => `Couldn’t send — ${reason}. Trying again…`,
         sendParked: ({ reason }: { reason: string }) => `Couldn’t send — ${reason}. Tap ↻ to try again.`,
+        draftsTitle: 'Drafts',
+        pendingTitle: 'Waiting to send',
+        draftPlaceholder: 'Draft…',
+        sendNow: 'Send',
+        expand: 'Expand',
+        collapse: 'Collapse',
+        moreItems: ({ count }: { count: number }) => `+${count} more`,
         offlineBanner: 'No connection — queued messages will send when you’re back online',
     },
 

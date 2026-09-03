@@ -408,6 +408,13 @@ export const pl: TranslationStructure = {
         retry: 'Ponów',
         sendRetrying: ({ reason }: { reason: string }) => `Nie udało się wysłać — ${reason}. Ponawianie…`,
         sendParked: ({ reason }: { reason: string }) => `Nie udało się wysłać — ${reason}. Dotknij ↻, aby ponowić.`,
+        draftsTitle: 'Szkice',
+        pendingTitle: 'Oczekujące na wysłanie',
+        draftPlaceholder: 'Szkic…',
+        sendNow: 'Wyślij',
+        expand: 'Rozwiń',
+        collapse: 'Zwiń',
+        moreItems: ({ count }: { count: number }) => `+${count} więcej`,
         offlineBanner: 'Brak połączenia — wiadomości z kolejki zostaną wysłane po ponownym połączeniu',
     },
 

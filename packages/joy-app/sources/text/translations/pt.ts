@@ -390,6 +390,13 @@ export const pt: TranslationStructure = {
         retry: 'Tentar de novo',
         sendRetrying: ({ reason }: { reason: string }) => `Não foi possível enviar — ${reason}. A tentar de novo…`,
         sendParked: ({ reason }: { reason: string }) => `Não foi possível enviar — ${reason}. Toque em ↻ para tentar de novo.`,
+        draftsTitle: 'Rascunhos',
+        pendingTitle: 'Aguardando envio',
+        draftPlaceholder: 'Rascunho…',
+        sendNow: 'Enviar',
+        expand: 'Expandir',
+        collapse: 'Recolher',
+        moreItems: ({ count }: { count: number }) => `+${count} mais`,
         offlineBanner: 'Sem conexão — as mensagens na fila serão enviadas quando você voltar a ficar online',
     },
 

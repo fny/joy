@@ -391,6 +391,13 @@ export const es: TranslationStructure = {
         retry: 'Reintentar',
         sendRetrying: ({ reason }: { reason: string }) => `No se pudo enviar — ${reason}. Reintentando…`,
         sendParked: ({ reason }: { reason: string }) => `No se pudo enviar — ${reason}. Toca ↻ para reintentar.`,
+        draftsTitle: 'Borradores',
+        pendingTitle: 'Pendientes de envío',
+        draftPlaceholder: 'Borrador…',
+        sendNow: 'Enviar',
+        expand: 'Expandir',
+        collapse: 'Contraer',
+        moreItems: ({ count }: { count: number }) => `+${count} más`,
         offlineBanner: 'Sin conexión — los mensajes en cola se enviarán cuando vuelvas a estar en línea',
     },
 

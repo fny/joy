@@ -392,6 +392,13 @@ export const zhHans: TranslationStructure = {
         retry: '重试',
         sendRetrying: ({ reason }: { reason: string }) => `无法发送 — ${reason}。正在重试…`,
         sendParked: ({ reason }: { reason: string }) => `无法发送 — ${reason}。点按 ↻ 重试。`,
+        draftsTitle: '草稿',
+        pendingTitle: '等待发送',
+        draftPlaceholder: '草稿…',
+        sendNow: '发送',
+        expand: '展开',
+        collapse: '收起',
+        moreItems: ({ count }: { count: number }) => `还有 ${count} 条`,
         offlineBanner: '无连接 — 队列中的消息将在恢复联网后发送',
     },
 
