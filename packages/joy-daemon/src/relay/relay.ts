@@ -23,7 +23,7 @@ import { existsSync, readFileSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
 import { joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey } from '../paths';
-import { publishV2Card } from './v2Card';
+import { publishV2Card, v2SessionIdFor } from './v2Card';
 import tweetnacl from 'tweetnacl';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -421,16 +421,24 @@ export class RelayClient {
    * daemon restart can hit a transient "fetch failed" before the network/
    * undici pool warms; a dropped notification is user-visible.
    */
-  async sendSessionPushEvent(sessionId: string, kind: 'done' | 'permission' | 'question', title: string, body: string): Promise<void> {
+  async sendSessionPushEvent(localSessionId: string, kind: 'done' | 'permission' | 'question', title: string, body: string): Promise<void> {
+    // DEEP LINK IDENTITY: the app keys every session by the RELAY id, so a push
+    // stamped with the daemon's local id routes to a session the app has never
+    // heard of — the tap landed on "Session has been deleted" for every
+    // notification (caught live 2026-09-03). Send the relay id; when the
+    // session is not bound yet, send NO id at all rather than an unroutable
+    // one, so the tap just opens the app instead of an error screen.
+    const sessionId = v2SessionIdFor(localSessionId);
+    const data: Record<string, unknown> = sessionId ? { kind, sessionId } : { kind };
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const { sent } = await this.sendPush(title, body, { kind, sessionId });
+        const { sent } = await this.sendPush(title, body, data);
         // Success IS logged: "no push arrived" must be distinguishable between
         // never-sent, no registered device, and delivery failure.
-        log(`push ${kind} sent for ${sessionId} (${sent} device(s))`);
+        log(`push ${kind} sent for ${localSessionId}${sessionId ? ` → ${sessionId.slice(0, 8)}` : " (UNBOUND — no deep link)"} (${sent} device(s))`);
         return;
       } catch (e) {
-        log(`push ${kind} failed for ${sessionId} (attempt ${attempt + 1}): ${e}`);
+        log(`push ${kind} failed for ${localSessionId} (attempt ${attempt + 1}): ${e}`);
       }
       if (attempt === 0) await sleep(1000);
     }

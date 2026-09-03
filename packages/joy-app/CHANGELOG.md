@@ -1,3 +1,8 @@
+# Sep 3 (5) — Notifications open the right session
+
+- **Tapping a notification opens the session again.** Every session push carried the daemon's own internal id instead of the relay id the app addresses sessions by, so every tap landed on "Session has been deleted". Pushes now deep-link correctly; a session the daemon has not finished binding sends no link at all rather than one that breaks. *Needs the updated daemon.*
+- **Reload Chat.** Session info has a new action that refetches one chat from scratch — for history that loads as empty. It only drops local state; nothing on the machine or the relay is touched. Previously the only way out was restarting the app.
+
 # Sep 3 (4) — Compaction reads like a boundary, not a wall of text
 
 - **The post-compaction summary is a card, not a giant message.** When a Claude session runs out of context it writes a long continuation summary; the chat had been showing that whole thing as if you had typed it. It now collapses into a "Compaction summary" row you can open when you want it.

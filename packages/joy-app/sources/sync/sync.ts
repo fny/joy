@@ -960,7 +960,20 @@ class Sync {
         const anyMessages = collected.length > 0;
         // Single ordered apply: ascending seq, exactly what the reducer expects.
         collected.sort((a, b) => a.seq - b.seq);
+        const storeBefore = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
         await this.applyFetchedMessages(sessionId, encryption, collected, { deriveThinking: true });
+        // History that fetches but never renders has now happened twice, and
+        // both times the only evidence was gone by the time it was reported
+        // (a reload rebuilds the store and hides it). Say what the initial
+        // load actually did: rows collected, the seq span, and how much the
+        // store grew. `collected > 0` with no growth is the reducer dropping
+        // them — the order-dependent apply racing rows the live stream already
+        // wrote — and that line is the whole diagnosis next time.
+        const storeAfter = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
+        log.log(`💬 initial history ${sessionId}: collected=${collected.length} seq=${anyMessages ? `${minSeq}..${maxSeq}` : '-'} store ${storeBefore}→${storeAfter} hasMore=${hasMore}`);
+        if (collected.length > 0 && storeAfter === storeBefore) {
+            log.log(`⚠️ initial history ${sessionId}: ${collected.length} rows applied but the store did not grow — history will render empty`);
+        }
 
         // Anchor both ends so future incremental forward sync resumes from
         // maxSeq, and loadOlderMessages can page backward from minSeq.

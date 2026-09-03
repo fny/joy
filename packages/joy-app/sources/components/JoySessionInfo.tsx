@@ -168,6 +168,15 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         ]);
     }, [performDelete]);
 
+    // Local-only heal for a chat whose history will not render. Drops this
+    // session's messages, reducer state and paging cursors and refetches from
+    // the relay; nothing server-side is touched, so the worst case is a reload.
+    // Until now the only way out was restarting the whole app.
+    const reloadChat = React.useCallback(() => {
+        sync.resetSessionChatState(session.id);
+        router.back();
+    }, [session.id, router]);
+
     const formatDate = (ts: number) => new Date(ts).toLocaleString();
 
     // Resume command — stock builder when metadata has the claude session
@@ -248,6 +257,12 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                         loading={restarting}
                     />
                 )}
+                <Item
+                    title="Reload Chat"
+                    subtitle="Refetch this chat from scratch — for history that will not load"
+                    icon={<Ionicons name="reload-outline" size={29} color="#007AFF" />}
+                    onPress={reloadChat}
+                />
                 <Item
                     title="Usage & Cost"
                     subtitle="Cost for this conversation, computed on the machine"

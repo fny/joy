@@ -1,6 +1,6 @@
 import { test, expect, afterEach } from "vitest";
 import { RelaySession } from "./relay";
-import { registerV2CardPublisher, unregisterV2CardPublisher } from "./v2Card";
+import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, v2SessionIdFor } from "./v2Card";
 
 // RelaySession is a local card holder: every metadata write merges into its
 // snapshot and publishes the WHOLE card through the v2 publisher the nucleus
@@ -75,4 +75,15 @@ test("receipts are delivered immediately when a sink is set, else buffered", () 
   expect(got).toEqual(["m1"]);
   s.stampReceiptOnLastQueued({ uuid: "m2", turn: "t1" });
   expect(got).toEqual(["m1", "m2"]);
+});
+
+test("v2 session id registry: pushes deep-link by RELAY id, not the local one", () => {
+  // The app keys sessions by the relay id; a push stamped with the local id
+  // routed to "Session has been deleted" for every notification.
+  expect(v2SessionIdFor("8f7c8f88")).toBeNull();
+  registerV2SessionId("8f7c8f88", "afa555f9-3c2f-4c63-a06a-f3eff18e0421");
+  expect(v2SessionIdFor("8f7c8f88")).toBe("afa555f9-3c2f-4c63-a06a-f3eff18e0421");
+  // Unbinding drops the mapping so a stale id can never be deep-linked.
+  unregisterV2CardPublisher("8f7c8f88");
+  expect(v2SessionIdFor("8f7c8f88")).toBeNull();
 });
