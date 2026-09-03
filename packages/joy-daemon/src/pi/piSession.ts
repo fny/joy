@@ -360,7 +360,7 @@ export class PiSession implements AgentSession {
 
   // ── teardown ──────────────────────────────────────────────────────────────
 
-  end(reason: "killed" | "process_exited"): boolean {
+  end(reason: "killed" | "process_exited" | "restart"): boolean {
     if (this.status === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
@@ -379,7 +379,7 @@ export class PiSession implements AgentSession {
     } else {
       if (this.#relay) this.#archivePromise = this.#relay.archive();
       this.#relay?.stop();
-      deleteWindowRecord(this.id);
+      if (reason !== "restart") deleteWindowRecord(this.id);
     }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;

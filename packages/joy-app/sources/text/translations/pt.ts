@@ -324,6 +324,7 @@ export const pt: TranslationStructure = {
         resumeFromTerminal: 'Para retomá-la pelo terminal:',
         newChat: 'Novo chat',
         forkAction: 'Bifurcar sessão',
+        teleportAction: 'Teletransportar',
         forkSubtitle: 'Continuar em uma nova sessão com o mesmo contexto',
         duplicateAction: 'Duplicar a partir da mensagem…',
         duplicateSubtitle: 'Voltar a um ponto escolhido e tentar de novo',

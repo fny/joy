@@ -97,6 +97,15 @@ every relay; machines register per account.
   (`takesThinkingLease`) and a visible dialog clears it outright — both kept
   `busy()` true for a prompt that never generates, holding the relay turn open
   and queueing everything behind it.
+- Session page **Restart / Fork / Teleport**. Restart ends the process with
+  `end("restart")` — no archive, record kept — and recreates under the SAME
+  local id, so the v2 binding (and the card) survive. Fork = `joy-fork-session`
+  (claude: `--resume <id> --fork-session`), the app follows the new card by
+  `joy__sessionId` (`waitForLocalSession`). Teleport = `joy-teleport-export`
+  on the source (transcript tail from the last `compact_boundary`, else a
+  turn-snapped tail ≤6MB; base64) → `joy-teleport-import` on the target
+  (writes `~/.claude/projects/<cwd>/<id>.jsonl`, refuses to clobber, then
+  `create({resume_id})`). Files are never copied. Claude only for now.
 - **Antigravity (`agy`) sessions** — `packages/joy-daemon/src/agy/`. Headless:
   one `agy --print --output-format stream-json --dangerously-skip-permissions
   --add-dir <cwd> [--conversation <id>] [--model <display name>]` process per

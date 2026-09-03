@@ -326,6 +326,7 @@ export const ja: TranslationStructure = {
         resumeFromTerminal: 'ターミナルから再開するには:',
         newChat: '新規チャット',
         forkAction: 'セッションをフォーク',
+        teleportAction: 'テレポート',
         forkSubtitle: '同じコンテキストで新しいセッションを続行',
         duplicateAction: 'メッセージから複製…',
         duplicateSubtitle: '選んだ地点まで巻き戻してやり直す',

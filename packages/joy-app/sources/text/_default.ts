@@ -371,6 +371,7 @@ export const en = {
         newChat: 'New chat',
         // Fork / duplicate / rewind flow (Claude only)
         forkAction: 'Fork session',
+        teleportAction: 'Teleport',
         forkSubtitle: 'Continue in a new session with the same context',
         duplicateAction: 'Duplicate from message…',
         duplicateSubtitle: 'Rewind to a chosen point and try again',

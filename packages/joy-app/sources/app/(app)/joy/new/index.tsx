@@ -38,13 +38,13 @@ import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { t } from '@/text';
 import { useAllMachines, useSessions, useSetting, useSettingMutable, storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
-import { machineStatusOnly, machineHarnessModels, machineHistoryLogs, machineOpencodeSessions } from '@/sync/v2/machine';
+import { machineStatusOnly, machineHarnessModels, machineHistoryLogs, machineOpencodeSessions, machineTeleportExport, machineTeleportImport } from '@/sync/v2/machine';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
-import { v2SpawnAndWait } from '@/sync/v2/spawn';
+import { v2SpawnAndWait, waitForLocalSession } from '@/sync/v2/spawn';
 import type { Machine, Session } from '@/sync/storageTypes';
 import {
     getEffortLevelsForModel,
@@ -117,7 +117,12 @@ function NewJoyTmuxSessionScreen() {
 
     // Optional prefill (e.g. the per-repo "+" in the session list passes the
     // repo's machine + path when this page is the default New session).
-    const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string; mode?: string }>();
+    const params = useLocalSearchParams<{ machineId?: string; path?: string; resumeId?: string; mode?: string; teleportFrom?: string }>();
+    // Teleport: this page is only the machine + folder picker; on Create the
+    // source daemon exports the conversation and the chosen machine imports
+    // and resumes it. Files are never copied — the folder is assumed synced.
+    const teleportFrom = params.teleportFrom ?? null;
+    const teleportSource = teleportFrom ? (storage.getState().sessions[teleportFrom] ?? null) : null;
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
     const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode' | 'pi' | 'agy'>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
@@ -435,6 +440,26 @@ function NewJoyTmuxSessionScreen() {
             // the daemon's nucleus lane executes it, and the session card
             // arrives via normal sync stamped with its v2 link. We wait for
             // that card so we can navigate straight into the session.
+            if (teleportFrom) {
+                const srcMachineId = teleportSource?.metadata?.machineId;
+                const srcLocalId = teleportSource?.metadata?.joy__sessionId;
+                if (!srcMachineId || !srcLocalId) throw new Error('The source session has no machine context');
+                const sctx = sync.machineOnlyCtx(srcMachineId);
+                const dctx = sync.machineOnlyCtx(selectedMachineId);
+                if (!sctx || !dctx) throw new Error('Both machines must be online to teleport');
+                const exp = await machineTeleportExport(sctx, srcLocalId);
+                if (!exp.data?.ok || !exp.data.claudeSessionId || !exp.data.transcriptBase64) throw new Error(exp.data?.error || 'Export failed');
+                const imp = await machineTeleportImport(dctx, {
+                    cwd, claudeSessionId: exp.data.claudeSessionId, transcriptBase64: exp.data.transcriptBase64,
+                    model: exp.data.model, permissionMode: exp.data.permissionMode, createDir: true,
+                });
+                if (!imp.data?.ok || !imp.data.localSessionId) throw new Error(imp.data?.error || 'Import failed');
+                const landed = await waitForLocalSession(imp.data.localSessionId);
+                if (!landed) throw new Error('The teleported session did not appear within a minute');
+                router.back();
+                setTimeout(() => router.push(`/session/${landed}` as never), 100);
+                return;
+            }
             const sessionId = await v2SpawnAndWait(selectedMachineId, {
                 cwd,
                 agent: selectedAgent,

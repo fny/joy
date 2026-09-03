@@ -22,9 +22,9 @@ import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleLi
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
-import { cwdToTranscriptDir } from "../claude/transcript";
+import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
 import { joySessionDir } from "../paths";
-import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync } from "fs";
+import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, join } from "path";
 import { hostname, platform, release, arch } from "os";
@@ -435,6 +435,98 @@ export const machineOps: MachineOp[] = [
       if (r.ok) return { status: 201, body: r.session };
       if (r.error === "cwd required") return { status: 400, body: { error: "cwd required" } };
       return { status: 500, body: result };
+    },
+  },
+  {
+    name: "fork",
+    scope: "machine",
+    rpcName: "joy-fork-session",
+    summary: "Fork a session from its last message into a NEW session (claude: --resume <id> --fork-session)",
+    http: { method: "POST", path: "/sessions/:id/fork" },
+    handler: async (registry, params) => {
+      const id = String(params.id ?? "");
+      if (!/^[0-9a-f]{8}$/.test(id)) return { error: "invalid session id" };
+      const src = registry.get(id);
+      if (!src) return { error: "session_not_found" };
+      if (src.agentFlavor !== "claude") return { error: `fork is not supported for ${src.agentFlavor} yet` };
+      const resumeId = src.claudeSessionId ?? (src.transcriptPath ? basename(src.transcriptPath, ".jsonl") : undefined);
+      if (!resumeId) return { error: "this session has no conversation to fork yet" };
+      const session = await registry.create({
+        cwd: src.cwd, resume_id: resumeId, forkSession: true,
+        model: src.model, effort: src.effort,
+        permissionMode: src.detectPermissionMode() ?? undefined,
+      });
+      return { ok: true, session: session.toJSON(), localSessionId: session.id };
+    },
+  },
+  {
+    name: "teleportExport",
+    scope: "machine",
+    rpcName: "joy-teleport-export",
+    summary: "Package a session's conversation to continue it on ANOTHER machine (claude: the resumable transcript tail)",
+    http: { method: "POST", path: "/sessions/:id/teleport-export" },
+    // Files are NOT included — the folder is assumed to exist (synced) on the
+    // target. Only the transcript travels, cut at the last compaction boundary
+    // (what Claude actually holds) or a turn-snapped tail under the cap, so it
+    // fits one sealed tunnel request on the import side.
+    handler: async (registry, params) => {
+      const id = String(params.id ?? "");
+      if (!/^[0-9a-f]{8}$/.test(id)) return { error: "invalid session id" };
+      const src = registry.get(id);
+      if (!src) return { error: "session_not_found" };
+      if (src.agentFlavor !== "claude") return { error: `teleport is not supported for ${src.agentFlavor} yet` };
+      const claudeSessionId = src.claudeSessionId ?? (src.transcriptPath ? basename(src.transcriptPath, ".jsonl") : undefined);
+      const path = src.transcriptPath ?? (claudeSessionId ? join(cwdToTranscriptDir(src.cwd), `${claudeSessionId}.jsonl`) : undefined);
+      if (!claudeSessionId || !path || !existsSync(path)) return { error: "this session has no transcript to teleport yet" };
+      const CAP = 6 * 1024 * 1024; // raw bytes; base64 + JSON stays under the tunnel's 10MB body cap
+      const off = teleportTailOffset(path, CAP);
+      const size = statSync(path).size;
+      const fd = openSync(path, "r");
+      let buf: Buffer;
+      try { buf = Buffer.alloc(size - off); readSync(fd, buf, 0, buf.length, off); } finally { closeSync(fd); }
+      return {
+        ok: true, agent: "claude", claudeSessionId, cwd: src.cwd,
+        model: src.currentModel ?? src.model, permissionMode: src.detectPermissionMode() ?? undefined,
+        bytes: buf.length, truncated: off > 0, transcriptBase64: buf.toString("base64"),
+      };
+    },
+  },
+  {
+    name: "teleportImport",
+    scope: "machine",
+    rpcName: "joy-teleport-import",
+    summary: "Receive a teleported conversation: write the transcript under the folder's project dir and resume it here",
+    http: { method: "POST", path: "/teleport-import" },
+    params: {
+      type: "object", required: ["cwd", "claudeSessionId", "transcriptBase64"],
+      properties: {
+        cwd: { type: "string" }, claudeSessionId: { type: "string" }, transcriptBase64: { type: "string" },
+        model: { type: "string" }, permissionMode: { type: "string" }, createDir: { type: "boolean" },
+      },
+    },
+    handler: async (registry, params) => {
+      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      const sid = typeof params.claudeSessionId === "string" ? params.claudeSessionId.trim() : "";
+      const b64 = typeof params.transcriptBase64 === "string" ? params.transcriptBase64 : "";
+      if (!cwd) return { error: "cwd required" };
+      if (!/^[0-9a-f-]{8,64}$/.test(sid)) return { error: "invalid claudeSessionId" };
+      if (!b64) return { error: "transcript required" };
+      const dir = cwdToTranscriptDir(cwd);
+      mkdirSync(dir, { recursive: true });
+      const target = join(dir, `${sid}.jsonl`);
+      // Never clobber a conversation that already lives here under that id.
+      if (existsSync(target)) return { error: `a conversation ${sid.slice(0, 8)} already exists in ${cwd} on this machine` };
+      writeFileSync(target, Buffer.from(b64, "base64"));
+      // Continue under a NEW claude id (--fork-session): the source keeps its
+      // own id — which may still be live if the two machines are one (a
+      // same-box teleport into another folder), where a plain --resume would
+      // collide. History is intact either way.
+      const session = await registry.create({
+        cwd, resume_id: sid, forkSession: true, createDir: params.createDir === true,
+        model: typeof params.model === "string" ? params.model : undefined,
+        permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
+      });
+      return { ok: true, session: session.toJSON(), localSessionId: session.id };
     },
   },
   {

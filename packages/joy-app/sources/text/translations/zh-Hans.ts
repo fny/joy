@@ -326,6 +326,7 @@ export const zhHans: TranslationStructure = {
         resumeFromTerminal: '要从终端恢复它：',
         newChat: '新对话',
         forkAction: '分叉会话',
+        teleportAction: '传送',
         forkSubtitle: '在相同上下文中开启新会话继续',
         duplicateAction: '从消息处复制…',
         duplicateSubtitle: '回到选定位置重新尝试',

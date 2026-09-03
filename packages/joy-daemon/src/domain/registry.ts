@@ -258,7 +258,11 @@ export class SessionRegistry {
     const liveInCwd = inCwd.find((s) => s.status === "active" || s.status === "starting");
     const detachedInCwd = inCwd.find((s) => s.status === "ended" && s.endReason === "process_exited");
 
-    if (opts.resume_id) {
+    // A FORK is never "the one already here": --fork-session reads the
+    // transcript once and continues under a new id, so a live match must not
+    // be returned in its place (that handed "Fork" the very session it was
+    // forking, 2026-09-03) and a detached one must not be restarted instead.
+    if (opts.resume_id && !opts.forkSession) {
       // Resuming a specific conversation: if it's the one already here, open/revive
       // it instead of recreating it. A different (not-live) id falls through and
       // gets its own new window — its transcript is distinct, so it coexists.
@@ -776,10 +780,10 @@ export class SessionRegistry {
     if (isOpencode) {
       const ocSessionId = (existing instanceof OpencodeSession ? existing.opencodeSessionId : undefined) ?? rec?.opencodeSessionId;
       const model = (existing instanceof OpencodeSession ? existing.model : undefined) ?? rec?.opencodeSettings?.model;
-      if (existing) existing.forceKill();
+      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
       return this.create({
         agent: "opencode",
-        id: existing ? undefined : opts.id,
+        id: opts.id,
         cwd,
         resume_id: ocSessionId,
         model,
@@ -792,10 +796,10 @@ export class SessionRegistry {
       // read the thread id off the session itself — otherwise restart would
       // start a brand-new thread instead of resuming (finding #7).
       const codexThreadId = (existing instanceof CodexSession ? existing.codexThreadId : undefined) ?? rec?.codexThreadId;
-      if (existing) existing.forceKill();
+      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
       return this.create({
         agent: "codex",
-        id: existing ? undefined : opts.id,
+        id: opts.id,
         cwd,
         resume_id: codexThreadId,
         model: existing?.model,
@@ -813,16 +817,19 @@ export class SessionRegistry {
     const resumeId = existing?.claudeSessionId
       ?? (existing?.transcriptPath ? basename(existing.transcriptPath, ".jsonl") : undefined)
       ?? rec?.claudeSessionId;
-    if (existing) existing.forceKill();
+    // Tear the process down WITHOUT archiving the card or deleting the
+    // record, then come back under the SAME id. forceKill() archived the
+    // relay card and minted a fresh id, so from the app "Restart" killed the
+    // session you were looking at and spawned a stranger elsewhere in the
+    // list — the app's handler had always assumed the identity survived.
+    // The record still holds the v2 session id + content key, so the lane
+    // rebinds the new process to the existing card.
+    if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
 
     // Env is refreshed automatically: create() launches claude through a fresh
     // login shell, so a restart re-sources the user's profile (.bashrc/.zshrc).
     return this.create({
-      // Reuse the joy id for a forgotten session so its stable relay tag
-      // reattaches to the existing app card instead of spawning a duplicate
-      // (BUG-13). A KNOWN session is force-killed + archived above, so it
-      // intentionally gets a fresh id/card.
-      id: existing ? undefined : opts.id,
+      id: opts.id,
       cwd,
       resume_id: resumeId,
       continue: (!resumeId && !existing) ? true : undefined,

@@ -95,6 +95,11 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         canRestart,
         restartSession,
         restarting,
+        canFork,
+        forkSession,
+        forking,
+        canTeleport,
+        teleportSession,
         archiveSession,
         archivingSession,
     } = useSessionQuickActions(session);
@@ -265,6 +270,23 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                         icon={<Ionicons name="refresh-outline" size={29} color="#007AFF" />}
                         onPress={restartSession}
                         loading={restarting}
+                    />
+                )}
+                {canFork && (
+                    <Item
+                        title="Fork"
+                        subtitle="New session that continues from the last message"
+                        icon={<Ionicons name="git-branch-outline" size={29} color="#007AFF" />}
+                        onPress={forkSession}
+                        loading={forking}
+                    />
+                )}
+                {canTeleport && (
+                    <Item
+                        title="Teleport"
+                        subtitle="Continue this conversation on another machine (files assumed synced)"
+                        icon={<Ionicons name="planet-outline" size={29} color="#007AFF" />}
+                        onPress={teleportSession}
                     />
                 )}
                 <Item

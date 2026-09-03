@@ -325,6 +325,7 @@ export const zhHant: TranslationStructure = {
         resumeFromTerminal: '若要從終端恢復它：',
         newChat: '新對話',
         forkAction: '分叉會話',
+        teleportAction: '傳送',
         forkSubtitle: '在相同上下文中開啟新會話繼續',
         duplicateAction: '從訊息處複製…',
         duplicateSubtitle: '回到選定位置重新嘗試',

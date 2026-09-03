@@ -796,7 +796,7 @@ export class CodexSession implements AgentSession {
 
   // ── teardown ──────────────────────────────────────────────────────────────
 
-  end(reason: "killed" | "process_exited"): boolean {
+  end(reason: "killed" | "process_exited" | "restart"): boolean {
     if (this.status === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
@@ -837,7 +837,7 @@ export class CodexSession implements AgentSession {
       clearCheckpoint(this.id);
       // Intentional kill → drop the record so record-based codex recovery
       // can't resurrect this session on the next daemon boot.
-      deleteWindowRecord(this.id);
+      if (reason !== "restart") deleteWindowRecord(this.id);
     }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;

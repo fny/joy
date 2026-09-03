@@ -36,7 +36,9 @@ export interface AgentSession {
 
   // ── lifecycle ──
   toJSON(): SessionRecord;
-  end(reason: "killed" | "process_exited"): boolean;
+  /** "restart": tear the process down but keep the relay card and the window
+   *  record — the session comes straight back under the SAME id. */
+  end(reason: "killed" | "process_exited" | "restart"): boolean;
   awaitArchive(): Promise<boolean>;
   forceKill(): boolean;
   attachRelay(rs: RelaySession, allowEnded?: boolean): boolean;

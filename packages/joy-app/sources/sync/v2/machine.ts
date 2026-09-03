@@ -125,6 +125,15 @@ export const machineSessionInfoFor = (ctx: MachineOnlyCtx, localSessionId: strin
     jm<Record<string, unknown>>(ctx, 'GET', `/v2/sessions/${encodeURIComponent(localSessionId)}`);
 export const machineSessionLog = (ctx: MachineOnlyCtx, localSessionId: string) =>
     jm<{ ok?: boolean; lines?: unknown[]; log?: unknown[]; error?: string }>(ctx, 'GET', `/v2/sessions/${encodeURIComponent(localSessionId)}/log`);
+/** Fork a session from its last message into a NEW session on the same machine. */
+export const machineForkSession = (ctx: MachineOnlyCtx, localSessionId: string) =>
+    jm<{ ok?: boolean; localSessionId?: string; error?: string }>(ctx, 'POST', `/v2/sessions/${encodeURIComponent(localSessionId)}/fork`, {});
+/** Package a session's conversation for another machine (transcript tail, base64). */
+export const machineTeleportExport = (ctx: MachineOnlyCtx, localSessionId: string) =>
+    jm<{ ok?: boolean; agent?: string; claudeSessionId?: string; cwd?: string; model?: string; permissionMode?: string; bytes?: number; truncated?: boolean; transcriptBase64?: string; error?: string }>(ctx, 'POST', `/v2/sessions/${encodeURIComponent(localSessionId)}/teleport-export`, {});
+/** Land a teleported conversation on THIS machine in `cwd` and resume it. */
+export const machineTeleportImport = (ctx: MachineOnlyCtx, body: { cwd: string; claudeSessionId: string; transcriptBase64: string; model?: string; permissionMode?: string; createDir?: boolean }) =>
+    jm<{ ok?: boolean; localSessionId?: string; error?: string }>(ctx, 'POST', '/v2/teleport-import', body);
 export const machineRestartSessionFor = (ctx: MachineOnlyCtx, localSessionId: string, body?: Record<string, unknown>) =>
     jm<{ ok?: boolean; relaySessionId?: string; error?: string }>(ctx, 'POST', `/v2/sessions/${encodeURIComponent(localSessionId)}/restart`, body ?? {});
 export const machineKillSessionFor = (ctx: MachineOnlyCtx, localSessionId: string) =>
