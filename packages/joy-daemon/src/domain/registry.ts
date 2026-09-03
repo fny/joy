@@ -902,13 +902,23 @@ export class SessionRegistry {
         continue;
       }
 
-      // Prefer the persisted claudeSessionId — binding by newest-mtime transcript
-      // adopts an unrelated conversation when this window's transcript isn't the
-      // newest in the dir (detached window, or another claude/codex run touched
-      // it) (BUG-6). Fall back to the heuristic only when there's no record.
-      const recTranscript = rec?.claudeSessionId
-        ? join(cwdToTranscriptDir(cwd), `${rec.claudeSessionId}.jsonl`)
+      // Bind to the file the previous daemon was ACTUALLY tailing first: the
+      // checkpoint path is direct evidence, claudeSessionId is a belief. They
+      // diverge whenever Claude is started with --resume/--continue: it writes a
+      // NEW transcript under a new id while the record keeps the id we asked
+      // for. Preferring the id bound a live session to its dead predecessor —
+      // no output mirrored, no echo confirms (slash commands timed out and
+      // PAUSED the queue), the goal bar frozen — and, with the checkpoint path
+      // no longer matching, replayed the whole 150MB file from byte 0, firing
+      // a burst of stale "done" pushes (faraz-vip b52bf522, 2026-09-03).
+      // Then the id (BUG-6: never the newest-mtime file while a record exists —
+      // that adopts an unrelated conversation). Heuristic only with no record.
+      const ckptTranscript = rec?.transcriptCheckpoint?.path && existsSync(rec.transcriptCheckpoint.path)
+        ? rec.transcriptCheckpoint.path
         : null;
+      const recTranscript = ckptTranscript ?? (rec?.claudeSessionId
+        ? join(cwdToTranscriptDir(cwd), `${rec.claudeSessionId}.jsonl`)
+        : null);
       // Newest-mtime fallback must never adopt a transcript another recovered
       // session already owns — with several sessions per cwd, both recordless
       // windows would otherwise bind the same (newest) conversation and mirror
