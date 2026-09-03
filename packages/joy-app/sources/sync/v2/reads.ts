@@ -43,13 +43,29 @@ export interface V2Page {
      *  nothing still advance it, so a caller paging forward never re-reads
      *  (and never stalls on) a page with no renderable rows. */
     cursor?: number;
+    /** turn.receipted / turn.started seen on this page, in seq order. */
+    lifecycle: V2Lifecycle[];
 }
 
 interface RawV2Event {
     id: string; seq: string; kind: string;
     turnId: string | null; commandId: string | null;
+    /** Who queued a turn.queued: `clientIntentId` is the sender's localId —
+     *  the key that lets the relay's row reconcile into the optimistic one. */
+    origin?: { clientIntentId?: string | null } | null;
     content: { ciphertext: string } | null;
     createdAt: number;
+}
+
+/** Turn lifecycle the chat renders as NOTHING but the optimistic send needs:
+ *  receipted = the daemon has the prompt, started = the agent has it. */
+export interface V2Lifecycle { turnId: string; kind: 'receipted' | 'started' }
+
+function toLifecycle(e: RawV2Event): V2Lifecycle | null {
+    if (!e.turnId) return null;
+    if (e.kind === 'turn.receipted') return { turnId: e.turnId, kind: 'receipted' };
+    if (e.kind === 'turn.started') return { turnId: e.turnId, kind: 'started' };
+    return null;
 }
 
 /** Translate one v2 event into an app row, or null when it is not renderable. */
@@ -83,8 +99,14 @@ function toRow(e: RawV2Event, key: Uint8Array | null): V2Row | null {
         const msg = openV2Message(e.content?.ciphertext, key);
         if (!msg) return null;
         return {
-            id: e.id, seq, localId: e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' }, __fromV2: true as const,
-            __v2Plain: { role: 'user', content: { type: 'text', text: msg.text, ...(msg.attachments.length ? { attachments: msg.attachments } : {}) } },
+            // localId = the sender's clientIntentId, so THIS device's optimistic
+            // row (inserted under that id) reconciles instead of duplicating.
+            id: e.id, seq, localId: e.origin?.clientIntentId ?? e.commandId ?? null, createdAt: e.createdAt, updatedAt: e.createdAt, content: { t: 'plain' }, __fromV2: true as const,
+            __v2Plain: {
+                role: 'user',
+                content: { type: 'text', text: msg.text, ...(msg.attachments.length ? { attachments: msg.attachments } : {}) },
+                meta: { sentFrom: 'joy', ...(e.turnId ? { turnId: e.turnId } : {}) },
+            },
         };
     }
     if (e.kind === 'output' || (e.kind === 'turn.terminal' && text !== null)) {
@@ -134,8 +156,9 @@ export async function v2MessagesAfter(
     const base = opts.base ?? getV2BaseUrl();
     const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, opts.afterSeq, opts.limit ?? 100);
     const messages = events.map(e => toRow(e, opts.key)).filter((r): r is V2Row => r !== null);
+    const lifecycle = events.map(toLifecycle).filter((l): l is V2Lifecycle => l !== null);
     const cursor = events.length ? Number(events[events.length - 1].seq) : opts.afterSeq;
-    return { messages, hasMore, cursor };
+    return { messages, hasMore, cursor, lifecycle };
 }
 
 /**
@@ -150,6 +173,7 @@ export async function v2MessagesBefore(
     const base = opts.base ?? getV2BaseUrl();
     const limit = opts.limit ?? 100;
     const rows: V2Row[] = [];
+    const lifecycle: V2Lifecycle[] = [];
     let cursor = 0;
     for (;;) {
         const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, cursor, 500);
@@ -159,11 +183,13 @@ export async function v2MessagesBefore(
             if (seq >= opts.beforeSeq) continue;
             const row = toRow(e, opts.key);
             if (row) rows.push(row);
+            const l = toLifecycle(e);
+            if (l) lifecycle.push(l);
         }
         cursor = Number(events[events.length - 1].seq);
         if (!hasMore) break;
         if (cursor >= opts.beforeSeq) break;
     }
     const tail = rows.slice(-limit);
-    return { messages: tail, hasMore: rows.length > tail.length };
+    return { messages: tail, hasMore: rows.length > tail.length, lifecycle };
 }

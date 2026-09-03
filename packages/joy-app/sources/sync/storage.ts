@@ -1,3 +1,4 @@
+import type { DeliveryStage } from './typesMessage';
 import { create } from "zustand";
 import { useShallow } from 'zustand/react/shallow'
 import equal from 'fast-deep-equal'
@@ -12,7 +13,7 @@ function useDeepEqual<T>(selector: (state: StorageState) => T): (state: StorageS
 import { Session, Machine, GitStatus, isJoyDaemonSource } from "./storageTypes";
 import type { GitStatusFiles } from "./gitStatusFiles";
 import type { ProjectFilesList } from "./projectFiles";
-import { createReducer, reducer, reconcileSentSeqs, ReducerState } from "./reducer/reducer";
+import { createReducer, reducer, reconcileSentSeqs, ReducerState, advanceDeliveryStage, bindTurnToLocal, forgetLocalMessage } from "./reducer/reducer";
 import { reconcileMachineMetadata } from "./machineReconcile";
 import { Message } from "./typesMessage";
 import { NormalizedMessage } from "./typesRaw";
@@ -231,6 +232,12 @@ interface StorageState {
      *  Safe against resurrection: applyMessages merges reducer output rather
      *  than rebuilding, and a local event row is never re-emitted. */
     dismissMessage: (sessionId: string, messageId: string) => void;
+    /** Optimistic sends: advance one row's delivery stage (by our localId or
+     *  the relay turnId), learn a row's turn from the POST ack, or drop a row
+     *  whose send failed. */
+    applyDeliveryStage: (sessionId: string, ref: { localId?: string; turnId?: string }, stage: DeliveryStage) => void;
+    bindTurnToLocal: (sessionId: string, localId: string, turnId: string) => void;
+    dismissLocalMessage: (sessionId: string, localId: string) => void;
     noteSessionVisible: (sessionId: string) => void;
     applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
@@ -910,6 +917,51 @@ export const storage = create<StorageState>()((set, get) => {
             const sessionMessages = { ...state.sessionMessages };
             delete sessionMessages[sessionId];
             return { ...state, sessionMessages };
+        }),
+        applyDeliveryStage: (sessionId, ref, stage) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            const changed = advanceDeliveryStage(existing.reducerState, ref, stage);
+            if (changed.length === 0) return state;
+            const messagesMap = { ...existing.messagesMap };
+            for (const m of changed) messagesMap[m.id] = m;
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, messagesMap, messages: Object.values(messagesMap).sort(compareMessagesNewestFirst) },
+                },
+            };
+        }),
+        bindTurnToLocal: (sessionId, localId, turnId) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            const changed = bindTurnToLocal(existing.reducerState, localId, turnId);
+            if (changed.length === 0) return state;
+            const messagesMap = { ...existing.messagesMap };
+            for (const m of changed) messagesMap[m.id] = m;
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, messagesMap, messages: Object.values(messagesMap).sort(compareMessagesNewestFirst) },
+                },
+            };
+        }),
+        dismissLocalMessage: (sessionId, localId) => set((state) => {
+            const existing = state.sessionMessages[sessionId];
+            if (!existing) return state;
+            const internalId = forgetLocalMessage(existing.reducerState, localId);
+            if (!internalId || !existing.messagesMap[internalId]) return state;
+            const messagesMap = { ...existing.messagesMap };
+            delete messagesMap[internalId];
+            return {
+                ...state,
+                sessionMessages: {
+                    ...state.sessionMessages,
+                    [sessionId]: { ...existing, messagesMap, messages: Object.values(messagesMap).sort(compareMessagesNewestFirst) },
+                },
+            };
         }),
         dismissMessage: (sessionId: string, messageId: string) => set((state) => {
             const existing = state.sessionMessages[sessionId];

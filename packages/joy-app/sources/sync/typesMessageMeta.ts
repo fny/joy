@@ -13,7 +13,9 @@ export const MessageMetaSchema = z.object({
     disallowedTools: z.array(z.string()).nullable().optional(), // Disallowed tools for this message (null = reset)
     effort: z.string().nullable().optional(), // Reasoning / thinking effort for this message (null = reset)
     displayText: z.string().optional(), // Optional text to display in UI instead of actual message text
-    joyTime: z.number().optional() // joy-tmux: Claude's transcript timestamp (epoch ms); orders mirrored user messages on the same clock as agent events
+    joyTime: z.number().optional(), // joy-tmux: Claude's transcript timestamp (epoch ms); orders mirrored user messages on the same clock as agent events
+    turnId: z.string().optional(), // relay turn this user prompt opened — the key that turn.receipted / turn.started use to advance deliveryStage
+    deliveryStage: z.enum(['local', 'relay', 'daemon', 'agent']).optional(), // optimistic send progress (see DeliveryStage in typesMessage)
 });
 
 export type MessageMeta = z.infer<typeof MessageMetaSchema>;

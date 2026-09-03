@@ -1,3 +1,8 @@
+# Sep 3 (11) — Sends show up instantly
+
+- **Your message appears the moment you send it.** It used to show only once the relay had accepted it and the app had polled it back — a visible lag on every send, and the reason tap-to-answer felt broken. Now it's in the chat immediately.
+- **And it brightens as it travels.** 70% while it's only in your chat, 80% once the relay has accepted it, 90% once your machine has picked it up, 100% once the agent has it. A send that fails disappears and its text returns to the composer, as before.
+
 # Sep 3 (10) — Waiting and Drafts are the same stack
 
 - **Messages waiting to send look and behave exactly like drafts.** The two strips above the composer were separate things — different rows, different controls, one clipping at a fixed height and the other growing without limit. They're now one component: the same header with a count and collapse, the same inline-editable rows, the same × to remove. A draft keeps its ↑ to send now; a waiting message shows ↻ instead when its send keeps failing (it sends itself otherwise).

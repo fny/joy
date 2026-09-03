@@ -100,6 +100,15 @@ every relay; machines register per account.
 - `<joy-options>` blocks become tap-to-answer pickers; `<joy-img>`/`<joy-file>`
   render inline; `<joy-title>` retitles (user `/title` locks); `<joy-notify>`
   becomes a push.
+- **Optimistic sends.** `sync.sendMessage` inserts the user row immediately
+  (`meta.deliveryStage: 'local'`, 70% opacity); the POST ack advances it to
+  `relay` (80%) and binds the relay `turnId`; `turn.receipted` → `daemon`
+  (90%); `turn.started` → `agent` (100%). The relay's own `turn.queued` row
+  reconciles into the optimistic one by `origin.clientIntentId` = localId
+  (reads.ts) — no duplicate bubble; it also supplies attachment citations.
+  Stages are monotonic (`advanceDeliveryStage`); rows with no stage (history,
+  other devices) render at 100%. A failed send is forgotten
+  (`dismissLocalMessage`) and its text goes back to the composer.
 - Above the composer, `PendingQueueStrip` (busy-held) and `DraftQueueStrip`
   (deliberate drafts) both render through ONE `QueueStack`: same header
   (title · count, collapsible), same inline-editable rows, capped at 3 rows
