@@ -60,9 +60,21 @@ export const MarkdownView = React.memo((props: {
             Modal.alert('Error', 'Failed to open text selection. Please try again.');
         }
     }, [props.markdown, router]);
+    // Desktop/web: right-click opens the same text view long-press does on
+    // touch (Copy the original markdown, Reuse into the composer). A right-click
+    // on an active SELECTION is left to the browser — its own menu is what you
+    // want for copying a phrase — so only an unselected right-click is taken.
+    const webContextMenu = Platform.OS === 'web' ? {
+        onContextMenu: (e: { preventDefault?: () => void }) => {
+            const selected = typeof window !== 'undefined' ? window.getSelection?.()?.toString() ?? '' : '';
+            if (selected.trim()) return;
+            e?.preventDefault?.();
+            handleLongPress();
+        },
+    } : {};
     const renderContent = () => {
         return (
-            <View style={{ width: '100%' }} {...(Platform.OS === 'web' ? ({ dataSet: { joySelectable: 'true' } } as any) : {})}>
+            <View style={{ width: '100%' }} {...(Platform.OS === 'web' ? ({ dataSet: { joySelectable: 'true' } } as any) : {})} {...(webContextMenu as any)}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
                         return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
