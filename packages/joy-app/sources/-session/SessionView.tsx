@@ -60,9 +60,8 @@ import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES, JOY_CODEX_PERMISSION_MODES } from '@/sync/joyModels';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
-import { JoyQueueStrip } from '@/components/JoyQueueStrip';
 import { DraftQueueStrip } from './DraftQueueStrip';
-import { PendingQueueStrip } from './PendingQueueStrip';
+import { WaitingStack } from './WaitingStack';
 import { DisconnectedBanner } from './DisconnectedBanner';
 import { GoalBar } from './GoalBar';
 import { LoginBar } from './LoginBar';
@@ -1047,12 +1046,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         <>
         {isJoyDaemon && (
             <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
-                <JoyQueueStrip queue={joyQueue} sessionId={sessionId} />
-            </CenteredInputWidth>
-        )}
-        {isJoyDaemon && !isDisconnected && (
-            <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
-                <PendingQueueStrip sessionId={sessionId} />
+                <WaitingStack queue={joyQueue} sessionId={sessionId} />
             </CenteredInputWidth>
         )}
         <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>

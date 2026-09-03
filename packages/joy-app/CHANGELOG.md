@@ -1,3 +1,7 @@
+# Sep 3 (16) — One "Waiting" list
+
+- **"Queued" and "Waiting to send" are gone; there is one list, Waiting.** Everything you've sent that hasn't reached the agent yet — held in the app because a turn was running, or lined up on your machine — is one stack above the composer, same rows as Drafts: edit in place, × to remove, ⇡ to steer into the running turn, ↻ when a send keeps failing. A paused queue shows as a banner at the top of the same list.
+
 # Sep 3 (15) — Fable in Limits, CPU and memory per session
 
 - **Limits shows the Fable weekly window.** Claude's usage API reports model-scoped weekly limits in a separate list the app never read; Fable's was sitting at 68% while Limits showed only the two unscoped bars. Any model-scoped window now appears as "Weekly · ‹model›". A few codenamed experiment buckets that used to show up as bare ids at 0% no longer do. *Needs the updated daemon.*
