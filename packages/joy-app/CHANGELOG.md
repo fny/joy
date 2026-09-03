@@ -1,6 +1,6 @@
-# Sep 3 (16) — One "Waiting" list
+# Sep 3 (16) — One "Queue" list
 
-- **"Queued" and "Waiting to send" are gone; there is one list, Waiting.** Everything you've sent that hasn't reached the agent yet — held in the app because a turn was running, or lined up on your machine — is one stack above the composer, same rows as Drafts: edit in place, × to remove, ⇡ to steer into the running turn, ↻ when a send keeps failing. A paused queue shows as a banner at the top of the same list.
+- **"Queued" and "Waiting to send" are gone; there is one list, Queue.** Everything you've sent that hasn't reached the agent yet — held in the app because a turn was running, or lined up on your machine — is one stack above the composer — the very same component as Drafts, no icons, always collapsible from its header however long the entries get: edit in place, × to remove, ⇡ to steer into the running turn, ↻ when a send keeps failing. A paused queue shows as a banner at the top of the same list.
 
 # Sep 3 (15) — Fable in Limits, CPU and memory per session
 

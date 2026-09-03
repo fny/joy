@@ -73,5 +73,5 @@ export const WaitingStack = React.memo(function WaitingStack({ sessionId, queue 
         onPress: () => { void queue.resume(); },
     } : null;
 
-    return <QueueStack title={t('joyQueue.pendingTitle')} icon="time-outline" rows={rows} notice={notice} />;
+    return <QueueStack title={t('joyQueue.pendingTitle')} rows={rows} notice={notice} />;
 });

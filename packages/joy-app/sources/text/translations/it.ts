@@ -390,7 +390,7 @@ export const it: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `Impossibile inviare — ${reason}. Nuovo tentativo…`,
         sendParked: ({ reason }: { reason: string }) => `Impossibile inviare — ${reason}. Tocca ↻ per riprovare.`,
         draftsTitle: 'Bozze',
-        pendingTitle: 'In attesa',
+        pendingTitle: 'Coda',
         steerNow: 'Indirizza ora',
         draftPlaceholder: 'Bozza…',
         sendNow: 'Invia',

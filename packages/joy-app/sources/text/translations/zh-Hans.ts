@@ -393,7 +393,7 @@ export const zhHans: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `无法发送 — ${reason}。正在重试…`,
         sendParked: ({ reason }: { reason: string }) => `无法发送 — ${reason}。点按 ↻ 重试。`,
         draftsTitle: '草稿',
-        pendingTitle: '等待中',
+        pendingTitle: '队列',
         steerNow: '立即引导',
         draftPlaceholder: '草稿…',
         sendNow: '发送',

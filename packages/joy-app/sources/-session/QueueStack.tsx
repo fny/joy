@@ -38,9 +38,8 @@ export interface QueueRowModel {
     error?: string | null;
 }
 
-export const QueueStack = React.memo(function QueueStack({ title, icon, rows, notice }: {
+export const QueueStack = React.memo(function QueueStack({ title, rows, notice }: {
     title: string;
-    icon: 'time-outline' | 'document-text-outline';
     rows: QueueRowModel[];
     /** Banner above the rows — tap to act (the daemon's paused-queue resume). */
     notice?: { text: string; onPress: () => void } | null;
@@ -52,6 +51,9 @@ export const QueueStack = React.memo(function QueueStack({ title, icon, rows, no
     return (
         <View style={styles.wrap}>
             {rows.length > 0 && (
+                // The header is OUTSIDE the scroll region and always rendered
+                // while there are rows, so however many or however long the
+                // entries get, collapse is one tap away at the top.
                 <Pressable
                     onPress={() => setCollapsed((c) => !c)}
                     hitSlop={8}
@@ -59,11 +61,11 @@ export const QueueStack = React.memo(function QueueStack({ title, icon, rows, no
                     accessibilityLabel={collapsed ? t('joyQueue.expand') : t('joyQueue.collapse')}
                     style={(p) => [styles.headerRow, { opacity: p.pressed ? 0.6 : 1 }]}
                 >
-                    <Ionicons name={icon} size={12} color={theme.colors.textSecondary} />
                     <Text style={styles.header}>{`${title.toUpperCase()} · ${rows.length}`}</Text>
                     {overflow > 0 && !collapsed && (
                         <Text style={styles.more}>{t('joyQueue.moreItems', { count: overflow })}</Text>
                     )}
+                    <View style={styles.headerSpacer} />
                     <Ionicons name={collapsed ? 'chevron-up' : 'chevron-down'} size={14} color={theme.colors.textSecondary} />
                 </Pressable>
             )}
@@ -143,7 +145,8 @@ const QueueRow = React.memo(function QueueRow({ row }: { row: QueueRowModel }) {
 
 const styles = StyleSheet.create((theme) => ({
     wrap: { marginBottom: 8, gap: 6 },
-    headerRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginLeft: 8, paddingVertical: 2 },
+    headerRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, minHeight: 28 },
+    headerSpacer: { flex: 1 },
     header: { fontSize: 11, letterSpacing: 0.4, color: theme.colors.textSecondary, ...Typography.default('semiBold') },
     more: { fontSize: 11, color: theme.colors.textSecondary, ...Typography.default() },
     notice: {

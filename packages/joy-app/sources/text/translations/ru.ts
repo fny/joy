@@ -519,7 +519,7 @@ export const ru: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `Не удалось отправить — ${reason}. Повторяем…`,
         sendParked: ({ reason }: { reason: string }) => `Не удалось отправить — ${reason}. Нажмите ↻, чтобы повторить.`,
         draftsTitle: 'Черновики',
-        pendingTitle: 'Ожидание',
+        pendingTitle: 'Очередь',
         steerNow: 'Направить сейчас',
         draftPlaceholder: 'Черновик…',
         sendNow: 'Отправить',

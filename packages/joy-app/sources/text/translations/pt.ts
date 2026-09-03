@@ -391,7 +391,7 @@ export const pt: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `Não foi possível enviar — ${reason}. A tentar de novo…`,
         sendParked: ({ reason }: { reason: string }) => `Não foi possível enviar — ${reason}. Toque em ↻ para tentar de novo.`,
         draftsTitle: 'Rascunhos',
-        pendingTitle: 'Aguardando',
+        pendingTitle: 'Fila',
         steerNow: 'Direcionar agora',
         draftPlaceholder: 'Rascunho…',
         sendNow: 'Enviar',

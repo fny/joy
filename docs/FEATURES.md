@@ -119,10 +119,11 @@ every relay; machines register per account.
   Stages are monotonic (`advanceDeliveryStage`); rows with no stage (history,
   other devices) render at 100%. A failed send is forgotten
   (`dismissLocalMessage`) and its text goes back to the composer.
-- Above the composer: **Waiting** (`WaitingStack`) and **Drafts**
+- Above the composer: **Queue** (`WaitingStack`) and **Drafts**
   (`DraftQueueStrip`), both rendered by ONE `QueueStack` — same header
   (title · count, collapsible, +N more), same inline-editable rows, × remove,
-  capped at 3 rows then scrolls. Waiting MERGES the app-held busy items and
+  capped at 3 rows then scrolls, header outside the scroll region so collapse
+  is always reachable, no icons. Queue MERGES the app-held busy items and
   the daemon's dispatch queue (`joy__queue`: visible + hidden items, edit via
   PATCH on commit, cancel, ⇡ steer) plus the paused-queue banner; Drafts get
   ↑ send-now. There is no separate "queued" strip any more.
