@@ -24,7 +24,7 @@ import { hostname } from "node:os";
 import tweetnacl from "tweetnacl";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { registerV2CardPublisher, unregisterV2CardPublisher, cardStateFor, publishV2Card } from "./v2Card";
+import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, joyStateDir } from "../paths";
@@ -495,6 +495,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // bind (or a daemon restart's rebind) publishes the current card without
   // waiting for the next change.
   function wireCardPublisher(localId: string, v2SessionId: string): void {
+    registerV2SessionId(localId, v2SessionId);
     registerV2CardPublisher(localId, async (metadata) => {
       const key = sessionKeys.get(v2SessionId) ?? null;
       const l = lease;

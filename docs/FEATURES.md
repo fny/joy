@@ -110,6 +110,13 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 - Daemon pushes alerts at the same thresholds plus claude/codex quota ≥90%
   (edge-triggered, 4h cooldown) — groundwork for iOS Live Activities (native
   build still pending).
+- Session pushes (done/permission/question, `<joy-notify>`) deep-link by the
+  RELAY session id, resolved through `v2SessionIdFor` — the app keys sessions
+  by that id, so stamping the daemon's local id sent every tap to "Session has
+  been deleted". An unbound session sends no link rather than a broken one.
+- Session info → **Reload Chat** drops one session's local messages, reducer
+  state and cursors and refetches (`sync.resetSessionChatState`); use it when
+  history renders empty.
 
 ## Usage & limits
 

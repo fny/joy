@@ -24,6 +24,23 @@ export function registerV2CardPublisher(localSessionId: string, fn: CardPublishe
 
 export function unregisterV2CardPublisher(localSessionId: string): void {
   publishers.delete(localSessionId);
+  v2SessionIds.delete(localSessionId);
+}
+
+// local session id → relay (v2) session id. The app addresses sessions by the
+// v2 id, so anything the daemon sends OUTWARD for the app to act on — push
+// notifications carry a deep link — must be stamped with this, not the local
+// id. Registered beside the publisher because the lane holds both ids there
+// and nowhere else in this direction.
+const v2SessionIds = new Map<string, string>();
+
+export function registerV2SessionId(localSessionId: string, v2SessionId: string): void {
+  v2SessionIds.set(localSessionId, v2SessionId);
+}
+
+/** The relay session id for a local session, or null when it is not bound. */
+export function v2SessionIdFor(localSessionId: string): string | null {
+  return v2SessionIds.get(localSessionId) ?? null;
 }
 
 /** Called from the metadata merge path with the COMPLETE merged card.
