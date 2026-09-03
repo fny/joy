@@ -686,6 +686,9 @@ export class Session {
   // ancient) ai-title verbatim on every resume without re-generating it — a
   // repeat carries no new information and must not stomp a fresher agent
   // (<joy-title>) title. Only a genuinely NEW ai-title value applies.
+  // PERSISTED (windowRecord.lastAiTitle): held only in memory, this reset on
+  // every restart, so the replay saw the stale value as new and stomped the
+  // title right back — the "title is stuck" report of 2026-09-03.
   #lastAiTitle: string | null = null;
   // The pending delayed-Enter (submit) for a just-typed message. Cancellable so an
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
@@ -743,6 +746,14 @@ export class Session {
     // Title lock survives restarts via the window record.
     const rec = loadWindowRecord(this.id);
     this.#titleLocked = rec?.titleLockedByUser === true;
+    // No persisted value = first run since this became durable. Seed from the
+    // transcript's CURRENT ai-title so the replay treats it as already-seen
+    // rather than "new" — otherwise the first restart after the upgrade stomps
+    // the title one last time. A genuinely new ai-title later still applies.
+    this.#lastAiTitle = rec?.lastAiTitle ?? this.#readLatestAiTitle();
+    if (!rec?.lastAiTitle && this.#lastAiTitle) {
+      saveWindowRecord(this.id, { lastAiTitle: this.#lastAiTitle });
+    }
     // Reload any queue items a previous daemon left undelivered (B1). They
     // drain on the first idle exactly like freshly queued messages.
     const persisted = loadQueue(this.id);
@@ -3135,6 +3146,7 @@ export class Session {
       // it can't stomp an agent <joy-title> re-title. New values still apply.
       if (title && title !== this.#lastAiTitle) {
         this.#lastAiTitle = title;
+        saveWindowRecord(this.id, { lastAiTitle: title });
         if (title !== this.summary) {
           this.summary = title;
           void this.#relay?.updateSummary(title);

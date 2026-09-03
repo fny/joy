@@ -29,3 +29,17 @@ test("no launchCwd ever → nothing persisted", () => {
   saveWindowRecord("zz", { claudeSessionId: "uuid-only" }, dir);
   expect(loadWindowRecord("zz", dir)).toBeNull();
 });
+
+// The ai-title dedupe used to live only in memory, so every restart replayed
+// Claude's endlessly-repeated stale title, saw it as new, and stomped the
+// agent's <joy-title> back to a title from days ago.
+test("lastAiTitle survives a restart and merges without clobbering the lock", () => {
+  saveWindowRecord("ttl00001", { launchCwd: "/w", titleLockedByUser: false }, dir);
+  saveWindowRecord("ttl00001", { lastAiTitle: "Disable suggestions" }, dir);
+  const rec = loadWindowRecord("ttl00001", dir);
+  expect(rec?.lastAiTitle).toBe("Disable suggestions");
+  expect(rec?.launchCwd).toBe("/w");
+
+  saveWindowRecord("ttl00001", { titleLockedByUser: true }, dir);
+  expect(loadWindowRecord("ttl00001", dir)?.lastAiTitle).toBe("Disable suggestions");
+});
