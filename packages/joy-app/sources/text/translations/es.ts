@@ -392,7 +392,7 @@ export const es: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `No se pudo enviar — ${reason}. Reintentando…`,
         sendParked: ({ reason }: { reason: string }) => `No se pudo enviar — ${reason}. Toca ↻ para reintentar.`,
         draftsTitle: 'Borradores',
-        pendingTitle: 'En espera',
+        pendingTitle: 'Cola',
         steerNow: 'Dirigir ahora',
         draftPlaceholder: 'Borrador…',
         sendNow: 'Enviar',

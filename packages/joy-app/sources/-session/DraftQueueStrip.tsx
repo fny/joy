@@ -21,5 +21,5 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
             remove(sessionId, d.id);
         },
     })), [drafts, sessionId, update, remove]);
-    return <QueueStack title={t('joyQueue.draftsTitle')} icon="document-text-outline" rows={rows} />;
+    return <QueueStack title={t('joyQueue.draftsTitle')} rows={rows} />;
 });

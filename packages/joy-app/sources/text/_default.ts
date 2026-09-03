@@ -439,7 +439,7 @@ export const en = {
         sendRetrying: ({ reason }: { reason: string }) => `Couldn’t send — ${reason}. Trying again…`,
         sendParked: ({ reason }: { reason: string }) => `Couldn’t send — ${reason}. Tap ↻ to try again.`,
         draftsTitle: 'Drafts',
-        pendingTitle: 'Waiting',
+        pendingTitle: 'Queue',
         steerNow: 'Steer now',
         draftPlaceholder: 'Draft…',
         sendNow: 'Send',

@@ -393,7 +393,7 @@ export const ja: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `送信できませんでした — ${reason}。再試行しています…`,
         sendParked: ({ reason }: { reason: string }) => `送信できませんでした — ${reason}。↻ をタップして再試行してください。`,
         draftsTitle: '下書き',
-        pendingTitle: '待機中',
+        pendingTitle: 'キュー',
         steerNow: '今すぐ指示',
         draftPlaceholder: '下書き…',
         sendNow: '送信',

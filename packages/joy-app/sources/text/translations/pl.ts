@@ -409,7 +409,7 @@ export const pl: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `Nie udało się wysłać — ${reason}. Ponawianie…`,
         sendParked: ({ reason }: { reason: string }) => `Nie udało się wysłać — ${reason}. Dotknij ↻, aby ponowić.`,
         draftsTitle: 'Szkice',
-        pendingTitle: 'Oczekujące',
+        pendingTitle: 'Kolejka',
         steerNow: 'Skieruj teraz',
         draftPlaceholder: 'Szkic…',
         sendNow: 'Wyślij',

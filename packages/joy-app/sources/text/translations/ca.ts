@@ -392,7 +392,7 @@ export const ca: TranslationStructure = {
         sendRetrying: ({ reason }: { reason: string }) => `No s'ha pogut enviar — ${reason}. S'està reintentant…`,
         sendParked: ({ reason }: { reason: string }) => `No s'ha pogut enviar — ${reason}. Toca ↻ per reintentar.`,
         draftsTitle: 'Esborranys',
-        pendingTitle: 'En espera',
+        pendingTitle: 'Cua',
         steerNow: 'Dirigeix ara',
         draftPlaceholder: 'Esborrany…',
         sendNow: 'Envia',
