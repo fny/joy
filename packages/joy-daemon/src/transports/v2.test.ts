@@ -112,7 +112,7 @@ describe("v2 machine plane", () => {
 
   test("harness inventory; unknown harness is 422, never a default", async () => {
     const all = await call("GET", "/v2/harnesses");
-    expect(all.json.harnesses.map((h: any) => h.id)).toEqual(["claude", "codex", "opencode", "pi"]);
+    expect(all.json.harnesses.map((h: any) => h.id)).toEqual(["claude", "codex", "opencode", "pi", "agy"]);
     expect((await call("GET", "/v2/harnesses/claude")).status).toBe(200);
     expect((await call("GET", "/v2/harnesses/gemini")).status).toBe(422);
     expect((await call("GET", "/v2/harnesses/gemini/models")).status).toBe(422);

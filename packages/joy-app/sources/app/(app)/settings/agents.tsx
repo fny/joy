@@ -43,6 +43,7 @@ const agentLabels: Record<AgentKey, string> = {
     gemini: 'Gemini',
     openclaw: 'OpenClaw',
     opencode: 'OpenCode',
+    agy: 'Antigravity',
 };
 
 function optionName(options: ModeOption[], key: string | null | undefined): string {

@@ -11,7 +11,7 @@ and `src/domain/fileOps.ts`); FEATURES.md is the companion feature map.
 ```
 joy-app ⇄ joy-relay (e.g. joy.voltai.party:4997, /joy/v2 over HTTPS + SSE)
               ⇄ joy-daemon (one per machine per account/relay)
-                    ⇄ tmux panes: claude | codex | opencode | pi
+                    ⇄ tmux panes: claude | codex | opencode | pi | agy (headless)
 ```
 
 - Accounts are auto-created on first `POST /joy/v2/auth` contact (ed25519
@@ -66,7 +66,7 @@ annotations are incremental (permissive objects where absent).
 |---|---|---|
 | `joy-list-sessions` | GET /sessions | All sessions (now includes `agent` flavor per record) |
 | `joy-get-session` | GET /sessions/:id | One session record |
-| `joy-create-session` | POST /sessions | Spawn agent (`agent`: claude\|codex\|opencode\|pi; `resume_id`, `forkSession`, `continue`, `model`, `effort`, `permissionMode`, `yolo`, `extraArgs`; unknown agent → loud error). Claude gets `CLAUDE_CODE_ENABLE_TASKS=0` + fresh `--append-system-prompt` every spawn |
+| `joy-create-session` | POST /sessions | Spawn agent (`agent`: claude\|codex\|opencode\|pi\|agy; `resume_id`, `forkSession`, `continue`, `model`, `effort`, `permissionMode`, `yolo`, `extraArgs`; unknown agent → loud error). Claude gets `CLAUDE_CODE_ENABLE_TASKS=0` + fresh `--append-system-prompt` every spawn |
 | `joy-restart-session` | POST /sessions/:id/restart | Relaunch in place |
 | `joy-kill-session` | DELETE /sessions/:id | Kill one |
 | `joy-kill-all-sessions` | POST /sessions/kill-all | Kill everything |
@@ -93,7 +93,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-agent-config-set` | POST /agent-config/:agent/set | Merge JSON-path assignment lines (`a[0].b = "x"`, null deletes); `.joy-bak` backup |
 | `joy-agent-config-write` | POST /agent-config/:agent | Full raw replace (must parse) |
 | `joy-agent-config-schema` | GET /agent-config/:agent/schema | Fetched + cached JSON Schema (claude, opencode) |
-| `joy-codex-models` / `joy-opencode-models` | GET /codex/models, /opencode/models | Model lists |
+| `joy-codex-models` / `joy-opencode-models` / `joy-agy-models` | GET /codex/models, /opencode/models, /agy/models | Model lists (agy: `agy models` display names — the name is the `--model` id) |
 | `joy-opencode-sessions` / `joy-opencode-set-model` | GET /opencode/sessions, POST /sessions/:id/opencode/model | opencode extras |
 | `joy-refresh-commands` | POST /commands/refresh | Re-scan slash commands |
 

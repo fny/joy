@@ -848,7 +848,7 @@ async function cmdNew(rest: string[]): Promise<number> {
   const agent = takeFlag(rest, "--agent") || "claude";
   const msg = takeFlag(rest, "-m") ?? takeFlag(rest, "--message");
   const dir = rest[0];
-  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi] [--model m] [--effort e] [--read-only] [--continue|--resume id] [--json]"); return 2; }
+  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m] [--effort e] [--read-only] [--continue|--resume id] [--json]"); return 2; }
   const mode = permissionModeFor(agent, readOnly);
   if (!mode.ok) { console.error(`${bad} ${mode.error}`); return 2; }
   const cwd = resolve(expandTilde(dir));
@@ -1187,7 +1187,7 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.b("about")}        Everything about one session:  joy about <session> [--json]
   ${c.b("check")}        Can it be talked to right now?  joy check <session>  → exit 0 idle · 3 busy · 6 needs input · 1 gone
   ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
-  ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--agent claude|codex|opencode|pi] [--model m]
+  ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m]
                  [--effort e] [--read-only] [--continue|--resume <id>] [--json]  → prints session id
   ${c.b("run")}          One-shot (ephemeral, like claude -p): create → prompt → print response → kill session.
                  joy run <prompt...> [--dir d] [--agent a] [--model m] [--read-only] [--timeout s] [--json]

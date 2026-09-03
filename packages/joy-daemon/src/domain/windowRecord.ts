@@ -48,7 +48,7 @@ export interface WindowRecord {
   transcriptCheckpoint?: { path: string; offset: number };
   /** Agent type — the discriminator recovery uses to reconstruct the right
    *  session class (claude Session vs CodexSession). Absent = claude (legacy). */
-  agent?: "claude" | "codex" | "opencode" | "pi";
+  agent?: "claude" | "codex" | "opencode" | "pi" | "agy";
   /** Codex app-server thread id, for thread/resume on recovery. */
   codexThreadId?: string;
   /** Codex app-server unix socket path (per session). */
@@ -66,6 +66,8 @@ export interface WindowRecord {
   opencodeDeliveredThrough?: string;
   opencodeSettings?: { model?: string; providerID?: string };
   piSettings?: { model?: string; sessionId?: string };
+  /** Antigravity (agy): model display name + the conversation id to --conversation on the next turn. */
+  agySettings?: { model?: string; conversationId?: string };
   updatedAt: number;
 }
 
@@ -111,7 +113,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; lastAiTitle?: string; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string } },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; lastAiTitle?: string; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -136,6 +138,7 @@ export function saveWindowRecord(
       opencodeDeliveredThrough: patch.opencodeDeliveredThrough ?? prev?.opencodeDeliveredThrough,
       opencodeSettings: patch.opencodeSettings ?? prev?.opencodeSettings,
       piSettings: patch.piSettings ?? prev?.piSettings,
+      agySettings: patch.agySettings ?? prev?.agySettings,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet

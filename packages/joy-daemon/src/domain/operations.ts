@@ -264,6 +264,21 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "agyModels",
+    scope: "machine",
+    rpcName: "joy-agy-models",
+    summary: "Antigravity (agy) model list — display names, as `agy --model` takes them",
+    http: { method: "GET", path: "/agy/models" },
+    handler: async () => {
+      try {
+        const { listAgyModels } = await import("../agy/models");
+        return { ok: true, models: await listAgyModels() };
+      } catch (e) {
+        return { ok: false, models: [], error: String(e) };
+      }
+    },
+  },
+  {
     name: "opencodeModels",
     scope: "machine",
     rpcName: "joy-opencode-models",
@@ -354,7 +369,7 @@ export const machineOps: MachineOp[] = [
       required: ["cwd"],
       properties: {
         cwd: { type: "string", description: "Working directory (created only with createDir)" },
-        agent: { type: "string", enum: ["claude", "codex", "opencode", "pi"], default: "claude" },
+        agent: { type: "string", enum: ["claude", "codex", "opencode", "pi", "agy"], default: "claude" },
         createDir: { type: "boolean" },
         gitUrl: { type: "string", description: "Clone (or reuse) into cwd before launching" },
         model: { type: "string" },
@@ -383,7 +398,7 @@ export const machineOps: MachineOp[] = [
       // philosophy as DirectoryCreationApprovalRequired — never silently
       // substitute; surface it and let the client decide. The app shows this
       // string in its error alert as-is.
-      const KNOWN_AGENTS = ["claude", "codex", "opencode", "pi"] as const;
+      const KNOWN_AGENTS = ["claude", "codex", "opencode", "pi", "agy"] as const;
       const agentRaw = typeof params.agent === "string" && params.agent.trim() ? params.agent.trim() : undefined;
       if (agentRaw && !(KNOWN_AGENTS as readonly string[]).includes(agentRaw)) {
         return { error: `unknown agent "${agentRaw}" — this joy-daemon doesn't support it yet (run \`joy update\` on this machine?)` };
@@ -397,7 +412,7 @@ export const machineOps: MachineOp[] = [
       }
       const session = await registry.create({
         cwd,
-        agent: agentRaw === "codex" || agentRaw === "opencode" || agentRaw === "pi" ? agentRaw : undefined,
+        agent: agentRaw === "codex" || agentRaw === "opencode" || agentRaw === "pi" || agentRaw === "agy" ? agentRaw : undefined,
         createDir: params.createDir === true,
         model: typeof params.model === "string" ? params.model : undefined,
         effort: typeof params.effort === "string" ? params.effort : undefined,
