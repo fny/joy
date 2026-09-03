@@ -33,6 +33,12 @@ export interface WindowRecord {
    *  and Claude's own ai-title re-titles are ignored until a bare /title
    *  unlocks. Persisted so the lock survives daemon restarts. */
   titleLockedByUser?: boolean;
+  /** Last ai-title VALUE applied from the transcript. Persisted because the
+   *  in-memory dedupe reset on every restart: the tailer replayed Claude's
+   *  ancient, endlessly-repeated ai-title, saw it as new, and stomped the
+   *  agent's <joy-title> back to a title from days ago (one session had 3195
+   *  copies of the same stale value). */
+  lastAiTitle?: string;
   /** Transcript replay checkpoint (codex review finding 8): byte offset of
    *  the tail AFTER the last processed entry, per transcript path. Recovery
    *  resumes here instead of replaying the whole file from 0 — which both
@@ -105,7 +111,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string } },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; lastAiTitle?: string; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string } },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -118,6 +124,7 @@ export function saveWindowRecord(
       v2SessionKey: patch.v2SessionKey ?? prev?.v2SessionKey,
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
+      lastAiTitle: patch.lastAiTitle ?? prev?.lastAiTitle,
       transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,
       agent: patch.agent ?? prev?.agent,
       codexThreadId: patch.codexThreadId ?? prev?.codexThreadId,
