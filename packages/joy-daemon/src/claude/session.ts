@@ -414,6 +414,14 @@ export interface QueuedMessage {
   id: string;
   text: string;
   createdAt: number;
+  /** Set when enqueue HANDLED the text itself (a joy-owned slash command) and
+   *  queued nothing — the returned id is synthetic and will never be delivered.
+   *  A caller that owns a relay turn must terminalize it instead of waiting for
+   *  a dispatch that is never coming: seen live 2026-09-03, a command-send left
+   *  a turn parked in the lane's start gate until unrelated activity flipped
+   *  busy(), then held the session's execution slot with every later message
+   *  queued behind it. */
+  handled?: "command";
 }
 
 /** Why auto-drain is currently halted — surfaced to the app for a precise banner. */
@@ -1182,7 +1190,8 @@ export class Session {
           source: opts?.source ?? "rpc", mirrorToRelay: false, visible: false,
         });
       }
-      return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now() };
+      this.#dlog(`handled ${cmd.name} as a joy command — nothing queued`);
+      return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now(), handled: "command" };
     }
     // Seq-dedupe (codex review finding 2): the confirmed-cursor contract
     // creates a benign crash window — spool written, cursor not yet

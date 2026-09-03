@@ -446,6 +446,15 @@ test("queue: per-item delivery state tracks pending → cancelled, and unknown i
   expect(s.queueItemState(a.id)).toBe("cancelled");
 });
 
+test("queue: a joy command is handled, not queued, and says so to its caller", () => {
+  const s = qSession();
+  const r = s.enqueue("/title hello");
+  expect(r.handled).toBe("command");
+  expect(s.queueState().pendingCount).toBe(0);
+  // A real message is not marked handled.
+  expect(s.enqueue("just a message").handled).toBeUndefined();
+});
+
 test("queue: hidden (relay/send/retry) items don't surface as editable chips", () => {
   const s = qSession();
   s.enqueue("visible one");                                                  // default visible:true
