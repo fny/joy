@@ -1,3 +1,7 @@
+# Sep 3 (13) — Right-click a message on desktop
+
+- **Right-click any message on desktop to open it in the text view** — the same one long-press opens on the phone — with Copy (the original markdown) and Reuse in its header. Right-clicking text you've already selected still gives you the browser's own menu.
+
 # Sep 3 (12) — Copy and Reuse move to the text view
 
 - **Copy and Reuse live in the text view now, not under every message.** Long-press a message (with the long-press copy mode on in Settings → Features) to open it in full; the header has Copy — the original markdown — and Reuse, which puts the text into the composer and takes you back to the chat. The per-message row is gone.

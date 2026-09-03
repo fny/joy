@@ -120,6 +120,9 @@ every relay; machines register per account.
   markdown on the clipboard; Reuse inserts it into the session's composer via
   `composerBridge` (appends below an existing draft, focuses) and returns to
   the chat. MarkdownView passes `sessionId` on the route. No per-message row.
+  On web/desktop the same view opens on **right-click** of a message
+  (`onContextMenu` in MarkdownView) — unless text is selected, in which case
+  the browser's own menu is left alone.
 - Cmd/Ctrl+F in-session search with match cycling.
 - Composer info line: agent · model · reasoning · permissions.
 
