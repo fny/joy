@@ -73,3 +73,22 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec): Prom
     }
     throw new Error('v2 spawn accepted but the session did not start within 2 minutes. Check the daemon lane on that machine.');
 }
+
+
+/**
+ * Wait for the card of a session the DAEMON created (fork, teleport, restart)
+ * to show up in sync, addressed by the daemon's local id — the card carries it
+ * as joy__sessionId. Returns the app session id to navigate to, or null.
+ */
+export async function waitForLocalSession(localSessionId: string, timeoutMs = 60_000): Promise<string | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        await sync.refreshSessions().catch(() => { /* broadcast will hydrate */ });
+        for (const [sid, s] of Object.entries(storage.getState().sessions)) {
+            const m = s.metadata as { joy__sessionId?: string; v2?: { localSessionId?: string; keyEnvelope?: string } } | undefined;
+            if ((m?.joy__sessionId === localSessionId || m?.v2?.localSessionId === localSessionId) && m?.v2?.keyEnvelope) return sid;
+        }
+        await new Promise(r => setTimeout(r, 1500));
+    }
+    return null;
+}

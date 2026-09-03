@@ -325,6 +325,7 @@ export const ca: TranslationStructure = {
         resumeFromTerminal: 'Per reprendre-la des del terminal:',
         newChat: 'Nou xat',
         forkAction: 'Bifurca la sessió',
+        teleportAction: 'Teletransporta',
         forkSubtitle: 'Continua en una nova sessió amb el mateix context',
         duplicateAction: 'Duplica des d\'un missatge…',
         duplicateSubtitle: 'Torna a un punt escollit i prova de nou',

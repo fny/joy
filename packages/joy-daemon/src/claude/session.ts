@@ -1069,7 +1069,7 @@ export class Session {
    *    server-side (drops it from the active list), detach the relay and kill
    *    the window.
    */
-  end(reason: "killed" | "process_exited"): boolean {
+  end(reason: "killed" | "process_exited" | "restart"): boolean {
     if (this.status === "ended") return false;
 
     this.#tailer?.close();
@@ -1124,7 +1124,7 @@ export class Session {
       // Killed → archived: publish the archived card, detach, kill the window.
       if (this.#relay) {
         // Keep the promise so killSession can await the real result.
-        this.#archivePromise = this.#relay.archive();
+        if (reason !== "restart") this.#archivePromise = this.#relay.archive();
         this.#relay.stop();
         this.#relay = null;
       }

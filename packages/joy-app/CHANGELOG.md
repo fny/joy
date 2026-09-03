@@ -1,3 +1,9 @@
+# Sep 3 (18) — Fork, Teleport, and a Restart that works
+
+- **Restart keeps your session.** It used to archive the card you were on and spawn a new one elsewhere in the list. The session now comes back under the same identity — same card, same history.
+- **Fork, one tap, from the session page.** A new session that continues from the last message (Claude sessions), and you're taken straight to it.
+- **Teleport a session to another machine.** From the session page, pick a machine and a folder; the conversation continues there. Only the conversation travels — files are not copied, the folder is assumed to be in sync. Claude sessions for now. *Both need the updated daemon.*
+
 # Sep 3 (17) — Antigravity sessions
 
 - **New agent: Antigravity.** Google's `agy` CLI joins Claude Code, Codex, OpenCode and pi. Pick "antigravity" on the new-session page, choose from the models `agy models` offers, and chat as with any other session — tool calls show as cards with their output. It runs headless: one `agy` process per turn against a persistent conversation, so a session survives daemon restarts and the queue (edit, reorder, cancel, steer) is the daemon's own. Permissions are skipped, as with the daemon's default mode; there is no terminal pane. *Needs the updated daemon, and `agy` installed and signed in on the machine.*

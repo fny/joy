@@ -452,6 +452,7 @@ export const ru: TranslationStructure = {
         resumeFromTerminal: 'Чтобы возобновить её из терминала:',
         newChat: 'Новый чат',
         forkAction: 'Форкнуть сессию',
+        teleportAction: 'Телепортировать',
         forkSubtitle: 'Продолжить в новой сессии с тем же контекстом',
         duplicateAction: 'Откатиться к сообщению…',
         duplicateSubtitle: 'Вернуться к выбранной точке и попробовать иначе',

@@ -6,8 +6,8 @@ import { sessionDelete, sessionKill } from '@/sync/ops';
 import { useLocalSetting, useMachine } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
-import { v2SpawnAndWait } from '@/sync/v2/spawn';
-import { machineRestartSessionFor } from '@/sync/v2/machine';
+import { waitForLocalSession } from '@/sync/v2/spawn';
+import { machineRestartSessionFor, machineForkSession } from '@/sync/v2/machine';
 import { t } from '@/text';
 import { JoyError } from '@/utils/errors';
 import { copySessionMetadataToClipboard, copySessionMetadataAndLogsToClipboard } from '@/utils/copySessionMetadataToClipboard';
@@ -127,17 +127,28 @@ export function useSessionQuickActions(
     // under a NEW session id (works on LIVE sessions too; the daemon's
     // resume-collision guard exempts forks).
     const [forking, performFork] = useJoyAction(async () => {
-        const directory = session.metadata?.path;
-        if (!canFork || !machineId || !directory || !claudeSessionId) {
+        if (!canFork || !machineId || !joySessionId) {
             throw new JoyError(t('session.forkErrorMissingMetadata'), false);
         }
-        const forked = await v2SpawnAndWait(machineId, {
-            cwd: directory, resume_id: claudeSessionId, forkSession: true,
-        });
-        if (!forked) return; // user declined the directory prompt
-        try { await sync.refreshSessions(); } catch { /* broadcast will hydrate */ }
+        // One tap: the daemon forks from the last message (claude: --resume
+        // <id> --fork-session) and we follow the new card as soon as it binds.
+        const fctx = sync.machineOnlyCtx(machineId);
+        if (!fctx) throw new JoyError('No machine context for this session', false);
+        const r = await machineForkSession(fctx, joySessionId);
+        if (!r.data?.ok || !r.data.localSessionId) throw new JoyError(r.data?.error || 'Failed to fork session', false);
+        const forked = await waitForLocalSession(r.data.localSessionId);
+        if (!forked) throw new JoyError('The forked session did not appear within a minute', false);
         navigateToSession(forked);
     });
+
+    // Teleport: continue this conversation on ANOTHER machine, in a folder
+    // there. Files are not copied (assume synced); the new-session page hosts
+    // the machine + folder pickers and runs the export → import.
+    const canTeleport = Boolean(joySessionId && machineOnline && session.metadata?.flavor !== 'codex' && session.metadata?.flavor !== 'opencode' && session.metadata?.flavor !== 'pi' && session.metadata?.flavor !== 'agy');
+    const teleportSession = React.useCallback(() => {
+        const path = session.metadata?.path ?? '';
+        router.push(`/joy/new?teleportFrom=${encodeURIComponent(session.id)}&path=${encodeURIComponent(path)}` as never);
+    }, [router, session.id, session.metadata?.path]);
 
     const forkSession = React.useCallback(() => {
         performFork();
@@ -185,6 +196,9 @@ export function useSessionQuickActions(
         if (canFork) {
             items.push({ id: 'fork', icon: 'git-branch-outline', label: t('session.forkAction'), onPress: forkSession });
         }
+        if (canTeleport) {
+            items.push({ id: 'teleport', icon: 'planet-outline', label: t('session.teleportAction'), onPress: teleportSession });
+        }
 
         if (canCopySessionMetadata) {
             items.push({ id: 'copy-metadata', icon: 'bug-outline', label: t('sessionInfo.copyMetadata'), onPress: copySessionMetadata });
@@ -200,6 +214,7 @@ export function useSessionQuickActions(
         deleteSession,
         canCopySessionMetadata,
         canFork,
+        canTeleport,
         canRestart,
         canResume,
         copySessionMetadata,
@@ -207,6 +222,7 @@ export function useSessionQuickActions(
         forkSession,
         openDetails,
         restartSession,
+        teleportSession,
     ]);
 
     const showActionAlert = React.useCallback(() => {
@@ -235,6 +251,8 @@ export function useSessionQuickActions(
         copySessionMetadataAndLogs,
         forkSession,
         forking,
+        teleportSession,
+        canTeleport,
         openDetails,
         restartSession,
         restarting,

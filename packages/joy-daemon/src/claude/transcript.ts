@@ -45,6 +45,28 @@ export function cappedTailOffset(path: string, capBytes: number): number {
 }
 
 /**
+ * Byte offset to cut a transcript for TELEPORT (copy to another machine and
+ * `--resume` it there): prefer the last `compact_boundary` line — the summary
+ * that follows it is the context Claude actually holds, so nothing earlier is
+ * needed to continue — as long as that tail fits `capBytes`; otherwise the
+ * turn-snapped tail cappedTailOffset gives. 0 = the whole file fits.
+ */
+export function teleportTailOffset(path: string, capBytes: number): number {
+  try {
+    const size = statSync(path).size;
+    if (capBytes <= 0 || size <= capBytes) return 0;
+    const text = readFileSync(path, "utf-8");
+    let off = 0; let lastBoundary = -1;
+    for (const line of text.split("\n")) {
+      if (line.includes('"compact_boundary"') && line.includes('"type":"system"')) lastBoundary = off;
+      off += Buffer.byteLength(line, "utf-8") + 1;
+    }
+    if (lastBoundary >= 0 && size - lastBoundary <= capBytes) return lastBoundary;
+    return cappedTailOffset(path, capBytes);
+  } catch { return 0; }
+}
+
+/**
  * Claude Code writes transcripts under ~/.claude/projects/<sanitized-cwd>/, where
  * the cwd is sanitized by replacing every character that is NOT [a-zA-Z0-9-] with
  * a dash. So slashes, dots, underscores, and spaces all collapse to "-" (case is
