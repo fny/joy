@@ -97,6 +97,11 @@ every relay; machines register per account.
   (`takesThinkingLease`) and a visible dialog clears it outright — both kept
   `busy()` true for a prompt that never generates, holding the relay turn open
   and queueing everything behind it.
+- File ops from the app are jailed to the session cwd (`validatePath`,
+  realpath-resolved) plus explicit extra roots. READ-side ops — view/download
+  (`readFile`), `listDirectory`, `getDirectoryTree`, `ripgrep` — also get
+  `TEMP_ROOTS` (`/tmp` + `os.tmpdir()`, via `readRoots()`), so `<joy-file>`
+  links to agent output in /tmp open. Write and delete stay cwd-only.
 - Compaction summaries arrive as a collapsed "Compaction summary" card
   (previously dropped entirely). The daemon flags the mirrored transcript entry
   with `isCompactSummary`; without the flag it renders as a plain user bubble.

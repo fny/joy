@@ -104,7 +104,7 @@ annotations are incremental (permissive objects where absent).
 | `abort` | POST /sessions/:id/abort | Escape the running turn (does NOT clear the input box — see docs/pane-input-clearing.md) |
 | `killSession` | (via DELETE /sessions/:id) | Session-scope kill |
 | `bash` | POST /sessions/:id/bash | Run a command in cwd |
-| `readFile` | POST /sessions/:id/readFile | ≤400KB inline base64; larger spills to an encrypted blob (`blobRef`) the app downloads/decrypts |
+| `readFile` | POST /sessions/:id/readFile | ≤400KB inline base64; larger spills to an encrypted blob (`blobRef`) the app downloads/decrypts. Paths: session cwd, the session's media dir, and the temp dirs (`/tmp`, `os.tmpdir()`) — read-side ops only (readFile/listDirectory/getDirectoryTree/ripgrep); write/delete stay cwd-only |
 | `writeFile` | POST /sessions/:id/writeFile | Write file |
 | `deleteFile` | POST /sessions/:id/deleteFile | Unlink one file (no trash). Files only — directories refused |
 | `listDirectory` / `getDirectoryTree` | POST /sessions/:id/… | FS browsing |
