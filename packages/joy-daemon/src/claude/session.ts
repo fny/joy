@@ -3672,6 +3672,12 @@ export class Session {
           // turn-end — after the last completion empties #bgTasks (reconcile is
           // coalesced at 150ms, well inside LLM reply latency) — pushes once.
           const notifyBlockers = [
+            // A REPLAYED turn end is history, not news. Recovery re-reads the
+            // transcript from its checkpoint (or from 0 when the checkpoint
+            // missed), and every historical end_turn walked into this branch —
+            // 18 pushes in one second after one restart. Same freshness rule
+            // as #shouldEmitNote.
+            entryTimeMs < this.#tailBoundAt - 60_000 ? "replay" : null,
             this.#dispatchInFlight ? "dispatch" : null,
             this.#queue.length > 0 ? `queue=${this.#queue.length}` : null,
             this.#drainRetry ? "drainRetry" : null,
