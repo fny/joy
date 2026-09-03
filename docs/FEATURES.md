@@ -100,6 +100,11 @@ every relay; machines register per account.
 - `<joy-options>` blocks become tap-to-answer pickers; `<joy-img>`/`<joy-file>`
   render inline; `<joy-title>` retitles (user `/title` locks); `<joy-notify>`
   becomes a push.
+- Every user and agent text message carries a **Copy · Reuse** row
+  (`MessageActions` in MessageView): Copy puts the ORIGINAL markdown on the
+  clipboard; Reuse inserts it into the composer via `composerBridge`
+  (appends below an existing draft, then focuses). Hover-revealed on web,
+  always visible on touch.
 - Cmd/Ctrl+F in-session search with match cycling.
 - Composer info line: agent · model · reasoning · permissions.
 

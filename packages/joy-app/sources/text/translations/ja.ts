@@ -989,6 +989,7 @@ export const ja: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `${mode}モードに切り替えました`,
         compactionSummary: 'コンパクション要約',
         contextCompacted: 'コンテキストを圧縮しました',
+        reuse: '再利用',
         unknownEvent: '不明なイベント',
         usageLimitUntil: ({ time }: { time: string }) => `${time}まで使用制限中`,
         unknownTime: '不明な時間',
