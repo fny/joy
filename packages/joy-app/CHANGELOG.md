@@ -1,6 +1,7 @@
 # Sep 3 (3) — Tap-to-answer options work again
 
 - **Option chips render again.** A question with `<joy-options>` had been showing its raw tags as text since Jul 1 — a later change that hides joy control tags swallowed the opening tag, so the block was never recognised. Options are tappable chips again.
+- **A held message now tells you why it is stuck.** Messages composed while the agent is working wait in the strip above the composer. If one fails to send, the row now shows the reason, and after the app stops retrying it says so and offers ↻ to try again — before, a failed send looked exactly like a message politely waiting its turn, forever.
 
 # Sep 3 (2) — Voice is back, bring your own agent
 

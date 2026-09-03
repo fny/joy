@@ -405,6 +405,9 @@ export const pl: TranslationStructure = {
         pendingHeader: ({ count }: { count: number }) => plural({ count, one: '1 wiadomość oczekuje na wysłanie', few: `${count} wiadomości oczekują na wysłanie`, many: `${count} wiadomości oczekuje na wysłanie` }),
         waitingForNetwork: 'Oczekiwanie na połączenie…',
         sendFailedOffline: 'Nie udało się wysłać — brak połączenia',
+        retry: 'Ponów',
+        sendRetrying: ({ reason }: { reason: string }) => `Nie udało się wysłać — ${reason}. Ponawianie…`,
+        sendParked: ({ reason }: { reason: string }) => `Nie udało się wysłać — ${reason}. Dotknij ↻, aby ponowić.`,
         offlineBanner: 'Brak połączenia — wiadomości z kolejki zostaną wysłane po ponownym połączeniu',
     },
 

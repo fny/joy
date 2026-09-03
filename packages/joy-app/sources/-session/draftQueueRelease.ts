@@ -35,7 +35,7 @@ const lastBusyAt = new Map<string, number>();
 const RELEASE_LEASE_MS = 30_000;
 // After this many failed attempts, stop auto-retrying every sweep; the draft
 // stays visible/editable with its error and the user can send it manually.
-const MAX_AUTO_ATTEMPTS = 5;
+export const MAX_AUTO_ATTEMPTS = 5;
 // Hard invariant (codex design review, 2026-07-11): NO app-side state may
 // indefinitely prevent user input from reaching the CLI. The fresh-busy gate
 // has a residual hostage case — activeAt refreshes from the daemon's generic
