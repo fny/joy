@@ -15,6 +15,10 @@ import { readFileBytes } from '@/utils/readFileBytes';
 import { encodeHex } from '@/encryption/hex';
 import { v2MessagesAfter, v2MessagesBefore } from './v2/reads';
 
+/** Relay poll cadence: the baseline live channel everywhere, and the ONLY one
+ *  on native (SSE needs a streaming fetch body React Native lacks). */
+const POLL_INTERVAL_MS = 2500;
+
 import { syncCurrentPushToken } from './pushRegistration';
 import { Platform, AppState } from 'react-native';
 import { NormalizedMessage, normalizeRawMessage } from './typesRaw';
@@ -336,16 +340,18 @@ class Sync {
             const sid = this.v2SessionIdIndex().get(v2SessionId);
             if (sid) this.getMessagesSync(sid).invalidate();
         };
-        // The doorbell is the app's ONLY realtime channel: it feeds the
-        // connection indicator too. The stream reconnects itself with a small
-        // backoff; between attempts the poll below keeps data flowing, so
-        // 'connecting' here means "no live stream", not "no data".
+        // The SSE doorbell is a LATENCY WIN, not the connection. It needs a
+        // streaming fetch body (res.body.getReader), which React Native does
+        // not have — so on native it can never open, and reporting its state as
+        // the app's left the phone pulsing "connecting" forever while data
+        // flowed perfectly through the poll below. The indicator now reports
+        // what actually carries data: a recent successful poll is 'connected',
+        // whichever transport delivered it.
         const connect = () => {
             if (this.v2LiveStopped) return;
-            storage.getState().setSocketStatus('connecting');
             try {
                 this.v2StreamStop = connectV2Stream({
-                    onHello: () => storage.getState().setSocketStatus('connected'),
+                    onHello: () => this.noteRelayReadOk(),
                     onPoke: (v2SessionId) => {
                         invalidateFor(v2SessionId);
                         // A state poke may mean a card/presence change (bind,
@@ -356,7 +362,9 @@ class Sync {
                     onClose: () => {
                         this.v2StreamStop = null;
                         if (this.v2LiveStopped) return;
-                        storage.getState().setSocketStatus('connecting');
+                        // Deliberately does NOT touch the indicator: on native
+                        // this fires on every attempt, and the poll is the real
+                        // connection. Retry quietly.
                         setTimeout(connect, 3000);
                     },
                 });
@@ -364,18 +372,38 @@ class Sync {
         };
         this.v2LiveStopped = false;
         connect();
-        // Poll fallback: keeps sessions live where SSE cannot run (native)
-        // or while the stream is down.
+        // Poll: the baseline everywhere, and the ONLY live channel on native.
+        // Its own success/failure drives the connection indicator.
         this.v2PollTimer = setInterval(() => {
             for (const sid of this.v2SessionIdIndex().values()) {
                 this.getMessagesSync(sid).invalidate();
             }
             this.sessionsSync.invalidate();
             this.machinesSync.invalidate();
-        }, 2500);
+        }, POLL_INTERVAL_MS);
     }
 
     private v2LiveStopped = false;
+    /** Last time anything was successfully read from the relay — the honest
+     *  input to the connection indicator (see startV2Live). */
+    private lastRelayReadOkAt = 0;
+
+    /** A read reached the relay: we are connected, whichever transport did it. */
+    private noteRelayReadOk() {
+        this.lastRelayReadOkAt = Date.now();
+        if (storage.getState().socketStatus !== 'connected') {
+            storage.getState().setSocketStatus('connected');
+        }
+    }
+
+    /** A read failed. One failure is noise (a dropped request, a radio waking);
+     *  only report trouble once nothing has landed for several poll cycles. */
+    private noteRelayReadFailed() {
+        if (Date.now() - this.lastRelayReadOkAt < 3 * POLL_INTERVAL_MS) return;
+        if (storage.getState().socketStatus === 'connected') {
+            storage.getState().setSocketStatus('connecting');
+        }
+    }
 
     stopV2Live() {
         this.v2LiveStopped = true;
@@ -569,7 +597,17 @@ class Sync {
         const { v2 } = await import('./v2/api');
         const { openCard } = await import('./v2/card');
         const { v2ActiveAt } = await import('./v2/liveness');
-        const { sessions: rows } = await v2.listSessions();
+        // This request runs on every poll tick, so it doubles as the connection
+        // probe — no extra traffic, and it reports the transport that actually
+        // carries data rather than the SSE stream native can never open.
+        let rows: Awaited<ReturnType<typeof v2.listSessions>>['sessions'];
+        try {
+            ({ sessions: rows } = await v2.listSessions());
+            this.noteRelayReadOk();
+        } catch (e) {
+            this.noteRelayReadFailed();
+            throw e; // InvalidateSync retries
+        }
 
         // Register a (legacy, key-less) session encryption per id: v2 message
         // content never uses it (rows arrive decrypted via __v2Plain), but the
