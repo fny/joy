@@ -736,37 +736,65 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const activitySince = () => registry.chatHistory().some((m) =>
         Number(m.id) > watermark && isOurs(m as { session_id?: string }) && m.role === "assistant");
 
-      // Phase A — the prompt leaves the LOCAL queue. Cross-adapter contract
-      // (verified against all four implementations): pendingCount is the only
-      // queue signal every adapter fills — claude counts all undelivered
-      // (incl. hidden + in-flight), codex/opencode count queued inbound, pi
-      // counts harness-queued. claude's busy() is true from enqueue onward
-      // (queue length), so busy() short-circuits A there and phases B/C carry
-      // the real waiting; the paused check therefore ALSO lives in B/C.
-      const dispatchDeadline = Date.now() + DISPATCH_TIMEOUT_MS;
+      // Phase A — OUR prompt reaches the agent.
+      //
+      // The authoritative signal is the adapter's per-item delivery state, when
+      // it has one (claude): it answers about THIS message. The old heuristic
+      // asked `pendingCount === 0 || busy()`, and for claude busy() is true from
+      // ENQUEUE onward — so A passed instantly on our own staging, B passed on
+      // the same flag, and C then terminalized `completed` the moment the
+      // session went idle. A prompt that never got typed was reported to the
+      // relay as a finished turn: silent loss, seen live 2026-09-03 (`turn
+      // 7a017583 completed` with no `[dispatch] typed` line for its item).
+      //
+      // Adapters with no per-item tracking (codex/opencode/pi) keep the
+      // heuristic — pendingCount is the one queue signal all of them fill.
+      const qid = queued?.id ?? null;
+      const itemState = (): string =>
+        (qid && session!.queueItemState ? session!.queueItemState(qid) : "unknown");
+      const tracked = itemState() !== "unknown";
+      // A message legitimately queued behind a long turn must NOT time out, so
+      // the tracked path waits as long as the turn itself may run.
+      const dispatchDeadline = Date.now() + (tracked ? TURN_CAP_MS : DISPATCH_TIMEOUT_MS);
+      let deliveryProven = false;
       for (;;) {
         const qs = session.queueState() as { pendingCount: number; paused: boolean };
         if (qs.paused) return failTurn("queue_paused");
-        if (qs.pendingCount === 0 || session.busy()) break;
+        if (tracked) {
+          const st = itemState();
+          if (st === "delivered") { deliveryProven = true; break; }
+          if (st === "cancelled") {
+            // Plucked locally (a cancel, an abort, a session teardown). The
+            // prompt will never run — say so instead of reporting `completed`.
+            await api("POST", `/daemon/turns/${turnId}/facts`, {
+              type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(),
+              meta: { reason: "prompt_cancelled_locally" },
+            }, leaseRef);
+            log(`${tag}: prompt cancelled before delivery → cancelled`);
+            return;
+          }
+        } else if (qs.pendingCount === 0 || session.busy()) break;
         if (Date.now() > dispatchDeadline) return failTurn("dispatch_timeout");
         await sleep(POLL_MS);
       }
 
       // Phase B — evidence the turn is RUNNING before we tell the relay so.
-      // codex/opencode/pi flip busy() (= thinking) asynchronously after the
-      // harness accepts the submit; without this gate a turn read "completed"
-      // in one debounce window before the agent ever started (the exact
-      // false-instant-complete the review caught).
-      const startDeadline = Date.now() + 180_000;
-      for (;;) {
-        // NB: for claude busy() is true from ENQUEUE onward, so this gate can
-        // pass on a previous turn's flag — log which signal released it, since
-        // that is the difference between "running" and "still queued".
-        if (session.busy()) { log(`${tag}: started (busy)`); break; }
-        if (activitySince()) { log(`${tag}: started (agent output)`); break; }
-        if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
-        if (Date.now() > startDeadline) return failTurn("no_agent_activity");
-        await sleep(POLL_MS);
+      // A proven delivery IS that evidence: the message was typed, submitted and
+      // echo-confirmed. Otherwise fall back to the flags — codex/opencode/pi flip
+      // busy() (= thinking) asynchronously after the harness accepts the submit,
+      // and without this gate a turn read "completed" in one debounce window
+      // before the agent ever started.
+      if (deliveryProven) {
+        log(`${tag}: started (delivery confirmed)`);
+      } else {
+        const startDeadline = Date.now() + 180_000;
+        for (;;) {
+          if (session.busy()) { log(`${tag}: started (busy)`); break; }
+          if (activitySince()) { log(`${tag}: started (agent output)`); break; }
+          if ((session.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
+          if (Date.now() > startDeadline) return failTurn("no_agent_activity");
+          await sleep(POLL_MS);
+        }
       }
       await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
 

@@ -434,6 +434,18 @@ test("queue: enqueue / list / edit / cancel", () => {
   void b;
 });
 
+// The v2 lane needs to know whether ITS prompt landed. busy() cannot say — for
+// claude it is true from enqueue onward, which let a turn report started AND
+// completed while its own message was never typed (silent loss, 2026-09-03).
+test("queue: per-item delivery state tracks pending → cancelled, and unknown ids", () => {
+  const s = qSession();
+  const a = s.enqueue("first");
+  expect(s.queueItemState(a.id)).toBe("pending");
+  expect(s.queueItemState("never-existed")).toBe("unknown");
+  expect(s.cancelQueued(a.id)).toBe(true);
+  expect(s.queueItemState(a.id)).toBe("cancelled");
+});
+
 test("queue: hidden (relay/send/retry) items don't surface as editable chips", () => {
   const s = qSession();
   s.enqueue("visible one");                                                  // default visible:true
