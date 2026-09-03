@@ -105,6 +105,9 @@ export function stripAnsi(s: string): string {
 /** Wire shape — frozen. The app and the debug page consume this JSON. */
 export interface SessionRecord {
   id: string;
+  /** Live CPU/RAM of the agent's process tree — stamped by the single-session
+   *  `get` op only (sampled; see domain/procStats). */
+  process?: { cpuPercent: number; rssBytes: number; processCount: number; sampledAt: number };
   /** Which harness runs this session (claude|codex|opencode|pi). */
   agent?: string;
   claude_session_id?: string;

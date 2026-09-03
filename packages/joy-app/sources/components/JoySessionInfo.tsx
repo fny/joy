@@ -178,6 +178,7 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
     }, [session.id, router]);
 
     const formatDate = (ts: number) => new Date(ts).toLocaleString();
+    const formatBytes = (b: number) => b >= 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : b >= 1 << 20 ? `${Math.round(b / (1 << 20))} MB` : `${Math.round(b / 1024)} KB`;
 
     // Resume command — stock builder when metadata has the claude session
     // id, otherwise assembled from the daemon's live record.
@@ -232,6 +233,15 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                 )}
                 {live?.pid != null && (
                     <Item title="PID" detail={String(live.pid)} icon={<Ionicons name="hardware-chip-outline" size={29} color="#FF2D55" />} showChevron={false} />
+                )}
+                {live?.process && (
+                    <Item
+                        title="CPU · Memory"
+                        detail={`${live.process.cpuPercent.toFixed(0)}% · ${formatBytes(live.process.rssBytes)}`}
+                        subtitle={`${live.process.processCount} process${live.process.processCount === 1 ? '' : 'es'} under the agent`}
+                        icon={<Ionicons name="pulse-outline" size={29} color="#FF2D55" />}
+                        showChevron={false}
+                    />
                 )}
                 {!!live?.flags?.length && (
                     <Item title="Launch Flags" subtitle={live.flags.join(' ')} icon={<Ionicons name="options-outline" size={29} color="#FF2D55" />} showChevron={false} />

@@ -17,6 +17,7 @@ import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
+import { processTreeStats } from "./procStats";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
@@ -328,9 +329,14 @@ export const machineOps: MachineOp[] = [
     rpcName: "joy-get-session",
     summary: "Fetch one session record",
     http: { method: "GET", path: "/sessions/:id" },
-    handler: (registry, params) => {
+    handler: async (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
-      return session ? session.toJSON() : { error: "session_not_found" };
+      if (!session) return { error: "session_not_found" };
+      const record = session.toJSON();
+      // Live CPU/RAM for the agent's process tree (sampled, ~400ms). Only on
+      // this single-session read — the list op stays cheap.
+      const process = await processTreeStats(record.pid);
+      return process ? { ...record, process } : record;
     },
     httpShape: (result) =>
       (result as { error?: string }).error

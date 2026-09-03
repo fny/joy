@@ -91,6 +91,52 @@ export async function fetchClaudeLimits(): Promise<{ ok: true; limits: ClaudeLim
   return result;
 }
 
+/** One normalized quota row for the app (see joy-app settings/limits). */
+export interface ClaudeLimitRow {
+  id: string;
+  kind: "window";
+  usedPercent: number;
+  resetsAt: string | null;
+  /** Model scope for a scoped window ("Fable", "Opus"), else undefined. */
+  scope?: string;
+  unit: "percent";
+}
+
+const CLAUDE_BUCKETS = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"] as const;
+
+/**
+ * Rows from the usage API response. Two sources, combined:
+ *  - the KNOWN top-level buckets (five_hour, seven_day, …) — never the
+ *    codenamed experiments beside them (nimbus_quill, tangelo, …), which
+ *    used to render as bare ids at 0%;
+ *  - the structured `limits` array, the only place a MODEL-SCOPED window
+ *    lives: `{kind:"weekly_scoped", percent, scope:{model:{display_name}}}`.
+ *    Fable's weekly limit is one of these (68% on 2026-09-03 while the app
+ *    showed only the two unscoped bars). Unscoped entries there (session,
+ *    weekly_all) duplicate the buckets and are skipped.
+ */
+export function claudeLimitRows(raw: unknown): ClaudeLimitRow[] {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const rows: ClaudeLimitRow[] = [];
+  for (const id of CLAUDE_BUCKETS) {
+    const w = r[id] as { utilization?: number; resets_at?: string } | null | undefined;
+    if (!w || typeof w !== "object" || typeof w.utilization !== "number") continue;
+    rows.push({ id, kind: "window", usedPercent: w.utilization, resetsAt: w.resets_at ?? null, scope: id.includes("opus") ? "Opus" : id.includes("sonnet") ? "Sonnet" : undefined, unit: "percent" });
+  }
+  const list = Array.isArray(r.limits) ? (r.limits as Array<Record<string, unknown>>) : [];
+  for (const e of list) {
+    const scope = (e.scope as { model?: { display_name?: string | null } | null } | null | undefined)?.model?.display_name;
+    if (!scope || typeof e.percent !== "number") continue;
+    rows.push({
+      id: `${String(e.kind ?? "scoped")}:${scope.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      kind: "window", usedPercent: e.percent,
+      resetsAt: typeof e.resets_at === "string" ? e.resets_at : null,
+      scope, unit: "percent",
+    });
+  }
+  return rows;
+}
+
 // ── codex ────────────────────────────────────────────────────────────────────
 
 export interface CodexLimitWindow {
