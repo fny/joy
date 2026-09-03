@@ -1009,6 +1009,8 @@ export class Session {
     void this.#relay?.updateDialog(null);
     this.#clearSubmitTimer();
     this.#cancelSteerSubmit();
+    for (const q of this.#queue) this.#recordOutcome(q.id, "cancelled");
+    if (this.#dispatchInFlight) this.#recordOutcome(this.#dispatchInFlight.id, "cancelled");
     this.#queue = [];
     this.#dispatchInFlight = null;
     clearQueue(this.id); // an ended session will never deliver — drop the spool
@@ -1943,6 +1945,7 @@ export class Session {
       if (this.#dispatchInFlight) {
         if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
         this.#neutralizePending(this.#dispatchInFlight.text);
+        this.#recordOutcome(this.#dispatchInFlight.id, "cancelled");
         this.#dispatchInFlight = null;
         this.#broadcastQueue();
       }
@@ -2250,6 +2253,7 @@ export class Session {
     // No plain-text echo will EVER come for this dispatch — drop its
     // pending entry now or it would suppress a later identical send.
     this.#neutralizePending(inflight.text);
+    this.#recordOutcome(inflight.id, "delivered");
     this.#dispatchInFlight = null;
     this.#dispatchExtends = 0;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
@@ -2827,6 +2831,7 @@ export class Session {
         if (prompt && this.#dispatchInFlight
           && flattenForMatch(prompt) === flattenForMatch(this.#dispatchInFlight.text)) {
           process.stderr.write(`[hook] ${this.id} UserPromptSubmit confirmed dispatch\n`);
+          this.#recordOutcome(this.#dispatchInFlight.id, "delivered");
           this.#clearSubmitTimer(); // our delayed Enter would fire into an empty box — harmless, but don't
           this.#dispatchInFlight = null;
           this.#dispatchExtends = 0;

@@ -779,6 +779,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (tracked) {
           const st = itemState();
           if (st === "delivered") { deliveryProven = true; break; }
+          if (st === "unknown") {
+            // The item left the queue without recording an outcome — a confirm
+            // path we don't know about. NEVER hang on that: fall back to the
+            // flag heuristic for this turn. (Waiting instead parked turns in
+            // `dispatching` for the full cap and wedged the session — my own
+            // regression, caught live 2026-09-03 within the hour.)
+            log(`${tag}: delivery state lost — falling back to activity signals`);
+            break;
+          }
           if (st === "cancelled") {
             // Plucked locally (a cancel, an abort, a session teardown). The
             // prompt will never run — say so instead of reporting `completed`.
