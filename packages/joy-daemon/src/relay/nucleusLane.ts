@@ -710,6 +710,22 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // Every later line for this turn names the session AND the local queue
       // item, so "turn X completed" can be tied to the message it carried.
       const tag = `turn ${turnId.slice(0, 8)} [${session.id}/${queued?.id ?? "?"}]`;
+
+      // A joy-owned slash command (/title, /steer, …) is executed by enqueue and
+      // never queued, so there is no dispatch to wait for. Close the turn now:
+      // parked in the gates below it would sit until some UNRELATED activity
+      // flipped busy(), then hold the session's relay execution slot with every
+      // later message stuck behind it (live 2026-09-03).
+      if (queued?.handled === "command") {
+        await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+        await drainRecords(session.id);
+        await api("POST", `/daemon/turns/${turnId}/facts`, {
+          type: "terminal", terminalState: "completed", runtimeEventId: randomUUID(),
+          meta: { reason: "handled_as_command" },
+        }, leaseRef);
+        log(`${tag}: handled as a joy command → completed`);
+        return;
+      }
       log(`${tag}: prompt staged (chars=${text.length})`);
 
       /** Terminalize the relay AND stop the local work — a failed turn whose
