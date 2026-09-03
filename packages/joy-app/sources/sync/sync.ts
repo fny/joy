@@ -10,7 +10,7 @@ import { InvalidateSync } from '@/utils/sync';
 import { randomUUID } from 'expo-crypto';
 import * as Crypto from 'expo-crypto';
 import { sealV2Content, sealV2Bytes, openV2Bytes, type V2Attachment } from './v2/crypto';
-import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, connectV2Stream } from './v2/api';
+import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, connectV2Stream, V2ApiError } from './v2/api';
 import { readFileBytes } from '@/utils/readFileBytes';
 import { encodeHex } from '@/encryption/hex';
 import { v2MessagesAfter, v2MessagesBefore } from './v2/reads';
@@ -496,9 +496,19 @@ class Sync {
                 attachments = await this.uploadV2Attachments(v2link.relay, v2link.sessionId, key, options.attachments);
             } catch (e) {
                 console.error('[v2] attachment upload failed', e);
+                // Say WHY. The reason used to go only to console.error, which is
+                // invisible on a phone — "uploads can't be uploaded from mobile"
+                // was reported with no way to tell a failed file read from a
+                // rejected POST from a hash mismatch. The detail is a status
+                // code or an error message, never file content.
+                const detail = e instanceof V2ApiError
+                    ? `HTTP ${e.status}${e.code ? ` · ${e.code}` : ''}`
+                    : e instanceof Error ? `${e.name}: ${e.message}` : String(e);
                 Modal.alert(
                     e instanceof AttachmentRejected ? t('imageUpload.fileTooLargeTitle') : t('imageUpload.uploadFailedTitle'),
-                    e instanceof AttachmentRejected ? e.message : t('imageUpload.uploadFailedMessage', { count: options.attachments.length }),
+                    e instanceof AttachmentRejected
+                        ? e.message
+                        : `${t('imageUpload.uploadFailedMessage', { count: options.attachments.length })}\n\n${detail}`,
                     [{ text: t('common.ok'), style: 'cancel' }],
                 );
                 return { ok: false, reason: `attachment upload failed: ${e instanceof Error ? e.message : e}` };

@@ -1,3 +1,7 @@
+# Sep 3 (7) — Failed uploads say why
+
+- **"Upload Failed" now names the reason.** An attachment that would not upload showed a generic message with the real error going only to the console — invisible on a phone. The alert now carries the failure itself (a status code, or the error), so a broken upload can be diagnosed from the device instead of guessed at.
+
 # Sep 3 (6) — Scrolling, stuck states and the connection dot
 
 - **Scrolling up no longer jumps.** The "loading older messages" spinner was mounted and unmounted at the very top of the list, growing and shrinking the header by its own height once per page fetched — so the chat lurched down and back up exactly where you were scrolling. The spinner's slot is now always there. Rows are also recycled by type, which removes the jitter underneath.
