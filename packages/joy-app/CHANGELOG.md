@@ -1,3 +1,8 @@
+# Sep 3 (15) — Fable in Limits, CPU and memory per session
+
+- **Limits shows the Fable weekly window.** Claude's usage API reports model-scoped weekly limits in a separate list the app never read; Fable's was sitting at 68% while Limits showed only the two unscoped bars. Any model-scoped window now appears as "Weekly · ‹model›". A few codenamed experiment buckets that used to show up as bare ids at 0% no longer do. *Needs the updated daemon.*
+- **CPU · Memory on the session info page.** Under Live: the agent's CPU (percent of one core, summed over its process tree — tool shells, dev servers, subagents) and resident memory, with the process count. Sampled when you open the page. *Needs the updated daemon.*
+
 # Sep 3 (14) — Tool output in the cards
 
 - **Claude's tool cards show what the tool printed.** A Bash call, a file read, a grep — the card now carries the output, and a call that failed is marked as failed. Until now a Claude card showed the command and that it had finished, and a command that exited with an error looked identical to one that succeeded. Very long output is trimmed to its beginning and end. *Needs the updated daemon.*

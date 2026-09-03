@@ -19,7 +19,7 @@ import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../doma
 import type { AgentSession } from "../domain/agentSession";
 import { validatePath } from "../domain/fileOps";
 import { readAgentConfig, writeAgentConfigRaw, applyAgentConfigAssignments, fetchAgentSchema, agentConfigSpec } from "../domain/agentConfig";
-import { fetchClaudeLimits, readCodexLimits } from "../domain/limits";
+import { fetchClaudeLimits, readCodexLimits, claudeLimitRows } from "../domain/limits";
 
 const HARNESSES = ["claude", "codex", "opencode", "pi"] as const;
 type Harness = (typeof HARNESSES)[number];
@@ -223,12 +223,7 @@ route("GET", "/v2/harnesses/:harness/limits", async (_ctx, p) => {
   if (p.harness === "claude") {
     const r = await fetchClaudeLimits().catch(e => ({ ok: false as const, error: String(e) }));
     if (!r.ok) return ok({ ok: true, harness: "claude", limits: [], status: { state: "unknown" }, error: { code: "read_failed", message: r.error }, observedAt });
-    const limits = Object.entries(r.limits as Record<string, { utilization?: number; resets_at?: string } | undefined>)
-      .filter((e): e is [string, { utilization?: number; resets_at?: string }] => !!e[1] && typeof e[1] === "object" && typeof e[1].utilization === "number")
-      .map(([id, w]) => ({
-        id, kind: "window" as const, usedPercent: w.utilization ?? 0, resetsAt: w.resets_at ?? null,
-        scope: id.includes("opus") ? "opus" : undefined, unit: "percent",
-      }));
+    const limits = claudeLimitRows(r.limits);
     return ok({ ok: true, harness: "claude", limits, status: { state: "ok" }, source: "oauth-usage-api", observedAt, stale: false, raw: r.limits });
   }
   if (p.harness === "codex") {

@@ -169,7 +169,14 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 - **Usage** (Settings): transcript-derived cost/tokens per period/project/
   model/session/tool, per machine or aggregated; daemon keeps a persistent
   parse cache (`~/.joy/usage-cache.json`) warmed every 2h.
+- Session info → Live → **CPU · Memory**: the `get` op stamps `process`
+  (`cpuPercent` summed over the agent's process tree, `rssBytes`,
+  `processCount`) from `domain/procStats` — Linux samples /proc twice, macOS
+  reads `ps`. Only on the single-session read.
 - **Limits** (Settings): server-truth account quota — claude 5h/weekly
+  Model-scoped weekly windows (Fable, …) come from the usage API's structured
+  `limits` array via `claudeLimitRows`; codenamed experiment buckets are not
+  rendered.
   utilization + reset times via the machine's own Claude Code OAuth token;
   codex windows from rollout `rate_limits`. No credential entry.
 

@@ -28,6 +28,9 @@ export type JoySessionRecord = {
     current_model?: string;
     effort?: string;
     flags?: string[];
+    /** Live CPU (% of one core, summed) and RSS for the agent's process tree —
+     *  present only on the single-session read. */
+    process?: { cpuPercent: number; rssBytes: number; processCount: number; sampledAt: number };
     started_at?: number;
     end_reason?: string;
 };

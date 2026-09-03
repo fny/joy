@@ -74,6 +74,9 @@ const KNOWN_WINDOWS: Record<string, string> = {
 
 function rowLabel(row: LimitRow, index: number): string {
     if (KNOWN_WINDOWS[row.id]) return KNOWN_WINDOWS[row.id];
+    // A model-scoped window from the usage API's structured list — "Fable" is
+    // one; the daemon names it from scope.model.display_name.
+    if (row.scope && row.id.startsWith('weekly_scoped')) return `Weekly · ${row.scope}`;
     if (row.id === 'primary' || row.id === 'secondary') {
         return windowName(row.windowMinutes, index === 0 ? 'Primary window' : 'Secondary window');
     }
