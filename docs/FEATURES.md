@@ -84,7 +84,10 @@ every relay; machines register per account.
   globally (header top-left collapse-all button, `useToolsCollapsed`).
 - Code diffs render with a `Diff +N −M` toggle row (Edit/Write/MultiEdit).
 - Compaction summaries arrive as a collapsed "Compaction summary" card
-  (previously dropped entirely).
+  (previously dropped entirely). The daemon flags the mirrored transcript entry
+  with `isCompactSummary`; without the flag it renders as a plain user bubble.
+- The `compact_boundary` record becomes a `<joy-compacted>` agent marker the app
+  draws as a centred divider — "Context compacted · 3m 3s · 385k → 17k".
 - `<joy-options>` blocks become tap-to-answer pickers; `<joy-img>`/`<joy-file>`
   render inline; `<joy-title>` retitles (user `/title` locks); `<joy-notify>`
   becomes a push.

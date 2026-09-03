@@ -987,6 +987,7 @@ export const zhHant: TranslationStructure = {
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `已切換到 ${mode} 模式`,
         compactionSummary: '壓縮摘要',
+        contextCompacted: '已壓縮上下文',
         unknownEvent: '未知事件',
         usageLimitUntil: ({ time }: { time: string }) => `使用限制到 ${time}`,
         unknownTime: '未知時間',

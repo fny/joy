@@ -534,9 +534,10 @@ test("api_error surfaced once per turn; turn_duration clears thinking", () => {
 
 test("compacting: PreCompact mark sets the banner, compact_boundary clears it", () => {
   const compactingCalls: (object | null)[] = [];
+  const notes: string[] = [];
   const s = new Session(
     { id: "c1", tmuxWindow: "joy:j-c1", cwd: "/tmp/c", flags: [], status: "active", startedAt: 0, claudeSessionId: "sid-c1" } as any,
-    { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
+    { relayClient: null, broadcast: () => {}, addChatMessage: (m: any) => { notes.push(String(m.content)); } } as any,
   );
   const rs: any = {
     relaySessionId: "rs-c1",
@@ -553,9 +554,32 @@ test("compacting: PreCompact mark sets the banner, compact_boundary clears it", 
   s.markCompacting("auto");
   expect(compactingCalls.at(-1)).toMatchObject({ trigger: "auto" });
 
-  // Claude writes the compact_boundary marker on completion → clears the banner.
-  s.onTranscriptEntry({ type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "auto" } } as any);
+  // Claude writes the compact_boundary marker on completion → clears the banner
+  // AND emits the <joy-compacted> divider carrying what the compaction cost.
+  s.onTranscriptEntry({
+    type: "system", subtype: "compact_boundary", timestamp: new Date().toISOString(),
+    compactMetadata: { trigger: "auto", durationMs: 182522, preTokens: 384900, postTokens: 16703 },
+  } as any);
   expect(compactingCalls.at(-1)).toBe(null);
+  const marker = notes.find((n) => n.startsWith("<joy-compacted>"));
+  expect(marker).toBeTruthy();
+  expect(JSON.parse(marker!.replace(/^<joy-compacted>|<\/joy-compacted>$/g, ""))).toEqual({
+    trigger: "auto", durationMs: 182522, preTokens: 384900, postTokens: 16703,
+  });
+});
+
+test("compact_boundary: absent metrics are omitted, not emitted as undefined", () => {
+  const notes: string[] = [];
+  const s = new Session(
+    { id: "c2", tmuxWindow: "joy:j-c2", cwd: "/tmp/c2", flags: [], status: "active", startedAt: 0, claudeSessionId: "sid-c2" } as any,
+    { relayClient: null, broadcast: () => {}, addChatMessage: (m: any) => { notes.push(String(m.content)); } } as any,
+  );
+  s.onTranscriptEntry({
+    type: "system", subtype: "compact_boundary", timestamp: new Date().toISOString(),
+    compactMetadata: { trigger: "manual" },
+  } as any);
+  const marker = notes.find((n) => n.startsWith("<joy-compacted>"));
+  expect(JSON.parse(marker!.replace(/^<joy-compacted>|<\/joy-compacted>$/g, ""))).toEqual({ trigger: "manual" });
 });
 
 // ── bgTaskEvent: launch/complete detection (single source of truth) ──────────

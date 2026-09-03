@@ -252,6 +252,49 @@ function BashRunCard({ cmd, stdout, stderr }: { cmd: string; stdout: string; std
   );
 }
 
+// The daemon emits a <joy-compacted>{json}</joy-compacted> marker when Claude
+// finishes compacting. It carries the only facts worth showing about a
+// compaction: what triggered it, how long it took, and how much context came
+// back. Parse it out; a malformed payload renders nothing rather than raw XML.
+type Compacted = { trigger?: string; durationMs?: number; preTokens?: number; postTokens?: number };
+function parseJoyCompacted(text: string): Compacted | null {
+  const m = /^\s*<joy-compacted>([\s\S]*?)<\/joy-compacted>\s*$/.exec(text);
+  if (!m) return null;
+  try {
+    const o = JSON.parse(m[1]);
+    return (o && typeof o === 'object') ? o as Compacted : {};
+  } catch { return {}; }
+}
+
+function formatDuration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+function formatTokens(n: number): string {
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+}
+
+// Compaction boundary → a quiet centred rule, not a message. It marks where the
+// conversation was summarized and says what that cost, so the collapsed summary
+// card below it has context.
+function CompactedDivider({ info }: { info: Compacted }) {
+  const parts: string[] = [];
+  if (typeof info.durationMs === 'number') parts.push(formatDuration(info.durationMs));
+  if (typeof info.preTokens === 'number' && typeof info.postTokens === 'number') {
+    parts.push(`${formatTokens(info.preTokens)} → ${formatTokens(info.postTokens)}`);
+  }
+  return (
+    <View style={styles.compactedDivider}>
+      <View style={styles.compactedRule} />
+      <Text style={styles.compactedLabel} numberOfLines={1}>
+        {t('message.contextCompacted')}{parts.length ? ` · ${parts.join(' · ')}` : ''}
+      </Text>
+      <View style={styles.compactedRule} />
+    </View>
+  );
+}
+
 // Background task completion (the harness's <task-notification> block).
 function TaskNotificationCard({ status, summary }: { status: string; summary: string }) {
   const { theme } = useUnistyles();
@@ -285,6 +328,12 @@ function AgentTextBlock(props: {
   // Hide thinking messages
   if (props.message.isThinking) {
     return null;
+  }
+
+  // Compaction boundary marker → divider.
+  const compacted = parseJoyCompacted(props.message.text);
+  if (compacted) {
+    return <CompactedDivider info={compacted} />;
   }
 
   // Bash command output → structured terminal card.
@@ -595,6 +644,23 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: 8,
     maxWidth: '100%',
     overflow: 'hidden',
+  },
+  compactedDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 16,
+    marginVertical: 14,
+  },
+  compactedRule: {
+    flex: 1,
+    height: 1,
+    backgroundColor: theme.colors.divider,
+  },
+  compactedLabel: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '500',
   },
   compactSummaryContainer: {
     marginHorizontal: 16,
