@@ -82,6 +82,11 @@ every relay; machines register per account.
 
 - Markdown + tool cards; tool cards collapse individually (chevron) and
   globally (header top-left collapse-all button, `useToolsCollapsed`).
+- Claude tool cards carry the tool's OUTPUT and failure state: the daemon
+  forwards `tool_result` content on `tool-call-end` (`result`, `isError`),
+  clamped to `TOOL_RESULT_MAX_CHARS` (48k, head + tail). Before 2026-09-03 the
+  record was the call id alone — no output, and a failed Bash call rendered
+  like a successful one.
 - Code diffs render with a `Diff +N −M` toggle row (Edit/Write/MultiEdit).
 - Background task counters (`joy__tasks`/`joy__agents`) age out a launch with no
   completion after `BG_LAUNCH_TTL_MS` (6h) — a lost `<task-notification>` used

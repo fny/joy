@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "vitest";
-import { RelaySession } from "./relay";
+import { RelaySession, encodeToolCallEnd } from "./relay";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, v2SessionIdFor } from "./v2Card";
 
 // RelaySession is a local card holder: every metadata write merges into its
@@ -86,4 +86,15 @@ test("v2 session id registry: pushes deep-link by RELAY id, not the local one", 
   // Unbinding drops the mapping so a stale id can never be deep-linked.
   unregisterV2CardPublisher("8f7c8f88");
   expect(v2SessionIdFor("8f7c8f88")).toBeNull();
+});
+
+test("encodeToolCallEnd carries the tool output and failure flag", () => {
+  const ok = encodeToolCallEnd("call-1", { turn: "t", result: "listing\n" });
+  const ev = (ok.content as unknown as { data: { ev: Record<string, unknown> } }).data.ev;
+  expect(ev).toEqual({ t: "tool-call-end", call: "call-1", result: "listing\n" });
+  const failed = encodeToolCallEnd("call-2", { turn: "t", result: "exit 1", isError: true });
+  expect((failed.content as unknown as { data: { ev: Record<string, unknown> } }).data.ev).toMatchObject({ isError: true, result: "exit 1" });
+  // Nothing textual → the record is exactly what it always was.
+  const bare = encodeToolCallEnd("call-3", { turn: "t" });
+  expect((bare.content as unknown as { data: { ev: Record<string, unknown> } }).data.ev).toEqual({ t: "tool-call-end", call: "call-3" });
 });

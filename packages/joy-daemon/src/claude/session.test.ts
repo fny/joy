@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, takesThinkingLease, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, takesThinkingLease, toolResultText, TOOL_RESULT_MAX_CHARS, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -1339,4 +1339,18 @@ test("classifyBgTasks: un-timestamped launches never age out", () => {
   const now = Date.now();
   const r = classifyBgTasks([{ kind: "launch", id: "bg-x", source: "shell" }], new Set(), now);
   expect(r.outstanding.has("bg-x")).toBe(true);
+});
+
+test("toolResultText: string and block results forward; image-only stays undefined; huge output keeps head + tail", () => {
+  expect(toolResultText("hello\nworld")).toBe("hello\nworld");
+  expect(toolResultText([{ type: "text", text: "a" }, { type: "image", source: {} }, { type: "text", text: "b" }])).toBe("a\nb");
+  expect(toolResultText([{ type: "image", source: {} }])).toBeUndefined();
+  expect(toolResultText(undefined)).toBeUndefined();
+  expect(toolResultText("")).toBeUndefined();
+  const big = "x".repeat(TOOL_RESULT_MAX_CHARS * 3);
+  const out = toolResultText(big)!;
+  expect(out.length).toBeLessThan(TOOL_RESULT_MAX_CHARS + 200);
+  expect(out).toContain("characters truncated");
+  expect(out.startsWith("x".repeat(100))).toBe(true);
+  expect(out.endsWith("x".repeat(100))).toBe(true);
 });

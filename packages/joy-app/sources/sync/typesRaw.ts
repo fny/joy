@@ -54,6 +54,10 @@ const sessionToolCallStartEventSchema = z.object({
 const sessionToolCallEndEventSchema = z.object({
     t: z.literal('tool-call-end'),
     call: z.string(),
+    // The tool's output (daemon-clamped) and whether it failed. Older daemons
+    // send neither; the card then shows completion only, as before.
+    result: z.string().optional(),
+    isError: z.boolean().optional(),
 });
 
 /** An attachment cited by a user message — the relay attachment id plus
@@ -684,8 +688,8 @@ function normalizeSessionEnvelope(
             content: [{
                 type: 'tool-result',
                 tool_use_id: envelope.ev.call,
-                content: null,
-                is_error: false,
+                content: envelope.ev.result ?? null,
+                is_error: envelope.ev.isError === true,
                 uuid: contentUUID,
                 parentUUID
             }],
