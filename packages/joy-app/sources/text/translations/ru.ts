@@ -992,6 +992,7 @@ export const ru: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `Переключено в режим ${mode}`,
         compactionSummary: 'Сводка компактификации',
         contextCompacted: 'Контекст сжат',
+        reuse: 'Повторить',
         unknownEvent: 'Неизвестное событие',
         usageLimitUntil: ({ time }: { time: string }) => `Лимит использования достигнут до ${time}`,
         unknownTime: 'неизвестное время',

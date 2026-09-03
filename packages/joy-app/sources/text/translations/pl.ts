@@ -1004,6 +1004,7 @@ export const pl: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `Przełączono na tryb ${mode}`,
         compactionSummary: 'Podsumowanie kompaktowania',
         contextCompacted: 'Kontekst skompaktowany',
+        reuse: 'Użyj ponownie',
         unknownEvent: 'Nieznane zdarzenie',
         usageLimitUntil: ({ time }: { time: string }) => `Osiągnięto limit użycia do ${time}`,
         unknownTime: 'nieznany czas',

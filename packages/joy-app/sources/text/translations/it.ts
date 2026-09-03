@@ -986,6 +986,7 @@ export const it: TranslationStructure = {
         switchedToMode: ({ mode }: { mode: string }) => `Passato alla modalità ${mode}`,
         compactionSummary: 'Riepilogo compattazione',
         contextCompacted: 'Contesto compattato',
+        reuse: 'Riutilizza',
         unknownEvent: 'Evento sconosciuto',
         usageLimitUntil: ({ time }: { time: string }) => `Limite di utilizzo raggiunto fino a ${time}`,
         unknownTime: 'ora sconosciuta',

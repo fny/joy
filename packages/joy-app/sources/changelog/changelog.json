@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 3 (9) — Copy and Reuse on every message",
+      "summary": "",
+      "markdown": "- **Copy gives you the original markdown.** Selecting text in a message only ever copied what was rendered — bullets, headers and code fences were lost. Each message now has a Copy action that copies the message exactly as it was written. On desktop it appears when you hover the message; on the phone it sits quietly under it.\n- **Reuse puts a message back in the composer.** Next to Copy. Tap it on anything you sent — or anything the agent said — and its text lands in the input, ready to edit and send. If you were already typing, it goes below your draft rather than replacing it."
+    },
+    {
       "title": "Sep 3 (8) — Attachments upload from the phone",
       "summary": "",
       "markdown": "- **Pictures and files send from iOS and Android again.** Hashing the sealed upload handed the native digest a raw buffer where it requires a typed array, so every attachment from a phone failed with \"Upload Failed\" before it ever reached the relay. Desktop and web were unaffected."
@@ -191,5 +196,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 3 (8) — Attachments upload from the phone"
+  "latestTitle": "Sep 3 (9) — Copy and Reuse on every message"
 }

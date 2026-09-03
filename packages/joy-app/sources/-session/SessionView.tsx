@@ -1,6 +1,7 @@
 import { AgentContentView } from '@/components/AgentContentView';
 import { AgentInput } from '@/components/AgentInput';
 import type { MultiTextInputHandle } from '@/components/MultiTextInput';
+import { registerComposer } from '@/-session/composerBridge';
 import { layout } from '@/components/layout';
 import {
     getAvailableModels,
@@ -456,6 +457,10 @@ type ChatComposerHandle = {
     /** Put text back after a failed send: replaces an empty box, otherwise
      *  goes above whatever the user typed meanwhile. */
     restoreMessage: (text: string) => void;
+    /** "Reuse" from a message row: replaces an empty box, otherwise goes
+     *  BELOW what the user has typed (they are adding to their draft, not
+     *  recovering a lost one), and focuses the input. */
+    insertMessage: (text: string) => void;
 };
 
 type ChatComposerProps = Omit<
@@ -508,7 +513,19 @@ const ChatComposer = React.memo(function ChatComposer(props: ChatComposerProps) 
             inputHandleRef.current?.setTextAndSelection(next, { start: next.length, end: next.length });
             setMessage(next);
         },
+        insertMessage: (text: string) => {
+            const current = inputHandleRef.current?.getText() ?? '';
+            const next = current.trim().length ? `${current}\n\n${text}` : text;
+            inputHandleRef.current?.setTextAndSelection(next, { start: next.length, end: next.length });
+            setMessage(next);
+            inputHandleRef.current?.focus();
+        },
     }), [clearDraft]);
+
+    // Expose "insert" to message rows (see composerBridge) for this session only.
+    React.useEffect(() => registerComposer(sessionId, (text) => {
+        composerHandleRef.current?.insertMessage(text);
+    }), [sessionId, composerHandleRef]);
 
     return (
         <AgentInput
