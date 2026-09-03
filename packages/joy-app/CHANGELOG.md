@@ -1,3 +1,7 @@
+# Sep 3 (3) — Tap-to-answer options work again
+
+- **Option chips render again.** A question with `<joy-options>` had been showing its raw tags as text since Jul 1 — a later change that hides joy control tags swallowed the opening tag, so the block was never recognised. Options are tappable chips again.
+
 # Sep 3 (2) — Voice is back, bring your own agent
 
 - **Talk to your sessions.** The mic in the composer opens a voice conversation with your own ElevenLabs Conversational AI agent. It hears what the focused session is doing, can send a message into any session, answer a held tool approval, and read out a `<joy-options>` question so you can pick by voice. Works on phone, desktop and web.

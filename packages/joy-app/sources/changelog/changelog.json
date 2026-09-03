@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 3 (3) — Tap-to-answer options work again",
+      "summary": "",
+      "markdown": "- **Option chips render again.** A question with `<joy-options>` had been showing its raw tags as text since Jul 1 — a later change that hides joy control tags swallowed the opening tag, so the block was never recognised. Options are tappable chips again."
+    },
+    {
       "title": "Sep 3 (2) — Voice is back, bring your own agent",
       "summary": "",
       "markdown": "- **Talk to your sessions.** The mic in the composer opens a voice conversation with your own ElevenLabs Conversational AI agent. It hears what the focused session is doing, can send a message into any session, answer a held tool approval, and read out a `<joy-options>` question so you can pick by voice. Works on phone, desktop and web.\n- **Standing by costs nothing.** After a stretch of silence (45 seconds by default, Settings → Voice) the conversation hangs up but stays *armed*: when a turn ends, an approval is held or a question is asked, it reconnects and speaks. The spoken transcript carries over, so it picks up where you left off. The × on the voice bar ends it for good.\n- **Wake by talking.** While idle and the app is open, the phone or browser listens locally (sound level only, nothing sent anywhere) and reconnects the moment you start talking; the bar reads \"Joy idle · Listening\". Off switch in Settings → Voice.\n- **Limits page works again.** It read the pre-tunnel reply shape, so every machine showed blank bars; it now renders the daemon's normalized quota windows (Claude 5-hour and weekly, Codex weekly) and shows the daemon's reason when a provider can't be read.\n- **`/joy-prompt` in the command picker.** Typing `/joy-` now offers it; it re-sends the current joy instructions to a running session (how sessions started before a daemon update pick up new instructions).\n- **Bring your own agent.** Settings → Voice: add an agent by name and agent id (public agent), or with an API key (private agent with authentication on). The key lives in your encrypted settings and is only used to mint conversation tokens on your device; no server is involved."
@@ -161,5 +166,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 3 (2) — Voice is back, bring your own agent"
+  "latestTitle": "Sep 3 (3) — Tap-to-answer options work again"
 }

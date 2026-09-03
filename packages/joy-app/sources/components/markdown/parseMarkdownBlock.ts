@@ -84,6 +84,31 @@ export function parseMarkdownBlock(markdown: string) {
         // Trim
         let trimmed = line.trim();
 
+        // Options block. MUST come before the joy-control-tag stripper below: a
+        // bare `<joy-options>` line matches that stripper's pattern, so with the
+        // stripper first the opener was dropped and every `<joy-option>…` line
+        // fell through as raw text (regression 2026-07-01, e91c3587).
+        if (trimmed.startsWith('<joy-options>')) {
+            let items: string[] = [];
+            while (index < lines.length) {
+                const nextLine = lines[index];
+                if (nextLine.trim() === '</joy-options>') {
+                    index++;
+                    break;
+                }
+                // Extract content from <joy-option> tags
+                const optionMatch = nextLine.match(/<joy-option>(.*?)<\/joy-option>/);
+                if (optionMatch) {
+                    items.push(optionMatch[1]);
+                }
+                index++;
+            }
+            if (items.length > 0) {
+                blocks.push({ type: 'options', items });
+            }
+            continue;
+        }
+
         // Ignore joy control tags (e.g. <joy-bg … />) on their OWN line — they're
         // daemon-consumed and never shown. Line-level, not global: the ``` handler
         // below already consumed code blocks, so a fenced/inline example of the tag
@@ -136,28 +161,6 @@ export function parseMarkdownBlock(markdown: string) {
                 index++;
             }
             blocks.push({ type: 'quote', lines: quoteLines });
-            continue;
-        }
-
-        // Options block
-        if (trimmed.startsWith('<joy-options>')) {
-            let items: string[] = [];
-            while (index < lines.length) {
-                const nextLine = lines[index];
-                if (nextLine.trim() === '</joy-options>') {
-                    index++;
-                    break;
-                }
-                // Extract content from <joy-option> tags
-                const optionMatch = nextLine.match(/<joy-option>(.*?)<\/joy-option>/);
-                if (optionMatch) {
-                    items.push(optionMatch[1]);
-                }
-                index++;
-            }
-            if (items.length > 0) {
-                blocks.push({ type: 'options', items });
-            }
             continue;
         }
 
