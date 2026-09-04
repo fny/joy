@@ -20,6 +20,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { daemonFilePath } from "../claude/hooks";
 
 import {
   createRelaySession, encodeUserMessage, encodeTurnEnd,
@@ -182,7 +183,10 @@ export class AgySession implements AgentSession {
 
     let proc: ChildProcess;
     try {
-      proc = spawn("agy", args, { cwd: this.cwd, env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"] });
+      // JOY_SESSION_ID is how the joy CLI knows WHO is talking: without it a
+      // `joy send` from inside this session was stamped "cli". Same two
+      // variables the claude launch line exports.
+      proc = spawn("agy", args, { cwd: this.cwd, env: { ...process.env, JOY_SESSION_ID: this.id, JOY_DAEMON_FILE: daemonFilePath() }, stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
       this.#finishTurn("failed", `spawn failed: ${e}`);
       return;

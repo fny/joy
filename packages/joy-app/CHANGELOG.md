@@ -1,3 +1,8 @@
+# Sep 4 (2) — Peer messages say who sent them
+
+- **"from Claude Code · Greet CLI (774a97e6)" instead of "from 774a97e6".** A message another session sends into this one now names the sender — its agent, its title, its id — and tapping the line opens that session. The daemon stamps the label too, so it holds even for sessions this device never had a card for.
+- **Antigravity and pi sessions are no longer anonymous.** A message they sent read "from cli" because their processes were never told which session they were; they are now, so their sends carry their identity like Claude's. *Needs the updated daemon.*
+
 # Sep 4 — Hand off to another model, and back
 
 - **Hand off.** From the session page, hand a session's work to a different agent or model — Claude to Antigravity, Opus to something cheaper, any harness to any other. The session writes a handoff note (goal, state, files touched, decisions, open questions, next steps, how to verify), and a new session in the same folder picks it up from the note. Nothing is copied but the note; files stay where they are.

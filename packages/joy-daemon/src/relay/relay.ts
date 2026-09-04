@@ -788,7 +788,10 @@ export class RelaySession {
     // renders "from joy:<id>" without parsing XML.
     if (wire.role === "user") {
       const from = joyMessageFrom((wire.content as { text?: unknown }).text);
-      if (from) wire.meta = { ...(wire.meta ?? {}), from };
+      if (from) {
+        const fromLabel = joyMessageFromLabel((wire.content as { text?: unknown }).text);
+        wire.meta = { ...(wire.meta ?? {}), from, ...(fromLabel ? { fromLabel } : {}) };
+      }
     }
     appendRecord(this.relaySessionId, wire, localId);
     recordSink?.(this.relaySessionId, wire, localId);
@@ -966,6 +969,13 @@ export function initRelay(): RelayClient | null {
 }
 
 /** Provenance attribute of a daemon-stamped <joy-message from="…"> wrapper. */
+/** The daemon-stamped human label of the sender (harness · title), if any. */
+export function joyMessageFromLabel(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const m = /^\s*<joy-message\b[^>]*\bfrom-label="([^"]+)"/.exec(text);
+  return m ? m[1] : null;
+}
+
 export function joyMessageFrom(text: unknown): string | null {
   if (typeof text !== "string") return null;
   const m = /^\s*<joy-message\b[^>]*\bfrom="([^"]+)"/.exec(text);

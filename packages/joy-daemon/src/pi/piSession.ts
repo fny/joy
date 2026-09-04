@@ -12,6 +12,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { daemonFilePath } from "../claude/hooks";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -132,7 +133,10 @@ export class PiSession implements AgentSession {
       else if (this.#continueLast) args.push("-c");
       // Provider keys come from the sealed store, applied to process.env by
       // the registry right before this spawn (domain/envStore.ts).
-      const env = { ...process.env };
+      // JOY_SESSION_ID tells the joy CLI who is talking (a `joy send` from a
+      // pi session was stamped "cli" without it); JOY_DAEMON_FILE lets it
+      // find the daemon. Same pair the claude launch line exports.
+      const env = { ...process.env, JOY_SESSION_ID: this.id, JOY_DAEMON_FILE: daemonFilePath() };
       const proc = spawn(piBinary(), args, {
         cwd: this.cwd,
         env,

@@ -763,7 +763,12 @@ export const machineOps: MachineOp[] = [
         if (!okFrom) return { error: "bad_from", from };
         const replyTo = typeof params.replyTo === "string" ? params.replyTo.trim() : (from.startsWith("joy:") ? from : "");
         if (replyTo && !/^joy:[0-9a-f]{8}$/.test(replyTo)) return { error: "bad_reply_to", replyTo };
-        text = `<joy-message from="${from}"${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${text}\n</joy-message>`;
+        // Who, not just which id: harness (+ model) and the sender's title, so
+        // the app can say "from Claude Code · Greet CLI (774a97e6)" even for a
+        // session it never had a card for. Escaped for the attribute.
+        const sender = from.startsWith("joy:") ? registry.get(from.slice(4)) : undefined;
+        const fromLabel = sender ? `${sessionLabel(sender)}${sender.summary ? ` · ${sender.summary}` : ""}`.replace(/["<>]/g, "") : "";
+        text = `<joy-message from="${from}"${fromLabel ? ` from-label="${fromLabel}"` : ""}${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${text}\n</joy-message>`;
       }
       const trimmed = text;
       const source = meta.via === "http" ? "web" as const : "rpc" as const;

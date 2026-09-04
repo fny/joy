@@ -22,6 +22,8 @@ import { stripAnsi } from '@/utils/ansi';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useUnistyles } from 'react-native-unistyles';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
+import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+import { getSessionName } from '@/utils/sessionUtils';
 
 
 export const MessageView = React.memo((props: {
@@ -98,6 +100,7 @@ function UserTextBlock(props: {
   // Chat font size setting: scale the 16/24 bubble text metrics. null at 100%
   // so the static unistyles objects pass through untouched.
   const chatFontScale = useChatFontScale();
+  const navigateToSession = useNavigateToSession();
   const scaledBubbleText = chatFontScale !== 1
     ? { fontSize: 16 * chatFontScale, lineHeight: 24 * chatFontScale }
     : null;
@@ -117,6 +120,25 @@ function UserTextBlock(props: {
   // also stamps meta.from. Show the sender, hide the wrapper.
   const wrapped = /^\s*<joy-message\b([^>]*)>([\s\S]*?)<\/joy-message>\s*$/.exec(props.message.text);
   const from = props.message.meta?.from ?? (wrapped ? /\bfrom="([^"]+)"/.exec(wrapped[1])?.[1] : undefined);
+  // WHO sent it, not just which id. A joy:<id> sender resolves to its card
+  // when the app has one (harness · title · id, tappable); otherwise the
+  // daemon-stamped label; otherwise the bare id. cli/cron read as themselves.
+  const fromLabel = props.message.meta?.fromLabel ?? (wrapped ? /\bfrom-label="([^"]+)"/.exec(wrapped[1])?.[1] : undefined);
+  const sender = React.useMemo(() => {
+    if (!from?.startsWith('joy:')) return null;
+    const id = from.slice(4);
+    for (const [sid, s] of Object.entries(storage.getState().sessions)) {
+      const m = s.metadata as { joy__sessionId?: string; flavor?: string } | undefined;
+      if (m?.joy__sessionId === id) {
+        const harness = ({ claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'pi', agy: 'Antigravity' } as Record<string, string>)[m.flavor ?? 'claude'] ?? m.flavor ?? 'joy';
+        return { appId: sid, label: `${harness} · ${getSessionName(s)} (${id})` };
+      }
+    }
+    return null;
+  }, [from]);
+  const fromText = from
+    ? (from.startsWith('joy:') ? (sender?.label ?? (fromLabel ? `${fromLabel} (${from.slice(4)})` : from.slice(4))) : from)
+    : '';
   const rawText = props.message.displayText || (wrapped ? wrapped[2].trim() : props.message.text);
   // Post-compaction summary: a wall of machine-generated context, not a user
   // message — render as a collapsed toggle row (like tool calls), not a bubble.
@@ -169,10 +191,16 @@ function UserTextBlock(props: {
         </View>
       )}
       {from && (
-        <View style={styles.fromRow}>
+        <Pressable
+          style={styles.fromRow}
+          disabled={!sender}
+          onPress={() => { if (sender) navigateToSession(sender.appId); }}
+          hitSlop={4}
+          accessibilityRole={sender ? 'button' : undefined}
+        >
           <Ionicons name={from.startsWith('joy:') ? 'git-network-outline' : from.startsWith('cron:') ? 'time-outline' : 'terminal-outline'} size={12} style={styles.fromIcon} />
-          <Text style={styles.fromText}>{t('session.messageFrom', { from: from.replace(/^joy:/, '') })}</Text>
-        </View>
+          <Text style={styles.fromText} numberOfLines={1}>{t('session.messageFrom', { from: fromText })}</Text>
+        </Pressable>
       )}
       {bodyText.trim().length > 0 && <View style={[styles.userMessageBubble, from ? styles.peerMessageBubble : null]}>
         {isMonoCommand

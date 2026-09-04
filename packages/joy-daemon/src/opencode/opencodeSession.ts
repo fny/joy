@@ -75,7 +75,11 @@ export function pickNewestSessionForCwd(
  *  never runs on the serve path (placeholder "New session - <date>" forever),
  *  so joy derives one — first line, clipped to 60 chars on a word boundary. */
 export function titleFromPrompt(text: string): string {
-  const line = text.trim().split("\n")[0].replace(/\s+/g, " ");
+  // A prompt that arrived from another session is wrapped in <joy-message …>;
+  // the title must come from what was SAID, not the wrapper (an Antigravity
+  // session was titled "joy-message from=joy:b52bf522 from-label=…").
+  const body = text.trim().replace(/^<joy-message\b[^>]*>\s*/i, "").replace(/\s*<\/joy-message>\s*$/i, "");
+  const line = body.trim().split("\n")[0].replace(/\s+/g, " ");
   if (line.length <= 60) return line;
   const cut = line.slice(0, 60);
   const sp = cut.lastIndexOf(" ");

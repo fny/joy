@@ -97,6 +97,13 @@ every relay; machines register per account.
   (`takesThinkingLease`) and a visible dialog clears it outright — both kept
   `busy()` true for a prompt that never generates, holding the relay turn open
   and queueing everything behind it.
+- Peer-message provenance: joy-send wraps `<joy-message from="joy:<id>"
+  from-label="<harness> (<model>) · <title>" reply-to=…>`; relay.ts lifts
+  both into `meta.from` / `meta.fromLabel`. The app resolves `joy:<id>` to a
+  card it holds (harness · title (id), tappable → that session), else shows
+  the stamped label, else the id. agy and pi child processes get
+  `JOY_SESSION_ID` + `JOY_DAEMON_FILE` like the claude launch line, so their
+  `joy send` is attributed (it used to read "cli").
 - **Handoff** (`domain/handoff.ts`): `joy-handoff` {agent, model?} on a session
   enqueues a note-request prompt (fixed template, ≤~2.5k words, written to
   `~/.joy/sessions/<id>/handoff-<ts>.md`); the daemon polls for the file

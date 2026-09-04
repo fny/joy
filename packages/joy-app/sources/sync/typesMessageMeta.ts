@@ -4,6 +4,7 @@ import { z } from 'zod';
 export const MessageMetaSchema = z.object({
     sentFrom: z.string().optional(), // Source identifier
     from: z.string().optional(), // Provenance the daemon stamped on a relayed message: joy:<session id> | cli | app | cron:<name>
+    fromLabel: z.string().optional(), // Daemon-stamped human label of a joy:<id> sender: "<harness> (<model>) · <title>"
     permissionMode: z.string().optional(), // Permission mode key for this message
     model: z.string().nullable().optional(), // Model name for this message (null = reset)
     fallbackModel: z.string().nullable().optional(), // Fallback model for this message (null = reset)

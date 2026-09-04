@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "vitest";
-import { RelaySession, encodeToolCallEnd } from "./relay";
+import { RelaySession, encodeToolCallEnd, joyMessageFrom, joyMessageFromLabel } from "./relay";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, v2SessionIdFor } from "./v2Card";
 
 // RelaySession is a local card holder: every metadata write merges into its
@@ -97,4 +97,11 @@ test("encodeToolCallEnd carries the tool output and failure flag", () => {
   // Nothing textual → the record is exactly what it always was.
   const bare = encodeToolCallEnd("call-3", { turn: "t" });
   expect((bare.content as unknown as { data: { ev: Record<string, unknown> } }).data.ev).toEqual({ t: "tool-call-end", call: "call-3" });
+});
+
+test("joy-message provenance: from and from-label are read from the daemon's wrapper", () => {
+  const text = '<joy-message from="joy:774a97e6" from-label="Claude Code (claude-opus-5) · Greet CLI" reply-to="joy:774a97e6">\nhi\n</joy-message>';
+  expect(joyMessageFrom(text)).toBe("joy:774a97e6");
+  expect(joyMessageFromLabel(text)).toBe("Claude Code (claude-opus-5) · Greet CLI");
+  expect(joyMessageFromLabel('<joy-message from="cli">\nhi\n</joy-message>')).toBeNull();
 });
