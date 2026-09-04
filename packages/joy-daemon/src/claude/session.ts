@@ -2503,7 +2503,14 @@ export class Session {
       this.#dlog(`submitted ${target.id}`);
       if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
       this.#setThinking(true);
-      this.#thinkingLeaseUntil = Date.now() + Session.#THINKING_LEASE_MS; // trusted edge — pane can't clear
+      // Trusted edge — the pane can't clear it — EXCEPT for a slash command,
+      // which never generates (see takesThinkingLease). This is the dispatch
+      // path: /clear fires no UserPromptSubmit hook, so the hook-side
+      // exemption never ran, the lease held for 170s after every /clear, and
+      // the relay turn stayed open with the user's next messages queued
+      // behind it (fny 47457b0f, 2026-09-04: /clear at 10:12:51 completed
+      // at 10:15:44).
+      this.#thinkingLeaseUntil = takesThinkingLease(opts.text) ? Date.now() + Session.#THINKING_LEASE_MS : 0;
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
@@ -2877,7 +2884,15 @@ export class Session {
         // carrying the binding alone. Conflicts with an already-learned sid
         // are logged loudly, not silently overwritten.
         const learnedConflict = !!(sid && this.claudeSessionId && sid !== this.claudeSessionId && this.status !== "starting");
-        if (learnedConflict) {
+        if (learnedConflict && str("source") === "clear") {
+          // /clear ROTATES the conversation: Claude minted a new session id
+          // and the old one is finished. The hook is authoritative here —
+          // keeping the learned id left restart/resume pointing at the dead
+          // conversation (fny 47457b0f, 2026-09-04). Adopt and persist it.
+          process.stderr.write(`[hook] ${this.id} SessionStart after /clear: ${this.claudeSessionId} → ${sid} (adopted)\n`);
+          this.claudeSessionId = sid!;
+          saveWindowRecord(this.id, { claudeSessionId: sid! });
+        } else if (learnedConflict) {
           // A LEARNED (transcript-confirmed) sid outranks a hook claim — log
           // loudly, stage for activity-confirmation, but do NOT overwrite
           // (5.6-sol verify #6: mismatch was logged and then clobbered anyway).
