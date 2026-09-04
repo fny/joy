@@ -994,6 +994,18 @@ export const ja: TranslationStructure = {
         diskHot: ({ percent }: { percent: number }) => `このマシンのディスク使用率 ${percent}%`,
     },
 
+    handoff: {
+        label: '引き継ぎ',
+        writing: ({ peer }: { peer: string }) => `${peer} への引き継ぎメモを作成中…`,
+        handedOff: ({ peer }: { peer: string }) => `${peer} に引き継ぎました`,
+        pickedUp: ({ peer }: { peer: string }) => `${peer} から引き継ぎました`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} が作業を戻しました`,
+        returned: ({ peer }: { peer: string }) => `${peer} に戻しました`,
+        failed: ({ error }: { error: string }) => `引き継ぎに失敗: ${error}`,
+        open: '開く',
+        handBack: '戻す',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `${mode}モードに切り替えました`,
         compactionSummary: 'コンパクション要約',

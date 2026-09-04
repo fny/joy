@@ -358,6 +358,7 @@ export class PiSession implements AgentSession {
     void this.#relay?.mergeMetadata({ v2: { ...link, localSessionId: this.id } });
   }
 
+  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { void this.#relay?.updateHandoff(info); }
   markCompacting(): void { /* pi compacts itself */ }
 
   // ── teardown ──────────────────────────────────────────────────────────────

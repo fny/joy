@@ -567,6 +567,7 @@ export class OpencodeSession implements AgentSession {
     void this.#relay?.mergeMetadata({ v2: { ...link, localSessionId: this.id } });
   }
 
+  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { void this.#relay?.updateHandoff(info); }
   markCompacting(): void { /* server-side */ }
 
   // ── teardown ──────────────────────────────────────────────────────────────

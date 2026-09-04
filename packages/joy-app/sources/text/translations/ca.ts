@@ -993,6 +993,18 @@ export const ca: TranslationStructure = {
         diskHot: ({ percent }: { percent: number }) => `Disc ple al ${percent}% en aquesta màquina`,
     },
 
+    handoff: {
+        label: 'Traspàs',
+        writing: ({ peer }: { peer: string }) => `Escrivint una nota de traspàs per a ${peer}…`,
+        handedOff: ({ peer }: { peer: string }) => `Traspassat a ${peer}`,
+        pickedUp: ({ peer }: { peer: string }) => `Recollit de ${peer}`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} ha retornat la feina`,
+        returned: ({ peer }: { peer: string }) => `Retornat a ${peer}`,
+        failed: ({ error }: { error: string }) => `El traspàs ha fallat: ${error}`,
+        open: 'obre',
+        handBack: 'Retorna',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `S'ha canviat al mode ${mode}`,
         compactionSummary: 'Resum de compactació',

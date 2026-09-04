@@ -19,6 +19,7 @@ import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
+import { notePath, noteRequestPrompt, pickupPrompt, handbackPrompt, awaitNote, finalizeNote, sessionLabel, type HandoffTarget } from "./handoff";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
@@ -489,6 +490,84 @@ export const machineOps: MachineOp[] = [
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
+    },
+  },
+  {
+    name: "handoff",
+    scope: "machine",
+    rpcName: "joy-handoff",
+    summary: "Hand a session's work to another model: the source writes a handoff note, a new session of the chosen harness/model picks it up in the same cwd",
+    http: { method: "POST", path: "/sessions/:id/handoff" },
+    params: { type: "object", required: ["agent"], properties: { agent: { type: "string", enum: ["claude", "codex", "opencode", "pi", "agy"] }, model: { type: "string" }, effort: { type: "string" }, permissionMode: { type: "string" } } },
+    // Returns at once with {ok, pending:true}; progress is published on the
+    // SOURCE card as joy__handoff (writing → handed_off {peer}), and the
+    // target card carries picked_up {peer}. The note takes the model a
+    // minute or so to write; a tunnel request must not wait on it.
+    handler: async (registry, params) => {
+      const id = String(params.id ?? "");
+      if (!/^[0-9a-f]{8}$/.test(id)) return { ok: false, error: "invalid session id" };
+      const src = registry.get(id);
+      if (!src) return { ok: false, error: "session_not_found" };
+      if (src.status === "ended") return { ok: false, error: "This session has ended; restart it before handing off." };
+      const agent = String(params.agent ?? "");
+      if (!["claude", "codex", "opencode", "pi", "agy"].includes(agent)) return { ok: false, error: `unknown agent "${agent}"` };
+      const target = { agent: agent as HandoffTarget["agent"], model: typeof params.model === "string" ? params.model : undefined, effort: typeof params.effort === "string" ? params.effort : undefined, permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined };
+      const targetLabel = `${({ claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "pi", agy: "Antigravity" } as Record<string, string>)[target.agent]}${target.model ? ` (${target.model})` : ""}`;
+      const path = notePath(src.id);
+      src.setHandoff?.({ state: "writing", peerLabel: targetLabel, note: path, at: Date.now() });
+      src.enqueue(noteRequestPrompt(path, "to", targetLabel), { source: "rpc", mirrorToRelay: true });
+      void (async () => {
+        try {
+          const body = await awaitNote(src, path);
+          const note = finalizeNote(path, body, src);
+          const dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false });
+          dst.enqueue(pickupPrompt(sessionLabel(src), src.id, note), { source: "rpc", mirrorToRelay: true });
+          dst.setHandoff?.({ state: "picked_up", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
+          src.setHandoff?.({ state: "handed_off", peer: dst.id, peerLabel: sessionLabel(dst), note: path, at: Date.now() });
+          process.stderr.write(`[handoff] ${src.id} → ${dst.id} (${targetLabel}) note=${path}\n`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stderr.write(`[handoff] ${src.id} failed: ${msg}\n`);
+          src.setHandoff?.({ state: "failed", error: msg, note: path, at: Date.now() });
+        }
+      })();
+      return { ok: true, pending: true, note: path };
+    },
+  },
+  {
+    name: "handback",
+    scope: "machine",
+    rpcName: "joy-handback",
+    summary: "Hand a picked-up session's work back to the session it came from (the target writes a note; the source receives it as a prompt)",
+    http: { method: "POST", path: "/sessions/:id/handback" },
+    handler: async (registry, params) => {
+      const id = String(params.id ?? "");
+      if (!/^[0-9a-f]{8}$/.test(id)) return { ok: false, error: "invalid session id" };
+      const tgt = registry.get(id);
+      if (!tgt) return { ok: false, error: "session_not_found" };
+      const meta = tgt.cardMetadata?.()?.joy__handoff as { state?: string; peer?: string } | undefined;
+      const peerId = meta?.peer;
+      const src = peerId ? registry.get(peerId) : undefined;
+      if (!src) return { ok: false, error: "This session was not picked up from another one (or that session is gone), so there is nothing to hand back to." };
+      if (src.status === "ended") return { ok: false, error: `The original session ${peerId} has ended; restart it first.` };
+      const path = notePath(tgt.id);
+      tgt.setHandoff?.({ state: "writing", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
+      tgt.enqueue(noteRequestPrompt(path, "back to", sessionLabel(src)), { source: "rpc", mirrorToRelay: true });
+      void (async () => {
+        try {
+          const body = await awaitNote(tgt, path);
+          const note = finalizeNote(path, body, tgt);
+          src.enqueue(handbackPrompt(sessionLabel(tgt), tgt.id, note), { source: "rpc", mirrorToRelay: true });
+          src.setHandoff?.({ state: "handed_back", peer: tgt.id, peerLabel: sessionLabel(tgt), note: path, at: Date.now() });
+          tgt.setHandoff?.({ state: "returned", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
+          process.stderr.write(`[handoff] ${tgt.id} → back to ${src.id} note=${path}\n`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}\n`);
+          tgt.setHandoff?.({ state: "failed", peer: src.id, error: msg, note: path, at: Date.now() });
+        }
+      })();
+      return { ok: true, pending: true, note: path };
     },
   },
   {

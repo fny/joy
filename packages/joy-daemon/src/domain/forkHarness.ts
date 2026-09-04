@@ -37,7 +37,7 @@ export function forkAgyConversation(conversationId: string): string {
 
 /** Find pi's session file for an id in any cwd-key directory (the key format
  *  is pi's own; matching the filename suffix avoids re-deriving it). */
-function findPiSessionFile(sessionId: string): { dir: string; file: string } | null {
+export function findPiSessionFile(sessionId: string): { dir: string; file: string } | null {
   const root = join(homedir(), ".pi", "agent", "sessions");
   if (!existsSync(root)) return null;
   for (const d of readdirSync(root)) {
@@ -65,7 +65,7 @@ export function forkPiSession(sessionId: string): string {
 }
 
 /** Locate a codex rollout by thread id (any day directory). */
-function findCodexRollout(threadId: string): string | null {
+export function findCodexRollout(threadId: string): string | null {
   const root = join(homedir(), ".codex", "sessions");
   if (!existsSync(root)) return null;
   const stack = [root];

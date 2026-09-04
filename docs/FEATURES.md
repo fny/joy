@@ -97,6 +97,16 @@ every relay; machines register per account.
   (`takesThinkingLease`) and a visible dialog clears it outright — both kept
   `busy()` true for a prompt that never generates, holding the relay turn open
   and queueing everything behind it.
+- **Handoff** (`domain/handoff.ts`): `joy-handoff` {agent, model?} on a session
+  enqueues a note-request prompt (fixed template, ≤~2.5k words, written to
+  `~/.joy/sessions/<id>/handoff-<ts>.md`); the daemon polls for the file
+  (exists, size stable, session idle — harness-agnostic), appends a Reference
+  block (session/model/machine, cwd, transcript path per harness, assets dir,
+  prior notes), creates the target in the same cwd and enqueues a pickup
+  prompt with the note. `joy-handback` on the target does the same and
+  delivers the note INTO the source as a prompt (the source was only idle).
+  Progress rides `joy__handoff` {state, peer, peerLabel, note} on both cards;
+  the app's `HandoffBar` renders it (open peer, Hand back). Same machine only.
 - Session page **Restart / Fork / Teleport**. Restart ends the process with
   `end("restart")` — no archive, record kept — and recreates under the SAME
   local id, so the v2 binding (and the card) survive. Fork = `joy-fork-session`,

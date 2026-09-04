@@ -993,6 +993,18 @@ export const zhHant: TranslationStructure = {
         diskHot: ({ percent }: { percent: number }) => `此機器磁碟已用 ${percent}%`,
     },
 
+    handoff: {
+        label: '交接',
+        writing: ({ peer }: { peer: string }) => `正在為 ${peer} 撰寫交接說明…`,
+        handedOff: ({ peer }: { peer: string }) => `已交接給 ${peer}`,
+        pickedUp: ({ peer }: { peer: string }) => `已從 ${peer} 接手`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} 已交回工作`,
+        returned: ({ peer }: { peer: string }) => `已交回給 ${peer}`,
+        failed: ({ error }: { error: string }) => `交接失敗：${error}`,
+        open: '開啟',
+        handBack: '交回',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `已切換到 ${mode} 模式`,
         compactionSummary: '壓縮摘要',

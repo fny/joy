@@ -1009,6 +1009,18 @@ export const pl: TranslationStructure = {
         diskHot: ({ percent }: { percent: number }) => `Dysk zapełniony w ${percent}% na tej maszynie`,
     },
 
+    handoff: {
+        label: 'Przekazanie',
+        writing: ({ peer }: { peer: string }) => `Pisanie notatki przekazania dla ${peer}…`,
+        handedOff: ({ peer }: { peer: string }) => `Przekazano do ${peer}`,
+        pickedUp: ({ peer }: { peer: string }) => `Przejęto od ${peer}`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} zwrócił pracę`,
+        returned: ({ peer }: { peer: string }) => `Zwrócono do ${peer}`,
+        failed: ({ error }: { error: string }) => `Przekazanie nie powiodło się: ${error}`,
+        open: 'otwórz',
+        handBack: 'Zwróć',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Przełączono na tryb ${mode}`,
         compactionSummary: 'Podsumowanie kompaktowania',

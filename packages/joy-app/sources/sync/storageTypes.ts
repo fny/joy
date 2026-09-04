@@ -135,6 +135,14 @@ export const MetadataSchema = z.object({
     joy__context: z.number().nullable().optional(),
     // The agent's active /goal (Claude goal_status), surfaced by joy-tmux. Drives
     // the goal bar. Present while a goal is in progress; cleared when met.
+    joy__handoff: z.object({
+        state: z.string(),
+        peer: z.string().optional(),
+        peerLabel: z.string().optional(),
+        note: z.string().optional(),
+        error: z.string().optional(),
+        at: z.number(),
+    }).passthrough().nullable().optional(),
     joy__goal: z.object({
         condition: z.string(),
         since: z.number().optional(),

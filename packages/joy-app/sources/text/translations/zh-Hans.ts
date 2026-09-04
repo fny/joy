@@ -994,6 +994,18 @@ export const zhHans: TranslationStructure = {
         diskHot: ({ percent }: { percent: number }) => `此机器磁盘已用 ${percent}%`,
     },
 
+    handoff: {
+        label: '交接',
+        writing: ({ peer }: { peer: string }) => `正在为 ${peer} 撰写交接说明…`,
+        handedOff: ({ peer }: { peer: string }) => `已交接给 ${peer}`,
+        pickedUp: ({ peer }: { peer: string }) => `已从 ${peer} 接手`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} 已交回工作`,
+        returned: ({ peer }: { peer: string }) => `已交回给 ${peer}`,
+        failed: ({ error }: { error: string }) => `交接失败：${error}`,
+        open: '打开',
+        handBack: '交回',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `已切换到 ${mode} 模式`,
         compactionSummary: '压缩摘要',

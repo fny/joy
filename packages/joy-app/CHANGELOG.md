@@ -1,3 +1,9 @@
+# Sep 4 — Hand off to another model, and back
+
+- **Hand off.** From the session page, hand a session's work to a different agent or model — Claude to Antigravity, Opus to something cheaper, any harness to any other. The session writes a handoff note (goal, state, files touched, decisions, open questions, next steps, how to verify), and a new session in the same folder picks it up from the note. Nothing is copied but the note; files stay where they are.
+- **Hand back.** The picked-up session shows a bar with a Hand back button: it writes its own note and the original session — which was only paused — receives it as a message and carries on with what changed.
+- **The note says where the full story lives.** Every note ends with a reference block joy adds itself: which session and model wrote it, the working directory, the full transcript's path, the session's assets folder, and any earlier notes — so the next model can go read the real thing when the note isn't enough, and the file explains itself months later. *Needs the updated daemon.*
+
 # Sep 3 (18) — Fork, Teleport, and a Restart that works
 
 - **Restart keeps your session.** It used to archive the card you were on and spawn a new one elsewhere in the list. The session now comes back under the same identity — same card, same history.

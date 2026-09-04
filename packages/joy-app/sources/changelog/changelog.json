@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 4 — Hand off to another model, and back",
+      "summary": "",
+      "markdown": "- **Hand off.** From the session page, hand a session's work to a different agent or model — Claude to Antigravity, Opus to something cheaper, any harness to any other. The session writes a handoff note (goal, state, files touched, decisions, open questions, next steps, how to verify), and a new session in the same folder picks it up from the note. Nothing is copied but the note; files stay where they are.\n- **Hand back.** The picked-up session shows a bar with a Hand back button: it writes its own note and the original session — which was only paused — receives it as a message and carries on with what changed.\n- **The note says where the full story lives.** Every note ends with a reference block joy adds itself: which session and model wrote it, the working directory, the full transcript's path, the session's assets folder, and any earlier notes — so the next model can go read the real thing when the note isn't enough, and the file explains itself months later. *Needs the updated daemon.*"
+    },
+    {
       "title": "Sep 3 (18) — Fork, Teleport, and a Restart that works",
       "summary": "",
       "markdown": "- **Restart keeps your session.** It used to archive the card you were on and spawn a new one elsewhere in the list. The session now comes back under the same identity — same card, same history.\n- **Fork, one tap, from the session page — every agent.** A new session that continues from the last message, and you're taken straight to it. Claude forks natively; Antigravity, pi and Codex fork by copying their conversation under a new id. OpenCode can't be forked (its sessions live inside its server) and says so.\n- **Teleport a session to another machine.** From the session page, pick a machine and a folder; the conversation continues there. Only the conversation travels — files are not copied, the folder is assumed to be in sync. Claude sessions for now. *Both need the updated daemon.*"
@@ -241,5 +246,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 3 (18) — Fork, Teleport, and a Restart that works"
+  "latestTitle": "Sep 4 — Hand off to another model, and back"
 }

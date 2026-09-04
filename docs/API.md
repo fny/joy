@@ -69,6 +69,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-create-session` | POST /sessions | Spawn agent (`agent`: claude\|codex\|opencode\|pi\|agy; `resume_id`, `forkSession`, `continue`, `model`, `effort`, `permissionMode`, `yolo`, `extraArgs`; unknown agent → loud error). Claude gets `CLAUDE_CODE_ENABLE_TASKS=0` + fresh `--append-system-prompt` every spawn |
 | `joy-restart-session` | POST /sessions/:id/restart | Relaunch in place |
 | `joy-fork-session` | POST /sessions/:id/fork | Fork from the last message into a NEW session (claude) → `localSessionId` |
+| `joy-handoff` / `joy-handback` | POST /sessions/:id/handoff {agent, model?}, POST /sessions/:id/handback | Hand a session's work to another model via a note the session writes (returns {ok, pending}; progress on the cards' `joy__handoff`); hand it back into the original session |
 | `joy-teleport-export` / `joy-teleport-import` | POST /sessions/:id/teleport-export, POST /teleport-import | Move a conversation between machines: export the resumable transcript tail (base64, ≤6MB), import writes it under the target cwd's project dir and resumes (claude) |
 | `joy-kill-session` | DELETE /sessions/:id | Kill one |
 | `joy-kill-all-sessions` | POST /sessions/kill-all | Kill everything |

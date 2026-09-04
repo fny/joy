@@ -125,6 +125,11 @@ export const machineSessionInfoFor = (ctx: MachineOnlyCtx, localSessionId: strin
     jm<Record<string, unknown>>(ctx, 'GET', `/v2/sessions/${encodeURIComponent(localSessionId)}`);
 export const machineSessionLog = (ctx: MachineOnlyCtx, localSessionId: string) =>
     jm<{ ok?: boolean; lines?: unknown[]; log?: unknown[]; error?: string }>(ctx, 'GET', `/v2/sessions/${encodeURIComponent(localSessionId)}/log`);
+/** Hand a session's work to another model (returns at once; progress rides joy__handoff). */
+export const machineHandoff = (ctx: MachineOnlyCtx, localSessionId: string, body: { agent: string; model?: string; effort?: string; permissionMode?: string }) =>
+    jm<{ ok?: boolean; pending?: boolean; note?: string; error?: string }>(ctx, 'POST', `/v2/sessions/${encodeURIComponent(localSessionId)}/handoff`, body);
+export const machineHandback = (ctx: MachineOnlyCtx, localSessionId: string) =>
+    jm<{ ok?: boolean; pending?: boolean; note?: string; error?: string }>(ctx, 'POST', `/v2/sessions/${encodeURIComponent(localSessionId)}/handback`, {});
 /** Fork a session from its last message into a NEW session on the same machine. */
 export const machineForkSession = (ctx: MachineOnlyCtx, localSessionId: string) =>
     jm<{ ok?: boolean; localSessionId?: string; error?: string }>(ctx, 'POST', `/v2/sessions/${encodeURIComponent(localSessionId)}/fork`, {});

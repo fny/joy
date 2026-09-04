@@ -79,6 +79,9 @@ export interface AgentSession {
   /** Snapshot of the session's card metadata (the object the app renders in
    *  its list). Used by the nucleus lane to publish the v2 card at bind. */
   cardMetadata?(): Record<string, unknown> | null;
+  /** Handoff bar on the card (domain/handoff.ts). Optional: adapters that
+   *  cannot show it simply don't implement it. */
+  setHandoff?(info: import("../relay/relay").JoyHandoffInfo | null): void;
   /** Tool-call approvals the harness is holding for a human (codex). */
   listApprovals?(): Array<{ requestId: string; kind: string; title: string; detail?: string; since: number }>;
   answerApproval?(params: Record<string, unknown> | undefined): { ok: boolean };

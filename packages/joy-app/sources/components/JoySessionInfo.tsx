@@ -21,7 +21,8 @@ import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { useJoyAction } from '@/hooks/useJoyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
 import { sync } from '@/sync/sync';
-import { machineSessionInfoFor, machineSessionLog } from '@/sync/v2/machine';
+import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
+import { machineSessionInfoFor, machineSessionLog, machineHandoff, machineHarnessModels } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
 import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { JoyError } from '@/utils/errors';
@@ -177,6 +178,45 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
     // session's messages, reducer state and paging cursors and refetches from
     // the relay; nothing server-side is touched, so the worst case is a reload.
     // Until now the only way out was restarting the whole app.
+    // Hand off: choose a harness, then a model from that harness's catalog
+    // (or its default), then ask the daemon. Progress shows in the chat's
+    // HandoffBar; this page just kicks it off.
+    const canHandoff = Boolean(joySessionId && machineId && sessionStatus.isConnected);
+    const [handingOff, performHandoff] = useJoyAction(async () => {
+        if (!machineId || !joySessionId) throw new JoyError('No machine context for this session', false);
+        const ctx = sync.machineOnlyCtx(machineId);
+        if (!ctx) throw new JoyError('Machine is offline', false);
+        const harnesses: Array<{ key: string; name: string }> = [
+            { key: 'claude', name: 'Claude Code' }, { key: 'codex', name: 'Codex' }, { key: 'agy', name: 'Antigravity' }, { key: 'opencode', name: 'OpenCode' }, { key: 'pi', name: 'pi' },
+        ];
+        const agent = await new Promise<string | null>((resolve) => {
+            Modal.alert('Hand off to', 'Which agent should pick this up?', [
+                ...harnesses.map((h) => ({ text: h.name, onPress: () => resolve(h.key) })),
+                { text: 'Cancel', style: 'cancel' as const, onPress: () => resolve(null) },
+            ]);
+        });
+        if (!agent) return;
+        let models: Array<{ id: string; name: string }> = [];
+        if (agent === 'claude') models = JOY_CLAUDE_MODELS.map((m) => ({ id: m.key, name: m.name }));
+        else {
+            const r = await machineHarnessModels(ctx, agent).catch(() => null);
+            const list = (r?.data?.models ?? []) as Array<{ id?: string; model?: string; displayName?: string }>;
+            models = list.slice(0, 8).map((m) => ({ id: String(m.id ?? m.model ?? ''), name: String(m.displayName ?? m.id ?? m.model ?? '') })).filter((m) => m.id);
+        }
+        const model = await new Promise<string | null | undefined>((resolve) => {
+            Modal.alert('Model', models.length ? 'Pick a model, or use the default.' : 'This agent picks its own model.', [
+                { text: 'Default', onPress: () => resolve(undefined) },
+                ...models.map((m) => ({ text: m.name, onPress: () => resolve(m.id) })),
+                { text: 'Cancel', style: 'cancel' as const, onPress: () => resolve(null) },
+            ]);
+        });
+        if (model === null) return;
+        const r = await machineHandoff(ctx, joySessionId, { agent, model: model ?? undefined });
+        if (!r.data?.ok) throw new JoyError(r.data?.error || 'Hand off failed', false);
+        router.back();
+    });
+    const pickHandoffTarget = React.useCallback(() => { performHandoff(); }, [performHandoff]);
+
     const reloadChat = React.useCallback(() => {
         sync.resetSessionChatState(session.id);
         router.back();
@@ -279,6 +319,15 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                         icon={<Ionicons name="git-branch-outline" size={29} color="#007AFF" />}
                         onPress={forkSession}
                         loading={forking}
+                    />
+                )}
+                {canHandoff && (
+                    <Item
+                        title="Hand off to…"
+                        subtitle="Another model picks up this work from a note this session writes"
+                        icon={<Ionicons name="swap-horizontal-outline" size={29} color="#007AFF" />}
+                        onPress={pickHandoffTarget}
+                        loading={handingOff}
                     />
                 )}
                 {canTeleport && (
