@@ -551,6 +551,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       log(`spawn ${offer.sessionId.slice(0, 8)}: no usable spawnSpec (need {t:'spawn',cwd,...}) — skipped`);
       return;
     }
+    let localId: string | undefined;
     try {
       // Idempotency across the create→bind gap: a prior attempt that crashed
       // after create left an intent record — re-bind that session instead of
@@ -558,6 +559,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const prior = readSpawnIntents()[offer.commandId];
       let session = prior ? registry.get(prior) : undefined;
       if (session && session.status === "ended") session = undefined;
+      if (session) spawning.add(localId = session.id);
       if (!session) {
         session = await registry.create({
           cwd: spec.cwd,
@@ -578,6 +580,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           extraArgs: spec.extraArgs,
         });
         writeSpawnIntent(offer.commandId, session.id);
+        spawning.add(localId = session.id);
+      }
+      // Already bound to ANOTHER relay row (an announce raced this spawn, or
+      // an earlier daemon generation bound it and this command was re-offered):
+      // the relay refuses a second bind for the same local id, so retrying
+      // every 5s is a permanent hot loop with the app's spinner on top. Fail
+      // this command; the session is reachable through its existing card.
+      const elsewhere = boundByLocal.get(session.id);
+      if (elsewhere && elsewhere !== offer.sessionId) {
+        abandonedSpawns.add(offer.commandId);
+        try {
+          await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`, { reason: `already_bound:${elsewhere}` }, leaseRef);
+        } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report already_bound: ${String(e2)}`); }
+        log(`spawn ${offer.sessionId.slice(0, 8)}: local ${session.id} is already bound to v2 ${elsewhere.slice(0, 8)} — reported, abandoned`);
+        return;
       }
       // Content sealing: with the account's content public key on hand,
       // mint the session's symmetric key, persist it beside the window
@@ -620,6 +637,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // and keeps being offered; back off so we don't hot-loop.
       log(`spawn ${offer.sessionId.slice(0, 8)} FAILED: ${String(e)}`);
       await sleep(5_000);
+    } finally {
+      if (localId) spawning.delete(localId);
     }
   }
 
@@ -946,6 +965,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // no spawn command involved. creationIntentId = the local id, so the call
   // is idempotent (a replay returns the same sessionId).
   const announcing = new Set<string>();
+  // Local sessions a spawn is mid-way through binding. The announce pass
+  // must never touch these: it saw a spawn's freshly created session as
+  // "live and unbound" (bind not landed yet), announced it, and the spawn's
+  // own bind then hit the relay's (daemon, local id) unique constraint on
+  // every retry, forever (fny 001c4d93/153f92a0, 2026-09-04).
+  const spawning = new Set<string>();
   async function announceLocalSession(session: AgentSession): Promise<void> {
     if (!lease || boundByLocal.has(session.id) || announcing.has(session.id)) return;
     announcing.add(session.id);
@@ -989,9 +1014,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
   }
   async function announceUnboundSessions(): Promise<void> {
+    // A session a spawn command created belongs to that command's relay
+    // row — even across a daemon restart (the intent file remembers it).
+    const spawned = new Set(Object.values(readSpawnIntents()));
     for (const s of registry.list()) {
       if (s.status !== "active" && s.status !== "starting") continue;
-      if (boundByLocal.has(s.id)) continue;
+      if (boundByLocal.has(s.id) || spawning.has(s.id) || spawned.has(s.id)) continue;
       await announceLocalSession(s);
     }
   }
