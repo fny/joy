@@ -86,6 +86,7 @@ export function noteRequestPrompt(path: string, direction: "to" | "back to", tar
     `Your work here is being handed ${direction} ${targetLabel}, which has none of your context. Write a handoff note so it can continue without you.`,
     "",
     `Write the note as a Markdown file at exactly this path: ${path}`,
+    `(If you cannot write outside the working directory, write it to ./.joy/handoffs/${path.split("/").pop()} instead.)`,
     "Use these sections, in this order, and keep the whole note under ~2,500 words:",
     "",
     "## Goal",
@@ -133,14 +134,18 @@ export function handbackPrompt(fromLabel: string, fromId: string, note: string):
  *  the session is no longer mid-turn. Resolves the note text or throws. */
 export async function awaitNote(session: AgentSession, path: string, timeoutMs = 6 * 60_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
+  // A sandboxed harness (codex safe-yolo/read-only) cannot write under ~/.joy;
+  // the prompt offers ./.joy/handoffs/<name> inside the cwd as the fallback.
+  const fallback = join(session.cwd, ".joy", "handoffs", path.split("/").pop() ?? "handoff.md");
   let lastSize = -1;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 2000));
     if (session.status === "ended") throw new Error("the session ended before the note was written");
-    if (!existsSync(path)) continue;
-    const size = statSync(path).size;
+    const where = existsSync(path) ? path : existsSync(fallback) ? fallback : null;
+    if (!where) continue;
+    const size = statSync(where).size;
     if (size > 0 && size === lastSize && !session.busy()) {
-      const text = readFileSync(path, "utf8");
+      const text = readFileSync(where, "utf8");
       if (text.trim().length > 0) return text;
     }
     lastSize = size;

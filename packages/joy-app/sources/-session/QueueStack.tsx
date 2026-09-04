@@ -32,8 +32,8 @@ export interface QueueRowModel {
     onSend?: () => void;
     /** ↻ — retry a release that keeps failing. */
     onRetry?: () => void;
-    /** ⇡ — steer: deliver into the running turn instead of waiting. */
-    onSteer?: () => void;
+    /** ⇡ — steer: deliver the CURRENT text into the running turn instead of waiting. */
+    onSteer?: (text: string) => void;
     /** Red line under the row (why it is stuck). */
     error?: string | null;
 }
@@ -122,7 +122,7 @@ const QueueRow = React.memo(function QueueRow({ row }: { row: QueueRowModel }) {
                         <Ionicons name="close" size={20} color={theme.colors.textSecondary} />
                     </Pressable>
                     {row.onSteer && (
-                        <Pressable onPress={row.onSteer} hitSlop={8} accessibilityRole="button" accessibilityLabel={t('joyQueue.steerNow')} style={(p) => [styles.iconButton, { opacity: p.pressed ? 0.5 : 1 }]}>
+                        <Pressable onPress={() => row.onSteer?.(text.trim() || row.text)} hitSlop={8} accessibilityRole="button" accessibilityLabel={t('joyQueue.steerNow')} style={(p) => [styles.iconButton, { opacity: p.pressed ? 0.5 : 1 }]}>
                             <Ionicons name="arrow-up-circle-outline" size={20} color={theme.colors.text} />
                         </Pressable>
                     )}

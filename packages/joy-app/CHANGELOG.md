@@ -1,3 +1,11 @@
+# Sep 4 (3) — Bug-review fixes
+
+- **Sessions the machine starts itself now show up.** A session created by `joy new`, by Fork, by Teleport, or as a Handoff target never got a card — the daemon had no way to announce a session it started on its own, so the app waited a minute and gave up while the agent ran unseen. They're announced within seconds now, sealed like any other. *Needs the updated daemon.*
+- **Restarting an Antigravity or pi session keeps it that agent.** Both used to come back as a fresh Claude session.
+- **Fork, Teleport and Handoff never revive a stale session in the same folder.** Creating a new session in a folder that held a detached one used to restart the old conversation instead — a handoff could hand its note to the wrong session.
+- **Antigravity: forks copy a consistent snapshot; output after a daemon restart is no longer dropped.** Copies go through SQLite (the conversation store is write-ahead-logged), and every turn's records carry a per-boot id so the relay can't mistake them for replays.
+- **Restart no longer archives the card it's keeping** (Codex, OpenCode, pi, Antigravity). **A failed teleport import can be retried.** **Exports and forks never cut a record in half** while the agent is still writing. **Steering an edited queue row sends the edited text.** **Peer links light up when the other session's card arrives.** New-session page sends the agent and model you actually picked. Antigravity and pi sessions no longer offer a Claude model picker. CPU/memory uses the machine's real page size and clock rate.
+
 # Sep 4 (2) — Peer messages say who sent them
 
 - **"from Claude Code · Greet CLI (774a97e6)" instead of "from 774a97e6".** A message another session sends into this one now names the sender — its agent, its title, its id — and tapping the line opens that session. The daemon stamps the label too, so it holds even for sessions this device never had a card for.

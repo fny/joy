@@ -94,6 +94,10 @@ export class AgySession implements AgentSession {
   #inFlight: QueuedMessage | null = null;
   #proc: ChildProcess | null = null;
   #turnSeq = 0;
+  // Per-boot nonce in every record id: a recovered session restarts #turnSeq
+  // at 0, and the relay dedupes by runtime event id — so "t1" again would
+  // be swallowed as a replay (codex review, 2026-09-04).
+  readonly #boot = randomUUID().slice(0, 8);
   #turn: string | null = null;
   #sawResult = false;
   // agent_response text arrives as deltas per step_index; emitted once per
@@ -175,7 +179,7 @@ export class AgySession implements AgentSession {
     const model = this.currentModel ?? this.model;
     if (model) args.push("--model", model);
 
-    this.#turn = `agy:${this.id}:t${++this.#turnSeq}`;
+    this.#turn = `agy:${this.id}:${this.#boot}:t${++this.#turnSeq}`;
     this.#sawResult = false;
     this.#textByStep.clear();
     this.#relay?.send(encodeTurnStart({ turn: this.#turn }), `${this.#turn}:start`);
@@ -418,7 +422,7 @@ export class AgySession implements AgentSession {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
-      if (this.#relay) this.#archivePromise = this.#relay.archive();
+      if (this.#relay && reason !== "restart") this.#archivePromise = this.#relay.archive(); // restart keeps the card
       this.#relay?.stop();
       if (reason !== "restart") deleteWindowRecord(this.id);
     }

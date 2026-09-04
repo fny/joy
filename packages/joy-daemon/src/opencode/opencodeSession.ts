@@ -590,7 +590,7 @@ export class OpencodeSession implements AgentSession {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
-      if (this.#relay) this.#archivePromise = this.#relay.archive();
+      if (this.#relay && reason !== "restart") this.#archivePromise = this.#relay.archive(); // restart keeps the card
       this.#relay?.stop();
       clearCodexInbound(this.id);
       if (reason !== "restart") deleteWindowRecord(this.id);

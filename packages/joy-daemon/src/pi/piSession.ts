@@ -384,7 +384,7 @@ export class PiSession implements AgentSession {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
-      if (this.#relay) this.#archivePromise = this.#relay.archive();
+      if (this.#relay && reason !== "restart") this.#archivePromise = this.#relay.archive(); // restart keeps the card
       this.#relay?.stop();
       if (reason !== "restart") deleteWindowRecord(this.id);
     }
