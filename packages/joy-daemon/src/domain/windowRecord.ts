@@ -13,6 +13,16 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync,
 import { join } from "path";
 import { defaultStateDir } from "./receipts";
 
+export interface HandoffJob {
+  role: "source" | "target";
+  path: string;
+  /** source: the harness/model to create; target: absent. */
+  target?: { agent: "claude" | "codex" | "opencode" | "pi" | "agy"; model?: string; effort?: string; permissionMode?: string };
+  /** target: the session to hand back to. */
+  peer?: string;
+  at: number;
+}
+
 export interface WindowRecord {
   /** joy session id (the tmux window suffix j-<id>). */
   id: string;
@@ -68,6 +78,10 @@ export interface WindowRecord {
   piSettings?: { model?: string; sessionId?: string };
   /** Antigravity (agy): model display name + the conversation id to --conversation on the next turn. */
   agySettings?: { model?: string; conversationId?: string };
+  /** An in-flight handoff/handback (domain/handoff.ts): the note path being
+   *  awaited and who it is for — so a daemon restart mid-note resumes the
+   *  poll instead of abandoning the workflow. Cleared when it settles. */
+  handoffJob?: HandoffJob;
   updatedAt: number;
 }
 
@@ -113,7 +127,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; lastAiTitle?: string; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string } },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; lastAiTitle?: string; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string }; handoffJob?: HandoffJob | null },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -139,6 +153,8 @@ export function saveWindowRecord(
       opencodeSettings: patch.opencodeSettings ?? prev?.opencodeSettings,
       piSettings: patch.piSettings ?? prev?.piSettings,
       agySettings: patch.agySettings ?? prev?.agySettings,
+      // null clears (a settled job); undefined keeps.
+      handoffJob: patch.handoffJob === null ? undefined : patch.handoffJob ?? prev?.handoffJob,
       updatedAt: Date.now(),
     };
     if (!next.launchCwd) return; // nothing useful to persist yet

@@ -19,7 +19,7 @@ import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
-import { notePath, noteRequestPrompt, pickupPrompt, handbackPrompt, awaitNote, finalizeNote, sessionLabel, type HandoffTarget } from "./handoff";
+import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, type HandoffTarget } from "./handoff";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
@@ -516,21 +516,7 @@ export const machineOps: MachineOp[] = [
       const path = notePath(src.id);
       src.setHandoff?.({ state: "writing", peerLabel: targetLabel, note: path, at: Date.now() });
       src.enqueue(noteRequestPrompt(path, "to", targetLabel), { source: "rpc", mirrorToRelay: true });
-      void (async () => {
-        try {
-          const body = await awaitNote(src, path);
-          const note = finalizeNote(path, body, src);
-          const dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false, forceNew: true });
-          dst.enqueue(pickupPrompt(sessionLabel(src), src.id, note), { source: "rpc", mirrorToRelay: true });
-          dst.setHandoff?.({ state: "picked_up", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
-          src.setHandoff?.({ state: "handed_off", peer: dst.id, peerLabel: sessionLabel(dst), note: path, at: Date.now() });
-          process.stderr.write(`[handoff] ${src.id} → ${dst.id} (${targetLabel}) note=${path}\n`);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          process.stderr.write(`[handoff] ${src.id} failed: ${msg}\n`);
-          src.setHandoff?.({ state: "failed", error: msg, note: path, at: Date.now() });
-        }
-      })();
+      void runHandoffJob(registry, src, target, path);
       return { ok: true, pending: true, note: path };
     },
   },
@@ -553,20 +539,7 @@ export const machineOps: MachineOp[] = [
       const path = notePath(tgt.id);
       tgt.setHandoff?.({ state: "writing", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
       tgt.enqueue(noteRequestPrompt(path, "back to", sessionLabel(src)), { source: "rpc", mirrorToRelay: true });
-      void (async () => {
-        try {
-          const body = await awaitNote(tgt, path);
-          const note = finalizeNote(path, body, tgt);
-          src.enqueue(handbackPrompt(sessionLabel(tgt), tgt.id, note), { source: "rpc", mirrorToRelay: true });
-          src.setHandoff?.({ state: "handed_back", peer: tgt.id, peerLabel: sessionLabel(tgt), note: path, at: Date.now() });
-          tgt.setHandoff?.({ state: "returned", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
-          process.stderr.write(`[handoff] ${tgt.id} → back to ${src.id} note=${path}\n`);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}\n`);
-          tgt.setHandoff?.({ state: "failed", peer: src.id, error: msg, note: path, at: Date.now() });
-        }
-      })();
+      void runHandbackJob(registry, tgt, src.id, path);
       return { ok: true, pending: true, note: path };
     },
   },

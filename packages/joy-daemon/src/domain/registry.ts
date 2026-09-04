@@ -20,6 +20,7 @@ import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
 import { PiSession } from "../pi/piSession";
 import { AgySession } from "../agy/agySession";
+import { resumeHandoffJobs } from "./handoff";
 import { PI_MODELS, defaultPiModel } from "../pi/models";
 import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
@@ -125,6 +126,12 @@ export class SessionRegistry {
   #nextChatId = 1;
   #nextMsgId = 1;
   #onRelayAttached?: SessionDeps["onRelayAttached"];
+  // Registered by the nucleus lane: mark every relay turn this LOCAL session
+  // is executing as cancel-requested, so a restart mid-turn terminalizes it
+  // as cancelled instead of the lane observing busy()=false on the corpse
+  // and reporting "completed" (codex review #7, 2026-09-04).
+  #turnCanceller?: (localId: string) => void;
+  setTurnCanceller(fn: (localId: string) => void): void { this.#turnCanceller = fn; }
 
   constructor(opts: {
     tmuxSession: string;
@@ -785,7 +792,7 @@ export class SessionRegistry {
     if (isOpencode) {
       const ocSessionId = (existing instanceof OpencodeSession ? existing.opencodeSessionId : undefined) ?? rec?.opencodeSessionId;
       const model = (existing instanceof OpencodeSession ? existing.model : undefined) ?? rec?.opencodeSettings?.model;
-      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
+      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
       return this.create({
         agent: "opencode",
         id: opts.id,
@@ -802,14 +809,14 @@ export class SessionRegistry {
     if (isAgy) {
       const conversationId = (existing instanceof AgySession ? existing.conversationId : undefined) ?? rec?.agySettings?.conversationId;
       const model = existing?.model ?? rec?.agySettings?.model;
-      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
+      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
       return this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, forceNew: true });
     }
     const isPi = (existing instanceof PiSession) || rec?.agent === "pi";
     if (isPi) {
       const piSessionId = (existing instanceof PiSession ? existing.piSessionId : undefined) ?? rec?.piSettings?.sessionId;
       const model = existing?.model ?? rec?.piSettings?.model;
-      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
+      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
       return this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, forceNew: true });
     }
     const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
@@ -818,7 +825,7 @@ export class SessionRegistry {
       // read the thread id off the session itself — otherwise restart would
       // start a brand-new thread instead of resuming (finding #7).
       const codexThreadId = (existing instanceof CodexSession ? existing.codexThreadId : undefined) ?? rec?.codexThreadId;
-      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
+      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
       return this.create({
         agent: "codex",
         id: opts.id,
@@ -846,7 +853,7 @@ export class SessionRegistry {
     // list — the app's handler had always assumed the identity survived.
     // The record still holds the v2 session id + content key, so the lane
     // rebinds the new process to the existing card.
-    if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
+    if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
 
     // Env is refreshed automatically: create() launches claude through a fresh
     // login shell, so a restart re-sources the user's profile (.bashrc/.zshrc).
@@ -1032,6 +1039,7 @@ export class SessionRegistry {
 
     this.#resurrectCodexOrphans();
     this.#sweepOrphanTmuxServers();
+    resumeHandoffJobs(this);
   }
 
   /** Start a per-session server: session `<name>` with the agent's window
