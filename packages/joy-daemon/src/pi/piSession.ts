@@ -73,6 +73,8 @@ export class PiSession implements AgentSession {
   #startedAt: number;
   #deps: SessionDeps;
   #proc: ChildProcess | null = null;
+  /** The process end() sent SIGTERM to, for awaitExit. */
+  #dying: ChildProcess | null = null;
   #relay: RelaySession | null = null;
   #started = false;
   #thinking = false;
@@ -362,16 +364,30 @@ export class PiSession implements AgentSession {
     void this.#relay?.mergeMetadata({ v2: { ...link, localSessionId: this.id } });
   }
 
-  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { void this.#relay?.updateHandoff(info); }
+  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { saveWindowRecord(this.id, { handoff: info }); void this.#relay?.updateHandoff(info); }
   markCompacting(): void { /* pi compacts itself */ }
 
   // ── teardown ──────────────────────────────────────────────────────────────
+
+
+  /** Resolve once the process end() signalled is gone (SIGKILL after `ms`).
+   *  The restart replacement reopens the SAME on-disk conversation; two
+   *  writers on it is how history gets corrupted (codex review, 2026-09-04). */
+  awaitExit(ms = 3000): Promise<void> {
+    const p = this.#dying;
+    if (!p || p.exitCode !== null || p.signalCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* gone */ } resolve(); }, ms);
+      p.once("exit", () => { clearTimeout(t); resolve(); });
+    });
+  }
 
   end(reason: "killed" | "process_exited" | "restart"): boolean {
     if (this.status === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
     if (this.#proc && this.#proc.exitCode === null) {
+      this.#dying = this.#proc;
       try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
     }
     this.#proc = null;

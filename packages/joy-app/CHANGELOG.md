@@ -1,3 +1,13 @@
+# Sep 4 (4) — Second bug-review pass
+
+- **Restart keeps your permission mode.** A Claude session started in plan or default mode came back from Restart with every permission granted (bypass) — the mode was never carried over. It is now read off the session (or its record) and passed through; Codex keeps its mode, model and effort too. *Needs the updated daemon.*
+- **Restart keeps queued messages.** Messages waiting behind a long turn were cancelled and dropped by Restart; they now move to the replacement and run in order. The turn that was interrupted ends as *cancelled* rather than *completed*, immediately.
+- **Hand back survives a restart.** The peer link a handoff creates was only on the card; a restart (session or machine) rebuilt the card blank and "Hand back" refused with "not picked up". It's persisted now. A handoff resumed after a daemon restart never launches a second target, and a handback never delivers its note into a session that was restarted while it was being written.
+- **Daemon-created sessions bind before they speak.** A handoff target is announced to the relay before its pickup prompt goes in, so its first answer is never dropped. A lost announce reply no longer strands a session forever.
+- **Fork uses the model you switched to**, not the one the session launched with. **Teleporting the same conversation twice works.** pi and Codex forks are valid files again (the first append after a fork landed on the wrong line). A failed Restart archives the old card instead of leaving a live-looking ghost.
+- **New session waits for the machine's model list** after you switch machines, so it can't send another machine's model id.
+- Slash commands that generate (`/compact`, custom commands) get a short busy hold instead of none; the lease renewal runs on its own timer so a slow relay can't expire the daemon's lease.
+
 # Sep 4 (3) — Bug-review fixes
 
 - **Sessions the machine starts itself now show up.** A session created by `joy new`, by Fork, by Teleport, or as a Handoff target never got a card — the daemon had no way to announce a session it started on its own, so the app waited a minute and gave up while the agent ran unseen. They're announced within seconds now, sealed like any other. *Needs the updated daemon.*

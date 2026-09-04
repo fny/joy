@@ -255,12 +255,17 @@ function NewJoyTmuxSessionScreen() {
     // Codex model catalog (model/list), fetched from the daemon when codex is
     // selected. Independent index state so switching agents doesn't clobber the
     // claude picker.
+    // Harness catalogs are per MACHINE: switching machines resets them and
+    // holds Create until the new machine's list is back — the stale arrays
+    // stayed selectable and sent machine A's model id to machine B.
+    const [catalogReady, setCatalogReady] = React.useState(true);
     const [codexModels, setCodexModels] = React.useState<{ model: string; displayName: string; supportedReasoningEfforts: string[]; defaultReasoningEffort: string | null; isDefault?: boolean }[]>([]);
     const [codexModelIndex, setCodexModelIndex] = React.useState(0);
     const [codexEffortIndex, setCodexEffortIndex] = React.useState(0);
     React.useEffect(() => {
         if (selectedAgent !== 'codex' || !selectedMachineId) return;
         let cancelled = false;
+        setCodexModels([]); setCodexModelIndex(0); setCatalogReady(false);
         const cctx = sync.machineOnlyCtx(selectedMachineId);
         if (!cctx) return;
         machineHarnessModels(cctx, 'codex').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof codexModels | undefined }))
@@ -270,7 +275,8 @@ function NewJoyTmuxSessionScreen() {
                 const def = res.models.findIndex((m) => m.isDefault);
                 setCodexModelIndex(def >= 0 ? def : 0);
             })
-            .catch(() => { /* codex not present / offline — picker stays empty */ });
+            .catch(() => { /* codex not present / offline — picker stays empty */ })
+            .finally(() => { if (!cancelled) setCatalogReady(true); });
         return () => { cancelled = true; };
     }, [selectedAgent, selectedMachineId]);
     // Opencode model catalog: static curated allowlist from the daemon
@@ -280,6 +286,7 @@ function NewJoyTmuxSessionScreen() {
     React.useEffect(() => {
         if (selectedAgent !== 'opencode' || !selectedMachineId) return;
         let cancelled = false;
+        setOcModels([]); setOcModelIndex(0); setCatalogReady(false);
         const octx2 = sync.machineOnlyCtx(selectedMachineId);
         if (!octx2) return;
         machineHarnessModels(octx2, 'opencode').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof ocModels | undefined }))
@@ -289,7 +296,8 @@ function NewJoyTmuxSessionScreen() {
                 const def = res.models.findIndex((m) => m.isDefault);
                 setOcModelIndex(def >= 0 ? def : 0);
             })
-            .catch(() => { /* opencode op absent (old daemon) — chip stays empty */ });
+            .catch(() => { /* opencode op absent (old daemon) — chip stays empty */ })
+            .finally(() => { if (!cancelled) setCatalogReady(true); });
         return () => { cancelled = true; };
     }, [selectedAgent, selectedMachineId]);
     const ocModel = ocModels[ocModelIndex];
@@ -301,6 +309,7 @@ function NewJoyTmuxSessionScreen() {
     React.useEffect(() => {
         if (selectedAgent !== 'agy' || !selectedMachineId) return;
         let cancelled = false;
+        setAgyModels([]); setAgyModelIndex(0); setCatalogReady(false);
         const actx = sync.machineOnlyCtx(selectedMachineId);
         if (!actx) return;
         machineHarnessModels(actx, 'agy').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof agyModels | undefined }))
@@ -310,7 +319,8 @@ function NewJoyTmuxSessionScreen() {
                 const def = res.models.findIndex((m) => m.isDefault);
                 setAgyModelIndex(def >= 0 ? def : 0);
             })
-            .catch(() => { /* agy op absent (old daemon) — chip stays empty */ });
+            .catch(() => { /* agy op absent (old daemon) — chip stays empty */ })
+            .finally(() => { if (!cancelled) setCatalogReady(true); });
         return () => { cancelled = true; };
     }, [selectedAgent, selectedMachineId]);
     const agyModel = agyModels[agyModelIndex];
@@ -503,7 +513,8 @@ function NewJoyTmuxSessionScreen() {
         }
     }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, selectedAgent, codexModel, codexEffort, ocModel, agyModel, teleportFrom, teleportSource, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, resumeId, resumeMb, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
 
-    const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning;
+    const catalogAgent = selectedAgent === 'codex' || selectedAgent === 'opencode' || selectedAgent === 'agy';
+    const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning && (!catalogAgent || catalogReady);
 
     const handleKeyPress = React.useCallback((event: KeyPressEvent): boolean => {
         if (Platform.OS === 'web' && event.key === 'Enter' && !event.shiftKey && agentInputEnterToSend) {

@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, takesThinkingLease, toolResultText, TOOL_RESULT_MAX_CHARS, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, thinkingLeaseMs, THINKING_LEASE_MS, SLASH_THINKING_LEASE_MS, toolResultText, TOOL_RESULT_MAX_CHARS, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -1297,17 +1297,16 @@ test("trustPromptKeys: null until the options paint (never guesses)", () => {
   expect(trustPromptKeys("")).toBeNull();
 });
 
-test("takesThinkingLease: real prompts hold the pane off, slash commands do not", () => {
-  expect(takesThinkingLease("write me a function")).toBe(true);
-  expect(takesThinkingLease("  think hard about /effort")).toBe(true); // a / mid-prompt is not a command
-  // These generate nothing — a 170s lease pins busy() and holds the relay turn.
-  expect(takesThinkingLease("/effort high")).toBe(false);
-  expect(takesThinkingLease("/model opus")).toBe(false);
-  expect(takesThinkingLease("  /status")).toBe(false);
-  // No prompt on the hook: keep the old, safe behaviour and take the lease —
-  // an unknown submit is far more likely a real turn than a slash command.
-  expect(takesThinkingLease(null)).toBe(true);
-  expect(takesThinkingLease(undefined)).toBe(true);
+test("thinkingLeaseMs: real prompts hold the full lease, slash commands a short one", () => {
+  expect(thinkingLeaseMs("write me a function")).toBe(THINKING_LEASE_MS);
+  expect(thinkingLeaseMs("  think hard about /effort")).toBe(THINKING_LEASE_MS); // a / mid-prompt is not a command
+  expect(thinkingLeaseMs("/effort high")).toBe(SLASH_THINKING_LEASE_MS);
+  expect(thinkingLeaseMs("/model opus")).toBe(SLASH_THINKING_LEASE_MS);
+  expect(thinkingLeaseMs("  /status")).toBe(SLASH_THINKING_LEASE_MS);
+  // /compact and custom commands generate: they keep the short lease, never zero.
+  expect(thinkingLeaseMs("/compact")).toBeGreaterThan(0);
+  expect(thinkingLeaseMs(null)).toBe(THINKING_LEASE_MS);
+  expect(thinkingLeaseMs(undefined)).toBe(THINKING_LEASE_MS);
 });
 
 test("classifyBgTasks: a launch that never completed ages out of the counter", () => {
