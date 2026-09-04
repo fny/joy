@@ -97,6 +97,13 @@ every relay; machines register per account.
   (`takesThinkingLease`) and a visible dialog clears it outright — both kept
   `busy()` true for a prompt that never generates, holding the relay turn open
   and queueing everything behind it.
+- Daemon-created sessions (joy new, fork, teleport, handoff targets,
+  restart) are ANNOUNCED to the relay by the lane every renew tick
+  (`announceLocalSession`: `POST /sessions {mode:"announce_existing"}` — the
+  row is born bound to this daemon with a fresh sealed key; idempotent by
+  `creationIntentId: announce:<id>`). Before this they had no card at all.
+  `create({forceNew})` skips the detached-session auto-revive (fork/handoff/
+  teleport set it). Agy record ids carry a per-boot nonce.
 - Peer-message provenance: joy-send wraps `<joy-message from="joy:<id>"
   from-label="<harness> (<model>) · <title>" reply-to=…>`; relay.ts lifts
   both into `meta.from` / `meta.fromLabel`. The app resolves `joy:<id>` to a

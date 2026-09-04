@@ -10,6 +10,14 @@
 import { readdirSync, readFileSync } from "fs";
 import { execFile } from "child_process";
 import { platform } from "os";
+import { execFileSync } from "child_process";
+
+// Read once: /proc reports RSS in pages and CPU in clock ticks, and neither is
+// universally 4096 / 100 (64 KiB pages exist; so do non-100 Hz kernels).
+let pageSizeCache = 0; let clkTckCache = 0;
+function sysconf(name: "PAGESIZE" | "CLK_TCK", fallback: number): number {
+  try { const n = Number(execFileSync("getconf", [name], { timeout: 2000 }).toString().trim()); return Number.isFinite(n) && n > 0 ? n : fallback; } catch { return fallback; }
+}
 
 export interface ProcessTreeStats {
   /** Percent of ONE core, summed over the tree (200 = two cores busy). */
@@ -25,7 +33,7 @@ const SAMPLE_MS = 400;
 
 function linuxTree(root: number): Map<number, { ppid: number; ticks: number; rssBytes: number }> {
   const all = new Map<number, { ppid: number; ticks: number; rssBytes: number }>();
-  const pageSize = 4096;
+  const pageSize = pageSizeCache || (pageSizeCache = sysconf("PAGESIZE", 4096));
   for (const name of readdirSync("/proc")) {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
@@ -56,9 +64,7 @@ function linuxTree(root: number): Map<number, { ppid: number; ticks: number; rss
 }
 
 function clockTicksPerSecond(): number {
-  // Linux userland CLK_TCK is 100 on every mainstream distro; getconf is the
-  // authority but a subprocess per sample is not worth it.
-  return 100;
+  return clkTckCache || (clkTckCache = sysconf("CLK_TCK", 100));
 }
 
 async function linuxStats(root: number): Promise<ProcessTreeStats | null> {

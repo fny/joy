@@ -626,7 +626,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         if (flavor === 'opencode' && ocModels.length) {
             return ocModels.map((m) => ({ key: m.id, name: m.displayName, description: null }));
         }
-        if (flavor === 'codex' || flavor === 'opencode') {
+        if (flavor === 'codex' || flavor === 'opencode' || flavor === 'agy' || flavor === 'pi') {
+            // Display-only for these: the daemon switches models server-side
+            // only for opencode, and /model is a claude command — offering the
+            // claude catalog on an agy session sent a command it can't take.
             const code = session.metadata?.currentModelCode;
             return code ? [{ key: code, name: code, description: null }] : [];
         }

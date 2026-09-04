@@ -52,7 +52,7 @@ export const WaitingStack = React.memo(function WaitingStack({ sessionId, queue 
             id: `daemon:${m.id}`, text: m.text,
             onCommit: (text) => { void queue.edit(m.id, text); },
             onRemove: () => { void queue.cancel(m.id); },
-            onSteer: () => steer(m.id, m.text),
+            onSteer: (text) => steer(m.id, text),
         })),
         // App-sent, already a bubble: the text is an immutable server row, so
         // an edit cancels the queued delivery and re-stashes the text as a draft.
@@ -60,7 +60,7 @@ export const WaitingStack = React.memo(function WaitingStack({ sessionId, queue 
             id: `daemon-hidden:${m.id}`, text: m.text,
             onCommit: (text) => { void queue.cancel(m.id); useDraftQueueStore.getState().add(sessionId, text); },
             onRemove: () => { void queue.cancel(m.id); },
-            onSteer: () => steer(m.id, m.text),
+            onSteer: (text) => steer(m.id, text),
         })),
     ], [held, daemonVisible, daemonHidden, sessionId, update, remove, retryRelease, queue, steer]);
 

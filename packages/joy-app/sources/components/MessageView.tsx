@@ -5,7 +5,7 @@ import { MarkdownView } from "./markdown/MarkdownView";
 import { t } from '@/text';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
-import { storage } from "@/sync/storage";
+import { storage, useAllSessions } from "@/sync/storage";
 import { Typography } from '@/constants/Typography';
 import { hasJoyTags, splitJoySegments } from "@/utils/joyImg";
 import { JoyFileChip } from "@/components/JoyFileChip";
@@ -124,18 +124,20 @@ function UserTextBlock(props: {
   // when the app has one (harness · title · id, tappable); otherwise the
   // daemon-stamped label; otherwise the bare id. cli/cron read as themselves.
   const fromLabel = props.message.meta?.fromLabel ?? (wrapped ? /\bfrom-label="([^"]+)"/.exec(wrapped[1])?.[1] : undefined);
+  // Reactive: the sender's card may arrive after this row first renders.
+  const allSessions = useAllSessions();
   const sender = React.useMemo(() => {
     if (!from?.startsWith('joy:')) return null;
     const id = from.slice(4);
-    for (const [sid, s] of Object.entries(storage.getState().sessions)) {
+    for (const s of allSessions) {
       const m = s.metadata as { joy__sessionId?: string; flavor?: string } | undefined;
       if (m?.joy__sessionId === id) {
         const harness = ({ claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'pi', agy: 'Antigravity' } as Record<string, string>)[m.flavor ?? 'claude'] ?? m.flavor ?? 'joy';
-        return { appId: sid, label: `${harness} · ${getSessionName(s)} (${id})` };
+        return { appId: s.id, label: `${harness} · ${getSessionName(s)} (${id})` };
       }
     }
     return null;
-  }, [from]);
+  }, [from, allSessions]);
   const fromText = from
     ? (from.startsWith('joy:') ? (sender?.label ?? (fromLabel ? `${fromLabel} (${from.slice(4)})` : from.slice(4))) : from)
     : '';

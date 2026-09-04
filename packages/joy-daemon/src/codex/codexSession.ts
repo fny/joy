@@ -827,7 +827,7 @@ export class CodexSession implements AgentSession {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
     } else {
-      if (this.#relay) this.#archivePromise = this.#relay.archive();
+      if (this.#relay && reason !== "restart") this.#archivePromise = this.#relay.archive(); // restart keeps the card
       try {
         void (this.#tmuxSocket
           ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())

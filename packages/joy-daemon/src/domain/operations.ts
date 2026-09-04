@@ -462,25 +462,25 @@ export const machineOps: MachineOp[] = [
           case "claude": {
             const resumeId = src.claudeSessionId ?? (src.transcriptPath ? basename(src.transcriptPath, ".jsonl") : undefined);
             if (!resumeId) return { ok: false, error: "This session has no conversation to fork yet." };
-            session = await registry.create({ ...common, resume_id: resumeId, forkSession: true, permissionMode: src.detectPermissionMode() ?? undefined });
+            session = await registry.create({ ...common, resume_id: resumeId, forkSession: true, forceNew: true, permissionMode: src.detectPermissionMode() ?? undefined });
             break;
           }
           case "agy": {
             const cid = (src as { conversationId?: string }).conversationId;
             if (!cid) return { ok: false, error: "This Antigravity session has no conversation to fork yet — send it a message first." };
-            session = await registry.create({ ...common, agent: "agy", resume_id: forkAgyConversation(cid) });
+            session = await registry.create({ ...common, agent: "agy", resume_id: forkAgyConversation(cid), forceNew: true });
             break;
           }
           case "pi": {
             const pid = (src as { piSessionId?: string }).piSessionId;
             if (!pid) return { ok: false, error: "This pi session has no session file to fork yet." };
-            session = await registry.create({ ...common, agent: "pi", resume_id: forkPiSession(pid) });
+            session = await registry.create({ ...common, agent: "pi", resume_id: forkPiSession(pid), forceNew: true });
             break;
           }
           case "codex": {
             const tid = (src as { codexThreadId?: string }).codexThreadId;
             if (!tid) return { ok: false, error: "This Codex session has no thread to fork yet." };
-            session = await registry.create({ ...common, agent: "codex", resume_id: forkCodexThread(tid), permissionMode: src.detectPermissionMode() ?? undefined });
+            session = await registry.create({ ...common, agent: "codex", resume_id: forkCodexThread(tid), forceNew: true, permissionMode: src.detectPermissionMode() ?? undefined });
             break;
           }
           default:
@@ -520,7 +520,7 @@ export const machineOps: MachineOp[] = [
         try {
           const body = await awaitNote(src, path);
           const note = finalizeNote(path, body, src);
-          const dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false });
+          const dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false, forceNew: true });
           dst.enqueue(pickupPrompt(sessionLabel(src), src.id, note), { source: "rpc", mirrorToRelay: true });
           dst.setHandoff?.({ state: "picked_up", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
           src.setHandoff?.({ state: "handed_off", peer: dst.id, peerLabel: sessionLabel(dst), note: path, at: Date.now() });
@@ -594,7 +594,14 @@ export const machineOps: MachineOp[] = [
       const size = statSync(path).size;
       const fd = openSync(path, "r");
       let buf: Buffer;
-      try { buf = Buffer.alloc(size - off); readSync(fd, buf, 0, buf.length, off); } finally { closeSync(fd); }
+      try {
+        const raw = Buffer.alloc(size - off);
+        const n = readSync(fd, raw, 0, raw.length, off);
+        // The harness may be mid-append: ship only complete lines, so the
+        // copy never ends inside a JSON record (codex review, 2026-09-04).
+        const cut = raw.subarray(0, n).lastIndexOf(0x0a);
+        buf = cut >= 0 ? raw.subarray(0, cut + 1) : raw.subarray(0, n);
+      } finally { closeSync(fd); }
       return {
         ok: true, agent: "claude", claudeSessionId, cwd: src.cwd,
         model: src.currentModel ?? src.model, permissionMode: src.detectPermissionMode() ?? undefined,
@@ -631,13 +638,19 @@ export const machineOps: MachineOp[] = [
       // Continue under a NEW claude id (--fork-session): the source keeps its
       // own id — which may still be live if the two machines are one (a
       // same-box teleport into another folder), where a plain --resume would
-      // collide. History is intact either way.
-      const session = await registry.create({
-        cwd, resume_id: sid, forkSession: true, createDir: params.createDir === true,
-        model: typeof params.model === "string" ? params.model : undefined,
-        permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
-      });
-      return { ok: true, session: session.toJSON(), localSessionId: session.id };
+      // collide. History is intact either way. If the launch fails, remove
+      // the file we wrote so a retry is not refused as "already exists".
+      try {
+        const session = await registry.create({
+          cwd, resume_id: sid, forkSession: true, forceNew: true, createDir: params.createDir === true,
+          model: typeof params.model === "string" ? params.model : undefined,
+          permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
+        });
+        return { ok: true, session: session.toJSON(), localSessionId: session.id };
+      } catch (e) {
+        try { rmSync(target, { force: true }); } catch { /* best effort */ }
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
     },
   },
   {

@@ -910,6 +910,63 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const isLeaseDeath = (e: unknown) =>
     /lease_unknown|lease_expired|lease_epoch_stale/.test(String(e));
 
+  function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+      p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+    });
+  }
+
+  // Relay row for a session the daemon started itself. The relay's
+  // createSession supports mode "announce_existing": the row is inserted
+  // already bound to this daemon (local id + key envelope, state "starting"),
+  // no spawn command involved. creationIntentId = the local id, so the call
+  // is idempotent (a replay returns the same sessionId).
+  const announcing = new Set<string>();
+  async function announceLocalSession(session: AgentSession): Promise<void> {
+    if (!lease || boundByLocal.has(session.id) || announcing.has(session.id)) return;
+    announcing.add(session.id);
+    try {
+      const rec = registry.listRecords().find((r) => r.id === session.id);
+      if (rec?.v2SessionId) {
+        // Bound before (a recovered record): just re-establish the maps.
+        bound.set(rec.v2SessionId, session.id); boundByLocal.set(session.id, rec.v2SessionId);
+        if (rec.v2SessionKey) sessionKeys.set(rec.v2SessionId, new Uint8Array(Buffer.from(rec.v2SessionKey, "base64")));
+        wireCardPublisher(session.id, rec.v2SessionId);
+        return;
+      }
+      let envelope = "v2:plaintext";
+      let key: Uint8Array | null = null;
+      if (opts.accountContentPublicKey) {
+        key = new Uint8Array(randomBytes(32));
+        envelope = sealSessionKey(key, opts.accountContentPublicKey);
+      }
+      const r = await withTimeout(api("POST", "/sessions", {
+        mode: "announce_existing", creationIntentId: `announce:${session.id}`, daemonId: machineId,
+        localSessionId: session.id, sessionKeyEnvelope: envelope,
+      }), 15_000) as { sessionId?: string };
+      const v2 = r?.sessionId;
+      if (!v2) throw new Error("announce returned no sessionId");
+      if (key) sessionKeys.set(v2, key);
+      registry.saveRecord(session.id, { v2SessionId: v2, ...(key ? { v2SessionKey: Buffer.from(key).toString("base64") } : {}) });
+      bound.set(v2, session.id); boundByLocal.set(session.id, v2);
+      session.setV2Link?.({ sessionId: v2, relay: relayUrl, keyEnvelope: envelope });
+      wireCardPublisher(session.id, v2);
+      log(`announced ${session.id} → v2 ${v2.slice(0, 8)} (${envelope.startsWith("v2sk1:") ? "sealed" : "plaintext"})`);
+    } catch (e) {
+      log(`announce ${session.id} failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      announcing.delete(session.id);
+    }
+  }
+  async function announceUnboundSessions(): Promise<void> {
+    for (const s of registry.list()) {
+      if (s.status !== "active" && s.status !== "starting") continue;
+      if (boundByLocal.has(s.id)) continue;
+      await announceLocalSession(s);
+    }
+  }
+
   async function renewLoop(): Promise<void> {
     let ticks = 0;
     while (!stopped) {
@@ -927,21 +984,33 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // per-session sweep stays on the slow cadence for the silent cases
       // (a fence violation with nothing queued).
       ticks += 1;
-      try {
-        const r = await api("GET", "/sessions");
-        const rows = (r.sessions ?? []) as Array<{ sessionId: string; daemonId: string; localSessionId?: string | null; queuedTurns?: number; executing?: string | null }>;
-        const suspects = ticks % 15 === 0 ? rows : rows.filter((s) => (s.queuedTurns ?? 0) > 0 && !s.executing);
-        if (suspects.length) await reconcileOrphanedTurns(suspects);
-      } catch { /* next tick */ }
+      // RENEW FIRST. The scan below makes per-session requests with no
+      // guarantee of promptness; running it ahead of the PUT let one slow
+      // relay reply push the renewal past the lease TTL — expiring the very
+      // lease the scan exists to protect (codex review, 2026-09-04).
       try {
         const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${lease.leaseId}`, {
           method: "PUT",
           headers: { ...baseHeaders(), "x-joy-lease-token": lease.leaseToken },
+          signal: AbortSignal.timeout(RENEW_MS),
         });
         if (!res.ok) throw new Error(`renew -> ${res.status}`);
       } catch {
         lease = null; // acquire loop below re-establishes
+        continue;
       }
+      // Sessions this daemon created ITSELF (joy new, fork, teleport, a
+      // handoff target, a restart) have no relay row: nothing ever announced
+      // them, so the app never saw a card and the lane dropped their output
+      // (boundByLocal empty). Announce any live, unbound one — idempotent by
+      // creation intent, so a retry after a failed announce is harmless.
+      try { await announceUnboundSessions(); } catch { /* next tick */ }
+      try {
+        const r = await withTimeout(api("GET", "/sessions"), 10_000);
+        const rows = (r.sessions ?? []) as Array<{ sessionId: string; daemonId: string; localSessionId?: string | null; queuedTurns?: number; executing?: string | null }>;
+        const suspects = ticks % 15 === 0 ? rows : rows.filter((s) => (s.queuedTurns ?? 0) > 0 && !s.executing);
+        if (suspects.length) await withTimeout(reconcileOrphanedTurns(suspects), 20_000);
+      } catch { /* next tick */ }
     }
   }
 

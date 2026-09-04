@@ -3,7 +3,7 @@ import { View, Pressable } from 'react-native';
 import { Text } from '@/components/StyledText';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useSession, storage } from '@/sync/storage';
+import { useSession, useAllSessions } from '@/sync/storage';
 import { sync } from '@/sync/sync';
 import { machineHandback } from '@/sync/v2/machine';
 import { useJoyAction } from '@/hooks/useJoyAction';
@@ -26,13 +26,13 @@ export const HandoffBar = React.memo(function HandoffBar({ sessionId }: { sessio
     const navigateToSession = useNavigateToSession();
     const h = session?.metadata?.joy__handoff;
 
+    // Reactive: the peer's card can arrive AFTER this bar first renders.
+    const sessions = useAllSessions();
     const peerAppId = React.useMemo(() => {
         if (!h?.peer) return null;
-        for (const [sid, s] of Object.entries(storage.getState().sessions)) {
-            if ((s.metadata as { joy__sessionId?: string } | undefined)?.joy__sessionId === h.peer) return sid;
-        }
-        return null;
-    }, [h?.peer]);
+        const hit = sessions.find((s) => (s.metadata as { joy__sessionId?: string } | undefined)?.joy__sessionId === h.peer);
+        return hit?.id ?? null;
+    }, [h?.peer, sessions]);
 
     const [handingBack, handBack] = useJoyAction(async () => {
         const machineId = session?.metadata?.machineId;

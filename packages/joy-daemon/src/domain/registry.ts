@@ -54,6 +54,11 @@ export interface CreateSessionOpts {
   permissionMode?: string;
   /** --fallback-model: model to fall back to when the primary is overloaded. */
   fallbackModel?: string;
+  /** Never revive/adopt a session already in this cwd — ALWAYS a new one.
+   *  Fork, handoff and teleport set it: create()'s auto-revive of a detached
+   *  session in the folder was restarting an unrelated old conversation and
+   *  handing it the pickup note instead (codex review, 2026-09-04). */
+  forceNew?: boolean;
   /** --fork-session: new session id when resuming. Ignored without continue/resume_id. */
   forkSession?: boolean;
   /** --chrome: Claude in Chrome integration. */
@@ -277,7 +282,7 @@ export class SessionRegistry {
         process.stderr.write(`[create] resume ${opts.resume_id} detached (window ${detachedInCwd.id}) — restarting in place\n`);
         return this.restart({ id: detachedInCwd.id });
       }
-    } else if (detachedInCwd) {
+    } else if (detachedInCwd && !opts.forceNew) {
       // Auto-revive a detached session (Claude died, window lingering) rather than
       // leave a dead window — restart() resumes its own conversation.
       process.stderr.write(`[create] ${detachedInCwd.id} detached in ${target} — restarting in place\n`);
@@ -790,6 +795,23 @@ export class SessionRegistry {
       });
     }
 
+    // Antigravity / pi restart: resume THEIR conversation under the same id —
+    // both fell through to the claude path and came back as a fresh Claude
+    // session with the record still saying agy/pi (codex review, 2026-09-04).
+    const isAgy = (existing instanceof AgySession) || rec?.agent === "agy";
+    if (isAgy) {
+      const conversationId = (existing instanceof AgySession ? existing.conversationId : undefined) ?? rec?.agySettings?.conversationId;
+      const model = existing?.model ?? rec?.agySettings?.model;
+      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
+      return this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, forceNew: true });
+    }
+    const isPi = (existing instanceof PiSession) || rec?.agent === "pi";
+    if (isPi) {
+      const piSessionId = (existing instanceof PiSession ? existing.piSessionId : undefined) ?? rec?.piSettings?.sessionId;
+      const model = existing?.model ?? rec?.piSettings?.model;
+      if (existing) { existing.end("restart"); this.#sessions.delete(opts.id); }
+      return this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, forceNew: true });
+    }
     const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
     if (isCodex) {
       // Resume the SAME thread. When a live session exists, `rec` is null, so
