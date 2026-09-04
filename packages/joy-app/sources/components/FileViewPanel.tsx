@@ -333,6 +333,18 @@ export const FileViewPanel = React.memo(function FileViewPanel({
 
     // Publish right-slot controls (edit/preview toggle, save button) into the chat header.
     const isLoaded = fileState.kind === 'loaded';
+    // Download what is on disk: text/images from memory, a non-image binary
+    // (never fetched — the panel only shows the notice) by reading its bytes now.
+    const downloadCurrent = React.useCallback(async () => {
+        if (imageBase64) return downloadFile(fileName, { base64: imageBase64 });
+        if (fileState.kind === 'binary') {
+            const res = await sessionReadFile(sessionId, filePath);
+            if (!res.success || !res.content) throw new Error(res.error || 'read failed');
+            return downloadFile(fileName, { base64: res.content });
+        }
+        return downloadFile(fileName, { utf8: editContent });
+    }, [imageBase64, fileState.kind, sessionId, filePath, fileName, editContent]);
+
     React.useEffect(() => {
         onHeaderRightSlotChange(
             <FileHeaderRight
@@ -343,15 +355,12 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                 hasChanges={hasChanges}
                 isSaving={isSaving}
                 onSave={handleSave}
-                onDownload={() => {
-                    void downloadFile(fileName, imageBase64 ? { base64: imageBase64 } : { utf8: editContent })
-                        .catch(() => Modal.alert(t('common.error'), t('files.failedToRead')));
-                }}
-                canDownload={isLoaded || !!imageBase64}
+                onDownload={() => { void downloadCurrent().catch(() => Modal.alert(t('common.error'), t('files.failedToRead'))); }}
+                canDownload={isLoaded || !!imageBase64 || fileState.kind === 'binary'}
             />
         );
         return () => onHeaderRightSlotChange(null);
-    }, [isMarkdown, isRenderable, isLoaded, displayMode, hasChanges, isSaving, handleSave, onHeaderRightSlotChange, imageBase64, editContent, fileName]);
+    }, [isMarkdown, isRenderable, isLoaded, displayMode, hasChanges, isSaving, handleSave, onHeaderRightSlotChange, imageBase64, fileState.kind, downloadCurrent]);
 
     return (
         <View style={styles.outer}>
@@ -431,6 +440,13 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                     <Text style={{ color: theme.colors.textSecondary, marginTop: 8, ...Typography.default() }}>
                         {t('files.binaryFile')}
                     </Text>
+                    <Pressable
+                        onPress={() => { void downloadCurrent().catch(() => Modal.alert(t('common.error'), t('files.failedToRead'))); }}
+                        style={{ marginTop: 16, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, backgroundColor: theme.colors.button.primary.background }}
+                        accessibilityRole="button"
+                    >
+                        <Text style={{ color: theme.colors.button.primary.tint, ...Typography.default('semiBold') }}>{t('files.download')}</Text>
+                    </Pressable>
                 </View>
             ) : isRenderable && !isMarkdown && displayMode === 'preview' ? (
                 <FileRenderedView filePath={filePath} content={editContent} />
