@@ -99,9 +99,14 @@ every relay; machines register per account.
   and queueing everything behind it.
 - Session page **Restart / Fork / Teleport**. Restart ends the process with
   `end("restart")` — no archive, record kept — and recreates under the SAME
-  local id, so the v2 binding (and the card) survive. Fork = `joy-fork-session`
-  (claude: `--resume <id> --fork-session`), the app follows the new card by
-  `joy__sessionId` (`waitForLocalSession`). Teleport = `joy-teleport-export`
+  local id, so the v2 binding (and the card) survive. Fork = `joy-fork-session`,
+  one contract for every harness ({ok, localSessionId} | {ok:false, error}):
+  claude `--resume <id> --fork-session`; agy/pi/codex copy their single
+  history file under a fresh id with the embedded id rewritten
+  (`domain/forkHarness`: agy conversations/<id>.db cascade_id, pi
+  <ts>_<id>.jsonl header, codex rollout-<ts>-<id>.jsonl session_meta);
+  opencode refused. The app follows the new card by `joy__sessionId`
+  (`waitForLocalSession`). Teleport = `joy-teleport-export`
   on the source (transcript tail from the last `compact_boundary`, else a
   turn-snapped tail ≤6MB; base64) → `joy-teleport-import` on the target
   (writes `~/.claude/projects/<cwd>/<id>.jsonl`, refuses to clobber, then

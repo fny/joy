@@ -18,6 +18,7 @@ import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore"
 import type { AgentSession } from "./agentSession";
 import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
+import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
@@ -443,20 +444,51 @@ export const machineOps: MachineOp[] = [
     rpcName: "joy-fork-session",
     summary: "Fork a session from its last message into a NEW session (claude: --resume <id> --fork-session)",
     http: { method: "POST", path: "/sessions/:id/fork" },
+    // ONE contract for every harness: {ok:true, localSessionId} or
+    // {ok:false, error} with a sentence the app shows as-is. Claude forks
+    // natively (--fork-session); agy/pi/codex fork by copying their single
+    // history file under a fresh id (domain/forkHarness); opencode keeps
+    // sessions inside its server with no fork surface and is refused.
     handler: async (registry, params) => {
       const id = String(params.id ?? "");
-      if (!/^[0-9a-f]{8}$/.test(id)) return { error: "invalid session id" };
+      if (!/^[0-9a-f]{8}$/.test(id)) return { ok: false, error: "invalid session id" };
       const src = registry.get(id);
-      if (!src) return { error: "session_not_found" };
-      if (src.agentFlavor !== "claude") return { error: `fork is not supported for ${src.agentFlavor} yet` };
-      const resumeId = src.claudeSessionId ?? (src.transcriptPath ? basename(src.transcriptPath, ".jsonl") : undefined);
-      if (!resumeId) return { error: "this session has no conversation to fork yet" };
-      const session = await registry.create({
-        cwd: src.cwd, resume_id: resumeId, forkSession: true,
-        model: src.model, effort: src.effort,
-        permissionMode: src.detectPermissionMode() ?? undefined,
-      });
-      return { ok: true, session: session.toJSON(), localSessionId: session.id };
+      if (!src) return { ok: false, error: "session_not_found" };
+      const common = { cwd: src.cwd, model: src.model, effort: src.effort } as const;
+      try {
+        let session: AgentSession;
+        switch (src.agentFlavor) {
+          case "claude": {
+            const resumeId = src.claudeSessionId ?? (src.transcriptPath ? basename(src.transcriptPath, ".jsonl") : undefined);
+            if (!resumeId) return { ok: false, error: "This session has no conversation to fork yet." };
+            session = await registry.create({ ...common, resume_id: resumeId, forkSession: true, permissionMode: src.detectPermissionMode() ?? undefined });
+            break;
+          }
+          case "agy": {
+            const cid = (src as { conversationId?: string }).conversationId;
+            if (!cid) return { ok: false, error: "This Antigravity session has no conversation to fork yet — send it a message first." };
+            session = await registry.create({ ...common, agent: "agy", resume_id: forkAgyConversation(cid) });
+            break;
+          }
+          case "pi": {
+            const pid = (src as { piSessionId?: string }).piSessionId;
+            if (!pid) return { ok: false, error: "This pi session has no session file to fork yet." };
+            session = await registry.create({ ...common, agent: "pi", resume_id: forkPiSession(pid) });
+            break;
+          }
+          case "codex": {
+            const tid = (src as { codexThreadId?: string }).codexThreadId;
+            if (!tid) return { ok: false, error: "This Codex session has no thread to fork yet." };
+            session = await registry.create({ ...common, agent: "codex", resume_id: forkCodexThread(tid), permissionMode: src.detectPermissionMode() ?? undefined });
+            break;
+          }
+          default:
+            return { ok: false, error: `Fork isn't available for ${src.agentFlavor}: its sessions live inside the ${src.agentFlavor} server, which offers no way to branch one.` };
+        }
+        return { ok: true, session: session.toJSON(), localSessionId: session.id };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
     },
   },
   {

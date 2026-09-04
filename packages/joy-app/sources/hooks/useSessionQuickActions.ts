@@ -51,12 +51,10 @@ export function useSessionQuickActions(
     // Fork: any claude session with a known conversation id on an online
     // machine. Works on active AND inactive sessions — the daemon launches
     // `claude --resume <id> --fork-session`, no transcript copy needed.
-    const claudeSessionId = session.metadata?.claudeSessionId;
-    const canFork = Boolean(
-        (!session.metadata?.flavor || session.metadata.flavor === 'claude')
-        && claudeSessionId
-        && machineOnline,
-    );
+    // Every joy harness offers Fork; the daemon decides whether it can (claude
+    // natively, agy/pi/codex by copying their history file, opencode refused)
+    // and answers with a sentence the app shows as-is when it can't.
+    const canFork = Boolean(joySessionId && machineOnline);
 
     // Restart: the daemon kills the tmux window and starts a fresh agent in
     // the same cwd resuming the same conversation. This is also how a
