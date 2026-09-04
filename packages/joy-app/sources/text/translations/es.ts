@@ -716,6 +716,7 @@ export const es: TranslationStructure = {
         loadingFile: ({ fileName }: { fileName: string }) => `Cargando ${fileName}...`,
         binaryFile: 'Archivo binario',
         cannotDisplayBinary: 'No se puede mostrar el contenido del archivo binario',
+        download: 'Descargar',
         diff: 'Diferencias',
         source: 'Fuente',
         rendered: 'Vista',

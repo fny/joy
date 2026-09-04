@@ -717,6 +717,7 @@ export const ja: TranslationStructure = {
         loadingFile: ({ fileName }: { fileName: string }) => `${fileName}を読み込み中...`,
         binaryFile: 'バイナリファイル',
         cannotDisplayBinary: 'バイナリファイルの内容を表示できません',
+        download: 'ダウンロード',
         diff: '差分',
         source: 'ソース',
         rendered: 'プレビュー',

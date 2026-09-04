@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 4 (5) — Download any file",
+      "summary": "",
+      "markdown": "- **Binary files can be downloaded.** A file that isn't text or an image (PDF, spreadsheet, archive, …) showed only a \"binary file\" notice with no way to save it, and the toolbar's download would have written an empty file. Both the file screen and the desktop file panel now have a Download button that fetches the file's bytes and saves it."
+    },
+    {
       "title": "Sep 4 (4) — Second bug-review pass",
       "summary": "",
       "markdown": "- **Restart keeps your permission mode.** A Claude session started in plan or default mode came back from Restart with every permission granted (bypass) — the mode was never carried over. It is now read off the session (or its record) and passed through; Codex keeps its mode, model and effort too. *Needs the updated daemon.*\n- **Restart keeps queued messages.** Messages waiting behind a long turn were cancelled and dropped by Restart; they now move to the replacement and run in order. The turn that was interrupted ends as *cancelled* rather than *completed*, immediately.\n- **Hand back survives a restart.** The peer link a handoff creates was only on the card; a restart (session or machine) rebuilt the card blank and \"Hand back\" refused with \"not picked up\". It's persisted now. A handoff resumed after a daemon restart never launches a second target, and a handback never delivers its note into a session that was restarted while it was being written.\n- **Daemon-created sessions bind before they speak.** A handoff target is announced to the relay before its pickup prompt goes in, so its first answer is never dropped. A lost announce reply no longer strands a session forever.\n- **Fork uses the model you switched to**, not the one the session launched with. **Teleporting the same conversation twice works.** pi and Codex forks are valid files again (the first append after a fork landed on the wrong line). A failed Restart archives the old card instead of leaving a live-looking ghost.\n- **New session waits for the machine's model list** after you switch machines, so it can't send another machine's model id.\n- Slash commands that generate (`/compact`, custom commands) get a short busy hold instead of none; the lease renewal runs on its own timer so a slow relay can't expire the daemon's lease."
@@ -261,5 +266,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 4 (4) — Second bug-review pass"
+  "latestTitle": "Sep 4 (5) — Download any file"
 }
