@@ -151,7 +151,7 @@ describe("nucleusLane turn lifecycle", () => {
         expect(session._aborts).toBe(1);
     }, 20_000);
 
-    it("plaintext content decodes; sealed-without-key stays queued (no crash)", async () => {
+    it("plaintext content decodes; sealed-without-key fails the turn with a reason (no crash)", async () => {
         const relay = makeFakeRelay();
         const url = await relay.listen(); srv = relay.server;
         const session = makeFakeSession("loc3");
@@ -162,12 +162,15 @@ describe("nucleusLane turn lifecycle", () => {
         handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m3", log: () => {} });
         relay.pushWork({ deliveryId: "ds", commandId: "sp", sessionId: "v2s3", kind: "spawn_session", ciphertext: spawnSpec("/tmp/z") });
         await sleep(1500);
-        // undecodable (sealed, no key on this machine) prompt → must NOT enqueue
+        // undecodable (sealed, no key on this machine) prompt → must NOT enqueue,
+        // and must NOT sit at the head of the queue forever: it fails with a
+        // reason so the app can show it and the messages behind it drain.
         relay.pushWork({ deliveryId: "dbad", commandId: "cbad", sessionId: "v2s3", kind: "prompt", turnId: "tbad", ciphertext: "v2e1:AAAA" });
         await sleep(1500);
-        expect(session.enqueued.length).toBe(0);            // left queued, not fed to the agent
-        // no terminal fabricated for an undecodable prompt
-        expect(relay.calls.some(c => c.path.includes("/turns/tbad/facts"))).toBe(false);
+        expect(session.enqueued.length).toBe(0);
+        const facts = relay.calls.find(c => c.path.includes("/turns/tbad/facts"));
+        expect(facts).toBeTruthy();
+        expect(JSON.stringify(facts!.body)).toContain("undecodable_prompt");
     }, 15_000);
 
     it("startup reconcile: relay-live sessions with no local runtime get archived; live/pre-bind/foreign rows untouched", async () => {

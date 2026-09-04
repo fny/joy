@@ -368,6 +368,20 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     for (const s of r.sessions ?? []) {
       if (s.daemonId === machineId && s.localSessionId) { bound.set(s.sessionId, s.localSessionId); boundByLocal.set(s.localSessionId, s.sessionId); }
     }
+    // A record can point at a row that is NOT the one the relay has this
+    // local session bound to (fny 47457b0f, 2026-09-04: a spawn that
+    // resolved to an already-bound live session rewrote the record with the
+    // spawn's own, never-bound row id on every retry). The relay's binding
+    // is the truth — realign the record so its key is filed under the row
+    // the app actually talks to; the re-envelope below then keeps the app
+    // and the daemon on that same key.
+    for (const rec of registry.listRecords()) {
+      const live = boundByLocal.get(rec.id);
+      if (live && rec.v2SessionId && rec.v2SessionId !== live && !bound.has(rec.v2SessionId)) {
+        registry.saveRecord(rec.id, { v2SessionId: live });
+        log(`record ${rec.id}: v2 ${rec.v2SessionId.slice(0, 8)} is not this session's row — realigned to ${live.slice(0, 8)}`);
+      }
+    }
     // Content keys ride the window records (same trust domain as transcripts).
     for (const rec of registry.listRecords()) {
       if (rec.v2SessionId && rec.v2SessionKey) {
@@ -675,10 +689,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const relive = () => { sess = registry.get(sess.id) ?? sess; };
       const prompt = decodePrompt(offer.ciphertext, sessionKeys.get(offer.sessionId));
       if (prompt === null) {
-        if (!notedSkips.has(turnId)) {
-          notedSkips.add(turnId);
-          log(`turn ${turnId.slice(0, 8)}: undecodable prompt — left queued`);
-        }
+        // Sealed with a key this daemon does not hold (a record rewrite, a
+        // rotation it missed). Left queued, it blocked every later message
+        // on the session behind it — for good (fny 867b15eb, 2026-09-04).
+        // Fail it with the reason instead: the app shows it, the user
+        // re-sends, the rest drains.
+        await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
+        await api("POST", `/daemon/turns/${turnId}/facts`, {
+          type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
+          meta: { reason: "undecodable_prompt" },
+        }, leaseRef);
+        log(`turn ${turnId.slice(0, 8)}: undecodable prompt → failed`);
         return;
       }
       await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
