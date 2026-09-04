@@ -64,6 +64,7 @@ import { DraftQueueStrip } from './DraftQueueStrip';
 import { WaitingStack } from './WaitingStack';
 import { DisconnectedBanner } from './DisconnectedBanner';
 import { GoalBar } from './GoalBar';
+import { HandoffBar } from './HandoffBar';
 import { LoginBar } from './LoginBar';
 import { DialogBar } from './DialogBar';
 import { CodexApprovalBar } from './CodexApprovalBar';
@@ -996,6 +997,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             <DialogBar sessionId={sessionId} />
             <CodexApprovalBar sessionId={sessionId} />
             <GoalBar sessionId={sessionId} />
+            <HandoffBar sessionId={sessionId} />
             <Deferred>
                 {messages.length > 0 && (
                     <ChatList ref={chatListRef} session={session} />

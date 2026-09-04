@@ -1040,6 +1040,18 @@ export const en = {
         diskHot: ({ percent }: { percent: number }) => `Disk ${percent}% full on this machine`,
     },
 
+    handoff: {
+        label: 'Handoff',
+        writing: ({ peer }: { peer: string }) => `Writing a handoff note for ${peer}…`,
+        handedOff: ({ peer }: { peer: string }) => `Handed off to ${peer}`,
+        pickedUp: ({ peer }: { peer: string }) => `Picked up from ${peer}`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} handed the work back`,
+        returned: ({ peer }: { peer: string }) => `Handed back to ${peer}`,
+        failed: ({ error }: { error: string }) => `Handoff failed: ${error}`,
+        open: 'open',
+        handBack: 'Hand back',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Switched to ${mode} mode`,
         compactionSummary: 'Compaction summary',

@@ -991,6 +991,18 @@ export const it: TranslationStructure = {
         diskHot: ({ percent }: { percent: number }) => `Disco pieno al ${percent}% su questa macchina`,
     },
 
+    handoff: {
+        label: 'Passaggio',
+        writing: ({ peer }: { peer: string }) => `Scrittura della nota di passaggio per ${peer}…`,
+        handedOff: ({ peer }: { peer: string }) => `Passato a ${peer}`,
+        pickedUp: ({ peer }: { peer: string }) => `Ripreso da ${peer}`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} ha restituito il lavoro`,
+        returned: ({ peer }: { peer: string }) => `Restituito a ${peer}`,
+        failed: ({ error }: { error: string }) => `Passaggio non riuscito: ${error}`,
+        open: 'apri',
+        handBack: 'Restituisci',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Passato alla modalità ${mode}`,
         compactionSummary: 'Riepilogo compattazione',

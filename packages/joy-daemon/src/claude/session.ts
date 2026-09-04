@@ -2840,6 +2840,7 @@ export class Session {
     else void Promise.resolve(this.#relay?.updateGoal(null)).catch((e) => process.stderr.write(`[goal] updateGoal(null) failed: ${e}\n`));
   }
 
+  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { void this.#relay?.updateHandoff(info); }
   /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
    *  status and arm a backstop timeout in case the compact_boundary record that
    *  normally clears it never arrives (compaction can run for minutes — see the

@@ -481,6 +481,16 @@ export interface JoyTasksInfo {
  * `goal_status` attachments. Present while a goal is in progress (met=false);
  * cleared to null when the goal is met/cleared. The app shows a goal bar.
  */
+/** Handoff bar: session.metadata.joy__handoff (see domain/handoff.ts). */
+export interface JoyHandoffInfo {
+  state: 'writing' | 'handed_off' | 'picked_up' | 'handed_back' | 'returned' | 'failed';
+  peer?: string;
+  peerLabel?: string;
+  note?: string;
+  error?: string;
+  at: number;
+}
+
 export interface JoyGoalInfo {
   condition: string; // the goal text the user set
   since: number;     // epoch ms when this goal became active
@@ -678,6 +688,11 @@ export class RelaySession {
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
     if (info == null && this.metadata?.joy__compacting == null) return;
     await this.mergeMetadata({ joy__compacting: info });
+  }
+
+  async updateHandoff(info: JoyHandoffInfo | null): Promise<void> {
+    if (info == null && this.metadata?.joy__handoff == null) return;
+    await this.mergeMetadata({ joy__handoff: info });
   }
 
   async updateGoal(info: JoyGoalInfo | null): Promise<void> {

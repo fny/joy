@@ -997,6 +997,18 @@ export const ru: TranslationStructure = {
         diskHot: ({ percent }: { percent: number }) => `Диск заполнен на ${percent}% на этой машине`,
     },
 
+    handoff: {
+        label: 'Передача',
+        writing: ({ peer }: { peer: string }) => `Пишу записку о передаче для ${peer}…`,
+        handedOff: ({ peer }: { peer: string }) => `Передано ${peer}`,
+        pickedUp: ({ peer }: { peer: string }) => `Принято от ${peer}`,
+        handedBack: ({ peer }: { peer: string }) => `${peer} вернул работу`,
+        returned: ({ peer }: { peer: string }) => `Возвращено ${peer}`,
+        failed: ({ error }: { error: string }) => `Передача не удалась: ${error}`,
+        open: 'открыть',
+        handBack: 'Вернуть',
+    },
+
     message: {
         switchedToMode: ({ mode }: { mode: string }) => `Переключено в режим ${mode}`,
         compactionSummary: 'Сводка компактификации',

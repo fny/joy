@@ -277,6 +277,8 @@ route("DELETE", "/v2/sessions/:id", withSession(async (ctx, _s, p) => ok(await m
 route("POST", "/v2/sessions/:id/restart", async (ctx, p, body) =>
   ok(await mcall("restart", ctx.registry, { id: p.id, ...body })));
 route("POST", "/v2/sessions/:id/fork", async (ctx, p) => ok(await mcall("fork", ctx.registry, { id: p.id })));
+route("POST", "/v2/sessions/:id/handoff", async (ctx, p, body) => ok(await mcall("handoff", ctx.registry, { id: p.id, ...body })));
+route("POST", "/v2/sessions/:id/handback", async (ctx, p) => ok(await mcall("handback", ctx.registry, { id: p.id })));
 route("POST", "/v2/sessions/:id/teleport-export", async (ctx, p) => ok(await mcall("teleportExport", ctx.registry, { id: p.id })));
 route("POST", "/v2/teleport-import", async (ctx, _p, body) => ok(await mcall("teleportImport", ctx.registry, body)));
 route("PATCH", "/v2/sessions/:id", withSession(async (ctx, session, p, body) => {
