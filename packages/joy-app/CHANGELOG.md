@@ -1,3 +1,7 @@
+# Sep 4 (5) — Download any file
+
+- **Binary files can be downloaded.** A file that isn't text or an image (PDF, spreadsheet, archive, …) showed only a "binary file" notice with no way to save it, and the toolbar's download would have written an empty file. Both the file screen and the desktop file panel now have a Download button that fetches the file's bytes and saves it.
+
 # Sep 4 (4) — Second bug-review pass
 
 - **Restart keeps your permission mode.** A Claude session started in plan or default mode came back from Restart with every permission granted (bypass) — the mode was never carried over. It is now read off the session (or its record) and passed through; Codex keeps its mode, model and effort too. *Needs the updated daemon.*

@@ -732,6 +732,7 @@ export const pl: TranslationStructure = {
         loadingFile: ({ fileName }: { fileName: string }) => `Ładowanie ${fileName}...`,
         binaryFile: 'Plik binarny',
         cannotDisplayBinary: 'Nie można wyświetlić zawartości pliku binarnego',
+        download: 'Pobierz',
         diff: 'Różnice',
         source: 'Źródło',
         rendered: 'Podgląd',

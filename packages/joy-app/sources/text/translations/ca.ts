@@ -716,6 +716,7 @@ export const ca: TranslationStructure = {
         loadingFile: ({ fileName }: { fileName: string }) => `Carregant ${fileName}...`,
         binaryFile: 'Fitxer binari',
         cannotDisplayBinary: 'No es pot mostrar el contingut del fitxer binari',
+        download: 'Baixa',
         diff: 'Diferències',
         source: 'Font',
         rendered: 'Vista',

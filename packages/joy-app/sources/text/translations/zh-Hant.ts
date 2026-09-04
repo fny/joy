@@ -716,6 +716,7 @@ export const zhHant: TranslationStructure = {
         loadingFile: ({ fileName }: { fileName: string }) => `正在載入 ${fileName}...`,
         binaryFile: '二進位檔案',
         cannotDisplayBinary: '無法顯示二進位檔案內容',
+        download: '下載',
         diff: '差異',
         source: '源碼',
         rendered: '渲染',

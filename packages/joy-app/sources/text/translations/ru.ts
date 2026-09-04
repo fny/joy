@@ -732,6 +732,7 @@ export const ru: TranslationStructure = {
         loadingFile: ({ fileName }: { fileName: string }) => `Загрузка ${fileName}...`,
         binaryFile: 'Бинарный файл',
         cannotDisplayBinary: 'Невозможно отобразить содержимое бинарного файла',
+        download: 'Скачать',
         diff: 'Различия',
         source: 'Исходник',
         rendered: 'Просмотр',

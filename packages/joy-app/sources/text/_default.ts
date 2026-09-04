@@ -763,6 +763,7 @@ export const en = {
         loadingFile: ({ fileName }: { fileName: string }) => `Loading ${fileName}...`,
         binaryFile: 'Binary File',
         cannotDisplayBinary: 'Cannot display binary file content',
+        download: 'Download',
         diff: 'Diff',
         source: 'Source',
         rendered: 'Rendered',

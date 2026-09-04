@@ -124,20 +124,6 @@ export default React.memo(function FileScreen() {
     const [displayMode, setDisplayMode] = React.useState<'file' | 'diff' | 'rendered'>('diff');
     // Raster images arrive as base64 (never decoded to text) — rendered-only.
     const [imageBase64, setImageBase64] = React.useState<string | null>(null);
-    // Download what is ON DISK. Text and images are already in memory; a
-    // binary that is not an image (pdf, xlsx, zip…) was never fetched — the
-    // viewer only shows the "binary file" notice — so fetch its bytes now.
-    // Before this, such files had no download at all on this screen, and
-    // the toolbar's download would have written an empty file.
-    const downloadCurrent = React.useCallback(async () => {
-        if (imageBase64) return downloadFile(fileName, { base64: imageBase64 });
-        if (fileContent?.isBinary && sessionId) {
-            const res = await sessionReadFile(sessionId, filePath);
-            if (!res.success || !res.content) throw new Error(res.error || 'read failed');
-            return downloadFile(fileName, { base64: res.content });
-        }
-        return downloadFile(fileName, { utf8: fileContent?.content ?? '' });
-    }, [imageBase64, fileContent, sessionId, filePath, fileName]);
     const renderKind = fileRenderKind(filePath);
     const [fontSize, setFontSize] = useLocalSettingMutable('fileViewerFontSize');
     const [wrap, setWrap] = useLocalSettingMutable('fileViewerWrap');
@@ -413,6 +399,20 @@ export default React.memo(function FileScreen() {
     }, [displayMode, fileContent?.content, requestedLine]);
 
     const fileName = filePath.split('/').pop() || filePath;
+    // Download what is ON DISK. Text and images are already in memory; a
+    // binary that is not an image (pdf, xlsx, zip…) was never fetched — the
+    // viewer only shows the "binary file" notice — so fetch its bytes now.
+    // Before this, such files had no download at all on this screen, and
+    // the toolbar's download would have written an empty file.
+    const downloadCurrent = React.useCallback(async () => {
+        if (imageBase64) return downloadFile(fileName, { base64: imageBase64 });
+        if (fileContent?.isBinary && sessionId) {
+            const res = await sessionReadFile(sessionId, filePath);
+            if (!res.success || !res.content) throw new Error(res.error || 'read failed');
+            return downloadFile(fileName, { base64: res.content });
+        }
+        return downloadFile(fileName, { utf8: fileContent?.content ?? '' });
+    }, [imageBase64, fileContent, sessionId, filePath, fileName]);
     const language = getFileLanguage(filePath);
 
     if (isLoading) {
