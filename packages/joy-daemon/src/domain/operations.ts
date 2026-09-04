@@ -455,7 +455,9 @@ export const machineOps: MachineOp[] = [
       if (!/^[0-9a-f]{8}$/.test(id)) return { ok: false, error: "invalid session id" };
       const src = registry.get(id);
       if (!src) return { ok: false, error: "session_not_found" };
-      const common = { cwd: src.cwd, model: src.model, effort: src.effort } as const;
+      // The CURRENT model/effort, not the launch ones: a /model or /effort
+      // change is tracked separately by the adapters and is what the card shows.
+      const common = { cwd: src.cwd, model: src.currentModel ?? src.model, effort: (src as { currentEffort?: string }).currentEffort ?? src.effort } as const;
       try {
         let session: AgentSession;
         switch (src.agentFlavor) {
@@ -605,8 +607,14 @@ export const machineOps: MachineOp[] = [
       const dir = cwdToTranscriptDir(cwd);
       mkdirSync(dir, { recursive: true });
       const target = join(dir, `${sid}.jsonl`);
-      // Never clobber a conversation that already lives here under that id.
-      if (existsSync(target)) return { error: `a conversation ${sid.slice(0, 8)} already exists in ${cwd} on this machine` };
+      // Never clobber a conversation a session HERE is bound to (a same-box
+      // teleport into the same folder). A file no session owns — an earlier
+      // import's leftover, or the same conversation teleported again — is
+      // replaced: the fork already took what it needed from it, and refusing
+      // made every retry fail (codex review, 2026-09-04).
+      const owned = registry.list().some((s) => s.transcriptPath === target || s.claudeSessionId === sid)
+        || registry.listRecords().some((r) => r.claudeSessionId === sid);
+      if (owned) return { error: `conversation ${sid.slice(0, 8)} belongs to a session in ${cwd} on this machine` };
       writeFileSync(target, Buffer.from(b64, "base64"));
       // Continue under a NEW claude id (--fork-session): the source keeps its
       // own id — which may still be live if the two machines are one (a

@@ -14,7 +14,7 @@ import { applyEnvStore } from "./envStore";
 import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
-import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
+import { Session, type ChatMessage, type SessionDeps, type QueuedItem } from "../claude/session";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
@@ -130,8 +130,52 @@ export class SessionRegistry {
   // is executing as cancel-requested, so a restart mid-turn terminalizes it
   // as cancelled instead of the lane observing busy()=false on the corpse
   // and reporting "completed" (codex review #7, 2026-09-04).
-  #turnCanceller?: (localId: string) => void;
-  setTurnCanceller(fn: (localId: string) => void): void { this.#turnCanceller = fn; }
+  /** Relay-lane hook: cancel the running turn(s) of a session being
+   *  restarted, except those whose queue item ids are in `keep` — they move
+   *  to the replacement and keep running under the same ids. */
+  #turnCanceller?: (localId: string, keep: ReadonlySet<string>) => void;
+  setTurnCanceller(fn: (localId: string, keep: ReadonlySet<string>) => void): void { this.#turnCanceller = fn; }
+  /** Relay-lane hook: bind a daemon-created session to a relay card now. */
+  #announcer?: (session: AgentSession) => Promise<void>;
+  setAnnouncer(fn: (session: AgentSession) => Promise<void>): void { this.#announcer = fn; }
+  async announce(id: string): Promise<void> {
+    const s = this.get(id);
+    if (s && this.#announcer) await this.#announcer(s);
+  }
+
+  /** Tear a session down for an in-place restart: pluck the prompts not yet
+   *  dispatched (they move to the replacement), cancel the relay turn(s)
+   *  that WERE (the interrupted one must end cancelled, not "completed" off
+   *  the dead object's busy() dropping), end the process without archiving
+   *  the card, and — for adapters that reopen the same on-disk conversation —
+   *  wait for the old process to be really gone. */
+  async #retire(existing: AgentSession | undefined, id: string): Promise<QueuedItem[]> {
+    if (!existing) return [];
+    const carried = (existing.takeQueuedForRestart?.() ?? []) as QueuedItem[];
+    this.#turnCanceller?.(id, new Set(carried.map((q) => q.id)));
+    existing.end("restart");
+    this.#sessions.delete(id);
+    await existing.awaitExit?.();
+    return carried;
+  }
+
+  /** Launch the replacement and hand it the carried prompts. A launch that
+   *  fails must not leave a live-looking card with no session behind it —
+   *  the app kept a "running" ghost that answered session_not_found forever
+   *  (codex review, 2026-09-04) — so archive it and rethrow. */
+  async #replace(id: string, cwd: string, carried: QueuedItem[], make: () => Promise<AgentSession>): Promise<AgentSession> {
+    let next: AgentSession;
+    try { next = await make(); }
+    catch (e) {
+      if (this.relayClient) {
+        try { await createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id }).archive(); } catch { /* best effort */ }
+      }
+      throw e;
+    }
+    for (const q of carried) next.enqueue(q.text, { id: q.id, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible });
+    if (carried.length) process.stderr.write(`[restart] ${id}: ${carried.length} queued prompt(s) carried to the replacement\n`);
+    return next;
+  }
 
   constructor(opts: {
     tmuxSession: string;
@@ -560,7 +604,7 @@ export class SessionRegistry {
     // Persist the window→launch-cwd binding now; the claudeSessionId is merged in
     // once the first transcript entry reveals it. recover()/restart() prefer this
     // over the newest-mtime / pane-current-path heuristics (BUG-6/13/15).
-    saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel });
+    saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel, claudePermissionMode: mode ?? "default" });
     this.broadcast("session_update", session.toJSON());
 
     if (relaySession) session.attachRelay(relaySession); // no-ops (and stops rs) if kill raced the create
@@ -792,14 +836,14 @@ export class SessionRegistry {
     if (isOpencode) {
       const ocSessionId = (existing instanceof OpencodeSession ? existing.opencodeSessionId : undefined) ?? rec?.opencodeSessionId;
       const model = (existing instanceof OpencodeSession ? existing.model : undefined) ?? rec?.opencodeSettings?.model;
-      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
-      return this.create({
+      const carried = await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, carried, () => this.create({
         agent: "opencode",
         id: opts.id,
         cwd,
         resume_id: ocSessionId,
         model,
-      });
+      }));
     }
 
     // Antigravity / pi restart: resume THEIR conversation under the same id —
@@ -809,15 +853,15 @@ export class SessionRegistry {
     if (isAgy) {
       const conversationId = (existing instanceof AgySession ? existing.conversationId : undefined) ?? rec?.agySettings?.conversationId;
       const model = existing?.model ?? rec?.agySettings?.model;
-      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
-      return this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, forceNew: true });
+      const carried = await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, carried, () => this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, forceNew: true }));
     }
     const isPi = (existing instanceof PiSession) || rec?.agent === "pi";
     if (isPi) {
       const piSessionId = (existing instanceof PiSession ? existing.piSessionId : undefined) ?? rec?.piSettings?.sessionId;
       const model = existing?.model ?? rec?.piSettings?.model;
-      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
-      return this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, forceNew: true });
+      const carried = await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, carried, () => this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, forceNew: true }));
     }
     const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
     if (isCodex) {
@@ -825,15 +869,20 @@ export class SessionRegistry {
       // read the thread id off the session itself — otherwise restart would
       // start a brand-new thread instead of resuming (finding #7).
       const codexThreadId = (existing instanceof CodexSession ? existing.codexThreadId : undefined) ?? rec?.codexThreadId;
-      if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
-      return this.create({
+      // Settings come back with it: model, effort AND permission mode (the
+      // old restart dropped the mode → "default").
+      const codexRec = rec ?? loadWindowRecord(opts.id);
+      const codexMode = existing?.detectPermissionMode() ?? codexRec?.codexSettings?.permissionMode ?? undefined;
+      const carried = await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, carried, () => this.create({
         agent: "codex",
         id: opts.id,
         cwd,
         resume_id: codexThreadId,
-        model: existing?.model,
-        effort: existing?.effort,
-      });
+        model: existing?.currentModel ?? existing?.model ?? codexRec?.codexSettings?.model,
+        effort: existing?.effort ?? codexRec?.codexSettings?.effort,
+        permissionMode: codexMode && PERMISSION_MODES.has(codexMode) ? codexMode : undefined,
+      }));
     }
 
     // Resume THIS session's specific conversation — its learned Claude id, or
@@ -853,18 +902,25 @@ export class SessionRegistry {
     // list — the app's handler had always assumed the identity survived.
     // The record still holds the v2 session id + content key, so the lane
     // rebinds the new process to the existing card.
-    if (existing) { this.#turnCanceller?.(opts.id); existing.end("restart"); this.#sessions.delete(opts.id); }
+    // The permission mode comes back too. Read it off the pane BEFORE the
+    // window dies, else from the record (launch / last /permissions set):
+    // omitting it made create() default to bypassPermissions, so a session
+    // the user ran in plan or default mode restarted with every permission
+    // silently granted (codex review, 2026-09-04).
+    const claudeMode = existing?.detectPermissionMode() ?? (rec ?? loadWindowRecord(opts.id))?.claudePermissionMode ?? undefined;
+    const carried = await this.#retire(existing, opts.id);
 
     // Env is refreshed automatically: create() launches claude through a fresh
     // login shell, so a restart re-sources the user's profile (.bashrc/.zshrc).
-    return this.create({
+    return this.#replace(opts.id, cwd, carried, () => this.create({
       id: opts.id,
       cwd,
       resume_id: resumeId,
       continue: (!resumeId && !existing) ? true : undefined,
-      model: existing?.model,
+      model: existing?.currentModel ?? existing?.model,
       effort: existing?.effort,
-    });
+      permissionMode: claudeMode && PERMISSION_MODES.has(claudeMode) ? claudeMode : undefined,
+    }));
   }
 
   /** Kill every session — active or detached — archiving each, then tear down

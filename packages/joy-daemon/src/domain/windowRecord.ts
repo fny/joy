@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, readdirSync } from "fs";
 import { join } from "path";
 import { defaultStateDir } from "./receipts";
+import type { JoyHandoffInfo } from "../relay/relay";
 
 export interface HandoffJob {
   role: "source" | "target";
@@ -20,6 +21,11 @@ export interface HandoffJob {
   target?: { agent: "claude" | "codex" | "opencode" | "pi" | "agy"; model?: string; effort?: string; permissionMode?: string };
   /** target: the session to hand back to. */
   peer?: string;
+  /** source: the target session once created — a replay after a daemon
+   *  death past this point must reuse it, not launch a second agent. */
+  dst?: string;
+  /** source: the pickup prompt reached the target's queue. */
+  delivered?: boolean;
   at: number;
 }
 
@@ -39,6 +45,13 @@ export interface WindowRecord {
   launchCwd: string;
   /** Claude's transcript/session uuid, once learned from a transcript entry. */
   claudeSessionId?: string;
+  /** Claude's permission mode as launched / last set. Restart reads it so a
+   *  session started in plan or default mode does not come back in bypass. */
+  claudePermissionMode?: string;
+  /** The key envelope of an in-flight announce (relay/nucleusLane): kept so a
+   *  retry after a lost reply repeats the SAME request — the relay's
+   *  idempotency is by intent + request hash. */
+  v2AnnounceEnvelope?: string;
   /** True once the user set a title explicitly (/title): agent joy-title tags
    *  and Claude's own ai-title re-titles are ignored until a bare /title
    *  unlocks. Persisted so the lock survives daemon restarts. */
@@ -82,6 +95,9 @@ export interface WindowRecord {
    *  awaited and who it is for — so a daemon restart mid-note resumes the
    *  poll instead of abandoning the workflow. Cleared when it settles. */
   handoffJob?: HandoffJob;
+  /** The settled handoff link (peer, state) — the card is rebuilt from a
+   *  blank holder on every restart, so "Hand back" needs it from here. */
+  handoff?: JoyHandoffInfo | null;
   updatedAt: number;
 }
 
@@ -127,7 +143,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  leave a truncated file. Merges so we don't clobber a known claudeSessionId. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; lastAiTitle?: string; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string }; handoffJob?: HandoffJob | null },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; lastAiTitle?: string; transcriptCheckpoint?: { path: string; offset: number }; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeDeliveredThrough?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string }; handoffJob?: HandoffJob | null; handoff?: JoyHandoffInfo | null; claudePermissionMode?: string; v2AnnounceEnvelope?: string },
   baseDir = defaultStateDir(),
 ): void {
   try {
@@ -139,6 +155,9 @@ export function saveWindowRecord(
       v2SessionId: patch.v2SessionId ?? prev?.v2SessionId,
       v2SessionKey: patch.v2SessionKey ?? prev?.v2SessionKey,
       claudeSessionId: patch.claudeSessionId ?? prev?.claudeSessionId,
+      claudePermissionMode: patch.claudePermissionMode ?? prev?.claudePermissionMode,
+      v2AnnounceEnvelope: patch.v2AnnounceEnvelope ?? prev?.v2AnnounceEnvelope,
+      handoff: patch.handoff === null ? undefined : patch.handoff ?? prev?.handoff,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       lastAiTitle: patch.lastAiTitle ?? prev?.lastAiTitle,
       transcriptCheckpoint: patch.transcriptCheckpoint ?? prev?.transcriptCheckpoint,

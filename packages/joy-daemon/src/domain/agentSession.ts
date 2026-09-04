@@ -46,7 +46,15 @@ export interface AgentSession {
 
   // ── app-facing intake / queue ──
   busy(): boolean;
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage;
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean; id?: string }): QueuedMessage;
+  /** Restart support: pluck every prompt that has NOT been dispatched yet so
+   *  the replacement can take them (same ids — the relay lane tracks them).
+   *  Adapters without a pluckable queue leave this undefined. */
+  takeQueuedForRestart?(): Array<{ id: string; text: string; source: DeliverySource; mirrorToRelay: boolean; seq?: number; visible: boolean }>;
+  /** Restart support: resolve once the process end() signalled is really
+   *  gone (kill -9 after `ms`). Adapters whose replacement reopens the same
+   *  on-disk conversation implement this so two writers never overlap. */
+  awaitExit?(ms?: number): Promise<void>;
   queueState(): QueueState;
   /** Delivery state of ONE queued item, when the adapter can track it (claude).
    *  Callers that need proof a SPECIFIC prompt landed must prefer this over the

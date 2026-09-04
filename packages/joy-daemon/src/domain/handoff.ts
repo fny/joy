@@ -169,19 +169,42 @@ export interface HandoffRegistry {
   get(id: string): AgentSession | undefined;
   list(): AgentSession[];
   create(opts: { cwd: string; agent?: HandoffTarget["agent"]; model?: string; effort?: string; permissionMode?: string; createDir?: boolean; forceNew?: boolean }): Promise<AgentSession>;
+  /** Bind a daemon-created session to a relay card now (the lane registers
+   *  this); absent = the lane's periodic announce pass will get to it. */
+  announce?(id: string): Promise<void>;
 }
 
 const HARNESS_LABEL: Record<string, string> = HARNESS_NAMES;
 
 /** Source side: wait for the note, create the target, hand it the note. */
-export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession, target: HandoffTarget, path: string): Promise<void> {
+export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession, target: HandoffTarget, path: string, resumed?: HandoffJob): Promise<void> {
   const targetLabel = `${HARNESS_LABEL[target.agent] ?? target.agent}${target.model ? ` (${target.model})` : ""}`;
-  saveWindowRecord(src.id, { handoffJob: { role: "source", path, target, at: Date.now() } });
+  // The job advances through persisted phases (note → dst created → prompt
+  // delivered) so a replay after a daemon death resumes at the phase it
+  // reached instead of launching a second target on the same note and cwd
+  // (codex review, 2026-09-04).
+  let job: HandoffJob = resumed ?? { role: "source", path, target, at: Date.now() };
+  const advance = (patch: Partial<HandoffJob>) => { job = { ...job, ...patch }; saveWindowRecord(src.id, { handoffJob: job }); };
+  advance({});
   try {
-    const body = await awaitNote(src, path);
-    const note = finalizeNote(path, body, src);
-    const dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false, forceNew: true });
-    dst.enqueue(pickupPrompt(sessionLabel(src), src.id, note), { source: "rpc", mirrorToRelay: true });
+    let dst: AgentSession;
+    if (job.dst) {
+      const found = registry.get(job.dst);
+      if (!found || found.status === "ended") throw new Error(`the target session ${job.dst} was created but is gone`);
+      dst = found;
+    } else {
+      const body = await awaitNote(src, path);
+      finalizeNote(path, body, src);
+      dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false, forceNew: true });
+      advance({ dst: dst.id });
+    }
+    if (!job.delivered) {
+      // Bind the card BEFORE the prompt goes in: records produced before a
+      // session is bound are dropped, and a target can answer in seconds.
+      try { await registry.announce?.(dst.id); } catch { /* the periodic pass retries */ }
+      dst.enqueue(pickupPrompt(sessionLabel(src), src.id, readFileSync(path, "utf8")), { source: "rpc", mirrorToRelay: true });
+      advance({ delivered: true });
+    }
     dst.setHandoff?.({ state: "picked_up", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
     src.setHandoff?.({ state: "handed_off", peer: dst.id, peerLabel: sessionLabel(dst), note: path, at: Date.now() });
     process.stderr.write(`[handoff] ${src.id} → ${dst.id} (${targetLabel}) note=${path}\n`);
@@ -198,10 +221,15 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
 export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSession, srcId: string, path: string): Promise<void> {
   saveWindowRecord(tgt.id, { handoffJob: { role: "target", path, peer: srcId, at: Date.now() } });
   try {
-    const src = registry.get(srcId);
-    if (!src || src.status === "ended") throw new Error(`the original session ${srcId} is gone; restart it and hand back again`);
+    const gone = (s: AgentSession | undefined): s is undefined => !s || s.status === "ended";
+    if (gone(registry.get(srcId))) throw new Error(`the original session ${srcId} is gone; restart it and hand back again`);
     const body = await awaitNote(tgt, path);
     const note = finalizeNote(path, body, tgt);
+    // Re-resolve AFTER the wait: a restart meanwhile replaced the source
+    // object under the same id, and the one looked up above is ended — the
+    // note would have gone into a dead object and read as "handed back".
+    const src = registry.get(srcId);
+    if (gone(src)) throw new Error(`the original session ${srcId} ended while the note was being written; restart it and hand back again`);
     src.enqueue(handbackPrompt(sessionLabel(tgt), tgt.id, note), { source: "rpc", mirrorToRelay: true });
     src.setHandoff?.({ state: "handed_back", peer: tgt.id, peerLabel: sessionLabel(tgt), note: path, at: Date.now() });
     tgt.setHandoff?.({ state: "returned", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
@@ -224,7 +252,7 @@ export function resumeHandoffJobs(registry: HandoffRegistry): void {
     const s = registry.get(rec.id);
     if (!s || s.status === "ended") { saveWindowRecord(rec.id, { handoffJob: null }); continue; }
     process.stderr.write(`[handoff] resuming ${job.role} job for ${rec.id} (note ${job.path})\n`);
-    if (job.role === "source" && job.target) void runHandoffJob(registry, s, job.target, job.path);
+    if (job.role === "source" && job.target) void runHandoffJob(registry, s, job.target, job.path, job);
     else if (job.role === "target" && job.peer) void runHandbackJob(registry, s, job.peer, job.path);
     else saveWindowRecord(rec.id, { handoffJob: null });
   }

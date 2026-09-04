@@ -184,8 +184,17 @@ const JOY_COMMANDS = new Set(["steer", "btw", "title", "login-code", "joy-prompt
  * idle poll and the relay turn stayed open with every later message queued
  * behind it (`/effort high` wedged a session for 60s, 2026-09-03).
  */
-export function takesThinkingLease(prompt: string | null | undefined): boolean {
-  return !(prompt ?? "").trimStart().startsWith("/");
+export const THINKING_LEASE_MS = 170_000;
+/** A slash command's lease. Most built-ins (/effort, /model, /status,
+ *  /clear) never generate, and the full lease held them "busy" for 170s —
+ *  but /compact, /init and every custom command DO generate, and with no
+ *  lease at all two idle-looking reads in the pre-spinner second could end
+ *  their turn early and let the next queued prompt in on top (codex
+ *  review, 2026-09-04). Long enough to cover that second, short enough
+ *  that a no-op command is over before anyone notices. */
+export const SLASH_THINKING_LEASE_MS = 8_000;
+export function thinkingLeaseMs(prompt: string | null | undefined): number {
+  return (prompt ?? "").trimStart().startsWith("/") ? SLASH_THINKING_LEASE_MS : THINKING_LEASE_MS;
 }
 
 /** Bytes of tool output forwarded to the app per call. The relay accepts 256KB
@@ -1209,7 +1218,23 @@ export class Session {
   queueItemState(id: string): QueueItemState {
     if (this.#dispatchInFlight?.id === id) return "pending";
     if (this.#queue.some((q) => q.id === id)) return "pending";
+    if (this.#carried.has(id)) return "pending"; // moved to the restart replacement
     return this.#itemOutcome.get(id) ?? "unknown";
+  }
+
+  /** Ids handed to a restart replacement (takeQueuedForRestart): still
+   *  "pending" as far as this object is concerned, so the lane's turn loop —
+   *  which may poll this object for a beat before the replacement exists —
+   *  never sees them as lost. */
+  #carried = new Set<string>();
+  takeQueuedForRestart(): QueuedItem[] {
+    // Not the in-flight one: it is mid-typing/mid-turn and ends cancelled
+    // with the process. Restart used to cancel ALL of these and drop the
+    // spool — a message queued behind a long turn vanished with no trace
+    // (codex review, 2026-09-04).
+    const carried = this.#queue.splice(0, this.#queue.length);
+    for (const q of carried) this.#carried.add(q.id);
+    return carried;
   }
 
   queueState(): QueueState {
@@ -1235,7 +1260,7 @@ export class Session {
    * app already has the bubble); /send passes {mirrorToRelay:true,visible:false};
    * 5xx retry passes {visible:false}.
    */
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean; id?: string }): QueuedMessage {
     // Joy-owned commands are handled HERE — before the text is queued or reaches Claude.
     //   /steer <msg>  type <msg> straight into the pane and submit it now, BYPASSING the
     //                 queue + its idle gate, so it lands immediately (mid-turn if a turn
@@ -1293,7 +1318,7 @@ export class Session {
       }
     }
     const item: QueuedItem = {
-      id: crypto.randomUUID().slice(0, 8),
+      id: opts?.id ?? crypto.randomUUID().slice(0, 8),
       text,
       createdAt: Date.now(),
       source: opts?.source ?? "rpc",
@@ -1962,6 +1987,7 @@ export class Session {
     }
     await sleep(250);
     const after = this.detectPermissionMode();
+    if (after === target) saveWindowRecord(this.id, { claudePermissionMode: after });
     return after === target
       ? { ok: true, mode: after }
       : { ok: false, mode: after ?? undefined, error: `landed on ${after ?? "unknown"}` };
@@ -2510,7 +2536,7 @@ export class Session {
       // the relay turn stayed open with the user's next messages queued
       // behind it (fny 47457b0f, 2026-09-04: /clear at 10:12:51 completed
       // at 10:15:44).
-      this.#thinkingLeaseUntil = takesThinkingLease(opts.text) ? Date.now() + Session.#THINKING_LEASE_MS : 0;
+      this.#thinkingLeaseUntil = Date.now() + thinkingLeaseMs(opts.text);
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
@@ -2717,7 +2743,6 @@ export class Session {
    *  turn-end/error, abort, Notification) or lease expiry clear it; every
    *  accepted clear voids the lease. Sized just under the app's 3-min TTL. */
   #thinkingLeaseUntil = 0;
-  static readonly #THINKING_LEASE_MS = 170_000;
 
   #setThinking(thinking: boolean): void {
     if (!thinking) this.#thinkingLeaseUntil = 0; // any accepted clear ends the lease
@@ -2847,7 +2872,7 @@ export class Session {
     else void Promise.resolve(this.#relay?.updateGoal(null)).catch((e) => process.stderr.write(`[goal] updateGoal(null) failed: ${e}\n`));
   }
 
-  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { void this.#relay?.updateHandoff(info); }
+  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { saveWindowRecord(this.id, { handoff: info }); void this.#relay?.updateHandoff(info); }
   /** PreCompact hook fired: Claude is compacting. Surface the "compacting"
    *  status and arm a backstop timeout in case the compact_boundary record that
    *  normally clears it never arrives (compaction can run for minutes — see the
@@ -2933,7 +2958,7 @@ export class Session {
         const prompt = str("prompt");
         // Trusted edge — the pane can't clear it. See takesThinkingLease for
         // why a slash command is exempt.
-        this.#thinkingLeaseUntil = takesThinkingLease(prompt) ? Date.now() + Session.#THINKING_LEASE_MS : 0;
+        this.#thinkingLeaseUntil = Date.now() + thinkingLeaseMs(prompt);
         this.#idlePolls = 0;
         if (prompt && this.#dispatchInFlight
           && flattenForMatch(prompt) === flattenForMatch(this.#dispatchInFlight.text)) {

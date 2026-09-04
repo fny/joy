@@ -16,6 +16,7 @@
  * Self-contained — no deps on joy-daemon internals beyond paths + the card
  * seam. External deps: tweetnacl.
  */
+import { loadWindowRecord } from "../domain/windowRecord";
 import { setTimeout as sleep } from "timers/promises";
 import { execSync } from 'node:child_process';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
@@ -1039,6 +1040,12 @@ export function createRelaySession(
   // Agent flavor drives the app's per-agent rendering (codex diff/patch views).
   // Absent → the app treats a joy-daemon session as claude.
   if (opts.flavor) metadata.flavor = opts.flavor;
+  // A settled handoff's peer link lives in the window record: the holder is
+  // rebuilt blank on every restart (session or daemon), and the card was the
+  // only place the link existed — "Hand back" then refused a valid handback
+  // as "not picked up" (codex review, 2026-09-04).
+  const handoff = loadWindowRecord(opts.id)?.handoff;
+  if (handoff) metadata.joy__handoff = handoff;
   return new RelaySession({ client, relaySessionId: opts.id, metadata });
 }
 

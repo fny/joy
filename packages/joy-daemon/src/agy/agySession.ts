@@ -93,6 +93,8 @@ export class AgySession implements AgentSession {
   #queue: QueuedMessage[] = [];
   #inFlight: QueuedMessage | null = null;
   #proc: ChildProcess | null = null;
+  /** The process end() sent SIGTERM to, for awaitExit. */
+  #dying: ChildProcess | null = null;
   #turnSeq = 0;
   // Per-boot nonce in every record id: a recovered session restarts #turnSeq
   // at 0, and the relay dedupes by runtime event id — so "t1" again would
@@ -401,10 +403,23 @@ export class AgySession implements AgentSession {
   setV2Link(link: { sessionId: string; relay: string; keyEnvelope: string }): void {
     void this.#relay?.mergeMetadata({ v2: { ...link, localSessionId: this.id } });
   }
-  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { void this.#relay?.updateHandoff(info); }
+  setHandoff(info: import("../relay/relay").JoyHandoffInfo | null): void { saveWindowRecord(this.id, { handoff: info }); void this.#relay?.updateHandoff(info); }
   markCompacting(): void { /* agy manages its own context */ }
 
   // ── teardown ──────────────────────────────────────────────────────────────
+
+
+  /** Resolve once the process end() signalled is gone (SIGKILL after `ms`).
+   *  The restart replacement reopens the SAME on-disk conversation; two
+   *  writers on it is how history gets corrupted (codex review, 2026-09-04). */
+  awaitExit(ms = 3000): Promise<void> {
+    const p = this.#dying;
+    if (!p || p.exitCode !== null || p.signalCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* gone */ } resolve(); }, ms);
+      p.once("exit", () => { clearTimeout(t); resolve(); });
+    });
+  }
 
   end(reason: "killed" | "process_exited" | "restart"): boolean {
     if (this.status === "ended") return false;
@@ -412,6 +427,7 @@ export class AgySession implements AgentSession {
     this.endReason = reason;
     if (this.#proc && this.#proc.exitCode === null) {
       this.#sawResult = true;
+      this.#dying = this.#proc;
       try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
     }
     this.#proc = null;

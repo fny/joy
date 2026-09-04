@@ -20,7 +20,10 @@ import { join } from "node:path";
 export class ForkUnsupported extends Error {}
 
 /** A live harness may be mid-append: keep only lines terminated by a newline
- *  so the copy never ends inside a JSON record. */
+ *  so the copy never ends inside a JSON record. Writers put the newline back
+ *  (join + "\n"): without it the harness's first append lands on the same
+ *  line as the copied last record and the file stops parsing (codex review,
+ *  2026-09-04). */
 function completeLines(text: string): string[] {
   const cut = text.lastIndexOf("\n");
   return (cut >= 0 ? text.slice(0, cut) : text).split("\n");
@@ -71,7 +74,7 @@ export function forkPiSession(sessionId: string): string {
   if (first.type !== "session") throw new ForkUnsupported("pi session file has an unexpected header");
   first.id = id; first.timestamp = new Date().toISOString();
   lines[0] = JSON.stringify(first);
-  writeFileSync(join(hit.dir, `${ts}_${id}.jsonl`), lines.join("\n"));
+  writeFileSync(join(hit.dir, `${ts}_${id}.jsonl`), lines.join("\n") + "\n");
   return id;
 }
 
@@ -106,6 +109,6 @@ export function forkCodexThread(threadId: string): string {
   lines[0] = JSON.stringify(first);
   const dir = join(homedir(), ".codex", "sessions", String(now.getUTCFullYear()), String(now.getUTCMonth() + 1).padStart(2, "0"), String(now.getUTCDate()).padStart(2, "0"));
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `rollout-${ts}-${id}.jsonl`), lines.join("\n"));
+  writeFileSync(join(dir, `rollout-${ts}-${id}.jsonl`), lines.join("\n") + "\n");
   return id;
 }
