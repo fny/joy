@@ -20,6 +20,7 @@ import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 
 import type { AgentSession } from "./agentSession";
+import { saveWindowRecord, listWindowRecords, type HandoffJob } from "./windowRecord";
 import { joySessionDir } from "../paths";
 import { findCodexRollout, findPiSessionFile } from "./forkHarness";
 
@@ -158,4 +159,73 @@ export function finalizeNote(path: string, body: string, source: AgentSession): 
   const text = body.trimEnd() + "\n" + referenceBlock(source);
   writeFileSync(path, text);
   return text;
+}
+
+
+// ── Jobs: persisted so a daemon restart mid-note resumes the poll ──────────
+
+/** Minimal registry surface the jobs need (avoids importing the class). */
+export interface HandoffRegistry {
+  get(id: string): AgentSession | undefined;
+  list(): AgentSession[];
+  create(opts: { cwd: string; agent?: HandoffTarget["agent"]; model?: string; effort?: string; permissionMode?: string; createDir?: boolean; forceNew?: boolean }): Promise<AgentSession>;
+}
+
+const HARNESS_LABEL: Record<string, string> = HARNESS_NAMES;
+
+/** Source side: wait for the note, create the target, hand it the note. */
+export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession, target: HandoffTarget, path: string): Promise<void> {
+  const targetLabel = `${HARNESS_LABEL[target.agent] ?? target.agent}${target.model ? ` (${target.model})` : ""}`;
+  saveWindowRecord(src.id, { handoffJob: { role: "source", path, target, at: Date.now() } });
+  try {
+    const body = await awaitNote(src, path);
+    const note = finalizeNote(path, body, src);
+    const dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false, forceNew: true });
+    dst.enqueue(pickupPrompt(sessionLabel(src), src.id, note), { source: "rpc", mirrorToRelay: true });
+    dst.setHandoff?.({ state: "picked_up", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
+    src.setHandoff?.({ state: "handed_off", peer: dst.id, peerLabel: sessionLabel(dst), note: path, at: Date.now() });
+    process.stderr.write(`[handoff] ${src.id} → ${dst.id} (${targetLabel}) note=${path}\n`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    process.stderr.write(`[handoff] ${src.id} failed: ${msg}\n`);
+    src.setHandoff?.({ state: "failed", error: msg, note: path, at: Date.now() });
+  } finally {
+    saveWindowRecord(src.id, { handoffJob: null });
+  }
+}
+
+/** Target side: wait for the note, deliver it into the source as a prompt. */
+export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSession, srcId: string, path: string): Promise<void> {
+  saveWindowRecord(tgt.id, { handoffJob: { role: "target", path, peer: srcId, at: Date.now() } });
+  try {
+    const src = registry.get(srcId);
+    if (!src || src.status === "ended") throw new Error(`the original session ${srcId} is gone; restart it and hand back again`);
+    const body = await awaitNote(tgt, path);
+    const note = finalizeNote(path, body, tgt);
+    src.enqueue(handbackPrompt(sessionLabel(tgt), tgt.id, note), { source: "rpc", mirrorToRelay: true });
+    src.setHandoff?.({ state: "handed_back", peer: tgt.id, peerLabel: sessionLabel(tgt), note: path, at: Date.now() });
+    tgt.setHandoff?.({ state: "returned", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
+    process.stderr.write(`[handoff] ${tgt.id} → back to ${src.id} note=${path}\n`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}\n`);
+    tgt.setHandoff?.({ state: "failed", peer: srcId, error: msg, note: path, at: Date.now() });
+  } finally {
+    saveWindowRecord(tgt.id, { handoffJob: null });
+  }
+}
+
+/** After recovery: pick up every job a previous daemon left mid-note. The
+ *  note may already be on disk (awaitNote returns at once) or still coming. */
+export function resumeHandoffJobs(registry: HandoffRegistry): void {
+  for (const rec of listWindowRecords()) {
+    const job = rec.handoffJob as HandoffJob | undefined;
+    if (!job) continue;
+    const s = registry.get(rec.id);
+    if (!s || s.status === "ended") { saveWindowRecord(rec.id, { handoffJob: null }); continue; }
+    process.stderr.write(`[handoff] resuming ${job.role} job for ${rec.id} (note ${job.path})\n`);
+    if (job.role === "source" && job.target) void runHandoffJob(registry, s, job.target, job.path);
+    else if (job.role === "target" && job.peer) void runHandbackJob(registry, s, job.peer, job.path);
+    else saveWindowRecord(rec.id, { handoffJob: null });
+  }
 }

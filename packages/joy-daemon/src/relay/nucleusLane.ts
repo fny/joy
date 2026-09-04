@@ -967,6 +967,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
   }
 
+  // A session being restarted in place: its running relay turn(s) must end
+  // as cancelled, not "completed" (the old object's busy() drops to false).
+  (registry as { setTurnCanceller?: (fn: (localId: string) => void) => void }).setTurnCanceller?.((localId: string) => {
+    for (const [turnId, t] of activeTurns) if (t.localId === localId) cancelRequested.add(turnId);
+  });
+
   async function renewLoop(): Promise<void> {
     let ticks = 0;
     while (!stopped) {
