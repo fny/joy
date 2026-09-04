@@ -98,6 +98,8 @@ export class PiSession implements AgentSession {
   }
 
   get relayAttached(): boolean { return this.#relay !== null; }
+  /** pi's own session id (the session file's id) — what a fork copies. */
+  get piSessionId(): string | undefined { return this.#piSessionId; }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@
     {
       "title": "Sep 3 (18) — Fork, Teleport, and a Restart that works",
       "summary": "",
-      "markdown": "- **Restart keeps your session.** It used to archive the card you were on and spawn a new one elsewhere in the list. The session now comes back under the same identity — same card, same history.\n- **Fork, one tap, from the session page.** A new session that continues from the last message (Claude sessions), and you're taken straight to it.\n- **Teleport a session to another machine.** From the session page, pick a machine and a folder; the conversation continues there. Only the conversation travels — files are not copied, the folder is assumed to be in sync. Claude sessions for now. *Both need the updated daemon.*"
+      "markdown": "- **Restart keeps your session.** It used to archive the card you were on and spawn a new one elsewhere in the list. The session now comes back under the same identity — same card, same history.\n- **Fork, one tap, from the session page — every agent.** A new session that continues from the last message, and you're taken straight to it. Claude forks natively; Antigravity, pi and Codex fork by copying their conversation under a new id. OpenCode can't be forked (its sessions live inside its server) and says so.\n- **Teleport a session to another machine.** From the session page, pick a machine and a folder; the conversation continues there. Only the conversation travels — files are not copied, the folder is assumed to be in sync. Claude sessions for now. *Both need the updated daemon.*"
     },
     {
       "title": "Sep 3 (17) — Antigravity sessions",
