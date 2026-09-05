@@ -14,6 +14,7 @@
 //    must deadline "prompt admitted but no assistant activity".
 
 import { spawn, execFileSync, type ChildProcess } from "child_process";
+import { readFileSync } from "node:fs";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
@@ -114,12 +115,22 @@ export class OpencodeClient {
         timeout: timeoutMs,
       }, (res) => {
         let out = "";
+        let ended = false;
         res.on("data", (d) => { out += d; });
         res.on("end", () => {
+          ended = true;
           if ((res.statusCode ?? 0) >= 400) { reject(new Error(`opencode ${method} ${path} → ${res.statusCode}: ${out.slice(0, 300)}`)); return; }
           try { resolve((out ? JSON.parse(out) : null) as T); } catch { resolve(out as unknown as T); }
         });
+        // Headers arrived, then the socket died mid-body: neither 'end' nor
+        // the request timeout fires, and the caller hung forever (#73).
+        res.on("error", (e) => reject(new Error(`opencode ${method} ${path} response error: ${e.message}`)));
+        res.on("aborted", () => reject(new Error(`opencode ${method} ${path} response aborted`)));
+        res.on("close", () => { if (!ended) reject(new Error(`opencode ${method} ${path} response truncated`)); });
       });
+      // One absolute deadline for the WHOLE exchange, not just the idle gap.
+      const hard = setTimeout(() => req.destroy(new Error(`opencode ${method} ${path} exceeded ${timeoutMs}ms`)), timeoutMs);
+      req.on("close", () => clearTimeout(hard));
       req.on("timeout", () => { req.destroy(new Error(`opencode ${method} ${path} timed out`)); });
       req.on("error", reject);
       if (payload) req.write(payload);
@@ -251,8 +262,10 @@ export function killOpencodeServerPid(pid: number): void {
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
 export function isOpencodeServerPid(pid: number): boolean {
+  // `require` does not exist in the daemon's ESM runtime: this always threw,
+  // always returned false, and recovery never reaped the recorded server —
+  // a second one was started for the same conversation (#71).
   try {
-    const { readFileSync } = require("fs") as typeof import("fs");
     const comm = readFileSync(`/proc/${pid}/comm`, "utf8").trim();
     return comm.includes("opencode");
   } catch { return false; }

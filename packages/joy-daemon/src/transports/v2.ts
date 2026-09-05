@@ -367,6 +367,13 @@ route("GET", "/v2/sessions/:id/events", withSession((ctx, session, p) => {
     if (!m) return;
     try {
       const d = JSON.parse(m[1]) as Record<string, unknown>;
+      // Chat rows carry session_id — the local id for codex/opencode/pi, the
+      // Claude transcript uuid for claude; `id` on those is the row number,
+      // which never matched and dropped every message (#76).
+      if (typeof d.session_id === "string") {
+        if (d.session_id === p.id || (!!session.claudeSessionId && d.session_id === session.claudeSessionId)) ctx.res.write(frame);
+        return;
+      }
       const sid = d.id ?? d.sessionId ?? (d.session as Record<string, unknown> | undefined)?.id;
       if (sid === p.id) ctx.res.write(frame);
     } catch { /* non-JSON frame — drop */ }

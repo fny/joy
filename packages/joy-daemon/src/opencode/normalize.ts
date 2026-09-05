@@ -162,7 +162,12 @@ export class OpencodeNormalizer {
         const core = this.#openTools.get(callID) ?? `${str(d.assistantMessageID)}:${callID}`;
         this.#openTools.delete(callID);
         if (!callID || !this.#turn) return [];
-        return [this.#wire(encodeToolCallEnd(core, { turn: this.#turn }), `${core}:tool-end`)];
+        // Carry the output / error so the card is inspectable (#68).
+        const isError = e.type === "session.next.tool.error";
+        const raw = isError ? (d.error ?? d.output ?? d.title) : (d.output ?? d.result ?? d.title);
+        const result = raw === undefined || raw === null ? undefined : (typeof raw === "string" ? raw : JSON.stringify(raw));
+        const clamped = result && result.length > 48_000 ? `${result.slice(0, 24_000)}\n…[truncated]…\n${result.slice(-24_000)}` : result;
+        return [this.#wire(encodeToolCallEnd(core, { turn: this.#turn, ...(clamped ? { result: clamped } : {}), ...(isError ? { isError: true } : {}) }), `${core}:tool-end`)];
       }
       case "session.next.step.ended": {
         // One step = one LLM call; finish 'tool-calls' means the turn
