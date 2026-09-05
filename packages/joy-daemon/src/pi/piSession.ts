@@ -151,6 +151,13 @@ export class PiSession implements AgentSession {
         process.stderr.write(`[pi ${this.id}] spawn error: ${e}\n`);
         if (this.status !== "ended") this.end("process_exited");
       });
+      // A write into a pipe pi has already closed (it died, or shut its
+      // stdin) emits `error: EPIPE` on stdin; with no listener that is an
+      // uncaught exception that killed the whole daemon (issue #46).
+      proc.stdin?.on("error", (e) => {
+        process.stderr.write(`[pi ${this.id}] stdin error: ${e instanceof Error ? e.message : e}\n`);
+        if (this.status !== "ended") this.end("process_exited");
+      });
       proc.stderr?.on("data", (c: Buffer) => {
         const s = String(c).trim();
         if (s) process.stderr.write(`[pi ${this.id}] ${s.slice(0, 500)}\n`);
@@ -178,8 +185,9 @@ export class PiSession implements AgentSession {
 
   #send(cmd: Record<string, unknown>): void {
     const proc = this.#proc;
-    if (!proc?.stdin?.writable) return;
-    proc.stdin.write(JSON.stringify(cmd) + "\n");
+    if (!proc?.stdin?.writable || proc.stdin.destroyed) return;
+    try { proc.stdin.write(JSON.stringify(cmd) + "\n"); }
+    catch (e) { process.stderr.write(`[pi ${this.id}] write failed: ${e instanceof Error ? e.message : e}\n`); }
   }
 
   // ── event stream → relay ──────────────────────────────────────────────────
