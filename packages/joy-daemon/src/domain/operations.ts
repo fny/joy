@@ -673,7 +673,9 @@ export const machineOps: MachineOp[] = [
       // no-op on an ended session, so the card stayed "detached", the record
       // and tmux server survived, and the next boot resurrected it (#43).
       if (session.status === "ended") session.forceKill(); else session.end("killed");
-      return { ok: await session.awaitArchive() || session.status === "ended" };
+      // The REAL archive result: a failed archive must read as failure so the
+      // app runs its fallback archive (Astra on 2f803b14).
+      return { ok: await session.awaitArchive() };
     },
     httpShape: (result) => {
       const ok = (result as { ok: boolean }).ok;

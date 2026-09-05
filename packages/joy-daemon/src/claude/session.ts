@@ -670,9 +670,8 @@ export class Session {
   #dialogFirstSeenAt = 0;
   // Consecutive #pollEnd passes where ONLY a pane dialog vouched for liveness
   // (no live pid, no running markers) — bounded grace, see #pollEnd.
-  #dialogLivenessPasses = 0;
-  /** Consecutive #pollEnd passes with a dead pid, no child, and only pane TEXT saying "running". */
-  #staleRunningPasses = 0;
+  /** Consecutive #pollEnd passes with a dead pid and no child under the pane shell — pane text alone keeps the session alive for at most 12 of these. */
+  #noProcessPasses = 0;
   // The archived-card publish fired when this session is killed — awaited by
   // the killSession op so it can report a genuine failure to the app instead of
   // an unconditional success (which would suppress the app's fallback archive).
@@ -2693,8 +2692,7 @@ export class Session {
       const fresh = this.#resolvePidFromPane();
       if (fresh !== undefined) {
         this.pid = fresh;
-        this.#dialogLivenessPasses = 0; // real process evidence resets the grace
-        this.#staleRunningPasses = 0;
+        this.#noProcessPasses = 0; // real process evidence resets the grace
       } else {
         const pane = this.#tmux.captureCached(this.tmuxWindow);
         // An open dialog hides every "claude is running" marker (verified live:
@@ -2705,30 +2703,27 @@ export class Session {
         // content on screen (frozen pane, dialog above the returned shell
         // prompt), so after ~1 min of dialog-only liveness we require real
         // markers again and tear down (gpt-5.6-sol review finding 4).
-        const dialogAlive = pane.ok && dialogFromPane(pane.out) != null && this.#dialogLivenessPasses < 12;
-        if (dialogAlive) this.#dialogLivenessPasses += 1;
-        // The same bound applies to the "running" markers: a claude killed
-        // outright (kill -9, OOM) leaves its frozen frame on the pane —
-        // box, spinner text and all — and with no live child under the
-        // shell that frame was trusted forever, so the card read "active"
-        // while nothing ran (live 2026-09-05: 40s+ after kill -9). A real
-        // re-exec shows up as a fresh child within a tick or two; a minute
-        // of pid-less "running" text with no child is a dead claude.
+        // Pane TEXT is not process evidence. A dialog or the "running"
+        // markers on screen buy a bounded grace (~1 min) for the cases where
+        // the pid is momentarily unresolvable (mid re-exec), after which a
+        // dead pid with no child under the shell is a dead claude — whatever
+        // the frozen frame says. ONE counter for both heuristics: a frame
+        // that matched both (the folder-trust prompt does) let each reset
+        // the other and never expired (Astra on 2f803b14).
+        const dialogText = pane.ok && dialogFromPane(pane.out) != null;
         const runningText = pane.ok && paneShowsClaudeRunning(pane.out);
-        const runningAlive = runningText && this.#staleRunningPasses < 12;
-        if (runningText) this.#staleRunningPasses += 1;
-        if (!runningAlive && !dialogAlive) {
-          process.stderr.write(`[end] ${this.id}: pid ${this.pid} gone, no child under the pane shell${runningText ? " (frozen frame ignored after 60s)" : ""} → detached\n`);
+        this.#noProcessPasses += 1;
+        const textAlive = (dialogText || runningText) && this.#noProcessPasses <= 12;
+        if (!textAlive) {
+          process.stderr.write(`[end] ${this.id}: pid ${this.pid} gone, no child under the pane shell${dialogText || runningText ? " (frozen frame ignored after 60s)" : ""} → detached\n`);
           this.end("process_exited");
           return;
         }
-        if (runningText) this.#dialogLivenessPasses = 0;
         // The pane still shows Claude (pid unresolvable right now — e.g. mid
         // re-exec). Keep watching; the next tick re-resolves.
       }
     } else {
-      this.#dialogLivenessPasses = 0; // pid alive — dialog grace not in use
-      this.#staleRunningPasses = 0;
+      this.#noProcessPasses = 0; // pid alive — grace not in use
     }
     setTimeout(() => this.#pollEnd(), 5000);
   }

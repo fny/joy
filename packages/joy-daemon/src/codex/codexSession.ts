@@ -897,7 +897,16 @@ export class CodexSession implements AgentSession {
 
   forceKill(): boolean {
     if (this.status === "ended") {
-      if (this.#relay) this.#archivePromise = this.#relay.archive();
+      // A detached session killed on purpose: archive, stop the relay, mark
+      // killed and delete the record — otherwise recovery resurrected it
+      // (Astra on 2f803b14, #43).
+      if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
+      this.endReason = "killed";
+      deleteWindowRecord(this.id);
+      void (this.#tmuxSocket
+        ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())
+        : this.#tmux.command(["kill-window", "-t", this.tmuxWindow]));
+      this.#deps.broadcast("session_update", this.toJSON());
       return true;
     }
     return this.end("killed");

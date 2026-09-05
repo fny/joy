@@ -7,7 +7,7 @@
 //
 // The account secret transits memory only — callers must not persist it.
 import { createHmac, createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, existsSync, renameSync , readFileSync} from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, renameSync , readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import tweetnacl from "tweetnacl";
 import { joyRelayAccessKey } from "../paths";
@@ -145,11 +145,20 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
   // Carry the machineKey forward: ~/.joy/env.sealed is sealed under it, and a
   // fresh key on every re-pair made the store unreadable for good — every
   // later spawn silently lost its provider keys (#117).
+  // env.sealed is ONE file per machine while credentials are per relay, so
+  // the key must be machine-wide: this relay's previous access.key first,
+  // else any sibling relay's (pairing a second relay used to mint a new key
+  // and make the store unreadable the moment that relay was selected).
   let machineKey = b64(new Uint8Array(randomBytes(32)));
-  try {
-    const prev = JSON.parse(readFileSync(join(credsDir, "access.key"), "utf8")) as { encryption?: { machineKey?: string } };
-    if (typeof prev.encryption?.machineKey === "string" && prev.encryption.machineKey) machineKey = prev.encryption.machineKey;
-  } catch { /* first pairing */ }
+  const readKey = (file: string): string | null => {
+    try {
+      const prev = JSON.parse(readFileSync(file, "utf8")) as { encryption?: { machineKey?: string } };
+      return typeof prev.encryption?.machineKey === "string" && prev.encryption.machineKey ? prev.encryption.machineKey : null;
+    } catch { return null; }
+  };
+  const inherited = readKey(join(credsDir, "access.key"))
+    ?? (() => { try { for (const d of readdirSync(join(credsDir, ".."))) { const k = readKey(join(credsDir, "..", d, "access.key")); if (k) return k; } } catch { /* no relays dir yet */ } return null; })();
+  if (inherited) machineKey = inherited;
   for (const f of ["access.key", "settings.json", "account.secret", "perimeter.key"]) {
     const p = join(credsDir, f);
     if (existsSync(p)) renameSync(p, p + ".replaced");
