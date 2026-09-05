@@ -351,6 +351,7 @@ export class OpencodeSession implements AgentSession {
     // (Astra's review of 6229b647, #67).
     const advance = () => {
       if (status === "cancelled") return;
+      if (this.#relay?.outboundPersistDegraded) return; // records only in RAM: hold the checkpoint
       const last = this.#norm?.lastMessageId;
       if (last && last !== this.#deliveredThrough) {
         this.#deliveredThrough = last;
@@ -451,7 +452,7 @@ export class OpencodeSession implements AgentSession {
           completedThrough = mid;
         }
       }
-      if (completedThrough) {
+      if (completedThrough && !this.#relay?.outboundPersistDegraded) {
         this.#deliveredThrough = completedThrough;
         this.#persistRecord();
       }

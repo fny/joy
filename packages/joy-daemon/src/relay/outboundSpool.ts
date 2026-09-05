@@ -67,9 +67,11 @@ export class OutboundSpool {
     }
   }
 
-  /** Outputs kept per local session before the oldest are dropped: a session
-   *  the relay refuses (event budget) or a day-long outage must not grow the
-   *  file without bound. Terminals are never dropped. */
+  /** Pending outputs per local session above which add() reports the spool
+   *  as degraded — a backpressure signal that holds adapter checkpoints —
+   *  instead of evicting (an evicted record may already be covered by a
+   *  checkpoint, so eviction was silent data loss; Astra, a07c43e2). Nothing
+   *  is dropped: the entries stay on disk and in the sender's queue. */
   static readonly MAX_OUTPUTS_PER_SESSION = 2_000;
 
   /** Persist synchronously (tmp + rename) — the caller relies on the record
@@ -92,15 +94,23 @@ export class OutboundSpool {
    *  their checkpoints) rather than assume durability. */
   add(entry: SpoolEntry): boolean {
     this.#entries.push(entry);
-    if (entry.kind === "output") {
-      const mine = this.#entries.filter((e) => e.kind === "output" && e.localId === entry.localId);
-      if (mine.length > OutboundSpool.MAX_OUTPUTS_PER_SESSION) {
-        const drop = new Set(mine.slice(0, mine.length - OutboundSpool.MAX_OUTPUTS_PER_SESSION).map((e) => e.id));
-        this.#entries = this.#entries.filter((e) => !drop.has(e.id));
-        process.stderr.write(`[v2-spool] ${entry.localId}: over ${OutboundSpool.MAX_OUTPUTS_PER_SESSION} pending outputs — dropped ${drop.size} oldest\n`);
+    const saved = this.#save();
+    if (entry.kind === "output" && this.pendingOutputs(entry.localId) > OutboundSpool.MAX_OUTPUTS_PER_SESSION) {
+      if (!this.#overflowNoted.has(entry.localId)) {
+        this.#overflowNoted.add(entry.localId);
+        process.stderr.write(`[v2-spool] ${entry.localId}: over ${OutboundSpool.MAX_OUTPUTS_PER_SESSION} pending outputs — reporting degraded until the backlog drains\n`);
       }
+      return false;
     }
-    return this.#save();
+    return saved;
+  }
+  #overflowNoted = new Set<string>();
+  /** True when some session's backlog is over the cap (see add). */
+  overflowing(): boolean {
+    const counts = new Map<string, number>();
+    for (const e of this.#entries) if (e.kind === "output") counts.set(e.localId, (counts.get(e.localId) ?? 0) + 1);
+    for (const [id, n] of counts) if (n > OutboundSpool.MAX_OUTPUTS_PER_SESSION) return true; else this.#overflowNoted.delete(id);
+    return false;
   }
 
   remove(id: string): void {

@@ -805,8 +805,19 @@ export class RelaySession {
    *  queue there is nothing to wait for: the receipt is delivered at once
    *  (or held until the Session registers its sink on attach). */
   stampReceiptOnLastQueued(receipt: { uuid: string; turn: string }): void {
-    if (this.receiptSink) this.receiptSink(receipt);
-    else this.pendingReceipts.push(receipt);
+    // While the lane's spool cannot persist, a receipt would let the adapter
+    // checkpoint past records that exist only in RAM (Astra, a07c43e2): hold
+    // it; setOutboundPersistDegraded(false) flushes every holder.
+    if (this.receiptSink && !outboundDegraded) this.receiptSink(receipt);
+    else { this.pendingReceipts.push(receipt); receiptHolders.add(this); }
+  }
+
+  /** Deliver receipts held while persistence was degraded. */
+  flushHeldReceipts(): void {
+    if (!this.receiptSink || outboundDegraded) return;
+    const pending = this.pendingReceipts.splice(0);
+    for (const r of pending) this.receiptSink(r);
+    receiptHolders.delete(this);
   }
 
   /** Session registers the receipts writer here (attachRelay). Flushes any
@@ -1031,10 +1042,12 @@ export type RecordSink = (localSessionId: string, wire: WireRecord, localId?: st
 let recordSink: RecordSink | null = null;
 export function setRecordSink(sink: RecordSink | null): void { recordSink = sink; }
 let outboundDegraded = false;
+const receiptHolders = new Set<RelaySession>();
 /** The lane reports its spool's health here (see RelaySession.outboundPersistDegraded). */
 export function setOutboundPersistDegraded(v: boolean): void {
   if (v !== outboundDegraded) process.stderr.write(`[relay] outbound persistence ${v ? "DEGRADED — adapter checkpoints held" : "restored"}\n`);
   outboundDegraded = v;
+  if (!v) for (const rs of [...receiptHolders]) rs.flushHeldReceipts();
 }
 
 /** Build the session card holder for a local session. Purely local: the

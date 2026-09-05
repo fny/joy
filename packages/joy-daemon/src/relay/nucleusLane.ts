@@ -353,9 +353,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   /** POST one spooled output until the relay acks it. Turn-scoped while its
    *  turn is still ours; otherwise (turn ended, daemon restarted) session-
    *  scoped — the chat is per session, the content still lands. */
-  async function postOutput(entry: SpooledOutput): Promise<void> {
+  /** Put an output on its session's ordered chain — once. Ownership is taken
+   *  HERE, at schedule time, so a replay pass never queues a second sender
+   *  for an entry that is waiting behind a blocked head (Astra, a07c43e2). */
+  function scheduleOutput(entry: SpooledOutput): void {
     if (posting.has(entry.id)) return;
     posting.add(entry.id);
+    const chain = (recordChains.get(entry.localId) ?? Promise.resolve()).then(() => postOutput(entry));
+    recordChains.set(entry.localId, chain);
+  }
+  async function postOutput(entry: SpooledOutput): Promise<void> {
     try {
       let delay = 1_000;
       while (!stopped) {
@@ -423,8 +430,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // transcript checkpoint until the spool persists again.
     setOutboundPersistDegraded(!spool.add(entry));
     if (!v2SessionId) return; // not bound yet: spool.bind() flushes it when the card exists
-    const chain = (recordChains.get(localId) ?? Promise.resolve()).then(() => postOutput(entry));
-    recordChains.set(localId, chain);
+    if (replayPending) return; // boot: replaySpool schedules everything in spool order, this included
+    scheduleOutput(entry);
   }
   /** Records spooled before a session was bound: give them their relay id
    *  and send them (in order) now that a card exists. */
@@ -436,10 +443,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // stamp here and let it do the sending.
     if (replayPending) return;
     log(`${localId}: flushing ${hits.length} record(s) spooled before bind`);
-    for (const e of hits) {
-      const chain = (recordChains.get(localId) ?? Promise.resolve()).then(() => postOutput(e));
-      recordChains.set(localId, chain);
-    }
+    for (const e of hits) scheduleOutput(e);
   }
   const drainRecords = (localId: string): Promise<void> => recordChains.get(localId) ?? Promise.resolve();
   setRecordSink(forwardRecord);
@@ -454,6 +458,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     const entry: SpooledTerminal = { kind: "terminal", id: randomUUID(), v2SessionId: boundByLocal.get(localId) ?? "", localId, turnId, body, at: Date.now() };
     setOutboundPersistDegraded(!spool.add(entry));
     posting.add(entry.id);
+    let handedOff = false;
     try {
       await drainRecords(localId);
       const attempt = async (): Promise<boolean> => {
@@ -480,7 +485,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2);
       }
       log(`terminal for turn ${turnId.slice(0, 8)} still unacked after 60s — retrying in the background`);
-      posting.add(entry.id);
+      handedOff = true; // the background worker owns the entry from here
       void (async () => {
         try {
           while (!stopped) {
@@ -491,7 +496,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         } finally { posting.delete(entry.id); }
       })();
     } finally {
-      posting.delete(entry.id);
+      if (!handedOff) posting.delete(entry.id);
     }
   }
 
@@ -522,6 +527,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  answer). Runs after every (re)acquire and on every sweep tick, so a
    *  deferred reconcile or a lease-fenced retry is picked up again. */
   async function replaySpool(): Promise<void> {
+    try { await replaySpoolInner(); } finally { replayPending = false; }
+  }
+  async function replaySpoolInner(): Promise<void> {
     const entries = spool.all().filter((e) => !posting.has(e.id));
     if (entries.length && replayPending) log(`replaying ${entries.length} spooled record(s)`);
     for (const e of entries) {
@@ -538,8 +546,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           } else continue;
         }
         if (!activeTurns.has(e.turnId ?? "")) e.turnId = null;
-        const chain = (recordChains.get(e.localId) ?? Promise.resolve()).then(() => postOutput(e));
-        recordChains.set(e.localId, chain);
+        scheduleOutput(e);
         continue;
       }
       // A saved terminal: after its session's pending outputs. Entries from
@@ -552,7 +559,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       });
       recordChains.set(key, chain);
     }
-    replayPending = false;
   }
 
   /** Raw attachment bytes from the relay store (sealed by the sender). */
@@ -1021,8 +1027,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // later message stuck behind it (live 2026-09-03).
       if (queued?.handled === "command") {
         await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
-        await drainRecords(sess.id);
-        await postTerminal(turnId, sess.id, {
+                await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "completed", runtimeEventId: randomUUID(),
           meta: { reason: "handled_as_command" },
         }, leaseRef);
@@ -1160,8 +1165,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // Stop the REAL agent too — reporting interrupted while the agent
           // keeps burning would be a lie with a bill attached.
           try { await sess.abort(); } catch { /* pane teardown */ }
-          await drainRecords(sess.id);
-          await postTerminal(turnId, sess.id, {
+                    await postTerminal(turnId, sess.id, {
             type: "terminal", terminalState: "interrupted", runtimeEventId: randomUUID(),
             meta: { reason: "turn_cap" },
           }, leaseRef);
@@ -1172,8 +1176,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       }
 
       const terminalState = cancelRequested.has(turnId) ? "cancelled" : "completed";
-      await drainRecords(sess.id);
-      await postTerminal(turnId, sess.id, {
+            await postTerminal(turnId, sess.id, {
         type: "terminal", terminalState, runtimeEventId: randomUUID(),
       }, leaseRef);
       log(`${tag} ${terminalState}`);
@@ -1398,6 +1401,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         for (const k of [...noWorkerSeen.keys()]) if (!seen.has(k)) noWorkerSeen.delete(k);
         // Saved records nobody is retrying (a deferred reconcile, a fenced retry).
         if (spool.size) void replaySpool();
+        // Backpressure: a backlog over the cap holds adapter checkpoints until it drains.
+        if (!spool.overflowing() && spool.size < OutboundSpool.MAX_OUTPUTS_PER_SESSION) setOutboundPersistDegraded(false);
       } catch { /* next tick */ }
     }
   }
@@ -1454,6 +1459,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           await sleep(10_000 + Math.floor(Math.random() * 10_000));
           continue;
         }
+        if (replayPending && lease) void replaySpool(); // boot failed mid-way: schedule what the spool holds
         if (!announced) {
           log(`${lane} lane idle (${String((e as Error).message ?? e)}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
           announced = true;
