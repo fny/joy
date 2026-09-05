@@ -810,7 +810,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       if (session && session.status === "ended") session = undefined;
       if (session) spawning.add(localId = session.id);
       if (!session) {
+        // Choose the local id NOW and persist the intent BEFORE create(): a
+        // crash between create and the intent write left the relay's spawn
+        // command unmapped, and the retry spawned a second agent for the
+        // same request (#75). A crash mid-create leaves a half-made server
+        // under this id, which #newAgentServer retires on the retry.
+        const chosen = prior ?? randomUUID().replace(/-/g, "").slice(0, 8);
+        writeSpawnIntent(offer.commandId, chosen);
+        spawning.add(localId = chosen);
         session = await registry.create({
+          id: chosen,
           cwd: spec.cwd,
           agent: (spec.agent as AgentSession["agentFlavor"]) ?? "claude",
           model: spec.model,
@@ -828,7 +837,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           forkSession: spec.forkSession,
           extraArgs: spec.extraArgs,
         });
-        writeSpawnIntent(offer.commandId, session.id);
+        if (session.id !== chosen) writeSpawnIntent(offer.commandId, session.id); // create() returned an existing session instead
         spawning.add(localId = session.id);
       }
       // Already bound to ANOTHER relay row (an announce raced this spawn, or

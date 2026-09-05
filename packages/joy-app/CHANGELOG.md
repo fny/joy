@@ -1,3 +1,13 @@
+# Sep 5 (2) — Machine fixes: restart, kill, recovery
+
+- **Restart works on a session whose agent has died.** The first Restart of a red "detached" card used to fail and archive it. Two Restarts tapped at once no longer kill each other's replacement; restarting before the first message no longer archives the card.
+- **Killing a detached session actually kills it** — tmux server, record and card go away, instead of a silent "ok" that left a ghost to come back on the next boot.
+- **pi sessions survive a machine restart** and resume their conversation like Antigravity and Codex ones do.
+- **A dead agent is detected within a minute** even when its frozen screen still looks alive.
+- **New sessions never revive an old one by accident.** `joy run` / `joy new` and a request for a different agent, model or permission mode in a folder with a detached session start fresh; `joy run` no longer deletes someone else's conversation on the way out.
+- **Re-pairing keeps the sealed provider keys readable.** A machine re-paired with `joy auth` lost access to its `joy env` store for good.
+- Machine-side durability from the previous batch (output and turn results survive relay outages and daemon restarts). *All of the above need the updated daemon.*
+
 # Sep 5 — Wave 0 fixes
 
 - **Saving from the desktop file editor no longer corrupts the file.** The editor sent the file's contents base64-encoded without saying so, and the machine wrote that base64 text to disk — while reporting "saved". Both save paths now declare the encoding. If you saved from the editor before this fix, check those files.

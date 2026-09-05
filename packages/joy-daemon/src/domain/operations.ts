@@ -370,6 +370,7 @@ export const machineOps: MachineOp[] = [
       type: "object",
       required: ["cwd"],
       properties: {
+        forceNew: { type: "boolean", description: "Never revive a detached session in this folder — always start a new one (#41)" },
         cwd: { type: "string", description: "Working directory (created only with createDir)" },
         agent: { type: "string", enum: ["claude", "codex", "opencode", "pi", "agy"], default: "claude" },
         createDir: { type: "boolean" },
@@ -421,6 +422,7 @@ export const machineOps: MachineOp[] = [
         yolo: typeof params.yolo === "boolean" ? params.yolo : undefined,
         continue: params.continue === true,
         resume_id: typeof params.resume_id === "string" ? params.resume_id : undefined,
+        forceNew: params.forceNew === true,
         resumeLimitMb: typeof params.resume_limit_mb === "number" ? params.resume_limit_mb : undefined,
         permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
         fallbackModel: typeof params.fallbackModel === "string" ? params.fallbackModel : undefined,
@@ -664,9 +666,14 @@ export const machineOps: MachineOp[] = [
     rpcName: "joy-kill-session",
     summary: "Kill one session",
     http: { method: "DELETE", path: "/sessions/:id" },
-    handler: (registry, params) => {
+    handler: async (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
-      return { ok: session ? session.end("killed") || session.status === "ended" : false };
+      if (!session) return { ok: false };
+      // A detached session (process already gone) needs forceKill: end() is a
+      // no-op on an ended session, so the card stayed "detached", the record
+      // and tmux server survived, and the next boot resurrected it (#43).
+      if (session.status === "ended") session.forceKill(); else session.end("killed");
+      return { ok: await session.awaitArchive() || session.status === "ended" };
     },
     httpShape: (result) => {
       const ok = (result as { ok: boolean }).ok;
@@ -1326,7 +1333,7 @@ export const sessionOps: SessionOp[] = [
       // that already ended still reports success (matches the app's
       // archive flow, which treats success=false as "CLI unreachable" and
       // falls back to a server-side archive).
-      session.end("killed");
+      if (session.status === "ended") session.forceKill(); else session.end("killed"); // detached needs forceKill (#43)
       // Await the (retrying) archive POST and report its real result: a genuine
       // failure now surfaces success:false so the app runs its fallback archive
       // instead of leaving the killed session in the active list.

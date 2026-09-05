@@ -25,7 +25,7 @@ import { PI_MODELS, defaultPiModel } from "../pi/models";
 import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
-import { loadWindowRecord, saveWindowRecord, listWindowRecords } from "./windowRecord";
+import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 
@@ -170,6 +170,9 @@ export class SessionRegistry {
       if (this.relayClient) {
         try { await createRelaySession(this.relayClient, { tag: `joy-daemon-${id}`, cwd, id }).archive(); } catch { /* best effort */ }
       }
+      // The card is archived; a surviving record would resurrect an agy or
+      // opencode session as running against it on the next boot (#52).
+      deleteWindowRecord(id);
       throw e;
     }
     for (const q of carried) next.enqueue(q.text, { id: q.id, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible });
@@ -310,9 +313,16 @@ export class SessionRegistry {
     // else the basename of the transcript it's tailing (= the Claude session uuid).
     const sessionIdentity = (s: AgentSession): string | undefined =>
       s.claudeSessionId ?? (s.transcriptPath ? basename(s.transcriptPath, ".jsonl") : undefined);
-    const inCwd = [...this.#sessions.values()].filter((s) => resolve(s.cwd) === target);
+    // Same folder AND same harness: a detached Claude must never answer a
+    // request for a codex/pi/agy session there (#44).
+    const flavor = opts.agent ?? "claude";
+    const inCwd = [...this.#sessions.values()].filter((s) => resolve(s.cwd) === target && s.agentFlavor === flavor);
     const liveInCwd = inCwd.find((s) => s.status === "active" || s.status === "starting");
-    const detachedInCwd = inCwd.find((s) => s.status === "ended" && s.endReason === "process_exited");
+    // Auto-revive only when the caller expressed no preference: an explicit
+    // model / permission mode / extra args is a request for THAT launch, not
+    // for whatever the dead session had.
+    const explicit = !!(opts.model || opts.permissionMode || opts.extraArgs || opts.effort);
+    const detachedInCwd = explicit ? undefined : inCwd.find((s) => s.status === "ended" && s.endReason === "process_exited");
 
     // A FORK is never "the one already here": --fork-session reads the
     // transcript once and continues under a new id, so a live match must not
@@ -817,7 +827,19 @@ export class SessionRegistry {
     return session;
   }
 
+  /** In-flight restarts by id: a second Restart (double tap, tunnel retry)
+   *  while the first is mid-relaunch used to find no session, fall back to
+   *  the record, hit "duplicate session" on the first one's fresh server,
+   *  kill it and archive the card (#45). It now joins the first. */
+  #restarting = new Map<string, Promise<AgentSession>>();
   async restart(opts: { id: string; cwd?: string }): Promise<AgentSession> {
+    const pending = this.#restarting.get(opts.id);
+    if (pending) return pending;
+    const run = this.#restartInner(opts).finally(() => { this.#restarting.delete(opts.id); });
+    this.#restarting.set(opts.id, run);
+    return run;
+  }
+  async #restartInner(opts: { id: string; cwd?: string }): Promise<AgentSession> {
     const existing = this.get(opts.id);
     // A daemon-forgotten session (window already gone after a daemon restart) has
     // no Session object — fall back to its persisted record so we can resume the
@@ -892,8 +914,15 @@ export class SessionRegistry {
     // in the cwd, so with several sessions in one directory it restarts the
     // WRONG one. `--continue` is only a last resort when we have nothing but a
     // cwd (recovery after the daemon lost the session entirely).
+    // A fresh session's transcript path is pinned before Claude writes the
+    // file (first turn). Resuming that uuid before any turn ran threw
+    // "Session not found" and the failed replacement archived the card —
+    // exactly when people restart (trust prompt, login screen) (#113). Only
+    // a transcript that exists is a conversation to resume; otherwise the
+    // replacement starts fresh under the same id.
+    const tp = existing?.transcriptPath;
     const resumeId = existing?.claudeSessionId
-      ?? (existing?.transcriptPath ? basename(existing.transcriptPath, ".jsonl") : undefined)
+      ?? (tp && existsSync(tp) ? basename(tp, ".jsonl") : undefined)
       ?? rec?.claudeSessionId;
     // Tear the process down WITHOUT archiving the card or deleting the
     // record, then come back under the SAME id. forceKill() archived the
@@ -1104,6 +1133,15 @@ export class SessionRegistry {
    *  other windows beside it). Spawn, never control — the control client
    *  attaches to the session this creates. */
   #newAgentServer(drv: TmuxDriver, session: string, cwd: string): boolean {
+    // A detached session (Claude exited, window sat at the shell) keeps its
+    // per-session server alive; end("restart") on an already-ended session is
+    // a no-op, so the restart's new-session failed with "duplicate session",
+    // abortCreate killed the server and the card was archived — every first
+    // Restart of a detached card (#42). Retire the stale server first.
+    if (drv.runSync("has-session", "-t", session).ok) {
+      process.stderr.write(`[create] ${session}: retiring stale per-session server before relaunch\n`);
+      drv.runSync("kill-server");
+    }
     if (!drv.runSync("new-session", "-d", "-s", session, "-n", TMUX_AGENT_WINDOW, "-x", "100", "-y", "40", "-c", cwd).ok) return false;
     drv.runSync("set-window-option", "-t", `${session}:${TMUX_AGENT_WINDOW}`, "automatic-rename", "off");
     drv.runSync("set-hook", "-t", session, "client-attached", CLIENT_ATTACHED_HOOK);
@@ -1168,6 +1206,22 @@ export class SessionRegistry {
     // Antigravity: headless, one process per turn, so there is nothing that
     // can have died — a record with a conversation id IS the session. Recreate
     // it live; the next prompt resumes the conversation.
+    // pi: the process died with the daemon, but `pi --session-id` resumes the
+    // conversation; without this loop a pi record stayed on disk forever and
+    // its card read "running" while every send answered session_not_found (#47).
+    for (const rec of listWindowRecords()) {
+      if (rec.agent !== "pi" || !rec.id || this.#sessions.has(rec.id)) continue;
+      if (!existsSync(rec.launchCwd)) continue;
+      const session = new PiSession({
+        id: rec.id, cwd: rec.launchCwd,
+        model: rec.piSettings?.model,
+        piSessionId: rec.piSettings?.sessionId,
+        status: "starting", startedAt: Date.now(),
+      }, this.#sessionDeps());
+      this.#sessions.set(rec.id, session);
+      this.#attachRelayAsync(session, () => session.beginWatching());
+      process.stderr.write(`[recover] pi ${rec.id} resumed session=${rec.piSettings?.sessionId ?? "(none yet)"}\n`);
+    }
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "agy" || !rec.id || this.#sessions.has(rec.id)) continue;
       if (!existsSync(rec.launchCwd)) continue;
