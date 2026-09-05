@@ -988,9 +988,15 @@ class Sync {
         const v2ctx = this.v2ReadCtx(sessionId);
         if (!v2ctx) throw new Error(`Failed to fetch initial page for ${sessionId}: no v2 link`);
         for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
-            let data: { messages: ApiMessage[]; hasMore: boolean; lifecycle: V2Lifecycle[] };
+            let data: { messages: ApiMessage[]; hasMore: boolean; unopenable?: number; lifecycle: V2Lifecycle[] };
             try {
                 data = await v2MessagesBefore({ ...v2ctx, beforeSeq });
+                // Same rule as the forward path (#3): with no key yet, a page
+                // whose sealed rows did not open must not anchor history —
+                // throwing here retries page 0 once the card's envelope lands.
+                if ((data.unopenable ?? 0) > 0 && !v2ctx.key) {
+                    throw new Error(`Initial page of ${sessionId}: ${data.unopenable} sealed row(s) and no content key yet — retry after the card lands`);
+                }
             } catch (e) {
                 if (page === 0) throw e;
                 break; // keep what we have — older pages are a bonus
@@ -1092,9 +1098,19 @@ class Sync {
             // the session's first output, and advancing past them lost them
             // until "Reload chat" (issue #3). Stop here; the invalidate that
             // follows the sessions refresh retries with the key.
-            if ((data.unopenable ?? 0) > 0 && !v2ctx.key) {
-                throw new Error(`Forward sync of ${sessionId}: ${data.unopenable} sealed row(s) and no content key yet — retry after the card lands`);
+            // With a key PRESENT the rows may be sealed under a newer key (the
+            // card's envelope was re-stamped) — retry a bounded number of times
+            // (v2ReadCtx re-reads the card each attempt), then advance and say
+            // so loudly rather than block the session forever on a corrupt row.
+            if ((data.unopenable ?? 0) > 0) {
+                const strikes = (this.unopenableStrikes.get(sessionId) ?? 0) + 1;
+                if (!v2ctx.key || strikes <= Sync.MAX_UNOPENABLE_RETRIES) {
+                    this.unopenableStrikes.set(sessionId, strikes);
+                    throw new Error(`Forward sync of ${sessionId}: ${data.unopenable} sealed row(s) could not be opened (${v2ctx.key ? `key present, attempt ${strikes}` : 'no content key yet'}) — retrying`);
+                }
+                log.log(`💬 fetchForwardSince: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries — advancing past them`);
             }
+            this.unopenableStrikes.delete(sessionId);
 
             await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
             this.applyLifecycle(sessionId, data.lifecycle);
@@ -1292,6 +1308,11 @@ class Sync {
         if (!bytes) throw new Error('attachment does not open under the session key');
         return bytes;
     }
+
+    /** Consecutive forward-sync attempts that met sealed rows they could not
+     *  open with a key present (see fetchForwardSince). */
+    private unopenableStrikes = new Map<string, number>();
+    private static readonly MAX_UNOPENABLE_RETRIES = 5;
 
     private v2ReadCtx(sessionId: string): { base: string; v2SessionId: string; key: Uint8Array | null; token: string } | null {
         const session = storage.getState().sessions[sessionId];
