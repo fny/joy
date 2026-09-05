@@ -51,15 +51,17 @@ export function loadCheckpoint(id: string, baseDir = joyStateDir()): CodexCheckp
   } catch { return empty(); }
 }
 
-export function saveCheckpoint(id: string, cp: CodexCheckpoint, baseDir = joyStateDir()): void {
+export function saveCheckpoint(id: string, cp: CodexCheckpoint, baseDir = joyStateDir()): boolean {
   try {
     mkdirSync(baseDir, { recursive: true });
     const p = fileFor(id, baseDir);
     const tmp = `${p}.tmp`;
     writeFileSync(tmp, JSON.stringify(cp));
     renameSync(tmp, p);
+    return true;
   } catch (e) {
     process.stderr.write(`[codex-checkpoint] save failed for ${id}: ${e}\n`);
+    return false;
   }
 }
 
