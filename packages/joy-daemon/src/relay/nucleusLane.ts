@@ -265,6 +265,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // Turns we can't run (no local session / undecodable) — logged once, not
   // per re-offer, so a stranded turn doesn't spam the journal every claim.
   const notedSkips = new Set<string>();
+  // Turns we looked at and could not run yet (no local runtime): re-check
+  // them after a bounded delay rather than on every claim — and never NEVER
+  // (a permanent blacklist would strand a prompt whose session comes back;
+  // Astra's review of #114).
+  const skipUntil = new Map<string, number>();
+  const SKIP_RECHECK_MS = 15_000;
   // spawn commandIds abandoned for good (e.g. directory missing and the
   // caller did not opt into creation) — never re-attempted, so the lane does
   // not hot-loop a permanently-failing spawn.
@@ -683,8 +689,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // fabricated failure. The lane logs once; the human decides.
         if (!notedSkips.has(turnId)) {
           notedSkips.add(turnId);
-          log(`turn ${turnId.slice(0, 8)}: no local session for v2 ${offer.sessionId.slice(0, 8)} — left queued`);
+          log(`turn ${turnId.slice(0, 8)}: no local session for v2 ${offer.sessionId.slice(0, 8)} — left queued, rechecking every ${SKIP_RECHECK_MS / 1000}s`);
         }
+        skipUntil.set(turnId, Date.now() + SKIP_RECHECK_MS);
         return;
       }
       // `sess` is re-resolved by local id at every poll below: a restart
@@ -1143,7 +1150,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // A turn we already looked at and left queued (no local runtime,
             // undecodable) comes back on every claim: it is not new work, and
             // treating it as such skipped the pause below — a hot loop (#114).
-            if (notedSkips.has(offer.turnId!)) continue;
+            const until = skipUntil.get(offer.turnId!);
+            if (until !== undefined) { if (Date.now() < until) continue; skipUntil.delete(offer.turnId!); }
+            if (inFlight.has(offer.turnId!)) continue; // still handling the previous offer of it
             void runTurn(offer, leaseRef); anyNew = true;
           }
         }
