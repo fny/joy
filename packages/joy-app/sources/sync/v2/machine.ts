@@ -44,9 +44,12 @@ export const machineReadFile = (ctx: MachineCtx, path: string) =>
     j<{ success: boolean; content?: string; error?: string }>(ctx, 'GET',
         `/v2/sessions/${ctx.localSessionId}/files/content?path=${encodeURIComponent(path)}`);
 
-export const machineWriteFile = (ctx: MachineCtx, path: string, content: string, expectedHash?: string) =>
+/** `encoding` MUST match how `content` is encoded: the daemon decodes as utf8
+ *  unless told 'base64'. The editor sent base64 without saying so and files
+ *  were overwritten with their own base64 text (issue #93). */
+export const machineWriteFile = (ctx: MachineCtx, path: string, content: string, expectedHash?: string, encoding: 'utf8' | 'base64' = 'utf8') =>
     j<{ success: boolean; hash?: string; error?: string }>(ctx, 'PUT',
-        `/v2/sessions/${ctx.localSessionId}/files/content`, { path, content, ...(expectedHash ? { expectedHash } : {}) });
+        `/v2/sessions/${ctx.localSessionId}/files/content`, { path, content, encoding, ...(expectedHash ? { expectedHash } : {}) });
 
 export const machineDeleteFile = (ctx: MachineCtx, path: string) =>
     j<{ success: boolean; error?: string }>(ctx, 'DELETE',

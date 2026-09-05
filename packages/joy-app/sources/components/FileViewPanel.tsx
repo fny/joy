@@ -271,6 +271,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                 filePath,
                 base64,
                 fileState.originalHash,
+                'base64',
             );
 
             if (!response.success) {
@@ -312,7 +313,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
             const currentHash = serverContent ? await computeSHA256(serverContent) : undefined;
 
             const base64 = encodeStringToBase64(editContent);
-            const response = await sessionWriteFile(sessionId, filePath, base64, currentHash);
+            const response = await sessionWriteFile(sessionId, filePath, base64, currentHash, 'base64');
 
             if (!response.success) {
                 Modal.alert(t('common.error'), response.error || t('files.failedToSave'));
