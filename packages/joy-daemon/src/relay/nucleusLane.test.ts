@@ -6,6 +6,13 @@ import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import { startNucleusLane, decodeRecord, type NucleusLaneHandle } from "./nucleusLane";
 import { RelaySession, encodeTextEvent, encodeToolCallStart } from "./relay";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+// The lane persists its outbound spool and spawn intents under joyStateDir():
+// point it at a throwaway dir so a test run never writes into (or replays
+// from) the live daemon's state — one did, 2026-09-05.
+process.env.JOY_HOME_DIR = mkdtempSync(joinPath(tmpdir(), "joy-lane-test-"));
 
 /** What an adapter holds: a RelaySession whose send() lands in the lane's record sink. */
 const adapterFor = (localId: string) => new RelaySession({ client: { creds: { machineId: "m" } } as any, relaySessionId: localId, metadata: {} });
