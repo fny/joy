@@ -1303,8 +1303,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // abort whatever is actually running.
       const ctx = activeTurns.get(offer.targetTurnId);
       if (ctx?.queuedId) { try { session.cancelQueued(ctx.queuedId); } catch { /* stub adapters */ } }
-      try { await session.abort(); } catch { /* pane may be mid-teardown */ }
-      log(`cancel ${offer.targetTurnId.slice(0, 8)}: queued plucked + abort sent`);
+      let aborted = false;
+      let why = "";
+      try { const r = await session.abort(); aborted = r.ok !== false; why = r.error ?? ""; } catch (e) { why = e instanceof Error ? e.message : String(e); }
+      if (aborted) {
+        log(`cancel ${offer.targetTurnId.slice(0, 8)}: queued plucked + abort sent`);
+      } else {
+        // The interrupt did not land: leave this cancel UNHANDLED so the relay's
+        // re-offer retries it instead of the log claiming success (#8).
+        handledCancels.delete(offer.targetTurnId);
+        log(`cancel ${offer.targetTurnId.slice(0, 8)}: abort failed (${why}) — will retry on the next offer`);
+      }
     }
     // The running turn loop observes busy() falling and terminalizes with
     // 'cancelled' (cancelRequested). A cancel for a turn we are NOT running
