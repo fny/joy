@@ -824,8 +824,10 @@ export class RelaySession {
    *  receipts stamped before registration. */
   setReceiptSink(sink: (r: { uuid: string; turn: string }) => void): void {
     this.receiptSink = sink;
-    const pending = this.pendingReceipts.splice(0);
-    for (const r of pending) sink(r);
+    // Same guarded path as restoration: receipts held because persistence
+    // was degraded stay held until it is restored (Astra, 478a7a83).
+    if (this.pendingReceipts.length) receiptHolders.add(this);
+    this.flushHeldReceipts();
   }
 
   /** True while the lane's outbound spool cannot persist (disk full, a

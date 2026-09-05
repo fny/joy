@@ -346,6 +346,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const posting = new Set<string>();
   // Sessions whose relay event budget is exhausted: logged once, outputs dropped.
   const budgetExhausted = new Set<string>();
+  // Latched when a spool save fails; cleared only when a resave puts every
+  // in-memory entry on disk (or they all ack and the empty spool saves). A
+  // small backlog is not evidence of persistence (Astra, 478a7a83).
+  let persistFailed = false;
+  /** Degraded = persistence failed OR some session's backlog is over the cap. */
+  const publishSpoolHealth = () => setOutboundPersistDegraded(persistFailed || spool.overflowing());
+  // Every save writes the WHOLE array, so one successful add() is a flush
+  // that covers every in-memory entry — that, or the sweep's resave, ends
+  // the latch. A small backlog never does.
+  const noteAdd = (r: { saved: boolean; overflow: boolean }) => { persistFailed = !r.saved; publishSpoolHealth(); };
   // True from lease acquire until replaySpool has scheduled everything the
   // spool held, in order. While set, flushUnbound only stamps ids (replay is
   // the single ordered scheduler at boot).
@@ -428,7 +438,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // Durable before anything else — adapters checkpoint on return. When the
     // disk refuses, say so: RelaySession.outboundPersistDegraded holds the
     // transcript checkpoint until the spool persists again.
-    setOutboundPersistDegraded(!spool.add(entry));
+    noteAdd(spool.add(entry));
     if (!v2SessionId) return; // not bound yet: spool.bind() flushes it when the card exists
     if (replayPending) return; // boot: replaySpool schedules everything in spool order, this included
     scheduleOutput(entry);
@@ -456,7 +466,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  restart hands the saved outcome to replaySpool. */
   async function postTerminal(turnId: string, localId: string, body: Record<string, unknown>, leaseRef: Lease): Promise<void> {
     const entry: SpooledTerminal = { kind: "terminal", id: randomUUID(), v2SessionId: boundByLocal.get(localId) ?? "", localId, turnId, body, at: Date.now() };
-    setOutboundPersistDegraded(!spool.add(entry));
+    noteAdd(spool.add(entry));
     posting.add(entry.id);
     let handedOff = false;
     try {
@@ -1401,8 +1411,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         for (const k of [...noWorkerSeen.keys()]) if (!seen.has(k)) noWorkerSeen.delete(k);
         // Saved records nobody is retrying (a deferred reconcile, a fenced retry).
         if (spool.size) void replaySpool();
-        // Backpressure: a backlog over the cap holds adapter checkpoints until it drains.
-        if (!spool.overflowing() && spool.size < OutboundSpool.MAX_OUTPUTS_PER_SESSION) setOutboundPersistDegraded(false);
+        // Persistence health: a failed save stays latched until a resave puts
+        // every pending entry on disk; the overflow half clears when every
+        // session's backlog is back under the cap.
+        if (persistFailed && spool.resave()) { persistFailed = false; log("spool persistence restored"); }
+        publishSpoolHealth();
       } catch { /* next tick */ }
     }
   }
@@ -1434,6 +1447,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             const until = skipUntil.get(offer.turnId!);
             if (until !== undefined) { if (Date.now() < until) continue; skipUntil.delete(offer.turnId!); }
             if (inFlight.has(offer.turnId!)) continue; // still handling the previous offer of it
+            // Backpressure: a session whose output backlog is over the cap
+            // gets no new prompt until it drains — producing more output
+            // that cannot leave the machine is the one thing that grows the
+            // spool without bound (Astra, 478a7a83).
+            const gatedLocal = bound.get(offer.sessionId);
+            if (gatedLocal && spool.pendingOutputs(gatedLocal) > OutboundSpool.MAX_OUTPUTS_PER_SESSION) {
+              if (!notedSkips.has(offer.turnId!)) { notedSkips.add(offer.turnId!); log(`turn ${offer.turnId!.slice(0, 8)}: ${gatedLocal} has ${spool.pendingOutputs(gatedLocal)} undelivered outputs — dispatch paused until they drain`); }
+              skipUntil.set(offer.turnId!, Date.now() + SKIP_RECHECK_MS);
+              continue;
+            }
             void runTurn(offer, leaseRef); anyNew = true;
           }
         }

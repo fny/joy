@@ -89,28 +89,31 @@ export class OutboundSpool {
     }
   }
 
-  /** Append and persist. Returns false when the entry is only in memory —
-   *  callers must then treat outbound persistence as degraded (adapters hold
-   *  their checkpoints) rather than assume durability. */
-  add(entry: SpoolEntry): boolean {
+  /** Append and persist. `saved` false = the entry is only in memory (the
+   *  caller latches persistence as failed until resave() succeeds);
+   *  `overflow` = this session's backlog is over the cap (backpressure). */
+  add(entry: SpoolEntry): { saved: boolean; overflow: boolean } {
     this.#entries.push(entry);
     const saved = this.#save();
-    if (entry.kind === "output" && this.pendingOutputs(entry.localId) > OutboundSpool.MAX_OUTPUTS_PER_SESSION) {
-      if (!this.#overflowNoted.has(entry.localId)) {
-        this.#overflowNoted.add(entry.localId);
-        process.stderr.write(`[v2-spool] ${entry.localId}: over ${OutboundSpool.MAX_OUTPUTS_PER_SESSION} pending outputs — reporting degraded until the backlog drains\n`);
-      }
-      return false;
+    const overflow = entry.kind === "output" && this.pendingOutputs(entry.localId) > OutboundSpool.MAX_OUTPUTS_PER_SESSION;
+    if (overflow && !this.#overflowNoted.has(entry.localId)) {
+      this.#overflowNoted.add(entry.localId);
+      process.stderr.write(`[v2-spool] ${entry.localId}: over ${OutboundSpool.MAX_OUTPUTS_PER_SESSION} pending outputs — dispatch paused and checkpoints held until the backlog drains\n`);
     }
-    return saved;
+    return { saved, overflow };
   }
   #overflowNoted = new Set<string>();
-  /** True when some session's backlog is over the cap (see add). */
+  /** Re-persist everything in memory. True only when the disk now holds every
+   *  entry — the only thing that ends a latched persistence failure. */
+  resave(): boolean { return this.#save(); }
+  /** True when ANY session's backlog is over the cap. */
   overflowing(): boolean {
     const counts = new Map<string, number>();
     for (const e of this.#entries) if (e.kind === "output") counts.set(e.localId, (counts.get(e.localId) ?? 0) + 1);
-    for (const [id, n] of counts) if (n > OutboundSpool.MAX_OUTPUTS_PER_SESSION) return true; else this.#overflowNoted.delete(id);
-    return false;
+    let any = false;
+    for (const [id, n] of counts) { if (n > OutboundSpool.MAX_OUTPUTS_PER_SESSION) any = true; else this.#overflowNoted.delete(id); }
+    for (const id of [...this.#overflowNoted]) if (!counts.has(id)) this.#overflowNoted.delete(id);
+    return any;
   }
 
   remove(id: string): void {
