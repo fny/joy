@@ -994,8 +994,15 @@ class Sync {
                 // Same rule as the forward path (#3): with no key yet, a page
                 // whose sealed rows did not open must not anchor history —
                 // throwing here retries page 0 once the card's envelope lands.
-                if ((data.unopenable ?? 0) > 0 && !v2ctx.key) {
-                    throw new Error(`Initial page of ${sessionId}: ${data.unopenable} sealed row(s) and no content key yet — retry after the card lands`);
+                if ((data.unopenable ?? 0) > 0) {
+                    await this.sessionsSync.invalidateAndAwait().catch(() => { /* retry anyway */ });
+                    const strikes = v2ctx.key ? (this.unopenableStrikes.get(sessionId) ?? 0) + 1 : 0;
+                    if (!v2ctx.key || strikes <= Sync.MAX_UNOPENABLE_RETRIES) {
+                        this.unopenableStrikes.set(sessionId, strikes);
+                        throw new Error(`Initial page of ${sessionId}: ${data.unopenable} sealed row(s) could not be opened (${v2ctx.key ? `key present, attempt ${strikes}` : 'no content key yet'}) — retrying`);
+                    }
+                    log.log(`💬 fetchInitialLatestPage: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries — anchoring past them (#128)`);
+                    this.unopenableStrikes.delete(sessionId);
                 }
             } catch (e) {
                 if (page === 0) throw e;
@@ -1103,12 +1110,19 @@ class Sync {
             // (v2ReadCtx re-reads the card each attempt), then advance and say
             // so loudly rather than block the session forever on a corrupt row.
             if ((data.unopenable ?? 0) > 0) {
-                const strikes = (this.unopenableStrikes.get(sessionId) ?? 0) + 1;
+                // Pull the card first so the retry reads the newest envelope,
+                // then retry. Only PRESENT-key failures spend the budget: a
+                // no-key wait must not exhaust the retries a stale key needs.
+                await this.sessionsSync.invalidateAndAwait().catch(() => { /* retry anyway */ });
+                const strikes = v2ctx.key ? (this.unopenableStrikes.get(sessionId) ?? 0) + 1 : 0;
                 if (!v2ctx.key || strikes <= Sync.MAX_UNOPENABLE_RETRIES) {
                     this.unopenableStrikes.set(sessionId, strikes);
                     throw new Error(`Forward sync of ${sessionId}: ${data.unopenable} sealed row(s) could not be opened (${v2ctx.key ? `key present, attempt ${strikes}` : 'no content key yet'}) — retrying`);
                 }
-                log.log(`💬 fetchForwardSince: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries — advancing past them`);
+                // Still unreadable with the freshest key after every retry:
+                // advance rather than wedge the session. Recoverable gaps are
+                // issue #128.
+                log.log(`💬 fetchForwardSince: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries with the current key — advancing past them (#128)`);
             }
             this.unopenableStrikes.delete(sessionId);
 
