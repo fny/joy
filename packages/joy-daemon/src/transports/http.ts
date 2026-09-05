@@ -97,7 +97,12 @@ export function startHttpServer(opts: {
 
   const server = createServer(async (req, res) => {
     const method = (req.method ?? "GET") as string;
-    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+    // A malformed request target (`GET http://[ HTTP/1.1`) made `new URL`
+    // throw before the try below — an unhandled rejection that killed the
+    // whole daemon, from an unauthenticated local client (issue #80).
+    let url: URL;
+    try { url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`); }
+    catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "bad request target" })); return; }
     const origin = (req.headers.origin as string | undefined) ?? "";
 
     const corsHeaders: Record<string, string> = {
