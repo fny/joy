@@ -1072,7 +1072,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // The relay refuses the start (cancelled): a /joy-prompt may have
             // enqueued its reinjection already — pluck it, then say cancelled.
             const rein = (queued as { reinjectionId?: string }).reinjectionId;
-            if (rein) { try { sess.cancelQueued(rein); } catch { /* stub adapters */ } }
+            let plucked = false;
+            if (rein) { try { plucked = sess.cancelQueued(rein); } catch { /* stub adapters */ } }
+            // Already admitted (cancelQueued found nothing): interrupt it like an
+            // ordinary rejected start, and take back any downloaded attachments.
+            if (!plucked) { try { await sess.abort(); } catch { /* pane teardown */ } }
+            for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } }
             await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
             log(`${tag}: /start refused for a handled command → cancelled`);
             return;

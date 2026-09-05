@@ -268,7 +268,13 @@ export async function killOpencodeServerPid(pid: number): Promise<boolean> {
         if (Number(fields[2]) === pid) out.push(Number(d)); // pgrp == launcher pid
       } catch { /* gone meanwhile */ }
     }
-    if (alive(pid) && !out.includes(pid)) out.push(pid);
+    // The launcher itself, unless it is a zombie its parent has not reaped
+    // yet: kill(pid, 0) succeeds for a zombie, but nothing runs there.
+    if (alive(pid) && !out.includes(pid)) {
+      let state = "";
+      try { const st = readFileSync(`/proc/${pid}/stat`, "utf8"); state = st.slice(st.lastIndexOf(")") + 2).split(" ")[0]; } catch { /* gone */ }
+      if (state && state !== "Z") out.push(pid);
+    }
     return out;
   };
   if (!groupKill("SIGTERM")) return true;
