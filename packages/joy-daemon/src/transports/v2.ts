@@ -472,7 +472,9 @@ route("GET", "/v2/sessions/:id/git/status", withSession(async (_ctx, session) =>
   return ok({ ok: true, ...parsePorcelainV2(r.stdout) });
 }));
 route("GET", "/v2/sessions/:id/git/entries", withSession(async (ctx, session) => {
-  const args = ["ls-files"];
+  // untracked=1: tracked + untracked-but-not-ignored — what an "All files"
+  // tab wants (the app used to shell out for this; #5).
+  const args = ctx.url.searchParams.get("untracked") === "1" ? ["-c", "core.quotepath=false", "ls-files", "--cached", "--others", "--exclude-standard"] : ["ls-files"];
   const p = ctx.url.searchParams.get("path");
   if (p) {
     const j = jailed(session, p);
@@ -483,9 +485,16 @@ route("GET", "/v2/sessions/:id/git/entries", withSession(async (ctx, session) =>
   if (r.code !== 0) return ok({ ok: false, error: r.stderr.trim() || "git failed" });
   return ok({ ok: true, files: r.stdout.split("\n").filter(Boolean) });
 }));
+// Interrupt the running turn whatever started it (terminal, peer message,
+// daemon-dispatched queue item): the app's Stop used to cancel only relay
+// turns and silently did nothing otherwise (#8).
+route("POST", "/v2/sessions/:id/abort", withSession(async (_ctx, session) => ok(await session.abort())));
 route("GET", "/v2/sessions/:id/git/diff", withSession(async (ctx, session) => {
-  const args = ["diff"];
+  const args = ["-c", "core.quotepath=false", "diff", "--no-ext-diff"];
   if (ctx.url.searchParams.get("staged") === "1") args.push("--cached");
+  // head=1: working tree vs HEAD (staged + unstaged in one patch) — the
+  // all-files diff overlay's view (#5).
+  else if (ctx.url.searchParams.get("head") === "1") args.push("HEAD");
   // numstat=1 returns per-file added/removed counts instead of the patch text —
   // what the file-list UI needs, without shipping whole diffs to render a "+3 −1".
   if (ctx.url.searchParams.get("numstat") === "1") args.push("--numstat");

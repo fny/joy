@@ -244,7 +244,8 @@ export class OpencodeClient {
  *  for pre-detached records. VERIFIED: a stray from a failed TERM was found
  *  alive a day later (2026-08-03), so escalate to SIGKILL if the group is
  *  still up after a grace period, and log the escalation. */
-export async function killOpencodeServerPid(pid: number): Promise<void> {
+/** Resolves true when the group is gone; false when owned members survived SIGKILL. */
+export async function killOpencodeServerPid(pid: number): Promise<boolean> {
   const alive = (p: number): boolean => { try { process.kill(p, 0); return true; } catch { return false; } };
   const groupKill = (sig: NodeJS.Signals): boolean => {
     try { process.kill(-pid, sig); return true; } catch { /* not a group leader */ }
@@ -254,18 +255,23 @@ export async function killOpencodeServerPid(pid: number): Promise<void> {
    *  outlive a launcher that honoured TERM). */
   const survivors = (): number[] => {
     const out: number[] = [];
-    try {
-      for (const d of readdirSync("/proc")) {
-        if (!/^\d+$/.test(d)) continue;
+    let entries: string[] = [];
+    try { entries = readdirSync("/proc"); } catch { /* /proc unavailable */ }
+    for (const d of entries) {
+      if (!/^\d+$/.test(d)) continue;
+      // Per-pid: a process vanishing between readdir and read must not end
+      // the whole scan (that hid the real survivor; Astra on 6660d84d).
+      try {
         const stat = readFileSync(`/proc/${d}/stat`, "utf8");
         const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        if (fields[0] === "Z") continue; // a zombie is not a live member
         if (Number(fields[2]) === pid) out.push(Number(d)); // pgrp == launcher pid
-      }
-    } catch { /* /proc unavailable */ }
+      } catch { /* gone meanwhile */ }
+    }
     if (alive(pid) && !out.includes(pid)) out.push(pid);
     return out;
   };
-  if (!groupKill("SIGTERM")) return;
+  if (!groupKill("SIGTERM")) return true;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < 20 && survivors().length; i++) await sleep(100); // ≤2s grace
   let left = survivors();
@@ -275,8 +281,9 @@ export async function killOpencodeServerPid(pid: number): Promise<void> {
     for (const p of left) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
     for (let i = 0; i < 20 && survivors().length; i++) await sleep(100);
     left = survivors();
-    if (left.length) process.stderr.write(`[opencode] server group ${pid}: ${left.join(",")} still alive after SIGKILL\n`);
+    if (left.length) { process.stderr.write(`[opencode] server group ${pid}: ${left.join(",")} still alive after SIGKILL\n`); return false; }
   }
+  return true;
 }
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
