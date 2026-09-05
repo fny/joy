@@ -79,8 +79,9 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     // for that file doesn't need to be re-fetched.
     const fetchedSignatures = React.useRef<Map<string, string>>(new Map());
     const inFlight = React.useRef<Set<string>>(new Set());
-    /** Bumped when a superseded fetch releases its paths, so the effect re-runs (#91). */
-    const [refetchTick, setRefetchTick] = React.useState(0);
+    /** The current file list, read when a fetch completes (#91). */
+    const filesRef = React.useRef(files);
+    filesRef.current = files;
     // Track whether we've ever populated results — only show the global spinner
     // on the very first load, not on subsequent file-set changes.
     const [hasLoadedOnce, setHasLoadedOnce] = React.useState(false);
@@ -127,95 +128,78 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
             return;
         }
 
-        let cancelled = false;
-
-        for (const file of toFetch) {
-            inFlight.current.add(file.fullPath);
-            fetchedSignatures.current.set(file.fullPath, fileSignature(file));
-        }
-
-        (async () => {
-            const fetched = await Promise.all(
-                toFetch.map(async (file): Promise<FileDiffResult> => {
-                    if (!sessionPath) {
-                        return { file, content: null, error: 'No session path' };
-                    }
-                    const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
-                    const gitDiffPath = resolved?.withinSessionRoot ? resolved.relativePath : null;
-                    if (!gitDiffPath || !resolved) {
-                        return { file, content: null, error: 'File is outside the session root.' };
-                    }
-
-                    try {
-                        // Images: show the actual picture (JoyImage fetches the
-                        // bytes on mount). Other binaries: placeholder, no read.
-                        if (isImagePath(file.fullPath)) {
-                            return { file, content: { kind: 'image' as const, path: resolved.absolutePath }, error: null };
-                        }
-                        if (isBinaryPath(file.fullPath)) {
-                            return { file, content: { kind: 'binary' as const }, error: null };
-                        }
-                        if (file.status === 'untracked') {
-                            // Use the native sessionReadFile RPC instead of `cat`
-                            // — `cat` doesn't behave the same on Windows
-                            // (PowerShell aliases it to Get-Content which
-                            // doesn't accept `--`), and shelling out for a
-                            // plain read is slower anyway.
-                            const res = await sessionReadFile(sessionId, resolved.absolutePath);
-                            if (!res.success) {
-                                return { file, content: null, error: res.error || 'Failed to read file' };
-                            }
-                            let contents: string;
-                            try {
-                                const binary = atob(res.content ?? '');
-                                const bytes = new Uint8Array(binary.length);
-                                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                                contents = new TextDecoder().decode(bytes);
-                            } catch {
-                                return { file, content: null, error: 'Failed to decode file' };
-                            }
-                            return { file, content: { kind: 'newFile', contents }, error: null };
-                        }
-
-                        // Working tree vs HEAD through the daemon's git route: no
-                        // shell, so the path is never interpolated (#5, #92).
-                        const res = await sessionGitDiff(sessionId, { path: gitDiffPath, head: true });
-                        if (!res.success) {
-                            return { file, content: null, error: res.error || 'Failed to fetch diff' };
-                        }
-                        return { file, content: { kind: 'patch', patch: res.diff }, error: null };
-                    } catch (err) {
-                        return { file, content: null, error: err instanceof Error ? err.message : 'Failed to fetch diff' };
-                    }
-                })
-            );
-
-            if (cancelled) {
-                // Superseded by a newer file set: nothing was committed for these
-                // paths, so forget both the in-flight mark AND the signature we
-                // recorded up front, then run the effect again so they are
-                // fetched — the replacement run had already skipped them (#91).
-                for (const r of fetched) { inFlight.current.delete(r.file.fullPath); fetchedSignatures.current.delete(r.file.fullPath); }
-                setRefetchTick((t) => t + 1);
-                return;
+        // Per-path fetches with ownership by signature. No batch-level cancel:
+        // a batch flag either stranded paths (never refetched) or, as a wakeup,
+        // cancelled unrelated in-flight work and looped (Astra on e4ee4754,
+        // #91). Each completion checks the CURRENT signature of its path: same →
+        // commit; changed → fetch the current version; gone → drop.
+        const fetchDiffFor = async (file: GitFileStatus): Promise<void> => {
+            const path = file.fullPath;
+            const sig = fileSignature(file);
+            inFlight.current.add(path);
+            const result: FileDiffResult = await (async (): Promise<FileDiffResult> => {
+            if (!sessionPath) {
+                return { file, content: null, error: 'No session path' };
+            }
+            const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
+            const gitDiffPath = resolved?.withinSessionRoot ? resolved.relativePath : null;
+            if (!gitDiffPath || !resolved) {
+                return { file, content: null, error: 'File is outside the session root.' };
             }
 
-            setResultsMap((prev) => {
-                const next = new Map(prev);
-                for (const r of fetched) {
-                    next.set(r.file.fullPath, r);
+            try {
+                // Images: show the actual picture (JoyImage fetches the
+                // bytes on mount). Other binaries: placeholder, no read.
+                if (isImagePath(file.fullPath)) {
+                    return { file, content: { kind: 'image' as const, path: resolved.absolutePath }, error: null };
                 }
-                return next;
-            });
-            for (const r of fetched) {
-                inFlight.current.delete(r.file.fullPath);
-            }
-            setHasLoadedOnce(true);
-        })();
+                if (isBinaryPath(file.fullPath)) {
+                    return { file, content: { kind: 'binary' as const }, error: null };
+                }
+                if (file.status === 'untracked') {
+                    // Use the native sessionReadFile RPC instead of `cat`
+                    // — `cat` doesn't behave the same on Windows
+                    // (PowerShell aliases it to Get-Content which
+                    // doesn't accept `--`), and shelling out for a
+                    // plain read is slower anyway.
+                    const res = await sessionReadFile(sessionId, resolved.absolutePath);
+                    if (!res.success) {
+                        return { file, content: null, error: res.error || 'Failed to read file' };
+                    }
+                    let contents: string;
+                    try {
+                        const binary = atob(res.content ?? '');
+                        const bytes = new Uint8Array(binary.length);
+                        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                        contents = new TextDecoder().decode(bytes);
+                    } catch {
+                        return { file, content: null, error: 'Failed to decode file' };
+                    }
+                    return { file, content: { kind: 'newFile', contents }, error: null };
+                }
 
-        return () => { cancelled = true; };
+                // Working tree vs HEAD through the daemon's git route: no
+                // shell, so the path is never interpolated (#5, #92).
+                const res = await sessionGitDiff(sessionId, { path: gitDiffPath, head: true });
+                if (!res.success) {
+                    return { file, content: null, error: res.error || 'Failed to fetch diff' };
+                }
+                return { file, content: { kind: 'patch', patch: res.diff }, error: null };
+            } catch (err) {
+                return { file, content: null, error: err instanceof Error ? err.message : 'Failed to fetch diff' };
+            }
+            })();
+            inFlight.current.delete(path);
+            const current = filesRef.current.find((f) => f.fullPath === path);
+            if (!current) return; // removed while fetching
+            if (fileSignature(current) !== sig) { void fetchDiffFor(current); return; } // changed while fetching
+            fetchedSignatures.current.set(path, sig);
+            setResultsMap((prev) => { const next = new Map(prev); next.set(path, result); return next; });
+            setHasLoadedOnce(true);
+        };
+        for (const file of toFetch) void fetchDiffFor(file);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sessionId, files, refetchTick]);
+    }, [sessionId, files]);
 
     // Render in deterministic file order (same sort as `files`).
     const results = React.useMemo<FileDiffResult[]>(() => {
