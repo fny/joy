@@ -165,6 +165,7 @@ export class SessionRegistry {
    *  (codex review, 2026-09-04) — so archive it and rethrow. */
   async #replace(id: string, cwd: string, carried: QueuedItem[], make: () => Promise<AgentSession>): Promise<AgentSession> {
     let next: AgentSession;
+    this.#replacing.add(id);
     try { next = await make(); }
     catch (e) {
       if (this.relayClient) {
@@ -174,6 +175,8 @@ export class SessionRegistry {
       // opencode session as running against it on the next boot (#52).
       deleteWindowRecord(id);
       throw e;
+    } finally {
+      this.#replacing.delete(id);
     }
     for (const q of carried) next.enqueue(q.text, { id: q.id, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible });
     if (carried.length) process.stderr.write(`[restart] ${id}: ${carried.length} queued prompt(s) carried to the replacement\n`);
@@ -295,6 +298,18 @@ export class SessionRegistry {
 
   async create(opts: CreateSessionOpts): Promise<AgentSession> {
     const id = opts.id ?? crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+    const cwd = expandHome(opts.cwd);
+    // Reserved while this create runs: a second create({id}) during the tmux
+    // setup used to kill the first one's server and return a second object
+    // (Astra on 01bdac2f). Released in the wrapper below.
+    if (this.#creating.has(id)) throw new Error(`session ${id} is being created (id_in_use)`);
+    this.#creating.add(id);
+    try { return await this.#createInner(opts, id, cwd); } finally { this.#creating.delete(id); }
+  }
+  #creating = new Set<string>();
+  /** Ids whose restart is currently running its replacement create (see create). */
+  #replacing = new Set<string>();
+  async #createInner(opts: CreateSessionOpts, id: string, cwd: string): Promise<AgentSession> {
     // Legacy shared-server layout only: the window that carries the id.
     const windowName = `j-${id}`;
 
@@ -302,7 +317,6 @@ export class SessionRegistry {
     // back to the daemon's cwd when the directory is missing, which cascades
     // into the transcript watcher looking in the wrong projects/ folder and
     // Claude's responses never reaching the app.
-    const cwd = expandHome(opts.cwd);
 
     // Multiple sessions per directory are allowed: each fresh session is pinned to
     // its own Claude session id (--session-id, below), so they no longer collide
@@ -321,7 +335,19 @@ export class SessionRegistry {
     // Auto-revive only when the caller expressed no preference: an explicit
     // model / permission mode / extra args is a request for THAT launch, not
     // for whatever the dead session had.
-    const explicit = !!(opts.model || opts.permissionMode || opts.extraArgs || opts.effort || opts.fallbackModel || opts.chrome || opts.yolo === false);
+    const explicit = !!(opts.model || opts.permissionMode || opts.extraArgs || opts.effort || opts.fallbackModel || opts.chrome || opts.yolo !== undefined);
+    /** Does a live session already match every setting the caller asked for? */
+    const matchesRequest = (live: AgentSession): boolean => {
+      if (opts.model && (live.currentModel ?? live.model) !== opts.model) return false;
+      if (opts.effort && live.effort !== opts.effort) return false;
+      if (opts.permissionMode && live.detectPermissionMode() !== opts.permissionMode) return false;
+      if (opts.yolo === false && live.detectPermissionMode() === "bypassPermissions") return false;
+      if (opts.yolo === true && live.detectPermissionMode() !== null && live.detectPermissionMode() !== "bypassPermissions") return false;
+      return true;
+    };
+    const conflict = (live: AgentSession): never => {
+      throw new Error(`a ${flavor} session (${live.id}) is already live in ${target} with different settings; restart it with the new settings, or resume without --continue`);
+    };
     const detachedInCwd = explicit ? undefined : inCwd.find((s) => s.status === "ended" && s.endReason === "process_exited");
 
     // An EXPLICIT id (a restart's replacement, a spawn's reserved id) is a
@@ -331,10 +357,14 @@ export class SessionRegistry {
     // that id is a conflict rather than something to launch over, and an
     // in-flight restart of it is joined, not raced (#42/#45/#75).
     if (opts.id) {
+      // Join an in-flight restart of this id — unless WE are that restart's
+      // replacement (self-join deadlocked every restart; Astra on 01bdac2f).
       const pendingRestart = this.#restarting.get(opts.id);
-      if (pendingRestart) return pendingRestart;
+      if (pendingRestart && !this.#replacing.has(opts.id)) return pendingRestart;
       const live = this.#sessions.get(opts.id);
       if (live && live.status !== "ended") throw new Error(`session ${opts.id} is already live (id_in_use)`);
+      // (the in-flight-create reservation is checked in create() itself, BEFORE
+      // it reserves this id — checking it here saw our own reservation)
     }
     // A FORK is never "the one already here": --fork-session reads the
     // transcript once and continues under a new id, so a live match must not
@@ -350,6 +380,7 @@ export class SessionRegistry {
         (s) => (s.status === "active" || s.status === "starting") && sessionIdentity(s) === opts.resume_id,
       );
       if (liveMatch) {
+        if (explicit && !matchesRequest(liveMatch)) conflict(liveMatch); // the caller asked for settings this session does not have (#44)
         process.stderr.write(`[create] resume ${opts.resume_id} already live (window ${liveMatch.id}) — returning existing\n`);
         return liveMatch;
       }
@@ -367,7 +398,7 @@ export class SessionRegistry {
       // running one — unless the caller asked for different settings, which
       // that session does not have: say so instead of silently returning a
       // different launch (Astra on 2f803b14, #44).
-      if (explicit) throw new Error(`a ${flavor} session (${liveInCwd.id}) is already live in ${target}; restart it with the new settings or start a new one (forceNew)`);
+      if (explicit && !matchesRequest(liveInCwd)) conflict(liveInCwd);
       process.stderr.write(`[create] continue with ${liveInCwd.id} live in ${target} — returning existing\n`);
       return liveInCwd;
     }
@@ -1163,7 +1194,16 @@ export class SessionRegistry {
       process.stderr.write(`[create] ${session}: retiring stale per-session server before relaunch\n`);
       drv.runSync("kill-server");
     }
-    if (!drv.runSync("new-session", "-d", "-s", session, "-n", TMUX_AGENT_WINDOW, "-x", "100", "-y", "40", "-c", cwd).ok) return false;
+    // The previous server (end("restart") just killed it) may still be
+    // releasing its socket: one short retry, and the tmux error is logged —
+    // "session create failed: new-session" alone said nothing.
+    let r = drv.runSync("new-session", "-d", "-s", session, "-n", TMUX_AGENT_WINDOW, "-x", "100", "-y", "40", "-c", cwd);
+    if (!r.ok) {
+      process.stderr.write(`[create] ${session}: new-session failed (${String((r as { err?: string; out?: string }).err ?? (r as { out?: string }).out ?? "").trim().slice(0, 200)}) — retrying once\n`);
+      const until = Date.now() + 400; while (Date.now() < until) { /* brief spin: runSync callers are synchronous */ }
+      r = drv.runSync("new-session", "-d", "-s", session, "-n", TMUX_AGENT_WINDOW, "-x", "100", "-y", "40", "-c", cwd);
+      if (!r.ok) { process.stderr.write(`[create] ${session}: new-session failed again (${String((r as { err?: string; out?: string }).err ?? (r as { out?: string }).out ?? "").trim().slice(0, 200)})\n`); return false; }
+    }
     drv.runSync("set-window-option", "-t", `${session}:${TMUX_AGENT_WINDOW}`, "automatic-rename", "off");
     drv.runSync("set-hook", "-t", session, "client-attached", CLIENT_ATTACHED_HOOK);
     return true;
