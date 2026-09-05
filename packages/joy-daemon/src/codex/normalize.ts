@@ -22,8 +22,7 @@ import {
   encodeToolCallStart,
   encodeToolCallEnd,
   encodeTurnEnd,
-  type WireRecord,
-} from "../relay/relay";
+  type WireRecord, encodeUserMessage } from "../relay/relay";
 
 /** A codex JSON-RPC notification: { method, params }. */
 export interface CodexNotification { method: string; params?: Record<string, unknown>; }
@@ -247,7 +246,16 @@ export class CodexNormalizer {
       case "commandExecution":
       case "fileChange":
       case "mcpToolCall":
-        return this.#toolEnd(joyTurn, core);
+        return this.#toolEnd(joyTurn, core, item);
+      case "userMessage": {
+        // A prompt typed in the attached TUI has no Joy clientId and no relay
+        // row: mirror it (deterministic localId, so live and history dedupe).
+        // Joy's own prompts are echoes and stay silent (#78).
+        const clientId = str(item.clientId) || str(item.clientUserMessageId);
+        if (clientId) return [];
+        const text = userMessageText(item);
+        return text ? [this.#wire(encodeUserMessage(text, Date.now()), `turn:${joyTurn}:item:${core}:user`)] : [];
+      }
       default:
         return [];
     }
@@ -259,11 +267,14 @@ export class CodexNormalizer {
     return [this.#wire(encodeToolCallStart({ call, name, input, turn: joyTurn }), `turn:${joyTurn}:item:${core}:tool-start`)];
   }
 
-  #toolEnd(joyTurn: string, core: string): CodexEffect[] {
+  #toolEnd(joyTurn: string, core: string, item?: Item): CodexEffect[] {
     const call = `${joyTurn}:${core}`;
     const turn = this.#openTools.get(call)?.turn ?? this.#currentTurn ?? joyTurn;
     this.#openTools.delete(call);
-    return [this.#wire(encodeToolCallEnd(call, { turn }), `turn:${turn}:item:${core}:tool-end`)];
+    // Carry the harness's output and failure status: a completion with an
+    // empty result was indistinguishable from success in the app (#68).
+    const { result, isError } = toolOutcome(item);
+    return [this.#wire(encodeToolCallEnd(call, { turn, ...(result !== undefined ? { result } : {}), ...(isError ? { isError } : {}) }), `turn:${turn}:item:${core}:tool-end`)];
   }
 
   #turnFor(p: Item): string {
@@ -279,4 +290,40 @@ export class CodexNormalizer {
     const last = (usage.last ?? {}) as Item;
     return typeof last.inputTokens === "number" ? [{ kind: "context", tokens: last.inputTokens }] : [];
   }
+}
+
+/** Text of a codex userMessage item — `text`, or the joined text parts of `content`. */
+function userMessageText(item: Item): string {
+  const direct = str(item.text);
+  if (direct) return direct;
+  const content = item.content;
+  if (Array.isArray(content)) return content.map((c) => (c && typeof c === "object" ? str((c as Item).text) : "")).filter(Boolean).join("\n");
+  return "";
+}
+
+/** Output + failure status of a completed codex tool item, per item type. */
+function toolOutcome(item?: Item): { result?: string; isError?: boolean } {
+  if (!item) return {};
+  const type = itemType(item);
+  const clamp = (v: string) => (v.length > 48_000 ? `${v.slice(0, 24_000)}\n…[truncated]…\n${v.slice(-24_000)}` : v);
+  if (type === "commandExecution") {
+    const out = str(item.aggregatedOutput) || str(item.output) || str(item.stdout);
+    const code = typeof item.exitCode === "number" ? item.exitCode : (typeof item.exit_code === "number" ? item.exit_code : undefined);
+    const failed = (code !== undefined && code !== 0) || str(item.status) === "failed";
+    const text = out || (code !== undefined ? `exit ${code}` : "");
+    return { result: text ? clamp(text) : undefined, isError: failed || undefined };
+  }
+  if (type === "fileChange") {
+    // Only a failure is worth a result line; a plain "completed" status is noise.
+    const failed = str(item.status) === "failed" || !!item.error;
+    const detail = failed ? (str(item.error) || str(item.status)) : "";
+    return { result: detail ? clamp(detail) : undefined, isError: failed || undefined };
+  }
+  if (type === "mcpToolCall") {
+    const err = item.error;
+    const res = item.result;
+    const text = err !== undefined && err !== null ? (typeof err === "string" ? err : JSON.stringify(err)) : (res !== undefined && res !== null ? (typeof res === "string" ? res : JSON.stringify(res)) : "");
+    return { result: text ? clamp(text) : undefined, isError: err !== undefined && err !== null ? true : (str(item.status) === "failed" || undefined) };
+  }
+  return {};
 }

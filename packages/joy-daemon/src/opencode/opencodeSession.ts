@@ -305,10 +305,20 @@ export class OpencodeSession implements AgentSession {
         // Admission ack = durable server-side; prompt.admitted event confirms
         // via the normalizer too, but the ack alone is safe to remove on
         // (admittedSeq is the server's own ordering receipt).
-        if (r.messageID) this.#removeInbound(item.clientId);
+        if (r.messageID) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
       } catch (e) {
-        process.stderr.write(`[opencode ${this.id}] prompt failed: ${e}\n`);
-        // leave sentUnknown: the deterministic id makes a retry idempotent.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/→ \d{3}:/.test(msg)) {
+          // The server ANSWERED and refused: this prompt is terminal. Leaving
+          // it sentUnknown re-ran it on the next unrelated intake, after the
+          // app had already shown it failed (#79).
+          process.stderr.write(`[opencode ${this.id}] prompt rejected: ${msg} — dropped\n`);
+          this.#removeInbound(item.clientId);
+          this.#recordOutcome(item.clientId, "failed");
+        } else {
+          process.stderr.write(`[opencode ${this.id}] prompt failed: ${msg}\n`);
+          // transport failure: leave sentUnknown — the deterministic id makes a retry idempotent.
+        }
       }
     }
   }
@@ -509,12 +519,15 @@ export class OpencodeSession implements AgentSession {
       }
       this.#deps.broadcast("session_update", this.toJSON());
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" }; // (#65)
     }
     if (this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq)) {
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" };
     }
-    if (seq != null && this.#inbound.some((i) => i.seq === seq)) { void this.#drainInbound(); return { id: String(seq), text, createdAt: Date.now() }; }
+    if (seq != null) {
+      const dup = this.#inbound.find((i) => i.seq === seq);
+      if (dup) { void this.#drainInbound(); return { id: dup.clientId, text, createdAt: dup.at }; }
+    }
     const item: CodexInboundItem = {
       clientId: seq != null ? `msg_joy${this.id}s${seq}` : `msg_joy${this.id}r${randomUUID().replace(/-/g, "").slice(0, 12)}`,
       text, state: "queued", at: Date.now(), seq,
@@ -527,7 +540,7 @@ export class OpencodeSession implements AgentSession {
     if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `oc:in:${this.id}:${seq ?? item.at}`);
     this.#maybeTitle(text);
     void this.#drainInbound();
-    return { id: String(item.at), text, createdAt: item.at };
+    return { id: item.clientId, text, createdAt: item.at }; // the durable clientId is the queue item id (#79)
   }
 
   queueState(): QueueState {
@@ -537,7 +550,23 @@ export class OpencodeSession implements AgentSession {
 
   resumeQueue(): void { void this.#drainInbound(); }
   editQueued(): boolean { return false; }
-  cancelQueued(): boolean { return false; }
+  cancelQueued(id: string): boolean {
+    const before = this.#inbound.length;
+    this.#inbound = this.#inbound.filter((i) => i.clientId !== id);
+    if (this.#inbound.length === before) return false;
+    saveCodexInbound(this.id, this.#inbound);
+    this.#recordOutcome(id, "cancelled");
+    return true;
+  }
+  #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
+  #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
+    this.#itemOutcome.set(id, outcome);
+    if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
+  }
+  queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
+    if (this.#inbound.some((i) => i.clientId === id)) return "pending";
+    return this.#itemOutcome.get(id) ?? "unknown";
+  }
   reorderQueued(): boolean { return false; }
 
   async abort(): Promise<{ ok: true }> {

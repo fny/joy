@@ -34,6 +34,7 @@ import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcRespons
 import { CodexNormalizer, type CodexNotification } from "./normalize";
 import { buildCodexAttachCommand } from "./attach";
 import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "./codexInboundStore";
+import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 import {
   loadCheckpoint, saveCheckpoint, clearCheckpoint, isTurnDelivered, markTurnDelivered,
   type CodexCheckpoint,
@@ -446,7 +447,7 @@ export class CodexSession implements AgentSession {
   #onDispatchEchoed(clientId: string): void {
     const before = this.#inbound.length;
     this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
-    if (this.#inbound.length !== before) saveCodexInbound(this.id, this.#inbound);
+    if (this.#inbound.length !== before) { saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); }
   }
 
   #markTurnDelivered(turnId: string): void {
@@ -716,12 +717,17 @@ export class CodexSession implements AgentSession {
       if (t) { this.summary = t; void this.#relay?.updateSummary(t); }
       this.#deps.broadcast("session_update", this.toJSON());
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? Date.now()}`);
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+      // handled: the lane must terminalize its turn now — waiting for agent
+      // activity a title change never produces held the queue for 3 min (#65).
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" };
     }
     if (this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq)) {
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now() };
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" };
     }
-    if (seq != null && this.#inbound.some((i) => i.seq === seq)) { this.#pumpDispatch(); return { id: String(seq), text, createdAt: Date.now() }; }
+    if (seq != null) {
+      const dup = this.#inbound.find((i) => i.seq === seq);
+      if (dup) { this.#pumpDispatch(); return { id: dup.clientId, text, createdAt: dup.at }; }
+    }
     const item: CodexInboundItem = { clientId: seq != null ? `codex-in:${this.id}:${seq}` : randomUUID(), text, state: "queued", at: Date.now(), seq };
     this.#inbound.push(item);
     if (!saveCodexInbound(this.id, this.#inbound) && opts?.requireDurable) {
@@ -730,7 +736,21 @@ export class CodexSession implements AgentSession {
     }
     if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `codex:in:${this.id}:${seq ?? item.at}`);
     this.#pumpDispatch();
-    return { id: String(item.at), text, createdAt: item.at };
+    // The durable clientId IS the queue item id: cancelQueued/queueItemState
+    // address the spool by it, and the lane tracks THIS prompt's delivery by
+    // the userMessage echo instead of another turn's busy flag (#66).
+    return { id: item.clientId, text, createdAt: item.at };
+  }
+
+  /** Per-item outcomes for the lane (see Session.queueItemState). */
+  #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
+  #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
+    this.#itemOutcome.set(id, outcome);
+    if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
+  }
+  queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
+    if (this.#inbound.some((i) => i.clientId === id)) return "pending";
+    return this.#itemOutcome.get(id) ?? "unknown";
   }
 
   queueState(): QueueState {
@@ -740,7 +760,18 @@ export class CodexSession implements AgentSession {
 
   resumeQueue(): void { this.#pumpDispatch(); }
   editQueued(): boolean { return false; }
-  cancelQueued(): boolean { return false; }
+  /** Pluck a spooled prompt by its clientId. A cancelled relay prompt used to
+   *  stay queued locally and run after the current turn (#66). An item already
+   *  handed to codex (sentUnknown) is removed too — the abort that follows a
+   *  cancel interrupts it if it did land. */
+  cancelQueued(id: string): boolean {
+    const before = this.#inbound.length;
+    this.#inbound = this.#inbound.filter((i) => i.clientId !== id);
+    if (this.#inbound.length === before) return false;
+    saveCodexInbound(this.id, this.#inbound);
+    this.#recordOutcome(id, "cancelled");
+    return true;
+  }
   reorderQueued(): boolean { return false; }
 
   async abort(): Promise<{ ok: true }> {
@@ -763,9 +794,29 @@ export class CodexSession implements AgentSession {
   }
 
   async sendRawKeys(script: string, opts?: { literal?: boolean }): Promise<{ ok: boolean; segments: number; error?: string }> {
-    const r = opts?.literal ? await this.#tmux.literal(this.tmuxWindow, script) : await this.#tmux.key(this.tmuxWindow, script);
-    return { ok: r.ok, segments: 1, error: r.ok ? undefined : "send failed" };
+    // Same token language as the claude adapter: the app sends "<Enter>",
+    // "<C-c>", "<Up>"… as bracket tokens with literal:false. Passing the raw
+    // script to send-keys typed the seven characters "<Enter>" into the TUI
+    // and nothing ever submitted (#111).
+    if (opts?.literal) {
+      const ok = (await this.#tmux.literal(this.tmuxWindow, script)).ok;
+      return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
+    }
+    let segments;
+    try { segments = toTmuxSegments(script); }
+    catch (e) {
+      if (e instanceof ParseError || e instanceof TmuxKeyError) return { ok: false, segments: 0, error: e.message };
+      throw e;
+    }
+    for (const seg of segments) {
+      const ok = seg.type === "keys"
+        ? (await this.#tmux.key(this.tmuxWindow, ...seg.names)).ok
+        : (await this.#tmux.literal(this.tmuxWindow, seg.text)).ok;
+      if (!ok) return { ok: false, segments: segments.length, error: "tmux send-keys failed" };
+    }
+    return { ok: true, segments: segments.length };
   }
+
 
   detectPermissionMode(): string | null { return this.#permissionMode; }
 

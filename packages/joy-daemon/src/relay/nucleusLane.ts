@@ -994,6 +994,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // sealed citations are what the sender meant. Only their intersection
         // is trusted: a citation the relay never saw for this session is
         // refused rather than fetched on account scope alone.
+        // Register the turn NOW so a control-lane cancel that lands during
+        // the download has something to mark; the prompt is checked against
+        // cancelRequested again right before it is enqueued (#77).
+        activeTurns.set(turnId, { localId: sess.id, queuedId: null, lease: leaseRef });
         const authorized = new Set((offer.attachments ?? []).map((x) => x.id));
         const paths: string[] = [];
         const written: string[] = [];
@@ -1033,8 +1037,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const history = registry.chatHistory();
       let watermark = history.length ? Number(history[history.length - 1].id) : -1;
 
+      if (cancelRequested.has(turnId)) {
+        // Cancelled while we were preparing it (attachments): never enqueue.
+        await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "cancelled_before_enqueue" } }, leaseRef);
+        log(`turn ${turnId.slice(0, 8)}: cancelled before enqueue → cancelled`);
+        return;
+      }
       const queued = sess.enqueue(text, { source: "rpc", visible: false, mirrorToRelay: false });
       activeTurns.set(turnId, { localId: sess.id, queuedId: queued?.id ?? null, lease: leaseRef });
+      if (cancelRequested.has(turnId) && queued?.id) { try { sess.cancelQueued(queued.id); } catch { /* stub adapters */ } }
       // Every later line for this turn names the session AND the local queue
       // item, so "turn X completed" can be tied to the message it carried.
       const tag = `turn ${turnId.slice(0, 8)} [${sess.id}/${queued?.id ?? "?"}]`;
@@ -1124,6 +1135,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
               meta: { reason: "prompt_cancelled_locally" },
             }, leaseRef);
             log(`${tag}: prompt cancelled before delivery → cancelled`);
+            return;
+          }
+          if (st === "failed") {
+            // The harness answered and refused the prompt (opencode 4xx/5xx):
+            // terminal, and it must not be retried on unrelated intake (#79).
+            await postTerminal(turnId, sess.id, {
+              type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
+              meta: { reason: "prompt_rejected_by_agent" },
+            }, leaseRef);
+            log(`${tag}: prompt rejected by the agent → failed`);
             return;
           }
         } else if (qs.pendingCount === 0 || sess.busy()) break;

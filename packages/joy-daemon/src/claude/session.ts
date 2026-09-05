@@ -528,7 +528,7 @@ export interface QueuedItem extends QueuedMessage {
  *  previous turn's flag while its own prompt was never typed — silent loss,
  *  observed live 2026-09-03). "unknown" = no record (e.g. after a restart), and
  *  the caller falls back to its heuristic. */
-export type QueueItemState = "pending" | "delivered" | "cancelled" | "unknown";
+export type QueueItemState = "pending" | "delivered" | "cancelled" | "failed" | "unknown";
 
 export interface QueueState {
   queue: QueuedMessage[];

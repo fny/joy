@@ -36,7 +36,7 @@ test("live capture → the exact claude-shaped wire sequence for a command turn"
   expect(wire).toEqual([
     { t: "turn-start" },
     { t: "tool-call-start", call: expect.any(String), name: "CodexBash", title: "CodexBash", description: "", args: { command: "/bin/bash -lc 'echo hello-from-codex'", cwd: expect.any(String) } },
-    { t: "tool-call-end", call: expect.any(String) },
+    { t: "tool-call-end", call: expect.any(String), result: expect.any(String) }, // the command output rides along (#68)
     { t: "text", text: "done" },
     { t: "turn-end", status: "completed" },
   ]);

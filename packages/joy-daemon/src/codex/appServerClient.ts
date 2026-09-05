@@ -198,8 +198,16 @@ export class CodexAppServerClient {
         }),
         deadline,
       ]);
-      ws.on("message", (data) => this.#onMessage(data.toString()));
-      ws.on("close", () => { this.#failAllPending(new Error("app-server socket closed")); if (!this.#closed) { this.#closed = true; this.#onClose(); } });
+      // Fenced to THIS socket: a retry after a timed-out initialize made a
+      // new connection, and when the abandoned first socket later closed its
+      // handler failed the new one's requests and detached the healthy
+      // session (#72).
+      ws.on("message", (data) => { if (this.#ws === ws) this.#onMessage(data.toString()); });
+      ws.on("close", () => {
+        if (this.#ws !== ws) return;
+        this.#failAllPending(new Error("app-server socket closed"));
+        if (!this.#closed) { this.#closed = true; this.#onClose(); }
+      });
       const result = await Promise.race([
         this.request("initialize", {
           clientInfo: { name: "joy-daemon", title: "Joy", version: "0.1.0" },
@@ -210,7 +218,15 @@ export class CodexAppServerClient {
         deadline,
       ]);
       this.notify("initialized", {});
+      this.#closed = false; // a successful connection is the only thing that reopens the client
       return result;
+    } catch (e) {
+      // Dispose what this attempt made: otherwise the socket lives on and its
+      // late close tears down whatever connection replaced it (#72).
+      if (this.#ws === ws) this.#ws = null;
+      this.#failAllPending(e instanceof Error ? e : new Error(String(e)));
+      try { ws.terminate(); } catch { /* never opened */ }
+      throw e;
     } finally {
       if (timer) clearTimeout(timer);
     }
