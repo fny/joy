@@ -13,9 +13,19 @@ export interface AuthCredentials {
 export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: number) => void, shouldCancel?: () => boolean): Promise<AuthCredentials | null> {
     let dots = 0;
     const serverUrl = getServerUrl();
+    // Hard stop. The relay forgets an answered request after ten minutes and
+    // a repeat poll of a forgotten key CREATES a new pending request, so a
+    // screen that slept across the approval would otherwise poll forever
+    // for a QR the user already approved (#127). Twenty minutes covers any
+    // real approval; after that the user re-scans a fresh code.
+    const deadline = Date.now() + 20 * 60 * 1000;
 
     while (true) {
         if (shouldCancel && shouldCancel()) {
+            return null;
+        }
+        if (Date.now() > deadline) {
+            console.log('\n\nPairing request expired. Please start again.');
             return null;
         }
 
