@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 5 (5) — Faster chat loading",
+      "summary": "",
+      "markdown": "- **Opening a long session is fast again, and scrolling up costs one request.** Loading older messages used to re-read the whole conversation from the beginning every time; the relay now serves pages backwards. *Needs the updated relay first — an older relay ignores the new page request.*\n- **Only the session on screen polls.** The app polled every session in the account every 2.5 seconds, decrypting everything and undoing the memory limit; now only the visible session (and one with a send still settling) does.\n- **Edit cards with very long lines no longer freeze the app** while their diff is computed."
+    },
+    {
       "title": "Sep 5 (4) — App fixes, second batch",
       "summary": "",
       "markdown": "- **File search and `@` mentions return results again** — the file list used a search call the machine rejected, so every session's Files search and autocomplete were empty.\n- **\"No connection\" means no connection.** The banner used to appear on cold start and never when the network was actually gone. It now shows after three failed polls and stays quiet while connecting.\n- **Files with accented or non-Latin names open** from tool rows and file lists (the path encoding threw on anything beyond Latin-1).\n- **Diagrams can't run code**: a Mermaid block containing `</script>` escaped its container on iOS/Android; it is escaped now and unexpected messages from the diagram view are ignored.\n- **Android sheets show every button** (the attach sheet hid Draw and Cancel; agent and model pickers hid most entries) and can be dismissed.\n- **Git line counts are back** on session rows and the files sidebar (+N/−N were blank for every session); renamed files show under their new name; **unread markers no longer vanish** while you type a draft or when machines refresh.\n- **The usage screen's per-session table loads** (it asked the machine for a route that didn't exist).\n- Smaller: New-session Create no longer sticks disabled when a machine's model catalog can't be fetched yet; an empty file opens as empty instead of \"Failed to read file\"; the effort chip on Codex sessions no longer types a Claude command into Codex; drafts save when you leave the screen, not on every keystroke. *Some need the updated daemon.*"
@@ -286,5 +291,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 5 (4) — App fixes, second batch"
+  "latestTitle": "Sep 5 (5) — Faster chat loading"
 }

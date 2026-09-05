@@ -144,9 +144,12 @@ function toRow(e: RawV2Event, key: Uint8Array | null, stats?: { unopenable: numb
 }
 
 async function fetchEvents(
-    base: string, token: string, v2SessionId: string, afterSeq: number, limit: number,
+    base: string, token: string, v2SessionId: string, cursor: number | { before: number }, limit: number,
 ): Promise<{ events: RawV2Event[]; hasMore: boolean }> {
-    const res = await fetch(`${base}/joy/v2/sessions/${v2SessionId}/events?after=${afterSeq}&limit=${limit}`, {
+    // `after` pages forward; `{ before }` asks the relay for the NEWEST events
+    // below that seq (ascending), so a backward page is one request (#4).
+    const q = typeof cursor === 'number' ? `after=${cursor}` : `before=${cursor.before}`;
+    const res = await fetch(`${base}/joy/v2/sessions/${v2SessionId}/events?${q}&limit=${limit}`, {
         headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error(`v2 events ${res.status}`);
@@ -171,9 +174,10 @@ export async function v2MessagesAfter(
 
 /**
  * Backward page: the newest rows BEFORE `beforeSeq` (or the newest overall
- * when beforeSeq is the sentinel). The v2 log only pages forward, so we walk
- * forward from 0 collecting rows below the bound and keep the last `limit` —
- * correct, and bounded by the log's own pagination.
+ * when beforeSeq is the sentinel). Uses the relay's descending page: walk back
+ * from the bound until `limit` renderable rows are in hand or the log is
+ * exhausted. (It used to walk the whole log forward from 0 on every page —
+ * O(log) requests and decrypts per scroll-up; #4.)
  */
 export async function v2MessagesBefore(
     opts: { base?: string; token: string; v2SessionId: string; key: Uint8Array | null; beforeSeq: number; limit?: number },
@@ -183,22 +187,25 @@ export async function v2MessagesBefore(
     const rows: V2Row[] = [];
     const lifecycle: V2Lifecycle[] = [];
     const stats = { unopenable: 0 };
-    let cursor = 0;
-    for (;;) {
-        const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, cursor, 500);
-        if (events.length === 0) break;
+    let bound = Number.isFinite(opts.beforeSeq) ? opts.beforeSeq : Number.MAX_SAFE_INTEGER;
+    let olderExists = false;
+    for (let pages = 0; pages < 20; pages++) {
+        const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, { before: bound }, 200);
+        if (events.length === 0) { olderExists = false; break; }
+        const pageRows: V2Row[] = [];
+        const pageLifecycle: V2Lifecycle[] = [];
         for (const e of events) {
-            const seq = Number(e.seq);
-            if (seq >= opts.beforeSeq) continue;
             const row = toRow(e, opts.key, stats);
-            if (row) rows.push(row);
+            if (row) pageRows.push(row);
             const l = toLifecycle(e);
-            if (l) lifecycle.push(l);
+            if (l) pageLifecycle.push(l);
         }
-        cursor = Number(events[events.length - 1].seq);
-        if (!hasMore) break;
-        if (cursor >= opts.beforeSeq) break;
+        rows.unshift(...pageRows);
+        lifecycle.unshift(...pageLifecycle);
+        bound = Number(events[0].seq);
+        olderExists = hasMore;
+        if (!hasMore || rows.length >= limit) break;
     }
     const tail = rows.slice(-limit);
-    return { messages: tail, hasMore: rows.length > tail.length, lifecycle, unopenable: stats.unopenable };
+    return { messages: tail, hasMore: olderExists || rows.length > tail.length, lifecycle, unopenable: stats.unopenable };
 }

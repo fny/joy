@@ -378,8 +378,16 @@ class Sync {
             // Sessions FIRST: a bind lands the card's key envelope, and the
             // messages fetch for that session needs it (issue #3).
             this.sessionsSync.invalidate();
+            // Only the session on screen (and any with a send still settling)
+            // polls its messages. Polling EVERY session fetched and decrypted
+            // the whole account every 2.5s, and re-anchored sessions the memory
+            // limit had just evicted (#2). Everything else is woken by the SSE
+            // poke or when it becomes visible.
+            const viewing = storage.getState().currentViewingSessionId;
+            const now = Date.now();
             for (const sid of this.v2SessionIdIndex().values()) {
-                this.getMessagesSync(sid).invalidate();
+                const recentSend = (this.recentSendAt.get(sid) ?? 0) > now - 60_000;
+                if (sid === viewing || recentSend) this.getMessagesSync(sid).invalidate();
             }
             this.machinesSync.invalidate();
         }, POLL_INTERVAL_MS);
@@ -434,6 +442,7 @@ class Sync {
     }
 
     async sendMessage(sessionId: string, text: string, options?: SendMessageOptions): Promise<SendMessageResult> {
+        this.recentSendAt.set(sessionId, Date.now());
 
         // Get encryption — may not be ready yet if sessions are still syncing
         let encryption = this.encryption.getSessionEncryption(sessionId);
@@ -887,6 +896,10 @@ class Sync {
                 // session feels frozen" — this is the fix.
                 await this.fetchInitialLatestPage(sessionId, encryption);
             } else if (!storage.getState().sessionMessages[sessionId]) {
+                // An evicted session that is not on screen stays evicted: re-
+                // anchoring it here on a background poll defeated the memory
+                // limit (#2). It re-anchors when it becomes visible.
+                if (storage.getState().currentViewingSessionId !== sessionId) return;
                 // Cursor survived but the message store was evicted
                 // (limitSessionMemory unload). Forward-replaying the gap would
                 // rebuild history we no longer even hold — re-anchor: refetch
@@ -1328,6 +1341,8 @@ class Sync {
     /** Consecutive forward-sync attempts that met sealed rows they could not
      *  open with a key present (see fetchForwardSince). */
     private unopenableStrikes = new Map<string, number>();
+    /** Sessions with a send in the last minute keep polling their messages (#2). */
+    private recentSendAt = new Map<string, number>();
     private static readonly MAX_UNOPENABLE_RETRIES = 5;
 
     private v2ReadCtx(sessionId: string): { base: string; v2SessionId: string; key: Uint8Array | null; token: string } | null {

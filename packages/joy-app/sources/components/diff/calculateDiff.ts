@@ -192,7 +192,11 @@ function calculateSimilarity(str1: string, str2: string): number {
         if (chars1[i] === chars2[i]) matches++;
     }
 
-    // Also check for common substrings
+    // The common-substring bonus is cubic in line length: one minified or
+    // string-literal line of a few thousand characters froze the JS thread for
+    // seconds when its card mounted (#18). Long lines use the positional ratio
+    // alone; short ones keep the bonus.
+    if (maxLen > 500) return matches / maxLen;
     const commonSubstrings = findCommonSubstrings(str1, str2);
     const substringBonus = commonSubstrings.reduce((sum, sub) => sum + sub.length, 0) / maxLen;
 
