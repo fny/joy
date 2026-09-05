@@ -477,16 +477,18 @@ route("GET", "/v2/sessions/:id/git/status", withSession(async (_ctx, session) =>
 route("GET", "/v2/sessions/:id/git/entries", withSession(async (ctx, session) => {
   // untracked=1: tracked + untracked-but-not-ignored — what an "All files"
   // tab wants (the app used to shell out for this; #5).
-  const args = ctx.url.searchParams.get("untracked") === "1" ? ["-c", "core.quotepath=false", "ls-files", "--cached", "--others", "--exclude-standard"] : ["ls-files"];
+  // -z: NUL-separated, so a name with quotes, backslashes or newlines arrives
+  // as the actual path rather than C-quoted text (Astra on de44f694).
+  const args = ctx.url.searchParams.get("untracked") === "1" ? ["ls-files", "-z", "--cached", "--others", "--exclude-standard"] : ["ls-files", "-z"];
   const p = ctx.url.searchParams.get("path");
   if (p) {
     const j = jailed(session, p);
     if (!j.ok) return ok({ ok: false, error: j.error }, 400);
-    args.push("--", j.path);
+    args.push("--", `:(literal)${j.path}`);
   }
   const r = await git(session.cwd, args);
   if (r.code !== 0) return ok({ ok: false, error: r.stderr.trim() || "git failed" });
-  return ok({ ok: true, files: r.stdout.split("\n").filter(Boolean) });
+  return ok({ ok: true, files: r.stdout.split("\0").filter(Boolean) });
 }));
 // Interrupt the running turn whatever started it (terminal, peer message,
 // daemon-dispatched queue item): the app's Stop used to cancel only relay
@@ -496,8 +498,12 @@ route("GET", "/v2/sessions/:id/git/diff", withSession(async (ctx, session) => {
   const args = ["-c", "core.quotepath=false", "diff", "--no-ext-diff"];
   if (ctx.url.searchParams.get("staged") === "1") args.push("--cached");
   // head=1: working tree vs HEAD (staged + unstaged in one patch) — the
-  // all-files diff overlay's view (#5).
-  else if (ctx.url.searchParams.get("head") === "1") args.push("HEAD");
+  // all-files diff overlay's view (#5). A repo with no commit yet has no
+  // HEAD: compare against the empty tree instead of failing.
+  else if (ctx.url.searchParams.get("head") === "1") {
+    const hasHead = (await git(session.cwd, ["rev-parse", "--verify", "-q", "HEAD"])).code === 0;
+    args.push(hasHead ? "HEAD" : "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+  }
   // numstat=1 returns per-file added/removed counts instead of the patch text —
   // what the file-list UI needs, without shipping whole diffs to render a "+3 −1".
   if (ctx.url.searchParams.get("numstat") === "1") args.push("--numstat");
@@ -505,7 +511,7 @@ route("GET", "/v2/sessions/:id/git/diff", withSession(async (ctx, session) => {
   if (p) {
     const j = jailed(session, p);
     if (!j.ok) return ok({ ok: false, error: j.error }, 400);
-    args.push("--", j.path);
+    args.push("--", `:(literal)${j.path}`); // a literal filename, not a glob (Astra on de44f694)
   } else {
     args.push("--", "."); // scope to the session cwd, not the whole worktree
   }
