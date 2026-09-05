@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {mkdtempSync} from 'node:fs';
+import * as http from 'node:http';
+process.env.JOY_HOME_DIR=mkdtempSync('/tmp/joy-test-tmux/review3/wave1-astra-timeout-');
+const {startNucleusLane}=await import('../src/relay/nucleusLane.ts');
+const server=http.createServer((req,res)=>{req.resume();});
+await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
+const start=Date.now();let stoppedWaiting:()=>void=()=>{};
+const failure=new Promise<void>(r=>stoppedWaiting=r);
+const registry:any={get:()=>undefined,list:()=>[],listRecords:()=>[],saveRecord(){},chatHistory:()=>[]};
+const lane=startNucleusLane({registry,relayUrl:`http://127.0.0.1:${(server.address() as any).port}`,token:'x',machineId:'m',log:s=>{if(s.includes('work lane idle'))stoppedWaiting();}});
+await failure;
+const elapsedMs=Date.now()-start;
+assert.ok(elapsedMs>=29000&&elapsedMs<35000);
+console.log(JSON.stringify({scenario:'real HTTP server withholds response',elapsedMs,result:'30s timeout verified'}));
+await lane.stop();server.closeAllConnections();server.close();process.exit(0);
