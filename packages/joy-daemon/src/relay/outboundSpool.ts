@@ -39,6 +39,8 @@ export interface SpooledTerminal {
   kind: "terminal";
   id: string;
   v2SessionId: string;
+  /** Local session id, so replay can order the terminal after that session's outputs. */
+  localId?: string;
   turnId: string;
   body: Record<string, unknown>;
   at: number;
@@ -57,27 +59,48 @@ export class OutboundSpool {
         const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
         if (Array.isArray(parsed)) this.#entries = parsed.filter((e): e is SpoolEntry => !!e && typeof e === "object" && typeof (e as SpoolEntry).id === "string");
       }
-    } catch {
-      this.#entries = []; // a corrupt spool loses its pending records; it never blocks the lane
+    } catch (e) {
+      // A corrupt spool loses its pending records; it never blocks the lane —
+      // but say so, loudly: this is data the app will not get.
+      process.stderr.write(`[v2-spool] ${path} unreadable (${e instanceof Error ? e.message : e}) — starting empty\n`);
+      this.#entries = [];
     }
   }
 
+  /** Outputs kept per local session before the oldest are dropped: a session
+   *  the relay refuses (event budget) or a day-long outage must not grow the
+   *  file without bound. Terminals are never dropped. */
+  static readonly MAX_OUTPUTS_PER_SESSION = 2_000;
+
   /** Persist synchronously (tmp + rename) — the caller relies on the record
    *  being on disk before it returns. */
-  #save(): void {
+  #save(): boolean {
     try {
       mkdirSync(dirname(this.#path), { recursive: true });
       const tmp = `${this.#path}.tmp`;
       writeFileSync(tmp, JSON.stringify(this.#entries));
       renameSync(tmp, this.#path);
+      return true;
     } catch (e) {
       process.stderr.write(`[v2-spool] save failed: ${e instanceof Error ? e.message : e}\n`);
+      return false;
     }
   }
 
-  add(entry: SpoolEntry): void {
+  /** Append and persist. Returns false when the entry is only in memory —
+   *  callers must then treat outbound persistence as degraded (adapters hold
+   *  their checkpoints) rather than assume durability. */
+  add(entry: SpoolEntry): boolean {
     this.#entries.push(entry);
-    this.#save();
+    if (entry.kind === "output") {
+      const mine = this.#entries.filter((e) => e.kind === "output" && e.localId === entry.localId);
+      if (mine.length > OutboundSpool.MAX_OUTPUTS_PER_SESSION) {
+        const drop = new Set(mine.slice(0, mine.length - OutboundSpool.MAX_OUTPUTS_PER_SESSION).map((e) => e.id));
+        this.#entries = this.#entries.filter((e) => !drop.has(e.id));
+        process.stderr.write(`[v2-spool] ${entry.localId}: over ${OutboundSpool.MAX_OUTPUTS_PER_SESSION} pending outputs — dropped ${drop.size} oldest\n`);
+      }
+    }
+    return this.#save();
   }
 
   remove(id: string): void {

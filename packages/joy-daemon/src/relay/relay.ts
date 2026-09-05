@@ -817,9 +817,12 @@ export class RelaySession {
     for (const r of pending) sink(r);
   }
 
-  /** There is no outbound spool any more, so it can never be degraded; the
-   *  transcript checkpoint gate in Session#scheduleCheckpoint reads this. */
-  readonly outboundPersistDegraded = false;
+  /** True while the lane's outbound spool cannot persist (disk full, a
+   *  permissions error): the transcript checkpoint gate in
+   *  Session#scheduleCheckpoint reads this and holds its checkpoint, so a
+   *  record that exists only in RAM is replayed from the transcript after a
+   *  crash instead of being skipped. */
+  get outboundPersistDegraded(): boolean { return outboundDegraded; }
 
   /** Last thinking value we recorded. */
   private lastThinking = false;
@@ -1027,6 +1030,12 @@ export function forgetRecords(localSessionId: string): void { recordLogs.delete(
 export type RecordSink = (localSessionId: string, wire: WireRecord, localId?: string) => void;
 let recordSink: RecordSink | null = null;
 export function setRecordSink(sink: RecordSink | null): void { recordSink = sink; }
+let outboundDegraded = false;
+/** The lane reports its spool's health here (see RelaySession.outboundPersistDegraded). */
+export function setOutboundPersistDegraded(v: boolean): void {
+  if (v !== outboundDegraded) process.stderr.write(`[relay] outbound persistence ${v ? "DEGRADED — adapter checkpoints held" : "restored"}\n`);
+  outboundDegraded = v;
+}
 
 /** Build the session card holder for a local session. Purely local: the
  *  relay-side v2 session row is created by the nucleus lane at spawn/bind,
