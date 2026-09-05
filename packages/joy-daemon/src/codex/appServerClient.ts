@@ -218,6 +218,7 @@ export class CodexAppServerClient {
         deadline,
       ]);
       this.notify("initialized", {});
+      this.#externallyResolved.clear(); // markers name the OLD connection's request ids (Astra on caf47165)
       this.#closed = false; // a successful connection is the only thing that reopens the client
       return result;
     } catch (e) {

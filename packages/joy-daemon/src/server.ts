@@ -136,7 +136,7 @@ startHttpServer({
 // Populate the machine-wide command set before recover() adopts sessions, so
 // the first per-session push already includes personal + plugin commands.
 registry.commands.rescanMachine();
-registry.recover();
+void registry.recover().catch((e) => process.stderr.write(`[recover] failed: ${e instanceof Error ? e.message : e}\n`));
 
 // v2 nucleus lane: the daemon's app-facing message plane — claims the relay's
 // durable v2 queue for this machine. Same credentials and machine identity as

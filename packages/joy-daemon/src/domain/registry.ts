@@ -302,6 +302,11 @@ export class SessionRegistry {
     // Reserved while this create runs: a second create({id}) during the tmux
     // setup used to kill the first one's server and return a second object
     // (Astra on 01bdac2f). Released in the wrapper below.
+    // Join an in-flight restart of this id BEFORE reserving: a joiner that
+    // reserved first made the restart's own replacement fail id_in_use
+    // (Astra on 45e1653a).
+    const pendingRestart = opts.id ? this.#restarting.get(opts.id) : undefined;
+    if (pendingRestart && !this.#replacing.has(id)) return pendingRestart;
     if (this.#creating.has(id)) throw new Error(`session ${id} is being created (id_in_use)`);
     this.#creating.add(id);
     try { return await this.#createInner(opts, id, cwd); } finally { this.#creating.delete(id); }
@@ -340,7 +345,11 @@ export class SessionRegistry {
     const matchesRequest = (live: AgentSession): boolean => {
       if (opts.model && (live.currentModel ?? live.model) !== opts.model) return false;
       if (opts.effort && live.effort !== opts.effort) return false;
-      if (opts.permissionMode && live.detectPermissionMode() !== opts.permissionMode) return false;
+      // Launch-only flags a live session cannot report: a request for them is
+      // a request for a new launch (Astra on 45e1653a).
+      if (opts.fallbackModel || opts.chrome || opts.extraArgs?.trim()) return false;
+      // An explicit permissionMode wins over yolo (the launch rule).
+      if (opts.permissionMode) return live.detectPermissionMode() === opts.permissionMode;
       if (opts.yolo === false && live.detectPermissionMode() === "bypassPermissions") return false;
       if (opts.yolo === true && live.detectPermissionMode() !== null && live.detectPermissionMode() !== "bypassPermissions") return false;
       return true;
@@ -393,7 +402,7 @@ export class SessionRegistry {
       // leave a dead window — restart() resumes its own conversation.
       process.stderr.write(`[create] ${detachedInCwd.id} detached in ${target} — restarting in place\n`);
       return this.restart({ id: detachedInCwd.id });
-    } else if (opts.continue && liveInCwd) {
+    } else if (opts.continue && liveInCwd && !opts.forceNew) {
       // continue-most-recent with a session already live here → open the
       // running one — unless the caller asked for different settings, which
       // that session does not have: say so instead of silently returning a
@@ -577,7 +586,7 @@ export class SessionRegistry {
     };
     if (names) {
       // Spawns the per-session SERVER too (first command on a fresh -L label).
-      if (!this.#newAgentServer(drv, names.session, cwd)) abortCreate("new-session");
+      if (!(await this.#newAgentServer(drv, names.session, cwd))) abortCreate("new-session");
     } else if (!(await drv.commandOnce(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd])).ok) {
       abortCreate("new-window");
     }
@@ -812,7 +821,7 @@ export class SessionRegistry {
       throw new Error(`codex session create failed: ${why}`);
     };
     if (names) {
-      if (!this.#newAgentServer(drv, names.session, cwd)) abortCreate("new-session");
+      if (!(await this.#newAgentServer(drv, names.session, cwd))) abortCreate("new-session");
     } else if (!(await drv.commandOnce(["new-window", "-t", this.tmuxSession, "-n", windowName, "-c", cwd])).ok) {
       abortCreate("new-window");
     }
@@ -1027,7 +1036,7 @@ export class SessionRegistry {
   listRecords(): ReturnType<typeof listWindowRecords> { return listWindowRecords(); }
   saveRecord(id: string, patch: Parameters<typeof saveWindowRecord>[1]): void { saveWindowRecord(id, patch); }
 
-  recover(): void {
+  async recover(): Promise<void> {
     // Startup scan — spawn (runs before the control client is reliably attached; kept
     // synchronous so daemon boot doesn't depend on the connection coming up first).
     const result = tmux.runSync("list-windows", "-t", this.tmuxSession, "-F", "#{window_name}");
@@ -1174,7 +1183,7 @@ export class SessionRegistry {
       process.stderr.write(`[recover] ${id} cwd=${cwd} alive=${isAlive} transcript=${transcriptPath}\n`);
     }
 
-    this.#resurrectCodexOrphans();
+    await this.#resurrectCodexOrphans();
     this.#sweepOrphanTmuxServers();
     resumeHandoffJobs(this);
   }
@@ -1184,7 +1193,7 @@ export class SessionRegistry {
    *  renames it and `<name>:agent` stays a stable target while the user adds
    *  other windows beside it). Spawn, never control — the control client
    *  attaches to the session this creates. */
-  #newAgentServer(drv: TmuxDriver, session: string, cwd: string): boolean {
+  async #newAgentServer(drv: TmuxDriver, session: string, cwd: string): Promise<boolean> {
     // A detached session (Claude exited, window sat at the shell) keeps its
     // per-session server alive; end("restart") on an already-ended session is
     // a no-op, so the restart's new-session failed with "duplicate session",
@@ -1199,10 +1208,10 @@ export class SessionRegistry {
     // "session create failed: new-session" alone said nothing.
     let r = drv.runSync("new-session", "-d", "-s", session, "-n", TMUX_AGENT_WINDOW, "-x", "100", "-y", "40", "-c", cwd);
     if (!r.ok) {
-      process.stderr.write(`[create] ${session}: new-session failed (${String((r as { err?: string; out?: string }).err ?? (r as { out?: string }).out ?? "").trim().slice(0, 200)}) — retrying once\n`);
-      const until = Date.now() + 400; while (Date.now() < until) { /* brief spin: runSync callers are synchronous */ }
+      process.stderr.write(`[create] ${session}: new-session failed (${(r.error ?? r.out ?? "").trim().slice(0, 200)}) — retrying once\n`);
+      await sleep(400); // the previous server may still be releasing its socket
       r = drv.runSync("new-session", "-d", "-s", session, "-n", TMUX_AGENT_WINDOW, "-x", "100", "-y", "40", "-c", cwd);
-      if (!r.ok) { process.stderr.write(`[create] ${session}: new-session failed again (${String((r as { err?: string; out?: string }).err ?? (r as { out?: string }).out ?? "").trim().slice(0, 200)})\n`); return false; }
+      if (!r.ok) { process.stderr.write(`[create] ${session}: new-session failed again (${(r.error ?? r.out ?? "").trim().slice(0, 200)})\n`); return false; }
     }
     drv.runSync("set-window-option", "-t", `${session}:${TMUX_AGENT_WINDOW}`, "automatic-rename", "off");
     drv.runSync("set-hook", "-t", session, "client-attached", CLIENT_ATTACHED_HOOK);
@@ -1243,7 +1252,7 @@ export class SessionRegistry {
    *  pid running `codex app-server` on that exact socket — never a recycled
    *  pid), recreating its window. Intentional kills can't resurrect: end
    *  ('killed') deletes the record. */
-  #resurrectCodexOrphans(): void {
+  async #resurrectCodexOrphans(): Promise<void> {
     // Opencode recovery: window-less by design, so records are the ONLY
     // discovery path. opencode persists sessions server-side per project dir,
     // so recovery is simply: fresh server in the cwd + resume the stored
@@ -1312,7 +1321,7 @@ export class SessionRegistry {
       run("tmux", "-L", sockLabel, "kill-server"); // a half-dead one from before, if any
       disposeTmuxHandle(sockLabel);
       const drv = tmuxHandleFor(sockLabel, names.session);
-      if (!this.#newAgentServer(drv, names.session, rec.launchCwd)) { disposeTmuxHandle(sockLabel); continue; }
+      if (!(await this.#newAgentServer(drv, names.session, rec.launchCwd))) { disposeTmuxHandle(sockLabel); continue; }
       const tmuxWindow = names.target;
       const shell = process.env.SHELL || "/bin/bash";
       drv.runSync("send-keys", "-t", tmuxWindow, "-l", `exec ${shell} -l`);

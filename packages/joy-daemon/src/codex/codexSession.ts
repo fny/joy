@@ -163,8 +163,9 @@ export class CodexSession implements AgentSession {
     // pull, so an inbound message can't race the load (finding #3 startup race).
     if (init.codexThreadId) {
       this.#inbound = loadCodexInbound(init.id);
-    for (const it of this.#inbound) this.#dispatched.add(it.clientId); // recovered spool entries are ours (#78)
       this.#checkpoint = loadCheckpoint(init.id);
+      for (const it of this.#inbound) this.#dispatched.add(it.clientId); // recovered spool entries are ours (#78)
+      for (const id of this.#checkpoint.knownClientIds ?? []) this.#dispatched.add(id); // …and the ones already echoed before the crash
       // Do NOT seed pendingEffort on resume/recover (finding #8).
     } else {
       clearCodexInbound(init.id);
@@ -214,6 +215,10 @@ export class CodexSession implements AgentSession {
       }
       if (!client) {
         client = await this.#spawnFresh();
+      }
+      if (this.status === "ended") { // killed while starting: this generation owns nothing (Astra on 08f70257)
+        try { client.close(); } catch { /* best effort */ }
+        return;
       }
       this.#client = client;
 
@@ -490,7 +495,14 @@ export class CodexSession implements AgentSession {
   #onDispatchEchoed(clientId: string): void {
     const before = this.#inbound.length;
     this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
-    if (this.#inbound.length !== before) { saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId); }
+    if (this.#inbound.length !== before) {
+      saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId);
+      // Ownership must survive a crash before the turn is checkpointed, or
+      // recovery mirrors our own prompt again as a TUI one (Astra on 08f70257).
+      const known = [...(this.#checkpoint.knownClientIds ?? []), clientId].slice(-200);
+      this.#checkpoint = { ...this.#checkpoint, knownClientIds: known };
+      saveCheckpoint(this.id, this.#checkpoint);
+    }
     this.#interruptIfCancelled(clientId); // the echo proves it landed; a tombstoned one is interrupted now
   }
 
@@ -615,10 +627,10 @@ export class CodexSession implements AgentSession {
     if (n.method === "turn/started") {
       const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
       if (typeof turn.id === "string") this.#activeTurnId = turn.id;
-      // A start that timed out client-side but landed: honour a cancel that
-      // arrived meanwhile.
-      const lastSent = this.#inflightItem ?? [...this.#inbound].reverse().find((i) => i.state === "sentUnknown") ?? null;
-      this.#interruptIfCancelled(lastSent?.clientId ?? null);
+      // A cancelled item whose start timed out client-side is settled by its
+      // userMessage ECHO (#onDispatchEchoed), which names the clientId. A
+      // turn/started alone is not attributable — guessing interrupted an
+      // unrelated TUI turn (Astra on caf47165).
     } else if (n.method === "turn/completed") {
       this.#activeTurnId = null;
       // Checkpoint is advanced by the terminal-row ACK (setReceiptSink), NOT

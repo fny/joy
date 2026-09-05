@@ -25,6 +25,9 @@ import { joyStateDir } from "../paths";
 export interface CodexCheckpoint {
   threadId: string | null;
   deliveredThroughTurnId: string | null;
+  /** clientIds this session dispatched and saw echoed (last 200): ownership
+   *  for userMessage items seen again on recovery (#78). */
+  knownClientIds?: string[];
 }
 
 function empty(): CodexCheckpoint {
@@ -43,6 +46,7 @@ export function loadCheckpoint(id: string, baseDir = joyStateDir()): CodexCheckp
     return {
       threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
       deliveredThroughTurnId: typeof parsed.deliveredThroughTurnId === "string" ? parsed.deliveredThroughTurnId : null,
+      knownClientIds: Array.isArray(parsed.knownClientIds) ? parsed.knownClientIds.filter((x): x is string => typeof x === "string") : undefined,
     };
   } catch { return empty(); }
 }
