@@ -344,7 +344,7 @@ export class PiSession implements AgentSession {
   cancelQueued(): boolean { return false; }
   reorderQueued(): boolean { return false; }
 
-  async abort(): Promise<{ ok: true }> {
+  async abort(): Promise<{ ok: boolean; error?: string }> {
     this.#send({ type: "abort" });
     if (this.#turn) {
       this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn }), `${this.#turn}:end`);

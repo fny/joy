@@ -607,9 +607,10 @@ export class OpencodeSession implements AgentSession {
   }
   reorderQueued(): boolean { return false; }
 
-  async abort(): Promise<{ ok: true }> {
+  async abort(): Promise<{ ok: boolean; error?: string }> {
     if (this.#client && this.#ocSessionId) {
-      try { await this.#client.interrupt(this.#ocSessionId); } catch { /* best effort */ }
+      try { await this.#client.interrupt(this.#ocSessionId); }
+      catch (e) { return { ok: false, error: `interrupt failed: ${e instanceof Error ? e.message : e}` }; } // the turn is NOT over locally (#8)
       this.#endTurn(this.#activeTurn ?? "", "cancelled");
     }
     return { ok: true };
