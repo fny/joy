@@ -1065,7 +1065,20 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // flipped busy(), then hold the session's relay execution slot with every
       // later message stuck behind it (live 2026-09-03).
       if (queued?.handled === "command") {
-        await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+        try {
+          await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+        } catch (e) {
+          if ((e as { status?: number }).status === 409) {
+            // The relay refuses the start (cancelled): a /joy-prompt may have
+            // enqueued its reinjection already — pluck it, then say cancelled.
+            const rein = (queued as { reinjectionId?: string }).reinjectionId;
+            if (rein) { try { sess.cancelQueued(rein); } catch { /* stub adapters */ } }
+            await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
+            log(`${tag}: /start refused for a handled command → cancelled`);
+            return;
+          }
+          throw e;
+        }
                 await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "completed", runtimeEventId: randomUUID(),
           meta: { reason: "handled_as_command" },
@@ -1202,6 +1215,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // (Astra, #77).
           if (queued?.id) { try { sess.cancelQueued(queued.id); } catch { /* stub adapters */ } }
           try { await sess.abort(); } catch { /* pane teardown */ }
+          for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } } // the prompt never runs: its files go too
           await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
           log(`${tag}: /start refused (${(e as Error).message}) → admitted prompt plucked + aborted → cancelled`);
           return;

@@ -203,8 +203,11 @@ export class OpencodeSession implements AgentSession {
       // spawn fresh (sessions persist server-side; a fresh server is simpler
       // and safer than rejoining an unknown-state one).
       if (this.#reapPid && isOpencodeServerPid(this.#reapPid)) {
-        await killOpencodeServerPid(this.#reapPid); // gone before a replacement opens the same conversation (#71)
+        const gone = await killOpencodeServerPid(this.#reapPid); // gone before a replacement opens the same conversation (#71)
+        if (!gone) throw new Error(`recorded opencode server ${this.#reapPid} could not be stopped — not starting a second one`);
       }
+      // Killed while we waited for the reap: this generation must not spawn.
+      if (this.status === "ended") return;
       const { proc, port } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
       this.#proc = proc;
       proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
@@ -280,12 +283,12 @@ export class OpencodeSession implements AgentSession {
    *  body goes out as its own unmirrored message — only the /joy-prompt row
    *  (when mirror) appears in chat. Clears #needsPreamble: the reinjection IS
    *  the (newer) preamble. */
-  #handleJoyPrompt(text: string, mirror: boolean, seq?: number): boolean {
+  #handleJoyPrompt(text: string, mirror: boolean, seq?: number): string | false {
     if (!/^\/joy-prompt(?:\s|$)/.test(text.trim())) return false;
     this.#needsPreamble = false;
     if (mirror && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
-    this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
-    return true;
+    const rein = this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
+    return rein.id; // the reinjection item, so a cancelled relay turn can pluck it (#77)
   }
 
   #draining = false;
@@ -551,8 +554,9 @@ export class OpencodeSession implements AgentSession {
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
       return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" }; // (#65)
     }
-    if (this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq)) {
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" };
+    const rein = this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq);
+    if (rein) {
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command", reinjectionId: rein };
     }
     if (seq != null) {
       const dup = this.#inbound.find((i) => i.seq === seq);

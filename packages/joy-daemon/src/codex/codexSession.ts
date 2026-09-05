@@ -370,13 +370,13 @@ export class CodexSession implements AgentSession {
    *  developerInstructions so a thread restart launches with the latest
    *  wording. The reinjection body is delivered as its own unmirrored message;
    *  only the /joy-prompt row (when mirror) appears in chat. */
-  #handleJoyPrompt(text: string, mirror: boolean, seq?: number): boolean {
+  #handleJoyPrompt(text: string, mirror: boolean, seq?: number): string | false {
     if (!/^\/joy-prompt(?:\s|$)/.test(text.trim())) return false;
     this.#developerInstructions = codexJoyInstructions();
     this.#persistWindowRecord();
     if (mirror && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? Date.now()}`);
-    this.enqueue(joyPromptReinjection(codexJoyInstructions()), { mirrorToRelay: false });
-    return true;
+    const rein = this.enqueue(joyPromptReinjection(codexJoyInstructions()), { mirrorToRelay: false });
+    return rein.id; // the reinjection item, so a cancelled relay turn can pluck it (#77)
   }
 
   #persistWindowRecord(): void {
@@ -783,8 +783,9 @@ export class CodexSession implements AgentSession {
       // activity a title change never produces held the queue for 3 min (#65).
       return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" };
     }
-    if (this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq)) {
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" };
+    const rein = this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq);
+    if (rein) {
+      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command", reinjectionId: rein };
     }
     if (seq != null) {
       const dup = this.#inbound.find((i) => i.seq === seq);

@@ -494,6 +494,9 @@ export interface QueuedMessage {
   id: string;
   text: string;
   createdAt: number;
+  /** For a handled /joy-prompt: the queue id of the instruction reinjection it
+   *  enqueued, so a lane whose relay turn is cancelled can pluck it (#77). */
+  reinjectionId?: string;
   /** Set when enqueue HANDLED the text itself (a joy-owned slash command) and
    *  queued nothing — the returned id is synthetic and will never be delivered.
    *  A caller that owns a relay turn must terminalize it instead of waiting for
