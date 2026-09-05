@@ -113,7 +113,12 @@ export function handleDocs(req, res, { version, routeTable = null }) {
   const path = url.split('?')[0];
   if (req.method !== 'GET' || (path !== '/docs' && path !== '/openapi.json')) return false;
   const q = url.match(/[?&]token=([^&]+)/);
-  if (!q || decodeURIComponent(q[1]) !== DOCS_TOKEN) {
+  // A malformed percent-escape (`?token=%`) made decodeURIComponent throw
+  // out of the request callback — an unhandled rejection that took the relay
+  // down from one unauthenticated request (issue #59). Invalid = wrong token.
+  let candidate = null;
+  try { candidate = q ? decodeURIComponent(q[1]) : null; } catch { candidate = null; }
+  if (candidate === null || candidate !== DOCS_TOKEN) {
     res.writeHead(401, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'docs token required (?token=…)' }));
     return true;

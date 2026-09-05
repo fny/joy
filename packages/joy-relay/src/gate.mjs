@@ -21,7 +21,8 @@ function candidateFrom(req) {
   const header = req.headers['x-joy-relay-key'];
   if (typeof header === 'string' && header) return header;
   const q = (req.url ?? '').match(/[?&]joyRelayKey=([^&]+)/);
-  if (q) return decodeURIComponent(q[1]);
+  // Same decode hazard as docs.mjs (#59): a bad escape is "no key", not a crash.
+  if (q) { try { return decodeURIComponent(q[1]); } catch { return null; } }
   return null;
 }
 
