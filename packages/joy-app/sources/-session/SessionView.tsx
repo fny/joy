@@ -906,17 +906,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         composerHandleRef.current?.clearMessage();
         clearImages();
         // One idempotency key per COMPOSITION: a retry after a lost response
-        // must reuse it, or the relay queues the prompt twice (#7). Rotated
-        // only once the relay has accepted the send.
+        // must reuse it, or the relay queues the prompt twice (#7). The key is
+        // taken for THIS message and a fresh one is minted at once, so a second
+        // message sent while this one is still in flight never shares it
+        // (Astra caught that); a failed send puts its key back with the text.
         const localId = compositionIdRef.current;
+        compositionIdRef.current = randomUUID();
         void sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments, localId }).then((res) => {
             if (res.ok) {
-                compositionIdRef.current = randomUUID();
                 releaseAttachmentUris(attachments);
                 return;
             }
             if (liveMessage.trim()) {
-                if (composerHandleRef.current) composerHandleRef.current.restoreMessage(liveMessage);
+                if (composerHandleRef.current) { composerHandleRef.current.restoreMessage(liveMessage); compositionIdRef.current = localId; }
                 // The screen was left while the send was in flight: keep the text
                 // as a durable draft instead of losing it (#124). Attachments
                 // cannot be kept this way; the alert says so.
