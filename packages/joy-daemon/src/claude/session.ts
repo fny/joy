@@ -2074,7 +2074,8 @@ export class Session {
         this.#broadcastQueue();
       }
     }
-    await this.#tmux.key(this.tmuxWindow, "Escape");
+    const esc = await this.#tmux.key(this.tmuxWindow, "Escape");
+    if (!esc.ok) return { ok: false, error: esc.error ?? "tmux send-keys failed" }; // the agent was NOT interrupted (#8)
     this.#setThinking(false);
     // Interrupting mid-tool means Claude won't write that tool's result — close any
     // open tools so their cards don't spin forever.

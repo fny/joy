@@ -184,11 +184,12 @@ export class PiSession implements AgentSession {
     saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "pi", piSettings: { model: this.currentModel ?? this.model, sessionId: this.#piSessionId } });
   }
 
-  #send(cmd: Record<string, unknown>): void {
+  /** True when the command was handed to pi's stdin. */
+  #send(cmd: Record<string, unknown>): boolean {
     const proc = this.#proc;
-    if (!proc?.stdin?.writable || proc.stdin.destroyed) return;
-    try { proc.stdin.write(JSON.stringify(cmd) + "\n"); }
-    catch (e) { process.stderr.write(`[pi ${this.id}] write failed: ${e instanceof Error ? e.message : e}\n`); }
+    if (!proc?.stdin?.writable || proc.stdin.destroyed) return false;
+    try { proc.stdin.write(JSON.stringify(cmd) + "\n"); return true; }
+    catch (e) { process.stderr.write(`[pi ${this.id}] write failed: ${e instanceof Error ? e.message : e}\n`); return false; }
   }
 
   // ── event stream → relay ──────────────────────────────────────────────────
@@ -345,7 +346,7 @@ export class PiSession implements AgentSession {
   reorderQueued(): boolean { return false; }
 
   async abort(): Promise<{ ok: boolean; error?: string }> {
-    this.#send({ type: "abort" });
+    if (!this.#send({ type: "abort" })) return { ok: false, error: "pi stdin is not writable" }; // nothing was interrupted (#8)
     if (this.#turn) {
       this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn }), `${this.#turn}:end`);
       this.#turn = null;
