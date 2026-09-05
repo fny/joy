@@ -195,6 +195,10 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       if (status !== 'queued') throw new ApiError(409, { error: 'not_editable', status });
       if (typeof body.ciphertext === 'string') {
         await t.query(`UPDATE commands SET ciphertext = $1 WHERE id = $2`, [body.ciphertext, m[2]]);
+        // A delivery already handed to a daemon carries the OLD payload:
+        // supersede it so /received refuses it and the next claim offers the
+        // edit (issue #57 — the agent ran A while the chat showed B).
+        await t.query(`UPDATE deliveries SET disposition = 'superseded' WHERE command_id = $1 AND disposition IS NULL`, [m[2]]);
         // Durable record of the edit: without it, a device replaying the
         // event log reconstructs the ORIGINAL text while GET shows the edit.
         const { seq } = await nextSeq(t, m[1]);
