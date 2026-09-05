@@ -302,8 +302,11 @@ export class OpencodeSession implements AgentSession {
     } finally { this.#draining = false; }
   }
   #drainAgain = false;
+  /** Read through a call so TS does not narrow `status` across an await. */
+  #isEnded(): boolean { return this.status === "ended"; }
   async #drainInboundInner(client: OpencodeClient, ocSessionId: string): Promise<void> {
     for (const item of [...this.#inbound]) {
+      if (this.status === "ended") return; // a killed generation sends nothing more (#43)
       if (item.state !== "queued" && item.state !== "sentUnknown") continue;
       // Re-check membership right before the send: a cancel that landed
       // during the previous await removed it from #inbound.
@@ -321,9 +324,11 @@ export class OpencodeSession implements AgentSession {
         // Admission ack = durable server-side; prompt.admitted event confirms
         // via the normalizer too, but the ack alone is safe to remove on
         // (admittedSeq is the server's own ordering receipt).
+        if (this.#isEnded()) return; // retired mid-request: do not touch the (cleared) spool (#43)
         // A cancel that raced the reply wins: never overwrite its outcome.
         if (r.messageID && this.#inbound.includes(item)) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
       } catch (e) {
+        if (this.#isEnded()) return;
         const msg = e instanceof Error ? e.message : String(e);
         if (/→ \d{3}:/.test(msg)) {
           // The server ANSWERED and refused: this prompt is terminal. Leaving
@@ -672,7 +677,7 @@ export class OpencodeSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       deleteWindowRecord(this.id);
-      clearCodexInbound(this.id); // nothing left to deliver (#43)
+      clearCodexInbound(this.id); this.#inbound = []; // nothing left to deliver (#43)
       this.#deps.broadcast("session_update", this.toJSON());
       return true;
     }

@@ -163,6 +163,7 @@ export class CodexSession implements AgentSession {
     // pull, so an inbound message can't race the load (finding #3 startup race).
     if (init.codexThreadId) {
       this.#inbound = loadCodexInbound(init.id);
+    for (const it of this.#inbound) this.#dispatched.add(it.clientId); // recovered spool entries are ours (#78)
       this.#checkpoint = loadCheckpoint(init.id);
       // Do NOT seed pendingEffort on resume/recover (finding #8).
     } else {
@@ -425,6 +426,10 @@ export class CodexSession implements AgentSession {
         permissionMode: this.#permissionMode,
         effort: this.#pendingEffort ?? undefined,
       });
+      if (this.status === "ended") { // retired while the start was in flight: this generation owns nothing now (#43)
+        try { await client.turnInterrupt(this.#threadId, turnId); } catch { /* best effort */ }
+        return;
+      }
       this.#pendingEffort = null; // applied (codex persists it thread-side)
       this.#activeTurnId = turnId; // serialize: no further dispatch until this completes
       if (this.#cancelledIds.has(item.clientId)) {
@@ -435,6 +440,7 @@ export class CodexSession implements AgentSession {
         try { await client.turnInterrupt(this.#threadId, turnId); } catch { /* best effort */ }
       }
     } catch (e) {
+      if (this.status === "ended") return; // a killed generation must not save its old queue (#43)
       if (e instanceof JsonRpcResponseError) {
         // EXPLICIT server rejection. A busy/already-active refusal is
         // retryable (turn/completed re-pumps); anything else, three times in
@@ -484,7 +490,7 @@ export class CodexSession implements AgentSession {
   #onDispatchEchoed(clientId: string): void {
     const before = this.#inbound.length;
     this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
-    if (this.#inbound.length !== before) { saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); }
+    if (this.#inbound.length !== before) { saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId); }
     this.#interruptIfCancelled(clientId); // the echo proves it landed; a tombstoned one is interrupted now
   }
 
@@ -662,7 +668,7 @@ export class CodexSession implements AgentSession {
           // card already emitted user rows BEFORE the turn bracket (#78).
           const ours = !!eff.clientId && (this.#dispatched.has(eff.clientId) || this.#inbound.some((i) => i.clientId === eff.clientId) || eff.clientId.startsWith(`codex-in:${this.id}:`));
           if (ours) { this.#onDispatchEchoed(eff.clientId); break; }
-          if (this.#replayingHistory) break;
+          if (this.#replayingHistory && this.#freshCard) break; // already emitted before the turn bracket
           this.#relay?.send(encodeUserMessage(eff.text, Date.now()), eff.localId);
           break;
         }
@@ -953,7 +959,7 @@ export class CodexSession implements AgentSession {
           : this.#tmux.command(["kill-window", "-t", this.tmuxWindow]));
       } catch { /* ignore */ }
       this.#relay?.stop();
-      clearCodexInbound(this.id); // a killed session will never deliver — drop the spool
+      clearCodexInbound(this.id); this.#inbound = []; // a killed session will never deliver — drop the spool
       clearCheckpoint(this.id);
       // Intentional kill → drop the record so record-based codex recovery
       // can't resurrect this session on the next daemon boot.
@@ -971,7 +977,7 @@ export class CodexSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       deleteWindowRecord(this.id);
-      clearCodexInbound(this.id); clearCheckpoint(this.id); // nothing left to deliver or resume (#43)
+      clearCodexInbound(this.id); clearCheckpoint(this.id); this.#inbound = []; // nothing left to deliver or resume (#43)
       void (this.#tmuxSocket
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())
         : this.#tmux.command(["kill-window", "-t", this.tmuxWindow]));
