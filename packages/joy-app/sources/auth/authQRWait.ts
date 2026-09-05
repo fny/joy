@@ -35,7 +35,10 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
             }, {
                 headers: {
                     'X-Joy-Client': getJoyClientId(),
-                }
+                },
+                // Bounded so the deadline above is checked even when the relay
+                // accepts the request and never answers (Astra, 09cd8b87).
+                timeout: Math.max(1_000, Math.min(15_000, deadline - Date.now())),
             });
 
             // The relay hands the answer out once (#70). 'consumed' means

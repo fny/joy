@@ -995,7 +995,7 @@ class Sync {
                 // whose sealed rows did not open must not anchor history —
                 // throwing here retries page 0 once the card's envelope lands.
                 if ((data.unopenable ?? 0) > 0) {
-                    await this.sessionsSync.invalidateAndAwait().catch(() => { /* retry anyway */ });
+                    this.sessionsSync.invalidate(); // fire only: awaiting queue idleness can starve under the 2.5s poll (Astra, c2f47079)
                     const strikes = v2ctx.key ? (this.unopenableStrikes.get(sessionId) ?? 0) + 1 : 0;
                     if (!v2ctx.key || strikes <= Sync.MAX_UNOPENABLE_RETRIES) {
                         this.unopenableStrikes.set(sessionId, strikes);
@@ -1113,7 +1113,7 @@ class Sync {
                 // Pull the card first so the retry reads the newest envelope,
                 // then retry. Only PRESENT-key failures spend the budget: a
                 // no-key wait must not exhaust the retries a stale key needs.
-                await this.sessionsSync.invalidateAndAwait().catch(() => { /* retry anyway */ });
+                this.sessionsSync.invalidate(); // fire only: awaiting queue idleness can starve under the 2.5s poll (Astra, c2f47079)
                 const strikes = v2ctx.key ? (this.unopenableStrikes.get(sessionId) ?? 0) + 1 : 0;
                 if (!v2ctx.key || strikes <= Sync.MAX_UNOPENABLE_RETRIES) {
                     this.unopenableStrikes.set(sessionId, strikes);
