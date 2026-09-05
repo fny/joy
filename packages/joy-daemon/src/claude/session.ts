@@ -1270,12 +1270,17 @@ export class Session {
     // callers still get an id.
     const cmd = parseJoyCommand(text);
     if (cmd) {
+      // Every branch below is fire-and-forget by design, but the promise
+      // must be OBSERVED: #steer rejects when typing fails (pane gone, tmux
+      // control watchdog, a kill in the same second) and an unhandled
+      // rejection took the whole daemon down (issue #29).
+      const bg = (p: Promise<unknown>, what: string) => { p.catch((e) => process.stderr.write(`[${this.id}] ${what} failed: ${e instanceof Error ? e.message : e}\n`)); };
       if (cmd.name === "steer" && cmd.args.trim()) {
-        void this.#steer(cmd.args, {
+        bg(this.#steer(cmd.args, {
           seq: opts?.seq,
           source: opts?.source ?? "rpc",
           mirrorToRelay: opts?.mirrorToRelay ?? true,
-        });
+        }), "/steer");
       } else if (cmd.name === "btw" && cmd.args.trim()) {
         // /btw is Claude Code's BUILT-IN side-question command (immediate,
         // control-request dispatch — answers without interrupting the main
@@ -1284,15 +1289,15 @@ export class Session {
         // the idle gate it would answer long after the moment passed. The
         // CLI runs the command and its reply lands in the transcript like
         // any other output; no collection channel needed.
-        void this.#steer(text, {
+        bg(this.#steer(text, {
           seq: opts?.seq,
           source: opts?.source ?? "rpc",
           mirrorToRelay: opts?.mirrorToRelay ?? true,
-        });
+        }), "/btw");
       } else if (cmd.name === "title") {
         this.#setTitle(cmd.args, { byUser: true });
       } else if (cmd.name === "login-code" && cmd.args.trim()) {
-        void this.#submitLoginCode(cmd.args);
+        bg(this.#submitLoginCode(cmd.args), "/login-code");
       } else if (cmd.name === "joy-prompt") {
         // Re-deliver the CURRENT instruction block in-band (system-prompt
         // attention decays in long sessions). Invisible + unmirrored: the

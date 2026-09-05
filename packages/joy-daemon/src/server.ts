@@ -35,6 +35,16 @@ applyEnvStore();
 import { SessionRegistry } from "./domain/registry";
 import { startHttpServer } from "./transports/http";
 import { computeUsage, periodToRange } from "./claude/usage";
+
+// Last resort. Every known fire-and-forget promise is observed at its call
+// site; this exists so the NEXT one somebody forgets logs a stack instead of
+// killing every live session's lane (two such crashes filed on 2026-09-04,
+// issues #29 and #46). uncaughtException is left to Node: a throw out of a
+// synchronous callback means state is unknown, and systemd restarts us.
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  process.stderr.write(`[daemon] unhandled rejection (kept running): ${msg}\n`);
+});
 import { startResourceAlerts } from "./domain/resourceAlerts";
 
 // Control-server port: the DEFAULT relay keeps the historical 4997; any other
