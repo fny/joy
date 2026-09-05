@@ -418,6 +418,7 @@ export class CodexSession implements AgentSession {
     item.state = "sentUnknown";
     saveCodexInbound(this.id, this.#inbound);
     this.#dispatched.add(item.clientId);
+    this.#inflightItem = item;
     try {
       const { turnId } = await client.turnStart(this.#threadId, item.text, {
         clientUserMessageId: item.clientId,
@@ -438,9 +439,13 @@ export class CodexSession implements AgentSession {
         // EXPLICIT server rejection. A busy/already-active refusal is
         // retryable (turn/completed re-pumps); anything else, three times in
         // a row, is a permanent refusal of THIS prompt → failed (Astra, #66).
+        // Busy refusals never count; three CONSECUTIVE non-busy refusals fail
+        // the item, and a non-busy refusal schedules its own bounded retry so
+        // the counter is driven without waiting for unrelated intake.
         const busy = /busy|already|in progress|active/i.test(String(e.message ?? ""));
-        const n = (this.#rejections.get(item.clientId) ?? 0) + 1;
+        const n = busy ? (this.#rejections.get(item.clientId) ?? 0) : (this.#rejections.get(item.clientId) ?? 0) + 1;
         this.#rejections.set(item.clientId, n);
+        if (!busy && n < 3) setTimeout(() => this.#pumpDispatch(), 2_000 * n).unref();
         if (!busy && n >= 3) {
           this.#inbound = this.#inbound.filter((i) => i.clientId !== item.clientId);
           saveCodexInbound(this.id, this.#inbound);
@@ -454,10 +459,24 @@ export class CodexSession implements AgentSession {
         }
       } else {
         // AMBIGUOUS (timeout / socket loss): it MIGHT have landed — hold as
-        // sentUnknown (at-most-once) rather than risk a duplicate turn.
+        // sentUnknown (at-most-once) rather than risk a duplicate turn. The
+        // tombstone (if any) stays: a late turn/started or echo settles it.
         process.stderr.write(`[codex ${this.id}] turn/start ambiguous failure: ${e}\n`);
       }
+    } finally {
+      this.#inflightItem = null;
     }
+  }
+
+  /** The item whose turn/start is in flight; a late turn/started or echo for
+   *  a tombstoned one is interrupted here (Astra, #66). */
+  #inflightItem: CodexInboundItem | null = null;
+  #interruptIfCancelled(clientId: string | null): void {
+    if (!clientId || !this.#cancelledIds.has(clientId)) return;
+    if (!this.#client || !this.#threadId || !this.#activeTurnId) return; // no turn identity yet — keep the tombstone
+    this.#cancelledIds.delete(clientId);
+    process.stderr.write(`[codex ${this.id}] ${clientId} was cancelled — interrupting late turn ${this.#activeTurnId}\n`);
+    void this.#client.turnInterrupt(this.#threadId, this.#activeTurnId).catch(() => { /* best effort */ });
   }
 
   /** A userMessage echo (live or from history replay) confirms delivery —
@@ -466,6 +485,7 @@ export class CodexSession implements AgentSession {
     const before = this.#inbound.length;
     this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
     if (this.#inbound.length !== before) { saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); }
+    this.#interruptIfCancelled(clientId); // the echo proves it landed; a tombstoned one is interrupted now
   }
 
   #markTurnDelivered(turnId: string): void {
@@ -589,6 +609,10 @@ export class CodexSession implements AgentSession {
     if (n.method === "turn/started") {
       const turn = (n.params?.turn ?? {}) as Record<string, unknown>;
       if (typeof turn.id === "string") this.#activeTurnId = turn.id;
+      // A start that timed out client-side but landed: honour a cancel that
+      // arrived meanwhile.
+      const lastSent = this.#inflightItem ?? [...this.#inbound].reverse().find((i) => i.state === "sentUnknown") ?? null;
+      this.#interruptIfCancelled(lastSent?.clientId ?? null);
     } else if (n.method === "turn/completed") {
       this.#activeTurnId = null;
       // Checkpoint is advanced by the terminal-row ACK (setReceiptSink), NOT
@@ -777,6 +801,8 @@ export class CodexSession implements AgentSession {
   /** Per-item outcomes for the lane (see Session.queueItemState). */
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
+    const prev = this.#itemOutcome.get(id);
+    if ((prev === "cancelled" || prev === "failed") && outcome === "delivered") return; // terminal outcomes win
     this.#itemOutcome.set(id, outcome);
     if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
   }

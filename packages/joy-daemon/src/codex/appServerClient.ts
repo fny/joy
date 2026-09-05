@@ -222,9 +222,10 @@ export class CodexAppServerClient {
       return result;
     } catch (e) {
       // Dispose what this attempt made: otherwise the socket lives on and its
-      // late close tears down whatever connection replaced it (#72).
-      if (this.#ws === ws) this.#ws = null;
-      this.#failAllPending(e instanceof Error ? e : new Error(String(e)));
+      // late close tears down whatever connection replaced it (#72). Shared
+      // pending requests are failed only when this attempt still owns #ws —
+      // a concurrent successful connect keeps its own.
+      if (this.#ws === ws) { this.#ws = null; this.#failAllPending(e instanceof Error ? e : new Error(String(e))); }
       try { ws.terminate(); } catch { /* never opened */ }
       throw e;
     } finally {
@@ -269,15 +270,17 @@ export class CodexAppServerClient {
     const asked = this.#ws;
     try {
       const result = await this.#onServerRequest(req);
+      // The connection that asked is gone: touch NOTHING shared — the
+      // replacement may be using the same request id (Astra, #72).
+      if (this.#ws !== asked) return;
       // Suppress the response if the request was resolved externally while the
       // handler was held (the TUI answered it, or an interrupt cleared it) —
       // sending a second response for the same id is a protocol error (#6).
       if (this.#externallyResolved.delete(key)) return;
-      if (this.#ws !== asked) return; // the connection that asked is gone
       this.#send({ jsonrpc: "2.0", id: req.id, result });
     } catch (e) {
-      if (this.#externallyResolved.delete(key)) return;
       if (this.#ws !== asked) return;
+      if (this.#externallyResolved.delete(key)) return;
       const code = e instanceof JsonRpcError ? e.code : -32603;
       const message = e instanceof Error ? e.message : String(e);
       this.#send({ jsonrpc: "2.0", id: req.id, error: { code, message } });
