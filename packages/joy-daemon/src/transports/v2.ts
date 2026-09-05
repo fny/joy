@@ -164,6 +164,9 @@ function withSession(fn: (ctx: Ctx, session: AgentSession, params: Record<string
 // ── machine: status / usage / restart ───────────────────────────────────────
 route("GET", "/v2/status", async (ctx) => ok(await mcall("status", ctx.registry, {})));
 route("POST", "/v2/daemon/restart", async (ctx) => ok(await mcall("restartDaemon", ctx.registry, {})));
+// Per-session usage rows for the usage screen: the app called this path and
+// the router 404'd it (#106).
+route("GET", "/v2/usage/sessions", async (ctx) => ok(await mcall("sessionUsage", ctx.registry, { period: ctx.url.searchParams.get("period") ?? "30days" })));
 route("GET", "/v2/usage", async (ctx) => {
   const harness = ctx.url.searchParams.get("harness");
   if (harness && harness !== "claude") {
