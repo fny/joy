@@ -22,7 +22,7 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import tweetnacl from "tweetnacl";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
@@ -239,7 +239,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     const m = readSpawnIntents();
     m[commandId] = localId;
     mkdirSync(joyStateDir(), { recursive: true });
-    writeFileSync(spawnIntentPath, JSON.stringify(m, null, 2));
+    // tmp + rename: a crash mid-write used to truncate the whole map and lose
+    // every other command's mapping (Astra on 2f803b14, #75).
+    const tmp = `${spawnIntentPath}.tmp`;
+    writeFileSync(tmp, JSON.stringify(m, null, 2));
+    renameSync(tmp, spawnIntentPath);
   };
   // v2 sessionId → local session id, rebuilt from the relay on start and
   // extended by every bind we perform.
@@ -815,7 +819,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // command unmapped, and the retry spawned a second agent for the
         // same request (#75). A crash mid-create leaves a half-made server
         // under this id, which #newAgentServer retires on the retry.
-        const chosen = prior ?? randomUUID().replace(/-/g, "").slice(0, 8);
+        let chosen = prior ?? randomUUID().replace(/-/g, "").slice(0, 8);
+        for (let tries = 0; tries < 8 && registry.get(chosen)?.id === chosen; tries++) chosen = randomUUID().replace(/-/g, "").slice(0, 8); // never reserve a live runtime's id
         writeSpawnIntent(offer.commandId, chosen);
         spawning.add(localId = chosen);
         session = await registry.create({

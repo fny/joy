@@ -180,6 +180,7 @@ export class PiSession implements AgentSession {
   }
 
   #persistRecord(): void {
+    if (this.status === "ended") return; // a retired/killed generation must not recreate a deleted record (#52)
     saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "pi", piSettings: { model: this.currentModel ?? this.model, sessionId: this.#piSessionId } });
   }
 

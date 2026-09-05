@@ -321,14 +321,28 @@ export class SessionRegistry {
     // Auto-revive only when the caller expressed no preference: an explicit
     // model / permission mode / extra args is a request for THAT launch, not
     // for whatever the dead session had.
-    const explicit = !!(opts.model || opts.permissionMode || opts.extraArgs || opts.effort);
+    const explicit = !!(opts.model || opts.permissionMode || opts.extraArgs || opts.effort || opts.fallbackModel || opts.chrome || opts.yolo === false);
     const detachedInCwd = explicit ? undefined : inCwd.find((s) => s.status === "ended" && s.endReason === "process_exited");
 
+    // An EXPLICIT id (a restart's replacement, a spawn's reserved id) is a
+    // request for exactly that session: none of the cwd adoption/revival
+    // below applies to it (a replacement once came back as a different live
+    // session in the same folder — Astra on 2f803b14), a live object under
+    // that id is a conflict rather than something to launch over, and an
+    // in-flight restart of it is joined, not raced (#42/#45/#75).
+    if (opts.id) {
+      const pendingRestart = this.#restarting.get(opts.id);
+      if (pendingRestart) return pendingRestart;
+      const live = this.#sessions.get(opts.id);
+      if (live && live.status !== "ended") throw new Error(`session ${opts.id} is already live (id_in_use)`);
+    }
     // A FORK is never "the one already here": --fork-session reads the
     // transcript once and continues under a new id, so a live match must not
     // be returned in its place (that handed "Fork" the very session it was
     // forking, 2026-09-03) and a detached one must not be restarted instead.
-    if (opts.resume_id && !opts.forkSession) {
+    if (opts.id) {
+      // explicit id: skip adoption (see above)
+    } else if (opts.resume_id && !opts.forkSession) {
       // Resuming a specific conversation: if it's the one already here, open/revive
       // it instead of recreating it. A different (not-live) id falls through and
       // gets its own new window — its transcript is distinct, so it coexists.
@@ -349,7 +363,11 @@ export class SessionRegistry {
       process.stderr.write(`[create] ${detachedInCwd.id} detached in ${target} — restarting in place\n`);
       return this.restart({ id: detachedInCwd.id });
     } else if (opts.continue && liveInCwd) {
-      // continue-most-recent with a session already live here → open the running one.
+      // continue-most-recent with a session already live here → open the
+      // running one — unless the caller asked for different settings, which
+      // that session does not have: say so instead of silently returning a
+      // different launch (Astra on 2f803b14, #44).
+      if (explicit) throw new Error(`a ${flavor} session (${liveInCwd.id}) is already live in ${target}; restart it with the new settings or start a new one (forceNew)`);
       process.stderr.write(`[create] continue with ${liveInCwd.id} live in ${target} — returning existing\n`);
       return liveInCwd;
     }
@@ -941,11 +959,14 @@ export class SessionRegistry {
 
     // Env is refreshed automatically: create() launches claude through a fresh
     // login shell, so a restart re-sources the user's profile (.bashrc/.zshrc).
+    // No resumable history (a record with no Claude uuid, a session that
+    // never ran a turn): launch FRESH under the same id. `--continue` here
+    // would resume whatever conversation is newest in the folder — someone
+    // else's (Astra on 2f803b14, #113).
     return this.#replace(opts.id, cwd, carried, () => this.create({
       id: opts.id,
       cwd,
       resume_id: resumeId,
-      continue: (!resumeId && !existing) ? true : undefined,
       model: existing?.currentModel ?? existing?.model,
       effort: existing?.effort,
       permissionMode: claudeMode && PERMISSION_MODES.has(claudeMode) ? claudeMode : undefined,
