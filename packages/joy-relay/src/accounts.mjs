@@ -10,6 +10,9 @@ import { ApiError } from './core.mjs';
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const KEY_LEN = 32;
 const PAIRING_TTL_MS = 24 * 60 * 60 * 1000;
+/** An ANSWERED request lives this long: enough for the requester's next poll
+ *  (1s in the app, immediate in the daemon), not the 24h an unanswered QR gets. */
+const ANSWERED_TTL_MS = 10 * 60 * 1000;
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 
 /** Compact, URL-safe, collision-resistant id (no dashes so it stays \w). */
@@ -95,18 +98,31 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
   // stores the sealed blob and, once answered, mints the requester a token.
   async function pairingRequest(kind, { publicKey, supportsV2 }) {
     const hex = keyHex(decodeKey(publicKey));
+    // The answer is handed out ONCE, inside the same transaction that marks it
+    // consumed. Anyone who saw the public key (it is in the QR the app shows)
+    // could otherwise poll after the real requester and be minted a bearer
+    // for the account, repeatedly, for 24 hours (issue #70). Possession of
+    // the private key is still not proven — the sealed blob is useless
+    // without it, but the TOKEN was not — so the window is now one poll.
     const row = await db.tx(async (t) => {
       const { rows: [existing] } = await t.query(
         `SELECT * FROM auth_requests WHERE kind = $1 AND public_key = $2`, [kind, hex]);
-      if (existing) return existing;
+      if (existing) {
+        if (existing.response && existing.response_account_id && !existing.consumed_at) {
+          await t.query(`UPDATE auth_requests SET consumed_at = now(), updated_at = now() WHERE id = $1`, [existing.id]);
+          return { ...existing, deliver: true };
+        }
+        return existing;
+      }
       const { rows: [created] } = await t.query(
         `INSERT INTO auth_requests (id, kind, public_key, supports_v2) VALUES ($1, $2, $3, $4) RETURNING *`,
         [newId('r'), kind, hex, supportsV2 === true]);
       return created;
     });
-    if (row.response && row.response_account_id) {
+    if (row.deliver) {
       return { state: 'authorized', token: tokens.mint(row.response_account_id, { session: row.id }), response: row.response };
     }
+    if (row.consumed_at) return { state: 'consumed' };
     return { state: 'requested' };
   }
 
@@ -138,7 +154,8 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
   }
 
   async function sweepPairings() {
-    await db.query(`DELETE FROM auth_requests WHERE created_at < $1`, [new Date(Date.now() - PAIRING_TTL_MS).toISOString()]);
+    await db.query(`DELETE FROM auth_requests WHERE created_at < $1 OR (response IS NOT NULL AND updated_at < $2)`,
+      [new Date(Date.now() - PAIRING_TTL_MS).toISOString(), new Date(Date.now() - ANSWERED_TTL_MS).toISOString()]);
   }
 
   // ── machines ──────────────────────────────────────────────────────────────

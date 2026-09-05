@@ -202,6 +202,10 @@ const MIGRATIONS = [
     UNIQUE (account_id, token)
   );
   `,
+  // Pairing answers are collected ONCE (#70): the requester's first authorized
+  // poll consumes the request; later polls with the same public key get no
+  // token. Answered requests also age out fast (see accounts.sweepPairings).
+  `ALTER TABLE auth_requests ADD COLUMN consumed_at TIMESTAMPTZ;`,
 ];
 
 export async function openDb(dataDir) {

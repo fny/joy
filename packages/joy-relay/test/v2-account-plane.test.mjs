@@ -182,6 +182,10 @@ describe('pairing', () => {
     expect(me.json.id).toBe((await call('GET', '/joy/v2/account/profile')).json.id);
     const done = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
     expect(done.json.status).toBe('authorized');
+    // The answer is collected ONCE (#70): a second poll — anyone who saw the
+    // public key in the QR — gets neither the token nor the sealed blob.
+    const again = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
+    expect(again.json).toEqual({ state: 'consumed' });
   });
 
   it('account flavour is independent of terminal flavour; unknown keys 404 on response', async () => {
