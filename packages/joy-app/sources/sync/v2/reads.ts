@@ -182,6 +182,7 @@ export async function v2MessagesBefore(
     const limit = opts.limit ?? 100;
     const rows: V2Row[] = [];
     const lifecycle: V2Lifecycle[] = [];
+    const stats = { unopenable: 0 };
     let cursor = 0;
     for (;;) {
         const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, cursor, 500);
@@ -189,7 +190,7 @@ export async function v2MessagesBefore(
         for (const e of events) {
             const seq = Number(e.seq);
             if (seq >= opts.beforeSeq) continue;
-            const row = toRow(e, opts.key);
+            const row = toRow(e, opts.key, stats);
             if (row) rows.push(row);
             const l = toLifecycle(e);
             if (l) lifecycle.push(l);
@@ -199,5 +200,5 @@ export async function v2MessagesBefore(
         if (cursor >= opts.beforeSeq) break;
     }
     const tail = rows.slice(-limit);
-    return { messages: tail, hasMore: rows.length > tail.length, lifecycle };
+    return { messages: tail, hasMore: rows.length > tail.length, lifecycle, unopenable: stats.unopenable };
 }
