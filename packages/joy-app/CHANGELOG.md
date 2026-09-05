@@ -1,3 +1,9 @@
+# Sep 5 (5) — Faster chat loading
+
+- **Opening a long session is fast again, and scrolling up costs one request.** Loading older messages used to re-read the whole conversation from the beginning every time; the relay now serves pages backwards. *Needs the updated relay first — an older relay ignores the new page request.*
+- **Only the session on screen polls.** The app polled every session in the account every 2.5 seconds, decrypting everything and undoing the memory limit; now only the visible session (and one with a send still settling) does.
+- **Edit cards with very long lines no longer freeze the app** while their diff is computed.
+
 # Sep 5 (4) — App fixes, second batch
 
 - **File search and `@` mentions return results again** — the file list used a search call the machine rejected, so every session's Files search and autocomplete were empty.
