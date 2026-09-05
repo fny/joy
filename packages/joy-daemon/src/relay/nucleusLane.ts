@@ -656,6 +656,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
   }
 
+  let lastBindingsRefresh = 0;
   async function runTurn(offer: WorkOffer, leaseRef: Lease): Promise<void> {
     const turnId = offer.turnId!;
     if (inFlight.has(turnId)) return;
@@ -665,8 +666,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       let session = localSession(offer.sessionId);
       if (!session) {
         // The binding map may be stale (daemon restarted since bind) —
-        // self-heal once from the relay before declaring the session missing.
-        try { await refreshBindings(); } catch { /* transient */ }
+        // self-heal from the relay before declaring the session missing.
+        // Rate-limited: the relay re-offers a turn we never /submitted on
+        // every claim, and a full refreshBindings per offer (GET /sessions +
+        // a PATCH per bound row + two orphan scans) ran as fast as the relay
+        // answered, for as long as the message sat there (issue #114).
+        if (Date.now() - lastBindingsRefresh > 30_000) {
+          lastBindingsRefresh = Date.now();
+          try { await refreshBindings(); } catch { /* transient */ }
+        }
         session = localSession(offer.sessionId);
       }
       if (!session || session.status === "ended") {
@@ -1131,7 +1139,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           if (lane === "control") {
             if (await handleCancel(offer, leaseRef)) anyNew = true;
           } else if (offer.kind === "spawn_session") { await handleSpawn(offer, leaseRef); anyNew = true; }
-          else if (offer.kind === "prompt") { void runTurn(offer, leaseRef); anyNew = true; }
+          else if (offer.kind === "prompt") {
+            // A turn we already looked at and left queued (no local runtime,
+            // undecodable) comes back on every claim: it is not new work, and
+            // treating it as such skipped the pause below — a hot loop (#114).
+            if (notedSkips.has(offer.turnId!)) continue;
+            void runTurn(offer, leaseRef); anyNew = true;
+          }
         }
         // A standing offer we already handled returns INSTANTLY from claim —
         // without this pause the loop hot-polls until the turn terminalizes.
