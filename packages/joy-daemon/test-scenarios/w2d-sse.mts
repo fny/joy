@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import {mkdtempSync} from 'node:fs';
+const root=process.env.JOY_REVIEW_SRC ?? '/tmp/joy-test-tmux/review3/wave2d-astra-checkout/packages/joy-daemon/src';
+const dir=mkdtempSync('/tmp/joy-test-tmux/review3/wave2b-astra-sse-');process.env.JOY_HOME_DIR=dir;
+const {startHttpServer}=await import(root+'/transports/http.ts');
+let emit:(f:string)=>void=()=>{};
+let current:any={id:'abcdef01',agentFlavor:'claude',cwd:dir,claudeSessionId:'old-transcript',toJSON(){return {id:this.id}}};
+const registry:any={get:(id:string)=>id===current.id?current:undefined,subscribeSse:(fn:any)=>{emit=fn;return ()=>{}},chatHistory:()=>[],list:()=>[current],commands:{union:()=>[]}};
+const port=await new Promise<number>(r=>startHttpServer({registry,port:0,publicDir:dir,token:'token',onListening:r}));
+const abort=new AbortController(),res=await fetch(`http://127.0.0.1:${port}/v2/sessions/abcdef01/events`,{headers:{'x-joy-token':'token'},signal:abort.signal});
+assert.equal(res.status,200);
+const reader=res.body!.getReader();let frames='';let running=true;
+const consume=(async()=>{while(running){try{const r=await reader.read();if(r.done)break;frames+=new TextDecoder().decode(r.value)}catch{break}}})();
+function row(session_id:string,content:string){emit(`event: message\ndata: ${JSON.stringify({id:'42',session_id,role:'assistant',content})}\n\n`)}
+row('abcdef01','local matches');row('old-transcript','uuid matches');row('foreign','must drop');
+await new Promise(r=>setTimeout(r,40));assert.ok(frames.includes('local matches'));assert.ok(frames.includes('uuid matches'));assert.ok(!frames.includes('must drop'));
+console.log('SSE: local id and Claude UUID messages forwarded; unrelated session dropped');
+current={...current,claudeSessionId:'new-transcript'};
+row('new-transcript','replacement message');row('old-transcript','stale old message');
+await new Promise(r=>setTimeout(r,40));
+assert.ok(frames.includes('replacement message'));assert.ok(!frames.includes('stale old message'));
+console.log('SSE after in-place restart: new transcript forwarded; retired transcript rejected');
+running=false;abort.abort();await consume;
+console.log('PASS: actual HTTP/SSE route with registry session replacement.');process.exit(0);

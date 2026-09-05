@@ -1,0 +1,25 @@
+import assert from 'node:assert/strict';
+import {mkdtempSync,writeFileSync,mkdirSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
+const root='/tmp/joy-test-tmux/review3/wave3a-followup-astra-checkout/packages/joy-daemon/src';
+const dir=mkdtempSync('/tmp/joy-test-tmux/review3/wave3-routes-');process.env.JOY_HOME_DIR=dir;
+const {startHttpServer}=await import(root+'/transports/http.ts');
+const repo=dir+'/repo',fresh=dir+'/fresh';mkdirSync(repo);mkdirSync(fresh);
+const git=(args:string[],cwd=repo)=>execFileSync('git',args,{cwd,encoding:'utf8'});
+for(const cwd of [repo,fresh]){git(['init','-q','-b','main'],cwd);git(['config','user.email','review@example.invalid'],cwd);git(['config','user.name','review'],cwd)}
+const names=['tracked.txt','a[1].txt','a1.txt','quo"te.txt','two\nlines.txt','$(touch OWNED).txt'];
+for(const n of names)writeFileSync(repo+'/'+n,'old\n');git(['add','.']);git(['commit','-qm','init']);
+for(const n of names)writeFileSync(repo+'/'+n,'new '+n+'\n');
+writeFileSync(repo+'/.gitignore','ignore.me\n');writeFileSync(repo+'/ignore.me','ignored');writeFileSync(repo+'/untracked.txt','new');
+writeFileSync(fresh+'/first.txt','first\n');git(['add','.'],fresh);
+let aborts=0;
+const sessions=[{id:'repo',cwd:repo,abort:async()=>{aborts++;return {ok:true}},toJSON:()=>({id:'repo'})},{id:'fresh',cwd:fresh,toJSON:()=>({id:'fresh'})}];
+const registry:any={get:(id:string)=>sessions.find(s=>s.id===id),list:()=>sessions,size:2,chatHistory:()=>[],claudeInfo:()=>({}),subscribeSse:()=>()=>{}};
+const base=await new Promise<string>(r=>startHttpServer({registry,port:0,publicDir:dir,token:'test',onListening:p=>r('http://127.0.0.1:'+p)}));
+const call=async(p:string,method='GET')=>{const res=await fetch(base+p,{method,headers:{'x-joy-token':'test','content-type':'application/json'},...(method==='POST'?{body:'{}'}:{})});return {status:res.status,data:await res.json() as any}};
+const entries=await call('/v2/sessions/repo/git/entries?untracked=1');assert.equal(entries.data.ok,true);assert.ok(entries.data.files.includes('untracked.txt'));assert.ok(!entries.data.files.includes('ignore.me'));assert.ok(entries.data.files.includes('quo"te.txt'));assert.ok(entries.data.files.includes('two\nlines.txt'));console.log('entries quote/newline names:',entries.data.files.filter((s:string)=>s.includes('quo')||s.includes('lines')));
+const wild=await call('/v2/sessions/repo/git/diff?path='+encodeURIComponent('a[1].txt'));assert.equal(wild.data.ok,true);assert.ok(!wild.data.diff.includes('a/a1.txt'));console.log('bracket path diff:',JSON.stringify(wild.data.diff));
+const simple=await call('/v2/sessions/repo/git/diff?head=1&path=tracked.txt');assert.ok(simple.data.diff.includes('+new tracked.txt'));
+const unborn=await call('/v2/sessions/fresh/git/diff?head=1&path=first.txt');assert.equal(unborn.data.ok,true);assert.ok(unborn.data.diff.includes('+first'));console.log('PASS unborn HEAD patch');
+const ab=await call('/v2/sessions/repo/abort','POST');assert.equal(ab.status,200);assert.equal(ab.data.ok,true);assert.equal(aborts,1);
+console.log('PASS actual HTTP routes: untracked/ignored, HEAD, abort. Fixed quoted entries, pathspec expansion, unborn HEAD (SHA-1).');process.exit(0);
