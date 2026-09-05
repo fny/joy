@@ -279,8 +279,9 @@ export default React.memo(function FileScreen() {
                     if (isRasterImagePath(filePath)) {
                         const imgResponse = await sessionReadFile(sessionId, filePath);
                         if (!isCancelled) {
-                            if (imgResponse.success && imgResponse.content) { // a zero-byte "image" falls to the binary notice below
-                                setImageBase64(imgResponse.content);
+                            if (imgResponse.success) {
+                                // A zero-byte image has nothing to render: binary notice, not an error (#87).
+                                if (imgResponse.content) setImageBase64(imgResponse.content);
                                 setFileContent({ content: '', encoding: 'base64', isBinary: true });
                             } else {
                                 setError(imgResponse.error || 'Failed to read file');
@@ -408,8 +409,8 @@ export default React.memo(function FileScreen() {
         if (imageBase64) return downloadFile(fileName, { base64: imageBase64 });
         if (fileContent?.isBinary && sessionId) {
             const res = await sessionReadFile(sessionId, filePath);
-            if (!res.success || !res.content) throw new Error(res.error || 'read failed');
-            return downloadFile(fileName, { base64: res.content });
+            if (!res.success) throw new Error(res.error || 'read failed');
+            return downloadFile(fileName, { base64: res.content ?? '' }); // an empty file downloads as an empty file
         }
         return downloadFile(fileName, { utf8: fileContent?.content ?? '' });
     }, [imageBase64, fileContent, sessionId, filePath, fileName]);

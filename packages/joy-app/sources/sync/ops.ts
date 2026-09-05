@@ -223,8 +223,8 @@ export async function sessionAbort(sessionId: string): Promise<void> {
     // or a daemon-dispatched item. Interrupt it on the machine (#8).
     const ctx = sync.machineCtx(sessionId);
     if (!ctx) throw noCtx('abort');
-    const { data } = await machineAbort(ctx);
-    if (data?.error) throw new Error(data.error);
+    const { status, data } = await machineAbort(ctx);
+    if (status !== 200 || !data || data.ok === false || data.error) throw new Error(data?.error || `abort failed (${status})`);
 }
 
 type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';

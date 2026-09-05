@@ -688,6 +688,7 @@ export const ca: TranslationStructure = {
             showingDiff: 'Mostrant canvis',
         },
         askUserQuestion: {
+            answerInDialog: 'Respon a la barra de diàleg a dalt del xat; les opcions de sota són només de referència.',
             submit: 'Envia resposta',
             tapAgain: 'Toca de nou per enviar',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'pregunta', plural: 'preguntes' })}`,

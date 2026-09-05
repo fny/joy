@@ -704,6 +704,7 @@ export const ru: TranslationStructure = {
             showingDiff: 'Показ изменений',
         },
         askUserQuestion: {
+            answerInDialog: 'Ответьте в панели диалога вверху чата — варианты ниже показаны для справки.',
             submit: 'Отправить ответ',
             tapAgain: 'Нажмите ещё раз для отправки',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'вопрос', few: 'вопроса', many: 'вопросов' })}`,

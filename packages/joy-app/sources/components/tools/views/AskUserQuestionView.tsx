@@ -252,12 +252,11 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
             if (tool.permission?.id) {
                 await sessionAllow(sessionId, tool.permission.id, undefined, undefined, 'approved', { answers });
             } else {
-                // v2 sessions carry no permission id: the answer goes to the agent
-                // as a message, like a <joy-options> chip does (#15). Before this
-                // the card flipped to "submitted" while nothing was sent.
-                const text = Object.entries(answers).map(([q, a]) => (questions.length > 1 ? `${q}: ${a}` : a)).join('\n');
-                const res = await sync.sendMessage(sessionId, text, { source: 'option' });
-                if (!res.ok) throw new Error(res.reason);
+                // No permission id (v2): there is no channel from this card to the
+                // question picker Claude is showing in its TUI — a plain message
+                // would only queue a new turn the relay cannot start while the
+                // question's turn runs (#15). The answer belongs in the dialog bar.
+                throw new Error('no answer channel');
             }
         } catch (error) {
             console.error('Failed to submit answer:', error);
@@ -293,9 +292,12 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         );
     }
 
+    // v2 sessions have no permission id: render read-only and say where to answer.
+    const readOnly = !tool.permission?.id;
     return (
         <ToolSectionView>
             <View style={styles.container}>
+                {readOnly ? <Text style={styles.questionText}>{t('tools.askUserQuestion.answerInDialog')}</Text> : null}
                 {questions.map((question, qIndex) => {
                     const selectedOptions = selections.get(qIndex) || new Set();
 
@@ -321,7 +323,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                                                 !canInteract && styles.optionButtonDisabled,
                                             ]}
                                             onPress={() => requireDoubleTap(optionKey, () => handleOptionToggle(qIndex, oIndex, question.multiSelect))}
-                                            disabled={!canInteract}
+                                            disabled={!canInteract || readOnly}
                                             activeOpacity={0.7}
                                         >
                                             {question.multiSelect ? (

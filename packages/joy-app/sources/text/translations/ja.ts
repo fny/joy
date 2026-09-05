@@ -647,6 +647,7 @@ export const ja: TranslationStructure = {
             moreTools: ({ count }: { count: number }) => `+${count} 個のツール`,
         },
         askUserQuestion: {
+            answerInDialog: 'チャット上部のダイアログバーで回答してください。下の選択肢は参考表示です。',
             submit: '回答を送信',
             tapAgain: 'もう一度タップして送信',
             multipleQuestions: ({ count }: { count: number }) => `${count}件の質問`,

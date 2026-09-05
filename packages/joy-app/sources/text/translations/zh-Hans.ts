@@ -689,6 +689,7 @@ export const zhHans: TranslationStructure = {
             showingDiff: '显示更改',
         },
         askUserQuestion: {
+            answerInDialog: '请在聊天顶部的对话栏中回答，下方选项仅供参考。',
             submit: '提交答案',
             tapAgain: '再次点击以提交',
             multipleQuestions: ({ count }: { count: number }) => `${count} 个问题`,

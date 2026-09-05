@@ -718,6 +718,7 @@ export const en = {
             question: 'Question',
         },
         askUserQuestion: {
+            answerInDialog: 'Answer this in the dialog bar at the top of the chat — the choices below are shown for reference.',
             submit: 'Submit Answer',
             tapAgain: 'Tap again to submit',
             multipleQuestions: ({ count }: { count: number }) => `${count} questions`,

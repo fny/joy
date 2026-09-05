@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { encodePathParam } from '@/utils/pathParam';
 import { View, Text, Pressable, ActivityIndicator, Platform } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -85,7 +86,7 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
             ? singleToolMessage.tool.input.file_path
             : null;
         if (filePath) {
-            router.push(`/session/${sessionId}/file?path=${btoa(filePath)}`);
+            router.push(`/session/${sessionId}/file?path=${encodePathParam(filePath)}`);
             return;
         }
         router.push(`/session/${sessionId}/message/${singleToolMessage.id}`);
@@ -379,7 +380,7 @@ function ToolSummaryRow(props: {
     const isPressable = Boolean(props.sessionId);
     const handlePress = React.useCallback(() => {
         if (filePath) {
-            router.push(`/session/${props.sessionId}/file?path=${btoa(filePath)}`);
+            router.push(`/session/${props.sessionId}/file?path=${encodePathParam(filePath)}`);
             return;
         }
         router.push(`/session/${props.sessionId}/message/${props.message.id}`);

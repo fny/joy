@@ -338,7 +338,7 @@ function NewJoyTmuxSessionScreen() {
         setOcPastLoading(true);
         const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
         const sctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!sctx) return;
+        if (!sctx) { setOcPastLoading(false); return; }
         machineOpencodeSessions(sctx, cwd).then(r => ({ ok: r.data?.ok, sessions: r.data?.sessions as typeof ocPast | undefined }))
             .then((res) => { setOcPast(res.sessions ?? []); })
             .catch(() => { setOcPast([]); })
@@ -356,7 +356,7 @@ function NewJoyTmuxSessionScreen() {
         setCcPastLoading(true);
         const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
         const lctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!lctx) return;
+        if (!lctx) { setCcPastLoading(false); return; }
         machineHistoryLogs(lctx, cwd).then(r => ({ ok: r.data?.ok, logs: r.data?.logs as typeof ccPast | undefined }))
             .then((res) => { setCcPast((res.logs ?? []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs)); })
             .catch(() => { setCcPast([]); })

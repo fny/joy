@@ -644,6 +644,7 @@ export const it: TranslationStructure = {
             moreTools: ({ count }: { count: number }) => `+${count} altri ${plural({ count, singular: 'strumento', plural: 'strumenti' })}`,
         },
         askUserQuestion: {
+            answerInDialog: 'Rispondi nella barra di dialogo in alto nella chat; le opzioni qui sotto sono solo di riferimento.',
             submit: 'Invia risposta',
             tapAgain: 'Tocca di nuovo per inviare',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'domanda', plural: 'domande' })}`,

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { sendKey } from '@/utils/sendKey';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
@@ -15,6 +16,7 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
     const remove = useDraftQueueStore((s) => s.remove);
     const rows = React.useMemo<QueueRowModel[]>(() => drafts.map((d) => ({
         id: d.id, text: d.text,
+        error: d.lastError ?? null,
         onChange: (text) => update(sessionId, d.id, text),
         onRemove: () => remove(sessionId, d.id),
         onSend: () => {
@@ -22,7 +24,9 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
             // The draft is removed only once the relay accepted it; a failed
             // send keeps it (with the error on the row) and says so (#10).
             const sentText = d.text;
-            void sync.sendMessage(sessionId, sentText, { source: 'chat', localId: d.id }).then((res) => {
+            // Key bound to the draft AND its text: an edited draft is a new
+            // message, an unchanged retry replays the acceptance (#10).
+            void sync.sendMessage(sessionId, sentText, { source: 'chat', localId: sendKey(d.id, sentText) }).then((res) => {
                 if (res.ok) {
                     // Remove only what was sent: an edit made while the send was
                     // in flight is a new draft, not the delivered one.
