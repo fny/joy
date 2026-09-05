@@ -7,7 +7,7 @@
 //
 // The account secret transits memory only — callers must not persist it.
 import { createHmac, createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, existsSync, renameSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, renameSync , readFileSync} from "node:fs";
 import { join } from "node:path";
 import tweetnacl from "tweetnacl";
 import { joyRelayAccessKey } from "../paths";
@@ -142,6 +142,14 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
 
   // 4. write creds (back up whatever was there)
   mkdirSync(credsDir, { recursive: true });
+  // Carry the machineKey forward: ~/.joy/env.sealed is sealed under it, and a
+  // fresh key on every re-pair made the store unreadable for good — every
+  // later spawn silently lost its provider keys (#117).
+  let machineKey = b64(new Uint8Array(randomBytes(32)));
+  try {
+    const prev = JSON.parse(readFileSync(join(credsDir, "access.key"), "utf8")) as { encryption?: { machineKey?: string } };
+    if (typeof prev.encryption?.machineKey === "string" && prev.encryption.machineKey) machineKey = prev.encryption.machineKey;
+  } catch { /* first pairing */ }
   for (const f of ["access.key", "settings.json", "account.secret", "perimeter.key"]) {
     const p = join(credsDir, f);
     if (existsSync(p)) renameSync(p, p + ".replaced");
@@ -151,7 +159,7 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
   writeFileSync(join(credsDir, "perimeter.key"), deriveRelayPerimeterKey(accountSecret) + "\n", { mode: 0o600 });
   writeFileSync(join(credsDir, "access.key"), JSON.stringify({
     token: resp.token,
-    encryption: { publicKey: b64(decrypted.slice(1, 33)), machineKey: b64(new Uint8Array(randomBytes(32))) },
+    encryption: { publicKey: b64(decrypted.slice(1, 33)), machineKey },
   }, null, 2), { mode: 0o600 });
   const machineId = randomUUID();
   writeFileSync(join(credsDir, "settings.json"), JSON.stringify({ machineId, serverUrl: relayUrl }, null, 2));

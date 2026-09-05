@@ -858,6 +858,7 @@ async function cmdNew(rest: string[]): Promise<number> {
     permissionMode: mode.mode,
     continue: cont || undefined,
     resume_id: resumeId || undefined,
+    forceNew: !cont && !resumeId ? true : undefined, // "new" means new (#41)
   }).catch(() => null);
   if (!r) { console.error(`${bad} daemon not running (joy start)`); return 1; }
   const body = await r.json().catch(() => ({}));
@@ -930,7 +931,9 @@ async function cmdRun(rest: string[]): Promise<number> {
   if (!mode.ok) { console.error(`${bad} ${mode.error}`); return 2; }
   const cwd = resolve(expandTilde(dir));
 
-  const cr = await api("POST", "/sessions", { cwd, createDir: true, model, effort, agent, permissionMode: mode.mode }).catch(() => null);
+  // forceNew: a one-shot must never revive (and then DELETE + purge) a detached
+  // conversation that happens to live in this folder (#41).
+  const cr = await api("POST", "/sessions", { cwd, createDir: true, model, effort, agent, permissionMode: mode.mode, forceNew: true }).catch(() => null);
   if (!cr) { console.error(`${bad} daemon not running (joy start)`); return 1; }
   const rec = await cr.json().catch(() => ({})) as any;
   if (cr.status !== 201) { console.error(`${bad} create failed: ${JSON.stringify(rec)}`); return 1; }
