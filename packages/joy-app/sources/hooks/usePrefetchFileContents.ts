@@ -66,7 +66,7 @@ async function prefetchFile(sessionId: string, sessionPath: string, file: GitFil
     // Fetch file content
     try {
         const response = await sessionReadFile(sessionId, filePath);
-        if (response.success && response.content) {
+        if (response.success && response.content != null) {
             let rawBytes: Uint8Array;
             let decodedContent: string;
             try {

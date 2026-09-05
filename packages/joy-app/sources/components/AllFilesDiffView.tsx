@@ -79,6 +79,8 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     // for that file doesn't need to be re-fetched.
     const fetchedSignatures = React.useRef<Map<string, string>>(new Map());
     const inFlight = React.useRef<Set<string>>(new Set());
+    /** Bumped when a superseded fetch releases its paths, so the effect re-runs (#91). */
+    const [refetchTick, setRefetchTick] = React.useState(0);
     // Track whether we've ever populated results — only show the global spinner
     // on the very first load, not on subsequent file-set changes.
     const [hasLoadedOnce, setHasLoadedOnce] = React.useState(false);
@@ -160,12 +162,12 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                             // doesn't accept `--`), and shelling out for a
                             // plain read is slower anyway.
                             const res = await sessionReadFile(sessionId, resolved.absolutePath);
-                            if (!res.success || !res.content) {
+                            if (!res.success) {
                                 return { file, content: null, error: res.error || 'Failed to read file' };
                             }
                             let contents: string;
                             try {
-                                const binary = atob(res.content);
+                                const binary = atob(res.content ?? '');
                                 const bytes = new Uint8Array(binary.length);
                                 for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
                                 contents = new TextDecoder().decode(bytes);
@@ -189,10 +191,12 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
             );
 
             if (cancelled) {
-                // Superseded by a newer file set: release these paths so the
-                // next run can fetch them again — they used to stay in
-                // inFlight forever and vanish from the overlay (#91).
-                for (const r of fetched) inFlight.current.delete(r.file.fullPath);
+                // Superseded by a newer file set: nothing was committed for these
+                // paths, so forget both the in-flight mark AND the signature we
+                // recorded up front, then run the effect again so they are
+                // fetched — the replacement run had already skipped them (#91).
+                for (const r of fetched) { inFlight.current.delete(r.file.fullPath); fetchedSignatures.current.delete(r.file.fullPath); }
+                setRefetchTick((t) => t + 1);
                 return;
             }
 
@@ -211,7 +215,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
 
         return () => { cancelled = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sessionId, files]);
+    }, [sessionId, files, refetchTick]);
 
     // Render in deterministic file order (same sort as `files`).
     const results = React.useMemo<FileDiffResult[]>(() => {

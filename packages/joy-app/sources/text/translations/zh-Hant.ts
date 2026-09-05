@@ -671,6 +671,7 @@ export const zhHant: TranslationStructure = {
             question: '問題',
         },
         askUserQuestion: {
+            answerInDialog: '請在聊天頂部的對話欄中回答，下方選項僅供參考。',
             submit: '提交答案',
             tapAgain: '再次點擊以提交',
             multipleQuestions: ({ count }: { count: number }) => `${count} 個問題`,

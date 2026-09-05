@@ -688,6 +688,7 @@ export const es: TranslationStructure = {
             showingDiff: 'Mostrando cambios',
         },
         askUserQuestion: {
+            answerInDialog: 'Responde en la barra de diálogo en la parte superior del chat; las opciones de abajo son solo de referencia.',
             submit: 'Enviar respuesta',
             tapAgain: 'Toca de nuevo para enviar',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'pregunta', plural: 'preguntas' })}`,

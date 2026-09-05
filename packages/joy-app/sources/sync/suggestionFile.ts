@@ -93,19 +93,14 @@ class FileSearchCache {
             // rejected — every search and @-mention came back empty (#6).
             const ctx = await sync.awaitMachineCtx(sessionId);
             const entries = ctx ? await machineGitEntries(ctx, { untracked: true }) : null;
-            const response = entries?.data?.ok && entries.data.files
-                ? { success: true as const, stdout: entries.data.files.join('\n') }
-                : { success: false as const, stdout: '', error: entries?.data?.error ?? 'no machine context' };
-
-            if (!response.success || !response.stdout) {
-                console.error('FileSearchCache: Failed to fetch files', response.error);
+            if (!entries?.data?.ok || !entries.data.files) {
+                console.error('FileSearchCache: Failed to fetch files', entries?.data?.error ?? 'no machine context');
                 return;
             }
-
-            // Parse the output into file items
-            const filePaths = response.stdout
-                .split('\n')
-                .filter(path => path.trim().length > 0);
+            // The array as the daemon returned it — never joined and re-split, a
+            // name containing a newline is one file. An empty repo is a valid
+            // answer and clears the cache.
+            const filePaths = entries.data.files.filter(path => path.length > 0);
 
             // Clear existing files
             cache.files = [];

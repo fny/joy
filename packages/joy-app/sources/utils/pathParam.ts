@@ -11,7 +11,9 @@ export function encodePathParam(path: string): string {
 export function decodePathParam(encoded: string): string {
     if (!encoded) return '';
     try {
-        return new TextDecoder().decode(decodeBase64(encoded, 'base64url'));
+        // fatal: a legacy btoa('résumé.md') link must fail here and reach the
+        // atob fallback instead of decoding to "r�sum�.md".
+        return new TextDecoder('utf-8', { fatal: true }).decode(decodeBase64(encoded, 'base64url'));
     } catch {
         try { return atob(encoded); } catch { return ''; }
     }

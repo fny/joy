@@ -1,4 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
+import { sendKey } from '@/utils/sendKey';
 import { randomUUID } from 'expo-crypto';
 import { AgentInput } from '@/components/AgentInput';
 import type { MultiTextInputHandle } from '@/components/MultiTextInput';
@@ -910,15 +911,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // taken for THIS message and a fresh one is minted at once, so a second
         // message sent while this one is still in flight never shares it
         // (Astra caught that); a failed send puts its key back with the text.
-        const localId = compositionIdRef.current;
-        compositionIdRef.current = randomUUID();
+        // Content-bound key (see utils/sendKey): a retry of the same text and
+        // attachments reuses it; anything edited — or merged with new text by
+        // restoreMessage — gets a new one. The composition id rotates per send
+        // so two in-flight messages with identical text still differ.
+        const localId = sendKey(compositionIdRef.current, liveMessage, attachments.map((a) => a.id ?? a.uri ?? '').filter(Boolean));
         void sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments, localId }).then((res) => {
             if (res.ok) {
+                compositionIdRef.current = randomUUID();
                 releaseAttachmentUris(attachments);
                 return;
             }
             if (liveMessage.trim()) {
-                if (composerHandleRef.current) { composerHandleRef.current.restoreMessage(liveMessage); compositionIdRef.current = localId; }
+                if (composerHandleRef.current) composerHandleRef.current.restoreMessage(liveMessage);
                 // The screen was left while the send was in flight: keep the text
                 // as a durable draft instead of losing it (#124). Attachments
                 // cannot be kept this way; the alert says so.

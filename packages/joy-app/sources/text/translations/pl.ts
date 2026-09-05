@@ -704,6 +704,7 @@ export const pl: TranslationStructure = {
             showingDiff: 'Pokazywanie zmian',
         },
         askUserQuestion: {
+            answerInDialog: 'Odpowiedz w pasku dialogu na górze czatu — poniższe opcje są tylko podglądem.',
             submit: 'Wyślij odpowiedź',
             tapAgain: 'Naciśnij ponownie, aby wysłać',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'pytanie', few: 'pytania', many: 'pytań' })}`,
