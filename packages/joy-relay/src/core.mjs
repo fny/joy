@@ -202,7 +202,14 @@ export function createCore(db, notify) {
       const s = await loadSession(t, sessionId, null);
       if (s.owner_daemon_id !== lease.daemon_id) throw new ApiError(403, 'not_owner_daemon');
       if (s.state !== 'provisioning' && s.state !== 'failed') {
-        if (s.local_session_id === body.localSessionId) return s.account_id; // idempotent re-bind
+        if (s.local_session_id === body.localSessionId) {
+          // Idempotent re-bind (a lost reply): take the envelope the daemon
+          // is sealing under NOW, so row and daemon can never disagree (#116).
+          if (typeof body.sessionKeyEnvelope === 'string' && body.sessionKeyEnvelope && body.sessionKeyEnvelope !== s.session_key_envelope) {
+            await t.query(`UPDATE native_sessions SET session_key_envelope = $2, updated_at = now() WHERE id = $1`, [sessionId, body.sessionKeyEnvelope]);
+          }
+          return s.account_id;
+        }
         throw new ApiError(409, 'already_bound');
       }
       if (!body.spawnCommandId) throw new ApiError(400, 'missing_spawnCommandId');
@@ -591,6 +598,9 @@ export function createCore(db, notify) {
       const d = await one(t, `SELECT * FROM deliveries WHERE id = $1 AND daemon_id = $2`, [deliveryId, lease.daemon_id]);
       if (!d) throw new ApiError(404, 'delivery_not_found');
       if (String(d.lease_epoch) !== String(lease.epoch)) throw new ApiError(412, 'lease_epoch_stale');
+      // Superseded by an edit (or a spawn retry): the daemon is holding a
+      // payload that is no longer the message. Refuse, so it re-claims (#57).
+      if (d.disposition) throw new ApiError(409, 'delivery_superseded');
       await t.query(`UPDATE deliveries SET received_at = now() WHERE id = $1`, [deliveryId]);
       await t.query(`UPDATE commands SET state = 'delivered' WHERE id = $1 AND state = 'queued'`, [d.command_id]);
     });
@@ -729,7 +739,13 @@ export function createCore(db, notify) {
   async function reconcileTurn(turnId, leaseRef, body) {
     return withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
       if (turn.state === 'terminal') return { turnId, state: 'terminal', terminalState: turn.terminal_state, replay: true };
-      if (turn.state !== 'orphaned') throw new ApiError(409, 'turn_not_orphaned');
+      // The OWNER daemon (same lease epoch) may also resolve a turn that is
+      // still dispatching/running/cancelling: it is telling us it has no
+      // worker for it any more — a terminal that never landed, a loop that
+      // died — and nothing else can release the execution slot while its
+      // renewals keep the lease alive (#74). Anyone else needs it orphaned.
+      const ownerLive = String(turn.lease_epoch) === String(lease.epoch) && ['dispatching', 'running', 'cancelling'].includes(turn.state);
+      if (turn.state !== 'orphaned' && !(ownerLive && body.resolution === 'terminal')) throw new ApiError(409, 'turn_not_orphaned');
       if (body.resolution === 'running') {
         if (s.active_turn_id && s.active_turn_id !== turnId) throw new ApiError(409, 'another_turn_active');
         await t.query(`UPDATE turns SET state = $2, lease_epoch = $3, last_progress_at = now() WHERE id = $1`,

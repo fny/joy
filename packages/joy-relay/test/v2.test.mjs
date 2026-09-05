@@ -665,3 +665,70 @@ describe('review fixes: regression coverage', () => {
     expect((await call('GET', `/joy/v2/attachments/${cited}`)).status).toBe(200);
   });
 });
+
+describe('wave 1: durability contract (#57, #74, #116)', () => {
+  it('editing a queued message after the daemon fetched it supersedes the delivery; the next claim carries the edit (#57)', async () => {
+    const d = makeDaemon('mach-edit');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'A' } })).json;
+    const offers = await d.claim('work');
+    const offer = offers.find((o) => o.sessionId === sessionId && o.kind === 'prompt');
+    expect(offer.ciphertext).toBe('A');
+    // The app edits while the daemon still holds the offer (no /received yet).
+    const edit = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`, { body: { ciphertext: 'B' } });
+    expect(edit.status).toBe(200);
+    // The daemon's cached delivery is refused …
+    const rcv = await d.received(offer.deliveryId);
+    expect(rcv.status).toBe(409);
+    expect(rcv.json.error).toBe('delivery_superseded');
+    // … and the next claim offers the edited payload on a fresh delivery.
+    const again = (await d.claim('work')).find((o) => o.sessionId === sessionId && o.kind === 'prompt');
+    expect(again.ciphertext).toBe('B');
+    expect(again.deliveryId).not.toBe(offer.deliveryId);
+    expect((await d.received(again.deliveryId)).status).toBe(200);
+    // Once received, the message is no longer editable.
+    const late = await call('PATCH', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`, { body: { ciphertext: 'C' } });
+    expect(late.status).toBe(409);
+  });
+
+  it('the owner daemon can release a running turn it has no worker for; a foreign daemon cannot (#74)', async () => {
+    const d = makeDaemon('mach-release');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'x' } })).json;
+    await deliverHead(d, sessionId); // running under d's epoch
+    // Another daemon (a different epoch) may not touch it.
+    const other = makeDaemon('mach-release-other');
+    await other.acquire();
+    const foreign = await other.reconcile(m1.turnId, { resolution: 'terminal', terminalState: 'interrupted' });
+    expect([403, 409]).toContain(foreign.status);
+    // The owner, same epoch, declares it has no worker: the slot is released.
+    const own = await d.reconcile(m1.turnId, { resolution: 'terminal', terminalState: 'interrupted', meta: { reason: 'no_local_worker' } });
+    expect(own.status).toBe(200);
+    expect(own.json.terminalState).toBe('interrupted');
+    // The queue moves again: a second message is offered.
+    await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'y' } });
+    const next = (await d.claim('work')).find((o) => o.sessionId === sessionId && o.kind === 'prompt');
+    expect(next).toBeTruthy();
+    expect(next.ciphertext).toBe('y');
+  });
+
+  it('an idempotent re-bind takes the envelope the daemon is sealing under now (#116)', async () => {
+    const d = makeDaemon('mach-rebind');
+    await d.acquire();
+    const localSessionId = randomUUID().slice(0, 8);
+    const created = await call('POST', '/joy/v2/sessions', {
+      body: { mode: 'announce_existing', creationIntentId: randomUUID(), daemonId: d.daemonId, localSessionId, sessionKeyEnvelope: 'env-A' },
+    });
+    const sessionId = created.json.sessionId;
+    const rebind = await d.bind(sessionId, { localSessionId, sessionKeyEnvelope: 'env-B' });
+    expect(rebind.status).toBe(200);
+    const { rows: [row] } = await db.query(`SELECT session_key_envelope FROM native_sessions WHERE id = $1`, [sessionId]);
+    expect(row.session_key_envelope).toBe('env-B');
+    // A different local id is still refused.
+    const clash = await d.bind(sessionId, { localSessionId: 'zzzzzzzz', sessionKeyEnvelope: 'env-C' });
+    expect(clash.status).toBe(409);
+  });
+});
+
