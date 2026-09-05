@@ -345,18 +345,24 @@ export class OpencodeSession implements AgentSession {
 
   #endTurn(turnID: string, status: "completed" | "failed" | "cancelled"): void {
     this.#clearTurnDeadline();
-    if (status !== "cancelled") {
+    // Checkpoint AFTER the turn's final records (open-tool closes, turn-end)
+    // have been handed to the relay sink, which spools them durably before
+    // returning — a crash between the two used to skip them on recovery
+    // (Astra's review of 6229b647, #67).
+    const advance = () => {
+      if (status === "cancelled") return;
       const last = this.#norm?.lastMessageId;
       if (last && last !== this.#deliveredThrough) {
         this.#deliveredThrough = last;
         this.#persistRecord();
       }
-    }
-    if (!this.#norm) return;
+    };
+    if (!this.#norm) { advance(); return; }
     const turn = this.#norm.currentTurn ?? turnID;
-    if (!turn) return;
+    if (!turn) { advance(); return; }
     this.#applyEffects(this.#norm.closeOpenTools());
     this.#relay?.send(encodeTurnEnd(status, { turn }), `oc:${this.#ocSessionId}:${turn}:turn-end`);
+    advance();
     this.#norm.setTurn(null);
     this.#activeTurn = null;
     this.#thinking = false;

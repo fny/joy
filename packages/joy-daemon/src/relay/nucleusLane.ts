@@ -28,7 +28,7 @@ import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, joyStateDir } from "../paths";
-import { setRecordSink, type WireRecord } from "./relay";
+import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./relay";
 import { OutboundSpool, type SpooledOutput, type SpooledTerminal } from "./outboundSpool";
 import { writeAttachmentToCwd } from "../domain/attachments";
 
@@ -300,11 +300,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000), // a hung relay must not hold a lane loop forever
     });
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok) {
       const err = new Error(`${method} ${path} -> ${res.status} ${json?.error ?? ""}`);
-      (err as Error & { status?: number }).status = res.status;
+      (err as Error & { status?: number; relayError?: string }).status = res.status;
+      (err as Error & { status?: number; relayError?: string }).relayError = typeof json?.error === "string" ? json.error : undefined;
       throw err;
     }
     return json;
@@ -324,49 +326,85 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // longer loses output (#60, #67) or leaves a turn unterminated (#74).
   const spool = new OutboundSpool(join(joyStateDir(), "v2-outbound.json"));
   const RETRY_MAX_MS = 30_000;
-  const isPermanent = (e: unknown): boolean => {
+  // How a failed POST is handled. Lease fencing (401 unknown/expired lease,
+  // 412 stale epoch) is TRANSIENT: it says nothing about whether the relay
+  // has the record, and the next lease can retry — deleting on it lost
+  // acknowledged-by-nobody data (Astra's review of 6229b647). The relay's
+  // per-session event budget (429 session_event_budget_exhausted) never
+  // clears by retrying: that is a permanent refusal of THIS record.
+  type Fate = "transient" | "permanent" | "budget";
+  const fateOf = (e: unknown): Fate => {
     const st = (e as { status?: number })?.status;
-    return typeof st === "number" && st >= 400 && st < 500 && st !== 408 && st !== 429;
+    const code = (e as { relayError?: string })?.relayError ?? "";
+    if (st === 429) return code === "session_event_budget_exhausted" ? "budget" : "transient";
+    if (typeof st !== "number") return "transient"; // network, timeout
+    if (st === 401 || st === 408 || st === 412 || st >= 500) return "transient";
+    return st >= 400 ? "permanent" : "transient";
   };
+  const isPermanent = (e: unknown): boolean => fateOf(e) === "permanent";
+  // Entries a live loop is retrying right now — replay leaves them alone.
+  const posting = new Set<string>();
+  // Sessions whose relay event budget is exhausted: logged once, outputs dropped.
+  const budgetExhausted = new Set<string>();
+  // True from lease acquire until replaySpool has scheduled everything the
+  // spool held, in order. While set, flushUnbound only stamps ids (replay is
+  // the single ordered scheduler at boot).
+  let replayPending = false;
   /** POST one spooled output until the relay acks it. Turn-scoped while its
    *  turn is still ours; otherwise (turn ended, daemon restarted) session-
    *  scoped — the chat is per session, the content still lands. */
   async function postOutput(entry: SpooledOutput): Promise<void> {
-    let delay = 1_000;
-    while (!stopped) {
-      const v2 = entry.v2SessionId;
-      if (!v2) return; // still unbound: flushed by spool.bind() later
-      const l = lease;
-      if (!l) { await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2); continue; }
-      const ciphertext = encodeRecord(entry.wire, sessionKeys.get(v2));
-      const turn = entry.turnId && activeTurns.get(entry.turnId);
-      try {
-        if (turn) {
-          try {
-            await api("POST", `/daemon/turns/${entry.turnId}/facts`, { type: "output", ciphertext, runtimeEventId: entry.runtimeEventId }, turn.lease);
-          } catch (e) {
-            if (!isPermanent(e)) throw e;
-            // The turn will not take it (terminal, fenced out): keep the content on the session.
+    if (posting.has(entry.id)) return;
+    posting.add(entry.id);
+    try {
+      let delay = 1_000;
+      while (!stopped) {
+        const v2 = entry.v2SessionId;
+        if (!v2) return; // still unbound: flushed by spool.bind() later
+        if (budgetExhausted.has(v2)) { spool.remove(entry.id); return; }
+        const l = lease;
+        if (!l) { await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2); continue; }
+        const ciphertext = encodeRecord(entry.wire, sessionKeys.get(v2));
+        const turn = entry.turnId && activeTurns.get(entry.turnId);
+        try {
+          if (turn) {
+            try {
+              await api("POST", `/daemon/turns/${entry.turnId}/facts`, { type: "output", ciphertext, runtimeEventId: entry.runtimeEventId }, l);
+            } catch (e) {
+              if (fateOf(e) !== "permanent") throw e;
+              // The turn will not take it (terminal, fenced out): keep the content on the session.
+              await api("POST", `/daemon/sessions/${v2}/facts`, { type: "output", ciphertext, runtimeEventId: entry.runtimeEventId }, l);
+            }
+          } else {
             await api("POST", `/daemon/sessions/${v2}/facts`, { type: "output", ciphertext, runtimeEventId: entry.runtimeEventId }, l);
           }
-        } else {
-          await api("POST", `/daemon/sessions/${v2}/facts`, { type: "output", ciphertext, runtimeEventId: entry.runtimeEventId }, l);
-        }
-        spool.remove(entry.id);
-        recordFailures.delete(entry.localId);
-        return;
-      } catch (e) {
-        if (isPermanent(e)) {
-          log(`record ${entry.runtimeEventId} for ${entry.localId} rejected for good: ${(e as Error).message} — dropped`);
           spool.remove(entry.id);
+          recordFailures.delete(entry.localId);
           return;
+        } catch (e) {
+          const fate = fateOf(e);
+          if (fate === "budget") {
+            if (!budgetExhausted.has(v2)) {
+              budgetExhausted.add(v2);
+              log(`${entry.localId}: relay event budget exhausted for v2 ${v2.slice(0, 8)} — further output for this session is dropped; the session needs a fresh card`);
+            }
+            spool.remove(entry.id);
+            return;
+          }
+          if (fate === "permanent") {
+            log(`record ${entry.runtimeEventId} for ${entry.localId} rejected for good: ${(e as Error).message} — dropped`);
+            spool.remove(entry.id);
+            return;
+          }
+          if (!recordFailures.has(entry.localId)) {
+            recordFailures.add(entry.localId);
+            log(`record forward failed for ${entry.localId}: ${(e as Error).message} — retrying with backoff (muted until the next success)`);
+          }
+          await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2);
         }
-        if (!recordFailures.has(entry.localId)) {
-          recordFailures.add(entry.localId);
-          log(`record forward failed for ${entry.localId}: ${(e as Error).message} — retrying with backoff (muted until the next success)`);
-        }
-        await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2);
       }
+    } finally {
+      posting.delete(entry.id);
     }
   }
   function forwardRecord(localId: string, wire: WireRecord, recLocalId?: string): void {
@@ -380,7 +418,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       kind: "output", id: randomUUID(), localId, v2SessionId, turnId: turnEntry?.[0] ?? null, wire,
       runtimeEventId: recLocalId ? `rec:${recLocalId}` : `rec:${bootNonce}:${randomUUID()}`, at: Date.now(),
     };
-    spool.add(entry); // durable before anything else — adapters checkpoint on return
+    // Durable before anything else — adapters checkpoint on return. When the
+    // disk refuses, say so: RelaySession.outboundPersistDegraded holds the
+    // transcript checkpoint until the spool persists again.
+    setOutboundPersistDegraded(!spool.add(entry));
     if (!v2SessionId) return; // not bound yet: spool.bind() flushes it when the card exists
     const chain = (recordChains.get(localId) ?? Promise.resolve()).then(() => postOutput(entry));
     recordChains.set(localId, chain);
@@ -390,6 +431,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   function flushUnbound(localId: string, v2SessionId: string): void {
     const hits = spool.bind(localId, v2SessionId);
     if (!hits.length) return;
+    // At boot the spool may also hold OLDER, already-bound records for this
+    // session: replaySpool schedules everything in spool order, so only
+    // stamp here and let it do the sending.
+    if (replayPending) return;
     log(`${localId}: flushing ${hits.length} record(s) spooled before bind`);
     for (const e of hits) {
       const chain = (recordChains.get(localId) ?? Promise.resolve()).then(() => postOutput(e));
@@ -399,53 +444,86 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const drainRecords = (localId: string): Promise<void> => recordChains.get(localId) ?? Promise.resolve();
   setRecordSink(forwardRecord);
 
-  /** A turn terminal, durable until acked. Awaits up to a minute of retries
-   *  so the turn loop's own ordering holds; past that it keeps retrying in
-   *  the background and the spool/replay path finishes the job. */
-  async function postTerminal(turnId: string, body: Record<string, unknown>, leaseRef: Lease): Promise<void> {
-    const v2SessionId = [...activeTurns.entries()].find(([id]) => id === turnId)?.[1]
-      ? (boundByLocal.get(activeTurns.get(turnId)!.localId) ?? "") : "";
-    const entry: SpooledTerminal = { kind: "terminal", id: randomUUID(), v2SessionId, turnId, body, at: Date.now() };
-    spool.add(entry);
-    const attempt = async (): Promise<boolean> => {
-      try {
-        await api("POST", `/daemon/turns/${turnId}/facts`, body, leaseRef);
-        spool.remove(entry.id);
-        return true;
-      } catch (e) {
-        if (isPermanent(e)) {
-          // Already terminal / fenced out / gone: the relay has its answer.
-          log(`terminal for turn ${turnId.slice(0, 8)} rejected (${(e as Error).message}) — dropped`);
+  /** A turn terminal, durable until acked. The intent is persisted FIRST,
+   *  then the session's outputs are drained (the terminal must land after
+   *  them), then it is posted with the CURRENT lease — retried on fencing
+   *  and transport failures, dropped only when the relay says the turn will
+   *  not take it. After a minute the retry moves to the background; a
+   *  restart hands the saved outcome to replaySpool. */
+  async function postTerminal(turnId: string, localId: string, body: Record<string, unknown>, leaseRef: Lease): Promise<void> {
+    const entry: SpooledTerminal = { kind: "terminal", id: randomUUID(), v2SessionId: boundByLocal.get(localId) ?? "", localId, turnId, body, at: Date.now() };
+    setOutboundPersistDegraded(!spool.add(entry));
+    posting.add(entry.id);
+    try {
+      await drainRecords(localId);
+      const attempt = async (): Promise<boolean> => {
+        const l = lease ?? leaseRef;
+        try {
+          await api("POST", `/daemon/turns/${turnId}/facts`, body, l);
           spool.remove(entry.id);
           return true;
+        } catch (e) {
+          if (fateOf(e) === "permanent") {
+            // Already terminal / turn gone: the relay has an answer for this turn.
+            log(`terminal for turn ${turnId.slice(0, 8)} rejected (${(e as Error).message}) — dropped`);
+            spool.remove(entry.id);
+            return true;
+          }
+          return false;
         }
-        return false;
-      }
-    };
-    const deadline = Date.now() + 60_000;
-    let delay = 1_000;
-    while (!stopped) {
-      if (await attempt()) return;
-      if (Date.now() > deadline) break;
-      await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2);
-    }
-    log(`terminal for turn ${turnId.slice(0, 8)} still unacked after 60s — retrying in the background`);
-    void (async () => {
+      };
+      const deadline = Date.now() + 60_000;
+      let delay = 1_000;
       while (!stopped) {
-        await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2);
-        if (!lease) continue;
         if (await attempt()) return;
+        if (Date.now() > deadline) break;
+        await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2);
       }
-    })();
+      log(`terminal for turn ${turnId.slice(0, 8)} still unacked after 60s — retrying in the background`);
+      posting.add(entry.id);
+      void (async () => {
+        try {
+          while (!stopped) {
+            await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2);
+            if (!lease) continue;
+            if (await attempt()) return;
+          }
+        } finally { posting.delete(entry.id); }
+      })();
+    } finally {
+      posting.delete(entry.id);
+    }
   }
 
-  /** After a (re)acquire: whatever a previous lease — or a previous daemon —
-   *  left unacked. Outputs go session-scoped (their turns are history);
-   *  terminals go through reconcile, which is what an orphaned turn needs. */
+  /** A saved terminal from a previous lease/daemon: resolve the turn with
+   *  the RECORDED outcome via reconcile. Returns true when settled. */
+  async function reconcileSaved(e: SpooledTerminal): Promise<boolean> {
+    const l = lease;
+    if (!l) return false;
+    try {
+      await api("POST", `/daemon/turns/${e.turnId}/reconcile`, {
+        resolution: "terminal", terminalState: e.body.terminalState ?? "interrupted",
+        meta: { ...(e.body.meta as object ?? {}), replayed: true },
+      }, l);
+      spool.remove(e.id);
+      return true;
+    } catch (err) {
+      const fate = fateOf(err);
+      if (fate === "permanent" && (err as { status?: number }).status !== 409) { spool.remove(e.id); return true; }
+      // 409 turn_not_orphaned: the relay has not orphaned the old epoch's
+      // turn yet (≤20s) — the next sweep tick tries again.
+      return false;
+    }
+  }
+
+  /** Everything the spool holds that no live loop owns, scheduled in spool
+   *  order per session: outputs onto the session's chain, a terminal chained
+   *  AFTER that session's outputs (so completion never lands before the
+   *  answer). Runs after every (re)acquire and on every sweep tick, so a
+   *  deferred reconcile or a lease-fenced retry is picked up again. */
   async function replaySpool(): Promise<void> {
-    const entries = spool.all();
-    if (!entries.length) return;
-    log(`replaying ${entries.length} spooled record(s)`);
+    const entries = spool.all().filter((e) => !posting.has(e.id));
+    if (entries.length && replayPending) log(`replaying ${entries.length} spooled record(s)`);
     for (const e of entries) {
       if (stopped) return;
       if (e.kind === "output") {
@@ -459,27 +537,22 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             continue;
           } else continue;
         }
-        e.turnId = activeTurns.has(e.turnId ?? "") ? e.turnId : null;
+        if (!activeTurns.has(e.turnId ?? "")) e.turnId = null;
         const chain = (recordChains.get(e.localId) ?? Promise.resolve()).then(() => postOutput(e));
         recordChains.set(e.localId, chain);
         continue;
       }
-      const l = lease;
-      if (!l) return;
-      try {
-        await api("POST", `/daemon/turns/${e.turnId}/reconcile`, {
-          resolution: "terminal", terminalState: e.body.terminalState ?? "interrupted",
-          meta: { ...(e.body.meta as object ?? {}), replayed: true },
-        }, l);
-        spool.remove(e.id);
-      } catch (err) {
-        const st = (err as { status?: number }).status;
-        if (st === 404 || st === 400) { spool.remove(e.id); continue; }
-        // 409 turn_not_orphaned: the relay has not orphaned the old epoch's
-        // turn yet (≤20s) — the next replay/sweep gets it.
-        log(`replay: reconcile of turn ${e.turnId.slice(0, 8)} deferred: ${(err as Error).message}`);
-      }
+      // A saved terminal: after its session's pending outputs. Entries from
+      // before localId was recorded fall back to the binding map.
+      if (!e.localId) e.localId = bound.get(e.v2SessionId);
+      posting.add(e.id);
+      const key = e.localId ?? e.turnId;
+      const chain = (recordChains.get(key) ?? Promise.resolve()).then(async () => {
+        try { await reconcileSaved(e); } finally { posting.delete(e.id); }
+      });
+      recordChains.set(key, chain);
     }
+    replayPending = false;
   }
 
   /** Raw attachment bytes from the relay store (sealed by the sender). */
@@ -593,6 +666,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         const st = await api("GET", `/sessions/${s.sessionId}`);
         const ex = st?.execution as { state?: string; turnId?: string } | undefined;
         if (ex?.state !== "orphaned" || !ex.turnId) continue;
+        if (spool.hasTerminalFor(ex.turnId)) {
+          // We KNOW how this turn ended — the terminal just never landed.
+          // replaySpool resolves it with the recorded outcome; a generic
+          // "interrupted" here would win the relay's first-terminal rule.
+          void replaySpool();
+          continue;
+        }
         await api("POST", `/daemon/turns/${ex.turnId}/reconcile`, {
           resolution: "terminal",
           terminalState: "interrupted",
@@ -812,6 +892,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     const turnId = offer.turnId!;
     if (inFlight.has(turnId)) return;
     inFlight.add(turnId);
+    let turnLocalId = bound.get(offer.sessionId) ?? ""; // for the catch below, which runs outside the session's scope
     try {
       try {
         await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
@@ -858,6 +939,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // the replacement's creation the lookup misses and the old one — which
       // still says "pending" for the items it handed over — stands in.
       let sess: AgentSession = session;
+      turnLocalId = session.id;
       const relive = () => { sess = registry.get(sess.id) ?? sess; };
       const prompt = decodePrompt(offer.ciphertext, sessionKeys.get(offer.sessionId));
       if (prompt === null) {
@@ -867,7 +949,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // Fail it with the reason instead: the app shows it, the user
         // re-sends, the rest drains.
         await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
-        await postTerminal(turnId, {
+        await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason: "undecodable_prompt" },
         }, leaseRef);
@@ -894,7 +976,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // not leave files the agent never heard about in the cwd.
         const fail = async (reason: string, a: PromptAttachment) => {
           for (const abs of written) { try { unlinkSync(abs); } catch { /* already gone */ } }
-          await postTerminal(turnId, {
+          await postTerminal(turnId, sess.id, {
             type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason, attachmentId: a.id },
           }, leaseRef);
           log(`turn ${turnId.slice(0, 8)}: ${reason} (${a.name}) → failed`);
@@ -940,7 +1022,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       if (queued?.handled === "command") {
         await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
         await drainRecords(sess.id);
-        await postTerminal(turnId, {
+        await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "completed", runtimeEventId: randomUUID(),
           meta: { reason: "handled_as_command" },
         }, leaseRef);
@@ -957,7 +1039,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const failTurn = async (reason: string, { abortLocal = false } = {}) => {
         try { if (queued?.id) sess.cancelQueued(queued.id); } catch { /* stub adapters */ }
         if (abortLocal) { try { await sess.abort(); } catch { /* pane teardown */ } }
-        await postTerminal(turnId, {
+        await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason },
         }, leaseRef);
@@ -1013,7 +1095,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           if (st === "cancelled") {
             // Plucked locally (a cancel, an abort, a session teardown). The
             // prompt will never run — say so instead of reporting `completed`.
-            await postTerminal(turnId, {
+            await postTerminal(turnId, sess.id, {
               type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(),
               meta: { reason: "prompt_cancelled_locally" },
             }, leaseRef);
@@ -1041,7 +1123,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // Restarted before the agent ever started on it: the prompt died
             // with the process. Say cancelled now, not no_agent_activity in
             // three minutes.
-            await postTerminal(turnId, {
+            await postTerminal(turnId, sess.id, {
               type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(),
               meta: { reason: "restarted_before_start" },
             }, leaseRef);
@@ -1079,7 +1161,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // keeps burning would be a lie with a bill attached.
           try { await sess.abort(); } catch { /* pane teardown */ }
           await drainRecords(sess.id);
-          await postTerminal(turnId, {
+          await postTerminal(turnId, sess.id, {
             type: "terminal", terminalState: "interrupted", runtimeEventId: randomUUID(),
             meta: { reason: "turn_cap" },
           }, leaseRef);
@@ -1091,7 +1173,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
 
       const terminalState = cancelRequested.has(turnId) ? "cancelled" : "completed";
       await drainRecords(sess.id);
-      await postTerminal(turnId, {
+      await postTerminal(turnId, sess.id, {
         type: "terminal", terminalState, runtimeEventId: randomUUID(),
       }, leaseRef);
       log(`${tag} ${terminalState}`);
@@ -1101,7 +1183,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // turn (with a live lease the sweep will never orphan it). If this post
       // also fails, lease death eventually orphans the turn — still honest.
       try {
-        await postTerminal(turnId, {
+        await postTerminal(turnId, turnLocalId, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason: "lane_error", detail: String(e).slice(0, 300) },
         }, leaseRef);
@@ -1289,24 +1371,33 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // release the slot; every later prompt queues behind it (#74). Two
         // consecutive sightings (a just-claimed turn is in inFlight before
         // the relay ever shows it executing) → release it as interrupted.
+        // The list carries the execution STATE, not the turn id — fetch the
+        // session for the id, then re-check the local guards against it.
         const seen = new Set<string>();
         for (const row of rows) {
-          const ex = row.executing;
-          if (!ex || row.daemonId !== machineId) continue;
-          if (inFlight.has(ex) || activeTurns.has(ex) || spool.hasTerminalFor(ex)) continue;
-          seen.add(ex);
-          const n = (noWorkerSeen.get(ex) ?? 0) + 1;
-          noWorkerSeen.set(ex, n);
+          if (!row.executing || row.daemonId !== machineId || !row.localSessionId) continue;
+          const st = await withTimeout(api("GET", `/sessions/${row.sessionId}`), 10_000).catch(() => null);
+          const ex = (st?.execution as { state?: string; turnId?: string } | undefined);
+          const turnId = ex?.turnId;
+          if (!turnId || !ex?.state || !["dispatching", "running", "cancelling"].includes(ex.state)) continue;
+          if (inFlight.has(turnId) || activeTurns.has(turnId) || spool.hasTerminalFor(turnId)) continue;
+          seen.add(turnId);
+          const n = (noWorkerSeen.get(turnId) ?? 0) + 1;
+          noWorkerSeen.set(turnId, n);
           if (n < 2 || !lease) continue;
+          // Re-check after the await: a claim may have started it meanwhile.
+          if (inFlight.has(turnId) || activeTurns.has(turnId)) { noWorkerSeen.delete(turnId); continue; }
           try {
-            await api("POST", `/daemon/turns/${ex}/reconcile`, { resolution: "terminal", terminalState: "interrupted", meta: { reason: "no_local_worker" } }, lease);
-            log(`released turn ${ex.slice(0, 8)} on ${row.sessionId.slice(0, 8)}: executing on the relay, no worker here → interrupted`);
+            await api("POST", `/daemon/turns/${turnId}/reconcile`, { resolution: "terminal", terminalState: "interrupted", meta: { reason: "no_local_worker" } }, lease);
+            log(`released turn ${turnId.slice(0, 8)} on ${row.sessionId.slice(0, 8)}: executing on the relay, no worker here → interrupted`);
           } catch (e) {
-            log(`release of turn ${ex.slice(0, 8)} failed: ${(e as Error).message}`);
+            log(`release of turn ${turnId.slice(0, 8)} failed: ${(e as Error).message}`);
           }
-          noWorkerSeen.delete(ex);
+          noWorkerSeen.delete(turnId);
         }
         for (const k of [...noWorkerSeen.keys()]) if (!seen.has(k)) noWorkerSeen.delete(k);
+        // Saved records nobody is retrying (a deferred reconcile, a fenced retry).
+        if (spool.size) void replaySpool();
       } catch { /* next tick */ }
     }
   }
@@ -1318,6 +1409,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (!lease) {
           if (lane === "control") { await sleep(1_000); continue; } // work loop owns acquire
           await acquire();
+          replayPending = true;
           await refreshBindings();
           void replaySpool();
           announced = false;
