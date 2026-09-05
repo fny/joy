@@ -203,7 +203,7 @@ export class OpencodeSession implements AgentSession {
       // spawn fresh (sessions persist server-side; a fresh server is simpler
       // and safer than rejoining an unknown-state one).
       if (this.#reapPid && isOpencodeServerPid(this.#reapPid)) {
-        killOpencodeServerPid(this.#reapPid);
+        await killOpencodeServerPid(this.#reapPid); // gone before a replacement opens the same conversation (#71)
       }
       const { proc, port } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
       this.#proc = proc;
@@ -288,11 +288,20 @@ export class OpencodeSession implements AgentSession {
     return true;
   }
 
+  #draining = false;
   async #drainInbound(): Promise<void> {
     const client = this.#client;
     if (!client || !this.#ocSessionId) return;
+    if (this.#draining) return; // one ordered drain; a second one re-sent a snapshot (Astra, #79)
+    this.#draining = true;
+    try { await this.#drainInboundInner(client, this.#ocSessionId); } finally { this.#draining = false; }
+  }
+  async #drainInboundInner(client: OpencodeClient, ocSessionId: string): Promise<void> {
     for (const item of [...this.#inbound]) {
       if (item.state !== "queued" && item.state !== "sentUnknown") continue;
+      // Re-check membership right before the send: a cancel that landed
+      // during the previous await removed it from #inbound.
+      if (!this.#inbound.includes(item)) continue;
       try {
         item.state = "sentUnknown";
         saveCodexInbound(this.id, this.#inbound);
@@ -301,12 +310,13 @@ export class OpencodeSession implements AgentSession {
         // calls (verified live 2026-08-03 — in-flight work continues and the
         // model incorporates the addition).
         const outText = this.#needsPreamble ? opencodeJoyPreamble() + item.text : item.text;
-        const r = await client.prompt(this.#ocSessionId, outText, { id: item.clientId, delivery: "steer" });
+        const r = await client.prompt(ocSessionId, outText, { id: item.clientId, delivery: "steer" });
         this.#needsPreamble = false;
         // Admission ack = durable server-side; prompt.admitted event confirms
         // via the normalizer too, but the ack alone is safe to remove on
         // (admittedSeq is the server's own ordering receipt).
-        if (r.messageID) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
+        // A cancel that raced the reply wins: never overwrite its outcome.
+        if (r.messageID && this.#inbound.includes(item)) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (/→ \d{3}:/.test(msg)) {
@@ -393,7 +403,7 @@ export class OpencodeSession implements AgentSession {
           break;
         }
         case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
-        case "confirmPrompt": this.#removeInbound(eff.messageID); this.#armTurnDeadline(eff.messageID); break;
+        case "confirmPrompt": if (eff.messageID) { this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID); } break; // admission proven by SSE too (#79)
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
@@ -453,7 +463,14 @@ export class OpencodeSession implements AgentSession {
             }
           } else if (pt === "tool" || pt === "tool-call" || pt === "toolCall") {
             this.#relay?.send(encodeToolCallStart({ call: core, name: "OpencodeTool", input: p.input ?? null, turn }), `oc:${sid}:${core}:tool-start`);
-            this.#relay?.send(encodeToolCallEnd(core, { turn }), `oc:${sid}:${core}:tool-end`);
+            // Same outcome semantics as the live normalizer (#68): the stored
+            // part state carries output / error / status.
+            const st = (p.state ?? {}) as Record<string, unknown>;
+            const isError = String(st.status ?? "") === "error" || st.error != null;
+            const raw = isError ? (st.error ?? st.output) : (st.output ?? st.result);
+            const result = raw == null ? undefined : (typeof raw === "string" ? raw : JSON.stringify(raw));
+            const clamped = result && result.length > 48_000 ? `${result.slice(0, 24_000)}\n…[truncated]…\n${result.slice(-24_000)}` : result;
+            this.#relay?.send(encodeToolCallEnd(core, { turn, ...(clamped ? { result: clamped } : {}), ...(isError ? { isError: true } : {}) }), `oc:${sid}:${core}:tool-end`);
           }
         }
         // Assistant message completed → close the turn row (deterministic id
@@ -644,6 +661,7 @@ export class OpencodeSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       deleteWindowRecord(this.id);
+      clearCodexInbound(this.id); // nothing left to deliver (#43)
       this.#deps.broadcast("session_update", this.toJSON());
       return true;
     }

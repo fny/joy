@@ -14,7 +14,7 @@
 //    must deadline "prompt admitted but no assistant activity".
 
 import { spawn, execFileSync, type ChildProcess } from "child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
@@ -244,20 +244,39 @@ export class OpencodeClient {
  *  for pre-detached records. VERIFIED: a stray from a failed TERM was found
  *  alive a day later (2026-08-03), so escalate to SIGKILL if the group is
  *  still up after a grace period, and log the escalation. */
-export function killOpencodeServerPid(pid: number): void {
+export async function killOpencodeServerPid(pid: number): Promise<void> {
+  const alive = (p: number): boolean => { try { process.kill(p, 0); return true; } catch { return false; } };
   const groupKill = (sig: NodeJS.Signals): boolean => {
     try { process.kill(-pid, sig); return true; } catch { /* not a group leader */ }
     try { process.kill(pid, sig); return true; } catch { return false; /* gone */ }
   };
-  if (!groupKill("SIGTERM")) return;
-  const timer = setTimeout(() => {
+  /** Members of the launcher's process group still alive (the server child may
+   *  outlive a launcher that honoured TERM). */
+  const survivors = (): number[] => {
+    const out: number[] = [];
     try {
-      process.kill(pid, 0); // still alive?
-      process.stderr.write(`[opencode] server ${pid} survived SIGTERM — escalating to SIGKILL\n`);
-      groupKill("SIGKILL");
-    } catch { /* dead — done */ }
-  }, 2_000);
-  timer.unref();
+      for (const d of readdirSync("/proc")) {
+        if (!/^\d+$/.test(d)) continue;
+        const stat = readFileSync(`/proc/${d}/stat`, "utf8");
+        const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        if (Number(fields[2]) === pid) out.push(Number(d)); // pgrp == launcher pid
+      }
+    } catch { /* /proc unavailable */ }
+    if (alive(pid) && !out.includes(pid)) out.push(pid);
+    return out;
+  };
+  if (!groupKill("SIGTERM")) return;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  for (let i = 0; i < 20 && survivors().length; i++) await sleep(100); // ≤2s grace
+  let left = survivors();
+  if (left.length) {
+    process.stderr.write(`[opencode] server group ${pid} survived SIGTERM (${left.join(",")}) — escalating to SIGKILL\n`);
+    groupKill("SIGKILL");
+    for (const p of left) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
+    for (let i = 0; i < 20 && survivors().length; i++) await sleep(100);
+    left = survivors();
+    if (left.length) process.stderr.write(`[opencode] server group ${pid}: ${left.join(",")} still alive after SIGKILL\n`);
+  }
 }
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
@@ -267,7 +286,11 @@ export function isOpencodeServerPid(pid: number): boolean {
   // a second one was started for the same conversation (#71).
   try {
     const comm = readFileSync(`/proc/${pid}/comm`, "utf8").trim();
-    return comm.includes("opencode");
+    if (!comm.includes("opencode")) return false;
+    // A recycled pid could be an interactive opencode: the server we spawned
+    // runs `opencode serve --port 0` (Astra, #71).
+    const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+    return cmdline.includes("serve");
   } catch { return false; }
 }
 

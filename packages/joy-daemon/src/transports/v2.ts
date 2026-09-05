@@ -371,7 +371,10 @@ route("GET", "/v2/sessions/:id/events", withSession((ctx, session, p) => {
       // Claude transcript uuid for claude; `id` on those is the row number,
       // which never matched and dropped every message (#76).
       if (typeof d.session_id === "string") {
-        if (d.session_id === p.id || (!!session.claudeSessionId && d.session_id === session.claudeSessionId)) ctx.res.write(frame);
+        // Resolve the live object each time: an in-place restart replaces it
+        // (and its transcript uuid) while this stream stays open.
+        const cur = ctx.registry.get(p.id) ?? session;
+        if (d.session_id === p.id || (!!cur.claudeSessionId && d.session_id === cur.claudeSessionId)) ctx.res.write(frame);
         return;
       }
       const sid = d.id ?? d.sessionId ?? (d.session as Record<string, unknown> | undefined)?.id;

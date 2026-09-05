@@ -263,15 +263,21 @@ export class CodexAppServerClient {
 
   async #handleServerRequest(req: ServerRequest): Promise<void> {
     const key = String(req.id);
+    // The reply belongs to the socket that asked. A reconnect reuses request
+    // ids, so a held approval answered after the connection was replaced
+    // would answer the NEW server's request of the same id (Astra, #72).
+    const asked = this.#ws;
     try {
       const result = await this.#onServerRequest(req);
       // Suppress the response if the request was resolved externally while the
       // handler was held (the TUI answered it, or an interrupt cleared it) —
       // sending a second response for the same id is a protocol error (#6).
       if (this.#externallyResolved.delete(key)) return;
+      if (this.#ws !== asked) return; // the connection that asked is gone
       this.#send({ jsonrpc: "2.0", id: req.id, result });
     } catch (e) {
       if (this.#externallyResolved.delete(key)) return;
+      if (this.#ws !== asked) return;
       const code = e instanceof JsonRpcError ? e.code : -32603;
       const message = e instanceof Error ? e.message : String(e);
       this.#send({ jsonrpc: "2.0", id: req.id, error: { code, message } });

@@ -75,6 +75,18 @@ export function parseEnvFile(text: string): Record<string, string> {
 const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 export function isValidEnvName(name: string): boolean { return NAME_RE.test(name); }
 
+/** Does this machineKey (base64) open the current store? True when there is
+ *  no store yet. Pairing uses it to pick the key that matches an existing
+ *  env.sealed instead of an arbitrary sibling relay's (#117). */
+export function machineKeyOpensStore(keyB64: string): boolean {
+  if (!existsSync(storePath())) return true;
+  try {
+    const key = Buffer.from(keyB64, "base64");
+    if (key.length !== 32) return false;
+    return open(readFileSync(storePath(), "utf8").trim(), new Uint8Array(key)) !== null;
+  } catch { return false; }
+}
+
 /** The store's contents, or an error string when it cannot be read (unpaired
  *  daemon has no machine key; a tampered file fails authentication). */
 export function readEnvStore(): { ok: true; env: Record<string, string> } | { ok: false; error: string } {
@@ -130,7 +142,7 @@ const appliedFromStore = new Set<string>();
 export function applyEnvStore(): void {
   // An unreadable store is loud, once: silently skipping it lost every
   // provider key for every later spawn with no hint why (#117).
-  { const probe = readEnvStore(); if (!probe.ok && !warnedUnreadable) { warnedUnreadable = true; process.stderr.write(`[env] ${storePath()} is ${probe.error} — provider keys are NOT being applied; run \`joy env ls\` to inspect, or delete the file and set the keys again\n`); } }
+  { const probe = readEnvStore(); if (!probe.ok && existsSync(storePath()) && !warnedUnreadable) { warnedUnreadable = true; process.stderr.write(`[env] ${storePath()} is ${probe.error} — provider keys are NOT being applied; run \`joy env ls\` to inspect, or delete the file and set the keys again\n`); } }
   const cur = readEnvStore();
   if (!cur.ok) return;
   for (const k of appliedFromStore) {
