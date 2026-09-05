@@ -119,7 +119,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     return { ok: true };
   });
   route('GET', '/sessions/([\\w-]+)/events', {}, async (ctx, m, body, url) =>
-    core.sessionEvents(ctx.accountId, m[1], url.searchParams.get('after'), url.searchParams.get('limit')));
+    core.sessionEvents(ctx.accountId, m[1], url.searchParams.get('after'), url.searchParams.get('limit'), url.searchParams.get('before')));
   // Retry a spawn that FAILED (e.g. cwd missing), opting into directory
   // creation — the durable-queue analog of v1's 'Create directory?' approval.
   route('POST', '/sessions/([\\w-]+)/spawn/retry', {}, async (ctx, m, body) =>

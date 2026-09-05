@@ -732,3 +732,21 @@ describe('wave 1: durability contract (#57, #74, #116)', () => {
   });
 });
 
+describe('wave 4: backward event pages (#4)', () => {
+  it('before= returns the newest events below the bound, ascending, with hasMore', async () => {
+    const d = makeDaemon('mach-before');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    for (let i = 0; i < 7; i++) await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: `m${i}` } });
+    const all = (await call('GET', `/joy/v2/sessions/${sessionId}/events?after=0&limit=100`)).json.messages;
+    expect(all.length).toBeGreaterThanOrEqual(7);
+    const last = Number(all[all.length - 1].seq);
+    const page = (await call('GET', `/joy/v2/sessions/${sessionId}/events?before=${last + 1}&limit=3`)).json;
+    expect(page.messages.map((e) => Number(e.seq))).toEqual(all.slice(-3).map((e) => Number(e.seq)));
+    expect(page.hasMore).toBe(true);
+    const older = (await call('GET', `/joy/v2/sessions/${sessionId}/events?before=${page.messages[0].seq}&limit=100`)).json;
+    expect(older.messages.map((e) => Number(e.seq))).toEqual(all.slice(0, -3).map((e) => Number(e.seq)));
+    expect(older.hasMore).toBe(false);
+  });
+});
+
