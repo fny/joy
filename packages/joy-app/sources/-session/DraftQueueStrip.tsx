@@ -21,8 +21,15 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
             if (!d.text.trim()) { remove(sessionId, d.id); return; }
             // The draft is removed only once the relay accepted it; a failed
             // send keeps it (with the error on the row) and says so (#10).
-            void sync.sendMessage(sessionId, d.text, { source: 'chat', localId: d.id }).then((res) => {
-                if (res.ok) { remove(sessionId, d.id); return; }
+            const sentText = d.text;
+            void sync.sendMessage(sessionId, sentText, { source: 'chat', localId: d.id }).then((res) => {
+                if (res.ok) {
+                    // Remove only what was sent: an edit made while the send was
+                    // in flight is a new draft, not the delivered one.
+                    const now = useDraftQueueStore.getState().bySession[sessionId]?.find((x) => x.id === d.id);
+                    if (!now || now.text === sentText) remove(sessionId, d.id);
+                    return;
+                }
                 useDraftQueueStore.getState().revertRelease(sessionId, d.id, res.reason);
                 if (!res.reason.startsWith('attachment upload failed')) Modal.alert(t('errors.sendFailedTitle'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
             });
