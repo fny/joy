@@ -1,3 +1,14 @@
+# Sep 5 (4) — App fixes, second batch
+
+- **File search and `@` mentions return results again** — the file list used a search call the machine rejected, so every session's Files search and autocomplete were empty.
+- **"No connection" means no connection.** The banner used to appear on cold start and never when the network was actually gone. It now shows after three failed polls and stays quiet while connecting.
+- **Files with accented or non-Latin names open** from tool rows and file lists (the path encoding threw on anything beyond Latin-1).
+- **Diagrams can't run code**: a Mermaid block containing `</script>` escaped its container on iOS/Android; it is escaped now and unexpected messages from the diagram view are ignored.
+- **Android sheets show every button** (the attach sheet hid Draw and Cancel; agent and model pickers hid most entries) and can be dismissed.
+- **Git line counts are back** on session rows and the files sidebar (+N/−N were blank for every session); renamed files show under their new name; **unread markers no longer vanish** while you type a draft or when machines refresh.
+- **The usage screen's per-session table loads** (it asked the machine for a route that didn't exist).
+- Smaller: New-session Create no longer sticks disabled when a machine's model catalog can't be fetched yet; an empty file opens as empty instead of "Failed to read file"; the effort chip on Codex sessions no longer types a Claude command into Codex; drafts save when you leave the screen, not on every keystroke. *Some need the updated daemon.*
+
 # Sep 5 (3) — App fixes, first batch
 
 - **All Files, per-file diffs and diff prefetch work again.** They were calling a shell path the machine never served, so every repo showed "No files in project" and every diff said "no response". They now use the machine's git routes directly; no shell is involved, so a file name with quotes or `$(…)` can't run anything either.

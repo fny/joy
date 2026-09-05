@@ -37,9 +37,14 @@ class ModalManagerClass implements IModal {
                 message,
                 buttons: buttons || [{ text: t('common.ok') }]
             } as Omit<ModalConfig, 'id'>);
+        } else if (Platform.OS === 'android' && buttons && buttons.length > 3 && this.showModalFn) {
+            // Android's Alert keeps only three buttons and is not cancelable by
+            // default: a 5-button sheet hid Draw and Cancel (#19). The custom
+            // modal renders every button.
+            this.showModalFn({ type: 'alert', title, message, buttons } as Omit<ModalConfig, 'id'>);
         } else {
             // Use native alert
-            Alert.alert(title, message, buttons);
+            Alert.alert(title, message, buttons, { cancelable: true });
         }
     }
 

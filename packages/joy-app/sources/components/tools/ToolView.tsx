@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { encodePathParam } from '@/utils/pathParam';
 import { Text, View, TouchableOpacity, ActivityIndicator, Platform } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -52,7 +53,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
         if (onPress) {
             onPress();
         } else if (sessionId && filePath) {
-            router.push(`/session/${sessionId}/file?path=${btoa(filePath)}`);
+            router.push(`/session/${sessionId}/file?path=${encodePathParam(filePath)}`);
         } else if (sessionId && messageId) {
             router.push(`/session/${sessionId}/message/${messageId}`);
         }
@@ -63,7 +64,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     const readFilePath = tool.name === 'Read' && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
     const handleOpenReadFile = React.useCallback(() => {
         if (!sessionId || !readFilePath) return;
-        router.push(`/session/${sessionId}/file?path=${btoa(readFilePath)}`);
+        router.push(`/session/${sessionId}/file?path=${encodePathParam(readFilePath)}`);
     }, [sessionId, readFilePath, router]);
 
     // Enable pressable if either onPress is provided or we have navigation params

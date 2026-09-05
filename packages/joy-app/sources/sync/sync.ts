@@ -402,9 +402,11 @@ class Sync {
      *  only report trouble once nothing has landed for several poll cycles. */
     private noteRelayReadFailed() {
         if (Date.now() - this.lastRelayReadOkAt < 3 * POLL_INTERVAL_MS) return;
-        if (storage.getState().socketStatus === 'connected') {
-            storage.getState().setSocketStatus('connecting');
-        }
+        // Three polls without a successful read = offline for the banner's
+        // purposes. 'connecting' never showed it, so a phone that lost the
+        // network stayed banner-less while a cold start flashed it (#11).
+        const st = storage.getState().socketStatus;
+        if (st === 'connected' || st === 'connecting') storage.getState().setSocketStatus('disconnected');
     }
 
     stopV2Live() {

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { decodePathParam } from '@/utils/pathParam';
 import { View, ScrollView, ActivityIndicator, Platform, Pressable } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import { isDemoSession } from '@/sync/demoSession';
@@ -104,7 +105,7 @@ export default React.memo(function FileScreen() {
 
     // Decode base64 path with error handling
     try {
-        rawPath = encodedPath ? atob(encodedPath) : '';
+        rawPath = encodedPath ? decodePathParam(encodedPath) : '';
     } catch (error) {
         console.error('Failed to decode file path:', error);
         rawPath = encodedPath || '';
@@ -278,7 +279,7 @@ export default React.memo(function FileScreen() {
                     if (isRasterImagePath(filePath)) {
                         const imgResponse = await sessionReadFile(sessionId, filePath);
                         if (!isCancelled) {
-                            if (imgResponse.success && imgResponse.content) {
+                            if (imgResponse.success && imgResponse.content) { // a zero-byte "image" falls to the binary notice below
                                 setImageBase64(imgResponse.content);
                                 setFileContent({ content: '', encoding: 'base64', isBinary: true });
                             } else {
@@ -315,11 +316,14 @@ export default React.memo(function FileScreen() {
                 const response = await sessionReadFile(sessionId, filePath);
 
                 if (!isCancelled) {
-                    if (response.success && response.content) {
+                    if (response.success) {
+                        // An empty file is a file: `success && content` treated the
+                        // daemon's "" as a failure and the fileEmpty notice was
+                        // unreachable (#87).
                         let rawBytes: Uint8Array;
                         let decodedContent: string;
                         try {
-                            rawBytes = decodeBase64ToBytes(response.content);
+                            rawBytes = decodeBase64ToBytes(response.content ?? '');
                             decodedContent = decodeUtf8Bytes(rawBytes);
                         } catch (decodeError) {
                             setFileContent({ content: '', encoding: 'base64', isBinary: true });

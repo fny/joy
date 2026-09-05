@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { encodePathParam } from '@/utils/pathParam';
 import { View, Text, ScrollView, Pressable, Platform, TextInput, ActivityIndicator } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 import Octicons from '@expo/vector-icons/Octicons';
@@ -199,7 +200,7 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
             onFilePress(file);
             return;
         }
-        const encodedPath = btoa(file.fullPath);
+        const encodedPath = encodePathParam(file.fullPath);
         router.push(`/session/${sessionId}/file?path=${encodedPath}`);
     }, [router, sessionId, onFilePress]);
 

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { encodePathParam } from '@/utils/pathParam';
 import { View, ActivityIndicator, Platform, TextInput, Pressable } from 'react-native';
 import { t } from '@/text';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -77,7 +78,7 @@ export default React.memo(function FilesScreen() {
             shakerRefs.current.get(file.fullPath)?.shake();
             return;
         }
-        const encodedPath = btoa(file.fullPath);
+        const encodedPath = encodePathParam(file.fullPath);
         router.push(`/session/${sessionId}/file?path=${encodedPath}`);
     }, [router, sessionId]);
 
@@ -225,7 +226,7 @@ export default React.memo(function FilesScreen() {
                     sessionId={sessionId!}
                     selectedPath={null}
                     onFilePress={(filePath) => {
-                        router.push(`/session/${sessionId}/file?path=${btoa(filePath)}`);
+                        router.push(`/session/${sessionId}/file?path=${encodePathParam(filePath)}`);
                     }}
                 />
             </View>
