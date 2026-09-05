@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { sendKey } from '@/utils/sendKey';
+import { beginSend, sendSucceeded, sendFailed } from '@/utils/sendKey';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { t } from '@/text';
@@ -24,16 +24,21 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
             // The draft is removed only once the relay accepted it; a failed
             // send keeps it (with the error on the row) and says so (#10).
             const sentText = d.text;
-            // Key bound to the draft AND its text: an edited draft is a new
-            // message, an unchanged retry replays the acceptance (#10).
-            void sync.sendMessage(sessionId, sentText, { source: 'chat', localId: sendKey(d.id, sentText) }).then((res) => {
+            // Fresh key per send; reused only for an exact retry of a FAILED send,
+            // so an edited draft is a new message and an unchanged retry replays
+            // the relay's acceptance (#10).
+            const scope = `draft:${sessionId}:${d.id}`;
+            const localId = beginSend(scope, sentText);
+            void sync.sendMessage(sessionId, sentText, { source: 'chat', localId }).then((res) => {
                 if (res.ok) {
+                    sendSucceeded(scope, localId);
                     // Remove only what was sent: an edit made while the send was
                     // in flight is a new draft, not the delivered one.
                     const now = useDraftQueueStore.getState().bySession[sessionId]?.find((x) => x.id === d.id);
                     if (!now || now.text === sentText) remove(sessionId, d.id);
                     return;
                 }
+                sendFailed(scope, localId);
                 useDraftQueueStore.getState().revertRelease(sessionId, d.id, res.reason);
                 if (!res.reason.startsWith('attachment upload failed')) Modal.alert(t('errors.sendFailedTitle'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
             });
