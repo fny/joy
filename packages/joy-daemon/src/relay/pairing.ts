@@ -7,6 +7,7 @@
 //
 // The account secret transits memory only — callers must not persist it.
 import { createHmac, createHash, randomBytes, randomUUID } from "node:crypto";
+import { machineKeyOpensStore } from "../domain/envStore";
 import { mkdirSync, writeFileSync, existsSync, renameSync , readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import tweetnacl from "tweetnacl";
@@ -156,8 +157,13 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
       return typeof prev.encryption?.machineKey === "string" && prev.encryption.machineKey ? prev.encryption.machineKey : null;
     } catch { return null; }
   };
-  const inherited = readKey(join(credsDir, "access.key"))
-    ?? (() => { try { for (const d of readdirSync(join(credsDir, ".."))) { const k = readKey(join(credsDir, "..", d, "access.key")); if (k) return k; } } catch { /* no relays dir yet */ } return null; })();
+  // Candidates: this relay's previous key, then every sibling relay's. Prefer
+  // the one that actually opens env.sealed (relays paired before the key was
+  // machine-wide may disagree); with no store yet, the first is fine.
+  const candidates: string[] = [];
+  const own = readKey(join(credsDir, "access.key")); if (own) candidates.push(own);
+  try { for (const d of readdirSync(join(credsDir, ".."))) { const k = readKey(join(credsDir, "..", d, "access.key")); if (k && !candidates.includes(k)) candidates.push(k); } } catch { /* no relays dir yet */ }
+  const inherited = candidates.find((k) => machineKeyOpensStore(k)) ?? candidates[0];
   if (inherited) machineKey = inherited;
   for (const f of ["access.key", "settings.json", "account.secret", "perimeter.key"]) {
     const p = join(credsDir, f);

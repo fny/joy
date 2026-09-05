@@ -36,6 +36,9 @@ export type CodexEffect =
   | { kind: "thinking"; value: boolean }
   | { kind: "receipt"; uuid: string; turn: string }
   | { kind: "confirmDispatch"; clientId: string }
+  /** A completed userMessage: the session decides (from the ids it dispatched)
+   *  whether this is its own echo or a prompt typed in the attached TUI (#78). */
+  | { kind: "userMessage"; clientId: string; text: string; turn: string; localId: string }
   | { kind: "model"; code: string }
   | { kind: "effort"; effort: string }
   | { kind: "context"; tokens: number }
@@ -248,13 +251,9 @@ export class CodexNormalizer {
       case "mcpToolCall":
         return this.#toolEnd(joyTurn, core, item);
       case "userMessage": {
-        // A prompt typed in the attached TUI has no Joy clientId and no relay
-        // row: mirror it (deterministic localId, so live and history dedupe).
-        // Joy's own prompts are echoes and stay silent (#78).
         const clientId = str(item.clientId) || str(item.clientUserMessageId);
-        if (clientId) return [];
         const text = userMessageText(item);
-        return text ? [this.#wire(encodeUserMessage(text, Date.now()), `turn:${joyTurn}:item:${core}:user`)] : [];
+        return text ? [{ kind: "userMessage", clientId, text, turn: joyTurn, localId: `turn:${joyTurn}:item:${core}:user` }] : [];
       }
       default:
         return [];

@@ -417,6 +417,7 @@ export class CodexSession implements AgentSession {
     // 'queued' (which would blindly resend). Ambiguous outcomes stay sentUnknown.
     item.state = "sentUnknown";
     saveCodexInbound(this.id, this.#inbound);
+    this.#dispatched.add(item.clientId);
     try {
       const { turnId } = await client.turnStart(this.#threadId, item.text, {
         clientUserMessageId: item.clientId,
@@ -425,15 +426,32 @@ export class CodexSession implements AgentSession {
       });
       this.#pendingEffort = null; // applied (codex persists it thread-side)
       this.#activeTurnId = turnId; // serialize: no further dispatch until this completes
+      if (this.#cancelledIds.has(item.clientId)) {
+        // Cancelled while turn/start was in flight: the turn is accepted and
+        // running — interrupt it the moment its id is known (Astra, #66).
+        this.#cancelledIds.delete(item.clientId);
+        process.stderr.write(`[codex ${this.id}] ${item.clientId} was cancelled mid-start — interrupting turn ${turnId}\n`);
+        try { await client.turnInterrupt(this.#threadId, turnId); } catch { /* best effort */ }
+      }
     } catch (e) {
       if (e instanceof JsonRpcResponseError) {
-        // EXPLICIT server rejection (definitely not accepted) → safe to requeue.
-        // Common cause: a turn is already active — the pending turn/completed
-        // (or turn/started, which sets #activeTurnId) will re-trigger the pump,
-        // so we do NOT hot-loop by re-pumping here.
-        item.state = "queued";
-        saveCodexInbound(this.id, this.#inbound);
-        process.stderr.write(`[codex ${this.id}] turn/start rejected (${e.code}) — requeued\n`);
+        // EXPLICIT server rejection. A busy/already-active refusal is
+        // retryable (turn/completed re-pumps); anything else, three times in
+        // a row, is a permanent refusal of THIS prompt → failed (Astra, #66).
+        const busy = /busy|already|in progress|active/i.test(String(e.message ?? ""));
+        const n = (this.#rejections.get(item.clientId) ?? 0) + 1;
+        this.#rejections.set(item.clientId, n);
+        if (!busy && n >= 3) {
+          this.#inbound = this.#inbound.filter((i) => i.clientId !== item.clientId);
+          saveCodexInbound(this.id, this.#inbound);
+          this.#recordOutcome(item.clientId, "failed");
+          this.#rejections.delete(item.clientId);
+          process.stderr.write(`[codex ${this.id}] turn/start rejected ${n}× (${e.code}: ${String(e.message ?? "").slice(0, 120)}) — prompt failed\n`);
+        } else {
+          item.state = "queued";
+          saveCodexInbound(this.id, this.#inbound);
+          process.stderr.write(`[codex ${this.id}] turn/start rejected (${e.code}) — requeued\n`);
+        }
       } else {
         // AMBIGUOUS (timeout / socket loss): it MIGHT have landed — hold as
         // sentUnknown (at-most-once) rather than risk a duplicate turn.
@@ -613,6 +631,17 @@ export class CodexSession implements AgentSession {
           }
           break;
         case "confirmDispatch": this.#onDispatchEchoed(eff.clientId); break;
+        case "userMessage": {
+          // Ours if we dispatched that clientId (spool, dispatched set, or our
+          // id scheme); anything else was typed in the attached TUI and has no
+          // relay row — mirror it once. Not during history replay: a fresh
+          // card already emitted user rows BEFORE the turn bracket (#78).
+          const ours = !!eff.clientId && (this.#dispatched.has(eff.clientId) || this.#inbound.some((i) => i.clientId === eff.clientId) || eff.clientId.startsWith(`codex-in:${this.id}:`));
+          if (ours) { this.#onDispatchEchoed(eff.clientId); break; }
+          if (this.#replayingHistory) break;
+          this.#relay?.send(encodeUserMessage(eff.text, Date.now()), eff.localId);
+          break;
+        }
       }
     }
   }
@@ -671,13 +700,16 @@ export class CodexSession implements AgentSession {
         }
       }
       this.#applyEffects(this.#norm.handle({ method: "turn/started", params: { turn: { id: tid } } }));
-      for (const item of items) {
-        // Feed item/started for EVERY item (incl. userMessage) so canonical
-        // ordinals allocate identically to the live path AND user-message
-        // echoes drain the inbound spool (finding #3a / #5).
-        this.#applyEffects(this.#norm.handle({ method: "item/started", params: { turnId: tid, item } }));
-        this.#applyEffects(this.#norm.handle({ method: "item/completed", params: { turnId: tid, item } }));
-      }
+      this.#replayingHistory = true;
+      try {
+        for (const item of items) {
+          // Feed item/started for EVERY item (incl. userMessage) so canonical
+          // ordinals allocate identically to the live path AND user-message
+          // echoes drain the inbound spool (finding #3a / #5).
+          this.#applyEffects(this.#norm.handle({ method: "item/started", params: { turnId: tid, item } }));
+          this.#applyEffects(this.#norm.handle({ method: "item/completed", params: { turnId: tid, item } }));
+        }
+      } finally { this.#replayingHistory = false; }
       // Synthesize turn/completed for a TERMINAL turn — its terminal row's ACK
       // advances the checkpoint (setReceiptSink); we do NOT mark it here.
       // For an inProgress turn the handling depends on how we started (#5):
@@ -766,12 +798,22 @@ export class CodexSession implements AgentSession {
    *  cancel interrupts it if it did land. */
   cancelQueued(id: string): boolean {
     const before = this.#inbound.length;
+    const item = this.#inbound.find((i) => i.clientId === id);
     this.#inbound = this.#inbound.filter((i) => i.clientId !== id);
     if (this.#inbound.length === before) return false;
     saveCodexInbound(this.id, this.#inbound);
     this.#recordOutcome(id, "cancelled");
+    // Already handed to codex (turn/start in flight): tombstone it so the
+    // accepted turn is interrupted as soon as its id arrives (#66).
+    if (item?.state === "sentUnknown") this.#cancelledIds.add(id);
     return true;
   }
+  /** clientIds this session handed to codex (ownership for userMessage echoes). */
+  #dispatched = new Set<string>();
+  /** Cancelled while their turn/start was in flight (see #dispatch). */
+  #cancelledIds = new Set<string>();
+  #rejections = new Map<string, number>();
+  #replayingHistory = false;
   reorderQueued(): boolean { return false; }
 
   async abort(): Promise<{ ok: true }> {
@@ -903,6 +945,7 @@ export class CodexSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       deleteWindowRecord(this.id);
+      clearCodexInbound(this.id); clearCheckpoint(this.id); // nothing left to deliver or resume (#43)
       void (this.#tmuxSocket
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())
         : this.#tmux.command(["kill-window", "-t", this.tmuxWindow]));

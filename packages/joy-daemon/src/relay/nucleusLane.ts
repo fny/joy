@@ -994,6 +994,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // is worse than an honest failure, so any fetch/open/write miss fails
       // the turn (submitted → failed) instead of dispatching a truncated ask.
       let text = prompt.text;
+      const writtenAttachments: string[] = [];
       if (prompt.attachments.length) {
         // The relay validated + pinned the OUTER id list (the offer); the
         // sealed citations are what the sender meant. Only their intersection
@@ -1005,7 +1006,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         activeTurns.set(turnId, { localId: sess.id, queuedId: null, lease: leaseRef });
         const authorized = new Set((offer.attachments ?? []).map((x) => x.id));
         const paths: string[] = [];
-        const written: string[] = [];
+        const written: string[] = writtenAttachments;
         // Half-materialized prompts are worse than none — a failed turn must
         // not leave files the agent never heard about in the cwd.
         const fail = async (reason: string, a: PromptAttachment) => {
@@ -1037,13 +1038,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         log(`turn ${turnId.slice(0, 8)}: materialized ${paths.length} attachment(s) in ${sess.cwd}`);
       }
 
+      // (declared above the attachment block so the cancel path can clean up)
       // Watermark the chat log BEFORE dispatch: everything the session's
       // agent says after this point belongs to this turn.
       const history = registry.chatHistory();
       let watermark = history.length ? Number(history[history.length - 1].id) : -1;
 
       if (cancelRequested.has(turnId)) {
-        // Cancelled while we were preparing it (attachments): never enqueue.
+        // Cancelled while we were preparing it (attachments): never enqueue,
+        // and take back the files we materialized for it.
+        for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } }
         await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "cancelled_before_enqueue" } }, leaseRef);
         log(`turn ${turnId.slice(0, 8)}: cancelled before enqueue → cancelled`);
         return;
@@ -1187,7 +1191,23 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           await sleep(POLL_MS);
         }
       }
-      await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+      try {
+        await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+      } catch (e) {
+        const st = (e as { status?: number }).status;
+        if (st === 409) {
+          // The relay refuses the start — typically turn_cancelled from a
+          // cancellation that beat the control offer here. The prompt is
+          // already admitted locally: pluck it and abort, then say cancelled
+          // (Astra, #77).
+          if (queued?.id) { try { sess.cancelQueued(queued.id); } catch { /* stub adapters */ } }
+          try { await sess.abort(); } catch { /* pane teardown */ }
+          await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
+          log(`${tag}: /start refused (${(e as Error).message}) → admitted prompt plucked + aborted → cancelled`);
+          return;
+        }
+        throw e;
+      }
 
       // Observe until the session has been idle for IDLE_DEBOUNCE_POLLS
       // consecutive polls. The turn's CONTENT no longer comes from here: the
