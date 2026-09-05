@@ -213,7 +213,7 @@ export async function machineUpdateMetadata(
  */
 export async function sessionAbort(sessionId: string): Promise<void> {
     const v2link = storage.getState().sessions[sessionId]?.metadata?.v2;
-    if (!v2link?.sessionId) return;
+    if (!v2link?.sessionId) throw new Error('session has no relay link yet'); // nothing could be stopped — say so (#8)
     const turnId = await v2ActiveTurn(v2link.relay, v2link.sessionId);
     if (turnId) {
         await v2CancelTurn(v2link.relay, v2link.sessionId, turnId);
@@ -224,7 +224,7 @@ export async function sessionAbort(sessionId: string): Promise<void> {
     const ctx = sync.machineCtx(sessionId);
     if (!ctx) throw noCtx('abort');
     const { status, data } = await machineAbort(ctx);
-    if (status !== 200 || !data || data.ok === false || data.error) throw new Error(data?.error || `abort failed (${status})`);
+    if (status !== 200 || !data || data.ok !== true) throw new Error(data?.error || `abort failed (${status})`); // only an explicit ok is success (#8)
 }
 
 type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
