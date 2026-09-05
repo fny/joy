@@ -28,6 +28,14 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
                 }
             });
 
+            // The relay hands the answer out once (#70). 'consumed' means
+            // someone else collected it — or our own earlier poll did and the
+            // reply was lost — and 'expired' that it aged out: neither can
+            // succeed by polling on, so stop and let the user re-scan.
+            if (response.data.state === 'consumed' || response.data.state === 'expired') {
+                console.log(`\n\nPairing request ${response.data.state}. Please start again.`);
+                return null;
+            }
             if (response.data.state === 'authorized') {
                 const token = response.data.token as string;
                 const encryptedResponse = decodeBase64(response.data.response);

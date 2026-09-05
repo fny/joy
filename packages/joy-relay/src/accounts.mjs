@@ -108,6 +108,12 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
       const { rows: [existing] } = await t.query(
         `SELECT * FROM auth_requests WHERE kind = $1 AND public_key = $2`, [kind, hex]);
       if (existing) {
+        // Enforced on READ too — the sweep is hourly, and an answer must not
+        // stay collectable for up to an hour past its ten minutes.
+        if (existing.response && Date.now() - ms(existing.updated_at) > ANSWERED_TTL_MS) {
+          await t.query(`DELETE FROM auth_requests WHERE id = $1`, [existing.id]);
+          return { expired: true };
+        }
         if (existing.response && existing.response_account_id && !existing.consumed_at) {
           await t.query(`UPDATE auth_requests SET consumed_at = now(), updated_at = now() WHERE id = $1`, [existing.id]);
           return { ...existing, deliver: true };
@@ -119,6 +125,7 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
         [newId('r'), kind, hex, supportsV2 === true]);
       return created;
     });
+    if (row.expired) return { state: 'expired' };
     if (row.deliver) {
       return { state: 'authorized', token: tokens.mint(row.response_account_id, { session: row.id }), response: row.response };
     }
