@@ -214,6 +214,7 @@ export class CodexSession implements AgentSession {
         client = await this.#tryRejoin();
       }
       if (!client) {
+        if (this.status === "ended") return; // killed while the rejoin was pending: do not spawn (Astra on 4b70d70c)
         client = await this.#spawnFresh();
       }
       if (this.status === "ended") { // killed while starting: this generation owns nothing (Astra on 08f70257)
@@ -302,6 +303,13 @@ export class CodexSession implements AgentSession {
     try { rmSync(this.#socketPath, { force: true }); } catch { /* ignore */ }
 
     this.#proc = spawnCodexAppServer({ socketPath: this.#socketPath, config: this.#config, joySessionId: this.id });
+    if (this.status === "ended") {
+      // Killed while the spawn was being set up: this process must not outlive
+      // the session it was started for (Astra on 4b70d70c).
+      try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
+      this.#proc = null;
+      throw new Error("session ended during startup");
+    }
     this.#proc.stderr?.on("data", () => { /* swallow the bubblewrap notice */ });
     this.#proc.on("error", (e) => { process.stderr.write(`[codex ${this.id}] app-server spawn error: ${e}\n`); if (this.status !== "ended") this.end("process_exited"); });
     this.#proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
