@@ -20,6 +20,7 @@ import { joyHomeDir } from "../paths";
 import { loadCredentials } from "../relay/relay";
 
 const FILE = "env.sealed";
+let warnedUnreadable = false;
 const LEGACY_FILE = "env";
 
 function storePath(): string { return join(joyHomeDir(), FILE); }
@@ -127,6 +128,9 @@ const appliedFromStore = new Set<string>();
  *  agent spawn: the per-session tmux server / app-server / pi process inherit
  *  process.env, so this is the one place all four agents pick keys up. */
 export function applyEnvStore(): void {
+  // An unreadable store is loud, once: silently skipping it lost every
+  // provider key for every later spawn with no hint why (#117).
+  { const probe = readEnvStore(); if (!probe.ok && !warnedUnreadable) { warnedUnreadable = true; process.stderr.write(`[env] ${storePath()} is ${probe.error} — provider keys are NOT being applied; run \`joy env ls\` to inspect, or delete the file and set the keys again\n`); } }
   const cur = readEnvStore();
   if (!cur.ok) return;
   for (const k of appliedFromStore) {
