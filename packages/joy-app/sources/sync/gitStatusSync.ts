@@ -4,7 +4,6 @@
  */
 
 import { InvalidateSync } from '@/utils/sync';
-import { sessionBash } from './ops';
 import { GitStatus } from './storageTypes';
 import { storage } from './storage';
 import { parseStatusSummary, getStatusCounts, isDirty } from './git-parsers/parseStatus';
@@ -196,55 +195,10 @@ export class GitStatusSync {
                 return;
             }
 
-            // First check if we're in a git repository
-            const gitCheckResult = await sessionBash(sessionId, {
-                command: 'git rev-parse --is-inside-work-tree',
-                cwd: session.metadata.path,
-                timeout: 5000
-            });
-
-            if (!gitCheckResult.success || gitCheckResult.exitCode !== 0) {
-                // Not a git repository, clear any existing status
-                storage.getState().applyGitStatus(projectKey, null);
-                return;
-            }
-
-            // Get git status in porcelain v2 format (includes branch info)
-            // --untracked-files=all ensures we get individual files, not directories
-            const statusResult = await sessionBash(sessionId, {
-                command: 'git -c core.quotepath=false status --porcelain=v2 --branch --show-stash --untracked-files=all',
-                cwd: session.metadata.path,
-                timeout: 10000
-            });
-
-            if (!statusResult.success) {
-                console.error('Failed to get git status:', statusResult.error);
-                return;
-            }
-
-            // Get git diff statistics for unstaged changes
-            const diffStatResult = await sessionBash(sessionId, {
-                command: 'git -c core.quotepath=false diff --numstat',
-                cwd: session.metadata.path,
-                timeout: 10000
-            });
-
-            // Get git diff statistics for staged changes
-            const stagedDiffStatResult = await sessionBash(sessionId, {
-                command: 'git -c core.quotepath=false diff --cached --numstat',
-                cwd: session.metadata.path,
-                timeout: 10000
-            });
-
-            // Parse the git status output with diff statistics
-            const gitStatus = this.parseGitStatusV2(
-                statusResult.stdout,
-                diffStatResult.success ? diffStatResult.stdout : '',
-                stagedDiffStatResult.success ? stagedDiffStatResult.stdout : ''
-            );
-
-            // Apply to storage keyed by path
-            storage.getState().applyGitStatus(projectKey, gitStatus);
+            // No machine context yet (the session is still binding): keep the
+            // last good status. The shell fallback that lived here never
+            // reached the daemon (#5).
+            return;
 
         } catch (error) {
             console.error('Error fetching git status for project', projectKey, ':', error);

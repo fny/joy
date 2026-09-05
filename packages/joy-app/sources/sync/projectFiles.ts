@@ -3,8 +3,9 @@
  * Fetches all tracked + untracked files and stores them in Zustand.
  */
 
-import { sessionBash } from './ops';
 import { storage } from './storage';
+import { machineGitEntries } from '@/sync/v2/machine';
+import { sync } from '@/sync/sync';
 
 export interface ProjectFile {
     fileName: string;
@@ -35,17 +36,18 @@ export async function getProjectFiles(sessionId: string): Promise<ProjectFilesLi
     // — it was never actually implemented, so non-git projects showed nothing).
     // The prune list covers the usual heavyweight dirs; 20k-file cap protects
     // against pathological trees. BSD/GNU-find compatible (boite is a Mac).
-    const res = await sessionBash(sessionId, {
-        command: "git -c core.quotepath=false ls-files --cached --others --exclude-standard 2>/dev/null || { find . \\( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name __pycache__ -o -name .next -o -name dist -o -name build -o -name Pods -o -name DerivedData \\) -prune -o -type f -print 2>/dev/null | head -20000; }",
-        cwd,
-        timeout: 15000,
-    });
+    // Tracked + untracked (not ignored) through the daemon's git route (#5).
+    // Outside a repo the route fails and the tab is empty — the shell `find`
+    // fallback never actually ran either (the bash path never reached the
+    // daemon), so this is not a regression; a listDir-based fallback is a
+    // separate change.
+    const ctx = await sync.awaitMachineCtx(sessionId);
+    if (!ctx) return null;
+    const { data } = await machineGitEntries(ctx, { untracked: true });
+    if (!data?.ok || !data.files) return null;
 
-    if (!res.success || !res.stdout) {
-        return null;
-    }
-
-    const files: ProjectFile[] = res.stdout
+    const files: ProjectFile[] = data.files
+        .join('\n')
         .split('\n')
         .filter(p => p.trim().length > 0)
         .map(p => {

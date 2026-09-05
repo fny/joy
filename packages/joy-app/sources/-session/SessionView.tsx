@@ -1,4 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
+import { randomUUID } from 'expo-crypto';
 import { AgentInput } from '@/components/AgentInput';
 import type { MultiTextInputHandle } from '@/components/MultiTextInput';
 import { registerComposer } from '@/-session/composerBridge';
@@ -760,6 +761,8 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // clear it without subscribing to it (which would re-render the whole
     // SessionViewLoaded tree on every keystroke).
     const composerHandleRef = React.useRef<ChatComposerHandle | null>(null);
+    /** Idempotency key for the message being composed (see handleSend / #7). */
+    const compositionIdRef = React.useRef<string>(randomUUID());
 
     // Handle dismissing CLI version warning
     const handleDismissCliWarning = React.useCallback(() => {
@@ -894,13 +897,24 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // told; the attachment URIs are released only once the bytes are up.
         composerHandleRef.current?.clearMessage();
         clearImages();
-        void sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments }).then((res) => {
+        // One idempotency key per COMPOSITION: a retry after a lost response
+        // must reuse it, or the relay queues the prompt twice (#7). Rotated
+        // only once the relay has accepted the send.
+        const localId = compositionIdRef.current;
+        void sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments, localId }).then((res) => {
             if (res.ok) {
+                compositionIdRef.current = randomUUID();
                 releaseAttachmentUris(attachments);
                 return;
             }
-            if (liveMessage.trim()) composerHandleRef.current?.restoreMessage(liveMessage);
-            if (attachments.length) addImages(attachments);
+            if (liveMessage.trim()) {
+                if (composerHandleRef.current) composerHandleRef.current.restoreMessage(liveMessage);
+                // The screen was left while the send was in flight: keep the text
+                // as a durable draft instead of losing it (#124). Attachments
+                // cannot be kept this way; the alert says so.
+                else useDraftQueueStore.getState().add(sessionId, liveMessage, 'draft');
+            }
+            if (attachments.length && composerHandleRef.current) addImages(attachments);
             // Attachment refusals already showed their own, more specific modal.
             if (!res.reason.startsWith('attachment upload failed')) {
                 Modal.alert(t('errors.sendFailedTitle'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
@@ -920,7 +934,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     const handleAbort = React.useCallback(() => {
         storage.getState().resetSessionAgentOverrides(sessionId);
-        sessionAbort(sessionId);
+        // Returned, not discarded: AgentInput awaits it (keeps the button
+        // pending, shakes on failure) and the Escape path can catch it (#126).
+        return sessionAbort(sessionId);
     }, [sessionId]);
 
     // Esc contract on this screen (web/desktop): abort when a turn is running,
@@ -928,7 +944,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // handler consults this registration instead of route-back (useEscapeAbort).
     const escAbortable = sessionStatus.state === 'thinking';
     React.useEffect(() => {
-        useEscapeAbort.getState().setHandler(escAbortable ? handleAbort : null);
+        useEscapeAbort.getState().setHandler(escAbortable ? () => { void handleAbort().catch((e) => Modal.alert(t('common.error'), e instanceof Error ? e.message : String(e))); } : null);
         return () => useEscapeAbort.getState().setHandler(null);
     }, [escAbortable, handleAbort]);
 

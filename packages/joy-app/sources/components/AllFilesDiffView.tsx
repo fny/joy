@@ -6,7 +6,7 @@ import { Typography } from '@/constants/Typography';
 import { FileIcon } from '@/components/FileIcon';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { getPatchDiffStats } from '@/components/diff/calculateDiff';
-import { sessionBash, sessionReadFile } from '@/sync/ops';
+import { sessionGitDiff, sessionReadFile } from '@/sync/ops';
 import { isBinaryPath, isImagePath } from '@/utils/binaryFile';
 import { JoyImage } from '@/components/JoyImage';
 import { storage, useSessionGitStatusFiles, useSettingMutable } from '@/sync/storage';
@@ -175,22 +175,26 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                             return { file, content: { kind: 'newFile', contents }, error: null };
                         }
 
-                        const res = await sessionBash(sessionId, {
-                            command: `git -c core.quotepath=false diff HEAD --no-ext-diff -- "${gitDiffPath}"`,
-                            cwd: sessionPath,
-                            timeout: 5000,
-                        });
+                        // Working tree vs HEAD through the daemon's git route: no
+                        // shell, so the path is never interpolated (#5, #92).
+                        const res = await sessionGitDiff(sessionId, { path: gitDiffPath, head: true });
                         if (!res.success) {
                             return { file, content: null, error: res.error || 'Failed to fetch diff' };
                         }
-                        return { file, content: { kind: 'patch', patch: res.stdout ?? '' }, error: null };
+                        return { file, content: { kind: 'patch', patch: res.diff }, error: null };
                     } catch (err) {
                         return { file, content: null, error: err instanceof Error ? err.message : 'Failed to fetch diff' };
                     }
                 })
             );
 
-            if (cancelled) return;
+            if (cancelled) {
+                // Superseded by a newer file set: release these paths so the
+                // next run can fetch them again — they used to stay in
+                // inFlight forever and vanish from the overlay (#91).
+                for (const r of fetched) inFlight.current.delete(r.file.fullPath);
+                return;
+            }
 
             setResultsMap((prev) => {
                 const next = new Map(prev);

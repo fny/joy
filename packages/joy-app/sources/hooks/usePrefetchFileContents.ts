@@ -10,7 +10,7 @@
  */
 
 import * as React from 'react';
-import { sessionReadFile, sessionBash } from '@/sync/ops';
+import {sessionReadFile, sessionGitDiff } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
 import type { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
@@ -54,13 +54,9 @@ async function prefetchFile(sessionId: string, sessionPath: string, file: GitFil
     // Fetch git diff
     if (gitDiffPath && gitDiffPath !== '.') {
         try {
-            const diffResponse = await sessionBash(sessionId, {
-                command: `git diff --no-ext-diff -- "${gitDiffPath}"`,
-                cwd: sessionPath,
-                timeout: 5000,
-            });
-            if (diffResponse.success && diffResponse.stdout.trim()) {
-                diff = diffResponse.stdout;
+            const diffResponse = await sessionGitDiff(sessionId, { path: gitDiffPath });
+            if (diffResponse.success && diffResponse.diff.trim()) {
+                diff = diffResponse.diff;
             }
         } catch {
             // Best-effort

@@ -3,7 +3,6 @@
  * Provides detailed git status with file-level changes and line statistics
  */
 
-import { sessionBash } from './ops';
 import { storage } from './storage';
 import { sync } from './sync';
 import { machineGitStatus, machineGitDiff, type V2GitStatus } from './v2/machine';
@@ -58,33 +57,7 @@ export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFil
             );
         }
 
-        // Get git status in porcelain v2 format (includes branch info and repo check)
-        // --untracked-files=all ensures we get individual files, not directories
-        const statusResult = await sessionBash(sessionId, {
-            command: 'git -c core.quotepath=false status --porcelain=v2 --branch --untracked-files=all',
-            cwd: session.metadata.path,
-            timeout: 10000
-        });
-
-        if (!statusResult.success || statusResult.exitCode !== 0) {
-            // Not a git repo or git command failed
-            return null;
-        }
-
-        // Get line stats separately for unstaged (working tree vs index) and
-        // staged (index vs HEAD) so a file with both kinds of changes doesn't
-        // double-count staged lines in its unstaged row.
-        const diffStatResult = await sessionBash(sessionId, {
-            command: 'git -c core.quotepath=false diff --numstat && echo "---STAGED---" && git -c core.quotepath=false diff --cached --numstat',
-            cwd: session.metadata.path,
-            timeout: 10000
-        });
-
-        // Parse the results using v2 parser
-        const statusOutput = statusResult.stdout;
-        const diffOutput = diffStatResult.success ? diffStatResult.stdout : '';
-
-        return parseGitStatusFilesV2(statusOutput, diffOutput);
+        return null; // no machine context yet; the shell fallback never reached the daemon (#5)
 
     } catch (error) {
         console.error('Error fetching git status files for session', sessionId, ':', error);

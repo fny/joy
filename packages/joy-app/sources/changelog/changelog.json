@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 5 (3) — App fixes, first batch",
+      "summary": "",
+      "markdown": "- **All Files, per-file diffs and diff prefetch work again.** They were calling a shell path the machine never served, so every repo showed \"No files in project\" and every diff said \"no response\". They now use the machine's git routes directly; no shell is involved, so a file name with quotes or `$(…)` can't run anything either.\n- **Re-sending after a lost response no longer queues the prompt twice.** A message keeps one idempotency key until the relay accepts it.\n- **Stop works for every running turn**, including ones started from the terminal or by another session — it used to do nothing for those. Failures now shake the button instead of vanishing.\n- **Drafts survive a failed send** (\"send now\" kept deleting the draft before the send was known to succeed). A message whose send fails after you left the session is kept as a draft instead of lost.\n- **AskUserQuestion answers reach the agent**; before, the card flipped to \"submitted\" while nothing was sent.\n- Renamed files show under their new name in git status. The all-files diff overlay no longer loses files that changed while it was loading. *Needs the updated daemon.*"
+    },
+    {
       "title": "Sep 5 (2) — Machine fixes: restart, kill, recovery",
       "summary": "",
       "markdown": "- **Restart works on a session whose agent has died.** The first Restart of a red \"detached\" card used to fail and archive it. Two Restarts tapped at once no longer kill each other's replacement; restarting before the first message no longer archives the card.\n- **Killing a detached session actually kills it** — tmux server, record and card go away, instead of a silent \"ok\" that left a ghost to come back on the next boot.\n- **pi sessions survive a machine restart** and resume their conversation like Antigravity and Codex ones do.\n- **A dead agent is detected within a minute** even when its frozen screen still looks alive.\n- **New sessions never revive an old one by accident.** `joy run` / `joy new` and a request for a different agent, model or permission mode in a folder with a detached session start fresh; `joy run` no longer deletes someone else's conversation on the way out.\n- **Re-pairing keeps the sealed provider keys readable.** A machine re-paired with `joy auth` lost access to its `joy env` store for good.\n- Machine-side durability from the previous batch (output and turn results survive relay outages and daemon restarts). *All of the above need the updated daemon.*"
@@ -276,5 +281,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 5 (2) — Machine fixes: restart, kill, recovery"
+  "latestTitle": "Sep 5 (3) — App fixes, first batch"
 }
