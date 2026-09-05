@@ -863,25 +863,37 @@ export function createCore(db, notify) {
     });
   }
 
-  async function sessionEvents(accountId, sessionId, afterSeq, limit) {
+  /** Forward page (`after`) or, with `before`, the NEWEST events below that
+   *  seq — one request per backward page instead of walking the whole log
+   *  from 0 (app issue #4). Both return ascending seq. */
+  async function sessionEvents(accountId, sessionId, afterSeq, limit, beforeSeq = null) {
     const s = (await db.query(`SELECT id FROM native_sessions WHERE id = $1 AND account_id = $2`, [sessionId, accountId])).rows[0];
     if (!s) throw new ApiError(404, 'session_not_found');
     const lim = Math.min(Number(limit ?? 200), 500);
-    const { rows } = await db.query(
+    let rows;
+    if (beforeSeq !== null && beforeSeq !== undefined) {
+      ({ rows } = await db.query(
+        `SELECT * FROM session_events WHERE session_id = $1 AND seq < $2 ORDER BY seq DESC LIMIT $3`,
+        [sessionId, String(beforeSeq), lim + 1]));
+      rows = rows.slice(0, lim).reverse().concat(rows.length > lim ? [rows[lim]] : []); // oldest-first page + the overflow marker
+      const page = rows.slice(0, Math.min(rows.length, lim));
+      return { messages: page.map(rowToEvent), hasMore: rows.length > lim };
+    }
+    ({ rows } = await db.query(
       `SELECT * FROM session_events WHERE session_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`,
-      [sessionId, String(afterSeq ?? 0), lim + 1]);
+      [sessionId, String(afterSeq ?? 0), lim + 1]));
     const page = rows.slice(0, lim);
+    return { messages: page.map(rowToEvent), hasMore: rows.length > lim };
+  }
+  function rowToEvent(e) {
     return {
-      messages: page.map((e) => ({
-        id: e.event_id, seq: String(e.seq), kind: e.kind,
-        turnId: e.turn_id, commandId: e.command_id,
-        origin: e.origin_client_intent_id
-          ? { actorId: e.origin_actor_id, clientIntentId: e.origin_client_intent_id, requestHash: e.origin_request_hash }
-          : null,
-        content: e.ciphertext ? { ciphertext: e.ciphertext } : null,
-        createdAt: new Date(e.created_at).getTime(),
-      })),
-      hasMore: rows.length > lim,
+      id: e.event_id, seq: String(e.seq), kind: e.kind,
+      turnId: e.turn_id, commandId: e.command_id,
+      origin: e.origin_client_intent_id
+        ? { actorId: e.origin_actor_id, clientIntentId: e.origin_client_intent_id, requestHash: e.origin_request_hash }
+        : null,
+      content: e.ciphertext ? { ciphertext: e.ciphertext } : null,
+      createdAt: new Date(e.created_at).getTime(),
     };
   }
 
