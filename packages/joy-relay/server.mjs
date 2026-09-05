@@ -56,18 +56,36 @@ setInterval(() => { accounts.sweepPairings().catch((e) => console.error('[joy-re
 const gate = createGate();
 
 const server = http.createServer(async (req, res) => {
-  // CORS preflight carries no bearer, no gate key, no body, and reveals only
-  // static CORS policy — answer OPTIONS /joy/v2 BEFORE the perimeter gate
-  // (browsers cannot attach the gate key to a preflight). The actual request
-  // that follows still carries the key and is still gated below.
-  if (req.method === 'OPTIONS' && req.url?.startsWith('/joy/v2')) {
+  try {
+    // CORS preflight carries no bearer, no gate key, no body, and reveals only
+    // static CORS policy — answer OPTIONS /joy/v2 BEFORE the perimeter gate
+    // (browsers cannot attach the gate key to a preflight). The actual request
+    // that follows still carries the key and is still gated below.
+    if (req.method === 'OPTIONS' && req.url?.startsWith('/joy/v2')) {
+      if (await v2.handle(req, res)) return;
+    }
+    if (!gate.allows(req)) return gate.rejectHttp(res);
+    if (handleDocs(req, res, { version: '0.2.0', routeTable: { routes: v2.routeTable(), served: true } })) return;
     if (await v2.handle(req, res)) return;
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not_found', relay: 'joy-relay' }));
+  } catch (e) {
+    // The request callback is async: a throw here was an unhandled rejection
+    // and Node exited — one bad request took every account offline (#59).
+    // v2.handle has its own error mapping; this is for everything around it.
+    console.error('[joy-relay] request failed:', e);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'internal_error' }));
+    } else {
+      try { res.end(); } catch { /* socket gone */ }
+    }
   }
-  if (!gate.allows(req)) return gate.rejectHttp(res);
-  if (handleDocs(req, res, { version: '0.2.0', routeTable: { routes: v2.routeTable(), served: true } })) return;
-  if (await v2.handle(req, res)) return;
-  res.writeHead(404, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ error: 'not_found', relay: 'joy-relay' }));
+});
+
+// Belt and braces for the above: a rejection nobody caught is logged, not fatal.
+process.on('unhandledRejection', (reason) => {
+  console.error('[joy-relay] unhandled rejection (kept running):', reason instanceof Error ? (reason.stack ?? reason.message) : reason);
 });
 
 // No WebSocket surface: the protocol is HTTP + SSE + long-poll only.
