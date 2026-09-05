@@ -1,3 +1,9 @@
+# Sep 5 — Wave 0 fixes
+
+- **Saving from the desktop file editor no longer corrupts the file.** The editor sent the file's contents base64-encoded without saying so, and the machine wrote that base64 text to disk — while reporting "saved". Both save paths now declare the encoding. If you saved from the editor before this fix, check those files.
+- **A session's first output no longer goes missing until "Reload chat".** When a session bound, its first sealed messages could arrive a beat before the key that opens them; the app stepped past them and never came back. It now waits for the key and retries.
+- Machine and relay fixes shipped alongside (need the updated daemon/relay): a malformed request can no longer crash the relay or a machine's daemon; a failed `/steer` or login-code entry no longer takes the daemon down; a pi process dying mid-write no longer does either; a message to a session with no running agent no longer makes the daemon spin against the relay; a pairing approval can be collected exactly once.
+
 # Sep 4 (5) — Download any file
 
 - **Binary files can be downloaded.** A file that isn't text or an image (PDF, spreadsheet, archive, …) showed only a "binary file" notice with no way to save it, and the toolbar's download would have written an empty file. Both the file screen and the desktop file panel now have a Download button that fetches the file's bytes and saves it.

@@ -43,6 +43,9 @@ export interface V2Page {
      *  nothing still advance it, so a caller paging forward never re-reads
      *  (and never stalls on) a page with no renderable rows. */
     cursor?: number;
+    /** Sealed rows on this page that could not be opened with the given key.
+     *  A forward sync must not advance past them (issue #3). */
+    unopenable?: number;
     /** turn.receipted / turn.started seen on this page, in seq order. */
     lifecycle: V2Lifecycle[];
 }
@@ -69,14 +72,18 @@ function toLifecycle(e: RawV2Event): V2Lifecycle | null {
 }
 
 /** Translate one v2 event into an app row, or null when it is not renderable. */
-function toRow(e: RawV2Event, key: Uint8Array | null): V2Row | null {
+function toRow(e: RawV2Event, key: Uint8Array | null, stats?: { unopenable: number }): V2Row | null {
     const seq = Number(e.seq);
     const payload = e.content ? openV2Payload(e.content.ciphertext, key) : null;
     const text = payload?.t === 'plain' ? payload.message.text : (e.content && !payload ? openV2Content(e.content.ciphertext, key) : null);
     if (e.content && payload === null && text === null) {
         // Sealed content we could not open (missing/incorrect session key) —
-        // loud, because it renders as an empty chat otherwise.
+        // loud, because it renders as an empty chat otherwise, and COUNTED,
+        // so a forward sync does not step its cursor past rows it never
+        // rendered (issue #3: the bind's envelope and first sealed events
+        // land together; the events page raced the card and was skipped).
         console.warn(`[v2 reads] could not open ${e.kind} seq=${e.seq} (key=${key ? 'present' : 'MISSING'})`);
+        if (stats) stats.unopenable += 1;
     }
 
     // A forwarded adapter record (tool call, text, turn lifecycle + usage,
@@ -155,10 +162,11 @@ export async function v2MessagesAfter(
 ): Promise<V2Page> {
     const base = opts.base ?? getV2BaseUrl();
     const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, opts.afterSeq, opts.limit ?? 100);
-    const messages = events.map(e => toRow(e, opts.key)).filter((r): r is V2Row => r !== null);
+    const stats = { unopenable: 0 };
+    const messages = events.map(e => toRow(e, opts.key, stats)).filter((r): r is V2Row => r !== null);
     const lifecycle = events.map(toLifecycle).filter((l): l is V2Lifecycle => l !== null);
     const cursor = events.length ? Number(events[events.length - 1].seq) : opts.afterSeq;
-    return { messages, hasMore, cursor, lifecycle };
+    return { messages, hasMore, cursor, lifecycle, unopenable: stats.unopenable };
 }
 
 /**

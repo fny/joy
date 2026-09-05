@@ -375,10 +375,12 @@ class Sync {
         // Poll: the baseline everywhere, and the ONLY live channel on native.
         // Its own success/failure drives the connection indicator.
         this.v2PollTimer = setInterval(() => {
+            // Sessions FIRST: a bind lands the card's key envelope, and the
+            // messages fetch for that session needs it (issue #3).
+            this.sessionsSync.invalidate();
             for (const sid of this.v2SessionIdIndex().values()) {
                 this.getMessagesSync(sid).invalidate();
             }
-            this.sessionsSync.invalidate();
             this.machinesSync.invalidate();
         }, POLL_INTERVAL_MS);
     }
@@ -1085,6 +1087,14 @@ class Sync {
             // Read from the relay's event log (seq-ordered, forward-paged).
             const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
             const messages = Array.isArray(data.messages) ? data.messages : [];
+            // Sealed rows this page could not open must not be stepped over:
+            // with no key yet (the card's envelope has not landed) they are
+            // the session's first output, and advancing past them lost them
+            // until "Reload chat" (issue #3). Stop here; the invalidate that
+            // follows the sessions refresh retries with the key.
+            if ((data.unopenable ?? 0) > 0 && !v2ctx.key) {
+                throw new Error(`Forward sync of ${sessionId}: ${data.unopenable} sealed row(s) and no content key yet — retry after the card lands`);
+            }
 
             await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
             this.applyLifecycle(sessionId, data.lifecycle);
