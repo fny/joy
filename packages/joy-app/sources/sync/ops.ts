@@ -297,10 +297,11 @@ export async function sessionWriteFile(
     sessionId: string,
     path: string,
     content: string,
-    expectedHash?: string | null
+    expectedHash?: string | null,
+    encoding: 'utf8' | 'base64' = 'utf8',
 ): Promise<SessionWriteFileResponse> {
     try {
-        const { data } = await machineWriteFile(requireCtx(sessionId, 'write file'), path, content, expectedHash ?? undefined);
+        const { data } = await machineWriteFile(requireCtx(sessionId, 'write file'), path, content, expectedHash ?? undefined, encoding);
         return (data ?? { success: false, error: 'no response' }) as SessionWriteFileResponse;
     } catch (error) {
         return { success: false, error: errorMessage(error) };
