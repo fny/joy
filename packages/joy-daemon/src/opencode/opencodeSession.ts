@@ -262,6 +262,7 @@ export class OpencodeSession implements AgentSession {
   }
 
   #persistRecord(): void {
+    if (this.status === "ended") return; // a retired/killed generation must not recreate a deleted record (#52)
     saveWindowRecord(this.id, {
       launchCwd: this.cwd, agent: "opencode",
       opencodeSessionId: this.#ocSessionId ?? undefined,
