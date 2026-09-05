@@ -1,6 +1,5 @@
 import { AgentContentView } from '@/components/AgentContentView';
-import { sendKey } from '@/utils/sendKey';
-import { randomUUID } from 'expo-crypto';
+import { beginSend, sendSucceeded, sendFailed } from '@/utils/sendKey';
 import { AgentInput } from '@/components/AgentInput';
 import type { MultiTextInputHandle } from '@/components/MultiTextInput';
 import { registerComposer } from '@/-session/composerBridge';
@@ -762,8 +761,6 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // clear it without subscribing to it (which would re-render the whole
     // SessionViewLoaded tree on every keystroke).
     const composerHandleRef = React.useRef<ChatComposerHandle | null>(null);
-    /** Idempotency key for the message being composed (see handleSend / #7). */
-    const compositionIdRef = React.useRef<string>(randomUUID());
 
     // Handle dismissing CLI version warning
     const handleDismissCliWarning = React.useCallback(() => {
@@ -911,17 +908,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // taken for THIS message and a fresh one is minted at once, so a second
         // message sent while this one is still in flight never shares it
         // (Astra caught that); a failed send puts its key back with the text.
-        // Content-bound key (see utils/sendKey): a retry of the same text and
-        // attachments reuses it; anything edited — or merged with new text by
-        // restoreMessage — gets a new one. The composition id rotates per send
-        // so two in-flight messages with identical text still differ.
-        const localId = sendKey(compositionIdRef.current, liveMessage, attachments.map((a) => a.id ?? a.uri ?? '').filter(Boolean));
+        // Idempotency key (utils/sendKey): fresh per send; reused only for an
+        // exact retry of a send that FAILED, so two identical messages in flight
+        // never share one and an edited restore is a new message (#7).
+        const sendScope = `composer:${sessionId}`;
+        const localId = beginSend(sendScope, liveMessage, attachments.map((a) => a.id ?? a.uri ?? '').filter(Boolean));
         void sync.sendMessage(sessionId, liveMessage, { source: 'chat', attachments, localId }).then((res) => {
             if (res.ok) {
-                compositionIdRef.current = randomUUID();
+                sendSucceeded(sendScope, localId);
                 releaseAttachmentUris(attachments);
                 return;
             }
+            sendFailed(sendScope, localId);
             if (liveMessage.trim()) {
                 if (composerHandleRef.current) composerHandleRef.current.restoreMessage(liveMessage);
                 // The screen was left while the send was in flight: keep the text
