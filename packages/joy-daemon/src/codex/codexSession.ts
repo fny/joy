@@ -499,9 +499,17 @@ export class CodexSession implements AgentSession {
     if (this.#inbound.length !== before) {
       // Ownership FIRST, then the spool: a crash between the two must leave a
       // durable copy of "this prompt was ours" somewhere (Astra on bdee9ac8).
+      // If the checkpoint cannot be written, the spool entry STAYS (state
+      // 'delivered' — never dispatched, never requeued) as that copy.
       const known = [...(this.#checkpoint.knownClientIds ?? []), clientId].slice(-200);
       this.#checkpoint = { ...this.#checkpoint, knownClientIds: known };
-      saveCheckpoint(this.id, this.#checkpoint);
+      const saved = saveCheckpoint(this.id, this.#checkpoint);
+      if (!saved) {
+        const kept = this.#inbound.length; // restore the entry as an ownership record
+        const orig = this.#inbound; void kept;
+        this.#inbound = [...orig, { clientId, text: "", state: "delivered", at: Date.now() }];
+        process.stderr.write(`[codex ${this.id}] checkpoint save failed — keeping ${clientId} in the spool as the ownership record\n`);
+      }
       saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId);
     }
     this.#interruptIfCancelled(clientId); // the echo proves it landed; a tombstoned one is interrupted now
@@ -510,7 +518,14 @@ export class CodexSession implements AgentSession {
   #markTurnDelivered(turnId: string): void {
     if (!turnId) return;
     const next = markTurnDelivered(this.#checkpoint, turnId);
-    if (next !== this.#checkpoint) { this.#checkpoint = next; saveCheckpoint(this.id, this.#checkpoint); }
+    if (next !== this.#checkpoint) {
+      this.#checkpoint = next;
+      if (saveCheckpoint(this.id, this.#checkpoint) && this.#inbound.some((i) => i.state === "delivered")) {
+        // Ownership is durable in the checkpoint again: the spool copies can go.
+        for (const i of this.#inbound) if (i.state === "delivered") this.#checkpoint.knownClientIds = [...(this.#checkpoint.knownClientIds ?? []), i.clientId].slice(-200);
+        if (saveCheckpoint(this.id, this.#checkpoint)) { this.#inbound = this.#inbound.filter((i) => i.state !== "delivered"); saveCodexInbound(this.id, this.#inbound); }
+      }
+    }
   }
 
   // ── server→client requests (approvals / elicitations) ───────────────────────

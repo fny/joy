@@ -418,7 +418,15 @@ export class OpencodeSession implements AgentSession {
           break;
         }
         case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
-        case "confirmPrompt": if (eff.messageID) { this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID); } break; // admission proven by SSE too (#79)
+        case "confirmPrompt":
+          if (eff.messageID) {
+            this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
+            if (this.#cancelledIds.delete(eff.messageID) && this.#client && this.#ocSessionId) {
+              // Admitted after the user cancelled it: interrupt now (#77).
+              void this.#client.interrupt(this.#ocSessionId).catch(() => { /* best effort */ });
+            }
+          }
+          break; // admission proven by SSE too (#79)
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
         case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
@@ -585,13 +593,22 @@ export class OpencodeSession implements AgentSession {
   resumeQueue(): void { void this.#drainInbound(); }
   editQueued(): boolean { return false; }
   cancelQueued(id: string): boolean {
-    const before = this.#inbound.length;
+    const item = this.#inbound.find((i) => i.clientId === id);
+    if (!item) return false;
     this.#inbound = this.#inbound.filter((i) => i.clientId !== id);
-    if (this.#inbound.length === before) return false;
     saveCodexInbound(this.id, this.#inbound);
     this.#recordOutcome(id, "cancelled");
+    if (item.state === "sentUnknown") {
+      // The HTTP prompt is in flight: it may be admitted after this. Tombstone
+      // it (admission interrupts) and report "not plucked" so the caller aborts
+      // now (Astra on 4b70d70c, #77).
+      this.#cancelledIds.add(id);
+      return false;
+    }
     return true;
   }
+  /** Cancelled while their prompt request was in flight (see cancelQueued). */
+  #cancelledIds = new Set<string>();
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
     // Terminal outcomes are monotonic: a late admission or reply for an item

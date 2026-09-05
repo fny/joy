@@ -13,7 +13,9 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmSync 
 import { join } from "path";
 import { joyStateDir } from "../paths";
 
-export type CodexInboundState = "queued" | "sentUnknown";
+/** delivered = ownership only: the echo proved delivery but the checkpoint
+ *  could not be saved, so the spool keeps the clientId; never dispatched. */
+export type CodexInboundState = "queued" | "sentUnknown" | "delivered";
 export interface CodexInboundItem {
   clientId: string;   // stable clientUserMessageId (created once, reused on retry)
   text: string;
