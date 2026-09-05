@@ -4,7 +4,8 @@
  */
 
 import Fuse from 'fuse.js';
-import { sessionRipgrep } from './ops';
+import { machineGitEntries } from '@/sync/v2/machine';
+import { sync } from '@/sync/sync';
 import { AsyncLock } from '@/utils/lock';
 
 export interface FileItem {
@@ -87,16 +88,17 @@ class FileSearchCache {
 
             console.log(`FileSearchCache: Refreshing file cache for session ${sessionId}...`);
 
-            // Use ripgrep to get all files in the project
-            const response = await sessionRipgrep(
-                sessionId,
-                ['--files', '--follow'],
-                undefined
-            );
+            // Tracked + untracked (not ignored) files through the daemon's git
+            // route. The ripgrep shim sent an empty query, which the daemon
+            // rejected — every search and @-mention came back empty (#6).
+            const ctx = await sync.awaitMachineCtx(sessionId);
+            const entries = ctx ? await machineGitEntries(ctx, { untracked: true }) : null;
+            const response = entries?.data?.ok && entries.data.files
+                ? { success: true as const, stdout: entries.data.files.join('\n') }
+                : { success: false as const, stdout: '', error: entries?.data?.error ?? 'no machine context' };
 
             if (!response.success || !response.stdout) {
                 console.error('FileSearchCache: Failed to fetch files', response.error);
-                console.log(response);
                 return;
             }
 

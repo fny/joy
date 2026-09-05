@@ -267,7 +267,7 @@ function NewJoyTmuxSessionScreen() {
         let cancelled = false;
         setCodexModels([]); setCodexModelIndex(0); setCatalogReady(false);
         const cctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!cctx) return;
+        if (!cctx) { setCatalogReady(true); return; } // no machine context yet: do not leave Create disabled (#86)
         machineHarnessModels(cctx, 'codex').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof codexModels | undefined }))
             .then((res) => {
                 if (cancelled || !res.models?.length) return;
@@ -288,7 +288,7 @@ function NewJoyTmuxSessionScreen() {
         let cancelled = false;
         setOcModels([]); setOcModelIndex(0); setCatalogReady(false);
         const octx2 = sync.machineOnlyCtx(selectedMachineId);
-        if (!octx2) return;
+        if (!octx2) { setCatalogReady(true); return; } // no machine context yet: do not leave Create disabled (#86)
         machineHarnessModels(octx2, 'opencode').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof ocModels | undefined }))
             .then((res) => {
                 if (cancelled || !res.models?.length) return;
@@ -311,7 +311,7 @@ function NewJoyTmuxSessionScreen() {
         let cancelled = false;
         setAgyModels([]); setAgyModelIndex(0); setCatalogReady(false);
         const actx = sync.machineOnlyCtx(selectedMachineId);
-        if (!actx) return;
+        if (!actx) { setCatalogReady(true); return; } // no machine context yet: do not leave Create disabled (#86)
         machineHarnessModels(actx, 'agy').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof agyModels | undefined }))
             .then((res) => {
                 if (cancelled || !res.models?.length) return;

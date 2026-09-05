@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 5 (4) — App fixes, second batch",
+      "summary": "",
+      "markdown": "- **File search and `@` mentions return results again** — the file list used a search call the machine rejected, so every session's Files search and autocomplete were empty.\n- **\"No connection\" means no connection.** The banner used to appear on cold start and never when the network was actually gone. It now shows after three failed polls and stays quiet while connecting.\n- **Files with accented or non-Latin names open** from tool rows and file lists (the path encoding threw on anything beyond Latin-1).\n- **Diagrams can't run code**: a Mermaid block containing `</script>` escaped its container on iOS/Android; it is escaped now and unexpected messages from the diagram view are ignored.\n- **Android sheets show every button** (the attach sheet hid Draw and Cancel; agent and model pickers hid most entries) and can be dismissed.\n- **Git line counts are back** on session rows and the files sidebar (+N/−N were blank for every session); renamed files show under their new name; **unread markers no longer vanish** while you type a draft or when machines refresh.\n- **The usage screen's per-session table loads** (it asked the machine for a route that didn't exist).\n- Smaller: New-session Create no longer sticks disabled when a machine's model catalog can't be fetched yet; an empty file opens as empty instead of \"Failed to read file\"; the effort chip on Codex sessions no longer types a Claude command into Codex; drafts save when you leave the screen, not on every keystroke. *Some need the updated daemon.*"
+    },
+    {
       "title": "Sep 5 (3) — App fixes, first batch",
       "summary": "",
       "markdown": "- **All Files, per-file diffs and diff prefetch work again.** They were calling a shell path the machine never served, so every repo showed \"No files in project\" and every diff said \"no response\". They now use the machine's git routes directly; no shell is involved, so a file name with quotes or `$(…)` can't run anything either.\n- **Re-sending after a lost response no longer queues the prompt twice.** A message keeps one idempotency key until the relay accepts it.\n- **Stop works for every running turn**, including ones started from the terminal or by another session — it used to do nothing for those. Failures now shake the button instead of vanishing.\n- **Drafts survive a failed send** (\"send now\" kept deleting the draft before the send was known to succeed). A message whose send fails after you left the session is kept as a draft instead of lost.\n- **AskUserQuestion answers reach the agent**; before, the card flipped to \"submitted\" while nothing was sent.\n- Renamed files show under their new name in git status. The all-files diff overlay no longer loses files that changed while it was loading. *Needs the updated daemon.*"
@@ -281,5 +286,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 5 (3) — App fixes, first batch"
+  "latestTitle": "Sep 5 (4) — App fixes, second batch"
 }

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { encodePathParam } from '@/utils/pathParam';
 import { Text, View, ScrollView, Platform, TouchableOpacity, useWindowDimensions } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { ToolCall, Message } from '@/sync/typesMessage';
@@ -30,7 +31,7 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolF
     const showOpenFileButton = readFilePath && sessionId;
     const handleOpenReadFile = React.useCallback(() => {
         if (!sessionId || !readFilePath) return;
-        router.push(`/session/${sessionId}/file?path=${btoa(readFilePath)}`);
+        router.push(`/session/${sessionId}/file?path=${encodePathParam(readFilePath)}`);
     }, [sessionId, readFilePath, router]);
     console.log('ToolFullView', devModeEnabled);
 

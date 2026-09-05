@@ -105,7 +105,9 @@ export const MermaidRenderer = React.memo((props: {
 
     // For iOS/Android, use WebView
     // Pass mermaid content via JSON to prevent XSS from HTML interpolation
-    const mermaidContent = JSON.stringify(props.content);
+    // JSON.stringify does not escape "</": a diagram containing "</script>"
+    // (agent output, a pasted page) broke out of the inline script (#17).
+    const mermaidContent = JSON.stringify(props.content).replace(/</g, '\\u003c');
     const html = `
         <!DOCTYPE html>
         <html>
@@ -170,11 +172,16 @@ export const MermaidRenderer = React.memo((props: {
                     style={{ flex: 1 }}
                     scrollEnabled={false}
                     onMessage={(event) => {
-                        const data = JSON.parse(event.nativeEvent.data);
-                        if (data.type === 'dimensions') {
+                        // Anything in the WebView can postMessage: never let a
+                        // non-JSON payload throw in the native callback (#17).
+                        let data: { type?: unknown; height?: unknown };
+                        try { data = JSON.parse(event.nativeEvent.data); } catch { return; }
+                        if (!data || typeof data !== 'object') return;
+                        const height = data.height;
+                        if (data.type === 'dimensions' && typeof height === 'number') {
                             setDimensions(prev => ({
                                 ...prev,
-                                height: Math.max(prev.height, data.height)
+                                height: Math.max(prev.height, height)
                             }));
                         }
                     }}

@@ -490,7 +490,7 @@ export const storage = create<StorageState>()((set, get) => {
         pathProjectFiles: {},
         pathExpandedDirs: {},
         sessionFileCache: {},
-        socketStatus: 'disconnected',
+        socketStatus: 'connecting', // cold start is "connecting", not "no connection" (#11)
         socketLastConnectedAt: null,
         socketLastDisconnectedAt: null,
         isDataReady: false,
@@ -1277,7 +1277,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 sessions: updatedSessions,
-                sessionListViewData: buildSessionListViewData(updatedSessions)
+                sessionListViewData: buildSessionListViewData(updatedSessions, state.unreadSessionIds)
             };
         }),
         updateSessionPermissionMode: (sessionId: string, mode: string | null) => set((state) => {
@@ -1426,7 +1426,7 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Rebuild sessionListViewData to reflect machine changes
             const sessionListViewData = buildSessionListViewData(
-                state.sessions
+                state.sessions, state.unreadSessionIds
             );
 
             // Persist for fast first paint next cold start.
@@ -1447,7 +1447,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 machines: remaining,
-                sessionListViewData: buildSessionListViewData(state.sessions)
+                sessionListViewData: buildSessionListViewData(state.sessions, state.unreadSessionIds)
             };
         }),
         deleteSession: (sessionId: string) => set((state) => {
@@ -1477,7 +1477,7 @@ export const storage = create<StorageState>()((set, get) => {
             saveSessionEffortLevels(effortLevels);
             
             // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions);
+            const sessionListViewData = buildSessionListViewData(remainingSessions, state.unreadSessionIds);
             
             return {
                 ...state,

@@ -821,6 +821,14 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     }, [sessionId, isJoyDaemon, flavor, machineId, joySessionId, sendJoyKeys]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
+        const flavor = storage.getState().sessions[sessionId]?.metadata?.flavor ?? 'claude';
+        if (isJoyDaemon && flavor !== 'claude') {
+            // /effort is a Claude Code command; typed into a codex/pi/agy pane
+            // it becomes a prompt, and the recorded level is one the harness
+            // never applied (#90). Codex effort is a per-turn daemon setting.
+            Modal.alert(t('common.error'), t('errors.operationFailed'));
+            return;
+        }
         if (isJoyDaemon) {
             // /effort <level> sets the interactive session's reasoning effort,
             // exactly like /model sets the model. Levels low/medium/high/xhigh/

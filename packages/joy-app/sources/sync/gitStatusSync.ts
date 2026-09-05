@@ -11,7 +11,7 @@ import { parseStatusSummaryV2, getStatusCountsV2, isDirtyV2, getCurrentBranchV2,
 import { parseCurrentBranch } from './git-parsers/parseBranch';
 import { parseNumStat, mergeDiffSummaries } from './git-parsers/parseDiff';
 import { sync } from './sync';
-import { machineGitStatus } from './v2/machine';
+import { machineGitStatus, machineGitDiff } from './v2/machine';
 
 
 export class GitStatusSync {
@@ -132,7 +132,12 @@ export class GitStatusSync {
      * status rather than clearing or failing).
      */
     /** Daemon-parsed porcelain (v2) → the app's GitStatus shape. */
-    private fromV2GitStatus(d: import('./v2/machine').V2GitStatus): GitStatus {
+    private fromV2GitStatus(d: import('./v2/machine').V2GitStatus, unstagedNumstat = '', stagedNumstat = ''): GitStatus {
+        const sum = (raw: string) => {
+            const d = parseNumStat(raw.trim());
+            return { added: d.insertions, removed: d.deletions };
+        };
+        const u = sum(unstagedNumstat), sg = sum(stagedNumstat);
         const modified: string[] = [];
         const staged: string[] = [];
         const untracked: string[] = [];
@@ -151,8 +156,14 @@ export class GitStatusSync {
             modifiedFiles: modified,
             stagedFiles: staged,
             untrackedFiles: untracked,
-            linesAdded: 0,
-            linesRemoved: 0,
+            isDirty: (d.entries ?? []).length > 0,
+            stagedLinesAdded: sg.added,
+            stagedLinesRemoved: sg.removed,
+            unstagedLinesAdded: u.added,
+            unstagedLinesRemoved: u.removed,
+            linesAdded: u.added + sg.added,
+            linesRemoved: u.removed + sg.removed,
+            linesChanged: u.added + sg.added + u.removed + sg.removed,
             stashCount: 0,
             lastUpdatedAt: Date.now(),
         } as unknown as GitStatus;
@@ -188,7 +199,13 @@ export class GitStatusSync {
             if (mctx) {
                 const { status, data } = await machineGitStatus(mctx);
                 if (status === 200 && data?.ok) {
-                    storage.getState().applyGitStatus(projectKey, this.fromV2GitStatus(data));
+                    // Line counts come from two numstat calls; without them every
+                    // +N/−N badge was blank (#103).
+                    const [unstaged, staged] = await Promise.all([
+                        machineGitDiff(mctx, { numstat: true }),
+                        machineGitDiff(mctx, { numstat: true, staged: true }),
+                    ]);
+                    storage.getState().applyGitStatus(projectKey, this.fromV2GitStatus(data, unstaged.data?.diff ?? '', staged.data?.diff ?? ''));
                 } else if (status === 200 && data && !data.ok) {
                     storage.getState().applyGitStatus(projectKey, null); // not a repo
                 }

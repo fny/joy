@@ -97,14 +97,17 @@ export function useDraft(
         };
     }, [sessionId, value, saveDraft]);
 
-    // Save on unmount
+    // Save on unmount — and ONLY on unmount: with [value] in the deps the
+    // cleanup ran on every keystroke, persisting all drafts and rebuilding the
+    // session list per character (#99). Read the latest values through refs.
+    const latestRef = useRef({ sessionId, value, saveDraft });
+    latestRef.current = { sessionId, value, saveDraft };
     useEffect(() => {
         return () => {
-            if (sessionId && value !== lastSavedValue.current) {
-                saveDraft(value);
-            }
+            const { sessionId: sid, value: v, saveDraft: save } = latestRef.current;
+            if (sid && v !== lastSavedValue.current) save(v);
         };
-    }, [sessionId, value, saveDraft]);
+    }, []);
 
     // Clear draft (used after message is sent)
     const clearDraft = useCallback(() => {
