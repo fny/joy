@@ -9,11 +9,7 @@
  */
 
 import { v2, v2ActiveTurn, v2CancelTurn } from './v2/api';
-import {
-    machineReadFile, machineWriteFile, machineDeleteFile, machineGrep,
-    machineHistory, machineHistoryMessages, machineKillSession,
-    type MachineCtx, type MachineOnlyCtx,
-} from './v2/machine';
+import { machineReadFile, machineWriteFile, machineDeleteFile, machineGrep, machineHistory, machineHistoryMessages, machineKillSession, type MachineCtx, type MachineOnlyCtx, machineGitDiff, machineAbort } from './v2/machine';
 import { tunnelJson } from './v2/tunnel';
 import { storage } from './storage';
 import { sync } from './sync';
@@ -221,7 +217,14 @@ export async function sessionAbort(sessionId: string): Promise<void> {
     const turnId = await v2ActiveTurn(v2link.relay, v2link.sessionId);
     if (turnId) {
         await v2CancelTurn(v2link.relay, v2link.sessionId, turnId);
+        return;
     }
+    // No relay turn: the agent was started from the terminal, a peer message
+    // or a daemon-dispatched item. Interrupt it on the machine (#8).
+    const ctx = sync.machineCtx(sessionId);
+    if (!ctx) throw noCtx('abort');
+    const { data } = await machineAbort(ctx);
+    if (data?.error) throw new Error(data.error);
 }
 
 type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
@@ -255,20 +258,17 @@ export async function sessionDeny(sessionId: string, id: string, mode?: Permissi
 /**
  * Execute a bash command in the session cwd (daemon, over the tunnel).
  */
-export async function sessionBash(sessionId: string, request: SessionBashRequest): Promise<SessionBashResponse> {
+/** Patch for one path (or the whole tree) through the daemon's git route —
+ *  the old bash path never reached the daemon and shell-quoted the path (#5, #92). */
+export async function sessionGitDiff(sessionId: string, opts: { path?: string; head?: boolean; staged?: boolean } = {}): Promise<{ success: boolean; diff: string; error?: string }> {
     try {
         const ctx = sync.machineCtx(sessionId);
-        if (!ctx) throw noCtx('bash');
-        const { data } = await daemonJson<SessionBashResponse>(ctx, 'POST', `/sessions/${ctx.localSessionId}/bash`, request);
-        return data ?? { success: false, stdout: '', stderr: '', exitCode: -1, error: 'no response' };
+        if (!ctx) throw noCtx('git diff');
+        const { data } = await machineGitDiff(ctx, opts);
+        if (!data?.ok) return { success: false, diff: '', error: data?.error || 'no response' };
+        return { success: true, diff: data.diff ?? '' };
     } catch (error) {
-        return {
-            success: false,
-            stdout: '',
-            stderr: errorMessage(error),
-            exitCode: -1,
-            error: errorMessage(error)
-        };
+        return { success: false, diff: '', error: errorMessage(error) };
     }
 }
 

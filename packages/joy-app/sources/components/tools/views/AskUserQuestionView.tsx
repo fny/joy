@@ -1,4 +1,6 @@
 import * as React from 'react';
+import { Modal } from '@/modal';
+import { sync } from '@/sync/sync';
 import { View, Text, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ToolViewProps } from './_all';
@@ -249,9 +251,18 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
             // not as a follow-up plain text message.
             if (tool.permission?.id) {
                 await sessionAllow(sessionId, tool.permission.id, undefined, undefined, 'approved', { answers });
+            } else {
+                // v2 sessions carry no permission id: the answer goes to the agent
+                // as a message, like a <joy-options> chip does (#15). Before this
+                // the card flipped to "submitted" while nothing was sent.
+                const text = Object.entries(answers).map(([q, a]) => (questions.length > 1 ? `${q}: ${a}` : a)).join('\n');
+                const res = await sync.sendMessage(sessionId, text, { source: 'option' });
+                if (!res.ok) throw new Error(res.reason);
             }
         } catch (error) {
             console.error('Failed to submit answer:', error);
+            setIsSubmitted(false); // the form comes back: nothing reached the agent
+            Modal.alert(t('common.error'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
         } finally {
             setIsSubmitting(false);
         }

@@ -35,9 +35,18 @@ export interface V2GitStatus {
 export const machineGitStatus = (ctx: MachineCtx) =>
     j<V2GitStatus>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/git/status`);
 
-export const machineGitDiff = (ctx: MachineCtx, opts?: { staged?: boolean; path?: string; numstat?: boolean }) =>
+export const machineGitDiff = (ctx: MachineCtx, opts?: { staged?: boolean; head?: boolean; path?: string; numstat?: boolean }) =>
     j<{ ok: boolean; diff?: string; error?: string }>(ctx, 'GET',
-        `/v2/sessions/${ctx.localSessionId}/git/diff?staged=${opts?.staged ? 1 : 0}${opts?.numstat ? '&numstat=1' : ''}${opts?.path ? `&path=${encodeURIComponent(opts.path)}` : ''}`);
+        `/v2/sessions/${ctx.localSessionId}/git/diff?staged=${opts?.staged ? 1 : 0}${opts?.head ? '&head=1' : ''}${opts?.numstat ? '&numstat=1' : ''}${opts?.path ? `&path=${encodeURIComponent(opts.path)}` : ''}`);
+
+/** Tracked (+ untracked, not ignored) files of the session's repo, relative paths. */
+export const machineGitEntries = (ctx: MachineCtx, opts?: { untracked?: boolean; path?: string }) =>
+    j<{ ok: boolean; files?: string[]; error?: string }>(ctx, 'GET',
+        `/v2/sessions/${ctx.localSessionId}/git/entries?untracked=${opts?.untracked ? 1 : 0}${opts?.path ? `&path=${encodeURIComponent(opts.path)}` : ''}`);
+
+/** Interrupt whatever turn the agent is running, relay-started or not (#8). */
+export const machineAbort = (ctx: MachineCtx) =>
+    j<{ ok?: boolean; error?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/abort`, {});
 
 // ── files ──────────────────────────────────────────────────────────────────
 export const machineReadFile = (ctx: MachineCtx, path: string) =>

@@ -173,8 +173,10 @@ function parseRenameCopy(matches: (string | undefined)[]): GitFileEntryV2 | null
         hashHead: matches[7],
         hashIndex: matches[8],
         renameScore: parseInt(matches[10] || '0', 10),
-        from: decodeGitPath(matches[11]),
-        path: decodeGitPath(matches[12])
+        // porcelain v2 rename lines are `… R<score> <newPath>\t<origPath>`: the
+        // target comes first (#104).
+        path: decodeGitPath(matches[11]),
+        from: decodeGitPath(matches[12])
     };
 }
 

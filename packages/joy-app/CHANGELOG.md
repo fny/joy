@@ -1,3 +1,12 @@
+# Sep 5 (3) — App fixes, first batch
+
+- **All Files, per-file diffs and diff prefetch work again.** They were calling a shell path the machine never served, so every repo showed "No files in project" and every diff said "no response". They now use the machine's git routes directly; no shell is involved, so a file name with quotes or `$(…)` can't run anything either.
+- **Re-sending after a lost response no longer queues the prompt twice.** A message keeps one idempotency key until the relay accepts it.
+- **Stop works for every running turn**, including ones started from the terminal or by another session — it used to do nothing for those. Failures now shake the button instead of vanishing.
+- **Drafts survive a failed send** ("send now" kept deleting the draft before the send was known to succeed). A message whose send fails after you left the session is kept as a draft instead of lost.
+- **AskUserQuestion answers reach the agent**; before, the card flipped to "submitted" while nothing was sent.
+- Renamed files show under their new name in git status. The all-files diff overlay no longer loses files that changed while it was loading. *Needs the updated daemon.*
+
 # Sep 5 (2) — Machine fixes: restart, kill, recovery
 
 - **Restart works on a session whose agent has died.** The first Restart of a red "detached" card used to fail and archive it. Two Restarts tapped at once no longer kill each other's replacement; restarting before the first message no longer archives the card.

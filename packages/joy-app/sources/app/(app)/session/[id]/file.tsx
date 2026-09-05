@@ -5,7 +5,7 @@ import { isDemoSession } from '@/sync/demoSession';
 import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
-import { sessionReadFile, sessionBash, sessionDeleteFile } from '@/sync/ops';
+import {sessionReadFile, sessionGitDiff, sessionDeleteFile } from '@/sync/ops';
 import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
 import { isBinaryPath } from '@/utils/binaryFile';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -301,14 +301,10 @@ export default React.memo(function FileScreen() {
                 // Fetch git diff for the file (if in git repo)
                 if (sessionPath && sessionId && gitDiffPath && gitDiffPath !== '.') {
                     try {
-                        const diffResponse = await sessionBash(sessionId, {
-                            command: `git diff --no-ext-diff -- "${gitDiffPath}"`,
-                            cwd: sessionPath,
-                            timeout: 5000
-                        });
+                        const diffResponse = await sessionGitDiff(sessionId, { path: gitDiffPath });
 
-                        if (!isCancelled && diffResponse.success && diffResponse.stdout.trim()) {
-                            fetchedDiff = diffResponse.stdout;
+                        if (!isCancelled && diffResponse.success && diffResponse.diff.trim()) {
+                            fetchedDiff = diffResponse.diff;
                             setDiffContent(fetchedDiff);
                         }
                     } catch (diffError) {
