@@ -385,6 +385,7 @@ export class CodexSession implements AgentSession {
   }
 
   #persistWindowRecord(): void {
+    if (this.status === "ended") return; // a retired generation writes no record (#43, #113)
     saveWindowRecord(this.id, {
       launchCwd: this.cwd, agent: "codex",
       codexThreadId: this.#threadId ?? this.#resumeThreadId ?? undefined,
@@ -496,12 +497,12 @@ export class CodexSession implements AgentSession {
     const before = this.#inbound.length;
     this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
     if (this.#inbound.length !== before) {
-      saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId);
-      // Ownership must survive a crash before the turn is checkpointed, or
-      // recovery mirrors our own prompt again as a TUI one (Astra on 08f70257).
+      // Ownership FIRST, then the spool: a crash between the two must leave a
+      // durable copy of "this prompt was ours" somewhere (Astra on bdee9ac8).
       const known = [...(this.#checkpoint.knownClientIds ?? []), clientId].slice(-200);
       this.#checkpoint = { ...this.#checkpoint, knownClientIds: known };
       saveCheckpoint(this.id, this.#checkpoint);
+      saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId);
     }
     this.#interruptIfCancelled(clientId); // the echo proves it landed; a tombstoned one is interrupted now
   }
@@ -861,9 +862,12 @@ export class CodexSession implements AgentSession {
   #replayingHistory = false;
   reorderQueued(): boolean { return false; }
 
-  async abort(): Promise<{ ok: true }> {
+  async abort(): Promise<{ ok: boolean; error?: string }> {
     if (this.#client && this.#threadId && this.#activeTurnId) {
-      try { await this.#client.turnInterrupt(this.#threadId, this.#activeTurnId); } catch { /* best effort */ }
+      // A failed interrupt is reported, not swallowed: the app's Stop used to
+      // read success while the agent kept running (#8).
+      try { await this.#client.turnInterrupt(this.#threadId, this.#activeTurnId); }
+      catch (e) { return { ok: false, error: `interrupt failed: ${e instanceof Error ? e.message : e}` }; }
     }
     return { ok: true };
   }

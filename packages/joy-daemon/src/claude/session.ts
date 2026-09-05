@@ -2007,7 +2007,7 @@ export class Session {
   }
 
   /** Escape → Claude Code interactive interprets as "interrupt generation". */
-  async abort(): Promise<{ ok: true }> {
+  async abort(): Promise<{ ok: boolean; error?: string }> {
     // Snapshot the pending submit BEFORE the awaited capture: if a NEW dispatch
     // starts during that await, this (now possibly stale) abort must not cancel it.
     const submitBefore = this.#submitTimer;

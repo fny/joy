@@ -65,7 +65,7 @@ export interface AgentSession {
   editQueued(id: string, text: string): boolean;
   cancelQueued(id: string): boolean;
   reorderQueued(id: string, toIndex: number): boolean;
-  abort(): Promise<{ ok: true }>;
+  abort(): Promise<{ ok: boolean; error?: string }>;
 
   // ── pane / control surface (tmux window shared by both agents) ──
   detectPermissionMode(): string | null;

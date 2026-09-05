@@ -271,9 +271,11 @@ export async function killOpencodeServerPid(pid: number): Promise<boolean> {
     // The launcher itself, unless it is a zombie its parent has not reaped
     // yet: kill(pid, 0) succeeds for a zombie, but nothing runs there.
     if (alive(pid) && !out.includes(pid)) {
-      let state = "";
-      try { const st = readFileSync(`/proc/${pid}/stat`, "utf8"); state = st.slice(st.lastIndexOf(")") + 2).split(" ")[0]; } catch { /* gone */ }
-      if (state && state !== "Z") out.push(pid);
+      // Only a POSITIVELY identified zombie is excluded; an unreadable state
+      // (no /proc, a failed read) keeps the kill(pid, 0) evidence.
+      let zombie = false;
+      try { const st = readFileSync(`/proc/${pid}/stat`, "utf8"); zombie = st.slice(st.lastIndexOf(")") + 2).split(" ")[0] === "Z"; } catch { /* unknown → assume live */ }
+      if (!zombie) out.push(pid);
     }
     return out;
   };

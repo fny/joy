@@ -1316,12 +1316,22 @@ export class SessionRegistry {
 
       // The TUI window is gone: give the session a fresh server of its own
       // (never the shared server — that layout is legacy-only now).
+      // recover() is async now: a restart or explicit create of this id can
+      // run between our checks. Hold the same reservation create() uses, and
+      // never touch a handle someone else owns (Astra on bdee9ac8).
+      if (this.#creating.has(rec.id) || this.#restarting.has(rec.id)) continue;
+      this.#creating.add(rec.id);
+      let server = false;
       const sockLabel = tmuxServerLabel(rec.id);
       const names = tmuxNamesFor(sockLabel, rec.id);
-      run("tmux", "-L", sockLabel, "kill-server"); // a half-dead one from before, if any
-      disposeTmuxHandle(sockLabel);
+      try {
+        run("tmux", "-L", sockLabel, "kill-server"); // a half-dead one from before, if any
+        disposeTmuxHandle(sockLabel);
+        server = await this.#newAgentServer(tmuxHandleFor(sockLabel, names.session), names.session, rec.launchCwd);
+      } finally { this.#creating.delete(rec.id); }
+      if (this.#sessions.has(rec.id) || this.#restarting.has(rec.id)) continue; // taken over meanwhile: leave its handle alone
+      if (!server) { disposeTmuxHandle(sockLabel); continue; }
       const drv = tmuxHandleFor(sockLabel, names.session);
-      if (!(await this.#newAgentServer(drv, names.session, rec.launchCwd))) { disposeTmuxHandle(sockLabel); continue; }
       const tmuxWindow = names.target;
       const shell = process.env.SHELL || "/bin/bash";
       drv.runSync("send-keys", "-t", tmuxWindow, "-l", `exec ${shell} -l`);

@@ -1074,9 +1074,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             const rein = (queued as { reinjectionId?: string }).reinjectionId;
             let plucked = false;
             if (rein) { try { plucked = sess.cancelQueued(rein); } catch { /* stub adapters */ } }
-            // Already admitted (cancelQueued found nothing): interrupt it like an
-            // ordinary rejected start, and take back any downloaded attachments.
-            if (!plucked) { try { await sess.abort(); } catch { /* pane teardown */ } }
+            // A reinjection that was already admitted (cancelQueued found
+            // nothing) is interrupted like an ordinary rejected start. A command
+            // that enqueued no work (/title) aborts nothing — that interrupted an
+            // unrelated terminal-started turn (Astra on 995abbf6).
+            if (rein && !plucked) { try { await sess.abort(); } catch { /* pane teardown */ } }
             for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } }
             await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
             log(`${tag}: /start refused for a handled command → cancelled`);

@@ -382,7 +382,7 @@ export class AgySession implements AgentSession {
     this.#broadcastQueue(); return true;
   }
 
-  async abort(): Promise<{ ok: true }> {
+  async abort(): Promise<{ ok: boolean; error?: string }> {
     const proc = this.#proc;
     if (proc && proc.exitCode === null) {
       this.#sawResult = true; // the exit handler must not report "failed"

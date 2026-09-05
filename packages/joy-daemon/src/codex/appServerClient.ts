@@ -188,6 +188,7 @@ export class CodexAppServerClient {
   async connect(socketPath: string, deadlineMs = 10_000): Promise<Record<string, unknown>> {
     const ws = new WebSocket(`ws+unix://${socketPath}:/`, { perMessageDeflate: false });
     this.#ws = ws;
+    this.#externallyResolved.clear(); // markers named the OLD connection's request ids; new requests are admitted from here
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("app-server connect timed out")), deadlineMs); });
     try {
@@ -218,7 +219,6 @@ export class CodexAppServerClient {
         deadline,
       ]);
       this.notify("initialized", {});
-      this.#externallyResolved.clear(); // markers name the OLD connection's request ids (Astra on caf47165)
       this.#closed = false; // a successful connection is the only thing that reopens the client
       return result;
     } catch (e) {
