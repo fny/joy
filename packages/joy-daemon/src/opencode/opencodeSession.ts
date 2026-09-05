@@ -292,10 +292,16 @@ export class OpencodeSession implements AgentSession {
   async #drainInbound(): Promise<void> {
     const client = this.#client;
     if (!client || !this.#ocSessionId) return;
-    if (this.#draining) return; // one ordered drain; a second one re-sent a snapshot (Astra, #79)
+    // One ordered drain at a time — but a wakeup that arrives while one is
+    // running is REMEMBERED, so an item enqueued after the snapshot is sent
+    // by a fresh pass instead of waiting for unrelated intake (Astra, #79).
+    if (this.#draining) { this.#drainAgain = true; return; }
     this.#draining = true;
-    try { await this.#drainInboundInner(client, this.#ocSessionId); } finally { this.#draining = false; }
+    try {
+      do { this.#drainAgain = false; await this.#drainInboundInner(client, this.#ocSessionId); } while (this.#drainAgain && this.status !== "ended");
+    } finally { this.#draining = false; }
   }
+  #drainAgain = false;
   async #drainInboundInner(client: OpencodeClient, ocSessionId: string): Promise<void> {
     for (const item of [...this.#inbound]) {
       if (item.state !== "queued" && item.state !== "sentUnknown") continue;
@@ -324,8 +330,9 @@ export class OpencodeSession implements AgentSession {
           // it sentUnknown re-ran it on the next unrelated intake, after the
           // app had already shown it failed (#79).
           process.stderr.write(`[opencode ${this.id}] prompt rejected: ${msg} — dropped\n`);
+          const stillOurs = this.#inbound.includes(item); // a cancel that raced the reply keeps its outcome
           this.#removeInbound(item.clientId);
-          this.#recordOutcome(item.clientId, "failed");
+          if (stillOurs) this.#recordOutcome(item.clientId, "failed");
         } else {
           process.stderr.write(`[opencode ${this.id}] prompt failed: ${msg}\n`);
           // transport failure: leave sentUnknown — the deterministic id makes a retry idempotent.
@@ -578,6 +585,10 @@ export class OpencodeSession implements AgentSession {
   }
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
+    // Terminal outcomes are monotonic: a late admission or reply for an item
+    // the user cancelled must not turn "cancelled" into "delivered".
+    const prev = this.#itemOutcome.get(id);
+    if ((prev === "cancelled" || prev === "failed") && outcome === "delivered") return;
     this.#itemOutcome.set(id, outcome);
     if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
   }
