@@ -1031,9 +1031,6 @@ async function checkState(id: string, opts: { signal?: AbortSignal } = {}): Prom
   return body;
 }
 
-/** The daemon-stamped <joy-message …> wrapper off a mirrored user row. */
-const stripJoyMessage = (s: string): string => s.replace(/^\s*<joy-message\b[^>]*>\s*/, "").replace(/\s*<\/joy-message>\s*$/, "").trim();
-
 /** The seq the session's log is at right now — the `{hello, seq}` line of
  *  `?last=0`, read and then abandoned (the body is not needed). null when
  *  the daemon did not answer within `signal`. */
@@ -1075,26 +1072,57 @@ const FINISH_GRACE_MS = 150; // a trailing record after the turn ended
 const CATCHUP_MS = 3000;    // the final tail fetch when the stream was down
 const CLEANUP_MS = 10_000;  // `joy run` teardown requests (session lookup + delete)
 
+/** A command as the daemon's durable ledger sees it (GET
+ *  /sessions/:id/queue/:qid): its state, terminal reason and the runtime
+ *  turn attributed to it. A read that fails is reported as exactly that —
+ *  never as "the queue is empty, so it must have been dispatched" (#498). */
+type CommandView =
+  | { ok: true; id: string; state: string; terminalReason: string | null; runtimeTurnId: string | null }
+  | { ok: false; kind: "gone" | "unknown_command" | "unreadable"; reason: string };
+async function fetchCommand(id: string, qid: string, signal: AbortSignal): Promise<CommandView> {
+  const r = await api("GET", `/sessions/${id}/queue/${encodeURIComponent(qid)}`, undefined, { signal }).catch((e) => (e instanceof Error ? e : new Error(String(e))));
+  if (r instanceof Error) return { ok: false, kind: "unreadable", reason: r.message };
+  const body = await r.json().catch(() => null) as any;
+  if (r.status === 404 && body?.error === "session_not_found") return { ok: false, kind: "gone", reason: "session_not_found" };
+  if (r.status === 404 && body?.error === "command_not_found") return { ok: false, kind: "unknown_command", reason: `the daemon has no record of turn ${qid} (never accepted here, or pruned)` };
+  if (!r.ok || !body?.ok || typeof body.state !== "string") return { ok: false, kind: "unreadable", reason: body?.error ? String(body.error) : `HTTP ${r.status}` };
+  return { ok: true, id: String(body.id ?? qid), state: body.state, terminalReason: typeof body.terminalReason === "string" ? body.terminalReason : null, runtimeTurnId: typeof body.runtimeTurnId === "string" && body.runtimeTurnId ? body.runtimeTurnId : null };
+}
+const COMMAND_TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
+/** Consecutive unreadable command reads tolerated (a daemon re-exec) before
+ *  the wait ends as `error`. */
+const QUEUE_READ_FAILURES = 3;
+const turnOf = (r: LoggedRecord): string | null => { const t = r.record?.content?.data?.turn; return typeof t === "string" && t ? t : null; };
+
 /**
  * Block until the turn behind `queuedId` (or, without one, whatever is
- * running) has ended, collecting the records produced meanwhile. Ends when
- * the queue no longer holds the item AND the session reports idle /
- * needs_input — polled, so it holds for every adapter regardless of how it
- * signals turn-end. The assistant text of the turn is the joined text
- * records of THAT turn:
- *   - an exclusive send / a bare `wait`: everything after `afterSeq`;
- *   - a queued item runs behind whatever is in flight, so the rest of the
- *     PREVIOUS answer lands after `afterSeq` too and used to be returned as
- *     this turn's reply (#498). The boundary is the daemon-mirrored user
- *     record carrying `text` (every adapter mirrors the dispatched prompt);
- *     the seq seen when the queue poll noticed the dispatch is the fallback.
- * Every request in here is bounded by the remaining deadline: a daemon that
- * accepts /check and never answers used to hold the wait forever, timeout or
- * not (#501). The record stream resumes from the last consumed seq when it
- * breaks; a tail that cannot be recovered is an `error`, not a short answer
- * (#497).
+ * running) has ended, collecting the records produced meanwhile.
+ *
+ * With a `queuedId` (every `ask`/`run`, `wait --turn`) the wait is bound to
+ * the DURABLE command (#498): `/sessions/:id/queue/:qid` is polled until the
+ * command reaches a terminal state — `completed` is the answer, `failed` /
+ * `cancelled` / `interrupted` an `error` with the daemon's reason. Nothing
+ * else completes it: not a global idle (`/check` idle while the command is
+ * still queued or running is just that), not a queue read that failed (a
+ * short run of unreadable reads is tolerated for a daemon re-exec, then it is
+ * the outcome), not the id having left a listing. `/check` still ends the
+ * wait early for `needs_input` (an approval / question, exit 6) and `ended`.
+ * The reply's text is the records of the runtime turn attributed to the
+ * command: the `runtimeTurnId` the daemon reports for its accepted attempt
+ * (codex, opencode, pi name their turns) — for an adapter that does not
+ * (claude), the first turn that STARTS after the send (turn-start records of
+ * the turn in flight at send time predate `afterSeq`, so its tail, and any
+ * later turn's output, are excluded even when the prompt was mirrored early).
+ * The turn's own turn-end record must be in hand for `answered`.
+ *
+ * Without a `queuedId` (a bare `wait`, an exclusive send the daemon did not
+ * id): everything after `afterSeq`, ending at an explicit idle.
+ *
+ * One deadline bounds every request, sleep and the final catch-up (#501);
+ * the record stream resumes from the last consumed seq when it breaks and
+ * the reply is fetched through the log's head before success (#497).
  */
-export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: string | null; text?: string; timeoutMs: number }): Promise<TurnOutcome> {
+export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: string | null; timeoutMs: number }): Promise<TurnOutcome> {
   // The one clock (#501): every request, sleep and the final catch-up run
   // under `life`; a caller that already spent part of its --timeout on the
   // pre-wait probes passes what is left as timeoutMs.
@@ -1104,8 +1132,6 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
   const controller = new AbortController();
   const bound = () => either(life.signal, controller.signal);
   const records: LoggedRecord[] = [];
-  let boundarySeq: number | null = opts.queuedId ? null : opts.afterSeq;
-  let fallbackBoundary: number | null = null;
   let lastSeq = opts.afterSeq;
   // The highest seq the daemon has ADVERTISED for this log: every `{hello,
   // seq}` frame (initial connect and each reconnect) names the log's head at
@@ -1114,24 +1140,27 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
   // residual) — so finish() fetches through the high-water before success.
   let advertised = opts.afterSeq;
   let sawActivity = false;
-  let connected = false;
   let lastStreamError: string | null = null;
-  const sentText = opts.text?.trim() ?? "";
+  // The runtime turn this wait is about (#498): named by the daemon for the
+  // command, else the first turn that starts after the send.
+  let turnId: string | null = null;
+  let turnFromDaemon = false;
   const consume = (line: any): void => {
     if (typeof line?.seq !== "number") return;
     lastSeq = line.seq;
     records.push(line);
-    if (boundarySeq === null && sentText && line.record?.role === "user" && stripJoyMessage(String(line.record.content?.text ?? "")) === sentText) boundarySeq = line.seq;
     const ev = evOf(line);
-    const from = boundarySeq ?? fallbackBoundary;
-    if (from !== null && line.seq > from && ev && (ev.t === "turn-start" || ev.t === "text" || ev.t === "tool-call-start")) sawActivity = true;
+    if (!ev || line.seq <= opts.afterSeq) return;
+    if (opts.queuedId) {
+      if (turnId === null && ev.t === "turn-start") turnId = turnOf(line);
+    } else if (ev.t === "turn-start" || ev.t === "text" || ev.t === "tool-call-start") sawActivity = true;
   };
   const pump = (async () => {
     let backoff = 200;
     while (!controller.signal.aborted) {
       try {
         for await (const line of streamEvents(id, { after: lastSeq, follow: true, signal: bound() })) {
-          if (line?.hello) { connected = true; advertised = Math.max(advertised, Number(line.seq) || 0); continue; }
+          if (line?.hello) { advertised = Math.max(advertised, Number(line.seq) || 0); continue; }
           consume(line);
         }
         lastStreamError = "stream closed"; // a follow stream never ends on its own
@@ -1139,7 +1168,6 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
         if (controller.signal.aborted || life.signal.aborted) return;
         lastStreamError = e instanceof Error ? e.message : String(e);
       }
-      connected = false;
       // Resume from the last consumed seq: nothing in between is lost (#497).
       await wait(Math.min(backoff, remaining()), bound());
       backoff = Math.min(backoff * 2, 2000);
@@ -1156,46 +1184,69 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
       // its head NOW — asked for directly (`?last=0`), and never below the
       // seq any hello frame advertised. Anything between the last consumed
       // record and that head is fetched once, bounded by what is left of the
-      // deadline (a timed-out wait starts NO catch-up, #501). A tail that
-      // cannot be obtained makes the outcome an `error`: a connected socket,
-      // or a stream that was down, is never taken as proof the rows arrived.
+      // deadline (a timed-out wait starts NO catch-up, #501). When the head
+      // cannot be asked for, the fetch itself establishes it (its hello
+      // names the head; EOF means everything through it was read). A tail
+      // that cannot be obtained makes the outcome an `error`: the state of
+      // the follow socket — open, or long dead without the client noticing
+      // — is never taken as proof the rows arrived.
       const budget = () => either(life.signal, AbortSignal.timeout(Math.min(CATCHUP_MS, remaining())));
       const head = await headSeq(id, budget());
-      const highWater = Math.max(advertised, head ?? 0);
+      let highWater = Math.max(advertised, head ?? 0);
       let fetchError: string | null = null;
-      if (lastSeq < highWater || (head === null && !connected)) {
+      if (head === null || lastSeq < highWater) {
         try {
-          for await (const line of streamEvents(id, { after: lastSeq, follow: false, signal: budget() })) { if (!line?.hello) consume(line); }
+          for await (const line of streamEvents(id, { after: lastSeq, follow: false, signal: budget() })) {
+            if (line?.hello) { highWater = Math.max(highWater, Number(line.seq) || 0); continue; }
+            consume(line);
+          }
         } catch (e) {
           fetchError = e instanceof Error ? e.message : String(e);
         }
       }
-      if (lastSeq < highWater || (head === null && !connected && fetchError)) {
+      if (lastSeq < highWater || (head === null && fetchError)) {
         state = "error";
         const why = fetchError ?? lastStreamError ?? "the daemon did not answer";
-        const held = lastSeq < highWater ? `the daemon holds records through seq ${highWater}` : "the stream was down and the tail could not be fetched";
+        const held = lastSeq < highWater ? `the daemon holds records through seq ${highWater}` : "the log's head could not be read and the tail could not be fetched";
         reason = `output stream lost after seq ${lastSeq} — ${held} (${why}) — the reply is incomplete; \`joy events ${id} --json\` has the records`;
+      } else if (state === "answered" && opts.queuedId && turnId && !records.some((r) => turnOf(r) === turnId && evOf(r)?.t === "turn-end")) {
+        // The daemon says the command completed, so its turn's end record
+        // precedes that verdict in the log — and the log has been read
+        // through its head. Not finding it means the attributed turn is not
+        // the one that completed: say so rather than return a guess (#498).
+        state = "error";
+        reason = `turn ${opts.queuedId} completed but the turn-end record of its runtime turn ${turnId}${turnFromDaemon ? "" : " (inferred: the first turn started after the send)"} is not in the log through seq ${lastSeq} — the reply cannot be attributed; \`joy events ${id} --json\` has the records`;
       }
     }
-    const from = boundarySeq ?? fallbackBoundary ?? opts.afterSeq;
-    const mine = records.filter((r) => r.seq > from);
+    const mine = opts.queuedId && turnId
+      ? records.filter((r) => turnOf(r) === turnId)
+      : records.filter((r) => r.seq > opts.afterSeq);
     const text = mine.map((r) => (r.record.role !== "user" ? textOf(r) : null)).filter((t): t is string => !!t && t.trim().length > 0).join("\n\n").trim();
     return { state, text, check, records: mine, ...(reason ? { reason } : {}) };
   };
-  let startedAt = Date.now();
-  let dispatched = !opts.queuedId;
+  const startedAt = Date.now();
   let lastCheck: any = null;
+  let unreadable = 0;
   for (;;) {
     if (timedOut()) return finish("timeout", lastCheck);
-    if (!dispatched) {
-      const q = await api("GET", `/sessions/${id}/queue`, undefined, { signal: life.signal }).catch(() => null);
+    if (opts.queuedId) {
+      const cmd = await fetchCommand(id, opts.queuedId, life.signal);
       if (timedOut()) return finish("timeout", lastCheck);
-      const qs = q && q.ok ? await q.json().catch(() => null) as any : null;
-      const items: any[] = qs?.items ?? qs?.queue ?? [];
-      dispatched = !items.some((it) => String(it.id) === String(opts.queuedId));
-      if (!dispatched) { await wait(Math.min(POLL_MS, remaining()), life.signal); continue; }
-      fallbackBoundary = lastSeq;
-      startedAt = Date.now();
+      if (!cmd.ok) {
+        if (cmd.kind === "gone") return finish("gone", lastCheck, cmd.reason);
+        if (cmd.kind === "unknown_command") return finish("error", lastCheck, cmd.reason);
+        if (++unreadable >= QUEUE_READ_FAILURES) return finish("error", lastCheck, `queue read failed for turn ${opts.queuedId}: ${cmd.reason}`);
+        await wait(Math.min(POLL_MS, remaining()), life.signal);
+        continue;
+      }
+      unreadable = 0;
+      if (cmd.runtimeTurnId && (!turnFromDaemon || turnId !== cmd.runtimeTurnId)) { turnId = cmd.runtimeTurnId; turnFromDaemon = true; }
+      if (COMMAND_TERMINAL.has(cmd.state)) {
+        const ck = lastCheck ?? await checkState(id, { signal: life.signal });
+        if (cmd.state === "completed") return finish("answered", ck);
+        if (cmd.state === "failed") return finish("error", ck, `turn ${opts.queuedId} failed: ${cmd.terminalReason ?? "no reason recorded"}`);
+        return finish("error", ck, `turn ${opts.queuedId} ${cmd.state}${cmd.terminalReason ? ` (${cmd.terminalReason})` : ""} — it did not run to completion`);
+      }
     }
     const ck = await checkState(id, { signal: life.signal });
     if (timedOut()) return finish("timeout", lastCheck);
@@ -1204,6 +1255,12 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
     if (ck.state === "error") return finish("error", ck, `check failed: ${ck.reason}`);
     if (ck.state === "ended") return finish("gone", ck, ck.reason);
     if (ck.state === "needs_input") return finish("needs_input", ck);
+    if (opts.queuedId) {
+      // Only the command's own terminal state ends a durable wait: an idle
+      // session with the command still queued / running is not an answer.
+      await wait(Math.min(POLL_MS, remaining()), life.signal);
+      continue;
+    }
     if (ck.state === "busy") { sawActivity = true; await wait(Math.min(POLL_MS, remaining()), life.signal); continue; }
     // idle — but a harness that flips busy asynchronously may not have started
     // yet: give it a short grace unless we already saw the turn happen.
@@ -1368,7 +1425,7 @@ export async function cmdAsk(rest: string[]): Promise<number> {
   if (!rec) return life.expired() ? OUTCOME_EXIT.timeout : 1;
   const sent = await sendTo(rec, text, { exclusive: noQueue, from: senderIdentity(), signal: life.signal });
   if (!sent.ok) return sent.code;
-  const out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, text, timeoutMs: life.remaining() });
+  const out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, timeoutMs: life.remaining() });
   if (json) {
     console.log(JSON.stringify({ session: rec.id, state: out.state, text: out.text, turn: sent.queuedId,
       question: out.check?.question ?? null, options: out.check?.options ?? null, approval: out.check?.approvals?.[0] ?? null,
@@ -1420,7 +1477,7 @@ async function cmdRun(rest: string[]): Promise<number> {
     const sent = await sendTo(rec, prompt, { from: senderIdentity(), replyTo: null, signal: life.signal });
     if (!sent.ok) code = sent.code;
     else {
-      out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, text: prompt, timeoutMs: life.remaining() });
+      out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, timeoutMs: life.remaining() });
       code = OUTCOME_EXIT[out.state];
       if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`);
       else if (out.state === "error" || out.state === "gone") console.error(`${bad} ${out.reason ?? out.state} (session ${rec.id})`);

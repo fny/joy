@@ -33,6 +33,7 @@ const HTTP_SHAPED: Record<string, (op: MachineOp) => HttpResponses> = {
   kill: (op) => ({ "200": success(op), "404": err("session_not_found"), "409": err("status_mismatch — ifStatus did not match the live status") }),
   send: (op) => ({ "200": success(op), "400": err("empty"), "404": err("session_not_found"), "409": err("busy | mode_not_scriptable"), "503": err("not_durable") }),
   queueList: (op) => ({ "200": success(op), "404": err("session_not_found") }),
+  queueGet: (op) => ({ "200": success(op), "404": err("session_not_found | command_not_found") }),
   queueAdd: (op) => ({ "200": success(op), "400": err("empty"), "404": err("session_not_found"), "503": err("not_durable") }),
   sendKeys: (op) => ({ "200": success(op), "400": err("empty"), "404": err("session_not_found") }),
   setMode: (op) => ({ "200": success(op), "404": err("session_not_found") }),

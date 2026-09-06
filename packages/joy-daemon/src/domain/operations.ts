@@ -1016,6 +1016,39 @@ export const machineOps: MachineOp[] = [
       (result as { error?: string }).error ? { status: 404, body: result } : { status: 200, body: result },
   },
   {
+    name: "queueGet",
+    scope: "machine",
+    rpcName: "joy-queue-get",
+    summary: "One command by id — durable state, terminal reason and the runtime turn attributed to it (what joy ask / wait --turn bind on)",
+    params: { type: "object", required: ["id", "qid"], properties: { id: { type: "string" }, qid: { type: "string", description: "the queued_id a send returned" } } },
+    result: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" }, id: { type: "string" }, text: { type: "string" }, createdAt: { type: "number" },
+        state: { type: "string", enum: ["queued", "submitting", "accepted", "unknown", "running", "cancelling", "completed", "failed", "cancelled", "interrupted"] },
+        terminalReason: { type: "string", description: "why a terminal state was reached (delivered | rejected | cancelled | idle_without_terminal | …); null while non-terminal" },
+        runtimeTurnId: { type: "string", description: "the runtime turn this command's attempt runs as — the `turn` its /events records carry; null until the runtime names one, or for adapters that never do (claude)" },
+        attempts: { type: "number" }, error: { type: "string" },
+      },
+    },
+    http: { method: "GET", path: "/sessions/:id/queue/:qid" },
+    // Terminal rows are pruned on the ledger's retention: an id older than
+    // that is command_not_found, which the CLI reports rather than treating
+    // as done (#498). Session-scoped: another session's id is not found here.
+    handler: (registry, params) => {
+      const session = registry.get(String(params.id ?? params.session_id ?? ""));
+      if (!session) return { error: "session_not_found" };
+      const c = queueFor(session).command(String(params.qid ?? params.queue_id ?? ""));
+      if (!c) return { error: "command_not_found" };
+      return { ok: true, ...c };
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found" || r.error === "command_not_found") return { status: 404, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
     name: "queueAdd",
     scope: "machine",
     rpcName: "joy-queue-add",

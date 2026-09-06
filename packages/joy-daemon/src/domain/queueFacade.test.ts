@@ -87,3 +87,24 @@ test("every facade lookup / mutation refuses a command id owned by another sessi
   expect(qb.reorder(bq.id, 0)).toBe(true);
   expect(qb.itemState(bq.id)).toBe("pending");
 });
+
+test("command(id): the durable row with its terminal reason and the runtime turn its attempt bound (#498); another session's id is null", async () => {
+  session("a"); session("b");
+  const qa = queueFor({ id: "a" }, coord);
+  const qb = queueFor({ id: "b" }, coord);
+  const head = qa.accept("a-head");     // submitting: the driver never answers
+  const queued = qa.accept("a-queued");
+  await settle();
+  expect(qa.command(head.id)).toMatchObject({ id: head.id, text: "a-head", state: "submitting", terminalReason: null, runtimeTurnId: null, attempts: 1 });
+  expect(qa.command(queued.id)).toMatchObject({ state: "queued", attempts: 0 });
+  expect(qb.command(head.id)).toBeNull();
+  expect(qa.command("nope")).toBeNull();
+  // the runtime names the turn on the attempt: the facade reports it
+  const attempt = ledger.latestAttempt(head.id)!;
+  ledger.setAttemptTurn(attempt.id, "T-runtime");
+  expect(qa.command(head.id)?.runtimeTurnId).toBe("T-runtime");
+  // a terminal row keeps its reason
+  expect(qa.cancel(queued.id)).toBe(true);
+  await settle();
+  expect(qa.command(queued.id)).toMatchObject({ state: "cancelled", terminalReason: "cancelled" });
+});
