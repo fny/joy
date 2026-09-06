@@ -1,5 +1,5 @@
 import { ValueSync } from '@/utils/sync';
-import { isLatest, nextGen, useLatestKey } from '@/utils/latest';
+import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
 import * as React from 'react';
 
 interface SuggestionOptions {
@@ -8,13 +8,79 @@ interface SuggestionOptions {
     wrapAround?: boolean;      // If true, wrap around when reaching top/bottom
 }
 
+export type Suggestion = { key: string, text: string, component: React.ElementType };
+export type SuggestionState = { suggestions: Suggestion[]; selected: number };
+
+/** The (suggestions, selected) state after a request for `suggestions` lands. */
+export function reduceSuggestions(
+    prev: SuggestionState,
+    suggestions: Suggestion[],
+    { clampSelection, autoSelectFirst }: { clampSelection: boolean; autoSelectFirst: boolean },
+): SuggestionState {
+    if (clampSelection) {
+        // Simply clamp the selection to valid range
+        let newSelected = prev.selected;
+
+        if (suggestions.length === 0) {
+            newSelected = -1;
+        } else if (autoSelectFirst && prev.suggestions.length === 0) {
+            // First time showing suggestions, auto-select first
+            newSelected = 0;
+        } else if (prev.selected >= suggestions.length) {
+            // Selection is out of bounds, clamp to last item
+            newSelected = suggestions.length - 1;
+        } else if (prev.selected < 0 && suggestions.length > 0 && autoSelectFirst) {
+            // No selection but we have suggestions
+            newSelected = 0;
+        }
+
+        return { suggestions, selected: newSelected };
+    }
+
+    // Try to preserve selection by key (old behavior)
+    if (prev.selected >= 0 && prev.selected < prev.suggestions.length) {
+        const previousKey = prev.suggestions[prev.selected].key;
+        const newIndex = suggestions.findIndex(s => s.key === previousKey);
+        if (newIndex !== -1) {
+            // Found the same key, keep it selected
+            return { suggestions, selected: newIndex };
+        }
+    }
+
+    // Key not found or no previous selection, clamp the selection
+    const clampedSelection = Math.min(prev.selected, suggestions.length - 1);
+    return {
+        suggestions,
+        selected: clampedSelection < 0 && suggestions.length > 0 && autoSelectFirst ? 0 : clampedSelection,
+    };
+}
+
+/**
+ * The request worker for one handler. Each run is a generation on
+ * `requestKey` across every worker the hook instance has owned, so a
+ * superseded handler's late result (an @a request finishing after @b's) is
+ * dropped instead of replacing the current suggestions (#249). `commit` only
+ * ever sees the newest request's result.
+ */
+export function createSuggestionSync(
+    requestKey: string,
+    handler: (query: string) => Promise<Suggestion[]>,
+    commit: (suggestions: Suggestion[]) => void,
+): ValueSync<string | null> {
+    return new ValueSync<string | null>(async (query) => {
+        if (!query) {
+            return;
+        }
+        const gen = nextGen(requestKey);
+        const suggestions = await handler(query);
+        if (!isLatest(requestKey, gen)) return;
+        commit(suggestions);
+    });
+}
+
 export function useActiveSuggestions(
     query: string | null, 
-    handler: (query: string) => Promise<{
-        key: string,
-        text: string,
-        component: React.ElementType
-    }[]>,
+    handler: (query: string) => Promise<Suggestion[]>,
     options: SuggestionOptions = {}
 ) {
     const { 
@@ -24,10 +90,7 @@ export function useActiveSuggestions(
     } = options;
 
     // State for suggestions
-    const [state, setState] = React.useState<{
-        suggestions: { key: string, text: string, component: React.ElementType }[];
-        selected: number,
-    }>({
+    const [state, setState] = React.useState<SuggestionState>({
         suggestions: [],
         selected: -1
     });
@@ -70,64 +133,32 @@ export function useActiveSuggestions(
         });
     }, [wrapAround]);
 
-    // Sync query to suggestions. Each request is a generation across every
-    // ValueSync this hook instance has owned: a superseded handler's late
-    // result (an @a request finishing after @b's) is dropped instead of
-    // replacing the current suggestions (#249). The previous ValueSync is
-    // stopped when the handler changes and on unmount.
+    // Sync query to suggestions. The worker lives in an effect, not a memo:
+    // React's effect replay (StrictMode, Fast Refresh) runs the cleanup and
+    // then the setup again on the SAME instance, so a memoized ValueSync
+    // stopped by that cleanup stayed stopped for the life of the hook and
+    // every later query was silently ignored (#249). Now the cleanup stops
+    // the worker and the setup builds a fresh one.
     const requestKey = useLatestKey('suggestions');
-    const sync = React.useMemo(() => {
-        return new ValueSync<string | null>(async (query) => {
-            if (!query) {
-                return;
-            }
-            const gen = nextGen(requestKey);
-            const suggestions = await handler(query);
-            if (!isLatest(requestKey, gen)) return;
-            setState((prev) => {
-                if (clampSelection) {
-                    // Simply clamp the selection to valid range
-                    let newSelected = prev.selected;
-                    
-                    if (suggestions.length === 0) {
-                        newSelected = -1;
-                    } else if (autoSelectFirst && prev.suggestions.length === 0) {
-                        // First time showing suggestions, auto-select first
-                        newSelected = 0;
-                    } else if (prev.selected >= suggestions.length) {
-                        // Selection is out of bounds, clamp to last item
-                        newSelected = suggestions.length - 1;
-                    } else if (prev.selected < 0 && suggestions.length > 0 && autoSelectFirst) {
-                        // No selection but we have suggestions
-                        newSelected = 0;
-                    }
-                    
-                    return { suggestions, selected: newSelected };
-                } else {
-                    // Try to preserve selection by key (old behavior)
-                    if (prev.selected >= 0 && prev.selected < prev.suggestions.length) {
-                        const previousKey = prev.suggestions[prev.selected].key;
-                        const newIndex = suggestions.findIndex(s => s.key === previousKey);
-                        if (newIndex !== -1) {
-                            // Found the same key, keep it selected
-                            return { suggestions, selected: newIndex };
-                        }
-                    }
-
-                    // Key not found or no previous selection, clamp the selection
-                    const clampedSelection = Math.min(prev.selected, suggestions.length - 1);
-                    return {
-                        suggestions,
-                        selected: clampedSelection < 0 && suggestions.length > 0 && autoSelectFirst ? 0 : clampedSelection
-                    };
-                }
-            });
-        });
-    }, [clampSelection, autoSelectFirst, handler, requestKey]);
-    React.useEffect(() => () => sync.stop(), [sync]);
+    const syncRef = React.useRef<ValueSync<string | null> | null>(null);
     React.useEffect(() => {
-        sync.setValue(query);
-    }, [query, sync]);
+        const sync = createSuggestionSync(requestKey, handler, (suggestions) => {
+            setState((prev) => reduceSuggestions(prev, suggestions, { clampSelection, autoSelectFirst }));
+        });
+        syncRef.current = sync;
+        return () => {
+            sync.stop();
+            retire(requestKey); // whatever this worker still has in flight must not land
+            if (syncRef.current === sync) syncRef.current = null;
+        };
+    }, [clampSelection, autoSelectFirst, handler, requestKey]);
+    React.useEffect(() => {
+        // Ownership moves the moment the query or handler changes, not when
+        // the serialized worker eventually runs the new value: an older
+        // request still awaiting its handler is superseded right here.
+        retire(requestKey);
+        syncRef.current?.setValue(query);
+    }, [query, clampSelection, autoSelectFirst, handler, requestKey]);
 
     // If no query return empty suggestions
     if (!query) {

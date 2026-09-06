@@ -19,7 +19,8 @@ import { t } from '@/text';
 import { layout } from '@/components/layout';
 import { useActiveInterval } from '@/hooks/useActiveInterval';
 import { currentGen, isLatest, nextGen, useLatestKey } from '@/utils/latest';
-import { logError } from '@/utils/guardAsync';
+import { guarded, logError, alertError, type ErrorReporter } from '@/utils/guardAsync';
+import { noteForegroundFileWrite } from '@/hooks/usePrefetchFileContents';
 
 interface FileViewPanelProps {
     sessionId: string;
@@ -172,10 +173,17 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         setShowConflictDiff(false);
         setIsSaving(false); // a save still in flight belongs to the previous file
 
+        // A read that throws (tunnel down, decode failure) shows as an error
+        // in the panel instead of a spinner that never clears.
+        const showReadFailure: ErrorReporter = (e) => {
+            logError(e);
+            if (!stale()) setFileState({ kind: 'error', message: t('files.failedToRead') });
+        };
+
         setImageBase64(null);
         if (isBinaryExtension(filePath)) {
             if (isRasterImagePath(filePath)) {
-                void (async () => {
+                guarded(async () => {
                     const res = await sessionReadFile(sessionId, filePath);
                     if (stale()) return;
                     if (res.success && res.content) {
@@ -184,14 +192,14 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                     } else {
                         setFileState({ kind: 'error', message: res.error || t('files.failedToRead') });
                     }
-                })();
+                }, showReadFailure)();
                 return () => { cancelled = true; };
             }
             setFileState({ kind: 'binary' });
             return;
         }
 
-        void (async () => {
+        guarded(async () => {
             try {
                 const fileResponse = await sessionReadFile(sessionId, filePath);
 
@@ -231,7 +239,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                     setFileState({ kind: 'error', message: t('files.failedToRead') });
                 }
             }
-        })();
+        }, showReadFailure)();
 
         return () => { cancelled = true; };
     }, [sessionId, filePath, fileKey]);
@@ -267,11 +275,15 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         setExternalChange(null);
         setShowConflictDiff(false);
         const gen = nextGen(fileKey);
-        void (async () => {
+        guarded(async () => {
             const hash = await computeSHA256(reloaded);
             if (!isLatest(fileKey, gen)) return;
             setFileState({ kind: 'loaded', content: reloaded, originalHash: hash });
             setEditContent(reloaded);
+        }, (e) => {
+            // The warning bar comes back so the reload can be retried.
+            if (isLatest(fileKey, gen)) setExternalChange(reloaded);
+            alertError()(e);
         })();
     }, [externalChange, fileKey]);
 
@@ -287,6 +299,10 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         if (fileState.kind !== 'loaded' || !hasChanges) return;
         setIsSaving(true);
         const gen = nextGen(fileKey);
+        // A prefetch of this file that began before the save must not land
+        // its pre-save read over the saved content (#325): once when the
+        // write starts, once when it has landed on disk.
+        noteForegroundFileWrite(sessionId, filePath);
 
         try {
             const base64 = encodeStringToBase64(editContent);
@@ -297,6 +313,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                 fileState.originalHash,
                 'base64',
             );
+            noteForegroundFileWrite(sessionId, filePath);
             if (!isLatest(fileKey, gen)) return; // another file is on screen now
 
             if (!response.success) {
@@ -333,6 +350,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         if (fileState.kind !== 'loaded') return;
         setIsSaving(true);
         const gen = nextGen(fileKey);
+        noteForegroundFileWrite(sessionId, filePath); // see handleSave (#325)
 
         try {
             // Re-read to get current hash, then write
@@ -342,6 +360,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
 
             const base64 = encodeStringToBase64(editContent);
             const response = await sessionWriteFile(sessionId, filePath, base64, currentHash, 'base64');
+            noteForegroundFileWrite(sessionId, filePath);
             if (!isLatest(fileKey, gen)) return;
 
             if (!response.success) {

@@ -13,7 +13,7 @@ import * as React from 'react';
 import {sessionReadFile, sessionGitDiff } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
-import { isLatest, nextGen } from '@/utils/latest';
+import { currentGen, isLatest, nextGen, retire } from '@/utils/latest';
 import type { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
 
 const BINARY_EXTENSIONS = new Set([
@@ -42,15 +42,62 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
 }
 
 /**
+ * Per-path write coordination between prefetch and the foreground (#325).
+ *
+ * The file cache has two kinds of writer: this prefetch and the file screen's
+ * reads and saves. Prefetch is the slow, best-effort one, so its commit is
+ * conditional: when a file's prefetch begins it snapshots the path's write
+ * generation and its cache entry, and it writes only if neither moved while
+ * it waited. A foreground read that lands through applyFileCache is seen via
+ * the entry snapshot; a save changes the file on disk without touching the
+ * cache, so the save path calls `noteForegroundFileWrite` instead. Either
+ * way an older prefetch can no longer land over what the user just did.
+ */
+export function fileCacheWriteKey(sessionId: string, filePath: string): string {
+    return `file-cache:${sessionId}:${filePath}`;
+}
+
+/** A foreground read or save of `filePath` happened: every prefetch of it that began earlier must not commit. */
+export function noteForegroundFileWrite(sessionId: string, filePath: string): void {
+    retire(fileCacheWriteKey(sessionId, filePath));
+}
+
+/**
+ * Snapshot the path's write state now; the returned gate answers "may a
+ * prefetch that began at the snapshot still write?". `readEntry` defaults to
+ * the Zustand cache entry (applyFileCache replaces the entry object on every
+ * write, so identity is the change signal).
+ */
+export function prefetchCommitGate(
+    sessionId: string,
+    filePath: string,
+    readEntry: () => unknown = () => storage.getState().sessionFileCache[sessionId]?.[filePath],
+): () => boolean {
+    const key = fileCacheWriteKey(sessionId, filePath);
+    // currentGen, not isLatest: a path nobody has written yet has no
+    // generation at all, and that must read as "unchanged", not "stale".
+    const gen = currentGen(key);
+    const entryBefore = readEntry();
+    return () => currentGen(key) === gen && readEntry() === entryBefore;
+}
+
+/**
  * Prefetch a single file's content + diff into the Zustand cache.
  * Silently swallows errors — prefetch is best-effort. `isCurrent` is checked
  * before every cache write: a prefetch cancelled by a newer file list must not
- * land an older version over the replacement's read (#325).
+ * land an older version over the replacement's read (#325). So is the per-path
+ * commit gate: a foreground read or save of this file since the prefetch began
+ * wins over whatever the prefetch read.
  */
 async function prefetchFile(sessionId: string, sessionPath: string, file: GitFileStatus, isCurrent: () => boolean): Promise<void> {
     const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
     const filePath = resolved?.absolutePath ?? file.fullPath;
     const gitDiffPath = resolved?.withinSessionRoot ? resolved.relativePath : null;
+    const mayCommit = prefetchCommitGate(sessionId, filePath);
+    const commit = (content: string, diff: string | null, isBinary: boolean) => {
+        if (!isCurrent() || !mayCommit()) return;
+        storage.getState().applyFileCache(sessionId, filePath, content, diff, isBinary);
+    };
 
     let diff: string | null = null;
 
@@ -77,7 +124,7 @@ async function prefetchFile(sessionId: string, sessionPath: string, file: GitFil
                 rawBytes = decodeBase64ToBytes(response.content);
                 decodedContent = new TextDecoder().decode(rawBytes);
             } catch {
-                storage.getState().applyFileCache(sessionId, filePath, '', diff, true);
+                commit('', diff, true);
                 return;
             }
 
@@ -88,13 +135,7 @@ async function prefetchFile(sessionId: string, sessionPath: string, file: GitFil
             }).length;
             const isBinary = hasNullBytes || (nonPrintableCount / decodedContent.length > 0.1);
 
-            storage.getState().applyFileCache(
-                sessionId,
-                filePath,
-                isBinary ? '' : decodedContent,
-                diff,
-                isBinary,
-            );
+            commit(isBinary ? '' : decodedContent, diff, isBinary);
         }
     } catch {
         // Best-effort
