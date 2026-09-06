@@ -239,3 +239,28 @@ test("#519: a live answer buffered while thread/read was pending re-uses the ide
   s.end("killed");
 });
 
+test("#131: a prompt typed in the attached TUI is mirrored BEFORE the turn bracket; a joy-sent prompt's echo opens the bracket", async () => {
+  const { relay, sent } = fakeRelay();
+  const { s, client } = await started("rec-131", { relay });
+  // Codex's order for a TUI prompt: turn/started, THEN the userMessage item.
+  client.notify({ method: "turn/started", params: { threadId: "TH", turn: { id: "T-tui" } } });
+  client.notify({ method: "thread/status/changed", params: { threadId: "TH", status: { type: "active" } } });
+  client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-tui", item: { type: "userMessage", id: "msg_1" } } });
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-tui", item: { type: "userMessage", id: "msg_1", text: "typed here" } } });
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-tui", item: { type: "agentMessage", id: "msg_2", text: "reply" } } });
+  client.notify({ method: "turn/completed", params: { threadId: "TH", turn: { id: "T-tui", status: "completed" } } });
+  expect(sent.map((x) => x.t)).toEqual(["user", "turn-start", "text", "turn-end"]);
+  expect(sent[0]).toMatchObject({ text: "typed here", localId: "turn:T-tui:item:userMessage:0:user" });
+  expect(sent[1].localId).toBe("codex:TH:turn:T-tui:start");
+  sent.length = 0;
+
+  // A joy-sent prompt: the mirror row is already in the card; its echo opens the bracket.
+  const c = queueFor(s).accept("from joy");
+  await vi.waitFor(() => expect(H.turnStarts).toHaveLength(1));
+  echo(client, c.id, "T1", "answer");
+  expect(sent.map((x) => x.t)).toEqual(["user", "turn-start", "text", "turn-end"]);
+  expect(sent[0]).toMatchObject({ text: "from joy", localId: `codex:in:rec-131:${c.id}` });
+  await settle(10);
+  expect(ledger().getCommand(c.id)?.state).toBe("completed");
+  s.end("killed");
+});
