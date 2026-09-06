@@ -374,9 +374,15 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   `{ hello, seq }` line followed by one NDJSON line per record.
 - CLI turn wait (`joy ask` / `wait` / `run`, `waitTurn` in `cli.ts`): polls
   `/sessions/:id/queue` until the turn id has left the queue, then `/check`
-  until an explicit `idle` / `needs_input`; every request carries the
-  remaining `--timeout` as its abort signal and the deadline is re-checked
-  after each (#501). `/check` 404 → `gone` (exit 1); any other non-2xx or an
+  until an explicit `idle` / `needs_input`. ONE deadline covers the whole
+  command (#501): `ask`/`run`/`wait` create a `lifetime(--timeout)` before
+  their first request, and session resolution, the seq probe, the send
+  (`run`: the create too), every poll, the 300/400 ms sleeps, the 150 ms
+  finish grace, the record stream and the final catch-up all run under its
+  signal / remaining time; a timed-out wait starts NO catch-up. A pre-wait
+  probe that hits the deadline exits 4 (a stalled `POST /send` says the
+  message may or may not have been queued). `run`'s teardown runs on its own
+  10 s clock so a spent lifetime still cleans up. `/check` 404 → `gone` (exit 1); any other non-2xx or an
   unknown `state` → `error` (exit 1, `reason`) — never `answered` (#496). The
   `/sessions/:id/events?follow=1` stream is resumed from the last consumed
   `seq` when it breaks; at the end a tail that cannot be fetched turns an
