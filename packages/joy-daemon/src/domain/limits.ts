@@ -16,7 +16,7 @@
 //     windows: used_percent + window_minutes + resets_in_seconds/resets_at);
 //     exactly what the /status TUI renders. Read locally, no API call.
 
-import { readFileSync, readdirSync, existsSync, statSync } from "fs";
+import { readFileSync, readdirSync, existsSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join } from "path";
 import { homedir, platform } from "os";
 import { execSync } from "child_process";
@@ -166,16 +166,17 @@ export interface CodexLimits {
   observedAt?: string;
 }
 
-/** Every rollout file under sessions/, with its mtime — the ONE index the
- *  reader ranks by. The previous walk enumerated the newest-CREATED day
- *  directories (60 files / 7 days) and only then sorted by mtime, so a
- *  long-running session from an older day — the one actually recording fresh
- *  quota — fell off the candidate list after a week of newer sessions;
- *  raising the cutoff only postponed the same defect (#543). A file's mtime
- *  says nothing about its creation directory, so the index must cover the
- *  whole store: a few thousand readdir/stat calls, milliseconds. */
-function indexRollouts(root: string): Array<{ file: string; mtime: number }> {
-  const out: Array<{ file: string; mtime: number }> = [];
+/** Every rollout file under sessions/, with its mtime and size — the ONE
+ *  listing the reader ranks by. The previous walk enumerated the newest-
+ *  CREATED day directories (60 files / 7 days) and only then sorted by
+ *  mtime, so a long-running session from an older day — the one actually
+ *  recording fresh quota — fell off the candidate list after a week of newer
+ *  sessions; raising the cutoff only postponed the same defect (#543). A
+ *  file's mtime says nothing about its creation directory, so the listing
+ *  must cover the whole store: a few thousand readdir/stat calls,
+ *  milliseconds — and no file CONTENT is read here. */
+function listRollouts(root: string): Array<{ file: string; mtime: number; size: number }> {
+  const out: Array<{ file: string; mtime: number; size: number }> = [];
   const list = (dir: string) => { try { return readdirSync(dir, { withFileTypes: true }); } catch { return []; } };
   for (const y of list(root)) {
     if (!y.isDirectory()) continue;
@@ -187,7 +188,7 @@ function indexRollouts(root: string): Array<{ file: string; mtime: number }> {
         for (const f of list(dayDir)) {
           if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
           const file = join(dayDir, f.name);
-          try { out.push({ file, mtime: statSync(file).mtimeMs }); } catch { /* vanished mid-walk */ }
+          try { const st = statSync(file); out.push({ file, mtime: st.mtimeMs, size: st.size }); } catch { /* vanished mid-walk */ }
         }
       }
     }
@@ -195,50 +196,140 @@ function indexRollouts(root: string): Array<{ file: string; mtime: number }> {
   return out;
 }
 
-/** The last rate_limits event in one rollout, or null. */
-function lastRateLimitEvent(file: string): { limits: CodexLimits; at: number } | null {
-  let text: string;
-  try { text = readFileSync(file, "utf-8"); } catch { return null; }
-  const lines = text.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!lines[i].includes('"rate_limits"')) continue;
-    try {
-      const e = JSON.parse(lines[i]);
-      const rl = e?.payload?.rate_limits ?? e?.rate_limits;
-      if (rl && typeof rl === "object") {
-        const ts = typeof e?.timestamp === "string" ? Date.parse(e.timestamp) : NaN;
-        return {
-          limits: { primary: rl.primary, secondary: rl.secondary, observedAt: e?.timestamp },
-          // No usable timestamp → the file's mtime is the best bound on when it was written.
-          at: Number.isFinite(ts) ? ts : (() => { try { return statSync(file).mtimeMs; } catch { return 0; } })(),
-        };
-      }
-    } catch { /* keep scanning */ }
-  }
-  return null;
+type CodexObservation = { limits: CodexLimits; at: number };
+
+/** Parse one rollout line as a rate_limits event, or null. */
+function rateLimitEvent(line: string, mtime: number): CodexObservation | null {
+  if (!line.includes('"rate_limits"')) return null;
+  try {
+    const e = JSON.parse(line);
+    const rl = e?.payload?.rate_limits ?? e?.rate_limits;
+    if (!rl || typeof rl !== "object") return null;
+    const ts = typeof e?.timestamp === "string" ? Date.parse(e.timestamp) : NaN;
+    return {
+      limits: { primary: rl.primary, secondary: rl.secondary, observedAt: e?.timestamp },
+      // No usable timestamp → the file's mtime is the best bound on when it was written.
+      at: Number.isFinite(ts) ? ts : mtime,
+    };
+  } catch { return null; }
 }
 
-/** How many recently-MODIFIED rollouts to read. The newest observation must
- *  live in one of the most recently written files (a file's mtime is never
- *  older than its last event), so this only needs to cover the number of
- *  codex sessions plausibly writing at once. */
-const CODEX_READ_MAX = 8;
+/** Bytes read per step of the backward scan, and the most a single refresh
+ *  reads from one file. Codex writes a rate_limits event with every
+ *  token_count, so the newest one sits within the last few KiB of a live
+ *  rollout; the cap keeps a pathological file from being read whole. */
+const TAIL_CHUNK = 256 * 1024;
+const TAIL_MAX = 4 * 1024 * 1024;
+const NL = 0x0a;
+
+/** The LAST rate_limits event in `file` between byte offsets `from` and
+ *  `size`, found by reading the region backward in chunks, plus how far the
+ *  complete lines reach (`scannedTo`): a trailing partial line — codex mid-
+ *  append — is not consumed, so the next refresh re-reads it whole. */
+function scanTail(file: string, from: number, size: number, mtime: number): { obs: CodexObservation | null; scannedTo: number } {
+  let fd: number;
+  try { fd = openSync(file, "r"); } catch { return { obs: null, scannedTo: from }; }
+  try {
+    let pos = size;
+    let carry = Buffer.alloc(0);       // the partial line straddling the chunk boundary
+    let scannedTo = from;
+    let read = 0;
+    let first = true;
+    while (pos > from && read < TAIL_MAX) {
+      const chunkStart = Math.max(from, pos - TAIL_CHUNK);
+      const chunk = Buffer.alloc(pos - chunkStart);
+      let n: number;
+      try { n = readSync(fd, chunk, 0, chunk.length, chunkStart); } catch { return { obs: null, scannedTo: from }; }
+      read += n;
+      let buf = Buffer.concat([chunk.subarray(0, n), carry]);
+      if (first) {
+        first = false;
+        const lastNl = buf.lastIndexOf(NL);
+        if (lastNl < 0) { carry = buf; pos = chunkStart; continue; }
+        scannedTo = chunkStart + lastNl + 1;
+        buf = buf.subarray(0, lastNl + 1);
+      }
+      let lineStart = 0;
+      if (chunkStart > from) {
+        const nl = buf.indexOf(NL);
+        if (nl < 0) { carry = buf; pos = chunkStart; continue; }
+        carry = buf.subarray(0, nl);
+        lineStart = nl + 1;
+      } else {
+        carry = Buffer.alloc(0);
+      }
+      const text = buf.subarray(lineStart).toString("utf8");
+      const lines = text.split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const obs = rateLimitEvent(lines[i], mtime);
+        if (obs) return { obs, scannedTo };
+      }
+      pos = chunkStart;
+    }
+    return { obs: null, scannedTo };
+  } finally {
+    try { closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
+/** Per-file observation index: what the file last reported and how much of
+ *  it has been read, keyed by path and refreshed when mtime/size move. A
+ *  request only READS files whose mtime says they changed — and, of those,
+ *  only the bytes appended since the last read (rollouts are append-only) —
+ *  so the historical store is never re-read per request. Evicted when the
+ *  file disappears from the listing. */
+interface CodexIndexEntry { mtime: number; size: number; scannedTo: number; obs: CodexObservation | null }
+
+/** A filesystem with coarse timestamps (HFS+ 1 s, FAT 2 s) can report an
+ *  mtime slightly BEFORE the event that produced it; the stop rule allows
+ *  this much so such a file is still read. Costs at most a few extra reads
+ *  of files written within the same seconds as the best observation — the
+ *  ones worth reading anyway, and cached by the index. */
+const MTIME_SLACK_MS = 2000;
+const codexIndex = new Map<string, CodexIndexEntry>();
+
+function refreshIndex(f: { file: string; mtime: number; size: number }): CodexIndexEntry {
+  const prev = codexIndex.get(f.file);
+  if (prev && prev.mtime === f.mtime && prev.size === f.size) return prev;
+  // Grown in place → only the appended bytes can hold a newer event; the
+  // previous observation stands unless one of them beats it. Shrunk or
+  // rewritten → start over from the tail.
+  const appended = prev && f.size >= prev.size ? prev.scannedTo : 0;
+  const { obs, scannedTo } = scanTail(f.file, appended, f.size, f.mtime);
+  const entry: CodexIndexEntry = {
+    mtime: f.mtime,
+    size: f.size,
+    scannedTo,
+    obs: obs ?? (prev && f.size >= prev.size ? prev.obs : null),
+  };
+  codexIndex.set(f.file, entry);
+  return entry;
+}
 
 /** Default root honours $CODEX_HOME — the store the running codex writes (#546).
- *  Picks the newest OBSERVATION across the most recently MODIFIED rollouts
- *  in the whole store, not the first event in the newest-created file: a
- *  long-running session from an earlier day keeps recording fresh quota
- *  while a session created today may have gone quiet hours ago, and the old
- *  walk returned the stale figure — or, past a few newer files (or days),
- *  never looked at the live rollout at all (#543). */
+ *  Picks the newest OBSERVATION in the whole store, not the first event in
+ *  the newest-created file: a long-running session from an earlier day keeps
+ *  recording fresh quota while a session created today may have gone quiet
+ *  hours ago, and the old walk returned the stale figure — or, past a few
+ *  newer files (or days), never looked at the live rollout at all (#543).
+ *
+ *  Files are visited in descending mtime order and the scan stops as soon as
+ *  the remaining files cannot beat the best observation seen: a file's mtime
+ *  is never older than its last event, so once every unvisited file was
+ *  modified at or before the best observation's timestamp, none of them can
+ *  hold a newer one. A fixed candidate count could not establish that — eight
+ *  rollouts receiving ordinary message appends after the live session's last
+ *  quota event pushed it off the list (#543 residual). */
 export function readCodexLimits(root = codexSessionsDir()): { ok: true; limits: CodexLimits } | { ok: false; error: string } {
   if (!existsSync(root)) return { ok: false, error: `no ${root} on this machine` };
-  const candidates = indexRollouts(root)
-    .sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0))
-    .slice(0, CODEX_READ_MAX);
-  let best: { limits: CodexLimits; at: number } | null = null;
-  for (const { file } of candidates) {
-    const obs = lastRateLimitEvent(file);
+  const files = listRollouts(root)
+    .sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
+  const live = new Set(files.map((f) => f.file));
+  for (const path of codexIndex.keys()) if (!live.has(path)) codexIndex.delete(path);
+  let best: CodexObservation | null = null;
+  for (const f of files) {
+    if (best && f.mtime + MTIME_SLACK_MS <= best.at) break;
+    const { obs } = refreshIndex(f);
     if (obs && (!best || obs.at > best.at)) best = obs;
   }
   return best ? { ok: true, limits: best.limits } : { ok: false, error: "no rate_limits events in recent codex sessions" };
