@@ -33,6 +33,9 @@ function makeFakeRelay() {
             if (path.endsWith("/claims/work")) { const o = workOffers; workOffers = []; return send({ offers: o }); }
             if (path.endsWith("/claims/control")) return send({ offers: [] });
             if (path === "/sessions") return send({ sessions: [] });
+            // The real relay's spawn-failed answer names its application
+            // result; a bare `{ok:true}` is no acknowledgement (#581).
+            if (path.endsWith("/spawn-failed")) { calls.push({ path, body }); return send({ ok: true, applied: true }); }
             calls.push({ path, body });
             send({ ok: true });
         });
