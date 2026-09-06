@@ -377,6 +377,39 @@ describe("a broken event stream never yields a successful partial answer (#497)"
     expect(log.out).toEqual(["part one\n\npart two"]);
     expect(ev.connections()).toBeGreaterThan(1);
   });
+
+  // #497 residual (Astra): a reconnect that says hello{seq:2} and then stalls
+  // before row 2 used to count as "connected", the catch-up was skipped, and
+  // `ask` exited 0 with part one only.
+  const stalledReopen = (stallFrom: number, stallTo: number) => eventsRoute([], {
+    onConnect: (n, res) => {
+      if (n < stallFrom || n > stallTo) return false; // the seq probe + the first follow, then whatever comes after the stall window
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      res.write(ndjson([{ hello: true, seq: 2 }])); // the reopened stream advertises seq 2 …
+      hanging.add(res); return true;                // … and never sends it
+    },
+  });
+  const reopenScenario = (ev: ReturnType<typeof eventsRoute>) => {
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => ev.push(agentText(1, "part one")), 20); });
+    setTimeout(() => { for (const r of hanging) r.destroy(); hanging.clear(); }, 80); // the first follow socket dies after part one
+    setTimeout(() => ev.push(agentText(2, "part two")), 120);                       // row 2 exists on the daemon
+    checkRoute((n) => (n < 3 ? { state: "busy" } : { state: "idle" }));
+  };
+
+  test("a reopened stream that advertises seq 2 and stalls: the catch-up cannot get it either → exit 1, incomplete", async () => {
+    sessionsRoute();
+    reopenScenario(stalledReopen(3, Infinity)); // every connection after the drop stalls after hello{seq:2}
+    expect(await cmdAsk([SID, "hello", "--no-queue", "--timeout", "8"])).toBe(1);
+    expect(log.out).toEqual(["part one"]);
+    expect(log.err.join("\n")).toMatch(/output stream lost after seq 1 — the daemon holds records through seq 2 .* the reply is incomplete/);
+  }, 15_000);
+
+  test("a reopened stream that advertises seq 2 and stalls: the final catch-up fetches row 2 → exit 0 with both parts", async () => {
+    sessionsRoute();
+    reopenScenario(stalledReopen(3, 3)); // only the reconnect stalls; the head probe and the catch-up are served
+    expect(await cmdAsk([SID, "hello", "--no-queue", "--timeout", "8"])).toBe(0);
+    expect(log.out).toEqual(["part one\n\npart two"]);
+  });
 });
 
 describe("a queued ask's reply is its own turn, not the tail of the previous one (#498)", () => {
