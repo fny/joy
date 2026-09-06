@@ -1,3 +1,14 @@
+# Sep 7 (5) — Tool cards, settings and sign-in
+
+- **Tool cards read one record.** Every card, detail screen and group summary shows the same outcome for a tool call, failed, cancelled, denied, running or done, across Claude, Codex, Gemini and pi sessions. Failures show their reason: no more "[object Object]", an ordinary tool error is no longer drawn as a cancellation, and a failed edit or patch is labelled as a proposal with the failure next to it.
+- **Nothing valid is dropped**: multi-part results keep every part including images, a zero or empty result is shown rather than treated as missing, and a result that loads before its call is attached when the call arrives. Two Task calls in one message keep their own output; a subagent's pending approval resolves everywhere it is shown; approvals are never hidden inside a collapsed patch.
+- **History stays history.** Loading older messages no longer switches the session into plan mode or clears another session's saved permission choice. Group summaries count files touched and say when something failed or awaits approval; manually expanded groups stay open.
+- **Logging out no longer hangs offline**; a login that could not be removed from the device is reported. Turning Mobile push off removes this device's token from the relay, and interrupted token replacements no longer leave the old token registered.
+- **QR login keeps waiting through a network blip**, shows one clear reason when a code was used or expired, and cannot sign you in behind the secret-key screen; manual restore no longer uppercases typed keys. Gated relays: device approvals and terminal pairing carry the relay key, and switching to a gated relay uses its saved key or asks for one.
+- **Dialogs never leave an action stuck** (Escape, programmatic dismissal, startup dialogs); only the top stacked dialog is shown and a prompt underneath keeps its draft. Command palette: no premature Enter during Japanese or Chinese input, it reopens reliably, and it gives Ctrl+K back to the browser when disabled.
+- **Machines and the daemon row go offline when they stop reporting**; environment-key failures show an error row with Retry; updates never overlap and rollback releases apply; the What's New dot clears everywhere at once.
+- **Agent Defaults stop offering Claude models to OpenCode, pi and Antigravity**; the config editor keeps unsaved edits and can retry; usage totals and machine deletion report partial failures instead of hiding them; project logs and deep links load correctly right after launch; history date headers are right across daylight-saving changes.
+
 # Sep 7 (4) — Composer, files and small fixes
 
 - **Dropping or pasting images into the web composer attaches them reliably**; an image copied together with text no longer dumps the text into the box.
