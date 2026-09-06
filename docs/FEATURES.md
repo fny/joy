@@ -78,7 +78,8 @@ every relay; machines register per account.
   of a second one (#519); the delivered-turn checkpoint never passes a turn
   whose history came back partial, so the next recovery still replays it
   (#518); a rejoined in-progress turn is the active one — busy, thinking,
-  Stop interrupts it by id (#513).
+  Stop interrupts it by id — whether or not its items came back full
+  (#513).
 - **Drafts**: composer stash button; drafts sit at the chat bottom.
 - **Slash commands** the daemon owns: `/title`, `/steer`, `/btw`,
   `/login-code`, `/joy-prompt` (re-inject current instructions — the fix for
