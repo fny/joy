@@ -46,17 +46,36 @@ describe('parseLocalCommandMessage', () => {
         });
     });
 
-    it('keeps real text but drops the wrapper tags for mixed content', () => {
+    it('passes ordinary user text through untouched', () => {
+        const text = 'just a normal message';
+        expect(parseLocalCommandMessage(text)).toEqual({ kind: 'text', text });
+    });
+});
+
+describe('parseLocalCommandMessage — mixed content keeps the command and its arguments (#271)', () => {
+    it('renders the wrappers as "/name args" in place, keeping the surrounding text', () => {
+        const text =
+            '<command-message>review is running</command-message>' +
+            '<command-name>/review</command-name>' +
+            '<command-args>Check authentication for privilege escalation.</command-args>' +
+            '\nBase commit: abc123';
+        expect(parseLocalCommandMessage(text)).toEqual({
+            kind: 'text',
+            text: '/review Check authentication for privilege escalation.\nBase commit: abc123',
+        });
+    });
+
+    it('text before the wrappers is kept, and the command line follows it', () => {
         const text =
             'Please run this:\n<command-message>x</command-message><command-name>/x</command-name><command-args>a</command-args>';
         expect(parseLocalCommandMessage(text)).toEqual({
             kind: 'text',
-            text: 'Please run this:',
+            text: 'Please run this:\n/x a',
         });
     });
 
-    it('passes ordinary user text through untouched', () => {
-        const text = 'just a normal message';
-        expect(parseLocalCommandMessage(text)).toEqual({ kind: 'text', text });
+    it('a mixed message with an argument-less command shows just the command', () => {
+        const text = '<command-name>/compact</command-name><command-args></command-args>\ntrailing note';
+        expect(parseLocalCommandMessage(text)).toEqual({ kind: 'text', text: '/compact\ntrailing note' });
     });
 });

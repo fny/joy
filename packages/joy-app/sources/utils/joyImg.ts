@@ -13,6 +13,7 @@
  */
 
 import { parseBudget } from './parseBudget';
+import { findCodeRanges, isInsideCode } from '@/components/markdown/codeRanges';
 
 export interface JoyImgSegment {
     kind: 'img';
@@ -36,12 +37,37 @@ export interface JoyMdSegment {
 
 export type JoySegment = JoyImgSegment | JoyFileSegment | JoyMdSegment;
 
-// The attribute run is `[^<>]{0,4000}` — it cannot cross into the NEXT tag,
-// so a message full of unfinished "<joy-img " fragments is scanned once
-// instead of once per fragment (the old `[^>]*?` rescanned to the end of the
-// text from every opening, quadratic). 4000 chars is far beyond any real tag.
-const TAG_RE = /<joy-(img|file)\b[^<>]{0,4000}>/gi;
+// A tag is at most this long; the attribute scan never runs past it, so a
+// message full of unfinished "<joy-img " fragments is scanned once instead
+// of once per fragment (the old `[^>]*?` rescanned to the end of the text
+// from every opening, quadratic). 4000 chars is far beyond any real tag.
+const MAX_TAG_LENGTH = 4000;
+const TAG_START_RE = /<joy-(img|file)\b/gi;
 const ATTR_RE = /([a-zA-Z-]+)\s*=\s*"([^"]*)"/g;
+
+/**
+ * Index just past the `>` that closes the tag opening at `start`, or -1 when
+ * the tag is unterminated within MAX_TAG_LENGTH. Quoted attribute values are
+ * skipped whole: a `>` inside `path="/tmp/a>b.txt"` or `alt="1 > 0"` used to
+ * end the tag early, dropping the attribute and leaking the rest of the tag
+ * into the message as text (#435). A second `<` outside quotes means this tag
+ * never closed (the next tag begins) — also unterminated.
+ */
+function findTagEnd(text: string, start: number): number {
+    const limit = Math.min(text.length, start + MAX_TAG_LENGTH);
+    let inQuote = false;
+    for (let i = start + 1; i < limit; i++) {
+        const c = text[i];
+        if (inQuote) {
+            if (c === '"') inQuote = false;
+            continue;
+        }
+        if (c === '"') inQuote = true;
+        else if (c === '>') return i + 1;
+        else if (c === '<') return -1;
+    }
+    return -1;
+}
 
 function parseAttrs(tag: string): Record<string, string> {
     const attrs: Record<string, string> = {};
@@ -59,11 +85,6 @@ function positiveInt(v: string | undefined): number | null {
 }
 
 const PREFIX_RE = /<joy-(img|file)/i;
-// An unterminated tag at the END of the text — the streaming case: the tag's
-// prefix has arrived but its closing '>' hasn't. Rendered as-is it shows raw
-// XML to the user until the next token batch (or forever, if output was
-// truncated mid-tag).
-const PARTIAL_TAIL_RE = /<joy-(img|file)\b[^<>]{0,4000}$/i;
 
 /** True when the text contains at least one joy tag (cheap pre-check). */
 export function hasJoyTags(text: string): boolean {
@@ -72,15 +93,45 @@ export function hasJoyTags(text: string): boolean {
 
 export function splitJoySegments(text: string): JoySegment[] {
     const segments: JoySegment[] = [];
+    // A tag quoted inside a fenced or inline code example is documentation,
+    // not an attachment: extracting it replaced the literal with a live image
+    // and split the fence around it (#436).
+    const codeRanges = findCodeRanges(text);
     let last = 0;
-    TAG_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
+    let searchFrom = 0;
     const budget = parseBudget();
-    while ((m = TAG_RE.exec(text))) {
+    // Unterminated tag at the END of the text — the streaming case: the tag's
+    // prefix has arrived but its closing '>' hasn't. Rendered as-is it shows
+    // raw XML to the user until the next token batch (or forever, if output
+    // was truncated mid-tag).
+    let partialTailStart = -1;
+
+    while (searchFrom < text.length) {
         if (!budget.spend()) break; // the remainder is emitted as markdown below
-        const before = text.slice(last, m.index);
+        TAG_START_RE.lastIndex = searchFrom;
+        const m = TAG_START_RE.exec(text);
+        if (!m) break;
+        const start = m.index;
+        if (isInsideCode(codeRanges, start)) {
+            searchFrom = start + m[0].length;
+            continue;
+        }
+        const end = findTagEnd(text, start);
+        if (end === -1) {
+            // No closing '>' before the next '<' or the end of the text. Only a
+            // tail that runs to the very end is the streaming case; anything
+            // else is malformed text and stays visible.
+            if (text.indexOf('<', start + 1) === -1 && text.length - start <= MAX_TAG_LENGTH) {
+                partialTailStart = start;
+                break;
+            }
+            searchFrom = start + m[0].length;
+            continue;
+        }
+        const before = text.slice(last, start);
         if (before.trim()) segments.push({ kind: 'md', text: before });
-        const attrs = parseAttrs(m[0]);
+        const tag = text.slice(start, end);
+        const attrs = parseAttrs(tag);
         if (m[1].toLowerCase() === 'img' && attrs.src) {
             segments.push({
                 kind: 'img',
@@ -98,10 +149,11 @@ export function splitJoySegments(text: string): JoySegment[] {
             });
         }
         // No src/path → tag is stripped (never render raw XML to the user).
-        last = m.index + m[0].length;
+        last = end;
+        searchFrom = end;
     }
     // Strip a trailing unterminated tag (mid-stream) so raw XML never renders.
-    const rest = text.slice(last).replace(PARTIAL_TAIL_RE, '');
+    const rest = partialTailStart === -1 ? text.slice(last) : text.slice(last, partialTailStart);
     if (rest.trim()) segments.push({ kind: 'md', text: rest });
     return segments;
 }
