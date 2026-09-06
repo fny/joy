@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseMarkdown } from './parseMarkdown';
+import { PARSE_INPUT_CAP } from '@/utils/parseBudget';
 
 const spans = (text: string) => text ? [{ styles: [], text, url: null }] : [];
 
@@ -266,5 +267,94 @@ describe('parseMarkdownBlock - unterminated options opener (#264 residual)', () 
             { type: 'options', items: ['A'] },
         ]);
         expect(parseMarkdown('<joy-options>\n<joy-option>A')).toEqual([]);
+    });
+});
+
+describe('parseMarkdownBlock - malformed options fallback (#264 residual)', () => {
+    const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 500);
+
+    it('an instruction after a complete option in an unterminated block is kept', () => {
+        expect(parseMarkdown('<joy-options><joy-option>Yes</joy-option>\nREAL INSTRUCTION')).toEqual([
+            { type: 'options', items: ['Yes'] },
+            { type: 'text', content: spans('REAL INSTRUCTION') },
+        ]);
+    });
+
+    it('an option opened on an earlier line and never closed is malformed, not in flight: the text after it is kept', () => {
+        expect(parseMarkdown('<joy-options><joy-option>\nREAL INSTRUCTION')).toEqual([
+            { type: 'text', content: spans('REAL INSTRUCTION') },
+        ]);
+    });
+
+    it('a closed block holding prose but no option keeps the prose', () => {
+        expect(parseMarkdown('<joy-options>\nREAL INSTRUCTION\n</joy-options>')).toEqual([
+            { type: 'text', content: spans('REAL INSTRUCTION') },
+        ]);
+        expect(parseMarkdown('<joy-options>Pick</joy-options> one\n- a')).toEqual([
+            { type: 'text', content: spans('Pick one') },
+            { type: 'list', items: [{ depth: 0, spans: spans('a') }] },
+        ]);
+        expect(parseMarkdown('<joy-options>\nREAL INSTRUCTION\nend </joy-options> more')).toEqual([
+            { type: 'text', content: spans('REAL INSTRUCTION') },
+            { type: 'text', content: spans('end  more') },
+        ]);
+    });
+
+    it('text after the last complete option on its line, and a stray closer, stay visible; a partial on the final line is still dropped', () => {
+        expect(parseMarkdown('<joy-options>\n<joy-option>A</joy-option> pick one\nthen this')).toEqual([
+            { type: 'options', items: ['A'] },
+            { type: 'text', content: spans('pick one') },
+            { type: 'text', content: spans('then this') },
+        ]);
+        expect(parseMarkdown('<joy-options>\n<joy-option>A</joy-option>\nmid\n<joy-option>B')).toEqual([
+            { type: 'options', items: ['A'] },
+            { type: 'text', content: spans('mid') },
+        ]);
+        expect(parseMarkdown('<joy-options><joy-option>A</joy-option><joy-option>B')).toEqual([
+            { type: 'options', items: ['A'] },
+        ]);
+        expect(parseMarkdown('<joy-options>\n<joy-option>A</joy-option>\nfoo\n</joy-option>')).toEqual([
+            { type: 'options', items: ['A'] },
+            { type: 'text', content: spans('foo') },
+        ]);
+    });
+
+    it('repeated unterminated openers are linear: each line is scanned once and the input array never grows', () => {
+        const openers = '<joy-options>\n'.repeat(2000) + 'keep me';
+        const t0 = performance.now();
+        const blocks = parseMarkdown(openers);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
+        expect(blocks).toEqual([{ type: 'text', content: spans('keep me') }]);
+
+        // Inline blocks back to back on ONE line: the leftover is re-read
+        // from its slot each time, so the work budget charges per KB of line.
+        const inline = '<joy-options><joy-option>A</joy-option></joy-options>'.repeat(300);
+        const t1 = performance.now();
+        const inlineBlocks = parseMarkdown(inline);
+        expect(performance.now() - t1).toBeLessThan(PERF_BUDGET_MS);
+        expect(inlineBlocks.filter(b => b.type === 'options')).toHaveLength(300);
+        const big = '<joy-options><joy-option>A</joy-option></joy-options>'.repeat(3000);
+        const t4 = performance.now();
+        const bigBlocks = parseMarkdown(big);
+        expect(performance.now() - t4).toBeLessThan(PERF_BUDGET_MS);
+        const parsed = bigBlocks.filter(b => b.type === 'options').length;
+        const plain = bigBlocks.map(b => b.type === 'text' ? b.content.map(s => s.text).join('') : '').join('');
+        expect(parsed).toBeGreaterThan(100);
+        expect(parsed + (plain.match(/<joy-option>A<\/joy-option>/g)?.length ?? 0)).toBe(3000);
+
+        const closers = '<joy-options>\n'.repeat(2000) + '</joy-options>\nkeep me';
+        const t2 = performance.now();
+        expect(parseMarkdown(closers)).toEqual([{ type: 'text', content: spans('keep me') }]);
+        expect(performance.now() - t2).toBeLessThan(PERF_BUDGET_MS);
+
+        const oneLine = '<joy-options>'.repeat(1500) + '<joy-option>B';
+        const t3 = performance.now();
+        expect(parseMarkdown(oneLine)).toEqual([]);
+        expect(performance.now() - t3).toBeLessThan(PERF_BUDGET_MS);
+    });
+
+    it('past the input cap the message is one plain text block', () => {
+        const huge = '# h\n' + 'x'.repeat(PARSE_INPUT_CAP + 1);
+        expect(parseMarkdown(huge)).toEqual([{ type: 'text', content: [{ styles: [], text: huge, url: null }] }]);
     });
 });

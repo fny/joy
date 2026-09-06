@@ -1,5 +1,39 @@
 import type { MarkdownBlock, MarkdownSpan } from "./parseMarkdown";
 import { parseMarkdownSpans } from "./parseMarkdownSpans";
+import { exceedsInputBudget, parseBudget } from "@/utils/parseBudget";
+
+const OPTIONS_OPEN = '<joy-options>';
+const OPTIONS_CLOSE = '</joy-options>';
+const OPTION_OPEN = '<joy-option>';
+const OPTION_CLOSE = '</joy-option>';
+
+function plainBlock(text: string): MarkdownBlock {
+    return { type: 'text', content: [{ styles: [], text, url: null }] };
+}
+
+// Complete <joy-option>…</joy-option> items in `body`, and the text after
+// the last of them (the whole body when there is none).
+function extractOptions(body: string): { items: string[]; rest: string } {
+    const items: string[] = [];
+    const optionRe = /<joy-option>([\s\S]*?)<\/joy-option>/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = optionRe.exec(body)) !== null) {
+        items.push(m[1]);
+        last = m.index + m[0].length;
+    }
+    return { items, rest: body.slice(last) };
+}
+
+// A `<joy-option>` opened on the LAST line of the input and not yet closed
+// is an option still streaming in: it is dropped, not shown as raw text.
+// Only the text from that opener on is dropped — an unclosed opener on an
+// earlier line is malformed, and the text after it is real content (#264).
+function stripInFlightOption(text: string): string {
+    const at = text.lastIndexOf(OPTION_OPEN);
+    if (at === -1 || text.includes(OPTION_CLOSE, at) || text.includes('\n', at)) return text;
+    return text.slice(0, at);
+}
 
 // Split a pipe-delimited table row into cells, stripping only the leading/trailing
 // empty strings caused by outer pipes while preserving interior empty cells.
@@ -99,8 +133,22 @@ function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock
 
 export function parseMarkdownBlock(markdown: string) {
     const blocks: MarkdownBlock[] = [];
+    // Plain-text fallback past the input cap, like every other UI-thread
+    // parser (utils/parseBudget): the text is still shown, undecorated.
+    if (exceedsInputBudget(markdown)) {
+        blocks.push(plainBlock(markdown));
+        return blocks;
+    }
+    const budget = parseBudget();
     const lines = markdown.split('\n');
     let index = 0;
+    // Options-region memo (#264). The first opener with no closer scans to
+    // the end of the input; every later opener is then known to have no
+    // closer either, and where the last option tags sit, so each line is
+    // scanned once however many stray openers precede it.
+    let noCloserFrom = lines.length;
+    let lastOptionOpenLine = -1;
+    let lastItemCloseLine = -1;
     outer: while (index < lines.length) {
         const line = lines[index];
         index++;
@@ -120,52 +168,116 @@ export function parseMarkdownBlock(markdown: string) {
         // bare `<joy-options>` line matches that stripper's pattern, so with the
         // stripper first the opener was dropped and every `<joy-option>…` line
         // fell through as raw text (regression 2026-07-01, e91c3587).
-        if (trimmed.startsWith('<joy-options>')) {
+        if (trimmed.startsWith(OPTIONS_OPEN)) {
             // The block may be written inline (`<joy-options><joy-option>Yes
             // </joy-option></joy-options> explanation…`) or one tag per line.
-            // Collect from the opener through the line holding the closer;
-            // text AFTER the closer on that line is handed back to the loop as
-            // its own line. Looking only at the FOLLOWING lines for options and
-            // a standalone closer swallowed the whole rest of the message (#264).
-            // No closer yet but option tags present (mid-stream) → the
-            // remainder is only option lines, consume them as before. No
-            // closer AND no option tag → not a block at all: the text goes
-            // back to the loop (#264).
-            const collected: string[] = [trimmed];
-            let closerFound = trimmed.includes('</joy-options>');
-            while (!closerFound && index < lines.length) {
-                const nextLine = lines[index];
-                index++;
-                collected.push(nextLine);
-                if (nextLine.includes('</joy-options>')) closerFound = true;
+            // The region runs from the opener through the line holding the
+            // closer; text AFTER the closer on that line is parsed like any
+            // line. Looking only at the FOLLOWING lines for options and a
+            // standalone closer swallowed the whole rest of the message (#264).
+            //
+            // Every region is parsed ONCE and the lines array never grows:
+            // leftover text is written back into the slot it came from and
+            // the loop re-reads that slot. The previous fallback appended the
+            // consumed remainder back onto the array, so repeated stray
+            // openers rescanned and copied shrinking suffixes quadratically.
+            //
+            // No closer: the block is still streaming, or malformed. Only the
+            // complete options are consumed (through the line holding the
+            // last `</joy-option>`), plus an option opened on the final line
+            // that is still in flight. Everything else — an instruction after
+            // the options, a closed block that holds prose but no option — is
+            // ordinary content, not swallowed.
+            const openerLine = index - 1;
+            // One unit per region, plus one per KB of the opener line: the
+            // leftover of an inline block is re-read from its slot, so a
+            // long line of inline blocks costs its length per block.
+            if (!budget.spend(1 + (trimmed.length >> 10))) {
+                blocks.push(plainBlock(lines.slice(openerLine).join('\n')));
+                break;
             }
-            let body = collected.join('\n');
-            if (closerFound) {
-                const closeAt = body.indexOf('</joy-options>');
-                const after = body.slice(closeAt + '</joy-options>'.length);
-                body = body.slice(0, closeAt);
-                if (after.trim()) {
-                    // Re-inject the trailing text so it is parsed like any line.
-                    lines.splice(index, 0, after.trim());
+            let closerLine = -1;
+            if (openerLine < noCloserFrom) {
+                let optionOpen = -1;
+                let itemClose = -1;
+                let i = openerLine;
+                for (; i < lines.length; i++) {
+                    const scanned = lines[i];
+                    if (scanned.includes(OPTIONS_CLOSE)) break;
+                    if (scanned.includes(OPTION_OPEN)) optionOpen = i;
+                    if (scanned.includes(OPTION_CLOSE)) itemClose = i;
                 }
-            } else if (!/<joy-option>/.test(body)) {
-                // A stray or malformed opener swallowed real instructions
-                // (#264). Hand every consumed line back to the loop; only the
-                // opener itself is dropped, like any bare joy control tag.
-                // The loop consumed to the end, so index === lines.length and
-                // pushing restores the original order.
-                lines.push(trimmed.slice('<joy-options>'.length));
-                for (let i = 1; i < collected.length; i++) lines.push(collected[i]);
+                if (i < lines.length) {
+                    closerLine = i;
+                } else {
+                    noCloserFrom = openerLine;
+                    lastOptionOpenLine = optionOpen;
+                    lastItemCloseLine = itemClose;
+                }
+            }
+            const regionText = (to: number) =>
+                to === openerLine ? trimmed : [trimmed, ...lines.slice(openerLine + 1, to + 1)].join('\n');
+            const lastLine = lines.length - 1;
+
+            if (closerLine !== -1) {
+                const region = regionText(closerLine);
+                const closeAt = region.indexOf(OPTIONS_CLOSE);
+                const body = region.slice(OPTIONS_OPEN.length, closeAt);
+                const after = region.slice(closeAt + OPTIONS_CLOSE.length);
+                const { items } = extractOptions(body);
+                let leftover: string;
+                if (items.length > 0) {
+                    blocks.push({ type: 'options', items });
+                    leftover = after;
+                } else if (closerLine === openerLine) {
+                    // Not a block after all: only the two tags are dropped.
+                    leftover = `${body}${after}`;
+                } else {
+                    // Same, across lines: the interior lines are parsed by the
+                    // loop as they are; only the closer tag is blanked out.
+                    lines[closerLine] = lines[closerLine].replace(OPTIONS_CLOSE, '');
+                    leftover = body.slice(0, body.indexOf('\n'));
+                    closerLine = openerLine;
+                }
+                index = closerLine + 1;
+                if (leftover.trim()) {
+                    lines[closerLine] = leftover.trim();
+                    index = closerLine;
+                }
                 continue;
             }
-            const items: string[] = [];
-            const optionRe = /<joy-option>([\s\S]*?)<\/joy-option>/g;
-            let optionMatch: RegExpExecArray | null;
-            while ((optionMatch = optionRe.exec(body)) !== null) {
-                items.push(optionMatch[1]);
+
+            // Complete items can only exist up to the last `</joy-option>`;
+            // when that region holds none, no later region does either
+            // (extraction runs once, not once per stray opener).
+            const regionEnd = Math.max(openerLine, lastItemCloseLine);
+            const { items, rest } = lastItemCloseLine >= openerLine
+                ? extractOptions(regionText(regionEnd).slice(OPTIONS_OPEN.length))
+                : { items: [] as string[], rest: '' };
+            if (items.length === 0) lastItemCloseLine = -1;
+            // Lines of the region after the last complete item are left to the
+            // loop untouched; only the item line's remainder is re-read.
+            let restLines = 0;
+            for (let i = 0; i < rest.length; i++) if (rest.charCodeAt(i) === 10) restLines++;
+            const consumedTo = items.length > 0 ? regionEnd - restLines : openerLine;
+            let leftover = items.length > 0
+                ? (restLines > 0 ? rest.slice(0, rest.indexOf('\n')) : rest)
+                : trimmed.slice(OPTIONS_OPEN.length);
+            if (lastOptionOpenLine === lastLine) {
+                if (consumedTo === lastLine) {
+                    leftover = stripInFlightOption(leftover);
+                } else {
+                    lines[lastLine] = stripInFlightOption(lines[lastLine]);
+                }
+                lastOptionOpenLine = -1; // handled once, never rescanned
             }
             if (items.length > 0) {
                 blocks.push({ type: 'options', items });
+            }
+            index = consumedTo + 1;
+            if (leftover.trim()) {
+                lines[consumedTo] = leftover.trim();
+                index = consumedTo;
             }
             continue;
         }

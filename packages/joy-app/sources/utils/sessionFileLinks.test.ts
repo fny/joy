@@ -293,3 +293,37 @@ describe('splitSessionFileText — explicit quote boundaries (#445 residual)', (
         expect(splitSessionFileText('See /repo/my.txt file.ts', '/repo').filter(s => s.link).map(s => s.text)).toEqual(['/repo/my.txt']);
     });
 });
+
+describe('splitSessionFileText — the closing quote is located as a character (#445 residual)', () => {
+    it('a sentence period after the closing quote does not shorten the quoted path', () => {
+        const text = 'See "/repo/my.txt file.ts".';
+        expect(splitSessionFileText(text, '/repo')).toEqual([
+            { text: 'See "', link: null },
+            { text: '/repo/my.txt file.ts', link: expect.objectContaining({ absolutePath: '/repo/my.txt file.ts', line: null }) },
+            { text: '".', link: null },
+        ]);
+    });
+
+    it('a ":line[:col]" after the closing quote applies to the quoted path and stays outside the link text', () => {
+        const text = 'See "/repo/my.txt file.ts":12 and \'/repo/a b.ts\':3:4, ok';
+        const segments = splitSessionFileText(text, '/repo');
+        expect(segments.map(s => s.text).join('')).toBe(text);
+        expect(segments.filter(s => s.link)).toEqual([
+            { text: '/repo/my.txt file.ts', link: expect.objectContaining({ absolutePath: '/repo/my.txt file.ts', line: 12, column: null }) },
+            { text: '/repo/a b.ts', link: expect.objectContaining({ absolutePath: '/repo/a b.ts', line: 3, column: 4 }) },
+        ]);
+        expect(segments[2]).toEqual({ text: '":12 and \'', link: null });
+    });
+
+    it('a single quoted token with a line suffix links the file, not the file plus its quote', () => {
+        expect(splitSessionFileText('open "/repo/a.ts":12 now', '/repo')).toEqual([
+            { text: 'open "', link: null },
+            { text: '/repo/a.ts', link: expect.objectContaining({ absolutePath: '/repo/a.ts', line: 12 }) },
+            { text: '":12 now', link: null },
+        ]);
+    });
+
+    it('an apostrophe inside a single-quoted name is not its closing quote', () => {
+        expect(splitSessionFileText("see '/repo/my docs/it's.ts'.", '/repo').filter(s => s.link).map(s => s.text)).toEqual(["/repo/my docs/it's.ts"]);
+    });
+});

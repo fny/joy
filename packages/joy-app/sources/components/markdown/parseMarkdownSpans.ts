@@ -1,5 +1,5 @@
 import type { MarkdownSpan } from "./parseMarkdown";
-import { exceedsInputBudget, parseBudget } from "@/utils/parseBudget";
+import { exceedsInputBudget, parseBudget, type ParseBudget } from "@/utils/parseBudget";
 
 // Inline pattern: bold, italic, link text, code. Every bracketed class is
 // LINEAR: the link text is `[^\[\]]+`, not `[^\]]+` — with the latter, a run
@@ -42,38 +42,55 @@ function scanLinkDestination(text: string, openAt: number): { url: string; end: 
     return null;
 }
 
-function countChar(text: string, ch: string): number {
-    let n = 0;
-    for (let i = 0; i < text.length; i++) if (text[i] === ch) n++;
-    return n;
-}
-
 // Markdown lets a destination escape its parentheses: "[x](https://a/b\(c\))".
 function unescapeLinkDestination(url: string): string {
     return url.replace(/\\([()])/g, '$1');
 }
 
-function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles']) {
+const URL_TRAILING_PUNCTUATION = '),.;:!?';
+
+// Length of the bare URL once sentence punctuation is trimmed off its end.
+// Trailing punctuation belongs to the sentence, not the URL — except a ")"
+// that closes a "(" inside the URL (wikipedia's "Function_(mathematics)"),
+// which used to be stripped and left the link one character short (#266).
+// The parentheses are counted ONCE and the counts updated while trimming:
+// recounting the whole URL per trailing ")" was quadratic — a URL followed
+// by 20k ")" took ~2 s (#266 residual).
+function bareUrlLength(url: string): number {
+    let opens = 0;
+    let closes = 0;
+    for (let i = 0; i < url.length; i++) {
+        const c = url.charCodeAt(i);
+        if (c === 40 /* ( */) opens++;
+        else if (c === 41 /* ) */) closes++;
+    }
+    let end = url.length;
+    while (end > 0 && URL_TRAILING_PUNCTUATION.includes(url[end - 1])) {
+        if (url[end - 1] === ')') {
+            if (opens >= closes) break;
+            closes--;
+        }
+        end--;
+    }
+    return end;
+}
+
+function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles'], budget: ParseBudget) {
     const urlPattern = /https?:\/\/[^\s<]+/g;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
     while ((match = urlPattern.exec(text)) !== null) {
+        if (!budget.spend()) break; // the remainder is emitted as plain text below
+
         const plainText = text.slice(lastIndex, match.index);
         if (plainText) {
             spans.push({ styles, text: plainText, url: null });
         }
 
-        let url = match[0];
-        let trailing = '';
-        // Trailing punctuation belongs to the sentence, not the URL — except a
-        // ")" that closes a "(" inside the URL (wikipedia's "Function_(mathematics)"),
-        // which used to be stripped and left the link one character short (#266).
-        while (/[),.;:!?]$/.test(url)) {
-            if (url.endsWith(')') && countChar(url, '(') >= countChar(url, ')')) break;
-            trailing = url.slice(-1) + trailing;
-            url = url.slice(0, -1);
-        }
+        const end = bareUrlLength(match[0]);
+        const url = match[0].slice(0, end);
+        const trailing = match[0].slice(end);
 
         if (url) {
             spans.push({ styles, text: url, url });
@@ -96,22 +113,23 @@ function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: Mark
 // (seen live with "**[ENG-5297 — …](linear.app/…)**"). Re-parse links here;
 // everything between them still gets the bare-URL auto-linking.
 const nestedLinkTextPattern = /\[([^\[\]]+)\]/g;
-function pushStyledContent(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles']) {
+function pushStyledContent(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles'], budget: ParseBudget) {
     let last = 0;
     let m: RegExpExecArray | null;
     nestedLinkTextPattern.lastIndex = 0;
     while ((m = nestedLinkTextPattern.exec(text)) !== null) {
+        if (!budget.spend()) break;
         const dest = scanLinkDestination(text, m.index + m[0].length);
         if (!dest) continue; // "[text]" without a destination stays plain text
         if (m.index > last) {
-            pushTextWithAutoLinks(spans, text.slice(last, m.index), styles);
+            pushTextWithAutoLinks(spans, text.slice(last, m.index), styles, budget);
         }
         spans.push({ styles, text: m[1], url: unescapeLinkDestination(dest.url) });
         last = dest.end;
         nestedLinkTextPattern.lastIndex = dest.end;
     }
     if (last < text.length) {
-        pushTextWithAutoLinks(spans, text.slice(last), styles);
+        pushTextWithAutoLinks(spans, text.slice(last), styles, budget);
     }
 }
 
@@ -136,15 +154,15 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
         // Capture the text between the end of the last match and the start of this match as plain text
         const plainText = markdown.slice(lastIndex, match.index);
         if (plainText) {
-            pushTextWithAutoLinks(spans, plainText, []);
+            pushTextWithAutoLinks(spans, plainText, [], budget);
         }
 
         if (match[1]) {
             // Bold
-            pushStyledContent(spans, match[2], header ? [] : ['bold']);
+            pushStyledContent(spans, match[2], header ? [] : ['bold'], budget);
         } else if (match[3]) {
             // Italic
-            pushStyledContent(spans, match[4], header ? [] : ['italic']);
+            pushStyledContent(spans, match[4], header ? [] : ['italic'], budget);
         } else if (match[5]) {
             // Link - handle incomplete links (no URL part)
             const dest = scanLinkDestination(markdown, pattern.lastIndex);
@@ -153,7 +171,7 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
                 pattern.lastIndex = dest.end;
             } else {
                 // If no URL part, treat as plain text with brackets
-                pushTextWithAutoLinks(spans, `[${match[6]}]`, []);
+                pushTextWithAutoLinks(spans, `[${match[6]}]`, [], budget);
             }
         } else if (match[7]) {
             // Inline code
@@ -167,7 +185,7 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
 
     // If there's any text remaining after the last match, treat it as plain
     if (lastIndex < markdown.length) {
-        pushTextWithAutoLinks(spans, markdown.slice(lastIndex), []);
+        pushTextWithAutoLinks(spans, markdown.slice(lastIndex), [], budget);
     }
 
     return spans;

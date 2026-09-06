@@ -115,3 +115,29 @@ describe('parseMarkdownSpans — balanced, escape-aware link destinations (#266 
         expect(spans.map(s => s.text).join('')).toBe(text);
     });
 });
+
+describe('parseMarkdownSpans — bare-URL trailing parentheses are trimmed in linear time (#266 residual)', () => {
+    it('a URL followed by 20k unmatched ")" parses well under the budget and sheds all of them', () => {
+        const closers = ')'.repeat(20_000);
+        const text = `https://x.test/${closers}`;
+        const t0 = performance.now();
+        const spans = parseMarkdownSpans(text, false);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
+        expect(spans).toEqual([
+            { styles: [], text: 'https://x.test/', url: 'https://x.test/' },
+            { styles: [], text: closers, url: null },
+        ]);
+    });
+
+    it('matched parentheses still survive, mixed with sentence punctuation, inside bold too', () => {
+        const wiki = 'https://en.wikipedia.org/wiki/Function_(mathematics)';
+        expect(parseMarkdownSpans(`**${wiki}).**`, false)).toEqual([
+            { styles: ['bold'], text: wiki, url: wiki },
+            { styles: ['bold'], text: ').', url: null },
+        ]);
+        expect(parseMarkdownSpans('https://a.test/x(y)z)?', false)).toEqual([
+            { styles: [], text: 'https://a.test/x(y)z', url: 'https://a.test/x(y)z' },
+            { styles: [], text: ')?', url: null },
+        ]);
+    });
+});
