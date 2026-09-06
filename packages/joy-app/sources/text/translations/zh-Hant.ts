@@ -1063,6 +1063,7 @@ export const zhHant: TranslationStructure = {
         unknownEvent: '未知事件',
         usageLimitUntil: ({ time }: { time: string }) => `使用限制到 ${time}`,
         unknownTime: '未知時間',
+        unopenableGap: ({ count }: { count: number }) => `無法解密 ${count} 則訊息 — 金鑰變更後將重試`,
     },
 
     codex: {

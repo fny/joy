@@ -1,6 +1,7 @@
 import * as React from 'react';
-import { useSession, useSessionMessages, useSetting } from "@/sync/storage";
+import { useSession, useSessionMessages, useSetting, useUnopenableGaps } from "@/sync/storage";
 import { sync } from '@/sync/sync';
+import { projectUnopenableGapRows } from '@/sync/unopenableGapRows';
 import { ActivityIndicator, AppState, InteractionManager, NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
@@ -83,7 +84,14 @@ export interface ChatListHandle {
 }
 
 export const ChatList = React.forwardRef<ChatListHandle, { session: Session }>((props, ref) => {
-    const { messages, hasMoreOlder, isLoadingOlder } = useSessionMessages(props.session.id);
+    const { messages: storedMessages, hasMoreOlder, isLoadingOlder } = useSessionMessages(props.session.id);
+    const unopenableGaps = useUnopenableGaps(props.session.id);
+    // Spans this device could not decrypt show as a placeholder row each,
+    // projected here at read time — never written into history (#128).
+    const messages = React.useMemo(
+        () => projectUnopenableGapRows(storedMessages, unopenableGaps),
+        [storedMessages, unopenableGaps],
+    );
     const joy__chatHistoryLimit = useSetting('joy__chatHistoryLimit');
     // Memoized: an un-memoized slice() minted a fresh array identity on EVERY
     // render (session object churns constantly mid-stream), defeating

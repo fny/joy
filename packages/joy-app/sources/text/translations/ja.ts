@@ -1064,6 +1064,7 @@ export const ja: TranslationStructure = {
         unknownEvent: '不明なイベント',
         usageLimitUntil: ({ time }: { time: string }) => `${time}まで使用制限中`,
         unknownTime: '不明な時間',
+        unopenableGap: ({ count }: { count: number }) => `${count}件のメッセージを復号できませんでした — 鍵が変わったら再試行します`,
     },
 
     codex: {

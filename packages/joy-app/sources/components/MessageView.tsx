@@ -11,6 +11,7 @@ import { hasJoyTags, splitJoySegments } from "@/utils/joyImg";
 import { JoyFileChip } from "@/components/JoyFileChip";
 import { JoyImage } from "./JoyImage";
 import { AttachmentView } from "./AttachmentView";
+import { UnopenableGapRow } from "./UnopenableGapRow";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
 import { sync, type SendMessageResult } from '@/sync/sync';
@@ -110,6 +111,10 @@ function RenderBlock(props: {
 
     case 'agent-event':
       return <AgentEventBlock event={props.message.event} metadata={props.metadata} sessionId={props.sessionId} messageId={props.message.id} />;
+
+    case 'unopenable-gap':
+      // Synthetic (#128): projected from the sync's gap ranges at read time.
+      return <UnopenableGapRow count={props.message.count} />;
 
 
     default:

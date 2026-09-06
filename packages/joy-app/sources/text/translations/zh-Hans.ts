@@ -1064,6 +1064,7 @@ export const zhHans: TranslationStructure = {
         unknownEvent: '未知事件',
         usageLimitUntil: ({ time }: { time: string }) => `使用限制到 ${time}`,
         unknownTime: '未知时间',
+        unopenableGap: ({ count }: { count: number }) => `无法解密 ${count} 条消息 — 密钥更改后将重试`,
     },
 
     codex: {

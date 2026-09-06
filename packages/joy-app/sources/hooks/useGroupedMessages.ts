@@ -269,6 +269,9 @@ function collectAgentWorkGroups(messages: Message[], turnOf: number[], collapseC
         const visibleAgentIndexes = indexes.filter((index) => {
             const msg = messages[index];
             if (msg.kind === 'user-text') return false;
+            // A could-not-decrypt placeholder (#128) is not agent work: it
+            // stays its own visible row rather than folding into the group.
+            if (msg.kind === 'unopenable-gap') return false;
             if (isInvisibleMessage(msg) || isUserAttachment(msg)) return false;
             return true;
         });

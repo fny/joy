@@ -1063,6 +1063,7 @@ export const ca: TranslationStructure = {
         unknownEvent: 'Esdeveniment desconegut',
         usageLimitUntil: ({ time }: { time: string }) => `Límit d'ús assolit fins a ${time}`,
         unknownTime: 'temps desconegut',
+        unopenableGap: ({ count }: { count: number }) => `No s'${plural({ count, singular: 'ha pogut desxifrar', plural: 'han pogut desxifrar' })} ${count} ${plural({ count, singular: 'missatge', plural: 'missatges' })} — es tornarà a provar quan canviïn les claus`,
     },
 
     codex: {
