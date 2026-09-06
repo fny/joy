@@ -128,15 +128,6 @@ export class SessionRegistry {
   #nextChatId = 1;
   #nextMsgId = 1;
   #onRelayAttached?: SessionDeps["onRelayAttached"];
-  // Registered by the nucleus lane: mark every relay turn this LOCAL session
-  // is executing as cancel-requested, so a restart mid-turn terminalizes it
-  // as cancelled instead of the lane observing busy()=false on the corpse
-  // and reporting "completed" (codex review #7, 2026-09-04).
-  /** Relay-lane hook: cancel the running turn(s) of a session being
-   *  restarted, except those whose queue item ids are in `keep` — they move
-   *  to the replacement and keep running under the same ids. */
-  #turnCanceller?: (localId: string, keep: ReadonlySet<string>) => void;
-  setTurnCanceller(fn: (localId: string, keep: ReadonlySet<string>) => void): void { this.#turnCanceller = fn; }
   /** Relay-lane hook: bind a daemon-created session to a relay card now. */
   #announcer?: (session: AgentSession) => Promise<void>;
   setAnnouncer(fn: (session: AgentSession) => Promise<void>): void { this.#announcer = fn; }
@@ -145,16 +136,17 @@ export class SessionRegistry {
     if (s && this.#announcer) await this.#announcer(s);
   }
 
-  /** Tear a session down for an in-place restart: pluck the prompts not yet
-   *  dispatched (they move to the replacement), cancel the relay turn(s)
-   *  that WERE (the interrupted one must end cancelled, not "completed" off
-   *  the dead object's busy() dropping), end the process without archiving
-   *  the card, and — for adapters that reopen the same on-disk conversation —
-   *  wait for the old process to be really gone. */
+  /** Tear a session down for an in-place restart: a legacy adapter plucks
+   *  the prompts not yet dispatched (they move to the replacement); a
+   *  coordinator-driven one leaves its queued rows in the ledger and its
+   *  running command ends interrupted{restart} (the relay lane observes the
+   *  state — the dead object's busy() dropping never reads as "completed").
+   *  End the process without archiving the card, and — for adapters that
+   *  reopen the same on-disk conversation — wait for the old process to be
+   *  really gone. */
   async #retire(existing: AgentSession | undefined, id: string): Promise<QueuedItem[]> {
     if (!existing) return [];
     const carried = (existing.takeQueuedForRestart?.() ?? []) as QueuedItem[];
-    this.#turnCanceller?.(id, new Set(carried.map((q) => q.id)));
     existing.end("restart");
     this.#sessions.delete(id);
     await existing.awaitExit?.();

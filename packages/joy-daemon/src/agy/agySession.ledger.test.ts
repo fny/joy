@@ -1,7 +1,8 @@
-// agy's queue lives in the ledger (C1, #49): prompts are accepted before they
-// are queued, a spawn is an attempt, the prompt on stdin is the delivery, and
-// a restart's replacement reloads the queue instead of losing it. Same fake
-// child as agySession.test.ts; isolated JOY_HOME_DIR.
+// agy's queue lives in the ledger (C1, #49) under the session coordinator
+// (C2): prompts are accepted before they are queued, a spawn is an attempt,
+// the prompt on stdin is the delivery (running), the run's settlement is the
+// terminal, and a restart's replacement takes the queue instead of losing
+// it. Same fake child as agySession.test.ts; isolated JOY_HOME_DIR.
 import { test, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -29,6 +30,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 import { AgySession } from "./agySession";
 import { ledgerFor } from "../domain/ledger";
+import { queueFor } from "../domain/queueFacade";
 
 let home: string;
 beforeAll(() => { home = mkdtempSync(join(tmpdir(), "joy-agy-ledger-")); process.env.JOY_HOME_DIR = home; });
@@ -48,46 +50,52 @@ test("queued prompts are ledger rows; the one in flight is delivered once it is 
   H.procs.length = 0;
   const id = "agy-led-1";
   const s = harness(id);
-  const a = s.enqueue("first", { mirrorToRelay: false });
-  const b = s.enqueue("second", { mirrorToRelay: false });
-  const c = s.enqueue("third", { mirrorToRelay: false });
+  const q = queueFor(s);
+  const a = q.accept("first", { mirrorToRelay: false, visible: true });
+  const b = q.accept("second", { mirrorToRelay: false, visible: true });
+  const c = q.accept("third", { mirrorToRelay: false, visible: true });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
   const ledger = ledgerFor();
-  expect(ledger.getCommand(a.id)).toMatchObject({ state: "completed", terminalReason: "delivered" });
-  expect(s.queueItemState(a.id)).toBe("pending"); // in flight from the queue's point of view
-  expect(ledger.listPending(id).map((r) => r.text)).toEqual(["second", "third"]);
-  expect(s.reorderQueued(c.id, 0)).toBe(true);
-  expect(ledger.listPending(id).map((r) => r.text)).toEqual(["third", "second"]);
-  expect(s.editQueued(b.id, "second, edited")).toBe(true);
+  await vi.waitFor(() => expect(ledger.getCommand(a.id)).toMatchObject({ state: "running" })); // on the harness's stdin: delivered, its result pending
+  expect(q.itemState(a.id)).toBe("delivered");
+  expect(ledger.listPending(id, ["queued"]).map((r) => r.text)).toEqual(["second", "third"]);
+  expect(q.reorder(c.id, 0)).toBe(true);
+  expect(ledger.listPending(id, ["queued"]).map((r) => r.text)).toEqual(["third", "second"]);
+  expect(q.edit(b.id, "second, edited")).toBe(true);
   expect(ledger.getCommand(b.id)?.text).toBe("second, edited");
-  // Restart mid-turn: the old process dies with turn one; the queue carries over.
+  // Restart mid-turn: the old process dies with turn one (its command is
+  // interrupted: the turn was live in a runtime torn down on purpose); the
+  // queue carries over.
   s.end("restart");
+  expect(ledger.getCommand(a.id)).toMatchObject({ state: "interrupted", terminalReason: "restart" });
   expect(ledger.listPending(id).map((r) => r.text)).toEqual(["third", "second, edited"]);
   const s2 = harness(id);
   await vi.waitFor(() => expect(H.procs).toHaveLength(2)); // "third" went straight in flight
-  expect(s2.queueState().inFlight).toBe("third");
-  expect(s2.queueState().queue.map((q) => q.text)).toEqual(["second, edited"]);
+  await vi.waitFor(() => expect(queueFor(s2).state().running?.text).toBe("third"));
+  expect(queueFor(s2).state().queue.map((x) => x.text)).toEqual(["second, edited"]);
   expect(H.procs[1].stdinText).toContain("third");
   s2.end("killed");
   expect(ledger.listPending(id)).toEqual([]); // a kill interrupts what is left
-  expect(s2.queueItemState(b.id)).toBe("cancelled");
+  expect(queueFor(s2).itemState(b.id)).toBe("cancelled");
 });
 
 test("a spawn failure fails the row durably; cancelQueued cancels the ledger row", async () => {
   H.procs.length = 0;
   const id = "agy-led-2";
   const s = harness(id);
-  const a = s.enqueue("boom", { mirrorToRelay: false });
-  const b = s.enqueue("later", { mirrorToRelay: false });
+  const q = queueFor(s);
+  const a = q.accept("boom", { mirrorToRelay: false });
+  const b = q.accept("later", { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
-  expect(s.cancelQueued(b.id)).toBe(true);
+  expect(q.cancel(b.id)).toBe(true);
   expect(ledgerFor().getCommand(b.id)?.state).toBe("cancelled");
   const p = H.procs[0];
   p.stdout.write(result());
   p.stdout.end();
   p.exitCode = 0; p.emit("exit", 0);
-  await vi.waitFor(() => expect(s.queueState().inFlight).toBeNull());
-  expect(s.queueItemState(a.id)).toBe("delivered");
+  await vi.waitFor(() => expect(q.state().running).toBeNull());
+  expect(q.itemState(a.id)).toBe("delivered");
+  expect(ledgerFor().getCommand(a.id)).toMatchObject({ state: "completed", terminalReason: "completed" });
   expect(H.procs).toHaveLength(1); // the cancelled one never spawned
   s.end("killed");
 });
