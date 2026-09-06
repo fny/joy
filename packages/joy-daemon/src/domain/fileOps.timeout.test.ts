@@ -92,6 +92,30 @@ describe("runTool keeps the kill helper's verdict (#538 residual)", () => {
     expect(await waitGone(leaderPid())).toBe(true);
   }, 20_000);
 
+  // #628 Wave F14: the tool's leader is very often a shell that backgrounds
+  // the real work and RETURNS. When it exits before the deadline the pgid is
+  // stale evidence, and the helper used to decline enumeration and report a
+  // termination that never happened: `timedOut: true`,
+  // `terminationUnconfirmed: false`, and the grandchild still running with the
+  // pipes it inherited. The spawn now stamps JOY_PGROUP and records the
+  // group's identity, so the descendant is still identified and killed.
+  it("terminates the descendant of a leader that exited before the deadline (#628)", async () => {
+    const r = await runTool("/bin/sh", ["-c", `sh -c 'trap "" TERM; exec sleep 30' & echo "group=$$ child=$!"; exit 0`], dir, undefined, 300);
+    const m = /group=(\d+) child=(\d+)/.exec(r.stdout);
+    expect(m).toBeTruthy();
+    const [leader, child] = [Number(m![1]), Number(m![2])];
+    try {
+      expect(r.timedOut).toBe(true);
+      expect(r.exitCode).toBe(-1);
+      // The claim is honest this time: the group really is gone.
+      expect(r.terminationUnconfirmed).toBe(false);
+      expect(await waitGone(child)).toBe(true);
+      expect(pidAlive(leader)).toBe(false);
+    } finally {
+      try { process.kill(child, "SIGKILL"); } catch { /* already dead, as asserted */ }
+    }
+  }, 20_000);
+
   it("a run that finishes in time carries neither", async () => {
     const r = await runTool("/bin/sh", ["-c", "echo ok"], dir, undefined, 10_000);
     expect(r).toMatchObject({ timedOut: false, terminationUnconfirmed: false, exitCode: 0, stdout: "ok\n" });

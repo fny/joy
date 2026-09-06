@@ -19,7 +19,7 @@ import { writeFileSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
 import { LineDecoder, TextAccumulator } from "../domain/textStream";
-import { withDeadline, killProcessGroup, BoundedTail, PGROUP_MARKER_ENV, newProcessGroupMarker } from "../domain/bounded";
+import { withDeadline, killProcessGroup, BoundedTail, PGROUP_MARKER_ENV, newProcessGroupMarker, registerGroup, spawnedGroupIdentity, isSpawnedGroupLeader, pidAlive } from "../domain/bounded";
 import * as http from "http";
 
 // Provider API keys (e.g. FIREWORKS_API_KEY for the opencode config's
@@ -59,6 +59,19 @@ export interface OpencodeSpawnResult {
    *  that provably belong to THIS server, never a group that merely reused
    *  the launcher's pid after it exited. */
   marker: string;
+  /** The launcher's start time as read at spawn (#628). Persist it beside a
+   *  recorded server pid: after a daemon restart it is the only way to tell
+   *  the recorded server from an unrelated process that inherited its pid. */
+  startedAt?: string;
+}
+
+/** The spawn identity of a recorded opencode server (#628) — persisted with
+ *  its pid so a later daemon run can verify the pid before signalling it. */
+export interface OpencodeServerIdentity {
+  /** Launcher start time at spawn (OpencodeSpawnResult.startedAt). */
+  start?: string;
+  /** `JOY_PGROUP` token the server was spawned with. */
+  marker?: string;
 }
 
 /** Spawn `opencode serve --port 0` in `cwd`. Port is parsed from stdout
@@ -87,6 +100,11 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
       [PGROUP_MARKER_ENV]: marker,
     },
   });
+  // Identity + membership captured at spawn (#628): the launcher exits as soon
+  // as the real `opencode.exe` is up, so by the time anything kills this group
+  // the pid alone proves nothing.
+  if (proc.pid) registerGroup(proc.pid, { marker });
+  const startedAt = proc.pid ? spawnedGroupIdentity(proc.pid)?.start : undefined;
   // Post-startup output is DRAINED but not retained (#69). A long-running
   // `opencode serve` keeps logging to stderr; the startup listener used to
   // append every later chunk to the parse buffer and re-run the listen regex
@@ -123,7 +141,7 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
     listenTimedOut = stopParsing;
   });
   const port = withDeadline(listen, 30_000, () => { listenTimedOut(); throw new Error("opencode serve: no listen line within 30s"); });
-  return { proc, port, serverLog, marker };
+  return { proc, port, serverLog, marker, startedAt };
 }
 
 /** One opencode SSE/global event. `durable.seq` is a per-session monotonic
@@ -291,8 +309,32 @@ export class OpencodeClient {
  *  launcher already exited is still found; without it (a pid recorded by an
  *  earlier daemon run) only the launcher itself and members captured while
  *  it lived are signalled — never a group that merely reused the pid. */
-export async function killOpencodeServerPid(pid: number, marker?: string): Promise<boolean> {
-  return killProcessGroup(pid, { graceMs: 2000, marker, log: (line) => process.stderr.write(line.replace(/^\[kill-group\]/, "[opencode] server") + "\n") });
+export async function killOpencodeServerPid(pid: number, marker?: string, spawnStart?: string): Promise<boolean> {
+  return killProcessGroup(pid, { graceMs: 2000, marker, spawnStart, log: (line) => process.stderr.write(line.replace(/^\[kill-group\]/, "[opencode] server") + "\n") });
+}
+
+/**
+ * Reap a server pid recorded by an EARLIER daemon run (#628). Nothing about
+ * that pid can be trusted now: the process may be long gone and its number
+ * reused, so the recorded spawn identity (launcher start time + JOY_PGROUP)
+ * is verified BEFORE anything is signalled.
+ *
+ *  - "unowned" — the pid is free, or now belongs to a different process, or
+ *    is not an `opencode serve`: nothing was signalled, and the caller may
+ *    start a fresh server;
+ *  - "gone"    — our recorded server was found and is now terminated;
+ *  - "alive"   — it survived SIGKILL (or could not be confirmed dead): the
+ *    caller must NOT start a second server on top of it.
+ */
+export async function reapRecordedOpencodeServer(pid: number, identity: OpencodeServerIdentity = {}): Promise<"unowned" | "gone" | "alive"> {
+  if (!isSpawnedGroupLeader(pid, identity)) {
+    if (pidAlive(pid) && (identity.start !== undefined || identity.marker !== undefined)) {
+      process.stderr.write(`[opencode] recorded server ${pid} is not the process we spawned (start ${identity.start ?? "?"}) — not signalling it\n`);
+    }
+    return "unowned";
+  }
+  if (!isOpencodeServerPid(pid)) return "unowned";
+  return (await killOpencodeServerPid(pid, identity.marker, identity.start)) ? "gone" : "alive";
 }
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
@@ -315,7 +357,7 @@ export function isOpencodeServerPid(pid: number): boolean {
  *  directory; the HTTP API can). Cost ≈ one server boot (~2-4s), acceptable
  *  for an on-demand picker. */
 export async function listOpencodeSessionsForCwd(cwd: string): Promise<Array<{ id: string; title: string; updatedAt: number }>> {
-  const { proc, port } = spawnOpencodeServer(cwd);
+  const { proc, port, marker, startedAt } = spawnOpencodeServer(cwd);
   try {
     const p = await port;
     const client = new OpencodeClient(p);
@@ -334,6 +376,10 @@ export async function listOpencodeSessionsForCwd(cwd: string): Promise<Array<{ i
     out.sort((a, b) => b.updatedAt - a.updatedAt);
     return out;
   } finally {
-    if (proc.pid) killOpencodeServerPid(proc.pid);
+    // The picker's server is torn down through the SAME ownership proof as
+    // every other one (#628): its launcher has usually already exited by now,
+    // so without the marker/start pair this kill either signalled nothing or
+    // signalled whatever inherited the pid.
+    if (proc.pid) void killOpencodeServerPid(proc.pid, marker, startedAt);
   }
 }

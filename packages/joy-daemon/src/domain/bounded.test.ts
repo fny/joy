@@ -1,9 +1,9 @@
-import { test, expect, describe, afterEach } from "vitest";
+import { test, expect, describe, afterEach, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, PGROUP_MARKER_ENV } from "./bounded";
+import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, PGROUP_MARKER_ENV, registerGroup, refreshGroupMembers, forgetGroup, spawnedGroupIdentity } from "./bounded";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const waitExit = async (p: ChildProcess) => { for (let i = 0; i < 100 && p.exitCode === null && p.signalCode === null; i++) await sleep(20); };
@@ -83,7 +83,7 @@ describe("killProcessGroup", () => {
   afterEach(() => { Object.assign(processProbe, original); });
   /** Every pid we spawn, so a failing assertion never leaves a sleeper behind. */
   const strays: number[] = [];
-  afterEach(() => { for (const p of strays.splice(0)) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } });
+  afterEach(() => { for (const p of strays.splice(0)) { forgetGroup(p); try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } });
   const sleeperOf = (pgid: number): number => {
     const [survivor, ...rest] = processGroupMembers(pgid).filter((p) => p !== pgid);
     expect(rest).toEqual([]);
@@ -195,6 +195,67 @@ describe("killProcessGroup", () => {
     };
     await expect(killed).resolves.toBe(true); // nothing left that is provably ours
     expect(pidAlive(survivor)).toBe(true);
+  });
+
+  test("a group registered at spawn still reaches the child of a leader that exited first (#628 F14)", async () => {
+    // The regression's shape WITHOUT a marker: the leader backgrounds a
+    // TERM-resistant job and exits before anything kills it, so at kill time
+    // the pgid is stale evidence. What was captured while it lived is not.
+    const leader = spawn("/bin/sh", ["-c", "(trap '' TERM; exec sleep 30) & read x; exit 0"], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
+    leader.unref();
+    const pgid = leader.pid!;
+    registerGroup(pgid);
+    await sleep(150);
+    refreshGroupMembers(pgid, { force: true }); // the opportunistic widening a spawn site does
+    const survivor = sleeperOf(pgid);
+    leader.stdin.end();
+    await waitExit(leader);
+    expect(leader.exitCode).toBe(0);
+    expect(pidAlive(pgid)).toBe(false); // the leader is GONE before the kill starts
+
+    const logs: string[] = [];
+    await expect(killProcessGroup(pgid, { graceMs: 300, log: (l) => logs.push(l) })).resolves.toBe(true);
+    expect(pidAlive(survivor)).toBe(false);
+    expect(logs.some((l) => l.includes("escalating to SIGKILL"))).toBe(true);
+  });
+
+  test("a pid reused BEFORE the kill is entered is not signalled and termination is unconfirmed (#628 F14)", async () => {
+    // Nothing real is touched: the probes describe a pid whose occupant is a
+    // different incarnation from the one registered at spawn.
+    const pid = 991337;
+    registerGroup(pid, { start: "SPAWN-INCARNATION" });
+    processProbe.identityOf = (p) => (p === pid ? { start: "NEW-unrelated-incarnation", zombie: false } : original.identityOf(p));
+    processProbe.membersOf = (pgid) => (pgid === pid ? [{ pid, start: "NEW-unrelated-incarnation", zombie: false }] : original.membersOf(pgid));
+    const signals: Array<[number, string | number | undefined]> = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((p: number, s: NodeJS.Signals) => { signals.push([p, s]); return true; }) as typeof process.kill);
+    const logs: string[] = [];
+    try {
+      await expect(killProcessGroup(pid, { graceMs: 0, log: (l) => logs.push(l) })).resolves.toBe(false);
+      expect(signals).toEqual([]); // neither kill(-pgid) nor a single-process kill
+    } finally { kill.mockRestore(); }
+    expect(logs.some((l) => l.includes("not the process spawned here"))).toBe(true);
+  });
+
+  test("a registered group whose leader vanished with nothing captured is unconfirmed, not 'terminated' (#628 F14)", async () => {
+    const p = spawn("true", [], { stdio: "ignore" });
+    await waitExit(p);
+    const pid = p.pid!;
+    // Registered as if it had been spawned and its start time read then; by
+    // kill time the pid is free and the group was never enumerable.
+    registerGroup(pid, { start: "start-at-spawn" });
+    const logs: string[] = [];
+    await expect(killProcessGroup(pid, { graceMs: 100, log: (l) => logs.push(l) })).resolves.toBe(false);
+    expect(logs.some((l) => l.includes("termination unconfirmed"))).toBe(true);
+  });
+
+  test("spawnedGroupIdentity is consumed by the kill, so records do not accumulate (#628 F14)", async () => {
+    const p = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    p.unref();
+    strays.push(p.pid!);
+    registerGroup(p.pid!, { marker: "tok-registry" });
+    expect(spawnedGroupIdentity(p.pid!)).toMatchObject({ marker: "tok-registry" });
+    await killProcessGroup(p.pid!, { graceMs: 100, log: () => {} });
+    expect(spawnedGroupIdentity(p.pid!)).toBeUndefined();
   });
 
   test("an already-dead pid resolves true without escalation", async () => {

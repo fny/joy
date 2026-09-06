@@ -16,7 +16,7 @@ import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, tmpdir } from "os";
 import { writeFileAtomicAsync } from "./atomicWrite";
 import { TextAccumulator } from "./textStream";
-import { killProcessGroup, retireChildProcess } from "./bounded";
+import { killProcessGroup, retireChildProcess, registerGroup, refreshGroupMembers, forgetGroup, newProcessGroupMarker, PGROUP_MARKER_ENV } from "./bounded";
 
 const execAsync = promisify(exec);
 
@@ -434,13 +434,23 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
     // terminate everything it spawned (a shell's background job, a helper
     // holding the pipes) with one group kill instead of signalling only the
     // direct child and leaving a grandchild behind (#538 residual).
+    // `JOY_PGROUP` (#628): the group's ownership proof. Everything the tool
+    // forks inherits it, so the deadline can identify the group's members
+    // through their own environment — the leader is very often a shell that
+    // backgrounds the real work and EXITS (`sh -c 'cmd & …'`), after which
+    // its pid is stale evidence that must never be signalled on its own.
+    const marker = newProcessGroupMarker();
     const child = nodeSpawn(binary, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
       windowsHide: true,
       detached: process.platform !== "win32",
-      env: jailedToolEnv(extraEnv),
+      env: { ...jailedToolEnv(extraEnv), [PGROUP_MARKER_ENV]: marker },
     });
+    // Identity captured at SPAWN, while the leader certainly exists: its
+    // start time (so a pid reused before the deadline is never mistaken for
+    // this tool) and the group's membership, widened opportunistically below.
+    if (child.pid) registerGroup(child.pid, { marker });
     // Nothing is ever fed to the tool: close stdin so a tool that would read
     // it (rg with no path operand) exits instead of waiting forever. The
     // handlers ALSO give rg a path so it searches the tree rather than this
@@ -471,6 +481,7 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
+      if (child.pid) forgetGroup(child.pid);
       resolveResult({ exitCode, stdout: stdout.end(), stderr: stderr.end(), timedOut, terminationUnconfirmed });
     };
     const deadline = setTimeout(() => {
@@ -488,7 +499,7 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       // Keep the helper's verdict: `false` (members outlived SIGKILL) and a
       // throw both mean the group may still be running — say so, never
       // settle as if the kill had succeeded.
-      killProcessGroup(child.pid, { graceMs: 2_000, log }).then(
+      killProcessGroup(child.pid, { graceMs: 2_000, marker, log }).then(
         (gone) => { if (!gone) terminationUnconfirmed = true; done(); },
         (err: unknown) => {
           terminationUnconfirmed = true;
@@ -498,10 +509,14 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       );
     }, timeoutMs);
     deadline.unref?.();
-    child.stdout.on("data", (d: Buffer) => { stdout.push(d); });
-    child.stderr.on("data", (d: Buffer) => { stderr.push(d); });
+    // Output is proof of life: every chunk is a chance to widen the captured
+    // membership (throttled to one scan per 200ms) before a leader that exits
+    // early takes the pgid's meaning with it.
+    const observe = () => { if (child.pid) refreshGroupMembers(child.pid); };
+    child.stdout.on("data", (d: Buffer) => { stdout.push(d); observe(); });
+    child.stderr.on("data", (d: Buffer) => { stderr.push(d); observe(); });
     child.on("close", (code) => { settle(code ?? 0); });
-    child.on("error", (err) => { if (settled) return; settled = true; clearTimeout(deadline); rejectResult(err); });
+    child.on("error", (err) => { if (settled) return; settled = true; clearTimeout(deadline); if (child.pid) forgetGroup(child.pid); rejectResult(err); });
   });
 }
 

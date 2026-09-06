@@ -28,7 +28,7 @@ import {
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
 import type { DeliverySource } from "../domain/agentSession";
 import type { AgentSession } from "../domain/agentSession";
-import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid, killOpencodeServerPid } from "./opencodeClient";
+import { spawnOpencodeServer, OpencodeClient, killOpencodeServerPid, reapRecordedOpencodeServer, type OpencodeServerIdentity } from "./opencodeClient";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
 import { opencodeJoyPreamble, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { ledgerFor, type Ledger } from "../domain/ledger";
@@ -288,8 +288,13 @@ export class OpencodeSession implements AgentSession {
   #ocSessionId: string | null = null;
   #resumeOcSessionId?: string;
   #reapPid?: number;
+  /** Spawn identity persisted with #reapPid — verified before the recorded
+   *  server is signalled (#628). */
+  #reapIdentity: OpencodeServerIdentity = {};
   /** `JOY_PGROUP` of the server this generation spawned (#628). */
   #procMarker?: string;
+  /** Launcher start time of the server this generation spawned (#628). */
+  #procStart?: string;
   #thinking = false;
   #started = false;
   #activeTurn: string | null = null;
@@ -334,7 +339,13 @@ export class OpencodeSession implements AgentSession {
     this.#reapPid = init.opencodeServerPid;
     this.#continueLast = init.continueLast === true;
     this.#titled = init.opencodeSessionId != null;
-    this.#titleLocked = loadWindowRecord(init.id)?.titleLockedByUser === true;
+    const rec = loadWindowRecord(init.id);
+    this.#titleLocked = rec?.titleLockedByUser === true;
+    // The persisted identity belongs to the persisted pid — pair them, or the
+    // reap would verify one server's pid against another's start time (#628).
+    if (this.#reapPid !== undefined && rec?.opencodeServerPid === this.#reapPid) {
+      this.#reapIdentity = { start: rec.opencodeServerStart, marker: rec.opencodeServerMarker };
+    }
     // The ledger is opened before the relay starts pulling; a new generation
     // closes the previous one (its in-flight prompts become `unknown`).
     this.#ledger = deps.ledger ?? ledgerFor();
@@ -404,15 +415,20 @@ export class OpencodeSession implements AgentSession {
       // Takeover: if a recorded server is verifiably alive, reap it — we always
       // spawn fresh (sessions persist server-side; a fresh server is simpler
       // and safer than rejoining an unknown-state one).
-      if (this.#reapPid && isOpencodeServerPid(this.#reapPid)) {
-        const gone = await killOpencodeServerPid(this.#reapPid); // gone before a replacement opens the same conversation (#71)
-        if (!gone) throw new Error(`recorded opencode server ${this.#reapPid} could not be stopped — not starting a second one`);
+      if (this.#reapPid) {
+        // The pid is verified against the identity recorded when it was
+        // spawned before anything is signalled (#628): after a restart it may
+        // belong to an unrelated process, and a stranger must be left alone —
+        // which is not a reason to refuse a fresh server.
+        const outcome = await reapRecordedOpencodeServer(this.#reapPid, this.#reapIdentity); // gone before a replacement opens the same conversation (#71)
+        if (outcome === "alive") throw new Error(`recorded opencode server ${this.#reapPid} could not be stopped — not starting a second one`);
       }
       // Killed while we waited for the reap: this generation must not spawn.
       if (this.status === "ended") return;
-      const { proc, port, marker } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
+      const { proc, port, marker, startedAt } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
       this.#proc = proc;
       this.#procMarker = marker;
+      this.#procStart = startedAt;
       proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
       proc.on("error", () => { if (this.status !== "ended") this.end("process_exited"); });
       const p = await port;
@@ -506,6 +522,10 @@ export class OpencodeSession implements AgentSession {
       launchCwd: this.cwd, agent: "opencode",
       opencodeSessionId: this.#ocSessionId ?? undefined,
       opencodeServerPid: this.#proc?.pid,
+      // Persisted WITH the pid: the next daemon run has no other way to tell
+      // our server from whatever inherited its number (#628).
+      opencodeServerStart: this.#proc?.pid ? this.#procStart : undefined,
+      opencodeServerMarker: this.#proc?.pid ? this.#procMarker : undefined,
       opencodeSettings: { model: this.currentModel ?? this.model, providerID: this.#providerID },
     });
   }
@@ -790,7 +810,7 @@ export class OpencodeSession implements AgentSession {
     this.endReason = reason;
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
-    if (this.#proc?.pid) killOpencodeServerPid(this.#proc.pid, this.#procMarker);
+    if (this.#proc?.pid) void killOpencodeServerPid(this.#proc.pid, this.#procMarker, this.#procStart);
     this.#proc = null;
     // The coordinator is retired FIRST: the turn-end below must not be
     // mistaken for the runtime's verdict on a dead generation's commands.
