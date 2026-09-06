@@ -5,6 +5,9 @@
 import type {
   RuntimeDriver, DriverCapabilities, CommandView, AttemptRef, SubmitResult, InterruptResult, ReconcileOutcome, Observation, HandledCommand,
 } from "./coordinator";
+import { coordinatorFor } from "./coordinator";
+import { ledgerFor } from "./ledger";
+import type { AgentSession } from "./agentSession";
 
 export interface Deferred<T> { resolve: (v: T) => void; reject: (e: unknown) => void; promise: Promise<T> }
 export function deferred<T>(): Deferred<T> {
@@ -110,4 +113,44 @@ export class FakeClock {
 /** Let promise chains and microtasks drain (a few macrotask turns). */
 export async function settle(turns = 5): Promise<void> {
   for (let i = 0; i < turns; i++) await new Promise((r) => setImmediate(r));
+}
+
+// ── a coordinator-driven fake session for lane / operations / handoff tests ──
+
+/** A minimal AgentSession-shaped object whose queue is the coordinator's:
+ *  adopted with a FakeDriver that, by default, accepts every submission and
+ *  reports its echo at once (the command is `running` a microtask later);
+ *  `complete(status)` ends whatever is executing. */
+export function fakeCoordinatedSession(id: string, opts: { autoAccept?: boolean; agent?: string; capabilities?: DriverCapabilities; cwd?: string; extra?: Record<string, unknown> } = {}) {
+  const ledger = ledgerFor();
+  const gen = ledger.openGeneration(id, opts.agent ?? "codex");
+  const driver = new FakeDriver(id, gen, opts.capabilities ?? CODEX_LIKE);
+  if (opts.autoAccept !== false) {
+    driver.onSubmit = (call) => {
+      queueMicrotask(() => driver.emit({ kind: "echo", runtimeRef: call.attempt.runtimeRef }));
+      return { kind: "accepted" };
+    };
+  }
+  const coordinator = coordinatorFor(ledger);
+  coordinator.adopt(id, driver);
+  driver.ready();
+  const s: Record<string, unknown> & { id: string; status: string; endReason?: string } = {
+    id, status: "active", cwd: opts.cwd ?? "/tmp/x", agentFlavor: opts.agent ?? "codex", claudeSessionId: undefined,
+    detectPermissionMode: () => "bypassPermissions",
+    busy: () => coordinator.busy(id),
+    abort: () => coordinator.abortRunning(id),
+    toJSON: () => ({ id, cwd: opts.cwd ?? "/tmp/x", agent: opts.agent ?? "codex", status: s.status }),
+    end(reason: "killed" | "process_exited" | "restart") { if (s.status === "ended") return false; s.status = "ended"; s.endReason = reason; coordinator.retire(id, reason); return true; },
+    forceKill() { return (s as unknown as { end: (r: "killed") => boolean }).end("killed"); },
+    awaitArchive: async () => true,
+    ...(opts.extra ?? {}),
+  };
+  return {
+    s: s as unknown as AgentSession & Record<string, unknown>,
+    driver, coordinator, ledger,
+    /** Texts the coordinator accepted for this session, in order. */
+    accepted: () => ledger.listCommands(id).map((c) => c.text),
+    /** End whatever is executing with the runtime's verdict. */
+    complete: (status: "completed" | "failed" | "cancelled" | "interrupted" = "completed") => driver.emit({ kind: "turn_ended", status }),
+  };
 }

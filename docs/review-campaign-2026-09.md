@@ -344,6 +344,28 @@ app.
   materialization stays lane-side, so a cancel during the download aborts
   the preparation rather than cancelling a row; a restart mid-turn closes
   the relay turn `interrupted{restart}` (was `cancelled`).
+- 2026-09-09 (C2 phase 5) — Claude on the coordinator
+  (`claude/claudeDriver.ts`): the Session keeps the pane gate, the pane-
+  writer lease, the confirm paths, the draft preservation and everything the
+  hooks round added, and exposes them as a driver — `prepare` (the gate, run
+  before the attempt is committed so a waiting row stays `queued`),
+  `submit` (type + delayed Enter + the runtime's verdict), `steer`,
+  `interrupt` (Escape), turn edges from the hooks with the transcript as the
+  tie-breaker. Deleted: the Session's in-memory queue, outcome cache,
+  carried set and drain pump; the queue facade's legacy branch and
+  `legacyWaitFor`; the lane's `legacyOutcome`/`LegacyWaitEnv`; the
+  registry's memory carry; `AgentSession`'s queue methods (the queue is the
+  coordinator's everywhere). Deviations: `/steer` is a durable steer command
+  (serialized — steers no longer supersede each other); a dispatch timeout
+  is a transient, uncounted rejection + `dispatch_timeout` pause (the row
+  stays queued, the attempt matchable for a late echo) rather than an
+  `unknown` reconciled by the driver; a row typed but not submitted at a
+  restart is reconciled `absent` and re-typed by the replacement (it used to
+  be cancelled); `accepted` (Enter landed, echo pending) blocks the next pane
+  op until the hook/echo lands. Astra's ask: crash-injection lane tests
+  (stop after `/start`, boot over the same ledger → one terminal
+  publication, no second `/start`; the running variant waits for the
+  runtime) in `nucleusLane.coordinator.test.ts`.
 - 2026-09-08 (later) — E1 tool-model residuals landed (7ead9a3d); #107
   sealed spawn specs end to end (705ef5f6: the relay holds ciphertext when
   the daemon advertises `capabilities.spawnSpecSealed`). Astra's E6 review:

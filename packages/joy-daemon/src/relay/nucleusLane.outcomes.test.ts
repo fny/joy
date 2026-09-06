@@ -12,6 +12,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import { startNucleusLane, type NucleusLaneHandle } from "./nucleusLane";
+import { fakeCoordinatedSession } from "../domain/coordinator.fakeDriver";
 import { RelaySession, encodeTurnEnd, encodeTextEvent } from "./relay";
 import { publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired } from "../domain/registry";
@@ -62,17 +63,12 @@ function makeFakeRelay(sessions: any[] = []) {
     };
 }
 
+/** A coordinator-driven fake session: submissions are accepted + echoed at
+ *  once (running); `complete(status)` is the runtime's turn end. */
 function makeFakeSession(id: string, extra: Record<string, unknown> = {}) {
-    const s: any = {
-        id, status: "active", cwd: "/tmp/x", claudeSessionId: undefined,
-        _busy: false, _pending: 0, _aborts: 0, _cancelQueued: 0, enqueued: [] as string[],
-        busy: () => s._busy,
-        queueState: () => ({ pendingCount: s._pending, paused: false }),
-        enqueue: (text: string) => { s.enqueued.push(text); s._pending = 1; return { id: "q1" }; },
-        cancelQueued: () => { s._cancelQueued++; return true; },
-        abort: async () => { s._aborts++; s._busy = false; return { ok: true }; },
-        ...extra,
-    };
+    const f = fakeCoordinatedSession(id, { agent: "claude", extra });
+    const s: any = f.s;
+    s.accepted = f.accepted; s.complete = f.complete; s.driver = f.driver;
     return s;
 }
 
@@ -90,14 +86,13 @@ describe("nucleusLane: adapter turn outcome (#584)", () => {
         relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s1", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
         await until(() => relay.calls.some(c => c.path.endsWith("/bind")));
         relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s1", kind: "prompt", turnId: "t1", ciphertext: enc("do it") });
-        await until(() => session.enqueued.includes("do it"));
-        session._pending = 0; session._busy = true;                     // dispatched + running → /start
-        await until(() => relay.calls.some(c => c.path === "/daemon/turns/t1/start"));
+        await until(() => session.accepted().includes("do it"));
+        await until(() => relay.calls.some(c => c.path === "/daemon/turns/t1/start")); // the driver's echo → running → /start
         const adapter = adapterFor("loc1");
         adapter.send(encodeTextEvent("partial", { turn: "a1" }), "loc1:text:1");
         adapter.send(encodeTurnEnd("failed", { turn: "a1" }), "loc1:a1:end"); // provider error, per the adapter
         await sleep(300);
-        session._busy = false;                                          // execution stopped
+        session.complete("failed");                                     // the runtime's verdict
         await until(() => relay.facts("t1").some(b => b.type === "terminal"), 10_000);
         const terminal = relay.facts("t1").find(b => b.type === "terminal");
         expect(terminal).toMatchObject({ terminalState: "failed", meta: { reason: "agent_reported_failed" } });
@@ -117,12 +112,11 @@ describe("nucleusLane: adapter turn outcome (#584)", () => {
         relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s2", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
         await until(() => relay.calls.some(c => c.path.endsWith("/bind")));
         relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s2", kind: "prompt", turnId: "t2", ciphertext: enc("ok") });
-        await until(() => session.enqueued.includes("ok"));
-        session._pending = 0; session._busy = true;
+        await until(() => session.accepted().includes("ok"));
         await until(() => relay.calls.some(c => c.path === "/daemon/turns/t2/start"));
         adapterFor("loc2").send(encodeTurnEnd("completed", { turn: "a2" }), "loc2:a2:end");
         await sleep(300);
-        session._busy = false;
+        session.complete();
         await until(() => relay.facts("t2").some(b => b.type === "terminal"), 10_000);
         expect(relay.facts("t2").find(b => b.type === "terminal")).toMatchObject({ terminalState: "completed" });
     }, 25_000);
@@ -161,7 +155,8 @@ describe("nucleusLane: a handled joy command is an immediately-terminal turn (#1
     it("enqueue → handled:'command' closes the turn completed without waiting for busy()", async () => {
         const relay = makeFakeRelay();
         const url = await relay.listen(); srv = relay.server;
-        const session = makeFakeSession("loc5", { enqueue: (text: string) => ({ id: "cmd1", text, createdAt: Date.now(), handled: "command" }) });
+        const session = makeFakeSession("loc5");
+        session.driver.commands = (text: string) => (text.startsWith("/title") ? { handled: true } : null);
         const registry: any = { get: (i: string) => (i === "loc5" ? session : undefined), create: async () => session, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
         handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: () => {} });
         relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s5", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });

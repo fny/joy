@@ -46,7 +46,7 @@ function makeFakeRelay() {
 
 const fakeSession = (id: string): any => ({
     id, status: "active", busy: () => false, queueState: () => ({ pendingCount: 0, paused: false }),
-    enqueue: () => ({ id: "q" }), cancelQueued: () => true, abort: async () => ({ ok: true }),
+    abort: async () => ({ ok: true }),
 });
 
 let handle: NucleusLaneHandle | null = null;
