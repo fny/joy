@@ -57,7 +57,7 @@ afterAll(async () => {
 
 describe("joy stop under a supervisor (#502)", () => {
   const fakeRun = (mainPid: string, onStop: () => void) => (cmd: string, args: string[]) => {
-    if (cmd === "systemctl" && args.includes("show")) return { status: 0, stdout: `${mainPid}\n` };
+    if (cmd === "systemctl" && args.includes("show")) return { status: 0, stdout: `MainPID=${mainPid}\n` };
     if (cmd === "systemctl" && args.includes("stop")) { onStop(); return { status: 0, stdout: "" }; }
     return { status: 1, stdout: "" };
   };
@@ -70,11 +70,22 @@ describe("joy stop under a supervisor (#502)", () => {
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 1, stdout: "" }) })).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/systemctl --user show joy-daemon.service exited 1/) });
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: null, stdout: "" }) })).toMatchObject({ kind: "unknown" }); // no systemctl binary
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "garbage\n" }) })).toMatchObject({ kind: "unknown" });
+    // An exit-0 run that printed NO MainPID line is the same non-answer (Astra F9):
+    // Number("") is 0, which used to read as "inactive — unsupervised".
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "" }) })).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/printed nothing, not a MainPID= line/) });
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "MainPID=\n" }) })).toMatchObject({ kind: "unknown" });
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "4242\n" }) })).toMatchObject({ kind: "unknown" }); // a bare number is not the property line
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "Id=joy-daemon.service\nMainPID=4242\n" }) })).toEqual({ kind: "systemd", unit: "joy-daemon.service" });
     const launchd = (out: string, status = 0) => ({ platform: "darwin", run: () => ({ status, stdout: out }) });
     expect(detectSupervisor(4242, launchd('{\n\t"PID" = 4242;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))?.kind).toBe("launchd");
-    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running
+    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running: a job dictionary without a PID
+    expect(detectSupervisor(4242, launchd('{\n\t"PID" = 999;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // the job runs something else
     expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded: launchctl's own definitive answer
     expect(detectSupervisor(4242, launchd("", 1))).toMatchObject({ kind: "unknown" }); // launchctl itself failed
+    // Exit 0 without the job's dictionary is malformed, not an inactive job (Astra F9).
+    expect(detectSupervisor(4242, launchd(""))).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/printed nothing, not the job's dictionary/) });
+    expect(detectSupervisor(4242, launchd("garbage\n"))).toMatchObject({ kind: "unknown" });
+    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "com.other.job";\n};'))).toMatchObject({ kind: "unknown" }); // some other job's dictionary
   });
 
   describe("a failed supervisor inspection (#502 residual)", () => {
@@ -123,6 +134,41 @@ describe("joy stop under a supervisor (#502)", () => {
       expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
     });
 
+    // Astra F9: `systemctl show` exited 0 and printed NOTHING while daemon.json
+    // recorded a systemd launch — the blank read as MainPID 0, "unsupervised",
+    // and the unit's daemon got a direct SIGTERM that Restart=always undid.
+    test("an exit-0 inspection that printed nothing is no answer: daemon.json's systemd launch wins, stopped through the unit", async () => {
+      withLauncher("systemd");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const actions: string[] = [];
+      const run = (_c: string, args: string[]) => { actions.push(args.join(" ")); if (args.includes("stop")) alive = false; return { status: 0, stdout: "" }; };
+      expect(await cmdStop({ platform: "linux", run, kill: () => { actions.push("SIGTERM"); }, exists: () => false, cgroupOf: () => null })).toBe(0);
+      expect(actions).not.toContain("SIGTERM");
+      expect(actions).toContain("--user stop joy-daemon.service");
+      expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+    });
+
+    test("an exit-0 inspection that printed nothing, no independent evidence: nothing is signalled, exit 1", async () => {
+      route("GET /status", (_q, res) => json(res, 200, { pid: 4242, version: "test" }));
+      const actions: string[] = [];
+      const run = (_c: string, args: string[]) => { actions.push(args.join(" ")); return { status: 0, stdout: "" }; };
+      expect(await cmdStop({ platform: "linux", run, kill: () => { actions.push("SIGTERM"); }, exists: () => false, cgroupOf: () => null })).toBe(1);
+      expect(actions).not.toContain("SIGTERM");
+      expect(actions.some((a) => a.includes(" stop "))).toBe(false);
+      expect(log.out.join("\n")).toMatch(/could not determine whether the daemon is supervised \(systemctl --user show joy-daemon.service printed nothing, not a MainPID= line\) — nothing signalled/);
+    });
+
+    test("darwin: exit-0 garbage from launchctl takes the unknown path too — daemon.json's launchd record stops it through launchctl", async () => {
+      withLauncher("launchd");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const actions: string[] = [];
+      const run = (cmd: string, args: string[]) => { actions.push(`${cmd} ${args[0]}`); if (args[0] === "unload") alive = false; return { status: 0, stdout: cmd === "launchctl" && args[0] === "list" ? "garbage\n" : "" }; };
+      expect(await cmdStop({ platform: "darwin", run, kill: () => { actions.push("SIGTERM"); }, exists: () => false })).toBe(0);
+      expect(actions).toEqual(["launchctl list", "launchctl unload"]);
+    });
+
     test("the kernel's cgroup settles it either way", () => {
       const deps = { platform: "linux", run: failing, kill: () => {}, exists: () => false };
       const inUnit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/joy-daemon.service\n";
@@ -157,7 +203,7 @@ describe("joy stop under a supervisor (#502)", () => {
   test("systemctl stop failing is reported as failure — no fallback signal that the unit would undo", async () => {
     route("GET /status", (_q, res) => json(res, 200, { pid: 4242, version: "test" }));
     const killed: number[] = [];
-    const run = (cmd: string, args: string[]) => args.includes("show") ? { status: 0, stdout: "4242\n" } : { status: 5, stdout: "" };
+    const run = (cmd: string, args: string[]) => args.includes("show") ? { status: 0, stdout: "MainPID=4242\n" } : { status: 5, stdout: "" };
     expect(await cmdStop({ platform: "linux", run, kill: (pid) => { killed.push(pid); } })).toBe(1);
     expect(killed).toEqual([]);
     expect(log.out.join("\n")).toMatch(/systemctl --user stop joy-daemon.service failed/);
@@ -415,22 +461,46 @@ describe("a broken event stream never yields a successful partial answer (#497)"
     expect(await cmdAsk([SID, "hello", "--no-queue", "--timeout", "8"])).toBe(0);
     expect(log.out).toEqual(["part one\n\npart two"]);
   });
+
+  // Astra F9: the deadline tripped during the finish grace, the completeness
+  // check sat behind !timedOut(), and the `answered` selected before it came
+  // back with "partial" — seq 2 advertised, never fetched, no turn-end.
+  test("the deadline trips during the finish grace: the advertised row is still checked for → timeout (exit 4), never a partial answered", async () => {
+    // every /events request (the head probe and the catch-up too) says hello{seq:2}, sends row 1 and stalls
+    route(`GET /sessions/${SID}/events`, (_q, res) => { res.writeHead(200, { "Content-Type": "application/x-ndjson" }); res.write(ndjson([{ hello: true, seq: 2 }, agentText(1, "partial")])); hanging.add(res); });
+    route(`GET /sessions/${SID}/queue/qDone`, (_q, res) => json(res, 200, { ok: true, id: "qDone", state: "completed", terminalReason: "completed", runtimeTurnId: "t" }));
+    checkRoute(() => ({ state: "idle" }));
+    const started = Date.now();
+    const out = await waitTurn(SID, { afterSeq: 0, queuedId: "qDone", timeoutMs: 80 });
+    expect(Date.now() - started).toBeLessThan(700);
+    expect(out.state).toBe("timeout");
+    expect(out.reason).toMatch(/deadline expired before the reply could be verified complete: output stream lost after seq 1 — the daemon holds records through seq 2/);
+  });
+
+  test("the same log with time left: the catch-up cannot get row 2 either → error, incomplete (exit 1)", async () => {
+    route(`GET /sessions/${SID}/events`, (_q, res) => { res.writeHead(200, { "Content-Type": "application/x-ndjson" }); res.write(ndjson([{ hello: true, seq: 2 }, agentText(1, "partial")])); hanging.add(res); });
+    route(`GET /sessions/${SID}/queue/qDone`, (_q, res) => json(res, 200, { ok: true, id: "qDone", state: "completed", terminalReason: "completed", runtimeTurnId: "t" }));
+    checkRoute(() => ({ state: "idle" }));
+    const out = await waitTurn(SID, { afterSeq: 0, queuedId: "qDone", timeoutMs: 6000 });
+    expect(out.state).toBe("error");
+    expect(out.reason).toMatch(/^output stream lost after seq 1 — the daemon holds records through seq 2 .* the reply is incomplete/);
+  }, 10_000);
 });
 
 describe("a queued ask is bound to its durable command and its runtime turn (#498)", () => {
   const turnEnd = (seq: number, turn: string, usage?: unknown) => rec(seq, { role: "session", content: { type: "session", data: { turn, ev: { t: "turn-end", status: "completed", ...(usage ? { usage } : {}) } } } });
   /** GET /sessions/:id/queue/:qid over a scripted sequence of states (the last one repeats). */
-  const commandRoute = (qid: string, states: Array<Partial<{ state: string; terminalReason: string | null; runtimeTurnId: string | null }> | Handler>) => {
+  const commandRoute = (qid: string, states: Array<Partial<{ state: string; terminalReason: string | null; attemptId: string | null; runtimeTurnId: string | null; turnStarted: boolean }> | Handler>) => {
     let n = 0;
     route(`GET /sessions/${SID}/queue/${qid}`, (q, res, url, body) => {
       const v = states[Math.min(n++, states.length - 1)];
       if (typeof v === "function") return (v as Handler)(q, res, url, body);
-      json(res, 200, { ok: true, id: qid, text: "…", createdAt: 0, state: "queued", terminalReason: null, runtimeTurnId: null, attempts: 1, ...v });
+      json(res, 200, { ok: true, id: qid, text: "…", createdAt: 0, state: "queued", terminalReason: null, attemptId: "at-1", runtimeTurnId: null, turnStarted: true, attempts: 1, ...v });
     });
     return { polls: () => n };
   };
 
-  test("B queued behind A: A's tail after the send is excluded, B's own turn (the first started after the send) is the reply", async () => {
+  test("B queued behind A: A's tail after the send is excluded, B's own turn (the one the daemon named for it) is the reply", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
     let dispatched = false;
@@ -444,11 +514,89 @@ describe("a queued ask is bound to its durable command and its runtime turn (#49
         await delay(50); ev.push(agentText(4, "B's answer", "b")); ev.push(turnEnd(5, "b", { output: 7 }));
       })();
     });
-    route(`GET /sessions/${SID}/queue/q2`, (_q, res) => json(res, 200, { ok: true, id: "q2", state: dispatched ? "completed" : "queued", terminalReason: dispatched ? "delivered" : null, runtimeTurnId: null }));
+    route(`GET /sessions/${SID}/queue/q2`, (_q, res) => json(res, 200, { ok: true, id: "q2", state: dispatched ? "completed" : "queued", terminalReason: dispatched ? "completed" : null, attemptId: dispatched ? "at-2" : null, runtimeTurnId: dispatched ? "b" : null, turnStarted: dispatched }));
     checkRoute(() => ({ state: "busy" }));
     expect(await cmdAsk([SID, "what", "is", "B", "--json"])).toBe(0);
     const out = JSON.parse(log.out[0]);
     expect(out).toMatchObject({ state: "answered", text: "B's answer", turn: "q2", usage: { output: 7 } });
+  });
+
+  // Astra F9 (#498 residual): A was ALREADY queued when B was sent, so A's
+  // turn is the first to start after the send. The CLI used to take that
+  // turn as B's and returned A's answer labelled qB. Claude's session now
+  // names the transcript turn each dispatch opened; the daemon reports it and
+  // the reply is exactly that turn's records.
+  const aThenB = (ev: ReturnType<typeof eventsRoute>) => {
+    ev.push(turnStart(1, "A")); ev.push(agentText(2, "A was already queued", "A")); ev.push(turnEnd(3, "A"));
+    ev.push(turnStart(4, "B")); ev.push(agentText(5, "B requested answer", "B")); ev.push(turnEnd(6, "B"));
+  };
+  test("claude, A already queued when B is sent: B's reply is the turn the daemon named for qB, not A's (the first started after the send)", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    commandRoute("qB", [{ state: "queued" }, { state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: "B", turnStarted: true }]);
+    checkRoute(() => ({ state: "busy" }));
+    expect(await cmdAsk([SID, "B", "--json", "--timeout", "3"])).toBe(0);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "answered", turn: "qB", text: "B requested answer" });
+  });
+
+  test("the daemon names qB's turn late (the hook ended it before the transcript named it): re-read within the grace, then B's reply", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    const c = commandRoute("qB", [{ state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: null, turnStarted: true }, { state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: null, turnStarted: true }, { state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: "B", turnStarted: true }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B", "--timeout", "5"])).toBe(0);
+    expect(log.out).toEqual(["B requested answer"]);
+    expect(c.polls()).toBeGreaterThanOrEqual(3);
+  });
+
+  test("completed, a turn started for it, but the daemon never attributes one: an explicit attribution error (exit 1), not the first turn or everything after the send", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    commandRoute("qB", [{ state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: null, turnStarted: true }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B", "--json", "--timeout", "8"])).toBe(1);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "error", text: "", reason: expect.stringMatching(/turn qB completed but the daemon attributed no runtime turn to it \(attempt at-b\) — the reply cannot be told from other turns' output/) });
+  }, 15_000);
+
+  test("an older daemon that reports neither attemptId nor turnStarted: the same attribution error, never a guess", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    route(`GET /sessions/${SID}/queue/qB`, (_q, res) => json(res, 200, { ok: true, id: "qB", state: "completed", terminalReason: "completed", runtimeTurnId: null }));
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B", "--timeout", "8"])).toBe(1);
+    expect(log.out).toEqual([]);
+    expect(log.err.join("\n")).toMatch(/turn qB completed but the daemon attributed no runtime turn to it — the reply cannot be told/);
+  }, 15_000);
+
+  // Astra F9: a /title the daemon handled itself completes with no runtime
+  // turn; with no new turn-start the CLI fell back to ALL later records and
+  // returned an unrelated active turn's tail as the answer.
+  test("a handled command (/title): completed with no runtime output → exit 0, EMPTY reply, no foreign tail", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qTitle" }); ev.push(agentText(1, "unrelated active turn tail", "A")); });
+    route(`GET /sessions/${SID}/queue/qTitle`, (_q, res) => json(res, 200, { ok: true, id: "qTitle", state: "completed", terminalReason: "handled_as_command", attemptId: null, runtimeTurnId: null, turnStarted: false }));
+    checkRoute(() => ({ state: "busy" }));
+    expect(await cmdAsk([SID, "/title new title", "--json", "--timeout", "3"])).toBe(0);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "answered", turn: "qTitle", text: "", reason: expect.stringMatching(/turn qTitle completed without runtime output \(handled by the daemon itself\)/) });
+    // and in plain mode: nothing on stdout, the note on stderr
+    expect(await cmdAsk([SID, "/title again", "--timeout", "3"])).toBe(0);
+    expect(log.out).toHaveLength(1);
+    expect(log.err.join("\n")).toMatch(/completed without runtime output/);
+  });
+
+  test("a slash command claude took (no turn started for its attempt): the same empty reply, exit 0", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qC" }); ev.push(agentText(1, "some other turn's text", "A")); });
+    route(`GET /sessions/${SID}/queue/qC`, (_q, res) => json(res, 200, { ok: true, id: "qC", state: "completed", terminalReason: "completed", attemptId: "at-c", runtimeTurnId: null, turnStarted: false }));
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "/compact", "--json", "--timeout", "3"])).toBe(0);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "answered", text: "", reason: expect.stringMatching(/turn qC completed without runtime output \(completed, no runtime turn started for it\)/) });
   });
 
   // Astra's early-mirror order: the real codex adapter mirrors the prompt at
@@ -472,11 +620,11 @@ describe("a queued ask is bound to its durable command and its runtime turn (#49
     expect(log.out).toEqual(["B answer"]);
   });
 
-  test("early mirror, no runtime turn from the daemon (claude): the first turn started after the send is the reply — not A's tail, not C", async () => {
+  test("early mirror, the turn named while running (claude: the transcript opened it): exactly that turn — not A's tail, not C", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
     route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => earlyMirrorBurst(ev), 20); });
-    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "delivered" }]);
+    commandRoute("qB", [{ state: "running" }, { state: "running", runtimeTurnId: "B" }, { state: "completed", terminalReason: "completed", runtimeTurnId: "B" }]);
     checkRoute((n) => ({ state: n === 1 ? "busy" : "idle" }));
     expect(await cmdAsk([SID, "B"])).toBe(0);
     expect(log.out).toEqual(["B answer"]);
@@ -569,8 +717,8 @@ describe("a queued ask is bound to its durable command and its runtime turn (#49
   });
 
   test("joy wait --turn binds the same way: completed → idle exit 0, failed → exit 1", async () => {
-    sessionsRoute(); eventsRoute();
-    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "delivered" }]);
+    sessionsRoute(); eventsRoute([turnStart(1, "b"), turnEnd(2, "b")]);
+    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "completed", runtimeTurnId: "b" }]);
     checkRoute(() => ({ state: "busy" }));
     expect(await cmdWaitIdle([SID, "--turn", "qB"])).toBe(0);
     expect(log.out.join("\n")).toContain(`${SID} idle`);
