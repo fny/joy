@@ -19,7 +19,7 @@ import { test, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 
 const H = vi.hoisted(() => ({
   clients: [] as any[],
@@ -150,10 +150,12 @@ test("#514: a failed attempt commit holds the send; the retry sends exactly once
   H.turnStarts.length = 0;
   const { s } = await started(id);
   // The 'queued' insert commits; the attempt (turn/start) does not.
-  const prepare = DatabaseSync.prototype.prepare;
-  const spy = vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (this: DatabaseSync, sql: string) {
-    if (/INSERT INTO attempts/.test(sql)) throw new Error("SQLITE_FULL: database or disk is full");
-    return prepare.call(this, sql);
+  // The ledger caches prepared statements per instance (#627), so the failure
+  // is injected where the cached statement EXECUTES, not where it is prepared.
+  const run = StatementSync.prototype.run;
+  const spy = vi.spyOn(StatementSync.prototype, "run").mockImplementation(function (this: StatementSync, ...args: unknown[]) {
+    if (/INSERT INTO attempts/.test(this.sourceSQL)) throw new Error("SQLITE_FULL: database or disk is full");
+    return run.apply(this, args as never);
   });
   const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
   let cmd: { id: string };
