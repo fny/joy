@@ -10,6 +10,32 @@ import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 
+// The #550 boundary cases below drive a REAL SessionRegistry.create up to the
+// moment the claude command is typed into the pane, run the import there, then
+// refuse the launch so nothing is ever spawned (same fake as
+// registry.create.test.ts). Every other test here uses a fake registry and
+// never reaches tmux.
+const boundary: { launchCmd: string | null; atLaunch: (() => void | Promise<void>) | null } = { launchCmd: null, atLaunch: null };
+vi.mock("../tmux/driver", () => {
+  const ok = { ok: true, out: "" };
+  const fake = {
+    runSync: (...args: string[]) => (args[0] === "has-session" ? { ok: false, out: "" } : ok),
+    command: async () => ok,
+    commandOnce: async () => ok,
+    key: async () => ok,
+    literal: async (_target: string, text: string) => {
+      if (/\bclaude\b/.test(text) && /--session-id|--resume|--continue/.test(text)) {
+        boundary.launchCmd = text;
+        await boundary.atLaunch?.();
+        return { ok: false, out: "", error: "test: launch refused at the boundary" };
+      }
+      return ok;
+    },
+    dispose: () => {},
+  };
+  return { tmux: fake, tmuxHandleFor: () => fake, disposeTmuxHandle: () => {}, TmuxDriver: class {} };
+});
+
 vi.mock("./handoff", async (importOriginal) => {
   const real = await importOriginal<typeof import("./handoff")>();
   // The jobs themselves poll for a note for minutes; the op contract under
@@ -18,6 +44,7 @@ vi.mock("./handoff", async (importOriginal) => {
 });
 
 import { machineOps, sourcePermissionMode } from "./operations";
+import { SessionRegistry } from "./registry";
 import { closeAllLedgers, ledgerFor, LedgerWriteError } from "./ledger";
 import { resetCoordinators, SessionCoordinator } from "./coordinator";
 import { fakeCoordinatedSession } from "./coordinator.fakeDriver";
@@ -32,7 +59,7 @@ const op = (name: string) => machineOps.find((o) => o.rpcName === name)!;
 let home: string;
 const realHome = process.env.JOY_HOME_DIR;
 const cleanupDirs: string[] = [];
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "joy-ops-session-")); process.env.JOY_HOME_DIR = home; closeAllLedgers(); resetCoordinators(); resetTranscriptClaims(); });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "joy-ops-session-")); process.env.JOY_HOME_DIR = home; closeAllLedgers(); resetCoordinators(); resetTranscriptClaims(); boundary.launchCmd = null; boundary.atLaunch = null; });
 afterEach(() => {
   resetCoordinators(); closeAllLedgers(); // coordinators first: a pump must not wake on a closed ledger
   if (realHome === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = realHome;
@@ -393,6 +420,49 @@ describe("same-machine teleport into another folder (#550)", () => {
     expect(inFlight).toHaveBeenCalledTimes(1);
     expect(transcriptClaims(join(dir, `${sid2}.jsonl`))).toEqual([]);
     expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+  });
+
+  it.each([
+    ["the selected transcript", true],
+    ["an empty project", false],
+  ] as const)("#550 residual: the REAL import at the launch boundary of a real --continue create is refused — its own list() call does not settle the in-flight reservation (%s)", async (_label, selected) => {
+    const { readFileSync } = await import("node:fs");
+    const dst = join(home, `project-h-${selected ? "selected" : "empty"}`); mkdirSync(dst);
+    const dir = cwdToTranscriptDir(dst); mkdirSync(dir, { recursive: true }); cleanupDirs.push(dir);
+    const sid = selected ? "abc-5513-0000" : "abc-5514-0000"; const target = join(dir, `${sid}.jsonl`);
+    if (selected) writeFileSync(target, "CONTINUED BY THE FIRST LAUNCH\n");
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    const originalCreate = reg.create.bind(reg);
+    // Only the import's launch is stubbed — and it must never be reached.
+    const importLaunch = vi.spyOn(reg, "create").mockResolvedValue({ id: "fa005513", toJSON: () => ({}) } as never);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const got: { result: Record<string, unknown> | null } = { result: null };
+    const expectedClaims = selected ? [[target, "bind"]] : [[dir, "bind"]];
+    boundary.atLaunch = async () => {
+      expect(transcriptClaims(target).map((c) => [c.path, c.mode])).toEqual(expectedClaims);
+      got.result = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+      // Old code: owned() → registry.list() → the reservation of a create with no Session yet was
+      // released as "aborted"; the import then claimed, wrote the bytes and returned ok:true.
+      expect(transcriptClaims(target).map((c) => [c.path, c.mode])).toEqual(expectedClaims);
+      if (selected) expect(readFileSync(target, "utf8")).toBe("CONTINUED BY THE FIRST LAUNCH\n"); else expect(existsSync(target)).toBe(false);
+    };
+    try {
+      await expect(originalCreate({ cwd: dst, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    } finally { stderr.mockRestore(); }
+    expect(got.result).not.toBeNull();
+    expect(got.result!.error).toMatch(/belongs to a session whose transcript is/);
+    expect(importLaunch).not.toHaveBeenCalled();
+    // The launch continues exactly the reserved file (by id); with nothing to select it is Claude's pick under the project reservation.
+    if (selected) { expect(boundary.launchCmd).toMatch(/--resume abc-5513-0000/); expect(boundary.launchCmd).not.toContain("--continue"); }
+    else expect(boundary.launchCmd).toMatch(/--continue/);
+    if (selected) expect(readFileSync(target, "utf8")).toBe("CONTINUED BY THE FIRST LAUNCH\n"); else expect(existsSync(target)).toBe(false);
+    expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+    // The aborted create released its reservation itself: the same import now proceeds.
+    expect(transcriptClaims(target)).toEqual([]);
+    const retry = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(retry.ok).toBe(true);
+    expect(importLaunch).toHaveBeenCalledTimes(1);
+    expect(readFileSync(target, "utf8")).toBe(Buffer.from(b64, "base64").toString());
   });
 
   it("#550 residual: a launch failure after another owner took the destination leaves that owner's file untouched", async () => {

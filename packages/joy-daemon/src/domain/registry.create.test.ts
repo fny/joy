@@ -14,7 +14,7 @@ const ok = { ok: true, out: "" };
 
 /** What the fake driver saw at the launch boundary; `atLaunch` runs there
  *  (a test's probe of the state a concurrent import would find). */
-const seen: { launchCmd: string | null; recordsAtLaunch: unknown[]; atLaunch: (() => void) | null } = { launchCmd: null, recordsAtLaunch: [], atLaunch: null };
+const seen: { launchCmd: string | null; recordsAtLaunch: unknown[]; atLaunch: (() => void | Promise<void>) | null } = { launchCmd: null, recordsAtLaunch: [], atLaunch: null };
 
 vi.mock("../tmux/driver", async () => {
   const wr = await import("./windowRecord");
@@ -29,7 +29,7 @@ vi.mock("../tmux/driver", async () => {
         // would leave for recovery.
         seen.launchCmd = text;
         seen.recordsAtLaunch = wr.listWindowRecords();
-        seen.atLaunch?.();
+        await seen.atLaunch?.();
         return { ok: false, out: "", error: "test: launch refused at the boundary" };
       }
       return ok;
@@ -141,7 +141,9 @@ test("a --continue launch whose newest project transcript a teleport import is r
     let importAtLaunch: unknown = "unset";
     seen.atLaunch = () => { importAtLaunch = claimTranscript(target, "teleport-import:abc-5508", "replace"); };
     await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
-    expect(seen.launchCmd).toMatch(/--continue/);
+    // Pinned to the reserved file by name, not left to Claude's own selection.
+    expect(seen.launchCmd).toMatch(/--resume abc-5508-0000/);
+    expect(seen.launchCmd).not.toContain("--continue");
     expect(importAtLaunch).toBeNull();
     expect(transcriptClaims(target)).toEqual([]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
@@ -188,7 +190,106 @@ test("a plain --continue create with no import in flight still launches (#550 re
     const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
     seen.atLaunch = () => { expect(transcriptClaims(target).map((c) => c.mode)).toEqual(["bind"]); };
     await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
-    expect(seen.launchCmd).toMatch(/claude .*--continue/);
+    expect(seen.launchCmd).toMatch(/claude .*--resume abc-5510-0000/);
     expect(transcriptClaims(target)).toEqual([]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);
+
+// ── #550: the reservation must survive the import's OWN ownership check, and
+// the launch must continue exactly the file that was reserved. Both cases run
+// the real import handler at the launch boundary of a real --continue create
+// (only the import's launch is stubbed — it must never be reached).
+async function importAtBoundary(reg: import("./registry").SessionRegistry, cwd: string, sid: string): Promise<Record<string, unknown>> {
+  const { machineOps } = await import("./operations");
+  const op = machineOps.find((o) => o.rpcName === "joy-teleport-import")!;
+  return (await op.handler(reg, { cwd, claudeSessionId: sid, transcriptBase64: Buffer.from("IMPORTED UNDER A LIVE CONTINUATION\n").toString("base64") }, { via: "rpc" })) as Record<string, unknown>;
+}
+
+test("#550: a real teleport import at the launch boundary of a --continue create is refused — list() does not settle the in-flight reservation, the selected transcript keeps its bytes", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { transcriptClaims, resetTranscriptClaims } = await import("./transcriptClaims");
+  const { cwdToTranscriptDir } = await import("../claude/transcript");
+  resetTranscriptClaims();
+  const dir = cwdToTranscriptDir(cwd); fs.mkdirSync(dir, { recursive: true });
+  const sid = "abc-5511-0000"; const target = join(dir, `${sid}.jsonl`);
+  fs.writeFileSync(target, "CONTINUED BY THE FIRST LAUNCH\n");
+  try {
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    const originalCreate = reg.create.bind(reg);
+    // The import's launch is the only stub — and it must never run.
+    const importLaunch = vi.spyOn(reg, "create").mockResolvedValue({ id: "fa005511", toJSON: () => ({}) } as never);
+    const got: { result: Record<string, unknown> | null } = { result: null };
+    seen.atLaunch = async () => {
+      expect(transcriptClaims(target).map((c) => c.mode)).toEqual(["bind"]);
+      got.result = await importAtBoundary(reg, cwd, sid);
+      // Old code: registry.list() inside owned() released the reservation (no Session yet), ok:true, bytes replaced.
+      expect(transcriptClaims(target).map((c) => c.mode)).toEqual(["bind"]);
+      expect(fs.readFileSync(target, "utf8")).toBe("CONTINUED BY THE FIRST LAUNCH\n");
+    };
+    await expect(originalCreate({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(got.result).not.toBeNull();
+    expect(got.result!.error).toMatch(/belongs to a session whose transcript is/);
+    expect(importLaunch).not.toHaveBeenCalled();
+    expect(seen.launchCmd).toMatch(/--resume abc-5511-0000/);
+    expect(fs.readFileSync(target, "utf8")).toBe("CONTINUED BY THE FIRST LAUNCH\n");
+    expect(fs.readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+    // The aborted create released it through its own finally — the only place an absent Session means "aborted".
+    expect(transcriptClaims(target)).toEqual([]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);
+
+test("#550: the same import at the launch boundary of a --continue create in an EMPTY project is refused — the project reservation survives list(), nothing lands in the dir", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { transcriptClaims, resetTranscriptClaims } = await import("./transcriptClaims");
+  const { cwdToTranscriptDir } = await import("../claude/transcript");
+  resetTranscriptClaims();
+  const dir = cwdToTranscriptDir(cwd); fs.mkdirSync(dir, { recursive: true }); // no transcripts
+  const sid = "abc-5512-0000"; const incoming = join(dir, `${sid}.jsonl`);
+  try {
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    const originalCreate = reg.create.bind(reg);
+    const importLaunch = vi.spyOn(reg, "create").mockResolvedValue({ id: "fa005512", toJSON: () => ({}) } as never);
+    const got: { result: Record<string, unknown> | null } = { result: null };
+    seen.atLaunch = async () => {
+      expect(transcriptClaims(incoming).map((c) => [c.path, c.mode])).toEqual([[dir, "bind"]]);
+      got.result = await importAtBoundary(reg, cwd, sid);
+      expect(transcriptClaims(incoming).map((c) => [c.path, c.mode])).toEqual([[dir, "bind"]]);
+      expect(fs.existsSync(incoming)).toBe(false);
+    };
+    await expect(originalCreate({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(got.result!.error).toMatch(/belongs to a session whose transcript is/);
+    expect(importLaunch).not.toHaveBeenCalled();
+    expect(seen.launchCmd).toMatch(/--continue/); // nothing to pin: Claude's selection, under the project reservation
+    expect(fs.readdirSync(dir)).toEqual([]);
+    expect(transcriptClaims(incoming)).toEqual([]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);
+
+test("#550: a replace claim taken on ANOTHER file after selection does not change what the launch continues — the command resumes the reserved transcript by id", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { claimTranscript, transcriptClaims, resetTranscriptClaims } = await import("./transcriptClaims");
+  const { cwdToTranscriptDir, findLatestTranscript } = await import("../claude/transcript");
+  resetTranscriptClaims();
+  const dir = cwdToTranscriptDir(cwd); fs.mkdirSync(dir, { recursive: true });
+  const oldSid = "b1930000-0000-4000-8000-000000000001", newSid = "b1930000-0000-4000-8000-000000000002";
+  const reserved = join(dir, `${oldSid}.jsonl`), incoming = join(dir, `${newSid}.jsonl`);
+  fs.writeFileSync(reserved, "{}\n"); fs.utimesSync(reserved, new Date(1000), new Date(1000));
+  const other: { claim: ReturnType<typeof claimTranscript> } = { claim: null };
+  try {
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    seen.atLaunch = () => {
+      expect(transcriptClaims(reserved).map((c) => c.mode)).toEqual(["bind"]);
+      // An import of a DIFFERENT conversation lands a newer file in the project before the Enter.
+      other.claim = claimTranscript(incoming, "teleport-import:other-file", "replace");
+      expect(other.claim).not.toBeNull();
+      fs.writeFileSync(incoming, "{}\n");
+      expect(findLatestTranscript(dir, 0)).toBe(incoming);
+      // Old code: `--continue` — Claude would have picked the import-owned file.
+      expect(seen.launchCmd).toMatch(new RegExp(`--resume ${oldSid}`));
+      expect(seen.launchCmd).not.toContain("--continue");
+    };
+    await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(seen.launchCmd).toMatch(new RegExp(`--resume ${oldSid}`));
+    expect(transcriptClaims(reserved)).toEqual([]);
+  } finally { other.claim?.release(); fs.rmSync(dir, { recursive: true, force: true }); }
 }, 20_000);

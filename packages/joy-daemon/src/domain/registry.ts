@@ -363,6 +363,15 @@ export class SessionRegistry {
   #continuationClaims = new Map<string, TranscriptClaim>();
   #settleContinuationClaims(): void {
     for (const [id, claim] of this.#continuationClaims) {
+      // A create still in flight owns its reservation: no Session is
+      // registered yet (or a restart's ended predecessor still is), and
+      // neither says the launch was aborted. Only the create's own finally
+      // — after #creating drops the id — may read an absent Session that
+      // way. An import's ownership check calls list() between the
+      // reservation and the launch; settling here released the live
+      // reservation and the import overwrote the selected transcript
+      // (Astra on 38f0a77f, #550).
+      if (this.#creating.has(id)) continue;
       const s = this.#sessions.get(id);
       if (!s || s.status === "ended") {
         // Aborted before registering, or over: nothing to reserve for.
@@ -620,24 +629,36 @@ export class SessionRegistry {
         if (!bind) throw new Error(`transcript ${pinnedTranscript} is being replaced by a teleport import; retry once it finishes`);
         this.#transcriptClaims.set(id, bind);
       }
-    } else if (opts.continue) {
-      // `--continue` names no file: Claude picks the project's most recent
-      // conversation at launch. Resolve it the way Claude will — the newest
-      // transcript in the canonical project dir — and reserve THAT; with
-      // nothing to select, reserve the whole project dir, so an import
-      // cannot land a transcript there that the launch would then continue.
-      // Either reservation is refused while an import replaces the file (or
-      // any file in the dir), and it is held past this create: the Session
-      // owns no path visibly until it binds, and a reservation released here
+    }
+    // A continuation launches PINNED to the transcript it reserved: `--resume
+    // <its id>` in place of `--continue`. `--continue` names no file — Claude
+    // picks the project's newest conversation at launch — so reserving the
+    // file selected here still left the launch unpinned: a file this create
+    // did not select could take a replace claim, land with a newer mtime
+    // before the Enter, and be the one Claude continued (Astra on 38f0a77f,
+    // #550). Set when a transcript was selected below.
+    let continueResumeId: string | undefined;
+    if (!pinnedTranscript && opts.continue) {
+      // Resolve the continuation the way Claude would — the newest transcript
+      // in the canonical project dir — and reserve THAT; the launch then names
+      // it, so what was reserved is exactly what is continued. With nothing
+      // to select (or a file whose name is no session id), reserve the whole
+      // project dir and emit plain `--continue`: an import cannot land a
+      // transcript there that the launch would then continue. Either
+      // reservation is refused while an import replaces the file (or any
+      // file in the dir), and it is held past this create: the Session owns
+      // no path visibly until it binds, and a reservation released here
       // reopened the same gap to imports. Narrowed to the bound file once it
       // binds, released when it ends (#settleContinuationClaims).
       const projectDir = cwdToTranscriptDir(cwd);
-      const selected = findLatestTranscript(projectDir, 0);
+      const latest = findLatestTranscript(projectDir, 0);
+      const selected = latest && SAFE_ID.test(basename(latest, ".jsonl")) ? latest : null;
       const reservation = selected
         ? claimTranscript(selected, `session:${id}`, "bind")
         : claimProject(projectDir, `session:${id}`);
       if (!reservation) throw new Error(`transcript ${selected ?? `in ${projectDir}`} is being replaced by a teleport import; retry once it finishes`);
       this.#continuationClaims.set(id, reservation);
+      if (selected) continueResumeId = basename(selected, ".jsonl");
     }
     // Flag list builder, parameterized on whether --continue is included.
     const buildFlags = (withContinue: boolean): string[] => {
@@ -648,7 +669,10 @@ export class SessionRegistry {
       if (claudeSettings) f.push("--settings", `'${claudeSettings}'`);
       if (opts.model) f.push("--model", opts.model);
       if (opts.fallbackModel) f.push("--fallback-model", opts.fallbackModel);
-      if (withContinue && opts.continue) f.push("--continue");
+      if (withContinue && opts.continue) {
+        if (continueResumeId) f.push("--resume", continueResumeId); // the reserved transcript, by name
+        else f.push("--continue");
+      }
       if (opts.resume_id) f.push("--resume", opts.resume_id);
       if (freshClaudeId) f.push("--session-id", freshClaudeId);
       // claude rejects --fork-session without --resume/--continue, so silently
@@ -669,7 +693,8 @@ export class SessionRegistry {
     const primaryCmd = [...envParts, "claude", ...flags].join(" ");
     // `--continue` exits non-zero ("No conversation found to continue") in a
     // cwd with no prior conversation, leaving a stuck/dead pane. Fall back to a
-    // fresh launch (no --continue) via `||` so the session still comes up.
+    // fresh launch (no --continue, no pinned --resume) via `||` so the session
+    // still comes up.
     const cmd = opts.continue
       ? `${primaryCmd} || ${[...envParts, "claude", ...buildFlags(false)].join(" ")}`
       : primaryCmd;
