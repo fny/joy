@@ -153,8 +153,30 @@ async function openResponse<T extends { s: number; r?: string }>(tunnelKey: Uint
         if (final) { sawFinal = true; break; }
     }
     // No FINAL tag ⇒ the stream was cut; never treat a truncation as success.
+    // With a verified head in hand this is the transport, not tamper: the
+    // relay drops a client that cannot drain its response within 10 s
+    // (429 client_slow to the daemon) and the bytes stop mid-body.
+    if (head !== null && !sawFinal) throw new TunnelError(502, 'connection_slow');
     if (!sawFinal || head === null) throw new TunnelError(502, 'stream_truncated');
     return { head, body: concat(bodyParts) };
+}
+
+/** 503s that mean "not now": the relay-wide inbox budget (`relay_busy`) or
+ *  this daemon's parked inbox (`daemon_busy`) is full. Both carry
+ *  `retry-after` and clear as the daemon drains — retried here, bounded.
+ *  `daemon_offline` is NOT in this set: no wait fixes it. */
+export const RETRYABLE_RELAY_CODES = new Set(['relay_busy', 'daemon_busy']);
+export const TUNNEL_MAX_ATTEMPTS = 3;
+const RETRY_AFTER_DEFAULT_MS = 1_000;
+const RETRY_AFTER_MAX_MS = 5_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** `retry-after` (seconds, as the relay sends it) in ms, defaulted and capped. */
+export function retryAfterMs(header: string | null | undefined): number {
+    if (header === null || header === undefined || header.trim() === '') return RETRY_AFTER_DEFAULT_MS;
+    const n = Number(header);
+    if (!Number.isFinite(n) || n < 0) return RETRY_AFTER_DEFAULT_MS;
+    return Math.min(RETRY_AFTER_MAX_MS, Math.round(n * 1000));
 }
 
 export interface TunnelFetchOpts {
@@ -176,21 +198,51 @@ export interface TunnelFetchOpts {
  */
 export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse> {
     const key = await deriveTunnelKey(opts.machineKey, opts.machineId);
-    const wire = await sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {}, t: Date.now() }, opts.body ?? new Uint8Array(0));
-
-    const res = await fetch(`${opts.relayUrl}/joy/v2/machines/${encodeURIComponent(opts.machineId)}/http`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${opts.accountToken}`, 'Content-Type': 'application/octet-stream' },
-        body: wire as unknown as BodyInit,
-    });
-    if (res.headers.get('content-type')?.includes('application/json')) {
-        const j = await res.json().catch(() => ({ error: 'relay_error' })) as { error?: string };
-        throw new TunnelError(res.status, j.error ?? 'relay_error');
+    const url = `${opts.relayUrl}/joy/v2/machines/${encodeURIComponent(opts.machineId)}/http`;
+    // An idempotent read may be re-asked once after a cut stream; a write may
+    // already have executed on the daemon, so its cut is surfaced as is.
+    const idempotent = opts.method === 'GET' || opts.method === 'HEAD';
+    let cutRetried = false;
+    for (let attempt = 1; ; attempt++) {
+        // Sealed per attempt: a fresh stream id and `t`, so a retry is never a
+        // byte-identical replay to the daemon's guard and its clock is current.
+        const wire = await sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {}, t: Date.now() }, opts.body ?? new Uint8Array(0));
+        // fetch resolves when the relay's HEADERS arrive — while the request
+        // body may still be uploading — so an admission refusal (503 busy or
+        // offline, 413 over the declared size) is seen before a large upload
+        // finishes.
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${opts.accountToken}`, 'Content-Type': 'application/octet-stream' },
+            body: wire as unknown as BodyInit,
+        });
+        if (res.headers.get('content-type')?.includes('application/json')) {
+            const j = await res.json().catch(() => ({ error: 'relay_error' })) as { error?: string };
+            const code = j.error ?? 'relay_error';
+            if (res.status === 503 && RETRYABLE_RELAY_CODES.has(code) && attempt < TUNNEL_MAX_ATTEMPTS) {
+                await sleep(retryAfterMs(res.headers.get('retry-after')));
+                continue;
+            }
+            throw new TunnelError(res.status, code);
+        }
+        if (!res.ok) throw new TunnelError(res.status, 'relay_error');
+        let buf: Uint8Array;
+        try {
+            buf = new Uint8Array(await res.arrayBuffer());
+        } catch {
+            // Headers said 200 and the body then died under us: the relay
+            // destroyed the stream (client_slow / daemon gone mid-response).
+            if (idempotent && !cutRetried) { cutRetried = true; continue; }
+            throw new TunnelError(502, 'connection_slow');
+        }
+        try {
+            const { head, body } = await openResponse<{ s: number; h: Record<string, string>; r?: string }>(key, buf, requestBinding(wire));
+            return { status: head.s, headers: head.h, body };
+        } catch (e) {
+            if (e instanceof TunnelError && e.code === 'connection_slow' && idempotent && !cutRetried) { cutRetried = true; continue; }
+            throw e;
+        }
     }
-    if (!res.ok) throw new TunnelError(res.status, 'relay_error');
-    const buf = new Uint8Array(await res.arrayBuffer());
-    const { head, body } = await openResponse<{ s: number; h: Record<string, string>; r?: string }>(key, buf, requestBinding(wire));
-    return { status: head.s, headers: head.h, body };
 }
 
 /** JSON convenience: sealed request, parsed daemon response. */

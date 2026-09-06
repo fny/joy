@@ -308,6 +308,8 @@ export const es: TranslationStructure = {
         sessionFull: 'Esta sesión está llena — continúa en una sesión nueva',
         pairingCodeExpired: 'El código expiró — escanéalo de nuevo',
         machineBusy: 'La máquina está ocupada — inténtalo de nuevo en un momento',
+        relayBusy: 'El relay está ocupado — inténtalo de nuevo en un momento',
+        connectionTooSlow: 'La conexión es demasiado lenta — inténtalo de nuevo con una red mejor',
     },
 
     newSession: {

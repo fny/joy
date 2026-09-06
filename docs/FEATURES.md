@@ -331,6 +331,19 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   the clear (#582); tunnel responses are bound to their request's stream id
   so the relay cannot replay one request's sealed answer to another (#418 —
   an app with this check needs daemons that emit the binding).
+- Tunnel exchanges are bounded end to end. Request side: the relay admits on
+  the headers before buffering a byte (`503 daemon_offline`; `413` for a
+  declared size over 32 MiB; `503 daemon_busy` past 16 requests / 64 MiB
+  parked per daemon; `503 relay_busy` past the relay-wide 256 requests /
+  256 MiB), reserving the declared size while the upload is in flight. Both
+  clients retry the two busy codes per `retry-after` (3 attempts, never
+  `daemon_offline`); the app reads "the machine/relay is busy". Response
+  side: at most 8 MiB buffered per client, then the daemon's frame post waits
+  for the socket to drain; a client that has not drained in 10 s is dropped
+  (daemon hears `429 client_slow`, a dead socket `410 client_gone`, a vanished
+  request `404 request_gone` — all terminal for the executor, which releases
+  its local stream). A cut stream after a verified head reads as
+  "connection too slow" (`connection_slow`), not tamper; a GET is re-asked once.
 - Local acceptance is durable: `send`, `queueAdd` and handoff notes are
   acknowledged only after the queue spool is persisted, else `not_durable`
   (#551, #542); queue and window-record writes are atomic (#555, #567).

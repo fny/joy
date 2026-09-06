@@ -17,7 +17,7 @@ const KEY = deriveTunnelKey(MKEY, MACHINE);
 
 const inbox: { requestId: string; payload: string }[] = [];
 /** Per request: how many frame posts to accept before the relay's 4xx, and what it answers. */
-const script = new Map<string, { okPosts: number; status: number; error: string; posts: number }>();
+const script = new Map<string, { okPosts: number; status: number; error: string; posts: number; delayMs?: number }>();
 /** Target-side view: open SSE responses by request path, and whether they closed. */
 const streams = new Map<string, { closed: boolean; writes: number }>();
 let relay: http.Server; let target: http.Server; let executor: ExecutorHandle;
@@ -28,9 +28,9 @@ async function until(pred: () => boolean, ms = 5_000): Promise<void> {
   while (!pred()) { if (Date.now() > deadline) throw new Error("timeout"); await sleep(20); }
 }
 
-function deliver(path: string, okPosts: number, status: number, error: string): string {
+function deliver(path: string, okPosts: number, status: number, error: string, delayMs = 0): string {
   const requestId = randomUUID();
-  script.set(requestId, { okPosts, status, error, posts: 0 });
+  script.set(requestId, { okPosts, status, error, posts: 0, delayMs });
   const wire = sealRequest(KEY, { m: "GET", p: path, h: {}, t: Date.now() }, new Uint8Array(0));
   inbox.push({ requestId, payload: Buffer.from(wire).toString("base64") });
   return requestId;
@@ -60,6 +60,8 @@ beforeAll(async () => {
       await readAll(req);
       const sc = script.get(m[1])!;
       sc.posts++;
+      // A slow client: the relay holds the post until the socket drains (up to 10 s live).
+      if (sc.delayMs) await sleep(sc.delayMs);
       if (sc.posts > sc.okPosts) {
         res.writeHead(sc.status, { "content-type": "application/json" }); res.end(JSON.stringify({ error: sc.error })); return;
       }
@@ -98,4 +100,29 @@ test("a stream the relay keeps accepting is NOT cut off (control)", async () => 
   deliver("/events/live", Number.MAX_SAFE_INTEGER, 200, "");
   await until(() => (streams.get("/events/live")?.writes ?? 0) >= 5);
   expect(streams.get("/events/live")!.closed).toBe(false);
+});
+
+test("429 client_slow mid-stream (client failed to drain in time) is terminal too: local reader released, no retry of the post", async () => {
+  const id = deliver("/events/slow", 2, 429, "client_slow");
+  await until(() => streams.get("/events/slow")?.closed === true);
+  await sleep(200);
+  expect(script.get(id)!.posts).toBe(3);        // 2 accepted + the refused one; never re-posted
+});
+
+test("410 client_gone is terminal as well", async () => {
+  const id = deliver("/events/gone410", 1, 410, "client_gone");
+  await until(() => streams.get("/events/gone410")?.closed === true);
+  await sleep(200);
+  expect(script.get(id)!.posts).toBe(2);
+});
+
+test("a frame post held by the relay (slow client draining) stalls ONLY that exchange — another one keeps streaming", async () => {
+  const slow = deliver("/events/held", Number.MAX_SAFE_INTEGER, 200, "", 1_500);   // every post answered after 1.5 s
+  await until(() => (script.get(slow)?.posts ?? 0) >= 1);                              // its first post is now parked
+  const fast = deliver("/events/beside", Number.MAX_SAFE_INTEGER, 200, "");
+  const t0 = Date.now();
+  await until(() => (script.get(fast)?.posts ?? 0) >= 5, 1_200);                      // 5 round trips while the other is held
+  expect(Date.now() - t0).toBeLessThan(1_200);
+  expect(script.get(slow)!.posts).toBeLessThanOrEqual(2);                             // the held exchange barely moved
+  expect(streams.get("/events/held")!.closed).toBe(false);                            // and was not cut off either
 });

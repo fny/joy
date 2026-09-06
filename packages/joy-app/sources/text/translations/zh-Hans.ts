@@ -309,6 +309,8 @@ export const zhHans: TranslationStructure = {
         sessionFull: '此会话已满 — 请在新会话中继续',
         pairingCodeExpired: '验证码已过期 — 请重新扫描',
         machineBusy: '设备正忙 — 请稍后重试',
+        relayBusy: '中继正忙 — 请稍后重试',
+        connectionTooSlow: '连接速度过慢 — 请在网络更好时重试',
     },
 
     newSession: {

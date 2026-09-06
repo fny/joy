@@ -308,6 +308,8 @@ export const zhHant: TranslationStructure = {
         sessionFull: '此工作階段已滿 — 請在新工作階段中繼續',
         pairingCodeExpired: '驗證碼已過期 — 請重新掃描',
         machineBusy: '裝置正忙 — 請稍後再試',
+        relayBusy: '中繼正忙 — 請稍後再試',
+        connectionTooSlow: '連線速度過慢 — 請在網路更好時重試',
     },
 
     newSession: {
