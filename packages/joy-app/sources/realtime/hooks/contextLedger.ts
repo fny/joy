@@ -13,13 +13,31 @@
 // Only a SHOWN session needs deferral. A session the connection has not
 // been shown gets its full history injected on first contact, and that
 // history already includes the change.
+//
+// The ledger lives exactly as long as the connection (or the attempt to
+// make one): it is cleared on every hang-up, drop and failed connect, not
+// only on disarm. Kept across an idle hang-up it deferred every message of
+// every shown session for as long as voice stayed armed — memory with no
+// bound, discarded unread by the next connect's fresh snapshot (#340).
+// Within a connection it is bounded too: past `maxDeferred` updates a
+// session's snapshot is void and the session is briefed in full again,
+// which is what a replay longer than the briefing would amount to anyway.
+
+/** Deferred updates a session may accumulate before its snapshot is void. */
+export const MAX_DEFERRED_UPDATES = 50;
 
 export class SessionContextLedger<M extends { id: string }> {
-    private shown = new Map<string, Map<string, M>>();
+    /** Per shown session: the updates deferred against its snapshot, or
+     *  null once there were more than the ledger keeps — the snapshot is
+     *  void and the session must be briefed in full again. */
+    private shown = new Map<string, Map<string, M> | null>();
 
-    /** Has this connection received the session's full context? */
+    constructor(private readonly maxDeferred: number = MAX_DEFERRED_UPDATES) {}
+
+    /** Has this connection received the session's full context, with a
+     *  snapshot that deferred updates can still be replayed against? */
     isShown(sessionId: string): boolean {
-        return this.shown.has(sessionId);
+        return this.shown.get(sessionId) instanceof Map;
     }
 
     /** The session's full context was (or is about to be) sent: a fresh
@@ -32,23 +50,30 @@ export class SessionContextLedger<M extends { id: string }> {
      * Remember an update the line could not carry. A later version of a
      * message replaces the earlier one in its original slot, so a replay is
      * one update per message, in first-seen order. False when the session is
-     * not shown (its first injection will include the change).
+     * not shown (its first injection will include the change). Past
+     * `maxDeferred` distinct messages nothing more is kept: the session is
+     * re-briefed in full instead, and that briefing includes the change.
      */
     defer(sessionId: string, messages: M[]): boolean {
+        if (!this.shown.has(sessionId)) return false;
         const deferred = this.shown.get(sessionId);
-        if (!deferred) return false;
+        if (!deferred) return true; // snapshot already void
         for (const m of messages) deferred.set(m.id, m);
+        if (deferred.size > this.maxDeferred) this.shown.set(sessionId, null);
         return true;
     }
 
-    /** Sessions with something deferred, in the order they were shown. */
+    /** Sessions whose context is behind — something deferred, or a void
+     *  snapshot — in the order they were shown. */
     staleSessions(): string[] {
         const out: string[] = [];
-        for (const [sessionId, deferred] of this.shown) if (deferred.size > 0) out.push(sessionId);
+        for (const [sessionId, deferred] of this.shown) if (deferred === null || deferred.size > 0) out.push(sessionId);
         return out;
     }
 
-    /** Take the updates deferred since the session's snapshot, oldest first. */
+    /** Take the updates deferred since the session's snapshot, oldest first.
+     *  Empty for a void snapshot: there is nothing to replay, the session is
+     *  not shown and its next injection is the full context. */
     takeDeferred(sessionId: string): M[] {
         const deferred = this.shown.get(sessionId);
         if (!deferred || deferred.size === 0) return [];
@@ -57,7 +82,15 @@ export class SessionContextLedger<M extends { id: string }> {
         return out;
     }
 
-    /** New connection or voice ended: nothing has been shown. */
+    /** Deferred updates held right now, across sessions. */
+    get size(): number {
+        let n = 0;
+        for (const deferred of this.shown.values()) n += deferred?.size ?? 0;
+        return n;
+    }
+
+    /** New connection attempt, or the line is down for good: nothing is
+     *  shown, nothing is deferred. */
     clear(): void {
         this.shown.clear();
     }

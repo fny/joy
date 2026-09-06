@@ -56,6 +56,8 @@ import { SOUND_WAKE_RETRY_MS, SOUND_WAKE_ROTATE_MS, isSoundWakeListening, startS
 import { SOUND_WAKE } from './soundWakeDetector';
 
 const live = () => recorders.filter(r => r.recording && !r.released);
+/** Run every pending microtask without advancing the (fake) clock. */
+const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 
 describe('native sound wake bounds its throwaway recording (#345)', () => {
     beforeEach(async () => {
@@ -163,5 +165,64 @@ describe('native sound wake bounds its throwaway recording (#345)', () => {
         await stopSoundWake();
         expect(fs.deleteCalls).toBe(1);
         expect(console.warn).not.toHaveBeenCalled();
+    });
+
+    it('a stop during a rotation waits for the old recorder to let go of the mic, and a restart opens only one', async () => {
+        await startSoundWake(() => {});
+        const old = recorders[0];
+        let finish!: () => void;
+        old.stop = () => new Promise<void>(r => { finish = () => { old.recording = false; r(); }; });
+        // The rotation tick fires; its stop of the old recorder is held.
+        vi.advanceTimersByTime(SOUND_WAKE_ROTATE_MS + SOUND_WAKE.SAMPLE_MS);
+        expect(old.recording).toBe(true);
+
+        let stopped = false;
+        const stopping = stopSoundWake().then(() => { stopped = true; });
+        await flush();
+        // The recorder is still on the microphone, so the stop is not done.
+        expect(old.recording).toBe(true);
+        expect(stopped).toBe(false);
+        expect(isSoundWakeListening()).toBe(false);
+
+        // A restart (AppState 'active' → maybeListenWhileIdle) meanwhile
+        // opens nothing beside it.
+        let started = false;
+        const starting = startSoundWake(() => {}).then(() => { started = true; });
+        await flush();
+        expect(started).toBe(false);
+        expect(recorders).toHaveLength(1);
+        expect(live()).toEqual([old]);
+
+        finish();
+        await stopping;
+        expect(old.released).toBe(true);
+        expect(disk.has(old.uri!)).toBe(false);
+        await starting;
+        expect(live()).toHaveLength(1);
+        expect(live()[0]).not.toBe(old);
+        expect(disk.size).toBe(1);
+        expect(isSoundWakeListening()).toBe(true);
+    });
+
+    it('a stop landing between the recorder starting and the start publishing it wins', async () => {
+        const record = audio.FakeRecorder.prototype.record;
+        let stop: Promise<void> | undefined;
+        audio.FakeRecorder.prototype.record = function () {
+            record.call(this);
+            // A stop already queued as the native start completes runs
+            // before startSoundWake's continuation.
+            void Promise.resolve().then(() => { stop = stopSoundWake(); });
+        };
+        try {
+            await startSoundWake(() => {});
+            await stop;
+        } finally {
+            audio.FakeRecorder.prototype.record = record;
+        }
+        expect(isSoundWakeListening()).toBe(false);
+        expect(live()).toHaveLength(0);
+        expect(recorders).toHaveLength(1);
+        expect(recorders[0].released).toBe(true);
+        expect(disk.size).toBe(0);
     });
 });

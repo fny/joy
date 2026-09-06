@@ -26,7 +26,8 @@ import { SessionContextLedger } from './contextLedger';
  */
 
 // Sessions whose full context the CURRENT connection has received, and what
-// changed in them while the line was down (#340). See contextLedger.ts.
+// changed in them while the connect was in flight (#340). Lives as long as
+// the connection: see contextLedger.ts and onVoiceDisconnected.
 const shown = new SessionContextLedger<Message>();
 const pending = new PendingPromptQueue();
 const seenRequests = new Set<string>();
@@ -223,10 +224,13 @@ export const voiceHooks = {
             }
         }
         if (!isVoiceConnected()) {
-            // The line is down. A session already in the agent's context —
-            // the one briefed while this connect is in flight — would
-            // otherwise never hear of this change (#340).
-            shown.defer(sessionId, messages);
+            // The line is down. While a connect is in flight, a session
+            // already in the agent's context — the one briefed in the system
+            // prompt — would otherwise never hear of this change (#340).
+            // Hung up, nothing is deferred: the next connect takes a fresh
+            // snapshot, and deferring until then retained every message of
+            // an idle, armed phone for hours, unread (#340).
+            if (storage.getState().realtimeStatus === 'connecting') shown.defer(sessionId, messages);
             return;
         }
         injectSessionContext(sessionId);
@@ -256,9 +260,19 @@ export const voiceHooks = {
     },
 
     /** The line is up: replay what changed in the briefed sessions since
-     *  their snapshot, before any focus announcement or queued prompt. */
+     *  their snapshot, before any focus announcement or queued prompt. A
+     *  session that changed more than the ledger keeps is briefed in full
+     *  again instead. */
     onVoiceConnected() {
-        for (const sid of shown.staleSessions()) refreshSessionContext(sid);
+        for (const sid of shown.staleSessions()) injectSessionContext(sid);
+    },
+
+    /** The line is down and stays down until the next connect — a hang-up,
+     *  a drop, the agent ending the call, a failed or abandoned connect.
+     *  What this connection was shown is worthless to the next one, which
+     *  snapshots afresh, so nothing is deferred against it (#340). */
+    onVoiceDisconnected() {
+        shown.clear();
     },
 
     /** Voice fully ended (disarmed). Hang-ups keep the queue. */
