@@ -110,3 +110,29 @@ describe('sessionFileLinks', () => {
         });
     });
 });
+
+describe('splitSessionFileText — bounded candidate scanning (#446)', () => {
+    it('400 repeated "a/ " tokens split in well under 100 ms and stay plain text', () => {
+        const text = 'a/ '.repeat(400);
+        const t0 = performance.now();
+        const segments = splitSessionFileText(text, '/repo');
+        expect(performance.now() - t0).toBeLessThan(100);
+        expect(segments).toEqual([{ text, link: null }]);
+    });
+
+    it('1000 repeated path-like tokens are still fast and lossless', () => {
+        const text = 'src/ '.repeat(1000);
+        const t0 = performance.now();
+        const segments = splitSessionFileText(text, '/repo');
+        expect(performance.now() - t0).toBeLessThan(100);
+        expect(segments.map(s => s.text).join('')).toBe(text);
+    });
+
+    it('still links a real path among many decoys, and never across a line break', () => {
+        const text = 'a/ '.repeat(50) + '\nsee src/index.ts:12 here\nsrc/other.ts';
+        const segments = splitSessionFileText(text, '/repo');
+        const links = segments.filter(s => s.link);
+        expect(links.map(s => s.text)).toEqual(['src/index.ts:12', 'src/other.ts']);
+        expect(segments.map(s => s.text).join('')).toBe(text);
+    });
+});

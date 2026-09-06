@@ -12,6 +12,8 @@
  * shown as raw XML.
  */
 
+import { parseBudget } from './parseBudget';
+
 export interface JoyImgSegment {
     kind: 'img';
     src: string;
@@ -34,7 +36,11 @@ export interface JoyMdSegment {
 
 export type JoySegment = JoyImgSegment | JoyFileSegment | JoyMdSegment;
 
-const TAG_RE = /<joy-(img|file)\b[^>]*?\/?>/gi;
+// The attribute run is `[^<>]{0,4000}` — it cannot cross into the NEXT tag,
+// so a message full of unfinished "<joy-img " fragments is scanned once
+// instead of once per fragment (the old `[^>]*?` rescanned to the end of the
+// text from every opening, quadratic). 4000 chars is far beyond any real tag.
+const TAG_RE = /<joy-(img|file)\b[^<>]{0,4000}>/gi;
 const ATTR_RE = /([a-zA-Z-]+)\s*=\s*"([^"]*)"/g;
 
 function parseAttrs(tag: string): Record<string, string> {
@@ -57,7 +63,7 @@ const PREFIX_RE = /<joy-(img|file)/i;
 // prefix has arrived but its closing '>' hasn't. Rendered as-is it shows raw
 // XML to the user until the next token batch (or forever, if output was
 // truncated mid-tag).
-const PARTIAL_TAIL_RE = /<joy-(img|file)\b[^>]*$/i;
+const PARTIAL_TAIL_RE = /<joy-(img|file)\b[^<>]{0,4000}$/i;
 
 /** True when the text contains at least one joy tag (cheap pre-check). */
 export function hasJoyTags(text: string): boolean {
@@ -69,7 +75,9 @@ export function splitJoySegments(text: string): JoySegment[] {
     let last = 0;
     TAG_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
+    const budget = parseBudget();
     while ((m = TAG_RE.exec(text))) {
+        if (!budget.spend()) break; // the remainder is emitted as markdown below
         const before = text.slice(last, m.index);
         if (before.trim()) segments.push({ kind: 'md', text: before });
         const attrs = parseAttrs(m[0]);
