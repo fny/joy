@@ -139,15 +139,21 @@ export class CodexNormalizer {
    *  already allocated for the same item (#519). A live item buffered while
    *  thread/read was pending is also in the returned history under a
    *  positional id; without the binding its flush allocated a second ordinal
-   *  — a second localId for the same answer, past the relay's dedupe. */
-  bindTransient(turnId: string, type: string, transientId: string, ordinal: number): void {
-    if (!turnId || !type || !transientId) return;
+   *  — a second localId for the same answer, past the relay's dedupe.
+   *  Returns whether it bound: an id that already has an identity keeps it,
+   *  and the caller must NOT treat the offered ordinal as consumed — a
+   *  repeated completion of a bound occurrence used to eat a history slot
+   *  here while its identity stayed put, pushing the next live item's
+   *  ordinal past the replay (#519). */
+  bindTransient(turnId: string, type: string, transientId: string, ordinal: number): boolean {
+    if (!turnId || !type || !transientId) return false;
     const state = this.#turnState(turnId);
     const key = `${type}|${transientId}`;
-    if (state.byId.has(key)) return;
+    if (state.byId.has(key)) return false;
     const core = `${type}:${ordinal}`;
     state.byId.set(key, core);
     this.#byTransient.set(transientId, { turn: turnId, type, core });
+    return true;
   }
 
   /** The turn an item/completed belongs to. An item whose start we saw resolves
