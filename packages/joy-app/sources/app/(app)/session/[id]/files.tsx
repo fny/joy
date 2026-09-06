@@ -8,7 +8,7 @@ import { Text } from '@/components/StyledText';
 import { Item } from '@/components/Item';
 import { ItemList } from '@/components/ItemList';
 import { Typography } from '@/constants/Typography';
-import { GitFileStatus } from '@/sync/gitStatusFiles';
+import { GitFileStatus, knownLines } from '@/sync/gitStatusFiles';
 import { searchFiles, FileItem } from '@/sync/suggestionFile';
 import { useSessionGitStatus } from '@/sync/storage';
 import { useGitStatusFiles } from '@/hooks/useGitStatusFiles';
@@ -123,6 +123,14 @@ export default React.memo(function FilesScreen() {
                 statusColor = theme.dark ? "#b0b0b0" : "#8E8E93";
                 statusIcon = "file";
                 break;
+            case 'typechange':
+                statusColor = "#FF9500";
+                statusIcon = "file-symlink-file";
+                break;
+            case 'conflicted':
+                statusColor = "#FF9500";
+                statusIcon = "alert";
+                break;
             default:
                 return null;
         }
@@ -131,12 +139,15 @@ export default React.memo(function FilesScreen() {
     };
 
     const renderLineChanges = (file: GitFileStatus) => {
+        // Exact counts only; 'unavailable' (binary, untracked, unread) shows nothing.
+        const lines = knownLines(file.lines);
+        if (!lines) return '';
         const parts = [];
-        if (file.linesAdded > 0) {
-            parts.push(`+${file.linesAdded}`);
+        if (lines.added > 0) {
+            parts.push(`+${lines.added}`);
         }
-        if (file.linesRemoved > 0) {
-            parts.push(`-${file.linesRemoved}`);
+        if (lines.removed > 0) {
+            parts.push(`-${lines.removed}`);
         }
         return parts.length > 0 ? parts.join(' ') : '';
     };

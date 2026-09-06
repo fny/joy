@@ -47,15 +47,141 @@ const j = <T>(ctx: MachineCtx, method: string, path: string, body?: unknown) =>
     }));
 
 // ── git ────────────────────────────────────────────────────────────────────
-export interface V2GitStatus {
+// Structured git status, schema v2 — the daemon parses git's machine formats
+// once (docs/API.md, "Structured git status"); the app renders these facts
+// and never reads git text. Mirrors packages/joy-daemon/src/domain/gitStatus.ts.
+
+/** Exact per-side line counts, or an explicit "unknown" — never a silent zero. */
+export type GitLineCount = { added: number; removed: number } | 'unavailable';
+
+/** A filename as IDENTITY (`cwd`: send this back to files/* and git/diff)
+ *  and as DISPLAY (`display`: show this; control characters are pictured,
+ *  undecodable bytes are U+FFFD). `repo` is the same identity relative to the
+ *  repository root. When `utf8` is false the strings are lossy and
+ *  `rawBase64` carries the exact repo-relative bytes. */
+export interface GitPathV2 {
+    repo: string;
+    cwd: string;
+    display: string;
+    utf8: boolean;
+    rawBase64?: string;
+}
+
+export interface GitStatusEntryV2 {
+    path: GitPathV2;
+    /** Porcelain XY letters for the index and worktree columns; '.' = unchanged. */
+    index: string;
+    worktree: string;
+    untracked: boolean;
+    /** Every unmerged record, AA and DD included. */
+    conflict: { xy: string } | null;
+    rename: { from: GitPathV2; score: number | null; copy: boolean } | null;
+    submodule: boolean;
+    binary: boolean | null;
+    lines: { staged: GitLineCount; unstaged: GitLineCount };
+}
+
+export type GitHeadV2 =
+    | { kind: 'branch'; name: string; oid: string }
+    | { kind: 'detached'; oid: string }
+    | { kind: 'unborn'; name: string | null };
+
+export interface GitBranchRefV2 {
+    name: string;
+    oid: string;
+    current: boolean;
+    worktree: string | null;
+    upstream: string | null;
+}
+
+export interface GitStatusRepoV2 {
+    v: 2;
+    ok: true;
+    relation: 'root' | 'inside';
+    cwd: string;
+    repository: { root: string; gitDir: string; commonDir: string; linkedWorktree: boolean; prefix: string };
+    head: GitHeadV2;
+    upstream: { name: string; ahead: number | null; behind: number | null } | null;
+    operation: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'bisect' | null;
+    stashCount: number;
+    branches: GitBranchRefV2[];
+    entries: GitStatusEntryV2[];
+    totals: {
+        staged: GitLineCount;
+        unstaged: GitLineCount;
+        counts: { staged: number; unstaged: number; untracked: number; conflicted: number; entries: number };
+    };
+    clean: boolean;
+}
+
+export type GitStatusV2 =
+    | GitStatusRepoV2
+    | { v: 2; ok: true; relation: 'none'; cwd: string }
+    | { v: 2; ok: false; code: 'git_missing' | 'git_failed' | 'timeout'; error: string };
+
+// ── REMOVE once every daemon runs a release with ?v=2 (2026-09) ─────────────
+// An older daemon ignores the `v` query and answers its original shape (no
+// `v` field). It is folded into the structured shape with every line count
+// 'unavailable' — the old numstat text is NOT parsed here.
+interface LegacyGitStatus {
     ok: boolean;
     branch: string | null; oid: string | null; upstream: string | null;
     ahead: number; behind: number; clean: boolean;
     entries: Array<{ path: string; staged: string; unstaged: string; untracked?: boolean; conflicted?: boolean; renamedFrom?: string }>;
     error?: string;
 }
-export const machineGitStatus = (ctx: MachineCtx) =>
-    j<V2GitStatus>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/git/status`);
+function legacyToStructured(d: LegacyGitStatus, cwd: string): GitStatusV2 {
+    if (!d.ok) {
+        // The old shape folded "not a repository" and "git failed" into one
+        // ok:false + stderr; only git's own wording is an authoritative not-a-repo.
+        if (/not a git repository|must be run in a work tree/i.test(d.error ?? '')) return { v: 2, ok: true, relation: 'none', cwd };
+        return { v: 2, ok: false, code: 'git_failed', error: d.error ?? 'git failed' };
+    }
+    const path = (p: string): GitPathV2 => ({ repo: p, cwd: p, display: p, utf8: true });
+    const counts = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0, entries: 0 };
+    const entries: GitStatusEntryV2[] = (d.entries ?? []).map((e) => {
+        counts.entries++;
+        if (e.untracked) counts.untracked++;
+        else if (e.conflicted) counts.conflicted++;
+        else {
+            if (e.staged) counts.staged++;
+            if (e.unstaged) counts.unstaged++;
+        }
+        return {
+            path: path(e.path),
+            index: e.untracked ? '?' : e.staged || '.',
+            worktree: e.untracked ? '?' : e.unstaged || '.',
+            untracked: !!e.untracked,
+            conflict: e.conflicted ? { xy: `${e.staged || 'U'}${e.unstaged || 'U'}` } : null,
+            rename: e.renamedFrom !== undefined ? { from: path(e.renamedFrom), score: null, copy: false } : null,
+            submodule: false,
+            binary: null,
+            lines: { staged: 'unavailable', unstaged: 'unavailable' },
+        };
+    });
+    return {
+        v: 2, ok: true, relation: 'root', cwd,
+        repository: { root: cwd, gitDir: '', commonDir: '', linkedWorktree: false, prefix: '' },
+        head: d.branch ? { kind: 'branch', name: d.branch, oid: d.oid ?? '' } : { kind: 'detached', oid: d.oid ?? '' },
+        upstream: d.upstream ? { name: d.upstream, ahead: d.ahead ?? null, behind: d.behind ?? null } : null,
+        operation: null,
+        stashCount: 0,
+        branches: [],
+        entries,
+        totals: { staged: 'unavailable', unstaged: 'unavailable', counts },
+        clean: entries.length === 0,
+    };
+}
+// ── end REMOVE ───────────────────────────────────────────────────────────────
+
+/** Structured git status (v=2). `data` is null only when the daemon sent no
+ *  JSON body; an old daemon's answer is folded into the v2 shape (see above). */
+export const machineGitStatus = async (ctx: MachineCtx): Promise<{ status: number; data: GitStatusV2 | null }> => {
+    const r = await j<GitStatusV2 | LegacyGitStatus>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/git/status?v=2`);
+    if (r.status !== 200 || !r.data) return { status: r.status, data: null };
+    if ('v' in r.data && r.data.v === 2) return { status: r.status, data: r.data };
+    return { status: r.status, data: legacyToStructured(r.data as LegacyGitStatus, '') }; // REMOVE with the legacy block
+};
 
 export const machineGitDiff = (ctx: MachineCtx, opts?: { staged?: boolean; head?: boolean; path?: string; numstat?: boolean }) =>
     j<{ ok: boolean; diff?: string; error?: string }>(ctx, 'GET',

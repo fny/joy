@@ -1,88 +1,40 @@
 /**
- * Git status file-level functionality
- * Provides detailed git status with file-level changes and line statistics
+ * Git status, file level — the Changes list, the sidebar tree, the all-files
+ * diff and the prefetcher all read this shape.
+ *
+ * Built from the daemon's STRUCTURED status (v=2): the daemon has already
+ * parsed porcelain and numstat, so nothing here reads git text. The shapes and
+ * the projection live in ./gitStatusModel (pure, unit-tested); this module
+ * adds the store lookup and the tunnel call.
  */
 
 import { storage } from './storage';
 import { sync } from './sync';
-import { machineGitStatus, machineGitDiff, type V2GitStatus } from './v2/machine';
-import { parseStatusSummaryV2, getCurrentBranchV2 } from './git-parsers/parseStatusV2';
-import { parseNumStat, createDiffStatsMap } from './git-parsers/parseDiff';
+import { machineGitStatus } from './v2/machine';
+import { classifyGitStatusResponse, type GitStatusFiles, type GitStatusFilesResult } from './gitStatusModel';
 
-export interface GitFileStatus {
-    fileName: string;
-    filePath: string;
-    fullPath: string;
-    status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
-    isStaged: boolean;
-    linesAdded: number;
-    linesRemoved: number;
-    oldPath?: string; // For renamed files
-}
-
-export interface GitStatusFiles {
-    stagedFiles: GitFileStatus[];
-    unstagedFiles: GitFileStatus[];
-    branch: string | null;
-    totalStaged: number;
-    totalUnstaged: number;
-}
-
-/**
- * Outcome of a git-status read. The three states are DISTINCT so callers can
- * keep the last good list on a failed read instead of showing "not a git
- * repository" (the old `null` meant both):
- *  - ok:          a fresh, complete file list;
- *  - not-repo:    the daemon answered and there is nothing to list;
- *  - unavailable: no answer / a failed request — the last list still stands.
- */
-export type GitStatusFilesResult =
-    | { kind: 'ok'; files: GitStatusFiles }
-    | { kind: 'not-repo' }
-    | { kind: 'unavailable'; error: string };
+export { knownLines, filesFromStructured, mergeChangeRows, classifyGitStatusResponse } from './gitStatusModel';
+export type { GitFileStatus, GitFileChange, GitStatusFiles, GitLineCount, GitStatusFilesResult } from './gitStatusModel';
 
 /**
  * Fetch detailed git status with file-level information (three-state).
  */
 export async function fetchGitStatusFiles(sessionId: string): Promise<GitStatusFilesResult> {
     try {
-        // Check if we have a session with valid metadata
         const session = storage.getState().sessions[sessionId];
         if (!session?.metadata?.path) {
             return { kind: 'unavailable', error: 'session has no path yet' };
         }
 
-        // v2 sessions read git state from the daemon's machine plane over the
-        // sealed tunnel: one parsed status call plus two numstat calls, instead
-        // of shelling out through a realtime socket.
+        // One structured call over the sealed tunnel; the daemon did the parsing.
         const mctx = await sync.awaitMachineCtx(sessionId);
         if (!mctx) {
-            return { kind: 'unavailable', error: 'no machine context yet' }; // the shell fallback never reached the daemon (#5)
+            return { kind: 'unavailable', error: 'no machine context yet' };
         }
 
-        const { status, data } = await machineGitStatus(mctx);
-        if (status !== 200 || !data) {
-            return { kind: 'unavailable', error: `status HTTP ${status}` };
-        }
-        if (!data.ok) return { kind: 'not-repo' }; // the daemon answered: not a repo (or git failed there)
-
-        const [unstaged, staged] = await Promise.all([
-            machineGitDiff(mctx, { numstat: true }),
-            machineGitDiff(mctx, { numstat: true, staged: true }),
-        ]);
-        // Each diff response is checked on its own: a 500 / ok:false numstat
-        // used to be read as an EMPTY diff, so a failed read came back as a
-        // successful file list with zero added/removed lines (#377). A failed
-        // read is unavailable; the caller keeps the last real statistics.
-        for (const [label, res] of [['unstaged', unstaged], ['staged', staged]] as const) {
-            if (res.status !== 200 || !res.data?.ok || typeof res.data.diff !== 'string') {
-                return { kind: 'unavailable', error: `${label} numstat failed: ${res.data?.error ?? `HTTP ${res.status}`}` };
-            }
-        }
-        return {
-            kind: 'ok',
-            files: fromV2Status(data, unstaged.data!.diff!, staged.data!.diff!),
-        };
+        // Only an explicit "not a repository" clears the list; a failed git
+        // command (ok:false) is unavailable and the last good list stands.
+        return classifyGitStatusResponse(await machineGitStatus(mctx));
     } catch (error) {
         console.error('Error fetching git status files for session', sessionId, ':', error);
         return { kind: 'unavailable', error: error instanceof Error ? error.message : String(error) };
@@ -96,165 +48,4 @@ export async function fetchGitStatusFiles(sessionId: string): Promise<GitStatusF
 export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFiles | null> {
     const result = await fetchGitStatusFiles(sessionId);
     return result.kind === 'ok' ? result.files : null;
-}
-
-/** Porcelain v2 status letter → the UI's file status. */
-function statusFromCode(code: string): GitFileStatus['status'] {
-    switch (code) {
-        case 'A': return 'added';
-        case 'D': return 'deleted';
-        case 'R': case 'C': return 'renamed';
-        default: return 'modified';
-    }
-}
-
-/**
- * Build the file-level view from the daemon's PARSED status (v2 machine plane)
- * plus numstat output for line counts. The v1 path reparses raw porcelain here;
- * over v2 the daemon has already done that work.
- */
-function fromV2Status(d: V2GitStatus, unstagedNumstat: string, stagedNumstat: string): GitStatusFiles {
-    const unstagedStats = createDiffStatsMap(parseNumStat(unstagedNumstat.trim()));
-    const stagedStats = createDiffStatsMap(parseNumStat(stagedNumstat.trim()));
-    const stagedFiles: GitFileStatus[] = [];
-    const unstagedFiles: GitFileStatus[] = [];
-    const mk = (path: string, status: GitFileStatus['status'], isStaged: boolean, oldPath?: string): GitFileStatus => {
-        const stats = (isStaged ? stagedStats : unstagedStats)[path];
-        return {
-            fileName: path.split('/').pop() ?? path,
-            filePath: path,
-            fullPath: path,
-            status,
-            isStaged,
-            linesAdded: stats?.added ?? 0,
-            linesRemoved: stats?.removed ?? 0,
-            ...(oldPath ? { oldPath } : {}),
-        };
-    };
-
-    for (const e of d.entries ?? []) {
-        if (e.untracked) { unstagedFiles.push(mk(e.path, 'untracked', false)); continue; }
-        if (e.staged) stagedFiles.push(mk(e.path, statusFromCode(e.staged), true, e.renamedFrom));
-        if (e.unstaged) unstagedFiles.push(mk(e.path, statusFromCode(e.unstaged), false, e.renamedFrom));
-    }
-
-    return {
-        stagedFiles,
-        unstagedFiles,
-        branch: d.branch ?? null,
-        totalStaged: stagedFiles.length,
-        totalUnstaged: unstagedFiles.length,
-    };
-}
-
-/**
- * Parse git status v2 and diff outputs into structured file data
- */
-function parseGitStatusFilesV2(
-    statusOutput: string,
-    combinedDiffOutput: string
-): GitStatusFiles {
-    // Parse status using v2 parser
-    const statusSummary = parseStatusSummaryV2(statusOutput);
-    const branchName = getCurrentBranchV2(statusSummary);
-    
-    // Parse combined diff statistics
-    const [unstagedOutput = '', stagedOutput = ''] = combinedDiffOutput.split('---STAGED---');
-    const unstagedDiff = parseNumStat(unstagedOutput.trim());
-    const stagedDiff = parseNumStat(stagedOutput.trim());
-    const unstagedStats = createDiffStatsMap(unstagedDiff);
-    const stagedStats = createDiffStatsMap(stagedDiff);
-
-    const stagedFiles: GitFileStatus[] = [];
-    const unstagedFiles: GitFileStatus[] = [];
-
-    for (const file of statusSummary.files) {
-        const parts = file.path.split('/');
-        const fileNameOnly = parts[parts.length - 1] || file.path;
-        const filePathOnly = parts.slice(0, -1).join('/');
-
-        // Create file status for staged changes
-        if (file.index !== ' ' && file.index !== '.' && file.index !== '?') {
-            const status = getFileStatusV2(file.index);
-            const stats = stagedStats[file.path] || { added: 0, removed: 0, binary: false };
-            
-            stagedFiles.push({
-                fileName: fileNameOnly,
-                filePath: filePathOnly,
-                fullPath: file.path,
-                status,
-                isStaged: true,
-                linesAdded: stats.added,
-                linesRemoved: stats.removed,
-                oldPath: file.from
-            });
-        }
-
-        // Create file status for unstaged changes
-        if (file.working_dir !== ' ' && file.working_dir !== '.') {
-            const status = getFileStatusV2(file.working_dir);
-            const stats = unstagedStats[file.path] || { added: 0, removed: 0, binary: false };
-            
-            unstagedFiles.push({
-                fileName: fileNameOnly,
-                filePath: filePathOnly,
-                fullPath: file.path,
-                status,
-                isStaged: false,
-                linesAdded: stats.added,
-                linesRemoved: stats.removed,
-                oldPath: file.from
-            });
-        }
-    }
-
-    // Add untracked files to unstaged
-    for (const untrackedPath of statusSummary.not_added) {
-        // Handle both files and directories (directories have trailing slash)
-        const isDirectory = untrackedPath.endsWith('/');
-        const cleanPath = isDirectory ? untrackedPath.slice(0, -1) : untrackedPath;
-        const parts = cleanPath.split('/');
-        const fileNameOnly = parts[parts.length - 1] || cleanPath;
-        const filePathOnly = parts.slice(0, -1).join('/');
-        
-        // Skip directory entries since we're using --untracked-files=all
-        // This is a fallback in case git still reports directories
-        if (isDirectory) {
-            console.warn(`Unexpected directory in untracked files: ${untrackedPath}`);
-            continue;
-        }
-        
-        unstagedFiles.push({
-            fileName: fileNameOnly,
-            filePath: filePathOnly,
-            fullPath: cleanPath,
-            status: 'untracked',
-            isStaged: false,
-            linesAdded: 0,
-            linesRemoved: 0
-        });
-    }
-
-    return {
-        stagedFiles,
-        unstagedFiles,
-        branch: branchName,
-        totalStaged: stagedFiles.length,
-        totalUnstaged: unstagedFiles.length
-    };
-}
-
-/**
- * Convert git status character to readable status (v2 format)
- */
-function getFileStatusV2(statusChar: string): GitFileStatus['status'] {
-    switch (statusChar) {
-        case 'M': return 'modified';
-        case 'A': return 'added';
-        case 'D': return 'deleted';
-        case 'R': 
-        case 'C': return 'renamed';
-        case '?': return 'untracked';
-        default: return 'modified';
-    }
 }

@@ -262,12 +262,25 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 
 ## Files & git
 
-Session Files view: git **Changes** (staged/unstaged/untracked groups, line
-counts) and searchable **All Files** tree; file page renders source/diff/
-rendered modes (Markdown, HTML, CSV/TSV, images), zoom/wrap, download, delete
-(confirmed, irreversible); desktop adds a CodeMirror editor with hash-guarded
-saves and conflict diff. Daemon FS
-ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
+Session Files view: git **Changes** (staged/unstaged/untracked/conflicted
+groups, exact per-file and total line counts) and searchable **All Files**
+tree; file page renders source/diff/rendered modes (Markdown, HTML, CSV/TSV,
+images), zoom/wrap, download, delete (confirmed, irreversible); desktop adds a
+CodeMirror editor with hash-guarded saves and conflict diff. Daemon FS ops are
+jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
+
+Git facts come from ONE structured daemon read (`git/status?v=2`, see
+docs/API.md "Structured git status"): the app has no git text parser. A file
+is opened by its exact identity and shown by separate display text, so names
+with quotes, pipes, trailing spaces, newlines or undecodable bytes list and
+open correctly; renames show destination + source; AA/DD conflicts are
+conflicts; a rebase or detached checkout is reported as such (linked
+worktrees included). Line counts are exact or absent (`'unavailable'` for
+binary/untracked/unread — never a stand-in 0), so the +N/−N badges on
+session rows, the Files header and each row show only real numbers. Refreshes
+retry through the sync backoff on transport failure and a stopped project
+sync can no longer overwrite its replacement's status. An older daemon (no
+`v=2`) still lists files, without line counts.
 
 ## Account & extras
 
