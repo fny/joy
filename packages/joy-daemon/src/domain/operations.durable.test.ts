@@ -274,3 +274,32 @@ describe("kill reports record_not_terminated when no termination marker is durab
     expect(await op("joy-kill-session").handler(fakeRegistry(s).reg as never, { id: "bbbb0006" }, { via: "rpc" })).toEqual({ ok: false });
   });
 });
+
+describe("send: an explicit replyTo of null / \"\" stamps no reply-to (#112)", () => {
+  const pair = (a: string, b: string) => {
+    const sender = fakeSession(a, { durable: true }); const target = fakeSession(b, { durable: true });
+    const reg = { get: (id: string) => (id === a ? sender.s : id === b ? target.s : undefined), nextChatId: () => 1, addChatMessage: () => {} };
+    return { reg, wrapper: () => target.calls[0].text.split("\n")[0] };
+  };
+
+  it("replyTo omitted: a joy sender defaults to reply-to=itself (unchanged)", async () => {
+    const { reg, wrapper } = pair("cccc0001", "cccc0002");
+    const r = (await op("joy-send").handler(reg as never, { session_id: "cccc0002", text: "ping", from: "joy:cccc0001" }, { via: "http" })) as Record<string, unknown>;
+    expect(r.ok).toBe(true);
+    expect(wrapper()).toContain('reply-to="joy:cccc0001"');
+  });
+
+  it.each([null, ""])("replyTo=%j from a joy session: <joy-message from=…> with NO reply-to", async (replyTo) => {
+    const { reg, wrapper } = pair("cccc0003", "cccc0004");
+    const r = (await op("joy-send").handler(reg as never, { session_id: "cccc0004", text: "FYI done", from: "joy:cccc0003", replyTo }, { via: "http" })) as Record<string, unknown>;
+    expect(r.ok).toBe(true);
+    expect(wrapper()).toContain('from="joy:cccc0003"');
+    expect(wrapper()).not.toContain("reply-to");
+  });
+
+  it("a malformed explicit replyTo is still refused", async () => {
+    const { reg } = pair("cccc0005", "cccc0006");
+    const r = (await op("joy-send").handler(reg as never, { session_id: "cccc0006", text: "x", from: "joy:cccc0005", replyTo: "nope" }, { via: "http" })) as Record<string, unknown>;
+    expect(r.error).toBe("bad_reply_to");
+  });
+});

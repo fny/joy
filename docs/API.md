@@ -76,7 +76,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-restart-daemon` | POST /daemon/restart | Exec-restart the daemon |
 | `joy-status` | GET /status | Daemon + sessions snapshot |
 | `joy-notify` | POST /notify | Push notification to all devices |
-| `joy-send` | POST /send | Deliver text to a session (queue-routed). `from` (`joy:<id>` \| `cli` \| `app` \| `cron:<name>`) + optional `replyTo` make the DAEMON wrap the text in `<joy-message from=… reply-to=…>` and stamp `meta.from` on the mirrored record — the sender's own wrapper is stripped, a `joy:` sender must exist here. `exclusive` keeps the old refuse-if-busy scripting contract. Returns `queued_id`. Acceptance is durable: if the queue spool cannot be persisted the op returns `not_durable` (HTTP 503) and nothing is acknowledged or mirrored (#551; same for `queueAdd` and handoff notes) |
+| `joy-send` | POST /send | Deliver text to a session (queue-routed). `from` (`joy:<id>` \| `cli` \| `app` \| `cron:<name>`) + optional `replyTo` make the DAEMON wrap the text in `<joy-message from=… reply-to=…>` and stamp `meta.from` on the mirrored record — the sender's own wrapper is stripped, a `joy:` sender must exist here. `replyTo` defaults to `from` for a `joy:` sender; an explicit `null` or `""` stamps NO `reply-to` (what `joy send --no-reply` and `joy run` send, #112). `exclusive` keeps the old refuse-if-busy scripting contract. Returns `queued_id`. Acceptance is durable: if the queue spool cannot be persisted the op returns `not_durable` (HTTP 503) and nothing is acknowledged or mirrored (#551; same for `queueAdd` and handoff notes) |
 | `joy-check` | GET /sessions/:id/check | `idle` \| `busy` (busySince) \| `needs_input` (held approvals, a hook-reported `waiting` {kind, tool?, since} — claude's permission prompt / elicitation — or a `<joy-options>` question) \| `ended`, plus queue depth and permissionMode — the one computation behind `joy check`/`wait`/`ask` |
 | `joy-approvals` / `joy-approvals-answer` | GET/POST /sessions/:id/approvals | Held tool-call approvals (codex) and `{requestId, decision: allow\|deny}` |
 | `joy-env-list` / `joy-env-set` / `joy-env-unset` | GET /env · POST /env · DELETE /env/:name | The sealed environment store (`~/.joy/env.sealed`, AES-GCM under the machine key): names only out, values in; applied to `process.env` at boot and before EVERY spawn so all four agents inherit it. Also on the tunnel as `/v2/env` |
@@ -366,9 +366,31 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   single SSE event `event: history\ndata: [<records>]\n\n` (byte-identical to
   the whole-array form) and `/sessions/:id/events` still opens with the
   `{ hello, seq }` line followed by one NDJSON line per record.
+- CLI turn wait (`joy ask` / `wait` / `run`, `waitTurn` in `cli.ts`): polls
+  `/sessions/:id/queue` until the turn id has left the queue, then `/check`
+  until an explicit `idle` / `needs_input`; every request carries the
+  remaining `--timeout` as its abort signal and the deadline is re-checked
+  after each (#501). `/check` 404 → `gone` (exit 1); any other non-2xx or an
+  unknown `state` → `error` (exit 1, `reason`) — never `answered` (#496). The
+  `/sessions/:id/events?follow=1` stream is resumed from the last consumed
+  `seq` when it breaks; at the end a tail that cannot be fetched turns an
+  otherwise-answered outcome into `error` ("output stream lost after seq N")
+  instead of a truncated reply (#497). The text of a queued turn starts at the
+  mirrored user row whose (wrapper-stripped) text is the sent prompt, else at
+  the seq seen when the queue poll noticed the dispatch (#498). `joy new -m`
+  reuses the send path and exits with its code on refusal (#494).
+- `joy install` bakes the effective `JOY_RELAY_URL` AND `JOY_HOME_DIR` into
+  the systemd unit / launchd plist, so the supervised daemon reads the same
+  credentials and state the installing CLI did (an overridden home used to be
+  dropped and the service started against `~/.joy`, #499).
 - `joy stop` signals only a verified daemon: the pid from an authenticated
   `/status`, or the daemon.json pid whose command line and start time match;
-  a stale record is removed without signalling (#495). The single-daemon lock
+  a stale record is removed without signalling (#495). A daemon the installed
+  service owns (the unit's `MainPID` / the launchd job's PID is that pid) is
+  stopped through `systemctl --user stop` / `launchctl unload` — a direct
+  SIGTERM was undone by `Restart=always` / `KeepAlive` three seconds later
+  while `stop` reported success (#502); a failing supervisor stop is exit 1
+  and nothing is signalled. Only a detached daemon gets the signal directly. The single-daemon lock
   is an SQLite `BEGIN IMMEDIATE` on `daemon.lock.db` — OS-backed, released
   when the process dies, nothing to reclaim; `daemon.lock` is an informational
   pidfile (#589). Node ≥ 22.13.
