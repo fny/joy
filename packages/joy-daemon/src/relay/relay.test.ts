@@ -333,6 +333,29 @@ test("a sealed blob this daemon cannot open is an unknown read: nothing is writt
   } finally { vi.unstubAllGlobals(); }
 });
 
+test("an unreadable blob with NO key envelope is preserved too: the repair does not run, nothing is written (#61 residual)", async () => {
+  // Astra on b2aa492d: the unreadable-blob exemption used to require a data
+  // key; a row with none went through PATCH+POST and lost its displayName.
+  // Policy: preserve-unknown — a missing envelope is not proof the blob is
+  // disposable (a client that paired against it can still hold its key).
+  const key = new Uint8Array(32).fill(12);
+  const relay = fakeMachineRelay(key);
+  relay.row.dataKey = null;
+  relay.sealGetsWith(new Uint8Array(32).fill(9)); // opens under a key we do not hold
+  const logged: string[] = [];
+  const err = vi.spyOn(process.stderr, "write").mockImplementation((c: any) => { logged.push(String(c)); return true; });
+  vi.stubGlobal("fetch", relay.fetchImpl);
+  try {
+    const client = new RelayClient(relay.creds as any);
+    expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(false);
+    expect(relay.writes).toEqual([]);
+    expect(relay.row.metadata.displayName).toBe("A");
+    expect(relay.row.version).toBe(1);
+    expect(relay.row.dataKey).toBeNull();                      // no envelope attached over a blob it cannot carry forward
+    expect(logged.some((l) => l.includes("unreadable machine metadata, not repairing"))).toBe(true);
+  } finally { vi.unstubAllGlobals(); err.mockRestore(); }
+});
+
 test("a no-data-key repair goes through the CAS write first: an app rename between read and write is kept (#61)", async () => {
   const key = new Uint8Array(32).fill(10);
   const relay = fakeMachineRelay(key);

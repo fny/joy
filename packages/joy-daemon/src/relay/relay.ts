@@ -362,8 +362,9 @@ export class RelayClient {
    * 4a69e55c); an unconditional POST after the CAS write still could, in a
    * smaller window (Astra on b2aa492d). A blob this daemon cannot open is an
    * unknown read too: the app-owned fields in it would be dropped by any
-   * write, so the publish is skipped while the row carries a data key (a
-   * row with none is readable by nobody and gets the repair).
+   * write, so the publish — and the key repair — is skipped whether or not
+   * the row carries a data key (preserve-unknown; a missing envelope does
+   * not make the blob disposable).
    */
   async getOrCreateMachine(metadata: Record<string, unknown>): Promise<boolean> {
     const run = this.#machineUpsert.then(() => this.#upsertMachine(metadata), () => this.#upsertMachine(metadata));
@@ -391,8 +392,15 @@ export class RelayClient {
           log('getOrCreateMachine: could not read the machine row — skipping this publish (nothing overwritten)');
           return false;
         }
-        if (current !== "missing" && current.unreadable && current.hasDataKey) {
-          log('getOrCreateMachine: the machine row holds sealed metadata this daemon cannot open — skipping this publish (nothing overwritten)');
+        if (current !== "missing" && current.unreadable) {
+          // Preserve-unknown, envelope or not: the repair may attach a key
+          // envelope only when it carries the existing metadata forward
+          // unchanged, and a blob this daemon cannot open cannot be carried
+          // forward — re-sealing needs the plaintext, and an envelope for OUR
+          // key over ciphertext sealed under another would open for nobody.
+          // A missing envelope is not proof the blob is disposable: a client
+          // that paired against it may still hold its key (Astra on b2aa492d).
+          log('getOrCreateMachine: unreadable machine metadata, not repairing (nothing overwritten)');
           return false;
         }
         const blob = { ...base };
