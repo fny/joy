@@ -3,15 +3,17 @@
 // failing. Runs against a throwaway JOY_HOME_DIR so window records never
 // touch live daemon state.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { LedgerWriteError } from "./ledger";
+import { LedgerWriteError, closeAllLedgers } from "./ledger";
+import { SessionCoordinator, resetCoordinators } from "./coordinator";
+import { fakeCoordinatedSession } from "./coordinator.fakeDriver";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let home: string;
 const realHome = process.env.JOY_HOME_DIR;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "joy-handoff-")); process.env.JOY_HOME_DIR = home; });
-afterEach(() => { vi.restoreAllMocks(); if (realHome === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = realHome; rmSync(home, { recursive: true, force: true }); });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "joy-handoff-")); process.env.JOY_HOME_DIR = home; closeAllLedgers(); resetCoordinators(); fakes.clear(); acceptSpy = null; });
+afterEach(() => { vi.restoreAllMocks(); acceptSpy = null; closeAllLedgers(); resetCoordinators(); if (realHome === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = realHome; rmSync(home, { recursive: true, force: true }); });
 
 // Imported lazily so JOY_HOME_DIR is set before any path is resolved.
 async function mods() {
@@ -24,26 +26,37 @@ async function mods() {
 }
 
 interface Fake {
-  id: string; cwd: string; status: "active" | "ended"; agentFlavor: "claude" | "codex";
+  id: string; cwd: string; status: string; agentFlavor: string;
   model?: string; currentModel?: string; summary?: string; transcriptPath?: string;
+  /** Every accept the coordinator was asked for (the durable enqueue). */
   enqueued: Array<{ text: string; opts: Record<string, unknown> }>;
   failFirst: number;
   handoff: unknown[];
-  enqueue(text: string, opts: Record<string, unknown>): { id: string; text: string; createdAt: number };
   setHandoff(info: unknown): void;
   busy(): boolean;
 }
+const fakes = new Map<string, Fake>();
+let acceptSpy: unknown = null;
+/** A coordinator-driven fake session whose first `failFirst` accepts are
+ *  refused the way a full disk refuses the ledger commit. */
 function fake(id: string, failFirst = 0): Fake {
-  return {
-    id, cwd: "/tmp/w", status: "active", agentFlavor: "claude", enqueued: [], failFirst, handoff: [],
-    enqueue(text, opts) {
-      this.enqueued.push({ text, opts });
-      if (this.failFirst > 0) { this.failFirst--; throw new LedgerWriteError("accept", new Error("SQLITE_FULL: database or disk is full")); }
-      return { id: "q", text, createdAt: 1 };
-    },
-    setHandoff(info) { this.handoff.push(info); },
-    busy: () => false,
-  };
+  const { s } = fakeCoordinatedSession(id, { agent: "claude", cwd: "/tmp/w" });
+  const f = s as unknown as Fake;
+  f.enqueued = []; f.failFirst = failFirst; f.handoff = [];
+  f.setHandoff = (info: unknown) => { f.handoff.push(info); };
+  fakes.set(id, f);
+  if (!acceptSpy) {
+    const real = SessionCoordinator.prototype.accept;
+    acceptSpy = vi.spyOn(SessionCoordinator.prototype, "accept").mockImplementation(function (this: SessionCoordinator, input) {
+      const target = fakes.get(input.sessionId);
+      if (target) {
+        target.enqueued.push({ text: input.text, opts: input as unknown as Record<string, unknown> });
+        if (target.failFirst > 0) { target.failFirst--; throw new LedgerWriteError("accept", new Error("SQLITE_FULL: database or disk is full")); }
+      }
+      return real.call(this, input);
+    });
+  }
+  return f;
 }
 const registryOf = (...ss: Fake[]) => ({
   get: (id: string) => ss.find((s) => s.id === id) as never,

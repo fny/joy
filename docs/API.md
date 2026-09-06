@@ -231,10 +231,11 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   completed | failed | cancelled | interrupted` (plus `cancelling`); the
   table `nextState(state, event)` decides every pair and is tested
   exhaustively. Adapters are **drivers** (`submit`, `interrupt`, `observe`,
-  `reconcile`, optional `steer`, `handleCommand`, `runtimeRef`) that keep
-  protocol buffering only — Codex, OpenCode, pi and agy today; Claude still
-  runs its own queue behind the queue facade (`domain/queueFacade.ts`) until
-  its driver lands. Rules: one driver operation per session at a time
+  `reconcile`, optional `steer`, `prepare`, `handleCommand`, `runtimeRef`,
+  `resume`) that keep protocol buffering only — Codex, OpenCode, pi, agy and
+  Claude (`claude/claudeDriver.ts`): every session's queue is the
+  coordinator's, and `domain/queueFacade.ts` (`queueFor`) is the app-facing
+  vocabulary over it (`AgentSession` has no queue methods). Rules: one driver operation per session at a time
   (`concurrentSubmit` drivers may submit while a turn runs; an attempt
   awaiting its verdict always serializes); the op token committed with the
   attempt is checked when the driver's result is applied — a stale result
@@ -265,7 +266,33 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   `queueList`) adds `running`, `busy`, `provenance`, `unresolvedCancels`,
   `drafts` and `commands` (every non-terminal row with its state) to the
   pre-C2 fields. `send … exclusive` refuses when anything is running OR
-  queued on a coordinator-driven session.
+  queued. **Claude specifics**: a row stays `queued` while it waits at the
+  pane gate (`prepare`: idle per `Session.promptReadiness()`, a fresh
+  capture at the ready prompt with an EMPTY box, a dirty box cleared by the
+  verified C-u loop — docs/pane-input-clearing.md); `submitting` means typed
+  with its Enter pending; `running` follows the runtime's proof of delivery
+  (UserPromptSubmit with the exact text, the transcript's user echo — its
+  uuid receipt retained —, a `<command-name>` / `<bash-input>` echo, a slash
+  command's dialog, or the hook-less turn-start-with-fresh-box read); a
+  `!bash` / `/slash` command is complete at delivery. The turn edges are the
+  hooks' (UserPromptSubmit → turn_started, Stop → completed, StopFailure →
+  failed, the 60 s idle notification → idle) with the transcript's
+  turn_duration / end_turn / interrupt marker as the hook-less tie-breaker;
+  a turn nobody dispatched is foreign. A submit that never echoes within the
+  window (extended while the pane visibly works) puts the row back to
+  `queued` and pauses the queue `dispatch_timeout` (the attempt stays
+  matchable: a late echo runs the command instead of re-typing it and lifts
+  the pause); an unclearable box pauses `input_dirty` (self-healing); a
+  failed type pauses `dispatch_failed`; `resume` lifts a pause. A cancel of a
+  typed-not-submitted row drops its Enter and settles it cancelled (#35);
+  Stop cancels every row in flight durably and sends Escape (the runtime's
+  interrupt marker / a Stop confirms it). `/steer <msg>` and `/btw <q>` are
+  commands of origin `steer` (never a chip): typed ahead of the FIFO through
+  the driver's steer op — into a running turn, a foreign one, or an idle box
+  — one pane operation at a time, so two steers never supersede each other
+  and a plain prompt waits for both. A restart leaves queued rows for the
+  replacement; a row typed but not submitted at the restart is reconciled
+  `absent` and re-typed once, a running one ends `interrupted{restart}`.
 - **One outbox sender per session** (`relay/outbox.ts`): rows post in `seq`
   order, retried by `runtimeEventId` with the backoff persisted in the row (a
   restart resumes the schedule), dropped on a permanent refusal, parked on an

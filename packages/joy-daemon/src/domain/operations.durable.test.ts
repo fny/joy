@@ -2,37 +2,55 @@
 // durable spool (#551), a conditional kill never lands on a session whose
 // status moved (#174), and git-URL clones are serialized + attempt-owned so a
 // failed clone can never delete a successful working copy (#547).
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { machineOps, cloneForSpawn, gitRepoIdentity } from "./operations";
 import { LedgerWriteError, SessionEndedError } from "./ledger";
+import { SessionCoordinator, resetCoordinators } from "./coordinator";
+import { fakeCoordinatedSession } from "./coordinator.fakeDriver";
+import { closeAllLedgers } from "./ledger";
 
 const op = (name: string) => machineOps.find((o) => o.rpcName === name)!;
 
 /** A minimal fake session: enqueue succeeds, or throws the ledger's errors per `durable` / `ended`. */
+let opsHome: string;
+beforeAll(() => { opsHome = mkdtempSync(join(tmpdir(), "joy-ops-durable-")); process.env.JOY_HOME_DIR = opsHome; });
+afterAll(() => { closeAllLedgers(); resetCoordinators(); delete process.env.JOY_HOME_DIR; rmSync(opsHome, { recursive: true, force: true }); });
+const fakes = new Map<string, { durable: boolean; calls: Array<{ text: string; opts: unknown }> }>();
+let acceptSpy: unknown = null;
+/** A coordinator-driven fake session; `durable:false` makes the coordinator
+ *  refuse every accept the way a full disk refuses the ledger commit. */
 function fakeSession(id: string, o: { durable: boolean; status?: "starting" | "active" | "ended"; ended?: boolean } = { durable: true }) {
   const calls: Array<{ text: string; opts: unknown }> = [];
-  const s = {
-    id, cwd: "/tmp/x", status: o.status ?? "active", claudeSessionId: "sid",
-    agentFlavor: "claude", summary: undefined, currentModel: undefined, model: undefined,
-    busy: () => false,
-    detectPermissionMode: () => "bypassPermissions",
-    enqueue(text: string, opts?: unknown) {
-      calls.push({ text, opts });
-      if (o.ended) throw new SessionEndedError(id);
-      if (!o.durable) throw new LedgerWriteError("accept", new Error("SQLITE_FULL"));
-      return { id: "q1", text, createdAt: 1 };
+  const killed: string[] = [];
+  const { s, coordinator } = fakeCoordinatedSession(id, {
+    agent: "claude", cwd: "/tmp/x",
+    extra: {
+      claudeSessionId: "sid", summary: undefined, currentModel: undefined, model: undefined,
+      killed,
+      end(reason: string) { killed.push(`end:${reason}`); return true; },
+      forceKill() { killed.push("forceKill"); return true; },
+      awaitArchive: async () => true,
     },
-    queueState: () => ({ pendingCount: calls.length, items: [] }),
-    killed: [] as string[],
-    end(reason: string) { this.killed.push(`end:${reason}`); return true; },
-    forceKill() { this.killed.push("forceKill"); return true; },
-    awaitArchive: async () => true,
-  };
-  return { s, calls };
+  });
+  if (o.status) (s as { status: string }).status = o.status;
+  if (o.ended) { (s as { status: string }).status = "ended"; coordinator.retire(id, "killed"); }
+  fakes.set(id, { durable: o.durable, calls });
+  if (!acceptSpy) {
+    const real = SessionCoordinator.prototype.accept;
+    acceptSpy = vi.spyOn(SessionCoordinator.prototype, "accept").mockImplementation(function (this: SessionCoordinator, input) {
+      const f = fakes.get(input.sessionId);
+      if (f) {
+        f.calls.push({ text: input.text, opts: input });
+        if (!f.durable) throw new LedgerWriteError("accept", new Error("SQLITE_FULL"));
+      }
+      return real.call(this, input);
+    });
+  }
+  return { s: s as unknown as typeof s & { killed: string[] }, calls };
 }
 function fakeRegistry(s: unknown) {
   const chat: unknown[] = [];
@@ -69,7 +87,7 @@ describe("send / queueAdd require a durable spool (#551)", () => {
     const { s, calls } = fakeSession("aaaa0002", { durable: true });
     const { reg, chat } = fakeRegistry(s);
     const r = (await op("joy-send").handler(reg as never, { session_id: "aaaa0002", text: "hello" }, { via: "http" })) as Record<string, unknown>;
-    expect(r).toMatchObject({ ok: true, chat_id: 7, queued_id: "q1" });
+    expect(r).toMatchObject({ ok: true, chat_id: 7, queued_id: expect.any(String) });
     expect(chat).toHaveLength(1);
     expect(calls).toHaveLength(1);
     expect(calls[0].opts).toMatchObject({ mirrorToRelay: true, visible: true, source: "web" });
@@ -82,7 +100,7 @@ describe("send / queueAdd require a durable spool (#551)", () => {
     expect(op("joy-queue-add").httpShape!(r1).status).toBe(503);
     const good = fakeSession("aaaa0004", { durable: true });
     const r2 = (await op("joy-queue-add").handler(fakeRegistry(good.s).reg as never, { id: "aaaa0004", text: "x" }, { via: "rpc" })) as Record<string, unknown>;
-    expect(r2).toMatchObject({ ok: true, id: "q1" });
+    expect(r2).toMatchObject({ ok: true, id: expect.any(String) });
     expect(good.calls).toHaveLength(1);
   });
 });

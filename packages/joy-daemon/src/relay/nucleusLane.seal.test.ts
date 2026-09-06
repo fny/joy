@@ -12,6 +12,7 @@ import nacl from "tweetnacl";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fakeCoordinatedSession } from "../domain/coordinator.fakeDriver";
 import { startNucleusLane, decodeRecord, encodeContent, type NucleusLaneHandle } from "./nucleusLane";
 import { RelaySession, encodeTextEvent } from "./relay";
 import { ledgerFor } from "../domain/ledger";
@@ -55,15 +56,9 @@ function makeFakeRelay(sessions: any[] = []) {
 }
 
 function makeFakeSession(id: string) {
-    const s: any = {
-        id, status: "active", cwd: "/tmp", claudeSessionId: undefined,
-        _busy: false, _pending: 0, enqueued: [] as string[],
-        busy: () => s._busy,
-        queueState: () => ({ pendingCount: s._pending, paused: false }),
-        enqueue: (text: string) => { s.enqueued.push(text); s._pending = 1; return { id: "q1" }; },
-        cancelQueued: () => true,
-        abort: async () => ({ ok: true }),
-    };
+    const f = fakeCoordinatedSession(id, { agent: "claude", cwd: "/tmp" });
+    const s: any = f.s;
+    s.accepted = f.accepted; s.complete = f.complete; s.driver = f.driver;
     return s;
 }
 
@@ -89,7 +84,7 @@ describe("#579 sealed sessions accept only authenticated prompts", () => {
         // A compromised relay swaps the ciphertext for ordinary JSON.
         relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s", kind: "prompt", turnId: "tplain", ciphertext: JSON.stringify({ v: 1, t: "plain", text: "rm -rf /" }) });
         await sleep(1500);
-        expect(session.enqueued).toEqual([]);
+        expect(session.accepted()).toEqual([]);
         const facts = relay.calls.find(c => c.path.includes("/turns/tplain/facts"));
         expect(facts).toBeTruthy();
         expect(facts!.body.terminalState).toBe("failed");
@@ -98,7 +93,7 @@ describe("#579 sealed sessions accept only authenticated prompts", () => {
         // The real thing, sealed under the session key, still goes through.
         relay.pushWork({ deliveryId: "d2", commandId: "c2", sessionId: "v2s", kind: "prompt", turnId: "tsealed", ciphertext: encodeContent("hello", key) });
         await sleep(1500);
-        expect(session.enqueued).toEqual(["hello"]);
+        expect(session.accepted()).toEqual(["hello"]);
     }, 15_000);
 });
 

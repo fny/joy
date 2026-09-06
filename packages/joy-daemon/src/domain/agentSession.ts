@@ -10,7 +10,7 @@
 // type-only imports (erased at runtime — no dependency cycle).
 
 import type { RelaySession } from "../relay/relay";
-import type { SessionStatus, SessionRecord, QueuedMessage, QueueState, QueueItemState } from "../claude/session";
+import type { SessionStatus, SessionRecord } from "../claude/session";
 
 /** Where an app→agent text came from: the relay lane, the local HTTP surface, or an RPC/CLI call. */
 export type DeliverySource = "relay" | "web" | "rpc";
@@ -50,35 +50,16 @@ export interface AgentSession {
   attachRelay(rs: RelaySession, allowEnded?: boolean): boolean;
   beginWatching(): void;
 
-  // ── app-facing intake / queue ──
-  // A session the SessionCoordinator (domain/coordinator.ts) has adopted has
-  // NO queue surface of its own: its commands are ledger rows the coordinator
-  // owns, and callers go through domain/queueFacade.ts (`queueFor`). The
-  // methods below exist only on adapters not yet ported to a RuntimeDriver.
+  // ── app-facing state ──
+  // The queue is NOT here: every session's commands are the session
+  // coordinator's rows (domain/coordinator.ts), reached through
+  // domain/queueFacade.ts (`queueFor`); each adapter is a RuntimeDriver of it.
+  /** Something is executing or held: a turn, a dispatch mid-flight, queued work. */
   busy(): boolean;
-  /** Accept a text for this session. Returns only after the acceptance is
-   *  COMMITTED to the ledger (domain/ledger.ts) — or throws: LedgerWriteError
-   *  when it could not be committed (nothing staged, no ack), SessionEndedError
-   *  when the session has ended (#553). Durability is not the caller's choice. */
-  enqueue?(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; id?: string }): QueuedMessage;
-  /** Restart support: pluck every prompt that has NOT been dispatched yet so
-   *  the replacement can take them (same ids — the relay lane tracks them).
-   *  Adapters without a pluckable queue leave this undefined. */
-  takeQueuedForRestart?(): Array<{ id: string; text: string; source: DeliverySource; mirrorToRelay: boolean; seq?: number; visible: boolean }>;
   /** Restart support: resolve once the process end() signalled is really
    *  gone (kill -9 after `ms`). Adapters whose replacement reopens the same
    *  on-disk conversation implement this so two writers never overlap. */
   awaitExit?(ms?: number): Promise<void>;
-  queueState?(): QueueState;
-  /** Delivery state of ONE queued item, when the adapter can track it (claude).
-   *  Callers that need proof a SPECIFIC prompt landed must prefer this over the
-   *  session-wide busy() flag; adapters without it return nothing and the caller
-   *  falls back. */
-  queueItemState?(id: string): QueueItemState;
-  resumeQueue?(): void;
-  editQueued?(id: string, text: string): boolean;
-  cancelQueued?(id: string): boolean;
-  reorderQueued?(id: string, toIndex: number): boolean;
   /** Stop whatever is executing (a coordinator session: every command in
    *  flight is cancelled durably; a foreign turn is interrupted). */
   abort(): Promise<{ ok: boolean; error?: string }>;

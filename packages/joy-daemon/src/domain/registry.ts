@@ -14,9 +14,8 @@ import { applyEnvStore } from "./envStore";
 import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
-import { Session, type ChatMessage, type SessionDeps, type QueuedItem } from "../claude/session";
+import { Session, type ChatMessage, type SessionDeps } from "../claude/session";
 import { ledgerFor } from "./ledger";
-import { queueFor } from "./queueFacade";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
@@ -136,28 +135,26 @@ export class SessionRegistry {
     if (s && this.#announcer) await this.#announcer(s);
   }
 
-  /** Tear a session down for an in-place restart: a legacy adapter plucks
-   *  the prompts not yet dispatched (they move to the replacement); a
-   *  coordinator-driven one leaves its queued rows in the ledger and its
-   *  running command ends interrupted{restart} (the relay lane observes the
-   *  state — the dead object's busy() dropping never reads as "completed").
-   *  End the process without archiving the card, and — for adapters that
-   *  reopen the same on-disk conversation — wait for the old process to be
-   *  really gone. */
-  async #retire(existing: AgentSession | undefined, id: string): Promise<QueuedItem[]> {
-    if (!existing) return [];
-    const carried = (existing.takeQueuedForRestart?.() ?? []) as QueuedItem[];
+  /** Tear a session down for an in-place restart: its queued rows stay in
+   *  the ledger for the replacement and its running command ends
+   *  interrupted{restart} (the coordinator's retire — the relay lane observes
+   *  the state; the dead object's busy() dropping never reads as
+   *  "completed"). End the process without archiving the card, and — for
+   *  adapters that reopen the same on-disk conversation — wait for the old
+   *  process to be really gone. */
+  async #retire(existing: AgentSession | undefined, id: string): Promise<void> {
+    if (!existing) return;
     existing.end("restart");
     this.#sessions.delete(id);
     await existing.awaitExit?.();
-    return carried;
   }
 
-  /** Launch the replacement and hand it the carried prompts. A launch that
-   *  fails must not leave a live-looking card with no session behind it —
-   *  the app kept a "running" ghost that answered session_not_found forever
-   *  (codex review, 2026-09-04) — so archive it and rethrow. */
-  async #replace(id: string, cwd: string, carried: QueuedItem[], make: () => Promise<AgentSession>): Promise<AgentSession> {
+  /** Launch the replacement (it takes the ledger's queued rows itself). A
+   *  launch that fails must not leave a live-looking card with no session
+   *  behind it — the app kept a "running" ghost that answered
+   *  session_not_found forever (codex review, 2026-09-04) — so archive it
+   *  and rethrow. */
+  async #replace(id: string, cwd: string, make: () => Promise<AgentSession>): Promise<AgentSession> {
     let next: AgentSession;
     this.#replacing.add(id);
     try { next = await make(); }
@@ -172,11 +169,6 @@ export class SessionRegistry {
     } finally {
       this.#replacing.delete(id);
     }
-    // Legacy adapters hand their undispatched prompts over here; a
-    // coordinator-driven session's queued rows simply stay in the ledger and
-    // the replacement's driver takes them (R6).
-    for (const q of carried) queueFor(next).accept(q.text, { id: q.id, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible });
-    if (carried.length) process.stderr.write(`[restart] ${id}: ${carried.length} queued prompt(s) carried to the replacement\n`);
     return next;
   }
 
@@ -965,8 +957,8 @@ export class SessionRegistry {
     if (isOpencode) {
       const ocSessionId = (existing instanceof OpencodeSession ? existing.opencodeSessionId : undefined) ?? rec?.opencodeSessionId;
       const model = (existing instanceof OpencodeSession ? existing.model : undefined) ?? rec?.opencodeSettings?.model;
-      const carried = await this.#retire(existing, opts.id);
-      return this.#replace(opts.id, cwd, carried, () => this.create({
+      await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, () => this.create({
         agent: "opencode",
         id: opts.id,
         cwd,
@@ -982,15 +974,15 @@ export class SessionRegistry {
     if (isAgy) {
       const conversationId = (existing instanceof AgySession ? existing.conversationId : undefined) ?? rec?.agySettings?.conversationId;
       const model = existing?.model ?? rec?.agySettings?.model;
-      const carried = await this.#retire(existing, opts.id);
-      return this.#replace(opts.id, cwd, carried, () => this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, forceNew: true }));
+      await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, () => this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, forceNew: true }));
     }
     const isPi = (existing instanceof PiSession) || rec?.agent === "pi";
     if (isPi) {
       const piSessionId = (existing instanceof PiSession ? existing.piSessionId : undefined) ?? rec?.piSettings?.sessionId;
       const model = existing?.model ?? rec?.piSettings?.model;
-      const carried = await this.#retire(existing, opts.id);
-      return this.#replace(opts.id, cwd, carried, () => this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, forceNew: true }));
+      await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, () => this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, forceNew: true }));
     }
     const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
     if (isCodex) {
@@ -1002,8 +994,8 @@ export class SessionRegistry {
       // old restart dropped the mode → "default").
       const codexRec = rec ?? loadWindowRecord(opts.id);
       const codexMode = existing?.detectPermissionMode() ?? codexRec?.codexSettings?.permissionMode ?? undefined;
-      const carried = await this.#retire(existing, opts.id);
-      return this.#replace(opts.id, cwd, carried, () => this.create({
+      await this.#retire(existing, opts.id);
+      return this.#replace(opts.id, cwd, () => this.create({
         agent: "codex",
         id: opts.id,
         cwd,
@@ -1057,7 +1049,7 @@ export class SessionRegistry {
     // never ran a turn): launch FRESH under the same id. `--continue` here
     // would resume whatever conversation is newest in the folder — someone
     // else's (Astra on 2f803b14, #113).
-    return this.#replace(opts.id, cwd, carried, () => this.create({
+    return this.#replace(opts.id, cwd, () => this.create({
       id: opts.id,
       cwd,
       resume_id: resumeId,

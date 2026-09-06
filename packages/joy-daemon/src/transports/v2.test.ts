@@ -7,6 +7,7 @@ import { test, expect, beforeAll, afterAll, describe } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, unlinkSync } from "fs";
 import { tmpdir, homedir } from "os";
 import { join } from "path";
+import { fakeCoordinatedSession } from "../domain/coordinator.fakeDriver";
 import { execFileSync } from "child_process";
 import { request as httpRequest } from "http";
 import { startHttpServer } from "./http";
@@ -18,8 +19,9 @@ const TOKEN = "test-token-v2";
 let base = "";
 let repo = "";
 let pub = "";
-/** What each fake session was asked to enqueue (route-targeting proof, #599). */
-const enqueued: Record<string, string[]> = { abcd1234: [], sub00001: [] };
+/** What each fake session was asked to accept (route-targeting proof, #599):
+ *  the coordinator's rows per session id. */
+let accepted: Record<string, () => string[]> = { abcd1234: () => [], sub00001: () => [] };
 
 const g = (args: string[]) => execFileSync("git", args, { cwd: repo });
 
@@ -41,24 +43,15 @@ beforeAll(async () => {
   g(["commit", "-m", "sub"]);
   writeFileSync(join(repo, "sub", "inner.txt"), "inner\nchanged\n");
 
-  const fakeSession = {
-    id: "abcd1234",
-    agentFlavor: "claude",
-    cwd: repo,
-    toJSON: () => ({ id: "abcd1234", cwd: repo, agent: "claude" }),
-    enqueue: (text: string) => { enqueued.abcd1234.push(text); return { id: "q1" }; },
-    queueState: () => ({ pendingCount: enqueued.abcd1234.length, paused: false }),
-  } as unknown as AgentSession;
+  // Coordinator-driven fake sessions (their queue rows live in an isolated ledger).
+  process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-v2-home-"));
+  const main = fakeCoordinatedSession("abcd1234", { agent: "claude", cwd: repo, extra: { toJSON: () => ({ id: "abcd1234", cwd: repo, agent: "claude" }) } });
+  const fakeSession = main.s as unknown as AgentSession;
   // A session whose cwd is a SUBDIRECTORY of the repository — git must not
   // report the rest of the worktree to it.
-  const subSession = {
-    id: "sub00001",
-    agentFlavor: "claude",
-    cwd: join(repo, "sub"),
-    toJSON: () => ({ id: "sub00001", cwd: join(repo, "sub"), agent: "claude" }),
-    enqueue: (text: string) => { enqueued.sub00001.push(text); return { id: "q2" }; },
-    queueState: () => ({ pendingCount: enqueued.sub00001.length, paused: false }),
-  } as unknown as AgentSession;
+  const sub = fakeCoordinatedSession("sub00001", { agent: "claude", cwd: join(repo, "sub"), extra: { toJSON: () => ({ id: "sub00001", cwd: join(repo, "sub"), agent: "claude" }) } });
+  const subSession = sub.s as unknown as AgentSession;
+  accepted = { abcd1234: main.accepted, sub00001: sub.accepted };
   // Exposed so the DELETE test can stub kill-side methods on the live object.
   (fakeSession as any).status = "active";
   (globalThis as any).__v2KillSession = fakeSession;
@@ -346,12 +339,12 @@ describe("review fixes: regression coverage", () => {
   });
 
   test("#599 body id/qid never redirect an operation away from the URL's session", async () => {
-    enqueued.abcd1234.length = 0; enqueued.sub00001.length = 0;
+    const before = accepted.abcd1234().length;
     const r = await call("POST", "/v2/sessions/abcd1234/queue", { body: { id: "sub00001", text: "dangerous-command" } });
     expect(r.status).toBe(200);
     expect(r.json.ok).toBe(true);
-    expect(enqueued.abcd1234).toEqual(["dangerous-command"]); // the URL's session
-    expect(enqueued.sub00001).toEqual([]);                    // never the body's
+    expect(accepted.abcd1234().slice(before)).toEqual(["dangerous-command"]); // the URL's session
+    expect(accepted.sub00001()).toEqual([]);                                 // never the body's
     // an unknown URL session is a 404 even when the body names a real one
     expect((await call("POST", "/v2/sessions/nope0000/queue", { body: { id: "abcd1234", text: "x" } })).status).toBe(404);
   });

@@ -5,6 +5,7 @@
 //    `{ok, applied:false, reason}` is logged, not treated as an error.
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
+import { fakeCoordinatedSession } from "../domain/coordinator.fakeDriver";
 import { startNucleusLane, type NucleusLaneHandle } from "./nucleusLane";
 import { DirectoryCreationApprovalRequired } from "../domain/registry";
 import { mkdtempSync } from "node:fs";
@@ -52,15 +53,10 @@ function makeFakeRelay() {
 }
 
 function makeFakeSession(id: string) {
-    const s: any = {
-        id, status: "active", cwd: "/tmp/x",
-        _busy: false, _pending: 0, _aborts: 0, _cancelQueued: 0, enqueued: [] as string[],
-        busy: () => s._busy,
-        queueState: () => ({ pendingCount: s._pending, paused: false }),
-        enqueue: (text: string) => { s.enqueued.push(text); s._pending = 1; return { id: "q1" }; },
-        cancelQueued: () => { s._cancelQueued++; return true; },
-        abort: async () => { s._aborts++; s._busy = false; return { ok: true }; },
-    };
+    const f = fakeCoordinatedSession(id, { agent: "claude" });
+    f.driver.onInterrupt = () => ({ kind: "sent" });
+    const s: any = f.s;
+    s.accepted = f.accepted; s.complete = f.complete; s.driver = f.driver; s.coordinator = f.coordinator;
     return s;
 }
 
@@ -83,7 +79,7 @@ describe("nucleusLane: session_archived / session_failed (#614)", () => {
         relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s1", kind: "prompt", turnId: "t1", ciphertext: enc("late prompt") });
         await until(() => relay.calls.some(c => c.path === "/daemon/turns/t1/submitted"));
         await sleep(1500);
-        expect(session.enqueued).toEqual([]);                          // never dispatched
+        expect(session.accepted()).toEqual([]);                        // never accepted
         expect(relay.facts("t1")).toEqual([]);                         // no terminal of any kind — the relay resolved it
         expect(logs.some(l => /t1.*\/submitted refused \(session_archived\)/.test(l))).toBe(true);
         expect(logs.some(l => /turn t1.* error/.test(l))).toBe(false); // not the generic lane_error path
@@ -91,7 +87,7 @@ describe("nucleusLane: session_archived / session_failed (#614)", () => {
         // The lane is not wedged: a turn for a live session still runs its lifecycle.
         relay.pushWork({ deliveryId: "d2", commandId: "c2", sessionId: "v2s1", kind: "prompt", turnId: "t2", ciphertext: enc("next") });
         await until(() => relay.calls.some(c => c.path === "/daemon/turns/t2/submitted"));
-        await until(() => session.enqueued.includes("next"));
+        await until(() => session.accepted().includes("next"));
     }, 25_000);
 
     it("/start 409 session_failed: the admitted prompt is plucked + aborted and the turn closes `cancelled`, never `failed`", async () => {
@@ -105,14 +101,15 @@ describe("nucleusLane: session_archived / session_failed (#614)", () => {
 
         relay.answers.set("/daemon/turns/t3/start", { status: 409, body: { error: "session_failed" } });
         relay.pushWork({ deliveryId: "d3", commandId: "c3", sessionId: "v2s2", kind: "prompt", turnId: "t3", ciphertext: enc("hi") });
-        await until(() => session.enqueued.includes("hi"));
-        session._pending = 0; session._busy = true;                     // dispatched + running → the lane posts /start
+        await until(() => session.accepted().includes("hi"));            // accepted + echoed → running → the lane posts /start
         await until(() => relay.facts("t3").some(b => b.type === "terminal"));
         const terminals = relay.facts("t3").filter(b => b.type === "terminal");
         expect(terminals).toHaveLength(1);
         expect(terminals[0]).toMatchObject({ terminalState: "cancelled", meta: { reason: "session_failed" } });
-        expect(session._cancelQueued).toBeGreaterThanOrEqual(1);
-        expect(session._aborts).toBeGreaterThanOrEqual(1);
+        // The admitted prompt is cancelled durably and the runtime interrupted.
+        const row = session.coordinator.commandForRelayTurn("t3");
+        expect(["cancelling", "cancelled"]).toContain(row?.state);
+        await until(() => session.driver.interrupts.length >= 1);
     }, 25_000);
 });
 
