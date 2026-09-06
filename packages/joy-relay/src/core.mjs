@@ -18,7 +18,8 @@ export const MAX_SESSIONS_PER_ACCOUNT = 200;
 export const MAX_DAEMONS_PER_ACCOUNT = 50;
 export const MAX_EVENTS_PER_SESSION = 50_000;
 /** Events a turn writes besides its outputs (queued, started, terminal);
- *  prompt admission keeps this many free per open turn (#613). */
+ *  prompt admission keeps this many free per open turn, and claim/start
+ *  re-check the same reserve against the live count (#613). */
 export const EVENT_BUDGET_LIFECYCLE_RESERVE = 3;
 
 export class ApiError extends Error {
@@ -334,6 +335,19 @@ export function createCore(db, notify) {
         if (!d || d.disposition !== null || String(d.lease_epoch) !== String(lease.epoch)) {
           return { ok: true, applied: false, reason: 'stale_attempt' };
         }
+      } else if (spawn) {
+        // No deliveryId (a daemon older than dc99d0d4): the report cannot say
+        // WHICH attempt failed. It is only unambiguous while no retry has ever
+        // happened — the command has one delivery and it is still live. A
+        // retry supersedes that delivery and the next claim mints a second
+        // one, so once either is true the report may be attempt 1 arriving
+        // late while attempt 2 is in flight; applying it would fail the
+        // retry's session (#612). Ack without applying instead — a live
+        // attempt that really failed will say so again, with its id.
+        const { rows: ds } = await t.query(`SELECT disposition FROM deliveries WHERE command_id = $1`, [spawn.id]);
+        if (ds.length > 1 || (ds.length === 1 && ds[0].disposition !== null)) {
+          return { ok: true, applied: false, reason: 'ambiguous_attempt' };
+        }
       }
       await t.query(`UPDATE native_sessions SET state = 'failed', spawn_failure = $2, updated_at = now() WHERE id = $1`,
         [sessionId, String(reason).slice(0, 300)]);
@@ -546,6 +560,37 @@ export function createCore(db, notify) {
     return seq;
   }
 
+  /** Event-budget check at claim and start (#613). Admission reserves the
+   *  lifecycle room arithmetically, but events written AFTER admission — the
+   *  running turn's outputs, out-of-turn session facts — consume that reserve
+   *  too, so a turn admitted under the cap could still be offered and started
+   *  once nothing of its output could be stored: every fact 429'd and the app
+   *  saw a hang. Re-check against the LIVE count before handing work out.
+   *  `>` (not admission's `>=`): admission leaves at most `cap - 1 - reserve`
+   *  behind for the new turn, which after its queued event is written reads
+   *  exactly `cap` here — a turn admitted with nothing consumed in between is
+   *  always claimable. Caller is in tx. */
+  async function eventBudgetExhausted(t, sessionId) {
+    const { rows: [{ n: eventCount }] } = await t.query(
+      `SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [sessionId]);
+    const { rows: [{ n: openTurns }] } = await t.query(
+      `SELECT count(*)::int AS n FROM turns WHERE session_id = $1 AND state <> 'terminal'`, [sessionId]);
+    return eventCount + EVENT_BUDGET_LIFECYCLE_RESERVE * openTurns > MAX_EVENTS_PER_SESSION;
+  }
+
+  /** Definitive answer for a turn the relay can no longer record (#613):
+   *  `failed` with a machine-readable reason (the app reads a failed message,
+   *  not a hang), the outstanding delivery superseded so a daemon still
+   *  holding the offer is refused at /received and re-claims. The command's
+   *  state is left alone on purpose: `rejected` would project as "rejected by
+   *  daemon", which this is not. Same transaction as the caller's decision. */
+  async function failTurnBudgetExhausted(t, session, turn) {
+    await terminalizeTurn(t, session, turn, 'failed', { reason: 'session_event_budget_exhausted' });
+    await t.query(`UPDATE commands SET disposition = 'session_event_budget_exhausted' WHERE id = $1`, [turn.prompt_command_id]);
+    await t.query(`UPDATE deliveries SET disposition = 'superseded' WHERE command_id = $1 AND disposition IS NULL`,
+      [turn.prompt_command_id]);
+  }
+
   // ── Daemon leases ─────────────────────────────────────────────────────────
 
   async function acquireLease(accountId, daemonId, body) {
@@ -612,8 +657,13 @@ export function createCore(db, notify) {
    *  HEAD queued prompt — strictly oldest-first, only when nothing is
    *  executing. The head is never skipped. */
   async function claimWork(leaseId, tokenHash) {
-    return db.tx(async (t) => {
+    // Sessions whose head was failed for budget inside this claim (#613):
+    // the app is poked AFTER commit, like every other state change.
+    const failedSessions = new Set();
+    let accountId = null;
+    const out = await db.tx(async (t) => {
       const lease = await fencedLease(t, leaseId, tokenHash);
+      accountId = lease.account_id;
       const { rows: sessions } = await t.query(
         `SELECT * FROM native_sessions WHERE owner_daemon_id = $1 AND account_id = $2 AND state NOT IN ('failed','archived')`,
         [lease.daemon_id, lease.account_id]);
@@ -635,11 +685,21 @@ export function createCore(db, notify) {
         const executing = await one(
           t, `SELECT id FROM turns WHERE session_id = $1 AND state IN ('dispatching','running','cancelling','orphaned') LIMIT 1`, [s.id]);
         if (executing) continue;
-        const head = await one(
-          t,
-          `SELECT c.*, tu.id AS head_turn_id FROM turns tu JOIN commands c ON c.id = tu.prompt_command_id
-           WHERE tu.session_id = $1 AND tu.state = 'queued' ORDER BY tu.request_seq LIMIT 1`,
-          [s.id]);
+        // The head is never skipped — but it is not offered either when the
+        // session can no longer record it (#613): it is failed right here,
+        // in this transaction, and the NEXT head is considered (failing one
+        // frees its reserve, so a later, smaller queue may still fit).
+        let head;
+        for (;;) {
+          head = await one(
+            t,
+            `SELECT c.*, tu.id AS head_turn_id FROM turns tu JOIN commands c ON c.id = tu.prompt_command_id
+             WHERE tu.session_id = $1 AND tu.state = 'queued' ORDER BY tu.request_seq LIMIT 1`,
+            [s.id]);
+          if (!head || !(await eventBudgetExhausted(t, s.id))) break;
+          await failTurnBudgetExhausted(t, s, { id: head.head_turn_id, prompt_command_id: head.id });
+          failedSessions.add(s.id);
+        }
         if (!head) continue;
         const deliveryId = await offerCommand(t, lease, head);
         // Carry the cited attachment ids so the daemon can fetch device-born
@@ -658,6 +718,8 @@ export function createCore(db, notify) {
       }
       return { epoch: String(lease.epoch), offers };
     });
+    for (const sid of failedSessions) notify.pokeAccount(accountId, sid, ['events', 'state']);
+    return out;
   }
 
   /** Control lane: pending cancel commands (priority, small). */
@@ -733,6 +795,14 @@ export function createCore(db, notify) {
    *  missing delivery, or when an EARLIER nonterminal turn exists (queue-head
    *  discipline). */
   async function turnStarted(turnId, leaseRef, body) {
+    const r = await turnStartedTx(turnId, leaseRef, body);
+    // The budget failure is committed above; the daemon gets the same
+    // cancel-class 409 shape it already handles at /start (#613).
+    if (r.budgetExhausted) throw new ApiError(409, 'session_event_budget_exhausted');
+    return r;
+  }
+
+  function turnStartedTx(turnId, leaseRef, body) {
     return withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
       if (turn.state === 'terminal') throw new ApiError(409, turn.terminal_state === 'cancelled' ? 'turn_cancelled' : 'turn_terminal');
       if (turn.cancel_requested) throw new ApiError(409, 'turn_cancelled');
@@ -747,6 +817,15 @@ export function createCore(db, notify) {
         t, `SELECT id FROM turns WHERE session_id = $1 AND request_seq < $2 AND state <> 'terminal' LIMIT 1`,
         [s.id, turn.request_seq]);
       if (earlier) throw new ApiError(409, 'not_queue_head');
+      // Budget re-check at start (#613): between claim and start the log can
+      // fill up (session facts, a slow daemon). Starting would only authorize
+      // outputs the relay must then refuse, so fail the turn definitively —
+      // COMMITTED, hence signalled to the caller instead of thrown here (a
+      // throw would roll the terminalization back) — and refuse the start.
+      if (await eventBudgetExhausted(t, s.id)) {
+        await failTurnBudgetExhausted(t, s, turn);
+        return { turnId, state: 'terminal', terminalState: 'failed', budgetExhausted: true };
+      }
       const runToken = body.runToken ?? randomUUID();
       await t.query(
         `UPDATE turns SET state = 'running', lease_epoch = $2, run_token = $3, started_at = now(), last_progress_at = now() WHERE id = $1`,
