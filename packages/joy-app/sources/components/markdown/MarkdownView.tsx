@@ -18,6 +18,7 @@ import { isHttpMarkdownLink } from './linkUtils';
 import { openExternalUrl } from '@/utils/openExternalUrl';
 import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
+import { alertError, guarded } from '@/utils/guardAsync';
 
 // Option type for callback
 export type Option = {
@@ -45,7 +46,7 @@ export const MarkdownView = React.memo((props: {
             return;
         }
 
-        void openExternalUrl(url);
+        guarded(() => openExternalUrl(url), alertError(t('common.openLinkFailed')))();
     }, []);
 
     const handleLongPress = React.useCallback(() => {

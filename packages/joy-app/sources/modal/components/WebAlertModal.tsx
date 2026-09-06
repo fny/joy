@@ -5,6 +5,7 @@ import { AlertModalConfig, ConfirmModalConfig } from '../types';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
+import { errorMessage, isThenable } from '@/utils/guardAsync';
 
 interface WebAlertModalProps {
     config: AlertModalConfig | ConfirmModalConfig;
@@ -15,14 +16,38 @@ interface WebAlertModalProps {
 export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps) {
     const { theme } = useUnistyles();
     const isConfirm = config.type === 'confirm';
-    
+    // An async button keeps the dialog open (buttons disabled) until it
+    // settles: success closes, a rejection is shown inline and the buttons
+    // come back so the user can retry or cancel. Before, the dialog closed at
+    // once and the rejection escaped unhandled with the retry control gone.
+    const [pending, setPending] = React.useState(false);
+    const [failure, setFailure] = React.useState<string | null>(null);
+    const mounted = React.useRef(true);
+    React.useEffect(() => () => { mounted.current = false; }, []);
+
     const handleButtonPress = (buttonIndex: number) => {
+        if (pending) return;
         if (isConfirm && onConfirm) {
             onConfirm(buttonIndex === 1);
-        } else if (!isConfirm && config.buttons?.[buttonIndex]?.onPress) {
-            config.buttons[buttonIndex].onPress!();
+            onClose();
+            return;
         }
-        onClose();
+        const onPress = !isConfirm ? config.buttons?.[buttonIndex]?.onPress : undefined;
+        if (!onPress) { onClose(); return; }
+        let result: unknown;
+        try {
+            result = onPress();
+        } catch (e) {
+            setFailure(errorMessage(e));
+            return;
+        }
+        if (!isThenable(result)) { onClose(); return; }
+        setPending(true);
+        setFailure(null);
+        Promise.resolve(result).then(
+            () => { if (mounted.current) setPending(false); onClose(); },
+            (e) => { if (!mounted.current) return; setPending(false); setFailure(errorMessage(e)); },
+        );
     };
 
     const buttons = isConfirm
@@ -114,8 +139,13 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
                             {config.message}
                         </Text>
                     )}
+                    {failure && (
+                        <Text style={[styles.message, styles.destructiveText, Typography.default()]} testID="alert-failure">
+                            {failure}
+                        </Text>
+                    )}
                 </View>
-                
+
                 <View style={styles.buttonContainer}>
                     {buttons.map((button, index) => (
                         <React.Fragment key={index}>
@@ -123,8 +153,10 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
                             <Pressable
                                 style={({ pressed }) => [
                                     styles.button,
-                                    pressed && styles.buttonPressed
+                                    pressed && styles.buttonPressed,
+                                    pending && { opacity: 0.5 }
                                 ]}
+                                disabled={pending}
                                 onPress={() => handleButtonPress(index)}
                             >
                                 <Text style={[

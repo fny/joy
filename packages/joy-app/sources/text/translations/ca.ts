@@ -43,6 +43,8 @@ export const ca: TranslationStructure = {
         discard: 'Descarta',
         version: 'Versió',
         copied: 'Copiat',
+        copyFailed: 'No s\'ha pogut copiar al porta-retalls',
+        openLinkFailed: 'No s\'ha pogut obrir l\'enllaç',
         share: 'Comparteix',
         copy: 'Copiar',
         scanning: 'Escanejant...',

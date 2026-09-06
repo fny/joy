@@ -21,6 +21,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { useJoyAction } from '@/hooks/useJoyAction';
 import { machineEnvList, machineEnvSet, machineEnvUnset } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
+import { alertError, errorMessage, guarded } from '@/utils/guardAsync';
 import { t } from '@/text';
 import * as Clipboard from 'expo-clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
@@ -399,11 +400,17 @@ const EnvironmentSection = React.memo(({ machineId, online }: { machineId: strin
     const reload = React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) { setError('no_ctx'); return; }
-        const r = await machineEnvList(ctx);
-        if (r.data?.ok) { setNames(r.data.names ?? []); setError(null); }
-        else setError(r.data?.error ?? `http_${r.status}`);
+        try {
+            const r = await machineEnvList(ctx);
+            if (r.data?.ok) { setNames(r.data.names ?? []); setError(null); }
+            else setError(r.data?.error ?? `http_${r.status}`);
+        } catch (e) {
+            // A timed-out or failed tunnel request is an error state, not an
+            // unhandled rejection; the Add row doubles as the retry.
+            setError(errorMessage(e));
+        }
     }, [machineId]);
-    React.useEffect(() => { if (online) void reload(); }, [online, reload]);
+    React.useEffect(() => { if (online) guarded(reload)(); }, [online, reload]);
     const [adding, doAdd] = useJoyAction(React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) return;
@@ -418,14 +425,13 @@ const EnvironmentSection = React.memo(({ machineId, online }: { machineId: strin
     const remove = React.useCallback((name: string) => {
         Modal.alert(t('machine.environmentRemoveTitle'), t('machine.environmentRemoveMessage', { name }), [
             { text: t('common.cancel'), style: 'cancel' },
-            { text: t('common.delete'), style: 'destructive', onPress: () => {
-                void (async () => {
-                    const ctx = sync.machineOnlyCtx(machineId);
-                    if (!ctx) return;
-                    await machineEnvUnset(ctx, name);
-                    await reload();
-                })();
-            } },
+            { text: t('common.delete'), style: 'destructive', onPress: guarded(async () => {
+                const ctx = sync.machineOnlyCtx(machineId);
+                if (!ctx) return;
+                const r = await machineEnvUnset(ctx, name);
+                if (!r.data?.ok) throw new Error(r.data?.error ?? `http_${r.status}`);
+                await reload();
+            }, alertError()) },
         ]);
     }, [machineId, reload]);
     if (!online) return null;

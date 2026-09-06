@@ -1,6 +1,7 @@
 import { Platform, Alert } from 'react-native';
 import { t } from '@/text';
 import { AlertButton, ModalConfig, CustomModalConfig, IModal } from './types';
+import { guarded, alertError } from '@/utils/guardAsync';
 
 class ModalManagerClass implements IModal {
     private showModalFn: ((config: Omit<ModalConfig, 'id'>) => string) | null = null;
@@ -43,8 +44,13 @@ class ModalManagerClass implements IModal {
             // modal renders every button.
             this.showModalFn({ type: 'alert', title, message, buttons } as Omit<ModalConfig, 'id'>);
         } else {
-            // Use native alert
-            Alert.alert(title, message, buttons, { cancelable: true });
+            // Use native alert. RN's Alert ignores a button's return value, so
+            // an async onPress that rejected escaped unhandled; each handler
+            // is wrapped so a failure is reported.
+            const guardedButtons = buttons?.map((b) => b.onPress
+                ? { ...b, onPress: guarded(b.onPress, alertError()) }
+                : b);
+            Alert.alert(title, message, guardedButtons, { cancelable: true });
         }
     }
 

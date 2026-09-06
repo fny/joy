@@ -2,6 +2,7 @@ import { Platform, Linking } from 'react-native';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { AudioModule } from 'expo-audio';
+import { alertError, guarded } from '@/utils/guardAsync';
 
 export interface MicrophonePermissionResult {
   granted: boolean;
@@ -89,7 +90,7 @@ export function showMicrophonePermissionDeniedAlert(canAskAgain: boolean = false
   } else {
     Modal.alert(title, canAskAgain ? t('voice.micAskAgain') : t('voice.micSettings'), [
       { text: t('common.cancel'), style: 'cancel' },
-      { text: t('voice.micOpenSettings'), onPress: () => { Linking.openSettings(); } },
+      { text: t('voice.micOpenSettings'), onPress: guarded(() => Linking.openSettings(), alertError(t('common.openLinkFailed'))) },
     ]);
   }
 }

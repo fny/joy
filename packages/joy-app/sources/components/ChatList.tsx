@@ -15,6 +15,7 @@ import { Message } from '@/sync/typesMessage';
 import { DisplayItem, ToolGroupItem, useGroupedMessages } from '@/hooks/useGroupedMessages';
 import Octicons from '@expo/vector-icons/Octicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { alertError, guarded } from '@/utils/guardAsync';
 
 const SCROLL_THRESHOLD = 300;
 // "Live" (pinned to the newest message) is a SEPARATE, much tighter band than
@@ -222,7 +223,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         scrollToMessageId: (messageId: string) => {
             const index = orderedItemsRef.current.findIndex((i) => rowContainsMessage(i, messageId));
             if (index < 0) return false;
-            flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 });
+            void flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 });
             return true;
         },
     }), []);
@@ -655,7 +656,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         }
         if (target < 0) return; // already above every prompt
         topVisibleIndexRef.current = target; // optimistic — survives rapid presses
-        flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
+        void flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
     }, []);
 
     // Down: jump to the nearest user prompt BELOW the current viewport, or to the
@@ -672,7 +673,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             return;
         }
         topVisibleIndexRef.current = target; // optimistic — survives rapid presses
-        flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
+        void flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
     }, [scrollToBottom]);
 
     // Older history lives at the visual TOP now, so `onStartReached` fires when
@@ -682,9 +683,11 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     // viewport anchored as older pages prepend (no jump).
     const hasMoreOlder = props.hasMoreOlder;
     const isLoadingOlder = props.isLoadingOlder;
+    // A failed page is reported (the spinner has already cleared); scrolling
+    // up again retries.
     const handleLoadOlder = useCallback(() => {
         if (!hasMoreOlder || isLoadingOlder) return;
-        void sync.loadOlderMessages(sessionId);
+        guarded(() => sync.loadOlderMessages(sessionId), alertError())();
     }, [sessionId, hasMoreOlder, isLoadingOlder]);
 
     // On macOS/web, Shift+wheel swaps deltaX/deltaY — restore vertical scrolling

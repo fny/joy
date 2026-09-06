@@ -45,6 +45,8 @@ export const zhHant: TranslationStructure = {
         discard: '放棄',
         version: '版本',
         copied: '已複製',
+        copyFailed: '無法複製到剪貼簿',
+        openLinkFailed: '無法開啟連結',
         share: '分享',
         copy: '複製',
         scanning: '掃描中...',
