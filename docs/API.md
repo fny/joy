@@ -251,4 +251,4 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   (`domain/resourceAlerts.ts`).
 - Machine heartbeat: cpu/ram/disk/load into encrypted daemonState every 20s
   (`PATCH /joy/v2/machines/:id`, CAS on `daemonStateVersion`).
-- Provider keys: the sealed store `~/.joy/env.sealed` (machine key), applied at boot and re-read before every spawn for every agent; a plaintext `~/.joy/env` is sealed into it on first boot and deleted.
+- Provider keys: the sealed store `~/.joy/env.sealed` (sealed under a machine-local `~/.joy/env.key`, published exclusively; legacy relay-key stores are re-sealed on first read), applied at boot and re-read before every spawn for every agent; a plaintext `~/.joy/env` is sealed into it on first boot and deleted. Writers serialize on `env.lock` (`store_busy` after 5 s); a value containing NUL is dropped with a warning and never applied or resealed (#533 #535).
