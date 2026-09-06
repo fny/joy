@@ -798,6 +798,7 @@ export const ru: TranslationStructure = {
         reload: 'Перезагрузить',
         overwrite: 'Перезаписать',
         conflicted: 'Конфликт',
+        refreshFailed: 'Не удалось обновить с машины; показана последняя загруженная версия.',
     },
 
 

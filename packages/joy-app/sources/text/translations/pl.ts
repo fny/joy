@@ -798,6 +798,7 @@ export const pl: TranslationStructure = {
         reload: 'Załaduj ponownie',
         overwrite: 'Nadpisz',
         conflicted: 'Konflikt',
+        refreshFailed: 'Nie udało się odświeżyć z maszyny; wyświetlana jest ostatnia wczytana wersja.',
     },
 
 

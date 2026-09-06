@@ -782,6 +782,7 @@ export const es: TranslationStructure = {
         reload: 'Recargar',
         overwrite: 'Sobrescribir',
         conflicted: 'Conflicto',
+        refreshFailed: 'No se pudo actualizar desde la máquina; se muestra la última versión cargada.',
     },
 
 
