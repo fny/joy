@@ -5,7 +5,7 @@
 // daemon-owned slash command interceptable (#552). Isolated JOY_HOME_DIR;
 // transcript dirs under ~/.claude/projects are created per test and removed.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -176,12 +176,65 @@ describe("same-machine teleport into another folder (#550)", () => {
     expect(other.ok).toBe(true);                                                              // old code: "belongs to a session …"
     expect((create.mock.calls[0] as unknown[])[0]).toMatchObject({ cwd: dst, resume_id: sid, forkSession: true });
     const same = (await op("joy-teleport-import").handler(reg, { cwd: src, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
-    expect(same.error).toMatch(/belongs to a session in/);
+    expect(same.error).toMatch(/belongs to a session whose transcript is/);
     expect(create).toHaveBeenCalledTimes(1);
     // The record alone (a daemon-forgotten session in the source folder) refuses too.
     const recOnly = { list: () => [], listRecords: () => [{ id: "deadbeef", claudeSessionId: sid, launchCwd: `${src}/.` }], create } as never;
     const viaRec = (await op("joy-teleport-import").handler(recOnly, { cwd: src, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
-    expect(viaRec.error).toMatch(/belongs to a session in/);
+    expect(viaRec.error).toMatch(/belongs to a session whose transcript is/);
+  });
+
+  it("#550 residual: ownership is by TRANSCRIPT PATH — a folder whose lossy project-dir encoding collides with the source's is refused, and the source bytes stay intact", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = join(home, "project-a"); const dst = join(home, "project_a");
+    mkdirSync(src); mkdirSync(dst);
+    expect(cwdToTranscriptDir(src)).toBe(cwdToTranscriptDir(dst));            // the collision
+    const dir = cwdToTranscriptDir(src); mkdirSync(dir, { recursive: true }); cleanupDirs.push(dir);
+    const sid = "abc-5501"; const target = join(dir, `${sid}.jsonl`);
+    writeFileSync(target, "SOURCE TRANSCRIPT\n");
+    const create = vi.fn(async () => ({ id: "fa005501", toJSON: () => ({}) }));
+    // A record-only source (no transcriptPath anywhere — derived from launchCwd + claudeSessionId).
+    const viaRecord = { list: () => [], listRecords: () => [{ id: "fa005502", launchCwd: src, claudeSessionId: sid }], create } as never;
+    const r1 = (await op("joy-teleport-import").handler(viaRecord, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r1.error).toMatch(/belongs to a session whose transcript is/);          // old code: ok:true, source overwritten
+    expect(readFileSync(target, "utf8")).toBe("SOURCE TRANSCRIPT\n");
+    // A live source that has not bound its transcriptPath yet (cwd + Claude id only).
+    const live = { id: "fa005503", cwd: `${src}/.`, status: "active", claudeSessionId: sid };
+    const viaLive = { list: () => [live], listRecords: () => [], create } as never;
+    const r2 = (await op("joy-teleport-import").handler(viaLive, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r2.error).toMatch(/belongs to a session whose transcript is/);
+    expect(readFileSync(target, "utf8")).toBe("SOURCE TRANSCRIPT\n");
+    expect(create).not.toHaveBeenCalled();
+    expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);   // no temp files left behind
+    // A folder whose transcript path genuinely differs is still the supported same-box fork.
+    const elsewhere = join(home, "project-b"); mkdirSync(elsewhere); cleanupDirs.push(cwdToTranscriptDir(elsewhere));
+    const r3 = (await op("joy-teleport-import").handler(viaRecord, { cwd: elsewhere, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r3.ok).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("SOURCE TRANSCRIPT\n");
+  });
+
+  it("#550 residual: an unowned leftover at the destination is set aside and restored when the launch fails — a failed import never loses prior bytes", async () => {
+    const { readFileSync } = await import("node:fs");
+    const dst = join(home, "project-c"); mkdirSync(dst);
+    const dir = cwdToTranscriptDir(dst); mkdirSync(dir, { recursive: true }); cleanupDirs.push(dir);
+    const sid = "abc-5502"; const target = join(dir, `${sid}.jsonl`);
+    writeFileSync(target, "LEFTOVER FROM AN EARLIER IMPORT\n");
+    const failing = vi.fn(async () => { throw new Error("tmux refused"); });
+    const r1 = (await op("joy-teleport-import").handler({ list: () => [], listRecords: () => [], create: failing } as never, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r1).toMatchObject({ ok: false, error: "tmux refused" });
+    expect(readFileSync(target, "utf8")).toBe("LEFTOVER FROM AN EARLIER IMPORT\n");   // old code: removed outright
+    expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+    // A successful import replaces the unowned leftover (the documented retry contract) and cleans up.
+    const create = vi.fn(async () => ({ id: "fa005504", toJSON: () => ({}) }));
+    const r2 = (await op("joy-teleport-import").handler({ list: () => [], listRecords: () => [], create } as never, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r2.ok).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe(Buffer.from(b64, "base64").toString());
+    expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+    // A launch failure with NO prior file removes what this import wrote (a retry is not refused as "already exists").
+    const sid2 = "abc-5503";
+    const r3 = (await op("joy-teleport-import").handler({ list: () => [], listRecords: () => [], create: failing } as never, { cwd: dst, claudeSessionId: sid2, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r3.ok).toBe(false);
+    expect(existsSync(join(dir, `${sid2}.jsonl`))).toBe(false);
   });
 });
 
