@@ -388,6 +388,7 @@ export const pl: TranslationStructure = {
         openUrl: 'Otwórz URL logowania',
         codePlaceholder: 'Wklej kod tutaj…',
         submitCode: 'Wyślij kod logowania',
+        sendFailed: 'Nie udało się wysłać kodu. Sprawdź połączenie i spróbuj ponownie.',
     },
 
     joyLogs: {

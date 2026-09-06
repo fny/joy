@@ -371,6 +371,7 @@ export const es: TranslationStructure = {
         openUrl: 'Abrir URL de inicio de sesión',
         codePlaceholder: 'Pega el código aquí…',
         submitCode: 'Enviar código de inicio de sesión',
+        sendFailed: 'No se pudo enviar el código. Comprueba la conexión e inténtalo de nuevo.',
     },
 
     joyLogs: {

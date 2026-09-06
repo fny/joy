@@ -417,6 +417,7 @@ export const en = {
         openUrl: 'Open login URL',
         codePlaceholder: 'Paste code here…',
         submitCode: 'Submit login code',
+        sendFailed: 'Could not send the code. Check the connection and try again.',
     },
 
     joyLogs: {

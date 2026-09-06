@@ -371,6 +371,7 @@ export const zhHant: TranslationStructure = {
         openUrl: '開啟登入 URL',
         codePlaceholder: '在此貼上授權碼…',
         submitCode: '提交授權碼',
+        sendFailed: '無法傳送驗證碼。請檢查連線後重試。',
     },
 
     joyLogs: {

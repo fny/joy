@@ -32,6 +32,23 @@ describe('settings', () => {
             expect(settingsParse(invalidSettings)).toEqual(settingsDefaults);
         });
 
+        it('one malformed field keeps every other valid field (#399)', () => {
+            const result = settingsParse({
+                voiceAgents: [{ id: 'v1', name: 'Home', agentId: 'agent_1', apiKey: 'sk-secret' }],
+                inferenceOpenAIKey: 'sk-openai',
+                notificationsMobile: false,
+                agentDefaultOverrides: { claude: { permissionMode: 'default' } },
+                showLineNumbers: 'false', // malformed, unrelated
+            });
+            expect(result.voiceAgents).toEqual([{ id: 'v1', name: 'Home', agentId: 'agent_1', apiKey: 'sk-secret' }]);
+            expect(result.inferenceOpenAIKey).toBe('sk-openai');
+            expect(result.notificationsMobile).toBe(false);
+            expect(result.agentDefaultOverrides).toEqual({ claude: { permissionMode: 'default' } });
+            expect(result.showLineNumbers).toBe(settingsDefaults.showLineNumbers); // only the bad field falls back
+            // …and an unrelated edit does not sync the lost values' defaults
+            expect(settingsToSyncPayload(applySettings(result, { viewInline: true })).inferenceOpenAIKey).toBe('sk-openai');
+        });
+
         it('should preserve unknown fields (loose schema)', () => {
             const settingsWithExtra = {
                 viewInline: true,

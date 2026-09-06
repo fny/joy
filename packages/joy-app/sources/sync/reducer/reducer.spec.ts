@@ -3191,3 +3191,49 @@ describe('reducer latestUsage seq-first freshness', () => {
         expect(r.usage?.inputTokens).toBe(222); // backfilled older turn rejected
     });
 });
+
+describe('historical reset events do not clobber the current snapshot (#391)', () => {
+    const usageMsg = (id: string, seq: number, createdAt: number, input: number): NormalizedMessage => ({
+        id, localId: null, createdAt, seq, role: 'agent', isSidechain: false,
+        content: [{ type: 'text', text: 'x', uuid: id, parentUUID: null }],
+        usage: { input_tokens: input, output_tokens: 0 },
+    });
+    const todoMsg = (id: string, seq: number, createdAt: number): NormalizedMessage => ({
+        id, localId: null, createdAt, seq, role: 'agent', isSidechain: false,
+        content: [{ type: 'tool-call', id: `t-${id}`, name: 'TodoWrite', input: { todos: [{ content: 'a', status: 'pending', priority: 'high', id: '1' }] }, description: null, uuid: id, parentUUID: null }],
+    });
+    const todoResult = (id: string, seq: number, createdAt: number): NormalizedMessage => ({
+        id, localId: null, createdAt, seq, role: 'agent', isSidechain: false,
+        content: [{ type: 'tool-result', tool_use_id: `t-${id.replace('-r', '')}`, content: { newTodos: [{ content: 'a', status: 'pending', priority: 'high', id: '1' }] }, is_error: false, uuid: id, parentUUID: null }],
+    });
+    const eventMsg = (id: string, seq: number, createdAt: number, message: string): NormalizedMessage => ({
+        id, localId: null, createdAt, seq, role: 'event', isSidechain: false,
+        content: { type: 'message', message },
+    });
+
+    it('an older "Context was reset" paged in later leaves the newer usage and todos alone', () => {
+        const state = createReducer();
+        reducer(state, [usageMsg('u', 100, 100_000, 4321), todoMsg('td', 101, 100_100), todoResult('td-r', 102, 100_200)]);
+        expect(state.latestUsage?.inputTokens).toBe(4321);
+        expect(state.latestTodos?.todos).toHaveLength(1);
+
+        const r = reducer(state, [eventMsg('reset', 10, 10_000, 'Context was reset')]);
+        expect(r.usage?.inputTokens).toBe(4321);
+        expect(r.todos).toHaveLength(1);
+    });
+
+    it('an older "Compaction completed" does not zero newer usage', () => {
+        const state = createReducer();
+        reducer(state, [usageMsg('u', 100, 100_000, 999)]);
+        const r = reducer(state, [eventMsg('compact', 10, 10_000, 'Compaction completed')]);
+        expect(r.usage?.inputTokens).toBe(999);
+    });
+
+    it('a NEWER reset still clears the snapshots', () => {
+        const state = createReducer();
+        reducer(state, [usageMsg('u', 100, 100_000, 999)]);
+        const r = reducer(state, [eventMsg('reset', 200, 200_000, 'Context was reset')]);
+        expect(r.usage?.inputTokens).toBe(0);
+        expect(r.todos).toEqual([]);
+    });
+});

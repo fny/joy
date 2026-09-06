@@ -76,47 +76,62 @@ export function ModalProvider({ children }: { children: React.ReactNode }) {
         dismissTopModal
     };
 
-    const currentModal = state.modals[state.modals.length - 1];
+    // EVERY modal in the stack stays mounted, not just the top one. Rendering
+    // only the top modal unmounted the prompt underneath whenever an alert
+    // (e.g. a connection failure) appeared on top, so its typed draft was
+    // gone when the alert closed (#333). Later entries render above earlier
+    // ones (RN/RNW Modal stack order); each keeps its own state.
+    const renderModal = (modal: ModalConfig) => {
+        switch (modal.type) {
+            case 'alert':
+                return (
+                    <WebAlertModal
+                        key={modal.id}
+                        config={modal}
+                        onClose={() => hideModal(modal.id)}
+                    />
+                );
+            case 'confirm':
+                return (
+                    <WebAlertModal
+                        key={modal.id}
+                        config={modal}
+                        onClose={() => hideModal(modal.id)}
+                        onConfirm={(value) => {
+                            Modal.resolveConfirm(modal.id, value);
+                            hideModal(modal.id);
+                        }}
+                    />
+                );
+            case 'prompt':
+                return (
+                    <WebPromptModal
+                        key={modal.id}
+                        config={modal}
+                        onClose={() => hideModal(modal.id)}
+                        onConfirm={(value) => {
+                            Modal.resolvePrompt(modal.id, value);
+                            hideModal(modal.id);
+                        }}
+                    />
+                );
+            case 'custom':
+                return (
+                    <CustomModal
+                        key={modal.id}
+                        config={modal}
+                        onClose={() => hideModal(modal.id)}
+                    />
+                );
+            default:
+                return null;
+        }
+    };
 
     return (
         <ModalContext.Provider value={contextValue}>
             {children}
-            {currentModal && (
-                <>
-                    {currentModal.type === 'alert' && (
-                        <WebAlertModal
-                            config={currentModal}
-                            onClose={() => hideModal(currentModal.id)}
-                        />
-                    )}
-                    {currentModal.type === 'confirm' && (
-                        <WebAlertModal
-                            config={currentModal}
-                            onClose={() => hideModal(currentModal.id)}
-                            onConfirm={(value) => {
-                                Modal.resolveConfirm(currentModal.id, value);
-                                hideModal(currentModal.id);
-                            }}
-                        />
-                    )}
-                    {currentModal.type === 'prompt' && (
-                        <WebPromptModal
-                            config={currentModal}
-                            onClose={() => hideModal(currentModal.id)}
-                            onConfirm={(value) => {
-                                Modal.resolvePrompt(currentModal.id, value);
-                                hideModal(currentModal.id);
-                            }}
-                        />
-                    )}
-                    {currentModal.type === 'custom' && (
-                        <CustomModal
-                            config={currentModal}
-                            onClose={() => hideModal(currentModal.id)}
-                        />
-                    )}
-                </>
-            )}
+            {state.modals.map(renderModal)}
         </ModalContext.Provider>
     );
 }

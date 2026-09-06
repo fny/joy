@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { recoverFields } from '@/utils/isolateBad';
 
 //
 // Schema
@@ -27,9 +28,8 @@ export const LocalSettingsSchema = z.object({
     // CLI version acknowledgments - keyed by machineId
     acknowledgedCliVersions: z.record(z.string(), z.string()).describe('Acknowledged CLI versions per machine'),
     appLock: z.boolean().describe('Require Face ID / device PIN to open the app (native only; device-local)'),
-    // .catch: localSettingsParse fails WHOLE-OBJECT, so a value retired from
-    // this enum (the old 'hashicon') would silently reset every local setting —
-    // theme, font scale, the lot. Coerce the unknown one instead.
+    // .catch: a value retired from this enum (the old 'hashicon') is coerced
+    // rather than treated as invalid, so the preference survives an upgrade.
     avatarVariant: z.enum(['circles', 'squares']).catch('circles').describe('Identicon style: circular (default) or square confetti grid'),
     sessionAvatarSize: z.number().describe('Session-list identicon size in px, clamped to [8, 24]'),
 });
@@ -38,8 +38,6 @@ export const LocalSettingsSchema = z.object({
 // NOTE: Local settings are device-specific and should NOT be synced.
 // These are preferences that make sense to be different on each device.
 //
-
-const LocalSettingsSchemaPartial = LocalSettingsSchema.passthrough().partial();
 
 export type LocalSettings = z.infer<typeof LocalSettingsSchema>;
 
@@ -78,11 +76,25 @@ Object.freeze(localSettingsDefaults);
 //
 
 export function localSettingsParse(settings: unknown): LocalSettings {
-    const parsed = LocalSettingsSchemaPartial.safeParse(settings);
-    if (!parsed.success) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
         return { ...localSettingsDefaults };
     }
-    return { ...localSettingsDefaults, ...parsed.data };
+    const input = settings as Record<string, unknown>;
+
+    // Fields are validated INDEPENDENTLY: one malformed value (e.g.
+    // limitSessionMemory:'5') used to fail the whole-object parse and return
+    // every default — silently turning appLock OFF and dropping the theme and
+    // font the user chose (#380). Only the bad field falls back now.
+    const { value, invalidKeys } = recoverFields(LocalSettingsSchema.shape, input, localSettingsDefaults);
+    if (invalidKeys.length > 0) {
+        console.warn(`[localSettings] ignoring invalid saved field(s), keeping the rest: ${invalidKeys.join(', ')}`);
+    }
+
+    // Unknown fields (written by a newer app version) ride along untouched.
+    const unknownFields: Record<string, unknown> = { ...input };
+    Object.keys(LocalSettingsSchema.shape).forEach(key => delete unknownFields[key]);
+
+    return { ...localSettingsDefaults, ...unknownFields, ...value };
 }
 
 //
