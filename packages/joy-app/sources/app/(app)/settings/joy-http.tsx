@@ -15,13 +15,14 @@ import { StyleSheet } from 'react-native-unistyles';
 
 const DEFAULT_SERVER_URL = 'http://localhost:4997';
 
+/** One identity per server: scheme+host+port, no trailing slash. */
+function normalizeJoyHttpUrl(url: string): string {
+    return url.trim().replace(/\/+$/, '');
+}
+
 export default React.memo(function JoyHttpScreen() {
     const [serverUrl, setServerUrl] = useSettingMutable('joy__tmuxServerUrl');
     const url = (serverUrl as string | null) ?? DEFAULT_SERVER_URL;
-    const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyTmuxSessions(url);
-
-    const killingIdRef = React.useRef<string | null>(null);
-    const screenshotIdRef = React.useRef<string | null>(null);
 
     const handleConfigureUrl = React.useCallback(async () => {
         const value = await Modal.prompt(
@@ -31,6 +32,35 @@ export default React.memo(function JoyHttpScreen() {
         );
         if (value?.trim()) setServerUrl(value.trim());
     }, [url, setServerUrl]);
+
+    return (
+        <ItemList style={{ paddingTop: 0 }}>
+            <ItemGroup
+                title={t('settingsSessions.serverUrl')}
+                footer={t('settingsSessions.serverUrlFooter')}
+            >
+                <Item
+                    title={url}
+                    icon={<Ionicons name="server-outline" size={29} color="#8E8E93" />}
+                    onPress={handleConfigureUrl}
+                />
+            </ItemGroup>
+
+            {/* Keyed by server: changing the URL REMOUNTS the session list, so
+                its poll, rows and row actions belong to one server for their
+                whole life. Server A's rows can no longer be killed or screenshot
+                against server B, and a late poll from A cannot overwrite B's
+                list (#177). */}
+            <ServerSessions key={normalizeJoyHttpUrl(url)} url={url} />
+        </ItemList>
+    );
+});
+
+const ServerSessions = React.memo(function ServerSessions({ url }: { url: string }) {
+    const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyTmuxSessions(url);
+
+    const killingIdRef = React.useRef<string | null>(null);
+    const screenshotIdRef = React.useRef<string | null>(null);
 
     const [createLoading, doCreate] = useJoyAction(React.useCallback(async () => {
         const cwd = await Modal.prompt(
@@ -81,18 +111,7 @@ export default React.memo(function JoyHttpScreen() {
     const activeSessions = sessions.filter(s => s.status !== 'ended');
 
     return (
-        <ItemList style={{ paddingTop: 0 }}>
-            <ItemGroup
-                title={t('settingsSessions.serverUrl')}
-                footer={t('settingsSessions.serverUrlFooter')}
-            >
-                <Item
-                    title={url}
-                    icon={<Ionicons name="server-outline" size={29} color="#8E8E93" />}
-                    onPress={handleConfigureUrl}
-                />
-            </ItemGroup>
-
+        <>
             <ItemGroup
                 title={t('settingsSessions.sessions')}
                 footer={error ?? undefined}
@@ -148,7 +167,7 @@ export default React.memo(function JoyHttpScreen() {
                     rightElement={createLoading ? <ActivityIndicator /> : undefined}
                 />
             </ItemGroup>
-        </ItemList>
+        </>
     );
 });
 

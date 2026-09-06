@@ -16,7 +16,9 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Modal } from '@/modal';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
+import { useMachine } from '@/sync/storage';
 import { machineConfigRead, machineConfigSchema, machineConfigSet, machineConfigWrite } from '@/sync/v2/machine';
+import { applyReload, applySaved, discardEdits, isDirty, type RawDraftState } from '@/utils/configRawDraft';
 
 interface ReadReply {
     ok: boolean;
@@ -71,36 +73,67 @@ export default React.memo(function AgentConfigEditorScreen() {
     const [reply, setReply] = React.useState<ReadReply | null>(null);
     const [schema, setSchema] = React.useState<any | null>(null);
     const [schemaError, setSchemaError] = React.useState<string | null>(null);
-    const [rawDraft, setRawDraft] = React.useState('');
+    // Raw editor: the file as last read + what the editor shows. A reload only
+    // replaces a CLEAN draft; unsaved edits survive path assignments and a
+    // Save that finishes while the user keeps typing (#169).
+    const [raw, setRaw] = React.useState<RawDraftState>({ disk: null, draft: '' });
+    const [staleDisk, setStaleDisk] = React.useState(false);
+    const rawDraft = raw.draft;
+    const rawDirty = isDirty(raw);
+    const setRawDraft = React.useCallback((draft: string) => setRaw((prev) => ({ ...prev, draft })), []);
     const [assignLine, setAssignLine] = React.useState('');
     const [busy, setBusy] = React.useState(false);
     const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
+    // The machine key arrives with machine sync; a cold-open before that (or a
+    // read during a blip) must not strand the screen on an error with no way
+    // back. Reads re-run when the machine record appears and on Retry (#170).
+    const machine = useMachine(machineId);
+    const machineReady = !!machine && !!sync.machineOnlyCtx(machineId);
+    const [attempt, setAttempt] = React.useState(0);
+    const retry = React.useCallback(() => setAttempt((n) => n + 1), []);
 
-    const load = React.useCallback(async () => {
+    const load = React.useCallback(async (afterSave = false) => {
         try {
             const rctx = sync.machineOnlyCtx(machineId);
             if (!rctx) throw new Error('no machine context');
             const r = await machineConfigRead(rctx, agent).then(r => r.data as unknown as ReadReply);
             setReply(r);
-            if (r.ok && typeof r.raw === 'string') setRawDraft(r.raw);
+            if (r.ok && typeof r.raw === 'string') {
+                const disk = r.raw;
+                setRaw((prev) => {
+                    if (afterSave) return applySaved(prev, disk);
+                    const out = applyReload(prev, disk);
+                    setStaleDisk(out.keptEdits);
+                    return out.state;
+                });
+            }
         } catch (e) {
             setReply({ ok: false, error: e instanceof Error ? e.message : String(e) });
         }
     }, [machineId, agent]);
 
     React.useEffect(() => {
+        if (!machineReady) {
+            // Not an error yet: the key is still on its way (#170).
+            setReply(machine ? { ok: false, error: 'Waiting for the machine key…' } : { ok: false, error: 'Machine not found yet — still syncing.' });
+            return;
+        }
+        let cancelled = false;
         void load();
         (async () => {
             try {
                 const s = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); if (!ctx0) return Promise.reject(new Error('no machine context')); return machineConfigSchema(ctx0, agent).then(r => r.data as unknown as { ok: boolean; schema?: unknown; error?: string }); })();
-                if (s.ok) setSchema(s.schema);
+                if (cancelled) return;
+                if (s.ok) { setSchema(s.schema); setSchemaError(null); }
                 else { setSchemaError(s.error ?? 'no schema'); setMode('raw'); }
             } catch (e) {
+                if (cancelled) return;
                 setSchemaError(e instanceof Error ? e.message : String(e));
                 setMode('raw');
             }
         })();
-    }, [machineId, agent, load]);
+        return () => { cancelled = true; };
+    }, [machineId, agent, load, machineReady, attempt]);
 
     const applyLines = React.useCallback(async (lines: string[]) => {
         setBusy(true);
@@ -117,13 +150,33 @@ export default React.memo(function AgentConfigEditorScreen() {
         }
     }, [machineId, agent, load]);
 
+    // A path assignment writes the FILE, not the editor: with unsaved raw edits
+    // the two would diverge silently (the assignment lacks the edits; the reload
+    // used to wipe them). Ask first (#169).
+    const applyAssignment = React.useCallback((line: string) => {
+        const run = () => void applyLines([line]).then(ok => ok && setAssignLine(''));
+        if (!rawDirty) { run(); return; }
+        Modal.alert(
+            'Unsaved raw edits',
+            'The assignment is applied to the file on disk, not to your unsaved edits. Save the editor first, or discard the edits and apply the assignment.',
+            [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Discard edits and apply', style: 'destructive', onPress: () => { setRaw(discardEdits); setStaleDisk(false); run(); } },
+            ],
+        );
+    }, [applyLines, rawDirty]);
+
     const saveRaw = React.useCallback(async () => {
+        const saving = rawDraft; // what the user pressed Save on
         setBusy(true);
         try {
-            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); if (!ctx0) return Promise.reject(new Error('no machine context')); return machineConfigWrite(ctx0, agent, rawDraft).then(r => r.data as unknown as { ok: boolean; error?: string }); })();
+            const r = await (function(){ const ctx0 = sync.machineOnlyCtx(machineId); if (!ctx0) return Promise.reject(new Error('no machine context')); return machineConfigWrite(ctx0, agent, saving).then(r => r.data as unknown as { ok: boolean; error?: string }); })();
             if (!r.ok) { Modal.alert('Error', r.error ?? 'save failed'); return; }
             Modal.alert('Saved', 'Previous file kept as .joy-bak');
-            await load();
+            setStaleDisk(false);
+            // Text typed while the save was pending is newer than what was
+            // saved: the reload must not replace it (#169).
+            await load(true);
         } catch (e) {
             Modal.alert('Error', e instanceof Error ? e.message : String(e));
         } finally {
@@ -208,7 +261,18 @@ export default React.memo(function AgentConfigEditorScreen() {
         <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             <Stack.Screen options={{ headerTitle: `${agent} config` }} />
             {!reply && <ActivityIndicator style={{ paddingVertical: 24 }} />}
-            {reply && !reply.ok && <Text style={styles.error}>{reply.error}</Text>}
+            {reply && !reply.ok && (
+                <View style={{ gap: 12 }}>
+                    <Text style={machineReady ? styles.error : styles.dim}>{reply.error}</Text>
+                    {machineReady ? (
+                        <Pressable onPress={retry} style={[styles.applyBtn, { alignSelf: 'flex-start' }]}>
+                            <Text style={styles.applyBtnText}>Retry</Text>
+                        </Pressable>
+                    ) : (
+                        <ActivityIndicator />
+                    )}
+                </View>
+            )}
             {reply?.ok && (
                 <>
                     <Text style={styles.pathNote}>
@@ -248,16 +312,24 @@ export default React.memo(function AgentConfigEditorScreen() {
                                     autoCapitalize="none"
                                     autoCorrect={false}
                                     spellCheck={false}
-                                    onSubmitEditing={() => { if (assignLine.trim()) void applyLines([assignLine]).then(ok => ok && setAssignLine('')); }}
+                                    onSubmitEditing={() => { if (assignLine.trim()) applyAssignment(assignLine); }}
                                 />
                                 <Pressable
                                     disabled={busy || !assignLine.trim()}
-                                    onPress={() => void applyLines([assignLine]).then(ok => ok && setAssignLine(''))}
+                                    onPress={() => applyAssignment(assignLine)}
                                     style={styles.applyBtn}
                                 >
                                     <Text style={styles.applyBtnText}>Apply</Text>
                                 </Pressable>
                             </View>
+                            {staleDisk && (
+                                <View style={styles.assignRow}>
+                                    <Text style={[styles.dim, { flex: 1 }]}>The file changed on disk; the editor kept your unsaved edits.</Text>
+                                    <Pressable onPress={() => { setRaw(discardEdits); setStaleDisk(false); }} style={styles.applyBtn}>
+                                        <Text style={styles.applyBtnText}>Discard edits</Text>
+                                    </Pressable>
+                                </View>
+                            )}
                             <TextInput
                                 value={rawDraft}
                                 onChangeText={setRawDraft}
@@ -268,7 +340,7 @@ export default React.memo(function AgentConfigEditorScreen() {
                                 spellCheck={false}
                             />
                             <Pressable disabled={busy} onPress={() => void saveRaw()} style={styles.saveBtn}>
-                                <Text style={styles.applyBtnText}>Save file</Text>
+                                <Text style={styles.applyBtnText}>{rawDirty ? 'Save file (unsaved edits)' : 'Save file'}</Text>
                             </Pressable>
                         </>
                     )}

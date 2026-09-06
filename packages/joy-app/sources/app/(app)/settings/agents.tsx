@@ -22,6 +22,7 @@ import {
     type AgentKey,
 } from '@/sync/agentDefaults';
 import { t } from '@/text';
+import { isUnsupportedOverride, modelOptionsFor, permissionOptionsFor } from '@/utils/agentDefaultOptions';
 
 type ExpandedField = {
     agent: AgentKey;
@@ -145,17 +146,20 @@ export default function AgentDefaultsSettingsScreen() {
             {agentKeys.map((agent) => {
                 const codeDefaults = getCodeAgentDefaults(agent);
                 const effectiveDefaults = resolveAgentDefaultConfig(agentDefaultOverrides, agent);
-                const permissionOptions = getHardcodedPermissionModes(agent, t);
-                const modelOptions = getHardcodedModelModes(agent, t).filter((option) => option.key !== 'default');
+                // Per-agent catalogues: the generic helpers fall through to
+                // Claude's lists for OpenCode/Pi/Antigravity, which cannot honour
+                // them (#171). A field with no options for this agent is hidden.
+                const permissionOptions = permissionOptionsFor(agent, (a) => getHardcodedPermissionModes(a, t));
+                const modelOptions = modelOptionsFor(agent, (a) => getHardcodedModelModes(a, t));
                 const effortOptions = getEffortLevelsForModel(agent, effectiveDefaults.modelMode);
                 const fields: FieldConfig[] = [
-                    {
-                        field: 'permissionMode',
+                    ...(permissionOptions.length > 0 ? [{
+                        field: 'permissionMode' as const,
                         title: 'Permission',
-                        icon: 'shield-checkmark-outline',
+                        icon: 'shield-checkmark-outline' as const,
                         options: permissionOptions,
                         codeDefaultKey: codeDefaults.permissionMode,
-                    },
+                    }] : []),
                     ...(modelOptions.length > 0 ? [{
                         field: 'modelMode' as const,
                         title: 'Model',
@@ -172,9 +176,36 @@ export default function AgentDefaultsSettingsScreen() {
                     }] : []),
                 ];
 
+                // Overrides saved before the catalogues were split (or for a
+                // hidden field) are shown once, as something to clear — never as
+                // a selected, honoured default (#171).
+                const unsupported = (['permissionMode', 'modelMode', 'effortLevel'] as const).filter((field) => {
+                    const options = fields.find((f) => f.field === field)?.options ?? [];
+                    return isUnsupportedOverride(agent, field, getAgentDefaultOverrideValue(agentDefaultOverrides, agent, field), options);
+                });
+
                 return (
                     <ItemGroup key={agent} title={agentLabels[agent]}>
+                        {fields.length === 0 && unsupported.length === 0 && (
+                            <Item
+                                title="No adjustable defaults"
+                                subtitle={agent === 'agy'
+                                    ? 'Antigravity runs with permissions skipped and its own default model.'
+                                    : 'Model is chosen per machine when creating a session; there is no permission mode.'}
+                                showChevron={false}
+                            />
+                        )}
                         {fields.map((field) => renderField(agent, field))}
+                        {unsupported.map((field) => (
+                            <Item
+                                key={`${agent}-${field}-unsupported`}
+                                title={`Unsupported ${field === 'permissionMode' ? 'permission' : field === 'modelMode' ? 'model' : 'effort'} override`}
+                                subtitle={`"${getAgentDefaultOverrideValue(agentDefaultOverrides, agent, field)}" is not something ${agentLabels[agent]} can use. Tap to clear.`}
+                                icon={<Ionicons name="alert-circle-outline" size={29} color="#FF9500" />}
+                                onPress={() => updateOverride(agent, field, null)}
+                                showChevron={false}
+                            />
+                        ))}
                     </ItemGroup>
                 );
             })}
