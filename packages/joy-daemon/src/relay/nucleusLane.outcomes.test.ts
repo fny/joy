@@ -143,14 +143,14 @@ describe("nucleusLane: adapter turn outcome (#584)", () => {
         relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s3", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
         await until(() => relay.calls.some(c => c.path.endsWith("/bind")));
         relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s3", kind: "prompt", turnId: "t3", ciphertext: enc("do it") });
-        await until(() => session.enqueued.includes("do it"));
-        session._pending = 0; session._busy = true;
+        await until(() => session.accepted().includes("do it"));
         // The POST arrives (recorded here) but its response is held 1.5s.
         await until(() => relay.calls.some(c => c.path === "/daemon/turns/t3/start"));
         const adapter = adapterFor("loc3");
         adapter.send(encodeTurnEnd("failed", { turn: "a3" }), "loc3:a3:end"); // inside the round trip
+        await sleep(300);
+        session.complete("failed");                                     // the runtime's verdict, still inside the round trip
         await sleep(2_500);                                             // /start answers; the wait moves on
-        session._busy = false;                                          // execution stopped
         await until(() => relay.facts("t3").some(b => b.type === "terminal"), 15_000);
         expect(relay.facts("t3").find(b => b.type === "terminal"))
             .toMatchObject({ terminalState: "failed", meta: { reason: "agent_reported_failed" } });
