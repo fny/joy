@@ -81,6 +81,7 @@ export const en = {
         permissionRequired: 'permission required',
         detached: 'detached',
         compacting: 'compacting',
+        outputDropped: 'output dropped — session full',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} tasks`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agents`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -425,6 +426,15 @@ export const en = {
         label: 'ACTION NEEDED',
         fallbackTitle: 'Claude Code is asking a question',
         openTerminal: 'Open the terminal to answer',
+    },
+    joyEventBudget: {
+        // EventBudgetBar — the relay refused this session's further output for
+        // good (#130); persistent, read from the card, never from a push
+        label: 'OUTPUT DROPPED',
+        title: 'This session is full — part of the conversation was not saved',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `${dropped} ${dropped === 1 ? 'record' : 'records'} of output since ${since} could not be saved because the relay's budget for this session is used up. It will not recover; nothing new sent here will be kept.`,
+        action: 'Start a new session',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins

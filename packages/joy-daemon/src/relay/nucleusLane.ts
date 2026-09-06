@@ -393,12 +393,48 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const budgetDropped = new Map<string, { localId: string; since: number; dropped: number }>();
   const budgetPublish = new Map<string, ReturnType<typeof setTimeout>>();
   const BUDGET_PUBLISH_MS = 1_000;
+  // The loss OUTLIVES this lane (#130 follow-up). The count used to live only
+  // in these maps and on the card holder: a daemon restart replaced both, and
+  // since a full session is exactly the one whose further output never
+  // arrives (the relay refuses it), nothing ever re-asserted the sole warning
+  // — the card the fresh holder republished was clean. Persisted as one small
+  // job row per session (no schema change; `forgetSession` drops it with the
+  // session's record) and re-asserted whenever the card publisher is wired.
+  const EVENT_BUDGET_JOB_KIND = "event_budget";
+  const budgetJobId = (v2: string) => `event_budget:${v2}`;
+  function persistBudget(v2: string): void {
+    const st = budgetDropped.get(v2);
+    if (!st || st.dropped <= 0) return;
+    try { ledger.putJob({ id: budgetJobId(v2), sessionId: st.localId, kind: EVENT_BUDGET_JOB_KIND, payload: { v2SessionId: v2, localId: st.localId, since: st.since, dropped: st.dropped } }); }
+    catch (e) { log(`event budget for ${v2.slice(0, 8)} not persisted: ${errText(e)}`); }
+  }
+  function readPersistedBudget(v2: string): { localId: string; since: number; dropped: number } | null {
+    let job: JobRow | null = null;
+    try { job = ledger.getJob(budgetJobId(v2)); } catch { return null; }
+    const p = job?.payload as { localId?: unknown; since?: unknown; dropped?: unknown } | null | undefined;
+    if (!p || typeof p.localId !== "string" || typeof p.since !== "number" || typeof p.dropped !== "number" || p.dropped <= 0) return null;
+    return { localId: p.localId, since: p.since, dropped: p.dropped };
+  }
   function publishBudget(v2: string): void {
     const st = budgetDropped.get(v2);
     if (!st) return;
     budgetPublish.delete(v2);
+    persistBudget(v2);
     void relaySessionFor(st.localId)?.updateEventBudget({ since: st.since, dropped: st.dropped })
-      .catch(() => { /* the card is best effort; the next drop re-asserts it */ });
+      .catch(() => { /* the card is best effort; the next drop (or rebind) re-asserts it */ });
+  }
+  /** Card publisher (re)wired for a bound session: put the persisted loss
+   *  back on the card if there is one. Idempotent — the holder skips a
+   *  redundant merge against a card the relay already has. */
+  function reassertBudget(localId: string, v2: string): void {
+    const st = budgetDropped.get(v2) ?? readPersistedBudget(v2);
+    if (!st || st.dropped <= 0) return;
+    st.localId = localId;
+    budgetDropped.set(v2, st);
+    budgetExhausted.add(v2); // the refusal is permanent: keep dropping instead of re-asking the relay
+    const t = budgetPublish.get(v2);
+    if (t) { clearTimeout(t); }
+    publishBudget(v2);
   }
   function noteBudgetDrop(localId: string, v2: string): void {
     const st = budgetDropped.get(v2) ?? { localId, since: Date.now(), dropped: 0 };
@@ -919,6 +955,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     });
     const current = registry.get(localId)?.cardMetadata?.();
     if (current) void publishV2Card(localId, current);
+    reassertBudget(localId, v2SessionId);
   }
 
   async function claim(lane: "work" | "control", asLease?: Lease | null): Promise<Array<WorkOffer & ControlOffer>> {
@@ -1952,7 +1989,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       lease = null;
       sender.stop();
       setRecordSink(null);
-      for (const t of budgetPublish.values()) clearTimeout(t);
+      // A publish still coalescing holds counts the ledger has not seen yet.
+      for (const [v2, t] of budgetPublish) { clearTimeout(t); persistBudget(v2); }
       budgetPublish.clear();
     },
     // The tunnel executor BORROWS this lease rather than acquiring its own

@@ -83,6 +83,7 @@ export const zhHant: TranslationStructure = {
         permissionRequired: '需要權限',
         detached: '已分離',
         compacting: '壓縮中',
+        outputDropped: '輸出已遺失 — 工作階段已滿',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 個任務`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} 代理`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -379,6 +380,13 @@ export const zhHant: TranslationStructure = {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提問',
         openTerminal: '開啟終端機進行回答',
+    },
+    joyEventBudget: {
+        label: '輸出已遺失',
+        title: '此工作階段已滿 — 部分對話未儲存',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `自 ${since} 起有 ${dropped} 筆輸出因中繼對此工作階段的配額已用盡而無法儲存。此狀態不會恢復；在此傳送的新內容不會被保留。`,
+        action: '開始新的工作階段',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
