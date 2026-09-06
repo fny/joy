@@ -162,6 +162,7 @@
     "resolve-path": "^1.4.0",
     "rn-encryption": "^2.5.0",
     "thumbhash": "^0.1.1",
+    "tweetnacl": "^1.0.3",
     "twrnc": "^4.9.1",
     "uuid": "^11.1.0",
     "vitest": "^3.2.4",

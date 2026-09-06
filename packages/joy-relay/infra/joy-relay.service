@@ -19,6 +19,12 @@ Environment=JOY_RELAY_DATA_DIR=/home/ubuntu/joy-relay-data/stable
 #   JOY_RELAY_TRUST_PROXY   1 = always honour x-forwarded-proto for the docs'
 #                           server URL, 0 = never; unset = honour it only when
 #                           x-forwarded-for/host arrive too (caddy sends all)
+#   JOY_RELAY_PAIRING_PROOF_ACCOUNT
+#                           1 = the app's account-restore pairing must present
+#                           the #127 proof of possession (like the daemon's
+#                           terminal flavour); unset = legacy one-shot pickup.
+#                           Set it only once every app build in the field
+#                           sends the proof (docs/API.md, Pairing).
 EnvironmentFile=-/home/ubuntu/joy-relay.env
 ExecStart=/usr/bin/node server.mjs
 Restart=always
