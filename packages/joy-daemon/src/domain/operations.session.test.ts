@@ -92,3 +92,54 @@ describe("fork / teleport permission mode fails closed (#50)", () => {
   });
 });
 
+// ── #53 ──────────────────────────────────────────────────────────────────────
+
+function handoffCapable(id: string, cwd: string) {
+  const infos: Array<Record<string, unknown> | null> = [];
+  const { s } = fakeCoordinatedSession(id, {
+    agent: "claude", cwd,
+    extra: {
+      setHandoff: (info: Record<string, unknown> | null) => { infos.push(info); },
+      cardMetadata: () => ({ joy__handoff: infos[infos.length - 1] ?? undefined }),
+    },
+  });
+  return { s, infos };
+}
+
+describe("handoff / handback in-progress guard (#53)", () => {
+  it("a second handoff for the same source is refused while the first is writing its note", async () => {
+    const id = uid();
+    const { s, infos } = handoffCapable(id, home);
+    const reg = { get: (x: string) => (x === id ? s : undefined) } as never;
+    const first = (await op("joy-handoff").handler(reg, { id, agent: "codex" }, { via: "rpc" })) as Record<string, unknown>;
+    expect(first).toMatchObject({ ok: true, pending: true });
+    expect(infos.at(-1)).toMatchObject({ state: "writing" });
+    const second = (await op("joy-handoff").handler(reg, { id, agent: "codex" }, { via: "rpc" })) as Record<string, unknown>;
+    expect(second).toEqual({ ok: false, error: "handoff already in progress" });
+    expect(infos.filter((i) => i?.state === "writing")).toHaveLength(1); // no second note prompt / job
+  });
+
+  it("a persisted job (the daemon restarted mid-note) also blocks a new handoff", async () => {
+    const id = uid();
+    const { s } = handoffCapable(id, home);
+    saveHandoffJob(id, { role: "source", path: join(home, "note.md"), target: { agent: "codex" }, at: Date.now() });
+    const r = await op("joy-handoff").handler({ get: () => s } as never, { id, agent: "codex" }, { via: "rpc" });
+    expect(r).toEqual({ ok: false, error: "handoff already in progress" });
+  });
+
+  it("handback: the second call is refused while the first is writing", async () => {
+    const srcId = uid(), tgtId = uid();
+    const { s: src } = handoffCapable(srcId, home);
+    const { s: tgt, infos } = handoffCapable(tgtId, home);
+    tgt.setHandoff!({ state: "picked_up", peer: srcId, at: Date.now() });
+    const reg = { get: (x: string) => (x === srcId ? src : x === tgtId ? tgt : undefined) } as never;
+    const first = (await op("joy-handback").handler(reg, { id: tgtId }, { via: "rpc" })) as Record<string, unknown>;
+    expect(first).toMatchObject({ ok: true, pending: true });
+    expect(infos.at(-1)).toMatchObject({ state: "writing", peer: srcId });
+    const second = await op("joy-handback").handler(reg, { id: tgtId }, { via: "rpc" });
+    expect(second).toEqual({ ok: false, error: "handback already in progress" });
+  });
+});
+
+const TELEPORT_B64 = Buffer.from(JSON.stringify({ type: "user", message: { role: "user", content: "x" } }) + "\n").toString("base64");
+
