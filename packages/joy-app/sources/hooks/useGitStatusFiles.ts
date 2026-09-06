@@ -17,20 +17,19 @@
 
 import * as React from 'react';
 import { useFocusEffect } from 'expo-router';
-import { fetchGitStatusFiles } from '@/sync/gitStatusFiles';
-import { createRefreshScope } from '@/sync/gitStatusModel';
-import { storage, useSession, useSessionGitStatusFiles } from '@/sync/storage';
+import { gitStatusRefreshScope, startGitStatusRefresh } from '@/sync/gitStatusFiles';
+import { useSession, useSessionGitStatusFiles } from '@/sync/storage';
 
-// Refresh generation per project key, MODULE-level: the screen that started
-// the stale request may have unmounted by the time it resolves, and a fresh
-// hook instance must still be able to outrank it. The focus effect retires
-// the generation on blur/unmount, so a refresh that completes after the
-// screen went away publishes nothing (#316).
-const refreshScope = createRefreshScope();
-
+// Publication goes through the module-level scope in gitStatusFiles that the
+// sidebar shares: the screen that started a stale request may have unmounted
+// by the time it resolves, and any later writer must still outrank it. This
+// instance remembers the generation IT minted so blur/unmount retires only
+// its own refresh — retiring the whole project used to cancel a sibling
+// screen's in-flight refresh and leave it fetching forever (#316).
 export function useGitStatusFiles(sessionId: string) {
     const cached = useSessionGitStatusFiles(sessionId);
     const [isFetching, setIsFetching] = React.useState(false);
+    const ownGen = React.useRef<number | null>(null);
     // On a cold load the screen mounts BEFORE sessions hydrate, so the project
     // key does not exist yet. Track it reactively and key the refresh on it:
     // otherwise the focus effect fires once against an unhydrated store, bails,
@@ -43,34 +42,25 @@ export function useGitStatusFiles(sessionId: string) {
 
     const refresh = React.useCallback(async () => {
         if (!pathKey) return;
-        const myGen = refreshScope.begin(pathKey);
+        const { gen, settled } = startGitStatusRefresh(sessionId, pathKey);
+        ownGen.current = gen;
         setIsFetching(true);
-        try {
-            const result = await fetchGitStatusFiles(sessionId);
-            if (!refreshScope.isCurrent(pathKey, myGen)) return; // superseded by a newer refresh, or the screen blurred (#316)
-            if (result.kind === 'ok') {
-                storage.getState().applyGitStatusFiles(pathKey, result.files);
-            } else if (result.kind === 'not-repo') {
-                storage.getState().applyGitStatusFiles(pathKey, null); // authoritative: nothing to list
-            } else {
-                // Failed read: keep whatever was last listed successfully.
-                console.warn(`[git] status refresh unavailable for ${pathKey}, keeping last result: ${result.error}`);
-            }
-        } catch (error) {
-            console.error('Failed to load git status files:', error);
-        } finally {
-            if (refreshScope.isCurrent(pathKey, myGen)) setIsFetching(false);
-        }
+        await settled; // publication (or not) is decided inside the shared scope
+        // The spinner tracks THIS instance's latest request: clear it when that
+        // request settled, whether or not it was allowed to publish — a refresh
+        // the sidebar superseded must not leave the screen fetching forever.
+        if (ownGen.current === gen) setIsFetching(false);
     }, [sessionId, pathKey]);
 
     // Refresh on mount and every time the screen is focused; on blur/unmount
-    // retire the project's generation so the in-flight refresh cannot publish
-    // into the cache from a screen that is no longer showing it (#316).
+    // retire the generation THIS instance minted so its in-flight refresh
+    // cannot publish from a screen that is no longer showing the list, while a
+    // sibling writer's newer refresh stays current (#316).
     useFocusEffect(
         React.useCallback(() => {
             refresh();
             return () => {
-                if (pathKey) refreshScope.retire(pathKey);
+                if (pathKey && ownGen.current !== null) gitStatusRefreshScope.retire(pathKey, ownGen.current);
                 setIsFetching(false);
             };
         }, [refresh, pathKey])

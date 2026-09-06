@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { filesFromStructured, gitStatusFromStructured, mergeChangeRows, knownLines, sumLines, classifyGitStatusResponse, createRefreshScope, type GitFileStatus } from './gitStatusModel';
+import { filesFromStructured, gitStatusFromStructured, mergeChangeRows, knownLines, sumLines, classifyGitStatusResponse, createRefreshScope, gitPathIdentity, type GitFileStatus } from './gitStatusModel';
 import type { GitStatusEntryV2, GitStatusRepoV2, GitPathV2 } from './v2/machine';
 
 const path = (cwd: string, over: Partial<GitPathV2> = {}): GitPathV2 => ({ repo: cwd, cwd, display: cwd, utf8: true, ...over });
@@ -78,6 +78,37 @@ describe('filesFromStructured', () => {
         expect(unborn.branch).toBe('main');
         expect(unborn.head).toBe('unborn');
     });
+
+    it('two different non-UTF-8 names never collapse into one row; each is unaddressable (fd07ad20 residual #3)', () => {
+        // Both byte strings decode lossily to the same "\uFFFD\uFFFD.bin", and
+        // keying by that text merged two real files into one nonexistent one.
+        const lossy = '\uFFFD\uFFFD.bin';
+        const a = path(lossy, { utf8: false, rawBase64: Buffer.from([0xff, 0xfe, 0x2e, 0x62, 0x69, 0x6e]).toString('base64') });
+        const b = path(lossy, { utf8: false, rawBase64: Buffer.from([0xfe, 0xff, 0x2e, 0x62, 0x69, 0x6e]).toString('base64') });
+        const d = repo({
+            entries: [
+                entry({ path: a, index: 'M', worktree: 'M' }),
+                entry({ path: b, untracked: true, index: '?', worktree: '?', binary: null, lines: { staged: { added: 0, removed: 0 }, unstaged: 'unavailable' } }),
+            ],
+            clean: false,
+        });
+        const f = filesFromStructured(d);
+        const rows = mergeChangeRows(f.stagedFiles, f.unstagedFiles);
+        expect(rows).toHaveLength(2);
+        expect(new Set(rows.map(r => r.fullPath)).size).toBe(2);
+        expect(rows.every(r => r.unaddressable && !r.utf8 && r.displayPath === lossy)).toBe(true);
+        expect(rows.map(r => r.rawBase64)).toEqual([a.rawBase64, b.rawBase64]);
+        // the SAME bytes on both sides are still one file
+        expect(f.stagedFiles[0].fullPath).toBe(f.unstagedFiles[0].fullPath);
+        expect(rows[0].status).toBe('modified');
+        expect(rows[1].status).toBe('untracked');
+        // a valid name is its own identity and is addressable
+        expect(gitPathIdentity(path('src/a.ts'))).toBe('src/a.ts');
+        expect(filesFromStructured(repo({ entries: [entry({ path: path('src/a.ts'), worktree: 'M' })] })).unstagedFiles[0]).toMatchObject({ utf8: true, unaddressable: false });
+        // a non-UTF-8 identity can never equal a real path: it contains NUL
+        expect(gitPathIdentity(a)).toContain('\u0000');
+        expect(gitPathIdentity(a)).not.toBe(gitPathIdentity(b));
+    });
 });
 
 describe('gitStatusFromStructured', () => {
@@ -108,7 +139,7 @@ describe('gitStatusFromStructured', () => {
 
 describe('mergeChangeRows', () => {
     const row = (over: Partial<GitFileStatus>): GitFileStatus => ({
-        fileName: 'config.json', filePath: '', fullPath: 'config.json', displayPath: 'config.json',
+        fileName: 'config.json', filePath: '', fullPath: 'config.json', displayPath: 'config.json', utf8: true, unaddressable: false,
         status: 'modified', isStaged: false, lines: 'unavailable', binary: false, ...over,
     });
 
@@ -129,6 +160,15 @@ describe('mergeChangeRows', () => {
     it('a deletion that is the only record stays a deletion', () => {
         const rows = mergeChangeRows([row({ status: 'deleted', isStaged: true })], []);
         expect(rows[0].status).toBe('deleted');
+    });
+
+    it('a staged edit followed by a worktree deletion shows as deleted, not as an openable modified file (#216, fd07ad20 residual #4)', () => {
+        const rows = mergeChangeRows(
+            [row({ status: 'modified', isStaged: true, lines: { added: 3, removed: 0 } })],
+            [row({ status: 'deleted', isStaged: false })],
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ status: 'deleted', isStaged: false });
     });
 });
 
@@ -168,17 +208,33 @@ describe('createRefreshScope', () => {
     it('retire on blur/unmount: a refresh that completes afterwards writes nothing; the next focus starts fresh', () => {
         const scope = createRefreshScope();
         const g = scope.begin('p');
-        scope.retire('p');
+        scope.retire('p', g);
         expect(scope.isCurrent('p', g)).toBe(false);
         const again = scope.begin('p');
         expect(scope.isCurrent('p', again)).toBe(true);
     });
 
+    it('retire is owner-specific: disposing screen A leaves screen B\'s newer refresh current (#316, fd07ad20 residual #5)', () => {
+        // A starts, B starts, A is disposed: B must still publish when it
+        // resolves — an unconditional retire left B unable to publish and
+        // stuck on isFetching.
+        const scope = createRefreshScope();
+        const a = scope.begin('p');
+        const b = scope.begin('p');
+        scope.retire('p', a);
+        expect(scope.isCurrent('p', b)).toBe(true);
+        expect(scope.isCurrent('p', a)).toBe(false);
+        // disposing B retires B; nothing older is resurrected
+        scope.retire('p', b);
+        expect(scope.isCurrent('p', b)).toBe(false);
+        expect(scope.isCurrent('p', a)).toBe(false);
+    });
+
     it('projects are independent', () => {
         const scope = createRefreshScope();
         const a = scope.begin('a');
-        scope.begin('b');
-        scope.retire('b');
+        const b = scope.begin('b');
+        scope.retire('b', b);
         expect(scope.isCurrent('a', a)).toBe(true);
     });
 });

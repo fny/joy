@@ -412,6 +412,73 @@ describe("readGitStatus on real repositories", () => {
     expect(r.totals.staged).toEqual({ added: 0, removed: 0 });
   });
 
+  test("a failed --show-prefix in a subdirectory session is a failed read, never a guessed root (fd07ad20 residual #1)", async () => {
+    // Only the toplevel query used to be checked: a failed prefix decoded as
+    // "" made the session look like the worktree root and every identity
+    // came out cwd-relative to the WRONG directory ("sub/a" for a file the
+    // app must open as "a").
+    const d = initRepo("prefix-fail");
+    mkdirSync(join(d, "sub"));
+    writeFileSync(join(d, "sub", "a.txt"), "1\n");
+    commitAll(d, "init");
+    writeFileSync(join(d, "sub", "a.txt"), "1\n2\n");
+    const { runGit } = await import("./gitStatus");
+    const failing = (flag: string): typeof runGit => (cwd, args) => args[0] === "rev-parse" && args.includes(flag)
+      ? Promise.resolve({ code: 128, stdout: Buffer.alloc(0), stderr: "fatal: injected\n", spawnError: null, timedOut: false })
+      : runGit(cwd, args);
+    for (const flag of ["--show-prefix", "--absolute-git-dir", "--git-common-dir"]) {
+      const r = await readGitStatus(join(d, "sub"), failing(flag));
+      expect(r, flag).toMatchObject({ ok: false, code: "git_failed", error: "fatal: injected" });
+    }
+    // the same session with a healthy git is still inside/"a.txt"
+    const ok = repoOf(await readGitStatus(join(d, "sub")));
+    expect(ok.relation).toBe("inside");
+    expect(byCwd(ok).get("a.txt")!.lines.unstaged).toEqual({ added: 1, removed: 0 });
+  });
+
+  test("diff.relative=true: numstat still joins porcelain's root-relative paths (fd07ad20 residual #2)", async () => {
+    // With diff.relative on, `git diff` keys were cwd-relative while porcelain
+    // keys stayed root-relative: every join missed, each modified file read
+    // "unavailable" and the totals still advertised a known zero.
+    const d = initRepo("diff-relative");
+    mkdirSync(join(d, "sub"));
+    writeFileSync(join(d, "sub", "a.txt"), "1\n");
+    writeFileSync(join(d, "sub", "b.txt"), "1\n");
+    commitAll(d, "init");
+    g(d, "config", "diff.relative", "true");
+    writeFileSync(join(d, "sub", "a.txt"), "1\n2\n");
+    writeFileSync(join(d, "sub", "b.txt"), "1\n2\n3\n");
+    g(d, "add", "sub/b.txt");
+    const r = repoOf(await readGitStatus(join(d, "sub")));
+    const m = byCwd(r);
+    expect(m.get("a.txt")!.lines.unstaged).toEqual({ added: 1, removed: 0 });
+    expect(m.get("b.txt")!.lines.staged).toEqual({ added: 2, removed: 0 });
+    expect(r.totals.unstaged).toEqual({ added: 1, removed: 0 });
+    expect(r.totals.staged).toEqual({ added: 2, removed: 0 });
+  });
+
+  test("a changed text entry that numstat did not cover makes that side's total unavailable, not zero (fd07ad20 residual #2)", async () => {
+    const d = initRepo("numstat-hole");
+    writeFileSync(join(d, "a.txt"), "1\n");
+    writeFileSync(join(d, "img.bin"), Buffer.from([0, 1, 2]));
+    commitAll(d, "init");
+    writeFileSync(join(d, "a.txt"), "1\n2\n");
+    writeFileSync(join(d, "img.bin"), Buffer.from([0, 1, 2, 3]));
+    const { runGit } = await import("./gitStatus");
+    // numstat succeeds but reports nothing for the modified text file
+    const emptyDiff: typeof runGit = (cwd, args) => args.includes("--numstat") && !args.includes("--cached")
+      ? Promise.resolve({ code: 0, stdout: Buffer.alloc(0), stderr: "", spawnError: null, timedOut: false })
+      : runGit(cwd, args);
+    const r = repoOf(await readGitStatus(d, emptyDiff));
+    expect(byCwd(r).get("a.txt")!.lines.unstaged).toBe("unavailable");
+    expect(r.totals.unstaged).toBe("unavailable");
+    expect(r.totals.staged).toEqual({ added: 0, removed: 0 });
+    // a binary file alone is not a hole: the sum legitimately excludes it
+    const healthy = repoOf(await readGitStatus(d));
+    expect(byCwd(healthy).get("img.bin")!.lines.unstaged).toBe("unavailable");
+    expect(healthy.totals.unstaged).toEqual({ added: 1, removed: 0 });
+  });
+
   test("git missing / failing surfaces as ok:false with a code", async () => {
     const d = initRepo("nogit");
     const missing = () => Promise.resolve({ code: 1, stdout: Buffer.alloc(0), stderr: "", spawnError: "ENOENT", timedOut: false });

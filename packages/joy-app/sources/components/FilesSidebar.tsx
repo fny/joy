@@ -11,7 +11,7 @@ import Animated, {
     Easing,
 } from 'react-native-reanimated';
 import { storage, useSessionGitStatus, useSessionGitStatusFiles, useSessionProjectFiles, useSessionExpandedDirs } from '@/sync/storage';
-import { getGitStatusFiles, GitFileStatus, knownLines, mergeChangeRows } from '@/sync/gitStatusFiles';
+import { gitStatusRefreshScope, startGitStatusRefresh, GitFileStatus, knownLines, mergeChangeRows } from '@/sync/gitStatusFiles';
 import { getProjectFiles, ProjectFile } from '@/sync/projectFiles';
 import { FileIcon } from '@/components/FileIcon';
 import { Typography } from '@/constants/Typography';
@@ -189,21 +189,23 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
     const [collapsed, setCollapsed] = React.useState<Set<string>>(() => new Set());
     const allFilesRef = React.useRef<AllFilesTabHandle>(null);
 
+    // Refresh through the SAME publication ownership as useGitStatusFiles: a
+    // private fetch-and-write here could land after the Changes screen had
+    // already published a fresher list and overwrite it with this older one
+    // (#316 review residual on fd07ad20). Only the generation this effect
+    // minted is retired on cleanup, so a sibling's newer refresh stays current.
     React.useEffect(() => {
-        let cancelled = false;
         const pathKey = storage.getState().getSessionPathKey(sessionId);
         if (!pathKey) return;
-        (async () => {
-            const result = await getGitStatusFiles(sessionId);
-            if (!cancelled && result) {
-                storage.getState().applyGitStatusFiles(pathKey, result);
-            }
-        })();
-        return () => { cancelled = true; };
+        const { gen } = startGitStatusRefresh(sessionId, pathKey);
+        return () => { gitStatusRefreshScope.retire(pathKey, gen); };
     }, [sessionId, gitStatus?.lastUpdatedAt]);
 
     const handleFilePress = React.useCallback((file: GitFileStatus) => {
         if (file.status === 'deleted') return;
+        // A non-UTF-8 name has no path the daemon can be handed; the row is
+        // shown by its display text only (fd07ad20 residual #3).
+        if (file.unaddressable) return;
         if (onFilePress) {
             onFilePress(file);
             return;

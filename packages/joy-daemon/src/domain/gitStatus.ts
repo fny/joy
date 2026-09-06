@@ -331,6 +331,10 @@ export function parseForEachRefZ(out: Buffer): GitBranchRef[] {
 
 const NOT_A_REPO = /not a git repository|must be run in a work tree/i;
 
+/** `-c` overrides that keep `git diff` path output in the format porcelain
+ *  uses (root-relative); see the diff invocations in readGitStatus. */
+const DIFF_PATH_FORMAT = ["-c", "diff.relative=false"] as const;
+
 function detectOperation(gitDir: string): GitOperation | null {
   if (existsSync(resolve(gitDir, "rebase-merge")) || existsSync(resolve(gitDir, "rebase-apply"))) return "rebase";
   if (existsSync(resolve(gitDir, "MERGE_HEAD"))) return "merge";
@@ -362,6 +366,15 @@ export async function readGitStatus(cwd: string, git: GitRunner = runGit): Promi
     if (NOT_A_REPO.test(top.stderr)) return { v: 2, ok: true, relation: "none", cwd };
     return failure(top, "git rev-parse");
   }
+  // Every answer is load-bearing for identity, not just the first: a failed
+  // --show-prefix decoded as "" would silently turn a subdirectory session
+  // into relation:"root" and hand the app cwd-relative paths like "sub/a" for
+  // a file it must open as "a"; a failed git-dir answer would point
+  // detectOperation at the wrong directory. One missing value is a failed
+  // read (ok:false), never a guessed root (review residual on fd07ad20, #1).
+  for (const [r, what] of [[pfx, "git rev-parse --show-prefix"], [gd, "git rev-parse --absolute-git-dir"], [cd, "git rev-parse --git-common-dir"]] as const) {
+    if (r.code !== 0) return failure(r, what);
+  }
   const root = decodeBytes(stripOneLf(top.stdout)).text;
   const prefix = decodeBytes(stripOneLf(pfx.stdout)).text;
   const gitDir = decodeBytes(stripOneLf(gd.stdout)).text;
@@ -373,8 +386,15 @@ export async function readGitStatus(cwd: string, git: GitRunner = runGit): Promi
     // user's own git. -uall lists untracked FILES, not collapsed directories.
     // "-- ." scopes the report to the session cwd inside a larger repository.
     git(cwd, ["--no-optional-locks", "status", "--porcelain=v2", "-z", "--branch", "--show-stash", "--untracked-files=all", "--", "."]),
-    git(cwd, ["--no-optional-locks", "diff", "--cached", "--numstat", "-z", "--no-ext-diff", "--no-color", "--", "."]),
-    git(cwd, ["--no-optional-locks", "diff", "--numstat", "-z", "--no-ext-diff", "--no-color", "--", "."]),
+    // Numstat records are joined to porcelain records by their exact path
+    // bytes, and porcelain is ALWAYS repository-root-relative. diff.relative
+    // (a per-repo or per-user config) makes diff paths cwd-relative instead,
+    // so in a subdirectory session every join would miss and each modified
+    // file would read "unavailable" — pin it off for this invocation (review
+    // residual on fd07ad20, #2). core.quotepath does not need pinning: with
+    // -z git never C-quotes a path, whatever that setting says.
+    git(cwd, ["--no-optional-locks", ...DIFF_PATH_FORMAT, "diff", "--cached", "--numstat", "-z", "--no-ext-diff", "--no-color", "--", "."]),
+    git(cwd, ["--no-optional-locks", ...DIFF_PATH_FORMAT, "diff", "--numstat", "-z", "--no-ext-diff", "--no-color", "--", "."]),
     git(cwd, ["for-each-ref", `--format=${REF_FORMAT}`, "refs/heads"]),
   ]);
   if (status.code !== 0) return failure(status, "git status");
@@ -395,14 +415,23 @@ export async function readGitStatus(cwd: string, git: GitRunner = runGit): Promi
 
   const entries: GitStatusEntry[] = [];
   const counts = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0, entries: 0 };
-  const sumStaged = { added: 0, removed: 0 };
-  const sumUnstaged = { added: 0, removed: 0 };
-  const side = (code: string, stats: Map<string, NumstatRecord> | null, key: string, sum: { added: number; removed: number }): { lines: LineCount; binary: boolean | null } => {
+  // A side's sum is only a TOTAL while every changed text entry contributed
+  // to it. Binary files are excluded by design (there is no line count to
+  // add) and untracked files never have numstat; but a tracked, changed,
+  // non-binary entry that numstat did not cover — or covered with a
+  // non-numeric count — is a hole, and a hole makes the sum "unavailable"
+  // rather than a confidently wrong smaller number (review residual on
+  // fd07ad20, #2: a modified file read "unavailable" while the totals
+  // advertised a known zero).
+  const sumStaged = { added: 0, removed: 0, complete: true };
+  const sumUnstaged = { added: 0, removed: 0, complete: true };
+  const side = (code: string, stats: Map<string, NumstatRecord> | null, key: string, sum: { added: number; removed: number; complete: boolean }): { lines: LineCount; binary: boolean | null } => {
     if (code === ".") return { lines: { added: 0, removed: 0 }, binary: null };
     if (stats === null) return { lines: "unavailable", binary: null };
     const s = stats.get(key);
-    if (!s) return { lines: "unavailable", binary: null };
-    if (s.binary || s.added === null || s.removed === null) return { lines: "unavailable", binary: s.binary };
+    if (!s) { sum.complete = false; return { lines: "unavailable", binary: null }; }
+    if (s.binary) return { lines: "unavailable", binary: true };
+    if (s.added === null || s.removed === null) { sum.complete = false; return { lines: "unavailable", binary: false }; }
     sum.added += s.added; sum.removed += s.removed;
     return { lines: { added: s.added, removed: s.removed }, binary: false };
   };
@@ -444,8 +473,8 @@ export async function readGitStatus(cwd: string, git: GitRunner = runGit): Promi
     branches,
     entries,
     totals: {
-      staged: stagedStats === null ? "unavailable" : sumStaged,
-      unstaged: unstagedStats === null ? "unavailable" : sumUnstaged,
+      staged: stagedStats === null || !sumStaged.complete ? "unavailable" : { added: sumStaged.added, removed: sumStaged.removed },
+      unstaged: unstagedStats === null || !sumUnstaged.complete ? "unavailable" : { added: sumUnstaged.added, removed: sumUnstaged.removed },
       counts,
     },
     clean: entries.length === 0,

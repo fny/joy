@@ -6,13 +6,15 @@
  *
  * Two fields carry a file's name and they are not interchangeable:
  *  - `fullPath` is the IDENTITY — the cwd-relative path the daemon accepts on
- *    files/* and git/diff. Open, diff and cache a file by this.
+ *    files/* and git/diff. Open, diff and cache a file by this. (A name that
+ *    is not valid UTF-8 has no such path; its row is `unaddressable` and
+ *    `fullPath` is only a distinct key — see gitPathIdentity.)
  *  - `displayPath` / `fileName` / `filePath` are DISPLAY text — control
  *    characters pictured, undecodable bytes as U+FFFD. Show these; never send
  *    them anywhere.
  */
 
-import type { GitLineCount, GitStatusEntryV2, GitStatusRepoV2, GitStatusV2 } from './v2/machine';
+import type { GitLineCount, GitPathV2, GitStatusEntryV2, GitStatusRepoV2, GitStatusV2 } from './v2/machine';
 import type { GitStatus } from './storageTypes';
 
 export type { GitLineCount };
@@ -24,10 +26,21 @@ export interface GitFileStatus {
     fileName: string;
     /** Display: the parent directory of the display path ('' at the root). */
     filePath: string;
-    /** IDENTITY: cwd-relative path for file operations. */
+    /** IDENTITY: cwd-relative path for file operations. For a name that is
+     *  not valid UTF-8 this is NOT a path git or the daemon will accept — it
+     *  is a key that stays distinct per file (see gitPathIdentity) and the
+     *  row is `unaddressable`. */
     fullPath: string;
     /** Display text of the whole path. */
     displayPath: string;
+    /** False when the filename bytes are not valid UTF-8 (then `fullPath` and
+     *  `displayPath` are lossy and `rawBase64` holds the exact bytes). */
+    utf8: boolean;
+    /** Base64 of the exact repo-relative filename bytes; only when !utf8. */
+    rawBase64?: string;
+    /** No open/diff action exists for this row: the daemon cannot be handed
+     *  its name as a UTF-8 string. Show it by `displayPath`, never fetch it. */
+    unaddressable: boolean;
     status: GitFileChange;
     isStaged: boolean;
     /** Exact counts for this side, or 'unavailable' (binary, untracked, or
@@ -76,21 +89,37 @@ function splitDisplay(display: string): { fileName: string; filePath: string } {
         : { fileName: display.slice(cut + 1) || display, filePath: display.slice(0, cut) };
 }
 
+/**
+ * The identity string every keyed consumer (tree, merge, diff list, prefetch)
+ * uses for a path. A valid-UTF-8 name IS its cwd path. A name that is not
+ * valid UTF-8 decodes lossily — two different byte strings can both become
+ * "\uFFFD\uFFFD.bin" — so keying by the lossy text merged two real files into
+ * one nonexistent row (review residual on fd07ad20, #3). Such a name is keyed
+ * by its exact bytes instead: NUL cannot occur in a filename, so the suffix
+ * can never collide with a real path, and the row is marked unaddressable.
+ */
+export function gitPathIdentity(p: GitPathV2): string {
+    return p.utf8 ? p.cwd : `${p.cwd}\u0000raw:${p.rawBase64 ?? ''}`;
+}
+
 function fileFromEntry(e: GitStatusEntryV2, side: 'staged' | 'unstaged'): GitFileStatus {
     const status: GitFileChange = e.untracked ? 'untracked'
         : e.conflict ? 'conflicted'
             : changeFromCode(side === 'staged' ? e.index : e.worktree);
     const f: GitFileStatus = {
         ...splitDisplay(e.path.display),
-        fullPath: e.path.cwd,
+        fullPath: gitPathIdentity(e.path),
         displayPath: e.path.display,
+        utf8: e.path.utf8,
+        unaddressable: !e.path.utf8,
         status,
         isStaged: side === 'staged',
         lines: e.lines[side],
         binary: e.binary === true,
     };
+    if (!e.path.utf8 && e.path.rawBase64 !== undefined) f.rawBase64 = e.path.rawBase64;
     if (e.rename) {
-        f.oldPath = e.rename.from.cwd;
+        f.oldPath = gitPathIdentity(e.rename.from);
         f.oldDisplayPath = e.rename.from.display;
     }
     if (e.conflict) f.conflict = e.conflict.xy;
@@ -147,18 +176,22 @@ export function gitStatusFromStructured(d: GitStatusRepoV2, now: number = Date.n
 /**
  * One row per path for the Changes tree. A path can carry a staged AND an
  * unstaged record (a staged deletion plus an untracked re-creation, a staged
- * edit plus further unstaged edits). Keep the record that describes the
- * WORKING TREE: a recreated file must open, not sit struck-through behind its
- * staged deletion (#216).
+ * edit plus further unstaged edits, a staged edit plus a worktree deletion).
+ * Keep the record that describes the WORKING TREE, whatever it says: a
+ * recreated file must open, not sit struck-through behind its staged
+ * deletion, and a file deleted from the worktree must show as deleted — not
+ * as the openable modified file its staged record still describes (#216;
+ * review residual on fd07ad20, #4). Availability follows the worktree.
  */
 export function mergeChangeRows(staged: GitFileStatus[], unstaged: GitFileStatus[]): GitFileStatus[] {
     const byPath = new Map<string, GitFileStatus>();
     for (const file of [...staged, ...unstaged]) {
         const prev = byPath.get(file.fullPath);
         if (!prev) { byPath.set(file.fullPath, file); continue; }
-        // An unstaged record is the worktree's own view; a non-deleted record
-        // beats a deleted one either way.
-        if ((prev.status === 'deleted' && file.status !== 'deleted') || (!file.isStaged && prev.isStaged && file.status !== 'deleted')) {
+        // The unstaged record is the worktree's own view and always wins over
+        // the staged one, deletion included. Between two records of the same
+        // side (should not happen), a non-deleted one beats a deleted one.
+        if ((!file.isStaged && prev.isStaged) || (prev.status === 'deleted' && file.status !== 'deleted')) {
             byPath.set(file.fullPath, file);
         }
     }
@@ -193,10 +226,16 @@ export function classifyGitStatusResponse(res: { status: number; data: GitStatus
 }
 
 /**
- * Latest-wins + focus-scoped refresh bookkeeping, keyed by project. A refresh
+ * Latest-wins + owner-scoped refresh bookkeeping, keyed by project. A refresh
  * publishes only while its generation is current: a newer refresh for the same
- * project supersedes it (#316), and `retire` (on blur/unmount) makes a refresh
- * that completes after the screen went away write nothing.
+ * project supersedes it (#316), and `retire` (on blur/unmount) makes the
+ * refresh the disposed owner started write nothing if it completes late.
+ *
+ * `retire` takes the generation the owner minted and only retires THAT one.
+ * An unconditional retire invalidated the whole project: with screen A and
+ * screen B refreshing the same project, disposing A retired B's in-flight
+ * refresh too — B then published nothing and sat on isFetching forever
+ * (review residual on fd07ad20, #5).
  */
 export function createRefreshScope() {
     const latest = new Map<string, number>();
@@ -212,9 +251,10 @@ export function createRefreshScope() {
         isCurrent(key: string, gen: number): boolean {
             return latest.get(key) === gen;
         },
-        /** Focus-scope disposal: nothing started before this may publish. */
-        retire(key: string): void {
-            latest.set(key, ++counter);
+        /** Owner disposal: the owner's own refresh may no longer publish. A
+         *  newer refresh (another owner's, or a later one) is untouched. */
+        retire(key: string, gen: number): void {
+            if (latest.get(key) === gen) latest.set(key, ++counter);
         },
     };
 }
