@@ -513,6 +513,12 @@ export class SessionRegistry {
     // session's id, which the hook POSTs to /sessions/:id/compacting.
     envParts.push(`JOY_DAEMON_FILE='${daemonFilePath()}'`);
     envParts.push(`JOY_SESSION_ID='${id}'`);
+    // Per-LAUNCH identity, echoed back on every hook event (launch_id). The
+    // session id above is a route a restart's replacement inherits and the
+    // conversation id survives a --resume, so neither can tell a delayed hook
+    // from the retired process apart from the live one's; this can.
+    const hookLaunchId = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    envParts.push(`JOY_LAUNCH_ID='${hookLaunchId}'`);
     // Claude Code's harness-side Tasks feature conflicts with joy's own
     // task/queue surfaces — keep it off in every joy-spawned claude.
     envParts.push(`CLAUDE_CODE_ENABLE_TASKS=0`);
@@ -625,7 +631,7 @@ export class SessionRegistry {
     // started blind. (A resume/continue launch leaves claudeSessionId alone:
     // Claude writes a NEW file under a new id on --resume, learned from the
     // transcript.)
-    if (!saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel, claudePermissionMode: mode ?? "default", claudeSessionId: freshClaudeId })) {
+    if (!saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel, claudePermissionMode: mode ?? "default", claudeSessionId: freshClaudeId, hookLaunchId })) {
       abortCreate("could not persist the launch record (is the joy state directory writable?)");
     }
     launchRecordSaved = true;
@@ -692,6 +698,7 @@ export class SessionRegistry {
       transcriptPath: resumeTranscriptPath ?? freshTranscriptPath,
       transcriptStartOffset: resumeStartOffset,
       backfillCapBytes,
+      hookLaunchId,
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);
@@ -1190,6 +1197,7 @@ export class SessionRegistry {
         claudeSessionId,
         transcriptPath: transcriptPath ?? undefined,
         transcriptStartOffset: startOffset,
+        hookLaunchId: rec?.hookLaunchId,
       }, this.#sessionDeps());
       if (startOffset > 0) process.stderr.write(`[recover] ${id} resuming transcript at checkpoint offset ${startOffset}\n`);
 
