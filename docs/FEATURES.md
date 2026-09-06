@@ -71,14 +71,19 @@ every relay; machines register per account.
   a time; opencode/pi route through their native steer semantics.
 - **Codex output & recovery** (`codex/codexSession.ts`): a prompt typed in the
   attached TUI is mirrored into the card once, BEFORE its turn bracket — the
-  turn-start record is held until the turn's first item, so the app groups it
-  like a joy-sent prompt (#131). A restart or rejoin replays thread history
+  turn-start record is held until the turn's first item, and a client id
+  this session never submitted opens nothing, so the app groups it like a
+  joy-sent prompt (#131). A restart or rejoin replays thread history
   through the same normalizer under deterministic ids; a live item that
   arrived while the read was pending binds to the replayed identity instead
-  of a second one (#519); the delivered-turn checkpoint never passes a turn
+  of a second one only on proof it is the same occurrence — inside the
+  snapshot boundary, same runtime id or whole content including outcome — a
+  repeat of the same command is its own result (#519); the delivered-turn
+  checkpoint never passes a turn
   whose history came back partial, so the next recovery still replays it
   (#518); a rejoined in-progress turn is the active one — busy, thinking,
-  Stop interrupts it by id (#513).
+  Stop interrupts it by id — whether or not its items came back full
+  (#513).
 - **Drafts**: composer stash button; drafts sit at the chat bottom.
 - **Slash commands** the daemon owns: `/title`, `/steer`, `/btw`,
   `/login-code`, `/joy-prompt` (re-inject current instructions — the fix for

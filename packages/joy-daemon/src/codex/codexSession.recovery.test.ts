@@ -29,6 +29,10 @@ const H = vi.hoisted(() => ({
   onTurnStart: null as null | ((client: any, clientId: string | undefined, turnId: string) => void),
   /** Runs INSIDE thread/read before it resolves — live traffic during the read. */
   onThreadRead: null as null | ((client: any) => void),
+  /** Runs when the session persists its window record — on a rejoin that is
+   *  AFTER thread/read resolved and BEFORE the buffer flush: live traffic
+   *  past the snapshot boundary. */
+  onWindowRecordSaved: null as null | (() => void),
   /** The app-server refuses turn/start while this turn runs (its real answer). */
   busyTurn: null as string | null,
 }));
@@ -61,6 +65,11 @@ vi.mock("./appServerClient", async (importOriginal) => {
   return { ...orig, CodexAppServerClient: FakeClient as any, spawnCodexAppServer: vi.fn(() => fakeProc()) };
 });
 
+vi.mock("../domain/windowRecord", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../domain/windowRecord")>();
+  return { ...orig, saveWindowRecord: (...args: Parameters<typeof orig.saveWindowRecord>) => { const r = orig.saveWindowRecord(...args); H.onWindowRecordSaved?.(); return r; } };
+});
+
 import { CodexSession } from "./codexSession";
 import { ledgerFor } from "../domain/ledger";
 import { queueFor } from "../domain/queueFacade";
@@ -74,7 +83,7 @@ afterAll(() => { delete process.env.JOY_HOME_DIR; rmSync(home, { recursive: true
 beforeEach(() => {
   H.turnStarts.length = 0; H.interrupts.length = 0;
   H.history = { thread: { id: "TH", turns: [] } };
-  H.onTurnStart = null; H.onThreadRead = null; H.busyTurn = null;
+  H.onTurnStart = null; H.onThreadRead = null; H.onWindowRecordSaved = null; H.busyTurn = null;
 });
 
 const deps: SessionDeps = { relayClient: null, broadcast: () => {}, addChatMessage: () => {} };
@@ -83,7 +92,7 @@ const fakeTmux = { literal: ok, key: ok, command: ok, commandOnce: ok, captureFr
 const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ledger = () => ledgerFor();
 
-interface Sent { localId: string | undefined; t: string; text?: string }
+interface Sent { localId: string | undefined; t: string; text?: string; result?: string }
 /** A relay that records what is sent, in order, and lets a test ack a
  *  turn's terminal row (the receipt sink → delivered-turn checkpoint). */
 function fakeRelay() {
@@ -95,7 +104,7 @@ function fakeRelay() {
     relaySessionId: "relay-1", metadataSnapshot: null, outboundPersistDegraded: false,
     send: (w: any, localId?: string) => {
       const ev = w?.content?.data?.ev;
-      sent.push(ev ? { localId, t: String(ev.t), text: ev.text } : { localId, t: w?.role === "user" || w?.content?.type === "text" ? "user" : String(w?.content?.type), text: w?.content?.text });
+      sent.push(ev ? { localId, t: String(ev.t), text: ev.text, result: ev.result } : { localId, t: w?.role === "user" || w?.content?.type === "text" ? "user" : String(w?.content?.type), text: w?.content?.text });
     },
     setReceiptSink: (s: any) => { sink = s; },
     stampReceiptOnLastQueued: (r: any) => { receipts.push(r); },
@@ -177,6 +186,39 @@ test("#513: rejoining a live orphan mid-turn restores the active turn — busy, 
   s.end("killed");
 });
 
+test("#513: a rejoined in-progress turn whose items came back partial is STILL the active one — busy, thinking, Stop interrupts it by id; its buffered completion frees the session", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-live", status: "inProgress", itemsView: "partial", items: [] },
+  ] } };
+  H.busyTurn = "T-live";
+  // The orphan's own tail lands while the read is pending: it is buffered,
+  // flushed after reconcile, and completes the restored turn.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg-tail", text: "the tail" } } });
+  };
+  const { relay, thinking, sent } = fakeRelay();
+  const { s, client } = await started("rec-513-partial", { relay, rejoin: true });
+  expect(s.busy()).toBe(true);
+  expect(s.toJSON().busy).toBe(true);
+  expect(thinking.at(-1)).toBe(true);
+  expect(queueFor(s).state()).toMatchObject({ busy: true, provenance: "terminal" });
+  // Content availability does not decide activity: Stop names the live turn.
+  expect(await s.abort()).toEqual({ ok: true });
+  expect(H.interrupts).toEqual(["T-live"]);
+  // The buffered live text went out under the turn's bracket, not as a stray row.
+  expect(sent.map((x) => x.t)).toEqual(["turn-start", "text"]);
+  expect(sent[1]).toMatchObject({ text: "the tail", localId: "codex:TH:turn:T-live:item:agentMessage:0:text" });
+  // The orphan's real completion frees the session.
+  H.busyTurn = null;
+  client.notify({ method: "turn/completed", params: { threadId: "TH", turn: { id: "T-live", status: "interrupted" } } });
+  expect(s.busy()).toBe(false);
+  expect(thinking.at(-1)).toBe(false);
+  expect(sent.at(-1)?.t).toBe("turn-end");
+  // The deferred turn is never checkpointed as delivered (#518 still holds).
+  expect(ledger().getCheckpoint("rec-513-partial", "codex_turn")?.ref ?? null).toBeNull();
+  s.end("killed");
+});
+
 test("#515: ending a session whose thread is active clears busy for busy() and toJSON()", async () => {
   const { relay } = fakeRelay();
   const { s, client } = await started("rec-515", { relay });
@@ -239,6 +281,84 @@ test("#519: a live answer buffered while thread/read was pending re-uses the ide
   s.end("killed");
 });
 
+test("#519: a NEW execution of the same command buffered during the read is not the old one — both results reach the relay under distinct ids", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-live", status: "inProgress", items: [{ type: "commandExecution", id: "item-0", command: "date", aggregatedOutput: "old timestamp", exitCode: 0 }] },
+  ] } };
+  // The same command runs AGAIN while the read is pending: equal input, a different output.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "new-command", command: "date" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "new-command", command: "date", aggregatedOutput: "new timestamp", exitCode: 0 } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-repeat", { relay, rejoin: true });
+  const ends = sent.filter((x) => x.t === "tool-call-end");
+  expect(ends.map((x) => [x.localId, x.result])).toEqual([
+    ["codex:TH:turn:T-live:item:commandExecution:0:tool-end", "old timestamp"],
+    ["codex:TH:turn:T-live:item:commandExecution:1:tool-end", "new timestamp"],
+  ]);
+  expect(sent.filter((x) => x.t === "tool-call-start").map((x) => x.localId)).toEqual([
+    "codex:TH:turn:T-live:item:commandExecution:0:tool-start",
+    "codex:TH:turn:T-live:item:commandExecution:1:tool-start",
+  ]);
+  s.end("killed");
+});
+
+test("#519: the snapshot boundary — an occurrence that arrives AFTER thread/read resolved is new even when its whole content equals a replayed item; the same runtime id binds", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-live", status: "inProgress", items: [
+      { type: "commandExecution", id: "call_same", command: "echo hi", aggregatedOutput: "hi", exitCode: 0 },
+      { type: "commandExecution", id: "item-1", command: "echo hi", aggregatedOutput: "hi", exitCode: 0 },
+    ] },
+  ] } };
+  // Inside the boundary: the runtime's own id names the first item (its
+  // content differs — the snapshot had it before the output settled).
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "call_same", command: "echo hi", aggregatedOutput: "hi\n", exitCode: 0 } } });
+  };
+  // Past the boundary (read resolved, flush pending): identical content, but
+  // the snapshot cannot contain it — a third `echo hi`.
+  H.onWindowRecordSaved = () => {
+    H.onWindowRecordSaved = null; // the first save on a rejoin is the post-read one
+    const client = H.clients.at(-1);
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "call_third", command: "echo hi" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "call_third", command: "echo hi", aggregatedOutput: "hi", exitCode: 0 } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-boundary", { relay, rejoin: true });
+  expect(sent.filter((x) => x.t === "tool-call-end").map((x) => [x.localId, x.result])).toEqual([
+    ["codex:TH:turn:T-live:item:commandExecution:0:tool-end", "hi"],
+    ["codex:TH:turn:T-live:item:commandExecution:1:tool-end", "hi"],
+    ["codex:TH:turn:T-live:item:commandExecution:0:tool-end", "hi\n"], // bound by id: the replayed identity, re-sent
+    ["codex:TH:turn:T-live:item:commandExecution:2:tool-end", "hi"],   // past the boundary: its own
+  ]);
+  s.end("killed");
+});
+
+test("#519: an equal-text NEW prompt during the read is its own user row, not the replayed one", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "completed", items: [
+      { type: "userMessage", id: "item-0", content: [{ type: "text", text: "hi" }] },
+      { type: "agentMessage", id: "item-1", text: "hello" },
+    ] },
+  ] } };
+  // The user types the same prompt again in the TUI while the read is pending: a new turn.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "turn/started", params: { threadId: "TH", turn: { id: "T2" } } });
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T2", item: { type: "userMessage", id: "msg_2" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T2", item: { type: "userMessage", id: "msg_2", text: "hi" } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-user", { relay, rejoin: true });
+  expect(sent.filter((x) => x.t === "user").map((x) => [x.localId, x.text])).toEqual([
+    ["turn:T1:item:userMessage:0:user", "hi"],
+    ["turn:T2:item:userMessage:0:user", "hi"],
+  ]);
+  // …and the new prompt lands BEFORE its turn bracket (#131).
+  expect(sent.map((x) => x.t)).toEqual(["user", "turn-start", "text", "turn-end", "user", "turn-start"]);
+  s.end("killed");
+});
+
 test("#131: a prompt typed in the attached TUI is mirrored BEFORE the turn bracket; a joy-sent prompt's echo opens the bracket", async () => {
   const { relay, sent } = fakeRelay();
   const { s, client } = await started("rec-131", { relay });
@@ -262,5 +382,25 @@ test("#131: a prompt typed in the attached TUI is mirrored BEFORE the turn brack
   expect(sent[0]).toMatchObject({ text: "from joy", localId: `codex:in:rec-131:${c.id}` });
   await settle(10);
   expect(ledger().getCommand(c.id)?.state).toBe("completed");
+  s.end("killed");
+});
+
+test.each([
+  ["clientId", (id: string) => ({ clientId: id })],
+  ["clientUserMessageId", (id: string) => ({ clientUserMessageId: id })],
+])("#131: a TUI prompt stamped with a FOREIGN %s is still mirrored BEFORE the turn bracket — a client id this session never submitted opens nothing", async (_form, stamp) => {
+  const { relay, sent } = fakeRelay();
+  const { s, client } = await started(`rec-131-foreign-${_form}`, { relay });
+  // The TUI (or another app-server client) stamps its own id on the prompt.
+  client.notify({ method: "turn/started", params: { threadId: "TH", turn: { id: "T-tui" } } });
+  client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-tui", item: { type: "userMessage", id: "m", ...stamp("external-tui-id") } } });
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-tui", item: { type: "userMessage", id: "m", ...stamp("external-tui-id"), text: "typed in TUI" } } });
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-tui", item: { type: "agentMessage", id: "msg_2", text: "reply" } } });
+  client.notify({ method: "turn/completed", params: { threadId: "TH", turn: { id: "T-tui", status: "completed" } } });
+  expect(sent.map((x) => x.t)).toEqual(["user", "turn-start", "text", "turn-end"]);
+  expect(sent[0]).toMatchObject({ text: "typed in TUI", localId: "turn:T-tui:item:userMessage:0:user" });
+  expect(sent[1].localId).toBe("codex:TH:turn:T-tui:start");
+  // Nothing of ours was confirmed by it.
+  expect(queueFor(s).state()).toMatchObject({ inFlight: null, running: null });
   s.end("killed");
 });

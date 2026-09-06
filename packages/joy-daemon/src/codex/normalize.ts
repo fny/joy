@@ -366,16 +366,31 @@ export class CodexNormalizer {
   }
 }
 
-/** What identifies an item's CONTENT across its live and history forms
- *  (the transient ids differ: live msg_…/call_…, history item-N). Empty
- *  when the type carries nothing comparable — never matched on. */
+/** The WHOLE observable content of a completed item — input AND outcome —
+ *  as it reads in both its live and history forms (the transient ids differ:
+ *  live msg_…/call_…, history item-N). Used to recognise a buffered live
+ *  completion in the history just replayed (#519). The outcome is part of
+ *  it on purpose: equality of the command alone is not proof of the same
+ *  occurrence — a NEW `date` after the snapshot aliased the old one and the
+ *  relay deduped its result away. Empty when the type carries nothing
+ *  comparable — never matched on. */
 export function itemSignature(item: Item): string {
   switch (itemType(item)) {
     case "agentMessage": return str(item.text).trim();
     case "userMessage": return userMessageText(item).trim();
-    case "commandExecution": return str(item.command);
-    case "fileChange": return item.changes !== undefined || item.content !== undefined ? JSON.stringify(item.changes ?? item.content) : "";
-    case "mcpToolCall": return JSON.stringify({ server: item.server ?? null, tool: item.tool ?? item.name ?? null, arguments: item.arguments ?? null });
+    case "commandExecution": {
+      const { result, isError } = toolOutcome(item);
+      return JSON.stringify({ command: str(item.command), status: str(item.status), result: result ?? null, isError: isError ?? false });
+    }
+    case "fileChange": {
+      if (item.changes === undefined && item.content === undefined) return "";
+      const { result, isError } = toolOutcome(item);
+      return JSON.stringify({ changes: item.changes ?? item.content, status: str(item.status), result: result ?? null, isError: isError ?? false });
+    }
+    case "mcpToolCall": {
+      const { result, isError } = toolOutcome(item);
+      return JSON.stringify({ server: item.server ?? null, tool: item.tool ?? item.name ?? null, arguments: item.arguments ?? null, status: str(item.status), result: result ?? null, isError: isError ?? false });
+    }
     default: return "";
   }
 }
