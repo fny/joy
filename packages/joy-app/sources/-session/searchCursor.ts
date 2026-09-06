@@ -36,3 +36,24 @@ export function reconcileSearchCursor(
     const index = Math.min(Math.max(previousIndex, 0), matches.length - 1);
     return { index, messageId: matches[index].messageId, scroll: true };
 }
+
+/**
+ * The ONE cursor decision the search bar makes per render of its inputs
+ * (#122). A query change and a match-list change used to be two effects
+ * that each read the render's OLD cursor: with B selected at index 1 and a
+ * new query yielding [X, A, B], the reset effect selected X at 0 while the
+ * reconcile effect, still holding selectedId = B, moved the index to 2 —
+ * the counter read 3/3 with X on screen. One decision, one outcome:
+ * a changed query starts over at the first hit; an unchanged query follows
+ * the selected message through the new list.
+ */
+export function nextSearchCursor(
+    matches: ReadonlyArray<{ messageId: string }>,
+    args: { queryChanged: boolean; selectedId: string | null; previousIndex: number },
+): SearchCursor {
+    if (args.queryChanged) {
+        if (matches.length === 0) return { index: 0, messageId: null, scroll: false };
+        return { index: 0, messageId: matches[0].messageId, scroll: true };
+    }
+    return reconcileSearchCursor(matches, args.selectedId, args.previousIndex);
+}

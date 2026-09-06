@@ -49,4 +49,22 @@ describe('parseChangelogContent (#350)', () => {
             { title: 'Three', summary: 'Summary line', markdown: '- x' },
         ]);
     });
+
+    it('a fence line followed by text is code, not a closer (#350 residual)', () => {
+        const md = '# Release\nSummary\n```sh\n```not-a-closing-fence\n# Fake\nbody\n```\n';
+        const { entries } = parseChangelogContent(md);
+        expect(entries.map(e => e.title)).toEqual(['Release']);
+        expect(entries[0].markdown).toContain('# Fake');
+        expect(entries[0].markdown).toContain('```not-a-closing-fence');
+    });
+
+    it('a closer may be indented and carry trailing whitespace', () => {
+        const md = ['# A', 'One.', '```', '# inside', '   ```  \t', '# B', 'Two.'].join('\n');
+        expect(parseChangelogContent(md).entries.map(e => e.title)).toEqual(['A', 'B']);
+    });
+
+    it('a backtick opener whose info string contains a backtick is not a fence', () => {
+        const md = ['# A', 'One.', '```not `a` fence', '# B', 'Two.'].join('\n');
+        expect(parseChangelogContent(md).entries.map(e => e.title)).toEqual(['A', 'B']);
+    });
 });

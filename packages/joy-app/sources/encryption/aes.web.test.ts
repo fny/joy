@@ -91,3 +91,24 @@ describe('aes.web', () => {
         expect(await decryptAESGCMString(await encryptAESGCMString('  x\n', key), key)).toBe('  x\n');
     });
 });
+
+describe('aes.web byte envelope (#303)', () => {
+    it('OLD unversioned byte ciphertext still decrypts to its raw bytes (real WebCrypto)', async () => {
+        const key = encodeBase64(new Uint8Array(32).fill(1));
+        // The reviewer's case: a pre-envelope blob whose bytes spell "QUJD"
+        // came back as "ABC" once the byte API assumed base64.
+        const old = await encryptAESGCMString('QUJD', key);
+        const opened = await decryptAESGCM(new Uint8Array(Buffer.from(old, 'base64')), key);
+        expect(new TextDecoder().decode(opened!)).toBe('QUJD');
+        const oldText = await encryptAESGCMString('plain text, not base64', key);
+        expect(new TextDecoder().decode((await decryptAESGCM(new Uint8Array(Buffer.from(oldText, 'base64')), key))!)).toBe('plain text, not base64');
+    });
+
+    it('new byte payloads are versioned and round-trip arbitrary bytes', async () => {
+        const key = encodeBase64(new Uint8Array(32).fill(2));
+        const bytes = new Uint8Array([255, 128, 0, 65]);
+        const sealed = await encryptAESGCM(bytes, key);
+        expect(Array.from((await decryptAESGCM(sealed, key))!)).toEqual([255, 128, 0, 65]);
+        expect(await decryptAESGCMString(encodeBase64(sealed), key)).toBe('joy-aes-bytes-v1:' + encodeBase64(bytes));
+    });
+});

@@ -13,13 +13,29 @@
  * dependency hop on the web bundle and lets Metro resolve a cheaper
  * platform-specific module without a runtime Platform.OS check.
  *
- * NOTE: encryptAESGCM / decryptAESGCM carry the bytes as base64 TEXT inside
- * the authenticated plaintext, exactly like aes.ts, because the native
- * rn-encryption surface is UTF-8-string only (#303). Keeping the same
+ * NOTE: encryptAESGCM / decryptAESGCM carry the bytes as versioned base64
+ * TEXT inside the authenticated plaintext, exactly like aes.ts, because the
+ * native rn-encryption surface is UTF-8-string only (#303). Keeping the same
  * payload encoding here is what makes a bytes blob portable across
  * platforms; a raw-bytes crypto.subtle call would silently diverge.
  */
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
+
+/** Byte-API plaintext envelope, version 1 — WIRE CONSTANT mirrored in aes.ts
+ *  (see the note there). Unmarked plaintext is a legacy blob whose text IS
+ *  the bytes; decoding it as base64 turned `QUJD` into `ABC` (#303). */
+const BYTES_ENVELOPE_V1 = 'joy-aes-bytes-v1:';
+
+function decodeBytesEnvelope(plaintext: string): Uint8Array | null {
+    if (plaintext.startsWith(BYTES_ENVELOPE_V1)) {
+        try {
+            return decodeBase64(plaintext.slice(BYTES_ENVELOPE_V1.length));
+        } catch {
+            return null;
+        }
+    }
+    return new TextEncoder().encode(plaintext);
+}
 
 const ALGO = 'AES-GCM';
 const IV_LEN = 12;
@@ -67,9 +83,10 @@ export async function decryptAESGCMString(data: string, key64: string): Promise<
 }
 
 export async function encryptAESGCM(data: Uint8Array, key64: string): Promise<Uint8Array> {
-    // Mirror aes.ts (#303): bytes travel as base64 text in the plaintext so
-    // arbitrary/invalid-UTF-8 bytes survive the native side's string API.
-    const encryptedB64 = (await encryptAESGCMString(encodeBase64(data), key64)).trim();
+    // Mirror aes.ts (#303): bytes travel as versioned base64 text in the
+    // plaintext so arbitrary/invalid-UTF-8 bytes survive the native side's
+    // string API, and legacy raw-text blobs stay distinguishable.
+    const encryptedB64 = (await encryptAESGCMString(BYTES_ENVELOPE_V1 + encodeBase64(data), key64)).trim();
     return decodeBase64(encryptedB64);
 }
 
@@ -79,9 +96,5 @@ export async function decryptAESGCM(data: Uint8Array, key64: string): Promise<Ui
     if (result === null) {
         return null;
     }
-    try {
-        return decodeBase64(result);
-    } catch {
-        return null;
-    }
+    return decodeBytesEnvelope(result);
 }

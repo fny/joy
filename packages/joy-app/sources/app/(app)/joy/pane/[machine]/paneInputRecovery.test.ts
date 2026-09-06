@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { planTextSubmit, resizePending, restoreFailedInput } from './paneInputRecovery';
+import { clearPendingScript, planTextSubmit, resizePending, restoreFailedInput, sendKeysOutcome } from './paneInputRecovery';
 
 describe('restoreFailedInput (#155)', () => {
     it('puts the submitted text back into an empty box', () => {
@@ -13,13 +13,40 @@ describe('restoreFailedInput (#155)', () => {
 
 describe('planTextSubmit (#155)', () => {
     it('types the text on a fresh submit', () => {
-        expect(planTextSubmit('ls', null)).toEqual({ typeText: true });
+        expect(planTextSubmit('ls', null)).toEqual({ clearFirst: false, typeText: true });
     });
-    it('skips typing when the same text already sits in the pane unsubmitted', () => {
-        expect(planTextSubmit('ls', 'ls')).toEqual({ typeText: false });
+    it('skips typing when the same text is known to sit in the pane unsubmitted', () => {
+        expect(planTextSubmit('ls', { text: 'ls', certain: true })).toEqual({ clearFirst: false, typeText: false });
     });
-    it('types again when the text was edited since', () => {
-        expect(planTextSubmit('ls -la', 'ls')).toEqual({ typeText: true });
+    it('clears the box before typing EDITED text (would otherwise append to the old text)', () => {
+        expect(planTextSubmit('edited', { text: 'old text', certain: true })).toEqual({ clearFirst: true, typeText: true });
+    });
+    it('clears first after a timeout left the box state unknown, even for the same text', () => {
+        expect(planTextSubmit('ls', { text: 'ls', certain: false })).toEqual({ clearFirst: true, typeText: true });
+    });
+});
+
+describe('sendKeysOutcome (#155)', () => {
+    it('HTTP 500 / {ok:false} without an error message is a failure, not a landed send', () => {
+        expect(sendKeysOutcome({ status: 500, data: { ok: false } })).toEqual({ outcome: 'failed', message: 'HTTP 500' });
+        expect(sendKeysOutcome({ status: 200, data: { ok: false } })).toEqual({ outcome: 'failed', message: 'HTTP 200' });
+        expect(sendKeysOutcome({ status: 200, data: {} })).toEqual({ outcome: 'failed', message: 'HTTP 200' });
+        expect(sendKeysOutcome({ status: 200, data: null })).toEqual({ outcome: 'failed', message: 'HTTP 200' });
+    });
+    it('requires a 2xx status AND ok:true', () => {
+        expect(sendKeysOutcome({ status: 200, data: { ok: true } })).toEqual({ outcome: 'ok' });
+        expect(sendKeysOutcome({ status: 503, data: { ok: true } })).toEqual({ outcome: 'failed', message: 'HTTP 503' });
+    });
+    it('surfaces the daemon error text when there is one', () => {
+        expect(sendKeysOutcome({ status: 409, data: { ok: false, error: 'no such window' } })).toEqual({ outcome: 'failed', message: 'no such window' });
+    });
+});
+
+describe('clearPendingScript (#155)', () => {
+    it('sends C-u presses, two per line, at least two, capped', () => {
+        expect(clearPendingScript('ls')).toBe('<C-u><C-u>');
+        expect(clearPendingScript('a\nb\nc')).toBe('<C-u>'.repeat(6));
+        expect(clearPendingScript(Array(20).fill('x').join('\n'))).toBe('<C-u>'.repeat(12));
     });
 });
 

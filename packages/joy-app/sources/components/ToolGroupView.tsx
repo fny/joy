@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { encodePathParam } from '@/utils/pathParam';
-import { View, Text, Pressable, ActivityIndicator, Platform } from 'react-native';
+import { View, Text, Pressable, ActivityIndicator, Platform, LayoutChangeEvent } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Octicons from '@expo/vector-icons/Octicons';
@@ -22,8 +22,55 @@ import { Message, ToolCallMessage } from '@/sync/typesMessage';
 import { getToolSummaryCategory, getToolSummaryDetail, ToolSummaryCategory } from '@/utils/toolDisplay';
 import { useRouter } from 'expo-router';
 import { formatMCPTitle } from './tools/views/MCPToolView';
+import { nestedGroupContaining, RevealLayout, RevealTarget } from './searchReveal';
 
-interface ToolGroupViewProps {
+type RevealRoot = React.RefObject<React.ComponentRef<typeof View> | null>;
+
+/** In-session search reveal (#203): the row holding the search target gets
+ *  `reveal`; the rendered hit is wrapped in a RevealAnchor that reports its
+ *  layout relative to `revealRoot` (the top-level row's outer view) through
+ *  `onRevealLayout`, so ChatList scrolls to the hit itself. */
+interface RevealProps {
+    reveal?: RevealTarget | null;
+    onRevealLayout?: (layout: RevealLayout) => void;
+}
+
+function RevealAnchor(props: {
+    target: RevealTarget;
+    root: RevealRoot;
+    onLayout?: (layout: RevealLayout) => void;
+    children: React.ReactNode;
+}) {
+    const { target, root, onLayout } = props;
+    const ref = React.useRef<React.ComponentRef<typeof View>>(null);
+    const report = React.useCallback((fallbackHeight: number | null) => {
+        const node = ref.current;
+        const rootNode = root.current;
+        if (!node || !rootNode || !onLayout) return;
+        node.measureLayout(rootNode, (_x, y, _width, height) => {
+            const h = height > 0 ? height : (fallbackHeight ?? 0);
+            onLayout({ messageId: target.messageId, nonce: target.nonce, y, height: h });
+        }, () => { /* unmounted mid-measure: nothing to reveal */ });
+    }, [target, root, onLayout]);
+    const handleLayout = React.useCallback((e: LayoutChangeEvent) => {
+        report(e.nativeEvent.layout.height);
+    }, [report]);
+    // A repeated search for the same message (new nonce) on an already laid
+    // out anchor gets no onLayout; re-measure on the target change instead.
+    // The first target is reported by onLayout once the view exists.
+    const initialTargetRef = React.useRef(target);
+    React.useEffect(() => {
+        if (initialTargetRef.current === target) return;
+        report(null);
+    }, [target, report]);
+    return (
+        <View ref={ref} collapsable={false} onLayout={handleLayout}>
+            {props.children}
+        </View>
+    );
+}
+
+interface ToolGroupViewProps extends RevealProps {
     group: ToolGroupItem;
     metadata: Metadata | null;
     sessionId: string;
@@ -33,6 +80,9 @@ interface ToolGroupViewProps {
     onToggle: (id: string) => void;
     nested?: boolean;
     hideSingleToolChildren?: boolean;
+    /** The enclosing row's root view for reveal measurement; a top-level
+     *  group uses its own outer view. */
+    revealRoot?: RevealRoot;
 }
 
 // Message refs are stable across grouping passes (useGroupedMessages rebuilds
@@ -63,12 +113,17 @@ function areToolGroupPropsEqual(prev: ToolGroupViewProps, next: ToolGroupViewPro
         && prev.onToggle === next.onToggle
         && prev.nested === next.nested
         && prev.hideSingleToolChildren === next.hideSingleToolChildren
+        && prev.reveal === next.reveal
+        && prev.onRevealLayout === next.onRevealLayout
+        && prev.revealRoot === next.revealRoot
         && areMessagesEqual(prev.group.messages, next.group.messages);
 }
 
 export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
-    const { group, metadata, sessionId, expanded, onToggle, nested, hideSingleToolChildren } = props;
+    const { group, metadata, sessionId, expanded, onToggle, nested, hideSingleToolChildren, reveal, onRevealLayout } = props;
     const router = useRouter();
+    const ownRootRef = React.useRef<React.ComponentRef<typeof View>>(null);
+    const revealRoot = props.revealRoot ?? ownRootRef;
     const summary = React.useMemo(() => generateGroupSummary(group.messages), [group.messages]);
     const summaryCategory = React.useMemo(() => getGroupSummaryCategory(group.messages), [group.messages]);
     // A lone tool folds into its header row — unless it still needs the user:
@@ -98,25 +153,45 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
         }
         router.push(`/session/${sessionId}/message/${singleToolMessage.id}`);
     }, [onToggle, group.id, router, sessionId, singleToolMessage]);
-    const renderGroupMessage = React.useCallback((msg: Message) => (
-        <ToolGroupMessageRow
-            key={msg.id}
-            message={msg}
-            metadata={metadata}
-            sessionId={sessionId}
+    const renderGroupMessage = React.useCallback((msg: Message) => {
+        const row = (
+            <ToolGroupMessageRow
+                key={msg.id}
+                message={msg}
+                metadata={metadata}
+                sessionId={sessionId}
+            />
+        );
+        if (reveal && reveal.messageId === msg.id) {
+            return (
+                <RevealAnchor key={msg.id} target={reveal} root={revealRoot} onLayout={onRevealLayout}>
+                    {row}
+                </RevealAnchor>
+            );
+        }
+        return row;
+    }, [metadata, sessionId, reveal, revealRoot, onRevealLayout]);
+
+    const header = (
+        <CollapseHeader
+            expanded={expanded}
+            hasRunning={group.hasRunning}
+            label={summary}
+            onPress={singleToolMessage ? handleSingleToolPress : handleToggle}
+            category={summaryCategory}
+            showChevron
         />
-    ), [metadata, sessionId]);
+    );
+    // A lone tool folded into its header IS the hit's rendering.
+    const revealHeader = reveal != null && singleToolMessage !== null && reveal.messageId === singleToolMessage.id;
 
     const body = (
         <View style={nested ? styles.nestedInnerContainer : styles.innerContainer}>
-            <CollapseHeader
-                expanded={expanded}
-                hasRunning={group.hasRunning}
-                label={summary}
-                onPress={singleToolMessage ? handleSingleToolPress : handleToggle}
-                category={summaryCategory}
-                showChevron
-            />
+            {revealHeader ? (
+                <RevealAnchor target={reveal} root={revealRoot} onLayout={onRevealLayout}>
+                    {header}
+                </RevealAnchor>
+            ) : header}
             {expanded && !suppressChildren && (
                 <View style={styles.content}>
                     {group.messages.map(renderGroupMessage)}
@@ -134,13 +209,13 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
     }
 
     return (
-        <View style={styles.outerContainer}>
+        <View style={styles.outerContainer} ref={ownRootRef} collapsable={false}>
             {body}
         </View>
     );
 }, areToolGroupPropsEqual);
 
-interface AgentWorkGroupViewProps {
+interface AgentWorkGroupViewProps extends RevealProps {
     group: AgentWorkGroupItem;
     metadata: Metadata | null;
     sessionId: string;
@@ -163,11 +238,14 @@ function areAgentWorkGroupPropsEqual(prev: AgentWorkGroupViewProps, next: AgentW
         && prev.metadata === next.metadata
         && prev.sessionId === next.sessionId
         && prev.onToggle === next.onToggle
+        && prev.reveal === next.reveal
+        && prev.onRevealLayout === next.onRevealLayout
         && areMessagesEqual(prev.group.messages, next.group.messages);
 }
 
 export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) => {
-    const { group, metadata, sessionId, expanded, onToggle } = props;
+    const { group, metadata, sessionId, expanded, onToggle, reveal, onRevealLayout } = props;
+    const rootRef = React.useRef<React.ComponentRef<typeof View>>(null);
     const runningElapsedSeconds = useElapsedTime(group.completedAt === null ? group.startedAt : null);
     const durationMs = group.completedAt === null
         ? runningElapsedSeconds * 1000
@@ -227,6 +305,27 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
         });
     }, [nestedItemsNewestFirst]);
 
+    // A search reveal (#203) opens the nested group holding the target, just
+    // as ChatList opens this row: the outer expansion alone left a hit inside
+    // an independently collapsed nested group hidden. Declared AFTER the
+    // seeding effect above so a never-seen group's initial collapse is undone
+    // in the same commit. Reads the nested items through a ref so only a new
+    // reveal reopens — a later toggle by the user is respected.
+    const nestedItemsRef = React.useRef(nestedItemsNewestFirst);
+    nestedItemsRef.current = nestedItemsNewestFirst;
+    React.useEffect(() => {
+        if (!reveal) return;
+        const groupId = nestedGroupContaining(nestedItemsRef.current, reveal.messageId);
+        if (!groupId) return;
+        manuallyToggledToolGroupsRef.current.delete(groupId); // a search reveal is not a manual toggle
+        setCollapsedToolGroups((prev) => {
+            if (!prev.has(groupId)) return prev;
+            const next = new Set(prev);
+            next.delete(groupId);
+            return next;
+        });
+    }, [reveal]);
+
     const handleToggleNestedGroup = React.useCallback((groupId: string) => {
         manuallyToggledToolGroupsRef.current.add(groupId);
         setCollapsedToolGroups((prev) => {
@@ -246,6 +345,7 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
 
     const renderNestedItem = React.useCallback((item: ToolDisplayItem) => {
         if (item.type === 'tool-group') {
+            const nestedReveal = reveal && item.messages.some((m) => m.id === reveal.messageId) ? reveal : null;
             return (
                 <ToolGroupView
                     key={item.id}
@@ -256,10 +356,13 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
                     onToggle={handleToggleNestedGroup}
                     nested
                     hideSingleToolChildren
+                    reveal={nestedReveal}
+                    onRevealLayout={onRevealLayout}
+                    revealRoot={rootRef}
                 />
             );
         }
-        return (
+        const message = (
             <MessageView
                 key={item.id}
                 message={item.message}
@@ -267,10 +370,18 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
                 sessionId={sessionId}
             />
         );
-    }, [collapsedToolGroups, handleToggleNestedGroup, metadata, sessionId]);
+        if (reveal && reveal.messageId === item.message.id) {
+            return (
+                <RevealAnchor key={item.id} target={reveal} root={rootRef} onLayout={onRevealLayout}>
+                    {message}
+                </RevealAnchor>
+            );
+        }
+        return message;
+    }, [collapsedToolGroups, handleToggleNestedGroup, metadata, sessionId, reveal, onRevealLayout]);
 
     return (
-        <View style={styles.outerContainer}>
+        <View style={styles.outerContainer} ref={rootRef} collapsable={false}>
             <View style={styles.innerContainer}>
                 <CollapseHeader
                     expanded={expanded}

@@ -16,6 +16,7 @@
  */
 import sodium from '@/encryption/libsodium.lib';
 import { encodeUTF8, decodeUTF8 } from '@/encryption/text';
+import { standaloneBytes } from '@/encryption/standalone';
 
 /** An attachment as it travels inside a sealed message. `id` is the relay's
  *  attachment id (GET /joy/v2/attachments/:id); the rest is what the chat
@@ -43,7 +44,9 @@ export function sealV2Content(text: string, key: Uint8Array | null, attachments?
     // Not sodium.from_string: the native module (@more-tech/react-native-libsodium)
     // exports to_string but no from_string — on iOS/Android that call was
     // "undefined is not a function" and every send failed while reads worked.
-    const ct = sodium.crypto_secretbox_easy(encodeUTF8(json), nonce, key);
+    // Every byte view that reaches sodium owns exactly its bytes: the native
+    // module sizes arguments by their whole backing store (#305/#307).
+    const ct = sodium.crypto_secretbox_easy(standaloneBytes(encodeUTF8(json)), nonce, standaloneBytes(key));
     const buf = new Uint8Array(nonce.length + ct.length);
     buf.set(nonce, 0); buf.set(ct, nonce.length);
     return 'v2e1:' + sodium.to_base64(buf, sodium.base64_variants.ORIGINAL);
@@ -84,7 +87,11 @@ export function openV2Payload(ciphertext: string | null | undefined, key: Uint8A
         if (!key) return null; // sealed content without the key — refuse honestly
         try {
             const raw = sodium.from_base64(ciphertext.slice(5), sodium.base64_variants.ORIGINAL);
-            const pt = sodium.crypto_secretbox_open_easy(raw.slice(24), raw.slice(0, 24), key);
+            const pt = sodium.crypto_secretbox_open_easy(
+                standaloneBytes(raw.subarray(24)),
+                standaloneBytes(raw.subarray(0, 24)),
+                standaloneBytes(key),
+            );
             p = JSON.parse(decodeUTF8(pt));
         } catch { return null; }
     } else {
@@ -114,16 +121,19 @@ export function openV2Content(ciphertext: string | null | undefined, key: Uint8A
     return `⟨${ciphertext.length}b payload⟩`;
 }
 
-/** Standalone copy: the native libsodium module sizes arguments by the
- *  underlying ArrayBuffer, so a view onto a larger buffer reads wrong. */
-const standalone = (b: Uint8Array) => (b.byteOffset === 0 && b.buffer.byteLength === b.length ? b : b.slice());
+// Byte ownership at the sodium boundary is @/encryption/standalone's
+// standaloneBytes. The local copy this file used to carry called `.slice()`,
+// which a Buffer overrides to return ANOTHER VIEW of its pool — so a Buffer
+// view [1,2] inside [9,1,2,9] still sealed all four bytes under the native
+// contract, and an authentic ciphertext handed over as a Buffer failed to
+// open (native byte ownership sweep, #305/#307).
 
 /** Seal attachment bytes for upload: nonce24 ‖ secretbox(bytes). Plaintext
  *  (legacy) sessions upload the bytes as they are — same policy as the text. */
 export function sealV2Bytes(bytes: Uint8Array, key: Uint8Array | null): Uint8Array {
     if (!key) return bytes;
     const nonce = sodium.randombytes_buf(24);
-    const ct = sodium.crypto_secretbox_easy(standalone(bytes), nonce, standalone(key));
+    const ct = sodium.crypto_secretbox_easy(standaloneBytes(bytes), nonce, standaloneBytes(key));
     const out = new Uint8Array(nonce.length + ct.length);
     out.set(nonce, 0); out.set(ct, nonce.length);
     return out;
@@ -133,6 +143,10 @@ export function openV2Bytes(bytes: Uint8Array, key: Uint8Array | null): Uint8Arr
     if (!key) return bytes;
     if (bytes.length < 24 + 16) return null;
     try {
-        return sodium.crypto_secretbox_open_easy(bytes.slice(24), bytes.slice(0, 24), standalone(key));
+        return sodium.crypto_secretbox_open_easy(
+            standaloneBytes(bytes.subarray(24)),
+            standaloneBytes(bytes.subarray(0, 24)),
+            standaloneBytes(key),
+        );
     } catch { return null; }
 }

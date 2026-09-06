@@ -51,6 +51,22 @@ describe('aes (native wrapper) against a string-only AES-GCM bridge', () => {
         expect(await decryptAESGCMString(await encryptAESGCMString('', KEY), KEY)).toBe('');
     });
 
+    it('#303: OLD unversioned byte ciphertext still decrypts to its raw bytes', async () => {
+        // A blob sealed by the pre-envelope byte API: the raw bytes went
+        // through the string surface unchanged, so its plaintext IS the text.
+        const legacy = new Uint8Array(Buffer.from(await encryptAESGCMString('QUJD', KEY), 'base64'));
+        expect(Array.from((await decryptAESGCM(legacy, KEY))!)).toEqual(Array.from(Buffer.from('QUJD')));
+        expect(new TextDecoder().decode((await decryptAESGCM(legacy, KEY))!)).not.toBe('ABC');
+        const legacyText = new Uint8Array(Buffer.from(await encryptAESGCMString('not base64!', KEY), 'base64'));
+        expect(new TextDecoder().decode((await decryptAESGCM(legacyText, KEY))!)).toBe('not base64!');
+    });
+
+    it('#303: new byte payloads carry the version marker inside the plaintext', async () => {
+        const sealed = await encryptAESGCM(new Uint8Array([65, 66, 67]), KEY);
+        const plaintext = await decryptAESGCMString(Buffer.from(sealed).toString('base64'), KEY);
+        expect(plaintext).toBe('joy-aes-bytes-v1:QUJD');
+    });
+
     it('a wrong key yields null (parity with aes.web) instead of throwing', async () => {
         const other = Buffer.from(new Uint8Array(32).fill(9)).toString('base64');
         const sealed = await encryptAESGCM(new Uint8Array([1, 2, 3]), KEY);

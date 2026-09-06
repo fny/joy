@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Text, TextInput, Platform, View, NativeSyntheticEvent, TextInputKeyPressEventData, TextInputSelectionChangeEventData } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
-import { isTextPlusOneNewline } from './newlineSwallow';
+import { isNewlineInsertedAtSelection, PendingNewlineSwallow } from './newlineSwallow';
 
 export type SupportedKey = 'Enter' | 'Escape' | 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight' | 'Tab';
 
@@ -131,17 +131,23 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
     // A return key the handler consumed (autocomplete applied a suggestion)
     // still inserts "\n" natively — preventDefault is a no-op on native — and
     // the following onChangeText('/co\n') overwrote the applied suggestion
-    // (#27). Remember the text as it was at the key press; a change that is
-    // exactly that text plus one newline, arriving right after, is swallowed
-    // and the handler's text is re-asserted through `value`.
-    const swallowNewlineRef = React.useRef<{ base: string; until: number } | null>(null);
+    // (#27). Remember the text AND caret as they were at that key press; the
+    // next change that is exactly that text with "\n" at that caret is the
+    // consumed newline — swallowed whenever it arrives — and the handler's
+    // text is re-asserted through `value`. The record is tied to the key
+    // event: the next change consumes it (matching or not) and any later key
+    // press supersedes it, so no wall-clock window is involved.
+    const swallowNewlineRef = React.useRef<PendingNewlineSwallow | null>(null);
 
     const handleKeyPress = React.useCallback((e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
+        // A new key event supersedes any swallow armed by a previous one.
+        swallowNewlineRef.current = null;
         if (!editable || !onKeyPress) return;
 
         const nativeEvent = e.nativeEvent;
         const key = nativeEvent.key;
         const textBeforeKey = latestTextRef.current;
+        const selectionBeforeKey = { ...selectionRef.current };
         
         // Map native key names to our normalized format
         let normalizedKey: SupportedKey | null = null;
@@ -184,7 +190,7 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
             if (handled) {
                 e.preventDefault();
                 if (normalizedKey === 'Enter' && Platform.OS !== 'web') {
-                    swallowNewlineRef.current = { base: textBeforeKey, until: Date.now() + 300 };
+                    swallowNewlineRef.current = { base: textBeforeKey, selection: selectionBeforeKey };
                 }
             }
         }
@@ -194,7 +200,7 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
         const swallow = swallowNewlineRef.current;
         if (swallow) {
             swallowNewlineRef.current = null;
-            if (Date.now() <= swallow.until && isTextPlusOneNewline(swallow.base, text)) {
+            if (isNewlineInsertedAtSelection(swallow, text)) {
                 // The native newline from a handled Enter (#27): keep the
                 // handler's text and push it back down through `value`.
                 pendingSelectionRef.current = selectionRef.current;

@@ -4,6 +4,7 @@ import sodium from '@/encryption/libsodium.lib';
 import { decodeUTF8, encodeUTF8 } from "@/encryption/text";
 import { decryptAESGCMString, encryptAESGCMString } from "@/encryption/aes";
 import { attempt } from "@/utils/isolateBad";
+import { standaloneBytes } from "@/encryption/standalone";
 
 //
 // IMPORTANT: Right now there is a bug in the AES implementation and it works only with a normal strings converted to Uint8Array. 
@@ -56,8 +57,11 @@ export class BoxEncryption implements Encryptor, Decryptor {
     private readonly publicKey: Uint8Array;
 
     constructor(seed: Uint8Array) {
-        // Use the seed to generate a proper keypair
-        const keypair = sodium.crypto_box_seed_keypair(seed);
+        // Use the seed to generate a proper keypair. The seed is caller-
+        // provided (a slice of derived key material): materialize it so the
+        // native module, which reads a view's WHOLE backing store, derives
+        // from exactly these 32 bytes (#305/#307 sweep).
+        const keypair = sodium.crypto_box_seed_keypair(standaloneBytes(seed));
         this.privateKey = keypair.privateKey;
         this.publicKey = keypair.publicKey;
     }
