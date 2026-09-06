@@ -14,6 +14,7 @@ import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useDrawingResult } from '@/hooks/useDrawingResult';
 import { DrawingSurface, type DrawingSurfaceHandle } from '@/components/DrawingSurface';
+import { canSaveDrawing } from '@/utils/drawingSave';
 
 const PEN_COLORS = ['#000000', '#FF3B30', '#007AFF', '#FFCC00', '#FFFFFF'] as const;
 const THICKNESSES = [2, 4, 7, 12] as const; // medium (4) is the default
@@ -31,10 +32,21 @@ export default React.memo(function DrawScreen() {
     // Annotation background: pasted or picked image rendered UNDER the ink and
     // captured with it — "paste a screenshot, draw on top" is the core flow.
     const [bgImage, setBgImage] = React.useState<string | null>(null);
+    // The surface loads the background asynchronously; capture paints only
+    // what has loaded. Save is enabled once the surface reports THIS source
+    // loaded, so a fast Save after pasting a large screenshot cannot export a
+    // blank or previous background (#161). A failed load clears the choice.
+    const [loadedBgImage, setLoadedBgImage] = React.useState<string | null>(null);
+    const onBackgroundLoad = React.useCallback((uri: string, ok: boolean) => {
+        if (ok) { setLoadedBgImage(uri); return; }
+        setBgImage((current) => (current === uri ? null : current));
+        Modal.alert(t('common.error'), t('imageUpload.pasteNoImageMessage'), [{ text: t('common.ok') }]);
+    }, []);
     const [saving, setSaving] = React.useState(false);
 
     const save = React.useCallback(async () => {
         if (saving || !surfaceRef.current) return;
+        if (!canSaveDrawing({ strokeCount, bgImage, loadedBgImage, saving })) return;
         setSaving(true);
         try {
             const shot = await surfaceRef.current.capture();
@@ -52,7 +64,7 @@ export default React.memo(function DrawScreen() {
             console.error('drawing capture failed', e);
             setSaving(false);
         }
-    }, [saving, sessionId]);
+    }, [saving, sessionId, strokeCount, bgImage, loadedBgImage]);
 
     const pickBackground = React.useCallback(() => {
         const paste = async () => {
@@ -82,7 +94,7 @@ export default React.memo(function DrawScreen() {
 
     const paper = darkPaper ? '#000000' : '#FFFFFF';
     const chromeOnPaper = darkPaper ? '#FFFFFF' : '#000000';
-    const canSave = strokeCount > 0 || !!bgImage;
+    const canSave = canSaveDrawing({ strokeCount, bgImage, loadedBgImage, saving });
 
     return (
         <View style={[styles.container, { backgroundColor: paper }]}>
@@ -93,6 +105,7 @@ export default React.memo(function DrawScreen() {
                 thickness={thickness}
                 paper={paper}
                 bgImage={bgImage}
+                onBackgroundLoad={onBackgroundLoad}
                 onStrokesChange={setStrokeCount}
             />
 

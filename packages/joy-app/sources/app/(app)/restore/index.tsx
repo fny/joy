@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TextInput, ScrollView, ActivityIndicator } from 'react-native';
+import React, { useState, useCallback, useRef } from 'react';
+import { View, Text, ScrollView, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/auth/AuthContext';
 import { RoundButton } from '@/components/RoundButton';
 import { Typography } from '@/constants/Typography';
 import { encodeBase64 } from '@/encryption/base64';
-import { generateAuthKeyPair, authQRStart } from '@/auth/authQRStart';
+import { generateAuthKeyPair, authQRStart, QRAuthKeyPair } from '@/auth/authQRStart';
 import { authQRWait } from '@/auth/authQRWait';
 import { layout } from '@/components/layout';
 import { Modal } from '@/modal';
@@ -67,69 +68,91 @@ export default function Restore() {
     const styles = stylesheet;
     const auth = useAuth();
     const router = useRouter();
-    const [restoreKey, setRestoreKey] = useState('');
-    const [isWaitingForAuth, setIsWaitingForAuth] = useState(false);
+    // The keypair of the attempt currently on screen; null while none is.
+    const [keypair, setKeypair] = useState<QRAuthKeyPair | null>(null);
     const [authReady, setAuthReady] = useState(false);
-    const [waitingDots, setWaitingDots] = useState(0);
-    const isCancelledRef = useRef(false);
+    const [, setWaitingDots] = useState(0);
+    // Both the auth object and the router are read through refs by the async
+    // attempt, so a rerender never restarts it.
+    const authRef = useRef(auth);
+    authRef.current = auth;
+    const routerRef = useRef(router);
+    routerRef.current = router;
 
-    // Memoize keypair generation to prevent re-creating on re-renders
-    const keypair = React.useMemo(() => generateAuthKeyPair(), []);
+    // A QR attempt lives exactly as long as this screen is FOCUSED (#158).
+    // Pushing "Restore with Secret Key Instead" blurs this screen, which
+    // cancels its attempt: a delayed QR approval can no longer log in behind
+    // the manual screen and yank it away with router.back(). Coming back
+    // mints a fresh keypair (the old request is dead on the relay anyway).
+    // Each attempt owns its own cancellation token — the previous
+    // screen-lifetime ref could not distinguish "this attempt" from "the one
+    // before it".
+    useFocusEffect(useCallback(() => {
+        // Already signed in (e.g. manual restore just completed and popped
+        // back here): nothing to pair, leave the screen.
+        if (authRef.current.isAuthenticated) {
+            routerRef.current.back();
+            return;
+        }
 
-    // Start QR authentication when component mounts
-    useEffect(() => {
-        const startQRAuth = async () => {
+        let cancelled = false;
+        const attempt = generateAuthKeyPair();
+        setKeypair(attempt);
+        setAuthReady(false);
+
+        const run = async () => {
             try {
-                setIsWaitingForAuth(true);
-
                 // Send authentication request
-                const success = await authQRStart(keypair);
+                const success = await authQRStart(attempt);
+                if (cancelled) return;
                 if (!success) {
                     Modal.alert(t('common.error'), t('errors.authenticationFailed'));
-                    setIsWaitingForAuth(false);
                     return;
                 }
 
                 setAuthReady(true);
 
                 // Start waiting for authentication
-                const credentials = await authQRWait(
-                    keypair,
+                const outcome = await authQRWait(
+                    attempt,
                     (dots) => setWaitingDots(dots),
-                    () => isCancelledRef.current
+                    () => cancelled
                 );
+                if (cancelled || outcome.kind === 'cancelled') return;
 
-                if (credentials && !isCancelledRef.current) {
+                if (outcome.kind === 'authorized') {
                     // Convert secret bytes to base64url string for login
-                    const secretString = encodeBase64(credentials.secret, 'base64url');
-                    await auth.login(credentials.token, secretString);
-                    if (!isCancelledRef.current) {
-                        router.back();
+                    const secretString = encodeBase64(outcome.credentials.secret, 'base64url');
+                    await authRef.current.login(outcome.credentials.token, secretString);
+                    if (!cancelled) {
+                        routerRef.current.back();
                     }
-                } else if (!isCancelledRef.current) {
-                    Modal.alert(t('common.error'), t('errors.authenticationFailed'));
+                } else {
+                    // ONE alert, with the specific reason (consumed / expired,
+                    // #607 #610). A generic "Authentication failed" on top of
+                    // it was the double alert users saw.
+                    Modal.alert(t('common.error'), outcome.message);
                 }
-
             } catch (error) {
-                if (!isCancelledRef.current) {
+                if (!cancelled) {
                     console.error('QR Auth error:', error);
                     Modal.alert(t('common.error'), t('errors.authenticationFailed'));
                 }
             } finally {
-                if (!isCancelledRef.current) {
-                    setIsWaitingForAuth(false);
+                if (!cancelled) {
                     setAuthReady(false);
                 }
             }
         };
 
-        startQRAuth();
+        void run();
 
-        // Cleanup function
         return () => {
-            isCancelledRef.current = true;
+            cancelled = true;
+            setAuthReady(false);
+            setKeypair(null);
         };
-    }, [keypair]);
+    }, []));
 
     return (
         <ScrollView style={styles.scrollView} contentContainerStyle={{ flexGrow: 1 }}>
@@ -143,12 +166,12 @@ export default function Restore() {
                         4. Scan this QR code
                     </Text>
                 </View>
-                {!authReady && (
+                {!(authReady && keypair) && (
                     <View style={{ width: 200, height: 200, backgroundColor: theme.colors.surface, alignItems: 'center', justifyContent: 'center' }}>
                         <ActivityIndicator size="small" color={theme.colors.text} />
                     </View>
                 )}
-                {authReady && (
+                {authReady && keypair && (
                     <QRCode
                         data={'joy:///account?' + encodeBase64(keypair.publicKey, 'base64url')}
                         size={300}

@@ -19,6 +19,8 @@ export interface DrawingSurfaceProps {
     paper: string;
     bgImage: string | null;
     onStrokesChange?: (count: number) => void;
+    /** The background source finished loading (ok) or failed — Save waits for it (#161). */
+    onBackgroundLoad?: (uri: string, ok: boolean) => void;
 }
 
 interface Stroke {
@@ -110,12 +112,18 @@ export const DrawingSurface = React.forwardRef<DrawingSurfaceHandle, DrawingSurf
         redraw();
         if (!props.bgImage) return;
         const img = new Image();
+        const src = props.bgImage;
         img.onload = () => {
             if (!isLatest(bgKey, gen)) return;
             bgImgRef.current = img;
             redraw();
+            propsRef.current.onBackgroundLoad?.(src, true);
         };
-        img.src = props.bgImage;
+        img.onerror = () => {
+            if (!isLatest(bgKey, gen)) return;
+            propsRef.current.onBackgroundLoad?.(src, false);
+        };
+        img.src = src;
     }, [props.bgImage, redraw, bgKey]);
 
     // Paper change repaints.

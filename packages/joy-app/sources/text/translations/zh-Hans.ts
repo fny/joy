@@ -311,6 +311,8 @@ export const zhHans: TranslationStructure = {
         machineBusy: '设备正忙 — 请稍后重试',
         relayBusy: '中继正忙 — 请稍后重试',
         connectionTooSlow: '连接速度过慢 — 请在网络更好时重试',
+        logoutFailed: '无法从此设备移除已保存的登录信息。请重试。',
+        syncStartFailedReload: '应用无法开始同步。请重新加载应用后重试。',
     },
 
     newSession: {
@@ -452,7 +454,8 @@ export const zhHans: TranslationStructure = {
         failedToConnectToServer: '连接服务器失败',
         currentlyUsingCustomServer: '当前使用自定义服务器',
         customServerUrlLabel: '自定义服务器 URL',
-        advancedFeatureFooter: "这是一个高级功能。只有在您知道自己在做什么时才更改服务器。更改服务器后您需要重新登录。"
+        advancedFeatureFooter: "这是一个高级功能。只有在您知道自己在做什么时才更改服务器。更改服务器后您需要重新登录。",
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} 需要访问密钥。请输入此中继的密钥。`,
     },
 
     sessionInfo: {
@@ -865,6 +868,7 @@ export const zhHans: TranslationStructure = {
         clientSideProcessing: '客户端处理',
         linkProcessedLocally: '链接在浏览器中本地处理',
         linkProcessedOnDevice: '链接在设备上本地处理',
+        pairingRequestNotFound: '未找到此链接对应的待处理连接请求。它可能已过期或属于其他中继——请在终端生成新链接后重试。',
     },
 
     modals: {

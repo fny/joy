@@ -9,9 +9,11 @@ interface WebPromptModalProps {
     config: PromptModalConfig;
     onClose: () => void;
     onConfirm: (value: string | null) => void;
+    /** False while another dialog is stacked on top (see BaseModal). */
+    active?: boolean;
 }
 
-export function WebPromptModal({ config, onClose, onConfirm }: WebPromptModalProps) {
+export function WebPromptModal({ config, onClose, onConfirm, active = true }: WebPromptModalProps) {
     const { theme } = useUnistyles();
     const [inputValue, setInputValue] = useState(config.defaultValue || '');
     const inputRef = useRef<TextInput>(null);
@@ -119,7 +121,7 @@ export function WebPromptModal({ config, onClose, onConfirm }: WebPromptModalPro
     });
 
     return (
-        <BaseModal visible={true} onClose={handleCancel} closeOnBackdrop={false}>
+        <BaseModal visible={true} onClose={handleCancel} closeOnBackdrop={false} active={active}>
             <View style={styles.container}>
                 <View style={styles.content}>
                     <Text style={[styles.title, Typography.default('semiBold')]}>

@@ -136,8 +136,9 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
         } as any);
     }, [commands, commandPaletteEnabled]);
 
-    // Set up global keyboard handler only if feature is enabled
-    useGlobalKeyboard(commandPaletteEnabled ? showCommandPalette : () => {});
+    // The shortcut listener exists only while the palette is enabled on web;
+    // a disabled palette must leave Ctrl+K to the browser (#206).
+    useGlobalKeyboard(showCommandPalette, Platform.OS === 'web' && !!commandPaletteEnabled);
 
     return <>{children}</>;
 }

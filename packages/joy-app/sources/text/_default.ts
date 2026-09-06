@@ -355,6 +355,8 @@ export const en = {
         machineBusy: 'The machine is busy — try again in a moment',
         relayBusy: 'The relay is busy — try again in a moment',
         connectionTooSlow: 'The connection is too slow — try again on a better network',
+        logoutFailed: 'Could not remove the saved login from this device. Try again.',
+        syncStartFailedReload: 'The app could not start syncing. Reload the app and try again.',
     },
 
     newSession: {
@@ -498,7 +500,8 @@ export const en = {
         failedToConnectToServer: 'Failed to connect to server',
         currentlyUsingCustomServer: 'Currently using custom server',
         customServerUrlLabel: 'Custom Server URL',
-        advancedFeatureFooter: "This is an advanced feature. Only change the server if you know what you're doing. You will need to log out and log in again after changing servers."
+        advancedFeatureFooter: "This is an advanced feature. Only change the server if you know what you're doing. You will need to log out and log in again after changing servers.",
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requires an access key. Enter the key for this relay.`,
     },
 
     sessionInfo: {
@@ -911,6 +914,7 @@ export const en = {
         clientSideProcessing: 'Client-Side Processing',
         linkProcessedLocally: 'Link processed locally in browser',
         linkProcessedOnDevice: 'Link processed locally on device',
+        pairingRequestNotFound: 'No pending connection request was found for this link. It may have expired or belong to another relay — generate a fresh link in the terminal and try again.',
     },
 
     modals: {

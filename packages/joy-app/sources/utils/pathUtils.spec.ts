@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveAbsolutePath, resolvePath } from './pathUtils';
+import { formatPathRelativeToHome, resolveAbsolutePath, resolvePath } from './pathUtils';
 
 describe('pathUtils', () => {
     describe('resolveAbsolutePath', () => {
@@ -222,5 +222,24 @@ describe('pathUtils', () => {
             expect(resolveAbsolutePath('/absolute/path', macHomeDir)).toBe('/absolute/path');
             expect(resolveAbsolutePath('./relative', macHomeDir)).toBe('./relative');
         });
+    });
+});
+
+describe('formatPathRelativeToHome', () => {
+    it('#193: a sibling directory that merely shares the home prefix is left absolute', () => {
+        expect(formatPathRelativeToHome('/home/alice2/project', '/home/alice')).toBe('/home/alice2/project');
+        expect(formatPathRelativeToHome('/home/alice-old/x', '/home/alice')).toBe('/home/alice-old/x');
+    });
+
+    it('collapses the home directory itself and paths under it', () => {
+        expect(formatPathRelativeToHome('/home/alice', '/home/alice')).toBe('~');
+        expect(formatPathRelativeToHome('/home/alice/project', '/home/alice')).toBe('~/project');
+        expect(formatPathRelativeToHome('/home/alice/project', '/home/alice/')).toBe('~/project');
+    });
+
+    it('returns the path unchanged without a usable home directory', () => {
+        expect(formatPathRelativeToHome('/srv/app', undefined)).toBe('/srv/app');
+        expect(formatPathRelativeToHome('/srv/app', '/')).toBe('/srv/app');
+        expect(formatPathRelativeToHome('/srv/app', '/home/alice')).toBe('/srv/app');
     });
 });

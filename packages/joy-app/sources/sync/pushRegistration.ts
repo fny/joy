@@ -6,6 +6,50 @@ import { Linking, Platform } from 'react-native';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { clearRegisteredPushToken, loadRegisteredPushToken, saveRegisteredPushToken } from './persistence';
 import { registerPushToken, unregisterPushToken } from './apiPush';
+import { relayScopedMMKV } from './serverConfig';
+import {
+    hasPendingCleanup,
+    reconcileRegistration,
+    serialized,
+    unregisterDevice,
+    type PushTokenApi,
+    type PushTokenStore,
+} from './pushTokenReconcile';
+
+// Tokens the relay still holds that this device no longer uses (an old token
+// after a rotation, or the device's own token after Mobile push was turned
+// off). Persisted so the deletion survives a restart (#385, #181).
+const PENDING_UNREGISTER_KEY = 'push-token-pending-unregister';
+
+function pushTokenStore(): PushTokenStore {
+    const mmkv = relayScopedMMKV();
+    return {
+        loadRegistered: loadRegisteredPushToken,
+        saveRegistered: saveRegisteredPushToken,
+        clearRegistered: clearRegisteredPushToken,
+        loadPendingUnregister: () => {
+            try {
+                const parsed = JSON.parse(mmkv.getString(PENDING_UNREGISTER_KEY) ?? '[]');
+                return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === 'string') : [];
+            } catch {
+                return [];
+            }
+        },
+        savePendingUnregister: (tokens) => {
+            if (tokens.length === 0) mmkv.delete(PENDING_UNREGISTER_KEY);
+            else mmkv.set(PENDING_UNREGISTER_KEY, JSON.stringify(tokens));
+        },
+    };
+}
+
+function pushTokenApi(credentials: AuthCredentials): PushTokenApi {
+    return {
+        register: (token) => registerPushToken(credentials, token),
+        unregister: (token) => unregisterPushToken(credentials, token),
+    };
+}
+
+const logCleanup = (message: string, error?: unknown) => console.log(`[push] ${message}`, error ?? '');
 
 export type PushPermissionStatus = 'unsupported' | 'granted' | 'denied' | 'undetermined';
 
@@ -150,63 +194,77 @@ export async function syncCurrentPushToken(credentials: AuthCredentials): Promis
         };
     }
 
-    let permission = await getPushPermissionInfo();
-    if (!permission.granted) {
-        if (!permission.canAskAgain) {
-            return {
-                registered: false,
-                token: loadRegisteredPushToken(),
-                permission,
-            };
-        }
-
-        permission = normalizePushPermission(await Notifications.requestPermissionsAsync());
+    // One sync at a time: a slower sync that learned an obsolete token must not
+    // overwrite or unregister the token a newer sync already registered (#386).
+    return serialized(async () => {
+        let permission = await getPushPermissionInfo();
         if (!permission.granted) {
+            if (!permission.canAskAgain) {
+                return {
+                    registered: false,
+                    token: loadRegisteredPushToken(),
+                    permission,
+                };
+            }
+
+            permission = normalizePushPermission(await Notifications.requestPermissionsAsync());
+            if (!permission.granted) {
+                return {
+                    registered: false,
+                    token: loadRegisteredPushToken(),
+                    permission,
+                };
+            }
+        }
+
+        const projectId = getExpoProjectId();
+        if (!projectId) {
             return {
                 registered: false,
                 token: loadRegisteredPushToken(),
                 permission,
             };
         }
-    }
 
-    const projectId = getExpoProjectId();
-    if (!projectId) {
+        const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
+        const currentToken = tokenData.data;
+        await reconcileRegistration(pushTokenApi(credentials), pushTokenStore(), currentToken, logCleanup);
+
         return {
-            registered: false,
-            token: loadRegisteredPushToken(),
+            registered: true,
+            token: currentToken,
             permission,
         };
+    });
+}
+
+/**
+ * Mobile push was turned off (or is off at startup): delete this device's
+ * token from the relay. The setting is device-local and never reaches the
+ * relay, so without this the relay kept pushing to the token (#181). A failed
+ * deletion stays pending — see `hasPendingPushTokenCleanup` — for a retry.
+ */
+export async function unregisterCurrentDevicePushToken(credentials: AuthCredentials): Promise<{ removed: boolean; pending: string[] }> {
+    if (Platform.OS === 'web') {
+        return { removed: true, pending: [] };
     }
+    return serialized(() => unregisterDevice(pushTokenApi(credentials), pushTokenStore(), logCleanup));
+}
 
-    const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
-    const currentToken = tokenData.data;
-    const previousToken = loadRegisteredPushToken();
-
-    await registerPushToken(credentials, currentToken);
-    saveRegisteredPushToken(currentToken);
-
-    if (previousToken && previousToken !== currentToken) {
-        try {
-            await unregisterPushToken(credentials, previousToken);
-        } catch (error) {
-            console.log('Failed to unregister previous push token:', error);
-        }
-    }
-
-    return {
-        registered: true,
-        token: currentToken,
-        permission,
-    };
+/** True while an old (or disabled) token of this device may still be on the relay. */
+export function hasPendingPushTokenCleanup(): boolean {
+    if (Platform.OS === 'web') return false;
+    return hasPendingCleanup(pushTokenStore());
 }
 
 export async function removePushToken(credentials: AuthCredentials, token: string): Promise<void> {
-    await unregisterPushToken(credentials, token);
+    await serialized(async () => {
+        await unregisterPushToken(credentials, token);
 
-    if (loadRegisteredPushToken() === token) {
-        clearRegisteredPushToken();
-    }
+        if (loadRegisteredPushToken() === token) {
+            clearRegisteredPushToken();
+        }
+    });
 }
 
 export function getCurrentPushDeviceMetadata(): CurrentPushDeviceMetadata {

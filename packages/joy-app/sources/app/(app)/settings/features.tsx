@@ -1,5 +1,6 @@
-import { Platform } from 'react-native';
+import { Platform, Pressable, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { useUnistyles } from 'react-native-unistyles';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
@@ -7,8 +8,10 @@ import { useSettingMutable, useLocalSettingMutable } from '@/sync/storage';
 import { Switch } from '@/components/Switch';
 import { Modal } from '@/modal';
 import { t } from '@/text';
+import { limitFromPromptValue } from '@/utils/limitPrompt';
 
 export default function FeaturesSettingsScreen() {
+    const { theme } = useUnistyles();
     const [agentInputEnterToSend, setAgentInputEnterToSend] = useSettingMutable('agentInputEnterToSend');
     const [commandPaletteEnabled, setCommandPaletteEnabled] = useLocalSettingMutable('commandPaletteEnabled');
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
@@ -30,16 +33,8 @@ export default function FeaturesSettingsScreen() {
                 placeholder: 'e.g. 100',
             }
         );
-        if (value === null) return;
-        const trimmed = value.trim();
-        if (trimmed === '') {
-            setChatHistoryLimit(null);
-        } else {
-            const parsed = parseInt(trimmed, 10);
-            if (!isNaN(parsed) && parsed > 0) {
-                setChatHistoryLimit(parsed);
-            }
-        }
+        const next = limitFromPromptValue(value);
+        if (next.change) setChatHistoryLimit(next.limit);
     };
 
     const handleLimitSessionMemory = async () => {
@@ -51,17 +46,28 @@ export default function FeaturesSettingsScreen() {
                 placeholder: t('settingsFeatures.limitSessionMemoryPlaceholder'),
             }
         );
-        if (value === null) return;
-        const trimmed = value.trim();
-        if (trimmed === '') {
-            setLimitSessionMemory(null);
-        } else {
-            const parsed = parseInt(trimmed, 10);
-            if (!isNaN(parsed) && parsed > 0) {
-                setLimitSessionMemory(parsed);
-            }
-        }
+        const next = limitFromPromptValue(value);
+        if (next.change) setLimitSessionMemory(next.limit);
     };
+
+    // Explicit "turn off" affordance for a set limit — independent of how the
+    // platform prompt reports an emptied field (#176).
+    // Item hides `detail` when a rightElement is given, so the value rides
+    // along inside the element.
+    const limitWithClear = (value: string, label: string, onClear: () => void) => (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Text style={{ fontSize: 17, color: theme.colors.textSecondary }}>{value}</Text>
+            <Pressable
+                onPress={onClear}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel={label}
+                style={({ pressed }) => [{ padding: 2 }, pressed && { opacity: 0.5 }]}
+            >
+                <Ionicons name="close-circle" size={22} color={theme.colors.textSecondary} />
+            </Pressable>
+        </View>
+    );
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
@@ -107,6 +113,7 @@ export default function FeaturesSettingsScreen() {
                     icon={<Ionicons name="filter-outline" size={29} color="#5AC8FA" />}
                     detail={chatHistoryLimit != null ? `${chatHistoryLimit}` : 'off'}
                     onPress={handleChatHistoryLimit}
+                    rightElement={chatHistoryLimit != null ? limitWithClear(String(chatHistoryLimit), 'Turn off chat history limit', () => setChatHistoryLimit(null)) : undefined}
                 />
                 <Item
                     title="Double tap"
@@ -157,6 +164,7 @@ export default function FeaturesSettingsScreen() {
                     icon={<Ionicons name="hardware-chip-outline" size={29} color="#34C759" />}
                     detail={limitSessionMemory != null ? String(limitSessionMemory) : t('settingsFeatures.limitSessionMemoryAll')}
                     onPress={handleLimitSessionMemory}
+                    rightElement={limitSessionMemory != null ? limitWithClear(String(limitSessionMemory), t('settingsFeatures.limitSessionMemoryAll'), () => setLimitSessionMemory(null)) : undefined}
                 />
             </ItemGroup>
 

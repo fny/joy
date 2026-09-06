@@ -2,6 +2,7 @@ import React from 'react';
 import { Platform } from 'react-native';
 import { storage } from '@/sync/storage';
 import { updateFaviconWithNotification, resetFavicon } from '@/utils/web/faviconGenerator';
+import { hasFreshPermissionRequest, msUntilNextFreshnessExpiry } from './faviconPermission';
 
 /**
  * Component that monitors all sessions and updates the favicon
@@ -12,17 +13,21 @@ export const FaviconPermissionIndicator = React.memo(() => {
         return null;
     }
 
-    const hasOnlineSessionWithPermissions = storage((state) => {
-        return Object.values(state.sessions).some(session => {
-            // Use centralized presence logic - only "online" sessions matter
-            const isOnline = session.presence === 'online';
+    // `presence` is only recomputed when a session update lands, so a
+    // session whose daemon went silent stayed 'online' and kept the alert
+    // favicon lit (#299). The predicate re-checks the heartbeat window, and
+    // the tick below re-renders when the earliest lit session goes stale.
+    const [, tick] = React.useReducer((n: number) => n + 1, 0);
+    const hasOnlineSessionWithPermissions = storage((state) =>
+        hasFreshPermissionRequest(Object.values(state.sessions), Date.now()));
+    const nextExpiryMs = storage((state) =>
+        msUntilNextFreshnessExpiry(Object.values(state.sessions), Date.now()));
 
-            const hasPermissions = session.agentState?.requests && 
-                Object.keys(session.agentState.requests).length > 0;
-
-            return isOnline && hasPermissions;
-        });
-    });
+    React.useEffect(() => {
+        if (nextExpiryMs === null) return;
+        const timer = setTimeout(tick, nextExpiryMs + 1);
+        return () => clearTimeout(timer);
+    }, [nextExpiryMs]);
 
     React.useLayoutEffect(() => {
         if (hasOnlineSessionWithPermissions) {

@@ -37,11 +37,21 @@ export default React.memo(function JoySessionsScreen() {
     // page ate a 3s live-probe on every visit. Cached results render
     // immediately; a background re-probe refreshes them.
     const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(cachedJoyMachineIds);
-    const probedRef = React.useRef(false);
+    // Bumped by "Probe again" so a failed or empty first probe can be retried
+    // without leaving the screen.
+    const [probeAttempt, setProbeAttempt] = React.useState(0);
 
+    // One discovery run per online-machine set. A change while a run is in
+    // flight cancels that run and starts a new one — the old code marked the
+    // screen "probed" on the first run, so the cancelled run never settled and
+    // the replacement returned at once: Loading forever (#178). With no online
+    // machines there is nothing to probe: settle to an empty set instead of
+    // staying on Loading.
     React.useEffect(() => {
-        if (probedRef.current || onlineMachines.length === 0) return;
-        probedRef.current = true;
+        if (onlineMachines.length === 0) {
+            setJoyMachineIds(new Set());
+            return;
+        }
         let cancelled = false;
         void (async () => {
             const probeOne = (id: string) => Promise.race([
@@ -55,13 +65,12 @@ export default React.memo(function JoySessionsScreen() {
             );
             cachedJoyMachineIds = found;
             setJoyMachineIds(found);
-            setSelectedMachineId(prev => prev ?? (found.values().next().value ?? null));
+            setSelectedMachineId(prev => (prev && found.has(prev)) ? prev : (found.values().next().value ?? null));
         })();
         return () => { cancelled = true; };
-    }, [onlineMachines.map(m => m.id).join(',')]);
+    }, [onlineMachines.map(m => m.id).join(','), probeAttempt]);
 
     const handleSelectMachine = React.useCallback((id: string) => {
-        probedRef.current = true;
         setSelectedMachineId(id);
     }, []);
 
@@ -83,7 +92,12 @@ export default React.memo(function JoySessionsScreen() {
                 ) : probing ? (
                     <Item title={t('settingsSessions.loading')} showChevron={false} rightElement={<ActivityIndicator />} />
                 ) : visibleMachines.length === 0 ? (
-                    <Item title="No machines running joy-daemon" showChevron={false} />
+                    <Item
+                        title="No machines running joy-daemon"
+                        subtitle={onlineMachines.length > 0 ? 'Tap to probe again' : undefined}
+                        onPress={onlineMachines.length > 0 ? () => setProbeAttempt((n) => n + 1) : undefined}
+                        showChevron={false}
+                    />
                 ) : (
                     <>
                         {visibleMachines.map(machine => {

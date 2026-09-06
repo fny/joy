@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { TextInput } from 'react-native';
 import { Command, CommandCategory } from './types';
 import { alertError, guarded } from '@/utils/guardAsync';
+import { clampSelectedIndex } from './paletteKeys';
 
 export function useCommandPalette(commands: Command[], onClose: () => void) {
     const [searchQuery, setSearchQuery] = useState('');
@@ -63,7 +64,7 @@ export function useCommandPalette(commands: Command[], onClose: () => void) {
     }, [searchQuery]);
 
     // The palette closes at once (the command may navigate away); a command
-    // that fails afterwards is reported rather than rejecting unhandled.
+    // that fails afterwards is reported rather than rejecting unhandled (#207).
     const handleSelectCommand = useCallback((command: Command) => {
         guarded(() => command.action(), alertError())();
         onClose();
@@ -73,6 +74,13 @@ export function useCommandPalette(commands: Command[], onClose: () => void) {
     const allCommands = useMemo(() => {
         return filteredCategories.flatMap(cat => cat.commands);
     }, [filteredCategories]);
+
+    // The command LIST can change without the query changing (a recent
+    // session disappears, a machine goes offline). The cursor then pointed
+    // past the end and Enter did nothing although rows existed (#208).
+    useEffect(() => {
+        setSelectedIndex(prev => clampSelectedIndex(prev, allCommands.length));
+    }, [allCommands.length]);
 
     const handleKeyPress = useCallback((key: string) => {
         switch(key) {
