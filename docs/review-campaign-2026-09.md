@@ -321,6 +321,12 @@ app.
   outcomes, cancelling/unresolved surfacing, idle-without-terminal →
   interrupted, relay_turn_id plumbing, `/steer`.
 
+- 2026-09-08 (later) — E1 tool-model residuals landed (7ead9a3d); #107
+  sealed spawn specs end to end (705ef5f6: the relay holds ciphertext when
+  the daemon advertises `capabilities.spawnSpecSealed`). Astra's E6 review:
+  57 fixed, 18 residuals in flight; its hooks-authority review left three
+  regressions and a partial, folded into the session-file round.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
