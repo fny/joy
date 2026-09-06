@@ -98,6 +98,25 @@ describe('prefetch — the foreground wins over a prefetch that began earlier (#
         expect(fileContentsKey(sid, `${ROOT}/a.txt`)).not.toBe(fileContentsKey(other, `${ROOT}/a.txt`));
     });
 
+    it('a replacement impression at a newer revision is not warmed by the cancelled impression\'s read (#325)', async () => {
+        const sid = session();
+        let cancelled = false;
+        const targets = [{ absolutePath: `${ROOT}/a.txt`, diffPath: null }];
+        const first = runPrefetch(sid, targets, () => cancelled, 3, 'r1');
+        await asked(1);
+        cancelled = true; // the changed list changed under the impression: a new one replaces it
+        const second = runPrefetch(sid, targets, () => false, 3, 'r2');
+        expect(reads.length).toBe(1); // the active read is not doubled — the newer revision trails it
+        answer(`${ROOT}/a.txt`, 'old-before-file-list-change');
+        await first;
+        await asked(1); // the trailing read for r2
+        answer(`${ROOT}/a.txt`, 'new');
+        await second;
+        expect(contentOf(sid, `${ROOT}/a.txt`)).toBe('new');
+        await runPrefetch(sid, targets, () => false, 3, 'r2'); // same revision: the cache answers
+        expect(reads.length).toBe(0);
+    });
+
     it('an empty file is a file: content "" is cached, not treated as a failure', async () => {
         const sid = session();
         const run = runPrefetch(sid, [{ absolutePath: `${ROOT}/empty.txt`, diffPath: null }]);

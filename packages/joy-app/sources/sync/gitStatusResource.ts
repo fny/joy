@@ -33,6 +33,13 @@ export function gitStatusKey(pathKey: string): string {
     return `git-status:${pathKey}`;
 }
 
+/** One structured status per project: a few KB each, bounded by project
+ *  count and by idle age (a project not looked at for an hour is re-read
+ *  next time). Observed projects (a badge, the Changes screen) are exempt
+ *  while observed. */
+const GIT_STATUS_FAMILY = 'git-status';
+resources.defineFamily(GIT_STATUS_FAMILY, { maxEntries: 64, maxAgeMs: 60 * 60_000 });
+
 export function projectKeyOf(session: { metadata?: { machineId?: string | null; path?: string | null } | null } | null | undefined): string | null {
     const machineId = session?.metadata?.machineId;
     const path = session?.metadata?.path;
@@ -57,6 +64,7 @@ function sessionForProject(pathKey: string): string | null {
 export function gitStatusSpec(pathKey: string): ResourceSpec<GitStatusData> {
     return {
         key: gitStatusKey(pathKey),
+        family: GIT_STATUS_FAMILY,
         // Two screens mounting together (sidebar + Changes) share one read.
         staleTime: 2000,
         refetchOnFocus: true,
@@ -114,8 +122,17 @@ export function useGitStatusResource(sessionId: string, opts: UseResourceOptions
         entry: view,
         files: filesOf(view.data),
         summary: summaryOf(view.data, view.dataUpdatedAt),
-        /** Time of the last daemon answer — the repository revision for diffs. */
+        /** Time of the last daemon answer. */
         checkedAt: view.checkedAt,
+        /** The repository revision for diffs: a MONOTONIC count of daemon
+         *  answers (two checks can never share it, a clock step cannot
+         *  reorder it). Every completed status check — the observed
+         *  repository's poll source — advances it, so a diff versioned by it
+         *  is re-validated on the next check even when status and line
+         *  counts did not move. */
+        revision: view.revision,
+        /** When the status DATA last changed (the changed list's version). */
+        dataUpdatedAt: view.dataUpdatedAt,
         isLoading: view.isLoading,
         error: view.error,
         unavailable: view.unavailable,

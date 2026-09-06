@@ -37,6 +37,8 @@ interface SessionReadFileResponse {
     success: boolean;
     content?: string; // base64 encoded
     error?: string;
+    /** Set with `success: false`: what kind of failure (see OpsFailure). */
+    failure?: OpsFailure;
     size?: number;
 }
 
@@ -64,9 +66,25 @@ interface SessionKillResponse {
     message: string;
 }
 
-const noCtx = (what: string) => new Error(`${what}: machine key not available yet`);
+/** The session has no machine context yet (no tunnel, key not derived). */
+class NoMachineContextError extends Error {
+    constructor(what: string) {
+        super(`${what}: machine key not available yet`);
+        this.name = 'NoMachineContextError';
+    }
+}
+const noCtx = (what: string) => new NoMachineContextError(what);
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
+
+/**
+ * Why a read did not succeed, for callers with a retry/unavailable policy
+ * (sync/fileContents): `no-context` — the request could not be made;
+ * `transport` — the tunnel threw or timed out (worth a bounded retry);
+ * `daemon` — the daemon answered and refused (terminal).
+ */
+export type OpsFailure = 'no-context' | 'transport' | 'daemon';
+const failureOf = (error: unknown): OpsFailure => (error instanceof NoMachineContextError ? 'no-context' : 'transport');
 
 /** Tunnel call to a daemon path (machine-scoped). */
 const daemonJson = <T>(ctx: MachineOnlyCtx, method: string, path: string, body?: unknown) =>
@@ -280,15 +298,15 @@ export async function sessionDeny(sessionId: string, id: string, mode?: Permissi
  */
 /** Patch for one path (or the whole tree) through the daemon's git route —
  *  the old bash path never reached the daemon and shell-quoted the path (#5, #92). */
-export async function sessionGitDiff(sessionId: string, opts: { path?: string; head?: boolean; staged?: boolean } = {}): Promise<{ success: boolean; diff: string; error?: string }> {
+export async function sessionGitDiff(sessionId: string, opts: { path?: string; head?: boolean; staged?: boolean } = {}): Promise<{ success: boolean; diff: string; error?: string; failure?: OpsFailure }> {
     try {
         const ctx = sync.machineCtx(sessionId);
         if (!ctx) throw noCtx('git diff');
         const { data } = await machineGitDiff(ctx, opts);
-        if (!data?.ok) return { success: false, diff: '', error: data?.error || 'no response' };
+        if (!data?.ok) return { success: false, diff: '', error: data?.error || 'no response', failure: 'daemon' };
         return { success: true, diff: data.diff ?? '' };
     } catch (error) {
-        return { success: false, diff: '', error: errorMessage(error) };
+        return { success: false, diff: '', error: errorMessage(error), failure: failureOf(error) };
     }
 }
 
@@ -304,9 +322,10 @@ function requireCtx(sessionId: string, what: string): MachineCtx {
 export async function sessionReadFile(sessionId: string, path: string): Promise<SessionReadFileResponse> {
     try {
         const { data } = await machineReadFile(requireCtx(sessionId, 'read file'), path);
-        return (data ?? { success: false, error: 'no response' }) as SessionReadFileResponse;
+        const res = (data ?? { success: false, error: 'no response' }) as SessionReadFileResponse;
+        return res.success ? res : { ...res, failure: 'daemon' };
     } catch (error) {
-        return { success: false, error: errorMessage(error) };
+        return { success: false, error: errorMessage(error), failure: failureOf(error) };
     }
 }
 

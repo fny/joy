@@ -8,11 +8,17 @@
  * short. Deleted, binary and unaddressable rows are skipped.
  *
  * Ownership is the resource's, not this hook's: `ensure(…, staleTime:
- * Infinity)` reads a key only when nothing is cached and coalesces with a
- * read already in flight, and a foreground read (`refresh`) or a save
- * (`setData`) of the same key supersedes whatever this prefetch started
- * earlier — an older prefetch can no longer land over what the user just did
- * (#325). No second gate is needed.
+ * Infinity)` reads a key only when nothing is cached FOR THIS REVISION and
+ * coalesces with a read already in flight for it, and a foreground read
+ * (`refresh`) or a save (`setData`) of the same key supersedes whatever
+ * this prefetch started earlier — an older prefetch can no longer land over
+ * what the user just did (#325). No second gate is needed.
+ *
+ * The revision is the changed list's (the git status data's update stamp):
+ * an impression that replaces one cancelled mid-read after the repository
+ * changed carries a newer revision, so the store serves it with one
+ * trailing read once the old read settles instead of handing it the
+ * obsolete contents; an impression at the same revision coalesces.
  */
 
 import * as React from 'react';
@@ -52,12 +58,14 @@ export function prefetchTargets(files: readonly GitFileStatus[], sessionPath: st
 
 const MAX_CONCURRENCY = 3;
 
-/** Warm the resources for `targets`; stops issuing new reads once cancelled. */
+/** Warm the resources for `targets` at `revision` (the changed list's);
+ *  stops issuing new reads once cancelled. */
 export async function runPrefetch(
     sessionId: string,
     targets: readonly PrefetchTarget[],
     isCancelled: () => boolean = () => false,
     concurrency: number = MAX_CONCURRENCY,
+    revision?: string,
 ): Promise<void> {
     let i = 0;
     const worker = async (): Promise<void> => {
@@ -65,9 +73,9 @@ export async function runPrefetch(
             const target = targets[i++];
             if (!target) return;
             await Promise.all([
-                resources.ensure(fileContentsSpec(sessionId, target.absolutePath), { staleTime: Infinity }),
+                resources.ensure(fileContentsSpec(sessionId, target.absolutePath, revision), { staleTime: Infinity }),
                 target.diffPath
-                    ? resources.ensure(gitDiffSpec(sessionId, target.diffPath), { staleTime: Infinity })
+                    ? resources.ensure(gitDiffSpec(sessionId, target.diffPath, {}, revision), { staleTime: Infinity })
                     : Promise.resolve(),
             ]);
         }
@@ -75,7 +83,9 @@ export async function runPrefetch(
     await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, worker));
 }
 
-export function usePrefetchFileContents(sessionId: string, gitStatusFiles: GitStatusFiles | null) {
+/** `revision`: when the changed list last changed (git status `dataUpdatedAt`);
+ *  omitted, every impression coalesces with whatever is cached or in flight. */
+export function usePrefetchFileContents(sessionId: string, gitStatusFiles: GitStatusFiles | null, revision?: number) {
     React.useEffect(() => {
         if (!gitStatusFiles) return;
         const sessionPath = storage.getState().sessions[sessionId]?.metadata?.path;
@@ -83,7 +93,7 @@ export function usePrefetchFileContents(sessionId: string, gitStatusFiles: GitSt
         const targets = prefetchTargets([...gitStatusFiles.stagedFiles, ...gitStatusFiles.unstagedFiles], sessionPath);
         if (targets.length === 0) return;
         let cancelled = false;
-        void runPrefetch(sessionId, targets, () => cancelled);
+        void runPrefetch(sessionId, targets, () => cancelled, MAX_CONCURRENCY, revision !== undefined ? String(revision) : undefined);
         return () => { cancelled = true; };
-    }, [sessionId, gitStatusFiles]);
+    }, [sessionId, gitStatusFiles, revision]);
 }
