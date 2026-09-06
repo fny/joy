@@ -66,17 +66,17 @@ annotations are incremental (permissive objects where absent).
 |---|---|---|
 | `joy-list-sessions` | GET /sessions | All sessions (now includes `agent` flavor per record) |
 | `joy-get-session` | GET /sessions/:id | One session record |
-| `joy-create-session` | POST /sessions | Spawn agent (`agent`: claude\|codex\|opencode\|pi\|agy; `resume_id`, `forkSession`, `continue`, `model`, `effort`, `permissionMode`, `yolo`, `extraArgs`; unknown agent → loud error). Claude gets `CLAUDE_CODE_ENABLE_TASKS=0` + fresh `--append-system-prompt` every spawn |
+| `joy-create-session` | POST /sessions | Spawn agent (`agent`: claude\|codex\|opencode\|pi\|agy; `resume_id`, `forkSession`, `continue`, `model`, `effort`, `permissionMode`, `yolo`, `extraArgs`, `gitUrl` — clone first into cwd, attempt-owned temp dir renamed in on success, failure reported as `clone_failed:<msg>` and nothing launched, also honoured by the relay spawn spec (#151, #547); unknown agent → loud error). Claude gets `CLAUDE_CODE_ENABLE_TASKS=0` + fresh `--append-system-prompt` every spawn |
 | `joy-restart-session` | POST /sessions/:id/restart | Relaunch in place |
 | `joy-fork-session` | POST /sessions/:id/fork | Fork from the last message into a NEW session (claude) → `localSessionId` |
 | `joy-handoff` / `joy-handback` | POST /sessions/:id/handoff {agent, model?}, POST /sessions/:id/handback | Hand a session's work to another model via a note the session writes (returns {ok, pending}; progress on the cards' `joy__handoff`); hand it back into the original session |
 | `joy-teleport-export` / `joy-teleport-import` | POST /sessions/:id/teleport-export, POST /teleport-import | Move a conversation between machines: export the resumable transcript tail (base64, ≤6MB), import writes it under the target cwd's project dir and resumes (claude) |
-| `joy-kill-session` | DELETE /sessions/:id | Kill one |
+| `joy-kill-session` | DELETE /sessions/:id | Kill one. Optional `ifStatus` (`?ifStatus=ended` or body `{ifStatus}`): the kill happens only if the session's status matches at that instant, else 409 `{error:"status_mismatch", status}` — the app's detached-session cleanup uses it so a session that restarted meanwhile is never killed (#174) |
 | `joy-kill-all-sessions` | POST /sessions/kill-all | Kill everything |
 | `joy-restart-daemon` | POST /daemon/restart | Exec-restart the daemon |
 | `joy-status` | GET /status | Daemon + sessions snapshot |
 | `joy-notify` | POST /notify | Push notification to all devices |
-| `joy-send` | POST /send | Deliver text to a session (queue-routed). `from` (`joy:<id>` \| `cli` \| `app` \| `cron:<name>`) + optional `replyTo` make the DAEMON wrap the text in `<joy-message from=… reply-to=…>` and stamp `meta.from` on the mirrored record — the sender's own wrapper is stripped, a `joy:` sender must exist here. `exclusive` keeps the old refuse-if-busy scripting contract. Returns `queued_id` |
+| `joy-send` | POST /send | Deliver text to a session (queue-routed). `from` (`joy:<id>` \| `cli` \| `app` \| `cron:<name>`) + optional `replyTo` make the DAEMON wrap the text in `<joy-message from=… reply-to=…>` and stamp `meta.from` on the mirrored record — the sender's own wrapper is stripped, a `joy:` sender must exist here. `exclusive` keeps the old refuse-if-busy scripting contract. Returns `queued_id`. Acceptance is durable: if the queue spool cannot be persisted the op returns `not_durable` (HTTP 503) and nothing is acknowledged or mirrored (#551; same for `queueAdd` and handoff notes) |
 | `joy-check` | GET /sessions/:id/check | `idle` \| `busy` (busySince) \| `needs_input` (held approvals, or a `<joy-options>` question) \| `ended`, plus queue depth and permissionMode — the one computation behind `joy check`/`wait`/`ask` |
 | `joy-approvals` / `joy-approvals-answer` | GET/POST /sessions/:id/approvals | Held tool-call approvals (codex) and `{requestId, decision: allow\|deny}` |
 | `joy-env-list` / `joy-env-set` / `joy-env-unset` | GET /env · POST /env · DELETE /env/:name | The sealed environment store (`~/.joy/env.sealed`, AES-GCM under the machine key): names only out, values in; applied to `process.env` at boot and before EVERY spawn so all four agents inherit it. Also on the tunnel as `/v2/env` |
@@ -108,10 +108,10 @@ annotations are incremental (permissive objects where absent).
 | `killSession` | (via DELETE /sessions/:id) | Session-scope kill |
 | `bash` | POST /sessions/:id/bash | Run a command in cwd |
 | `readFile` | POST /sessions/:id/readFile | ≤400KB inline base64; larger spills to an encrypted blob (`blobRef`) the app downloads/decrypts. Paths: session cwd, the session's media dir, and the temp dirs (`/tmp`, `os.tmpdir()`) — read-side ops only (readFile/listDirectory/getDirectoryTree/ripgrep); write/delete stay cwd-only |
-| `writeFile` | POST /sessions/:id/writeFile | Write file |
+| `writeFile` | POST /sessions/:id/writeFile | Write file. Atomic (temp sibling + fsync + rename): a failed write leaves the previous contents whole (#539); `expectedHash` check and write are one critical section per path (#63). `PUT /v2/sessions/:id/files/content` has the same contract; invalid base64 is a 400 with nothing touched (#605) |
 | `deleteFile` | POST /sessions/:id/deleteFile | Unlink one file (no trash). Files only — directories refused |
 | `listDirectory` / `getDirectoryTree` | POST /sessions/:id/… | FS browsing |
-| `ripgrep` / `difftastic` | POST /sessions/:id/… | Search / diff helpers |
+| `ripgrep` / `difftastic` | POST /sessions/:id/… | Search / diff helpers. Argv is jailed: only an allow-list of options passes, path operands are validated against the cwd (+ read roots), option-like arguments that smuggle paths (`-f`, `--pre`, `-L`, `--ignore-file`, `-`) are refused (#537) |
 | `joy-hook` | POST /sessions/:id/hook | Claude hook events (PreCompact → "compacting" status) |
 | `compacting` | POST /sessions/:id/compacting | Hook-driven status flip |
 
@@ -160,6 +160,22 @@ A perimeter key (`JOY_RELAY_ACCESS_KEY`, header `x-joy-relay-key`) can gate
 the whole surface; unknown paths are 404 — there is no upstream.
 
 ## Background daemon behaviors (not ops)
+
+- Sealed sessions refuse plaintext: once a session has a content key, only a
+  valid authenticated `v2e1:` envelope is accepted as a prompt; plaintext JSON
+  fails the turn with `plaintext_on_sealed_session` (#579). Spooled outbound
+  records carry their sealing identity; a sealed record whose key is gone is
+  dropped with a log line, never sent in the clear (#582).
+- `GET /v2/sessions/:id/git/status` paths are relative to the session cwd (a
+  subdirectory session sees `inner.txt`, an outside-cwd rename partner
+  `../x`), not to the repository root (#601). Tracked symlinks keep their own
+  identity; containment is checked on the real path (#603). Body identifiers
+  never override the URL's session/queue-item id (#599).
+- `joy stop` signals only a verified daemon: the pid from an authenticated
+  `/status`, or the daemon.json pid whose command line and start time match;
+  a stale record is removed without signalling (#495). The singleton lock is
+  written whole and linked into place; an in-progress creation counts as
+  occupied (#589).
 
 - Usage cache warmer: boot + every 2h (`server.ts`).
 - Resource alerts: RAM/disk ≥90% (5min sampling) and claude/codex quota ≥90%

@@ -150,7 +150,10 @@ every relay; machines register per account.
   realpath-resolved) plus explicit extra roots. READ-side ops — view/download
   (`readFile`), `listDirectory`, `getDirectoryTree`, `ripgrep` — also get
   `TEMP_ROOTS` (`/tmp` + `os.tmpdir()`, via `readRoots()`), so `<joy-file>`
-  links to agent output in /tmp open. Write and delete stay cwd-only.
+  links to agent output in /tmp open. Write and delete stay cwd-only. Writes
+  are atomic and hash-checked under a per-path lock (#539, #63); `ripgrep` /
+  `difftastic` argv is allow-listed so no option can smuggle a path out of the
+  jail (#537).
 - Compaction summaries arrive as a collapsed "Compaction summary" card
   (previously dropped entirely). The daemon flags the mirrored transcript entry
   with `isCompactSummary`; without the flag it renders as a plain user bubble.
@@ -237,7 +240,9 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 - **Agent Config** (Settings): edit each agent's real config file on a machine
   — schema-walked rows (claude/opencode publish JSON Schemas) or raw mode with
   full-file editing and JSON-path assignment lines
-  (`examples[0].title = "hi"`); daemon backs up `.joy-bak` on every write.
+  (`examples[0].title = "hi"`); daemon writes atomically and rotates the
+  `.joy-bak` backup only as part of a successful replacement, so a retried
+  failed save can never destroy the last good copy (#527).
 
 ## Identity & relays
 
@@ -308,7 +313,14 @@ ops are jailed to the session cwd (+ read-only `~/.joy/sessions/<id>` media).
 - Three packages, no upstream: joy-app, joy-daemon, joy-relay. There is no
   proxy and no second server — an endpoint the relay doesn't implement
   doesn't exist.
-- Everything user-visible is E2E-encrypted through the relay.
+- Everything user-visible is E2E-encrypted through the relay. A sealed session
+  never accepts a plaintext prompt (#579) and never replays spooled output in
+  the clear (#582); tunnel responses are bound to their request's stream id
+  so the relay cannot replay one request's sealed answer to another (#418 —
+  an app with this check needs daemons that emit the binding).
+- Local acceptance is durable: `send`, `queueAdd` and handoff notes are
+  acknowledged only after the queue spool is persisted, else `not_durable`
+  (#551, #542); queue and window-record writes are atomic (#555, #567).
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.
