@@ -56,14 +56,23 @@ export interface NucleusLaneOpts {
   accountContentPublicKey?: Uint8Array | null;
   /** The per-machine key (access.key `machineKey`, the tunnel's root). Set →
    *  the lane derives the spawn-spec key (deriveSpawnSpecKey) and opens
-   *  sealed `v2e1:` spawn specs; the machine metadata advertises
-   *  `capabilities.spawnSpecSealed` so the app seals (#107). Absent → only
-   *  plain-JSON specs are usable; a sealed one fails the spawn. */
+   *  sealed `v2e1:` spawn specs, and the handle reports `spawnSpecSealed()`
+   *  true so the machine metadata advertises `capabilities.spawnSpecSealed`
+   *  and the app seals (#107). Absent → only plain-JSON specs are usable; a
+   *  sealed one fails the spawn — so the capability must NOT be advertised
+   *  (RelayClient.setSpawnSpecSealed is fed from this handle, never assumed). */
   machineKey?: Uint8Array | null;
   log?: (line: string) => void;
 }
 
-export interface NucleusLaneHandle { stop(): Promise<void>; currentLease(): { leaseId: string; leaseToken: string } | null }
+export interface NucleusLaneHandle {
+  stop(): Promise<void>;
+  currentLease(): { leaseId: string; leaseToken: string } | null;
+  /** Whether THIS lane can open sealed `v2e1:` spawn specs — i.e. it holds
+   *  the machine key. The authoritative source for the machine record's
+   *  `capabilities.spawnSpecSealed` advertisement (#107). */
+  spawnSpecSealed(): boolean;
+}
 
 interface Lease { leaseId: string; leaseToken: string; epoch: string }
 
@@ -1884,5 +1893,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // The tunnel executor BORROWS this lease rather than acquiring its own
     // (a second acquirer on the same machineId evicts the first).
     currentLease: () => (lease ? { leaseId: lease.leaseId, leaseToken: lease.leaseToken } : null),
+    spawnSpecSealed: () => spawnSpecKey !== null,
   };
 }

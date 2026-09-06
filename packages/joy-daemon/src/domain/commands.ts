@@ -295,8 +295,14 @@ export class CommandRegistry {
       for (const [name, d] of src) if (names.has(name) && !merged.has(name)) merged.set(name, d);
     }
     const descriptions = Object.fromEntries([...merged].sort((a, b) => a[0].localeCompare(b[0])));
+    // The relay client's capability advertisement (spawnSpecSealed, #107) is
+    // published inside the same blob, so a change in it — the lane gaining or
+    // losing the machine key — must dirty the key: one republish follows, and
+    // a repeat push with nothing changed stays a no-op.
+    const capabilities = this.#relay?.capabilities() ?? {};
     const key = union.join("\n") + "\u0000" + plugins.join("\n") + "\u0000" +
-      Object.entries(descriptions).map(([k, v]) => `${k}=${v}`).join("\n");
+      Object.entries(descriptions).map(([k, v]) => `${k}=${v}`).join("\n") + "\u0000" +
+      JSON.stringify(capabilities);
     return { union, plugins, descriptions, key };
   }
 

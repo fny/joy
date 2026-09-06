@@ -337,6 +337,29 @@ export class RelayClient {
   // reads the row as the previous one left it.
   #machineUpsert: Promise<boolean> = Promise.resolve(true);
 
+  // Whether the live nucleus lane holds the machine key and so can open a
+  // sealed `v2e1:` spawn spec (#107). Off until the lane says otherwise: a
+  // record that advertised sealing unconditionally told the app to seal for a
+  // daemon whose lane had no key, and every such spawn died `bad_spawn_spec`.
+  #spawnSpecSealed = false;
+
+  /** Set from NucleusLaneHandle.spawnSpecSealed() — the same key state the
+   *  lane opens specs with. Returns whether the advertisement changed; the
+   *  caller republishes the machine record through the dirty-tracked path
+   *  (CommandRegistry.pushMachineIfChanged folds `capabilities()` into its
+   *  change key, so one push follows a change and none follows a repeat). */
+  setSpawnSpecSealed(sealed: boolean): boolean {
+    if (this.#spawnSpecSealed === sealed) return false;
+    this.#spawnSpecSealed = sealed;
+    return true;
+  }
+
+  /** The daemon's feature advertisement as it will be published: a
+   *  capability is present only while it is actually true. */
+  capabilities(): Record<string, boolean> {
+    return this.#spawnSpecSealed ? { spawnSpecSealed: true } : {};
+  }
+
   /**
    * Publish the machine row's sealed metadata. The app's path picker uses
    * `machine.metadata.homeDir` to format paths as `~/foo`, and the machine
@@ -375,13 +398,18 @@ export class RelayClient {
   async #upsertMachine(metadata: Record<string, unknown>): Promise<boolean> {
     // Always report the LIVE hostname (an OS rename shouldn't need a daemon restart).
     // `capabilities` is the daemon's feature advertisement (sealed with the
-    // rest of the blob): the app checks it before choosing a wire form. A
-    // capability is only ever ADDED here — an older app ignores the field.
+    // rest of the blob): the app checks it before choosing a wire form. An
+    // older app ignores the field.
     //   spawnSpecSealed — the nucleus lane opens `v2e1:` spawn specs sealed
     //   under deriveSpawnSpecKey(machineKey, machineId), so the app seals
     //   `POST /joy/v2/sessions` spawnSpec instead of sending plain JSON (#107).
+    //   Advertised ONLY while the lane holds the machine key (capabilities()):
+    //   a caller's stale `spawnSpecSealed` in `metadata` is dropped, and an
+    //   absent key publishes the field absent — the app then sends plain JSON,
+    //   which any daemon spawns.
     const prior = metadata.capabilities;
-    const capabilities = { ...(prior && typeof prior === 'object' && !Array.isArray(prior) ? prior as Record<string, unknown> : {}), spawnSpecSealed: true };
+    const { spawnSpecSealed: _stale, ...carried } = prior && typeof prior === 'object' && !Array.isArray(prior) ? prior as Record<string, unknown> : {};
+    const capabilities = { ...carried, ...this.capabilities() };
     const base: Record<string, unknown> = { ...metadata, host: hostname(), capabilities };
     try {
       for (let attempt = 0; attempt < 4; attempt++) {

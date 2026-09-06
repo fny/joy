@@ -182,6 +182,12 @@ if (process.env.JOY_V2_LANE !== "0") {
       machineKey: creds.encryption.machineKey.length === 32 ? creds.encryption.machineKey : null,
       log: (line) => process.stderr.write(line + "\n"),
     });
+    // The machine record advertises `capabilities.spawnSpecSealed` from the
+    // LANE's key state — the one that will actually open the spec (#107).
+    // Credentials are read once per boot (`joy auth` re-pairs on disk and
+    // the daemon restarts), so this is set once; should the key ever change
+    // in-process, set it again and pushMachineIfChanged republishes once.
+    if (relayClient?.setSpawnSpecSealed(nucleusLane.spawnSpecSealed())) void registry.commands.pushMachineIfChanged();
   } else {
     process.stderr.write("[v2-lane] no credentials (access.key) — lane not started\n");
   }
