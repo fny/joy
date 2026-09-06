@@ -141,11 +141,17 @@ export class CodexSession implements AgentSession {
   // traffic must not interleave with synthetic history replay.
   #buffering = true;
   #notifBuffer: CodexNotification[] = [];
-  // The items history replay emitted per turn, by content signature, so a
-  // live item buffered while thread/read was pending — the SAME item under
-  // a different transient id — binds to the ordinal replay allocated instead
-  // of a second one (#519). Consumed by the flush.
-  #historyItems = new Map<string, Array<{ type: string; ordinal: number; sig: string; matched: boolean }>>();
+  // The items history replay emitted per turn — id, type, ordinal and whole
+  // content — so a live item buffered while thread/read was pending, the
+  // SAME item under a different transient id, binds to the ordinal replay
+  // allocated instead of a second one (#519). Consumed by the flush.
+  #historyItems = new Map<string, Array<{ id: string; type: string; ordinal: number; sig: string; matched: boolean }>>();
+  // How much of the notification buffer had arrived when thread/read
+  // RESOLVED: the snapshot boundary. The socket is ordered, so a
+  // notification received after the read's response describes something
+  // the snapshot cannot contain — it is new by construction and never
+  // bound to a replayed item, however equal its content (#519).
+  #snapshotBoundary = 0;
   // The oldest turn whose history could NOT be replayed (itemsView != full):
   // the delivered high-water must never pass it, or the next recovery skips
   // its output for good once the full items become available (#518).
@@ -597,27 +603,36 @@ export class CodexSession implements AgentSession {
     for (const n of buffered) this.#dispatchNotification(n);
   }
 
-  /** A live item that completed while thread/read was pending is ALSO in the
-   *  history just replayed, under a positional id. Match each buffered
-   *  completion to the first unmatched replayed item of its turn with the
-   *  same type and content, in order, and bind its live id to that ordinal
-   *  — its flush then re-emits the replayed localIds (relay-deduped) instead
-   *  of minting a second identity for the same answer (#519). */
+  /** A live item that completed while thread/read was pending may ALSO be in
+   *  the history just replayed, under a positional id. Bind its live id to
+   *  the ordinal replay allocated — its flush then re-emits the replayed
+   *  localIds (relay-deduped) instead of minting a second identity for the
+   *  same answer (#519) — but ONLY on proof it is the same occurrence:
+   *   - the completion arrived before thread/read resolved (inside the
+   *     snapshot boundary; anything after it is new by construction), AND
+   *   - the runtime gave the same item id, or the whole content — input and
+   *     outcome — equals an unmatched replayed item of the same turn+type.
+   *  Equality of a command alone is not proof: a NEW `date` buffered after
+   *  the snapshot aliased the old `date` and the relay deduped its result
+   *  away. An ambiguous occurrence keeps its own identity. */
   #bindBufferedToHistory(buffered: CodexNotification[]): void {
     const history = this.#historyItems;
     this.#historyItems = new Map();
+    const boundary = this.#snapshotBoundary;
+    this.#snapshotBoundary = 0;
     if (!history.size) return;
-    for (const n of buffered) {
+    for (const n of buffered.slice(0, boundary)) {
       if (n.method !== "item/completed") continue;
       const p = n.params ?? {};
       const turnId = typeof p.turnId === "string" ? p.turnId : "";
       const item = (p.item ?? {}) as Record<string, unknown>;
       const id = typeof item.id === "string" ? item.id : "";
       const type = typeof item.type === "string" ? item.type : "";
-      const sig = itemSignature(item);
       const replayed = history.get(turnId);
-      if (!replayed || !id || !type || !sig) continue;
-      const hit = replayed.find((h) => !h.matched && h.type === type && h.sig === sig);
+      if (!replayed || !id || !type) continue;
+      const sig = itemSignature(item);
+      const hit = replayed.find((h) => !h.matched && h.type === type && h.id === id)
+        ?? (sig ? replayed.find((h) => !h.matched && h.type === type && h.sig === sig) : undefined);
       if (!hit) continue;
       hit.matched = true;
       this.#norm.bindTransient(turnId, type, id, hit.ordinal);
@@ -718,8 +733,15 @@ export class CodexSession implements AgentSession {
           // The userMessage echo carrying a clientId we submitted proves
           // delivery; the coordinator pairs it with its attempt (a late one
           // for a cancelled row is interrupted there — the tombstone rule).
-          this.#flushHeldTurnStart(); // our own prompt's row is already in the card: the bracket opens here
-          if (this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client")) this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" });
+          // Only OUR id opens the bracket here (our prompt's row is already
+          // in the card). A foreign client id — the TUI / another app-server
+          // client stamps its own — is not ours to bracket: its user row is
+          // mirrored on item/completed and must land first, so the held
+          // turn-start waits for that effect (#131).
+          if (this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client")) {
+            this.#flushHeldTurnStart();
+            this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" });
+          }
           break;
         case "userMessage": {
           // Ours if this session ever submitted that clientId (an attempt
@@ -749,6 +771,9 @@ export class CodexSession implements AgentSession {
 
   async #reconcileHistoryInner(client: CodexAppServerClient): Promise<void> {
     const res = await client.threadRead(this.#threadId!);
+    // Everything buffered up to here could be in the snapshot; nothing
+    // after it can be (#519).
+    this.#snapshotBoundary = this.#notifBuffer.length;
     const thread = ((res.thread ?? res) as Record<string, unknown>);
     const turns = Array.isArray(thread.turns) ? thread.turns as Record<string, unknown>[] : [];
 
@@ -774,19 +799,27 @@ export class CodexSession implements AgentSession {
       // Nor anything AFTER it: a later terminal turn's ack used to advance
       // the high-water past this gap, and the next recovery skipped this
       // turn's output for good once its full items were available (#518).
-      if (view && view !== "full") {
+      // A TERMINAL deferred turn is left alone entirely (no bracket for
+      // content that is not here yet). An IN-PROGRESS one still falls
+      // through to the status handling below: whether the runtime is active
+      // is a fact about the turn, not about its item availability — the
+      // rejoined session read idle and Stop had nothing to interrupt when
+      // the live turn's items came back partial (#513).
+      const deferred = !!view && view !== "full";
+      if (deferred) {
         process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay; the delivered mark holds below it\n`);
         if (!this.#deferredFloor || tid < this.#deferredFloor) this.#deferredFloor = tid;
-        continue;
+        if (status !== "inProgress") continue;
       }
-      const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
-      // What replay is about to emit, by content, for the live-buffer flush (#519).
+      const items = deferred ? [] : (Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : []);
+      // What replay is about to emit — id, ordinal, whole content — for the
+      // live-buffer flush (#519).
       const ordinals = new Map<string, number>();
       this.#historyItems.set(tid, items.map((item) => {
         const type = String((item as { type?: unknown }).type ?? "");
         const ordinal = ordinals.get(type) ?? 0;
         ordinals.set(type, ordinal + 1);
-        return { type, ordinal, sig: itemSignature(item), matched: false };
+        return { id: String((item as { id?: unknown }).id ?? ""), type, ordinal, sig: itemSignature(item), matched: false };
       }));
       // FRESH CARD (restart / resume-by-id / continue): the new relay session
       // has no prior rows, so replay the user prompts too — BEFORE the turn
