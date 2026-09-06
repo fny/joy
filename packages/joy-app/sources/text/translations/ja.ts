@@ -265,6 +265,7 @@ export const ja: TranslationStructure = {
         fileNotFound: 'ファイルが見つかりません',
         invalidFormat: 'フォーマットが無効です',
         operationFailed: '操作に失敗しました',
+        daemonOutdated: 'このマシンのデーモンが古くなっています — そのマシンで `joy update` を実行してください',
         tryAgain: '再試行してください',
         contactSupport: '問題が続く場合はサポートにお問い合わせください',
         sessionNotFound: 'セッションが見つかりません',

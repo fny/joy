@@ -281,6 +281,7 @@ export const pl: TranslationStructure = {
         fileNotFound: 'Plik nie został znaleziony',
         invalidFormat: 'Nieprawidłowy format',
         operationFailed: 'Operacja nie powiodła się',
+        daemonOutdated: 'Demon tej maszyny jest nieaktualny — uruchom na niej `joy update`',
         tryAgain: 'Spróbuj ponownie',
         contactSupport: 'Skontaktuj się z pomocą techniczną, jeśli problem będzie się powtarzał',
         sessionNotFound: 'Sesja nie została znaleziona',

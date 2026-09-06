@@ -265,6 +265,7 @@ export const zhHans: TranslationStructure = {
         fileNotFound: '文件未找到',
         invalidFormat: '格式无效',
         operationFailed: '操作失败',
+        daemonOutdated: '此机器的守护进程已过期 — 请在该机器上运行 `joy update`',
         tryAgain: '请重试',
         contactSupport: '如果问题持续存在，请联系支持',
         sessionNotFound: '会话未找到',

@@ -264,6 +264,7 @@ export const ca: TranslationStructure = {
         fileNotFound: 'Fitxer no trobat',
         invalidFormat: 'Format no vàlid',
         operationFailed: 'L\'operació ha fallat',
+        daemonOutdated: 'El dimoni d\'aquesta màquina està desactualitzat — executa-hi `joy update`',
         tryAgain: 'Torna-ho a provar',
         contactSupport: 'Contacta amb el suport si el problema persisteix',
         sessionNotFound: 'Sessió no trobada',
