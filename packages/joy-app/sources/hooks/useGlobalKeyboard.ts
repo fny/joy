@@ -1,9 +1,14 @@
 import { useEffect } from 'react';
 import { Platform } from 'react-native';
 
-export function useGlobalKeyboard(onCommandPalette: () => void) {
+/**
+ * Cmd/Ctrl+K → open the command palette. While `enabled` is false NO listener
+ * is installed: the old no-op-callback approach still preventDefault'ed the
+ * key, so disabling the palette also broke the browser's own Ctrl+K (#206).
+ */
+export function useGlobalKeyboard(onCommandPalette: () => void, enabled: boolean = true) {
     useEffect(() => {
-        if (Platform.OS !== 'web') {
+        if (Platform.OS !== 'web' || !enabled) {
             return;
         }
 
@@ -25,5 +30,5 @@ export function useGlobalKeyboard(onCommandPalette: () => void) {
         return () => {
             window.removeEventListener('keydown', handleKeyDown);
         };
-    }, [onCommandPalette]);
+    }, [onCommandPalette, enabled]);
 }

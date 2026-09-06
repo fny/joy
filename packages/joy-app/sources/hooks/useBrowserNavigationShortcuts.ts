@@ -38,6 +38,18 @@ function runRouteForward(): boolean {
     return true;
 }
 
+/**
+ * Mouse Forward mirrors Mouse Back: the intra-session overlay stack (file
+ * diff / file view) is consulted FIRST, then browser route history. Before,
+ * Forward only knew route history, so an overlay closed with Mouse Back could
+ * not be reopened with Mouse Forward — and if route forward history existed
+ * the shortcut left the session instead (#310). Exported for tests.
+ */
+export function runForward(): boolean {
+    if (useOverlayNav.getState().forward()) return true;
+    return runRouteForward();
+}
+
 function exitZenMode(): boolean {
     const state = storage.getState();
     if (!state.localSettings.zenMode) {
@@ -103,7 +115,7 @@ export function useBrowserNavigationShortcuts() {
 
             const handled = direction === 'back'
                 ? runBack({ exitZen: false })
-                : runRouteForward();
+                : runForward();
             if (handled) {
                 mouseNavigationHandledRef.current = true;
                 event.preventDefault();

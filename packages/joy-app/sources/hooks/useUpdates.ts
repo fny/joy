@@ -1,64 +1,62 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, AppStateStatus, Platform } from 'react-native';
 import * as Updates from 'expo-updates';
-
-type PendingOtaUpdate = {
-    ota_version?: string;
-    ota_runtime_version?: string;
-};
+import { createUpdateChecker, type PendingOtaUpdate, type UpdateChecker } from './updateCheck';
 
 export function useUpdates() {
     const [updateAvailable, setUpdateAvailable] = useState(false);
     const [isChecking, setIsChecking] = useState(false);
     const [pendingUpdate, setPendingUpdate] = useState<PendingOtaUpdate | null>(null);
 
-    useEffect(() => {
-        // Check for updates when app becomes active
-        const subscription = AppState.addEventListener('change', handleAppStateChange);
+    // ONE synchronous guard for the whole check+download, shared by the
+    // initial, foreground and manual checks (#327). The AppState listener is
+    // installed once, so it must not read React state to decide.
+    const checkerRef = useRef<UpdateChecker | null>(null);
+    if (!checkerRef.current) checkerRef.current = createUpdateChecker(Updates);
+    const mountedRef = useRef(true);
 
-        // Initial check
-        checkForUpdates();
-
-        return () => {
-            subscription.remove();
-        };
-    }, []);
-
-    const handleAppStateChange = (nextAppState: AppStateStatus) => {
-        if (nextAppState === 'active') {
-            checkForUpdates();
-        }
-    };
-
-    const checkForUpdates = async () => {
+    const checkForUpdates = useCallback(async () => {
         if (__DEV__) {
             // Don't check for updates in development
             return;
         }
-
-        if (isChecking) {
-            return;
-        }
-
+        const checker = checkerRef.current!;
+        if (checker.busy) return;
         setIsChecking(true);
-
         try {
-            const update = await Updates.checkForUpdateAsync();
-            if (update.isAvailable) {
-                const pendingUpdate = {
-                    ota_version: update.manifest.id,
-                    ota_runtime_version: 'runtimeVersion' in update.manifest ? update.manifest.runtimeVersion : undefined,
-                };
-                await Updates.fetchUpdateAsync();
-                setPendingUpdate(pendingUpdate);
+            const outcome = await checker.check();
+            if (!mountedRef.current || !outcome) return;
+            if (outcome.kind === 'ready') {
+                // A rollback (#328) or a genuinely new download (#329) is the
+                // only thing worth a reload invitation.
+                setPendingUpdate(outcome.pending);
                 setUpdateAvailable(true);
             }
         } catch (error) {
             console.error('Error checking for updates:', error);
         } finally {
-            setIsChecking(false);
+            if (mountedRef.current) setIsChecking(false);
         }
-    };
+    }, []);
+
+    useEffect(() => {
+        mountedRef.current = true;
+        // Check for updates when app becomes active
+        const handleAppStateChange = (nextAppState: AppStateStatus) => {
+            if (nextAppState === 'active') {
+                void checkForUpdates();
+            }
+        };
+        const subscription = AppState.addEventListener('change', handleAppStateChange);
+
+        // Initial check
+        void checkForUpdates();
+
+        return () => {
+            mountedRef.current = false;
+            subscription.remove();
+        };
+    }, [checkForUpdates]);
 
     const reloadApp = async () => {
         if (Platform.OS === 'web') {
@@ -75,6 +73,7 @@ export function useUpdates() {
     return {
         updateAvailable,
         isChecking,
+        pendingUpdate,
         checkForUpdates,
         reloadApp,
     };

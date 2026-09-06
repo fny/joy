@@ -3,6 +3,7 @@ import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
+import { formatPathRelativeToHome } from './pathUtils';
 
 export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
 
@@ -218,29 +219,8 @@ export function getResumeCommandBlock(session: Session): ResumeCommandBlock | nu
  * If the path starts with the home directory, replaces it with ~
  * Otherwise returns the full path.
  */
-export function formatPathRelativeToHome(path: string, homeDir?: string): string {
-    if (!homeDir) return path;
-    
-    // Normalize paths to handle trailing slashes
-    const normalizedHome = homeDir.endsWith('/') ? homeDir.slice(0, -1) : homeDir;
-    const normalizedPath = path;
-    
-    // Check if path starts with home directory
-    if (normalizedPath.startsWith(normalizedHome)) {
-        // Replace home directory with ~
-        const relativePath = normalizedPath.slice(normalizedHome.length);
-        // Add ~ and ensure there's a / after it if needed
-        if (relativePath.startsWith('/')) {
-            return '~' + relativePath;
-        } else if (relativePath === '') {
-            return '~';
-        } else {
-            return '~/' + relativePath;
-        }
-    }
-    
-    return path;
-}
+// Moved to pathUtils (boundary-aware, #193); re-exported for existing importers.
+export { formatPathRelativeToHome };
 
 /**
  * Returns the session path for the subtitle.

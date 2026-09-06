@@ -66,6 +66,17 @@ function formatPushPermissionSubtitle(permission: PushPermissionInfo | null): st
     return 'iOS has stopped prompting. Open system settings to enable notifications again.';
 }
 
+/** Why a granted permission still produced no relay registration (#168). */
+function describeMissingRegistration(result: { registered: boolean; token: string | null; permission: PushPermissionInfo }): string {
+    if (!result.permission.granted) {
+        return 'Push notification permission was not granted.';
+    }
+    // registered:false with permission granted has exactly one cause today:
+    // no Expo project id, so no token could be requested from Expo.
+    const base = 'Notification permission is granted, but this build has no Expo project id, so no push token could be obtained or registered with the relay.';
+    return result.token ? `${base} The previously registered token stays in place.` : base;
+}
+
 function formatPushTokenFingerprint(token: string): string {
     const rawValue = token.replace(/^ExponentPushToken\[/, '').replace(/\]$/, '');
     if (rawValue.length <= 12) {
@@ -277,9 +288,16 @@ export default React.memo(() => {
             setPushPermission(result.permission);
 
             if (result.granted) {
-                await syncCurrentPushToken(auth.credentials);
+                // OS permission is not registration: without an Expo project id
+                // (or when the token fetch fails) nothing reaches the relay, and
+                // this used to claim success anyway (#168).
+                const registration = await syncCurrentPushToken(auth.credentials);
                 await loadPushSettings();
-                Modal.alert(t('common.success'), 'Push notifications are enabled for this device.');
+                if (registration.registered && registration.token) {
+                    Modal.alert(t('common.success'), 'Push notifications are enabled for this device.');
+                } else {
+                    Modal.alert('Not registered', describeMissingRegistration(registration));
+                }
                 return;
             }
 
@@ -313,6 +331,12 @@ export default React.memo(() => {
 
             if (!result.permission.granted) {
                 Modal.alert(t('common.error'), 'Push notifications are not enabled for this device yet.');
+                return;
+            }
+
+            // Permission alone does not mean a token was sent to the relay (#168).
+            if (!result.registered || !result.token) {
+                Modal.alert('Not registered', describeMissingRegistration(result));
                 return;
             }
 

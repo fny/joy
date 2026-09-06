@@ -20,6 +20,22 @@ function normalizeNotificationData(data: unknown): unknown {
     return data;
 }
 
+// encodeURIComponent throws URIError on a lone surrogate (e.g. "\ud800").
+// Notification payloads are untrusted input; a malformed id must read as
+// "no route" (so a valid fallback can be tried), not crash extraction (#438).
+function encodeSessionId(sessionId: string): string | null {
+    try {
+        return encodeURIComponent(sessionId);
+    } catch {
+        return null;
+    }
+}
+
+function sessionRoute(sessionId: string): `/session/${string}` | null {
+    const encoded = encodeSessionId(sessionId);
+    return encoded === null ? null : `/session/${encoded}`;
+}
+
 function getSessionRouteFromUrl(url: string): `/session/${string}` | null {
     const trimmedUrl = url.trim();
     if (!trimmedUrl) {
@@ -45,7 +61,7 @@ function getSessionRouteFromUrl(url: string): `/session/${string}` | null {
         return null;
     }
 
-    return `/session/${encodeURIComponent(trimmedSessionId)}`;
+    return sessionRoute(trimmedSessionId);
 }
 
 export function getSessionRouteFromNotificationData(data: unknown): `/session/${string}` | null {
@@ -72,7 +88,7 @@ export function getSessionRouteFromNotificationData(data: unknown): `/session/${
         return null;
     }
 
-    return `/session/${encodeURIComponent(trimmedSessionId)}`;
+    return sessionRoute(trimmedSessionId);
 }
 
 export function getSessionRouteFromNotificationResponse(response: unknown): `/session/${string}` | null {

@@ -327,6 +327,8 @@ export const pl: TranslationStructure = {
         machineBusy: 'Maszyna jest zajęta — spróbuj ponownie za chwilę',
         relayBusy: 'Przekaźnik jest zajęty — spróbuj ponownie za chwilę',
         connectionTooSlow: 'Połączenie jest zbyt wolne — spróbuj ponownie w lepszej sieci',
+        logoutFailed: 'Nie udało się usunąć zapisanego logowania z tego urządzenia. Spróbuj ponownie.',
+        syncStartFailedReload: 'Aplikacja nie mogła uruchomić synchronizacji. Załaduj aplikację ponownie i spróbuj jeszcze raz.',
     },
 
     newSession: {
@@ -468,7 +470,8 @@ export const pl: TranslationStructure = {
         failedToConnectToServer: 'Nie udało się połączyć z serwerem',
         currentlyUsingCustomServer: 'Aktualnie używany jest niestandardowy serwer',
         customServerUrlLabel: 'URL niestandardowego serwera',
-        advancedFeatureFooter: 'To jest zaawansowana funkcja. Zmieniaj serwer tylko jeśli wiesz, co robisz. Po zmianie serwera będziesz musiał się wylogować i zalogować ponownie.'
+        advancedFeatureFooter: 'To jest zaawansowana funkcja. Zmieniaj serwer tylko jeśli wiesz, co robisz. Po zmianie serwera będziesz musiał się wylogować i zalogować ponownie.',
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} wymaga klucza dostępu. Wprowadź klucz dla tego przekaźnika.`,
     },
 
     sessionInfo: {
@@ -880,6 +883,7 @@ export const pl: TranslationStructure = {
         clientSideProcessing: 'Przetwarzanie po stronie klienta',
         linkProcessedLocally: 'Link przetworzony lokalnie w przeglądarce',
         linkProcessedOnDevice: 'Link przetworzony lokalnie na urządzeniu',
+        pairingRequestNotFound: 'Nie znaleziono oczekującego żądania połączenia dla tego linku. Mógł wygasnąć lub należeć do innego przekaźnika — wygeneruj nowy link w terminalu i spróbuj ponownie.',
     },
 
     modals: {

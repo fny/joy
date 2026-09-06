@@ -310,6 +310,8 @@ export const es: TranslationStructure = {
         machineBusy: 'La máquina está ocupada — inténtalo de nuevo en un momento',
         relayBusy: 'El relay está ocupado — inténtalo de nuevo en un momento',
         connectionTooSlow: 'La conexión es demasiado lenta — inténtalo de nuevo con una red mejor',
+        logoutFailed: 'No se pudo eliminar el inicio de sesión guardado de este dispositivo. Inténtalo de nuevo.',
+        syncStartFailedReload: 'La aplicación no pudo iniciar la sincronización. Recarga la aplicación e inténtalo de nuevo.',
     },
 
     newSession: {
@@ -451,7 +453,8 @@ export const es: TranslationStructure = {
         failedToConnectToServer: 'Falló al conectar con el servidor',
         currentlyUsingCustomServer: 'Actualmente usando servidor personalizado',
         customServerUrlLabel: 'URL del servidor personalizado',
-        advancedFeatureFooter: 'Esta es una característica avanzada. Solo cambia el servidor si sabes lo que haces. Necesitarás cerrar sesión e iniciarla nuevamente después de cambiar servidores.'
+        advancedFeatureFooter: 'Esta es una característica avanzada. Solo cambia el servidor si sabes lo que haces. Necesitarás cerrar sesión e iniciarla nuevamente después de cambiar servidores.',
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requiere una clave de acceso. Introduce la clave de este relay.`,
     },
 
     sessionInfo: {
@@ -864,6 +867,7 @@ export const es: TranslationStructure = {
         clientSideProcessing: 'Procesamiento del lado del cliente',
         linkProcessedLocally: 'Enlace procesado localmente en el navegador',
         linkProcessedOnDevice: 'Enlace procesado localmente en el dispositivo',
+        pairingRequestNotFound: 'No se encontró ninguna solicitud de conexión pendiente para este enlace. Puede haber caducado o pertenecer a otro relay: genera un enlace nuevo en la terminal e inténtalo de nuevo.',
     },
 
     modals: {

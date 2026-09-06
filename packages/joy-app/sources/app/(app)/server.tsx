@@ -12,7 +12,7 @@ import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
-import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey, getDerivedRelayPerimeterKey } from '@/sync/serverConfig';
+import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey, getDerivedRelayPerimeterKey, relayAccessKeyHeaders, relayNameForUrl } from '@/sync/serverConfig';
 import { copyToClipboard } from '@/utils/clipboard';
 import { switchRelayAndReload, loginToRelay } from '@/sync/relaySwitch';
 import { TokenStorage } from '@/auth/tokenStorage';
@@ -115,35 +115,79 @@ export default function ServerConfigScreen() {
     const [isValidating, setIsValidating] = useState(false);
     const [applyingKey, setApplyingKey] = useState(false);
 
-    const validateServer = async (url: string): Promise<boolean> => {
+    // One capabilities probe of `url` with the given perimeter key (or the
+    // key saved for THAT relay). 'gated' = the relay answered 401/403, i.e.
+    // it exists but wants a (different) access key.
+    const probeRelay = async (url: string, accessKey?: string): Promise<'ok' | 'gated' | 'error' | 'not_relay' | 'unreachable'> => {
         try {
-            setIsValidating(true);
-            setError(null);
-            
             // joy-relay answers its unauthenticated capabilities probe with
             // `relay: 'joy-relay'`; anything else is not a relay we can talk to.
+            // The fetch interceptor only adds the key for the ACTIVE relay's
+            // origin; the destination's saved key has to be attached here or a
+            // gated relay refused a switch despite having its correct key on
+            // this device (#160).
+            const keyHeaders = accessKey ? { 'X-Joy-Relay-Key': accessKey } : relayAccessKeyHeaders(url);
             const response = await fetch(`${url.replace(/\/+$/, '')}/joy/v2/capabilities`, {
                 method: 'GET',
                 headers: {
-                    'Accept': 'application/json'
+                    'Accept': 'application/json',
+                    ...keyHeaders,
                 }
             });
-            
-            if (!response.ok) {
-                setError(t('server.serverReturnedError'));
-                return false;
+
+            if (response.status === 401 || response.status === 403) {
+                return 'gated';
             }
-            
+            if (!response.ok) {
+                return 'error';
+            }
+
             const caps = await response.json().catch(() => null) as { relay?: string } | null;
             if (caps?.relay !== 'joy-relay') {
-                setError(t('server.notValidJoyServer'));
-                return false;
+                return 'not_relay';
             }
-            
-            return true;
+            return 'ok';
         } catch (err) {
-            setError(t('server.failedToConnectToServer'));
-            return false;
+            return 'unreachable';
+        }
+    };
+
+    const validateServer = async (url: string): Promise<boolean> => {
+        setIsValidating(true);
+        setError(null);
+        try {
+            let result = await probeRelay(url);
+            if (result === 'gated') {
+                // No usable key saved for the destination: let the user supply
+                // one now (#160). It is saved for that relay only once it works.
+                const entered = await Modal.prompt(
+                    t('server.relayAccessKeyLabel'),
+                    t('server.relayAccessKeyRequired', { relay: relayNameForUrl(url) }),
+                    { placeholder: '—', inputType: 'secure-text' }
+                );
+                const key = entered?.trim();
+                if (!key) {
+                    setError(t('server.serverReturnedError'));
+                    return false;
+                }
+                result = await probeRelay(url, key);
+                if (result === 'ok') {
+                    setRelayAccessKey(key, url);
+                }
+            }
+            switch (result) {
+                case 'ok':
+                    return true;
+                case 'not_relay':
+                    setError(t('server.notValidJoyServer'));
+                    return false;
+                case 'unreachable':
+                    setError(t('server.failedToConnectToServer'));
+                    return false;
+                default:
+                    setError(t('server.serverReturnedError'));
+                    return false;
+            }
         } finally {
             setIsValidating(false);
         }

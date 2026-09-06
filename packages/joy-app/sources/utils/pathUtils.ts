@@ -73,3 +73,23 @@ export function resolveAbsolutePath(path: string, homeDir?: string): string {
     // Handle ~username paths (not supported, return original)
     return path;
 }
+/**
+ * If the path is INSIDE the home directory, replace that prefix with ~;
+ * otherwise return the path unchanged. The match must end at a directory
+ * boundary: a plain `startsWith` rewrote /home/alice2/project on a machine
+ * whose home is /home/alice to ~/2/project, which resolves to a different
+ * (or nonexistent) directory (#193).
+ */
+export function formatPathRelativeToHome(path: string, homeDir?: string): string {
+    if (!homeDir) return path;
+
+    // Normalize paths to handle trailing slashes
+    const normalizedHome = homeDir.endsWith('/') ? homeDir.slice(0, -1) : homeDir;
+    if (normalizedHome === '') return path;
+
+    if (path === normalizedHome) return '~';
+    if (path.startsWith(normalizedHome + '/')) {
+        return '~' + path.slice(normalizedHome.length);
+    }
+    return path;
+}

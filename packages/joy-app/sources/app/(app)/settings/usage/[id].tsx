@@ -16,6 +16,7 @@ import { isMachineOnline } from '@/utils/machineUtils';
 import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
 import { machineUsageOnly, machineSessionUsageAll, machineStatusOnly } from '@/sync/v2/machine';
+import { splitUsageResults } from '@/utils/usageResults';
 
 // Survives navigation so revisits render instantly (same trick as joy-sessions).
 let cachedBurnMachineIds: Set<string> | null = null;
@@ -343,8 +344,12 @@ export default React.memo(function UsageSettingsScreen() {
     const [state, setState] = React.useState<
         | { phase: 'loading' }
         | { phase: 'error'; message: string }
-        | { phase: 'done'; report: BurnReport; byMachine: Array<{ id: string; cost: number; sessions: number }>; sessions: SessionRow[] }
+        // `failed`: intended targets with no usable report. A non-empty list
+        // means the aggregate is PARTIAL and is labelled so (#182).
+        | { phase: 'done'; report: BurnReport; byMachine: Array<{ id: string; cost: number; sessions: number }>; sessions: SessionRow[]; failed: Array<{ id: string; reason: string }> }
     >({ phase: 'loading' });
+    // Bumped by Retry so the missing machines are asked again.
+    const [fetchAttempt, setFetchAttempt] = React.useState(0);
 
     React.useEffect(() => {
         if (!scope || !joyMachineIds) return;
@@ -368,19 +373,11 @@ export default React.memo(function UsageSettingsScreen() {
                     return { id, rep, sess };
                 }));
                 if (cancelled) return;
-                const good = results
-                    .filter((r): r is PromiseFulfilledResult<{ id: string; rep: BurnReport; sess: { ok?: boolean; sessions?: SessionRow[] } | null }> => r.status === 'fulfilled')
-                    .map(r => r.value)
-                    .filter(x => x.rep?.ok);
+                const { good, failed } = splitUsageResults(targets, results);
                 if (good.length === 0) {
-                    const firstRejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult | undefined;
-                    const firstError = results
-                        .filter(r => r.status === 'fulfilled')
-                        .map(r => (r as PromiseFulfilledResult<{ rep: BurnReport }>).value.rep?.error)
-                        .find(Boolean);
                     setState({
                         phase: 'error',
-                        message: firstError || (firstRejected?.reason instanceof Error ? firstRejected.reason.message : 'usage query failed'),
+                        message: failed[0]?.reason ?? 'usage query failed',
                     });
                     return;
                 }
@@ -392,20 +389,25 @@ export default React.memo(function UsageSettingsScreen() {
                     .flatMap(g => (g.sess?.sessions ?? []).map(s => ({ ...s, machineId: g.id })))
                     .sort((a, b) => b.cost - a.cost)
                     .slice(0, 15);
-                setState({ phase: 'done', report, byMachine, sessions });
+                setState({ phase: 'done', report, byMachine, sessions, failed });
             } catch (e) {
                 if (!cancelled) setState({ phase: 'error', message: e instanceof Error ? e.message : 'usage query failed' });
             }
         })();
         return () => { cancelled = true; };
-    }, [scope, period, joyMachineIds && [...joyMachineIds].sort().join(',')]);
+    }, [scope, period, joyMachineIds && [...joyMachineIds].sort().join(','), fetchAttempt]);
 
     const machineName = (id: string) => {
         const m = machines.find(x => x.id === id);
         return m?.metadata?.displayName || m?.metadata?.host || id.slice(0, 8);
     };
 
-    const headerTitle = isAll ? 'All machines · Usage' : machineName(scope);
+    const missing = state.phase === 'done' ? state.failed : [];
+    // An all-machines total with a machine missing is a partial total: say so
+    // in the title as well as inline, never as an unqualified aggregate (#182).
+    const headerTitle = isAll
+        ? (missing.length > 0 ? 'Some machines · Usage' : 'All machines · Usage')
+        : machineName(scope);
     const screen = <Stack.Screen options={{ headerTitle }} />;
 
     if (!joyMachineIds) {
@@ -475,6 +477,20 @@ export default React.memo(function UsageSettingsScreen() {
                 </Section>
             )}
 
+            {missing.length > 0 && (
+                <Section title="Incomplete">
+                    <Text style={styles.centerText}>
+                        {`Missing usage from ${missing.map(m => machineName(m.id)).join(', ')} — the total below covers ${byMachine.length} of ${byMachine.length + missing.length} machines.`}
+                    </Text>
+                    {missing.map(m => (
+                        <Text key={m.id} style={styles.centerText}>{`${machineName(m.id)}: ${m.reason}`}</Text>
+                    ))}
+                    <Pressable onPress={() => setFetchAttempt(n => n + 1)} style={[styles.chip, { alignSelf: 'center', marginTop: 8 }]}>
+                        <Text style={styles.chipText}>Retry</Text>
+                    </Pressable>
+                </Section>
+            )}
+
             {report && o && (
                 <>
                     {/* Header — big burn number, like the TUI banner */}
@@ -492,7 +508,7 @@ export default React.memo(function UsageSettingsScreen() {
                         </Text>
                     </View>
 
-                    {scope === 'all' && byMachine.length > 1 && (
+                    {scope === 'all' && (byMachine.length > 1 || missing.length > 0) && (
                         <Section title="By Machine">
                             {byMachine.map(m => (
                                 <BarRow

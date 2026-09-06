@@ -310,6 +310,8 @@ export const zhHant: TranslationStructure = {
         machineBusy: '裝置正忙 — 請稍後再試',
         relayBusy: '中繼正忙 — 請稍後再試',
         connectionTooSlow: '連線速度過慢 — 請在網路更好時重試',
+        logoutFailed: '無法從此裝置移除已儲存的登入資訊。請重試。',
+        syncStartFailedReload: '應用程式無法開始同步。請重新載入應用程式後重試。',
     },
 
     newSession: {
@@ -451,7 +453,8 @@ export const zhHant: TranslationStructure = {
         failedToConnectToServer: '連線伺服器失敗',
         currentlyUsingCustomServer: '目前使用自訂伺服器',
         customServerUrlLabel: '自訂伺服器 URL',
-        advancedFeatureFooter: "這是一個進階功能。只有在您知道自己在做什麼時才更改伺服器。更改伺服器後您需要重新登入。"
+        advancedFeatureFooter: "這是一個進階功能。只有在您知道自己在做什麼時才更改伺服器。更改伺服器後您需要重新登入。",
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} 需要存取金鑰。請輸入此中繼的金鑰。`,
     },
 
     sessionInfo: {
@@ -864,6 +867,7 @@ export const zhHant: TranslationStructure = {
         clientSideProcessing: '用戶端處理',
         linkProcessedLocally: '連結在瀏覽器中本機處理',
         linkProcessedOnDevice: '連結在裝置上本機處理',
+        pairingRequestNotFound: '找不到此連結對應的待處理連線請求。它可能已過期或屬於其他中繼——請在終端機產生新連結後重試。',
     },
 
     modals: {

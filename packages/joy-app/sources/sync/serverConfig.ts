@@ -1,4 +1,5 @@
 import { MMKV } from 'react-native-mmkv';
+import { relayKeyForUrl, legacyRelayKeyForUrl, relayKeyNeedsMigration } from './relayKey';
 
 // Separate MMKV instance for server config that persists across logouts
 const serverConfigStorage = new MMKV({ id: 'server-config' });
@@ -15,24 +16,40 @@ export const KNOWN_RELAYS = [
     { key: 'joy', name: 'Joy Relay', url: DEFAULT_SERVER_URL },
 ] as const;
 
-/** Stable per-relay identifier: host, or host_port for non-default ports —
- *  mirrors the daemon's ~/.joy/relays/<host[_port]>/ naming so app and CLI
- *  agree on what counts as "the same relay". */
-export function relayKeyForUrl(url: string): string {
-    try {
-        const u = new URL(url);
-        return u.port ? `${u.hostname}_${u.port}` : u.hostname;
-    } catch {
-        return url.replace(/[^a-zA-Z0-9._-]/g, '_');
-    }
-}
+/** Stable per-relay identifier — see relayKey.ts. For an https relay with an
+ *  ordinary hostname it is `host` / `host_port`, mirroring the daemon's
+ *  ~/.joy/relays/<host[_port]>/; other schemes and IPv6 literals get a
+ *  collision-free, SecureStore-safe form (#398, #192). */
+export { relayKeyForUrl } from './relayKey';
 
 /** MMKV store scoped to the active relay. Every relay (the default one
  *  included) gets its own store, so switching relays never bleeds one
  *  account's caches (sessions, machines, drafts, push registration) into
  *  another. */
 export function relayScopedMMKV(): MMKV {
-    return new MMKV({ id: `relay.${relayKeyForUrl(getServerUrl())}` });
+    const url = getServerUrl();
+    const store = new MMKV({ id: `relay.${relayKeyForUrl(url)}` });
+    migrateLegacyRelayStore(store, url);
+    return store;
+}
+
+/** #398 changed the store id for non-https relays. Carry a legacy store's
+ *  contents over ONCE (only into an empty canonical store, and only when the
+ *  legacy id differs) so drafts, settings and the push registration of an
+ *  http relay survive the upgrade. Every value in these stores is a string
+ *  (JSON or a raw token), so a string copy is exact. */
+function migrateLegacyRelayStore(store: MMKV, url: string): void {
+    if (!relayKeyNeedsMigration(url)) return;
+    try {
+        if (store.getAllKeys().length > 0) return;
+        const legacy = new MMKV({ id: `relay.${legacyRelayKeyForUrl(url)}` });
+        for (const key of legacy.getAllKeys()) {
+            const value = legacy.getString(key);
+            if (value !== undefined) store.set(key, value);
+        }
+    } catch (error) {
+        console.warn('Relay store migration skipped:', error);
+    }
 }
 
 /** Display name for a relay URL: the known-relay name, else the hostname. */
@@ -91,6 +108,17 @@ export function getRelayAccessKey(url: string = getServerUrl()): string | null {
  *  "yes" for every relay and the answer would be meaningless. */
 export function getStoredRelayAccessKey(url: string = getServerUrl()): string | null {
     return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || null;
+}
+
+/** The perimeter-key header for a request to `url`, as a headers fragment —
+ *  `{}` when the relay has no key. The global fetch interceptor below only
+ *  covers fetch() to the ACTIVE origin; axios (XMLHttpRequest on web and
+ *  native) never passes through it, so every axios call to a relay must
+ *  spread this in explicitly (#186), and a probe of a DIFFERENT relay must
+ *  carry that relay's saved key rather than the active one's (#160). */
+export function relayAccessKeyHeaders(url: string = getServerUrl()): Record<string, string> {
+    const key = getRelayAccessKey(url);
+    return key ? { 'X-Joy-Relay-Key': key } : {};
 }
 
 export function setRelayAccessKey(key: string | null, url: string = getServerUrl()): void {

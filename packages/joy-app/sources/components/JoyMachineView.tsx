@@ -22,12 +22,13 @@ import { useJoyAction } from '@/hooks/useJoyAction';
 import { machineEnvList, machineEnvSet, machineEnvUnset } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
 import { alertError, errorMessage, guarded } from '@/utils/guardAsync';
-import { isLatest, nextGen, useLatestKey } from '@/utils/latest';
+import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
 import { t } from '@/text';
 import { copyToClipboard } from '@/utils/clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { machineStatusOnly, machineSlashCommandsAll } from '@/sync/v2/machine';
+import { resolveDaemonRow, resolveEnvErrorRow, envNamesFor, type DaemonProbe, type EnvNames } from './joyMachineDaemonState';
 
 // Bytes → "X.X GB" for the system readouts.
 const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
@@ -85,13 +86,18 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         Modal.alert(`${all.length} commands · ${plugins.size} plugins`, body);
     }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands]);
 
-    const [status, setStatus] = React.useState<JoyStatus | null>(null);
+    // The probe result is stored WITH the machine it was issued for, and the
+    // rendered row is derived from (probe, current machine, online): a
+    // stopped daemon or a machine switch can no longer leave a stale green
+    // "running" (or another machine's PID) on screen (#228).
+    const [probe, setProbe] = React.useState<DaemonProbe<JoyStatus> | null>(null);
     const [failed, setFailed] = React.useState(false);
     React.useEffect(() => {
         if (!machineId || !online) {
             setFailed(!online);
             return;
         }
+        setFailed(false);
         let cancelled = false;
         let retry: ReturnType<typeof setTimeout> | null = null;
         // The machine record can come from the local cache (so `online` is
@@ -109,12 +115,14 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
             Promise.race([
                 machineStatusOnly(sctx).then(r => r.data as unknown as JoyStatus),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-            ]).then(s => { if (!cancelled) { setStatus(s); setFailed(false); } })
+            ]).then(s => { if (!cancelled) { setProbe({ machineId, status: s }); setFailed(false); } })
                 .catch(() => { if (!cancelled) setFailed(true); });
         };
         attempt(20);
         return () => { cancelled = true; if (retry) clearTimeout(retry); };
     }, [machineId, online]);
+    const daemon = resolveDaemonRow({ probe, machineId, online, failed });
+    const status = daemon.status;
 
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || 'machine';
 
@@ -183,7 +191,7 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         await machineSlashCommandsAll(c0, true);
     }, [machineId]));
 
-    if (!status && !failed) {
+    if (daemon.loading) {
         return (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
                 <ActivityIndicator />
@@ -202,8 +210,8 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
             >
                 <Item
                     title="Daemon"
-                    detail={status?.ok ? 'running' : 'unreachable'}
-                    icon={<Ionicons name="pulse-outline" size={29} color={status?.ok ? '#34C759' : '#FF3B30'} />}
+                    detail={daemon.detail}
+                    icon={<Ionicons name="pulse-outline" size={29} color={daemon.running ? '#34C759' : '#FF3B30'} />}
                     showChevron={false}
                 />
                 {status?.version && (
@@ -396,32 +404,43 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
  * once, when set. Applies to sessions spawned from now on.
  */
 const EnvironmentSection = React.memo(({ machineId, online }: { machineId: string; online: boolean }) => {
-    const [names, setNames] = React.useState<string[] | null>(null);
+    // The list remembers WHICH machine answered, and rows render only while
+    // that is the machine on screen — so a delete row can never be aimed at
+    // a machine other than the one whose names it shows (#226).
+    const [env, setEnv] = React.useState<EnvNames | null>(null);
     const [error, setError] = React.useState<string | null>(null);
-    // Names are cleared on a machine change and every response is fenced to
-    // the request that asked: machine A's late list can no longer be shown
-    // (and its delete rows aimed) at machine B (#226).
+    // Every response is fenced to the request that asked. The generation is
+    // minted BEFORE the context lookup and retired on every identity/offline
+    // transition (effect cleanup): switching from A to a B that has no
+    // context yet used to leave A's generation current, so A's late list
+    // landed as B's names and wiped B's "no key" error (#226).
     const envKey = useLatestKey('machine-env');
     const reload = React.useCallback(async () => {
+        const gen = nextGen(envKey);
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) { setError('no_ctx'); return; }
-        const gen = nextGen(envKey);
         try {
             const r = await machineEnvList(ctx);
             if (!isLatest(envKey, gen)) return;
-            if (r.data?.ok) { setNames(r.data.names ?? []); setError(null); }
+            if (r.data?.ok) { setEnv({ machineId, names: r.data.names ?? [] }); setError(null); }
             else setError(r.data?.error ?? `http_${r.status}`);
         } catch (e) {
             // A timed-out or failed tunnel request is an error state, not an
-            // unhandled rejection; the Add row doubles as the retry.
+            // unhandled rejection. It gets its own Retry row below — the Add
+            // row is NOT a retry: it prompts for a name first and reloads
+            // only after a successful change (#227).
             if (isLatest(envKey, gen)) setError(errorMessage(e));
         }
     }, [machineId, envKey]);
     React.useEffect(() => {
-        setNames(null);
+        setEnv(null);
         setError(null);
         if (online) guarded(reload)();
-    }, [online, reload]);
+        else retire(envKey);
+        // Leaving this identity (machine change, offline, unmount) retires
+        // whatever is still in flight for it (#226).
+        return () => retire(envKey);
+    }, [online, reload, envKey]);
     const [adding, doAdd] = useJoyAction(React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) return;
@@ -433,26 +452,50 @@ const EnvironmentSection = React.memo(({ machineId, online }: { machineId: strin
         if (!r.data?.ok) { Modal.alert(t('common.error'), r.data?.error ?? `http_${r.status}`); return; }
         await reload();
     }, [machineId, reload]));
-    const remove = React.useCallback((name: string) => {
+    // Bound to the row's SOURCE machine, not whatever machineId is current
+    // by the time the confirmation is answered (#226).
+    const remove = React.useCallback((sourceMachineId: string, name: string) => {
         Modal.alert(t('machine.environmentRemoveTitle'), t('machine.environmentRemoveMessage', { name }), [
             { text: t('common.cancel'), style: 'cancel' },
             { text: t('common.delete'), style: 'destructive', onPress: guarded(async () => {
-                const ctx = sync.machineOnlyCtx(machineId);
+                const ctx = sync.machineOnlyCtx(sourceMachineId);
                 if (!ctx) return;
                 const r = await machineEnvUnset(ctx, name);
                 if (!r.data?.ok) throw new Error(r.data?.error ?? `http_${r.status}`);
                 await reload();
             }, alertError()) },
         ]);
-    }, [machineId, reload]);
+    }, [reload]);
+    const errorRow = resolveEnvErrorRow(error);
+    const names = envNamesFor(env, machineId);
     if (!online) return null;
     return (
         <ItemGroup title={t('machine.environment')} footer={t('machine.environmentFooter')}>
-            {error === 'no_machine_key' && (
-                <Item title={t('machine.environmentUnavailable')} icon={<Ionicons name="lock-closed-outline" size={29} color="#FF9500" />} showChevron={false} />
+            {/* EVERY load failure is a visible row with an explicit Retry —
+                offline, timeout and HTTP errors used to render nothing, and the
+                Add row never was a retry (#227). The locked row stays tappable
+                too: the machine key may have arrived since. */}
+            {errorRow?.kind === 'no_key' && (
+                <Item
+                    title={t('machine.environmentUnavailable')}
+                    detail={t('common.retry')}
+                    icon={<Ionicons name="lock-closed-outline" size={29} color="#FF9500" />}
+                    onPress={guarded(reload)}
+                    showChevron={false}
+                />
+            )}
+            {errorRow?.kind === 'failure' && (
+                <Item
+                    title={t('common.error')}
+                    subtitle={errorRow.detail}
+                    detail={t('common.retry')}
+                    icon={<Ionicons name="alert-circle-outline" size={29} color="#FF3B30" />}
+                    onPress={guarded(reload)}
+                    showChevron={false}
+                />
             )}
             {names?.map((n) => (
-                <Item key={n} title={n} detail="••••••" icon={<Ionicons name="key-outline" size={29} color="#5856D6" />} onPress={() => remove(n)} showChevron={false} />
+                <Item key={n} title={n} detail="••••••" icon={<Ionicons name="key-outline" size={29} color="#5856D6" />} onPress={() => remove(env!.machineId, n)} showChevron={false} />
             ))}
             {names && names.length === 0 && !error && (
                 <Item title={t('machine.environmentNone')} icon={<Ionicons name="key-outline" size={29} color="#8E8E93" />} showChevron={false} />

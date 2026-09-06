@@ -311,6 +311,8 @@ export const ja: TranslationStructure = {
         machineBusy: 'マシンがビジー状態です — しばらくしてからもう一度お試しください',
         relayBusy: 'リレーがビジー状態です — しばらくしてからもう一度お試しください',
         connectionTooSlow: '接続が遅すぎます — より良いネットワークでもう一度お試しください',
+        logoutFailed: 'このデバイスから保存済みのログイン情報を削除できませんでした。もう一度お試しください。',
+        syncStartFailedReload: 'アプリが同期を開始できませんでした。アプリを再読み込みしてもう一度お試しください。',
     },
 
     newSession: {
@@ -452,7 +454,8 @@ export const ja: TranslationStructure = {
         failedToConnectToServer: 'サーバーへの接続に失敗しました',
         currentlyUsingCustomServer: '現在カスタムサーバーを使用中',
         customServerUrlLabel: 'カスタムサーバーURL',
-        advancedFeatureFooter: "これは高度な機能です。何をしているか理解している場合のみサーバーを変更してください。サーバー変更後は再度ログインが必要です。"
+        advancedFeatureFooter: "これは高度な機能です。何をしているか理解している場合のみサーバーを変更してください。サーバー変更後は再度ログインが必要です。",
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} にはアクセスキーが必要です。このリレーのキーを入力してください。`,
     },
 
     sessionInfo: {
@@ -865,6 +868,7 @@ export const ja: TranslationStructure = {
         clientSideProcessing: 'クライアントサイド処理',
         linkProcessedLocally: 'リンクはブラウザ内でローカルに処理されました',
         linkProcessedOnDevice: 'リンクはデバイス上でローカルに処理されました',
+        pairingRequestNotFound: 'このリンクに対応する保留中の接続リクエストが見つかりません。期限切れか、別のリレーのものかもしれません。ターミナルで新しいリンクを生成してもう一度お試しください。',
     },
 
     modals: {

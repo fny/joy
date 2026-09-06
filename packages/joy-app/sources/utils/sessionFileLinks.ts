@@ -324,9 +324,16 @@ function buildLink(path: string, line: number | null, column: number | null, ses
     };
 }
 
+/**
+ * Resolve a path the app ALREADY KNOWS is a file path (the viewer's decoded
+ * `?path=` parameter, a git-status entry) against the session root. The path
+ * is taken literally: `report:2026` is a file named `report:2026`, not line
+ * 2026 of `report` (#163). Line and column travel as explicit route
+ * parameters; only textual links (parseSessionFileLink) parse a `:line:col`
+ * suffix, because there the suffix is the only place that information exists.
+ */
 export function resolveSessionFilePath(path: string, sessionRoot?: string | null): SessionFileLink | null {
-    const parsed = parseLineAndColumn(path);
-    return buildLink(parsed.path, parsed.line, parsed.column, sessionRoot);
+    return buildLink(path.trim(), null, null, sessionRoot);
 }
 
 export function parseSessionFileLink(

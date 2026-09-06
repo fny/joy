@@ -12,6 +12,7 @@ import { layout } from '@/components/layout';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Pressable } from 'react-native';
 import { t } from '@/text';
+import { dateHeaderFor, localDayKey } from '@/utils/sessionDateGroups';
 
 interface SessionHistoryItem {
     type: 'session' | 'date-header';
@@ -96,67 +97,51 @@ const styles = StyleSheet.create((theme) => ({
     },
 }));
 
-function formatDateHeader(date: Date): string {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-    const sessionDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-    
-    if (sessionDate.getTime() === today.getTime()) {
-        return t('sessionHistory.today');
-    } else if (sessionDate.getTime() === yesterday.getTime()) {
-        return t('sessionHistory.yesterday');
-    } else {
-        const diffTime = today.getTime() - sessionDate.getTime();
-        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-        return t('sessionHistory.daysAgo', { count: diffDays });
-    }
+// Date headers are calendar-date arithmetic (utils/sessionDateGroups): the
+// old midnight-minus-24h "yesterday" and floor(ms / 86400000) day counts
+// mislabelled every group after a DST transition (#166).
+function formatDateHeader(date: Date, now: Date): string {
+    const header = dateHeaderFor(date, now);
+    if (header.kind === 'today') return t('sessionHistory.today');
+    if (header.kind === 'yesterday') return t('sessionHistory.yesterday');
+    return t('sessionHistory.daysAgo', { count: header.days });
 }
 
 function groupSessionsByDate(sessions: Session[]): SessionHistoryItem[] {
     const sortedSessions = sessions
         .slice()
         .sort((a, b) => b.updatedAt - a.updatedAt);
-    
+
+    const now = new Date();
     const items: SessionHistoryItem[] = [];
     let currentDateGroup: Session[] = [];
-    let currentDateString: string | null = null;
-    
+    let currentDayKey: string | null = null;
+    let currentDay: Date | null = null;
+
+    const flush = () => {
+        if (currentDateGroup.length === 0 || !currentDay) return;
+        items.push({ type: 'date-header', date: formatDateHeader(currentDay, now) });
+        currentDateGroup.forEach(sess => {
+            items.push({ type: 'session', session: sess });
+        });
+    };
+
     for (const session of sortedSessions) {
         const sessionDate = new Date(session.updatedAt);
-        const dateString = sessionDate.toDateString();
-        
-        if (currentDateString !== dateString) {
-            // Process previous group
-            if (currentDateGroup.length > 0) {
-                items.push({
-                    type: 'date-header',
-                    date: formatDateHeader(new Date(currentDateString!)),
-                });
-                currentDateGroup.forEach(sess => {
-                    items.push({ type: 'session', session: sess });
-                });
-            }
-            
-            // Start new group
-            currentDateString = dateString;
+        const dayKey = localDayKey(sessionDate);
+
+        if (currentDayKey !== dayKey) {
+            flush();
+            currentDayKey = dayKey;
+            currentDay = sessionDate;
             currentDateGroup = [session];
         } else {
             currentDateGroup.push(session);
         }
     }
-    
-    // Process final group
-    if (currentDateGroup.length > 0) {
-        items.push({
-            type: 'date-header',
-            date: formatDateHeader(new Date(currentDateString!)),
-        });
-        currentDateGroup.forEach(sess => {
-            items.push({ type: 'session', session: sess });
-        });
-    }
-    
+
+    flush();
+
     return items;
 }
 

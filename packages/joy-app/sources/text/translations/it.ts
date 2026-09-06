@@ -308,6 +308,8 @@ export const it: TranslationStructure = {
         machineBusy: 'La macchina è occupata — riprova tra un momento',
         relayBusy: 'Il relay è occupato — riprova tra un momento',
         connectionTooSlow: 'La connessione è troppo lenta — riprova con una rete migliore',
+        logoutFailed: 'Impossibile rimuovere l\'accesso salvato da questo dispositivo. Riprova.',
+        syncStartFailedReload: 'L\'app non è riuscita ad avviare la sincronizzazione. Ricarica l\'app e riprova.',
     },
 
     newSession: {
@@ -449,7 +451,8 @@ export const it: TranslationStructure = {
         failedToConnectToServer: 'Impossibile connettersi al server',
         currentlyUsingCustomServer: 'Attualmente si usa un server personalizzato',
         customServerUrlLabel: 'URL server personalizzato',
-        advancedFeatureFooter: 'Questa è una funzionalità avanzata. Cambia il server solo se sai cosa stai facendo. Dovrai disconnetterti e accedere di nuovo dopo aver cambiato server.'
+        advancedFeatureFooter: 'Questa è una funzionalità avanzata. Cambia il server solo se sai cosa stai facendo. Dovrai disconnetterti e accedere di nuovo dopo aver cambiato server.',
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} richiede una chiave di accesso. Inserisci la chiave per questo relay.`,
     },
 
     sessionInfo: {
@@ -862,6 +865,7 @@ export const it: TranslationStructure = {
         clientSideProcessing: 'Elaborazione lato client',
         linkProcessedLocally: 'Link elaborato localmente nel browser',
         linkProcessedOnDevice: 'Link elaborato localmente sul dispositivo',
+        pairingRequestNotFound: 'Nessuna richiesta di connessione in sospeso trovata per questo link. Potrebbe essere scaduto o appartenere a un altro relay: genera un nuovo link nel terminale e riprova.',
     },
 
     modals: {

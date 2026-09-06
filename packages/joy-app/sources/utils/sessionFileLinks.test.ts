@@ -101,6 +101,20 @@ describe('sessionFileLinks', () => {
         ]);
     });
 
+    it('takes a viewer path literally — a colon-digits basename is a file name, not a line number (#163)', () => {
+        expect(resolveSessionFilePath('report:2026', sessionRoot)).toEqual({
+            path: 'report:2026',
+            absolutePath: '/Users/kirilldubovitskiy/projects/joy/report:2026',
+            relativePath: 'report:2026',
+            withinSessionRoot: true,
+            line: null,
+            column: null,
+        });
+        expect(resolveSessionFilePath('/tmp/backup:12:30.log', sessionRoot)?.absolutePath).toBe('/tmp/backup:12:30.log');
+        // Textual links still parse the suffix — that is where a link's line lives.
+        expect(parseSessionFileLink('src/report.ts:2026', { sessionRoot })?.line).toBe(2026);
+    });
+
     it('resolves viewer input to an absolute path', () => {
         expect(resolveSessionFilePath('packages/joy-app/README.md', sessionRoot)).toEqual({
             path: 'packages/joy-app/README.md',

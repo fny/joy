@@ -310,6 +310,8 @@ export const ca: TranslationStructure = {
         machineBusy: 'La màquina està ocupada — torna-ho a provar en un moment',
         relayBusy: 'El relay està ocupat — torna-ho a provar en un moment',
         connectionTooSlow: 'La connexió és massa lenta — torna-ho a provar amb una xarxa millor',
+        logoutFailed: 'No s\'ha pogut eliminar l\'inici de sessió desat d\'aquest dispositiu. Torna-ho a provar.',
+        syncStartFailedReload: 'L\'aplicació no ha pogut iniciar la sincronització. Torna a carregar l\'aplicació i torna-ho a provar.',
     },
 
     newSession: {
@@ -451,7 +453,8 @@ export const ca: TranslationStructure = {
         failedToConnectToServer: 'Ha fallat la connexió amb el servidor',
         currentlyUsingCustomServer: 'Actualment utilitzant un servidor personalitzat',
         customServerUrlLabel: 'URL del servidor personalitzat',
-        advancedFeatureFooter: 'Aquesta és una funció avançada. Només canvia el servidor si saps el que fas. Hauràs de tancar la sessió i tornar-la a iniciar després de canviar els servidors.'
+        advancedFeatureFooter: 'Aquesta és una funció avançada. Només canvia el servidor si saps el que fas. Hauràs de tancar la sessió i tornar-la a iniciar després de canviar els servidors.',
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requereix una clau d'accés. Introdueix la clau d'aquest relay.`,
     },
 
     sessionInfo: {
@@ -864,6 +867,7 @@ export const ca: TranslationStructure = {
         clientSideProcessing: 'Processament del costat del client',
         linkProcessedLocally: 'Enllaç processat localment al navegador',
         linkProcessedOnDevice: 'Enllaç processat localment al dispositiu',
+        pairingRequestNotFound: 'No s\'ha trobat cap sol·licitud de connexió pendent per a aquest enllaç. Pot haver caducat o pertànyer a un altre relay: genera un enllaç nou al terminal i torna-ho a provar.',
     },
 
     modals: {

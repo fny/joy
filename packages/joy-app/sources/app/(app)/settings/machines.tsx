@@ -9,11 +9,17 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { useJoyMachines } from '@/hooks/useJoyMachines';
+import { isMachineOnline } from '@/utils/machineUtils';
 
 export default React.memo(function MachinesSettingsScreen() {
     const router = useRouter();
     const { theme } = useUnistyles();
-    const { machines: joyMachines } = useJoyMachines();
+    const { machines: probedMachines } = useJoyMachines();
+    // The probe cache remembers which machines ANSWERED once; it is not
+    // re-evaluated when the last daemon goes offline (the hook skips the probe
+    // with no online machines). Gate the rows on current liveness so a stopped
+    // daemon is not shown as connected, and reach "No machines connected" (#180).
+    const joyMachines = probedMachines.filter(isMachineOnline);
 
     return (
         <ItemList style={{ paddingTop: 0 }}>

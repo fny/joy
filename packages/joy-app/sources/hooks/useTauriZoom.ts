@@ -1,15 +1,12 @@
 import { useEffect } from 'react';
 import { Platform } from 'react-native';
 import { isTauri } from '@/utils/isTauri';
+import { createTauriZoomController } from './tauriZoomController';
 
 export const DEFAULT_APP_ZOOM = 1.0;
 export const BROWSER_APP_ZOOM = 1.0;
 
-const MIN_APP_ZOOM = 0.5;
-const MAX_APP_ZOOM = 2.5;
 const WEB_ZOOM_CLASS = 'joy-app-zoomed';
-
-const clampZoom = (zoom: number) => Math.max(MIN_APP_ZOOM, Math.min(MAX_APP_ZOOM, zoom));
 
 export function getBrowserAppZoomValue(): string {
     return String(BROWSER_APP_ZOOM);
@@ -38,35 +35,24 @@ export function useTauriZoom() {
         root.classList.remove(WEB_ZOOM_CLASS);
         root.style.removeProperty('--joy-app-zoom');
 
-        let zoom = DEFAULT_APP_ZOOM;
-        let webview: { setZoom: (z: number) => Promise<void> } | null = null;
+        // The controller owns load/retry/consume decisions (#326): a failed
+        // webview import is logged (not an unhandled rejection), the next
+        // shortcut retries it, and keys are only consumed once a webview exists.
+        const controller = createTauriZoomController({
+            load: async () => {
+                const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+                return getCurrentWebview();
+            },
+            defaultZoom: DEFAULT_APP_ZOOM,
+            onError: (e) => console.error('[useTauriZoom] webview zoom failed:', e),
+        });
+        void controller.init();
 
-        const apply = (z: number) => {
-            zoom = clampZoom(z);
-            webview?.setZoom(zoom).catch((e) => console.error('setZoom failed:', e));
-        };
-
-        (async () => {
-            const { getCurrentWebview } = await import('@tauri-apps/api/webview');
-            webview = getCurrentWebview();
-            apply(zoom);
-        })();
-
-        const onKey = (e: KeyboardEvent) => {
-            if ((!e.metaKey && !e.ctrlKey) || e.altKey) return;
-            if (e.key === '=' || e.key === '+') {
-                e.preventDefault();
-                apply(zoom + 0.1);
-            } else if (e.key === '-' || e.key === '_') {
-                e.preventDefault();
-                apply(zoom - 0.1);
-            } else if (e.key === '0') {
-                e.preventDefault();
-                apply(DEFAULT_APP_ZOOM);
-            }
-        };
-
+        const onKey = (e: KeyboardEvent) => { controller.handleKey(e); };
         window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
+        return () => {
+            window.removeEventListener('keydown', onKey);
+            controller.dispose();
+        };
     }, []);
 }

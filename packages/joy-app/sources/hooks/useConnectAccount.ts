@@ -20,41 +20,56 @@ export function useConnectAccount(options?: UseConnectAccountOptions) {
     const [isLoading, setIsLoading] = React.useState(false);
     const checkScannerPermissions = useCheckScannerPermissions();
 
+    // Callbacks and credentials are read through refs so that processAuthUrl
+    // — and with it the scanner subscription below — keeps ONE identity for
+    // the life of the hook. Callers pass an inline options object, so every
+    // parent rerender used to give processAuthUrl a new identity, the effect
+    // cleaned up, and its cleanup dismissed the iOS scanner the user was
+    // still pointing at a QR code (#313).
+    const optionsRef = React.useRef(options);
+    optionsRef.current = options;
+    const credentialsRef = React.useRef(auth.credentials);
+    credentialsRef.current = auth.credentials;
+
     const processAuthUrl = React.useCallback(async (url: string) => {
         if (!url.startsWith('joy:///account?')) {
             Modal.alert(t('common.error'), t('modals.invalidAuthUrl'), [{ text: t('common.ok') }]);
             return false;
         }
-        
+
         setIsLoading(true);
         try {
+            const credentials = credentialsRef.current;
+            if (!credentials) {
+                throw new Error('Not logged in');
+            }
             const tail = url.slice('joy:///account?'.length);
             const publicKey = decodeBase64(tail, 'base64url');
-            const response = encryptBox(decodeBase64(auth.credentials!.secret, 'base64url'), publicKey);
-            await authAccountApprove(auth.credentials!.token, publicKey, response);
-            
+            const response = encryptBox(decodeBase64(credentials.secret, 'base64url'), publicKey);
+            await authAccountApprove(credentials.token, publicKey, response);
+
             Modal.alert(t('common.success'), t('modals.deviceLinkedSuccessfully'), [
-                { 
-                    text: t('common.ok'), 
-                    onPress: () => options?.onSuccess?.()
+                {
+                    text: t('common.ok'),
+                    onPress: () => optionsRef.current?.onSuccess?.()
                 }
             ]);
             return true;
         } catch (e) {
             console.error(e);
             Modal.alert(t('common.error'), t('modals.failedToLinkDevice'), [{ text: t('common.ok') }]);
-            options?.onError?.(e);
+            optionsRef.current?.onError?.(e);
             return false;
         } finally {
             setIsLoading(false);
         }
-    }, [auth.credentials, options]);
+    }, []);
 
     const connectAccount = React.useCallback(async () => {
         if (await checkScannerPermissions()) {
             // Use camera scanner. Backing out of Android's code scanner rejects
             // (BarcodeScanningCancelledException) — that is a normal exit; a
-            // real launch failure is shown.
+            // real launch failure is shown (#312).
             try {
                 await CameraView.launchScanner({
                     barcodeTypes: ['qr']
@@ -63,18 +78,19 @@ export function useConnectAccount(options?: UseConnectAccountOptions) {
                 if (isScannerCancellation(e)) return;
                 console.error('Failed to launch scanner', e);
                 Modal.alert(t('common.error'), errorMessage(e), [{ text: t('common.ok') }]);
-                options?.onError?.(e);
+                optionsRef.current?.onError?.(e);
             }
         } else {
             Modal.alert(t('common.error'), t('modals.cameraPermissionsRequiredToScanQr'), [{ text: t('common.ok') }]);
         }
-    }, [checkScannerPermissions, options]);
+    }, [checkScannerPermissions]);
 
     const connectWithUrl = React.useCallback(async (url: string) => {
         return await processAuthUrl(url);
     }, [processAuthUrl]);
 
-    // Set up barcode scanner listener
+    // Set up barcode scanner listener — once per mount; it is torn down (and
+    // the iOS scanner dismissed) only on unmount (#313).
     const isProcessingRef = React.useRef(false);
     React.useEffect(() => {
         if (CameraView.isModernBarcodeScannerAvailable) {

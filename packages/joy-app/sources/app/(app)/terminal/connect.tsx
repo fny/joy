@@ -10,6 +10,17 @@ import { ItemList } from '@/components/ItemList';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
 import { t } from '@/text';
+import { resolvePendingTerminalKey, clearPendingTerminalKey } from '@/auth/pendingTerminalKey';
+
+/** sessionStorage is per tab and gone when the tab closes — exactly the
+ *  lifetime a pending pairing request should have. Absent outside browsers. */
+function tabStorage(): Storage | null {
+    try {
+        return typeof window !== 'undefined' ? window.sessionStorage : null;
+    } catch {
+        return null;
+    }
+}
 
 export default function TerminalConnectScreen() {
     const router = useRouter();
@@ -17,24 +28,27 @@ export default function TerminalConnectScreen() {
     const [hashProcessed, setHashProcessed] = useState(false);
     const { processAuthUrl, isLoading } = useConnectTerminal({
         onSuccess: () => {
+            // Approved: the parked key must not resurface on a later visit.
+            clearPendingTerminalKey(tabStorage());
             router.back();
         }
     });
 
-    // Extract key from hash on web platform
+    // Extract key from hash on web platform. The fragment is scrubbed from
+    // the URL (browser history) but the key is parked in tab-scoped storage
+    // so a reload before accepting — or after a failed approval — brings the
+    // same request back instead of "Invalid connection link" (#183).
     useEffect(() => {
         if (Platform.OS === 'web' && typeof window !== 'undefined' && !hashProcessed) {
-            const hash = window.location.hash;
-            if (hash.startsWith('#key=')) {
-                const key = hash.substring(5); // Remove '#key='
+            const key = resolvePendingTerminalKey(window.location.hash, tabStorage());
+            if (key) {
                 setPublicKey(key);
-                
-                // Clear the hash from URL to prevent exposure in browser history
-                window.history.replaceState(null, '', window.location.pathname + window.location.search);
-                setHashProcessed(true);
-            } else {
-                setHashProcessed(true);
+                if (window.location.hash) {
+                    // Clear the hash from URL to prevent exposure in browser history
+                    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+                }
             }
+            setHashProcessed(true);
         }
     }, [hashProcessed]);
 
@@ -47,6 +61,8 @@ export default function TerminalConnectScreen() {
     };
 
     const handleReject = () => {
+        // Explicit rejection ends the pending request for this tab.
+        clearPendingTerminalKey(tabStorage());
         router.back();
     };
 

@@ -5,15 +5,17 @@ import { AlertModalConfig, ConfirmModalConfig } from '../types';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
-import { errorMessage, isThenable } from '@/utils/guardAsync';
+import { runAlertButton } from './alertButtonPress';
 
 interface WebAlertModalProps {
     config: AlertModalConfig | ConfirmModalConfig;
     onClose: () => void;
     onConfirm?: (value: boolean) => void;
+    /** False while another dialog is stacked on top (see BaseModal). */
+    active?: boolean;
 }
 
-export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps) {
+export function WebAlertModal({ config, onClose, onConfirm, active = true }: WebAlertModalProps) {
     const { theme } = useUnistyles();
     const isConfirm = config.type === 'confirm';
     // An async button keeps the dialog open (buttons disabled) until it
@@ -22,8 +24,16 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
     // once and the rejection escaped unhandled with the retry control gone.
     const [pending, setPending] = React.useState(false);
     const [failure, setFailure] = React.useState<string | null>(null);
-    const mounted = React.useRef(true);
-    React.useEffect(() => () => { mounted.current = false; }, []);
+    // Set inside the effect BODY, not only at initialization: React StrictMode
+    // replays effects (setup → cleanup → setup), and a ref that was only ever
+    // flipped false in cleanup stayed false for the component's whole life,
+    // so a rejected async button was ignored — buttons stayed disabled and no
+    // error appeared (#331).
+    const mounted = React.useRef(false);
+    React.useEffect(() => {
+        mounted.current = true;
+        return () => { mounted.current = false; };
+    }, []);
 
     const handleButtonPress = (buttonIndex: number) => {
         if (pending) return;
@@ -33,21 +43,12 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
             return;
         }
         const onPress = !isConfirm ? config.buttons?.[buttonIndex]?.onPress : undefined;
-        if (!onPress) { onClose(); return; }
-        let result: unknown;
-        try {
-            result = onPress();
-        } catch (e) {
-            setFailure(errorMessage(e));
-            return;
-        }
-        if (!isThenable(result)) { onClose(); return; }
-        setPending(true);
-        setFailure(null);
-        Promise.resolve(result).then(
-            () => { if (mounted.current) setPending(false); onClose(); },
-            (e) => { if (!mounted.current) return; setPending(false); setFailure(errorMessage(e)); },
-        );
+        runAlertButton(onPress, {
+            isLive: () => mounted.current,
+            pending: () => { setPending(true); setFailure(null); },
+            close: () => { if (mounted.current) setPending(false); onClose(); },
+            fail: (message) => { setPending(false); setFailure(message); },
+        });
     };
 
     const buttons = isConfirm
@@ -128,7 +129,7 @@ export function WebAlertModal({ config, onClose, onConfirm }: WebAlertModalProps
     });
 
     return (
-        <BaseModal visible={true} onClose={onClose} closeOnBackdrop={false}>
+        <BaseModal visible={true} onClose={onClose} closeOnBackdrop={false} active={active}>
             <View style={styles.container}>
                 <View style={styles.content}>
                     <Text style={[styles.title, Typography.default('semiBold')]}>
