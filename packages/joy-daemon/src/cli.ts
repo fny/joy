@@ -5,8 +5,8 @@
 // this CLI finds and authenticates to it — one daemon (and one state dir,
 // tmux server, service unit) per relay; --relay picks which one.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync } from "fs";
-import { join, dirname, resolve, basename, sep } from "path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync, readlinkSync } from "fs";
+import { join, dirname, resolve, basename, sep, isAbsolute } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
@@ -81,7 +81,10 @@ const ok = c.g("✓");
 const bad = c.r("✗");
 const warn = c.y("!");
 
-type DaemonState = { token: string; pid: number; port: number; relay?: string; startedAt: number; version: string };
+/** daemon.json. `entry`/`exec` (#495 residual) are the daemon's own
+ *  process.argv[1] and process.execPath, recorded at start so a stale pid can
+ *  be checked against the exact script it should be running. */
+type DaemonState = { token: string; pid: number; port: number; relay?: string; startedAt: number; version: string; entry?: string; exec?: string };
 
 function readState(): DaemonState | null {
   try { return JSON.parse(readFileSync(STATE_FILE, "utf8")) as DaemonState; } catch { return null; }
@@ -208,14 +211,17 @@ async function cmdStart(): Promise<number> {
 }
 
 /** What the OS says process `pid` is: its command line and, where the kernel
- *  tells us (Linux /proc), when it started. null = no such process. */
-export interface ProcessIdentity { command: string; startedAt?: number }
+ *  tells us (Linux /proc), when it started and its working directory (to
+ *  resolve a relative script operand). null = no such process. */
+export interface ProcessIdentity { command: string; startedAt?: number; cwd?: string }
 export function processIdentity(pid: number): ProcessIdentity | null {
   if (osPlatform() === "linux") {
     let command: string;
     try {
       command = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ");
     } catch { return null; }
+    let cwd: string | undefined;
+    try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { /* a foreign uid's process; the command alone decides */ }
     let startedAt: number | undefined;
     try {
       // /proc/<pid>/stat: "pid (comm) state ppid …"; comm may contain spaces
@@ -229,17 +235,28 @@ export function processIdentity(pid: number): ProcessIdentity | null {
       const btime = btimeLine ? Number(btimeLine.slice(6).trim()) : NaN;
       if (Number.isFinite(ticks) && Number.isFinite(btime)) startedAt = (btime + ticks / 100) * 1000;
     } catch { /* command alone still identifies it */ }
-    return { command, startedAt };
+    return { command, startedAt, cwd };
   }
   const r = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
   const command = r.status === 0 ? r.stdout.trim() : "";
   return command ? { command } : null;
 }
 
-/** Is this command line the daemon we launch (`node --import tsx …/server.ts`,
- *  from a joy-daemon checkout or install)? */
+/** The script operand of a `node [flags] <script>` command line, when it is a
+ *  server.ts: the first whitespace-separated token ending in `server.ts`. */
+export function serverEntryOf(command: string): string | null {
+  const m = /(?:^|\s)(\S*server\.ts)(?=\s|$)/.exec(command);
+  return m ? m[1] : null;
+}
+
+/** LEGACY identity, for a daemon.json written before `entry` was recorded
+ *  (#495 residual): the server.ts must sit under a `joy-daemon/` path segment
+ *  — a checkout (packages/joy-daemon/src/server.ts) or an install
+ *  (@fny/joy-daemon/src/server.ts). The old rule, "contains server.ts and
+ *  tsx", accepted `node --import tsx /home/u/unrelated/server.ts`. */
 export function looksLikeJoyDaemon(command: string): boolean {
-  return /(^|[\s/])server\.ts(\s|$)/.test(command) && /joy-daemon|tsx/.test(command);
+  const entry = serverEntryOf(command);
+  return !!entry && /(^|\/)joy-daemon\//.test(entry);
 }
 
 /** daemon.json wrote startedAt a moment after the process started (module
@@ -252,12 +269,27 @@ const START_SKEW_MS = 120_000;
  *  that wrote it; `joy stop` used to SIGTERM whatever now held it (#495). */
 export function verifyDaemonPid(
   pid: number,
-  state: { startedAt?: number } | null,
+  state: { startedAt?: number; entry?: string; exec?: string } | null,
   identity: ProcessIdentity | null,
 ): { ok: true } | { ok: false; reason: string } {
   if (!identity) return { ok: false, reason: `pid ${pid} is not running` };
-  if (!looksLikeJoyDaemon(identity.command)) {
-    return { ok: false, reason: `pid ${pid} is not a joy-daemon (${identity.command.slice(0, 80) || "unknown command"})` };
+  const shown = identity.command.slice(0, 80) || "unknown command";
+  if (state?.entry) {
+    // The daemon recorded the script it runs (process.argv[1], absolute): the
+    // live command line must name EXACTLY that file (#495 residual) — a
+    // same-looking joy-daemon from another install, or any other server.ts,
+    // is not the process daemon.json describes. A relative operand (`tsx
+    // src/server.ts` from the package dir) is resolved against the process's
+    // cwd where the kernel reports it. `exec` is recorded for the log but not
+    // enforced: process.execPath is the real binary while argv[0] is often a
+    // bare `node` or a symlink, so it would only produce false "stale"s.
+    const operand = serverEntryOf(identity.command);
+    const entry = operand && !isAbsolute(operand) && identity.cwd ? resolve(identity.cwd, operand) : operand;
+    if (entry !== state.entry) {
+      return { ok: false, reason: `pid ${pid} is not the daemon daemon.json records (expected ${state.entry}; running: ${shown})` };
+    }
+  } else if (!looksLikeJoyDaemon(identity.command)) {
+    return { ok: false, reason: `pid ${pid} is not a joy-daemon (${shown})` };
   }
   if (identity.startedAt && state?.startedAt && Math.abs(identity.startedAt - state.startedAt) > START_SKEW_MS) {
     return { ok: false, reason: `pid ${pid} started at a different time than daemon.json records — a reused pid` };

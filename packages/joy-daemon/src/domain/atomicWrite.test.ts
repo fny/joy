@@ -132,3 +132,46 @@ test("async twin: success + backup rotation", async () => {
   expect(readFileSync(p + ".joy-bak", "utf8")).toBe("v1");
   expect(leftovers()).toEqual([]);
 });
+
+// #527 residual (Astra): a symlinked destination must be written THROUGH.
+// Renaming over the link replaced it with a regular file, and link(2) on the
+// link made the backup a second symlink to the overwritten target.
+test("symlinked destination: link survives, real target replaced, backup is a COPY of the old contents (#527)", () => {
+  const managed = join(dir, "dotfiles", "settings.json");
+  fs.mkdirSync(join(dir, "dotfiles"));
+  writeFileSync(managed, '{"gen":1}');
+  const link = join(dir, "settings.json");
+  fs.symlinkSync(managed, link);
+
+  writeFileAtomic(link, '{"gen":2}', { backup: true });
+
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);           // the link is intact...
+  expect(fs.readlinkSync(link)).toBe(managed);                      // ...and still points at the managed file
+  expect(readFileSync(managed, "utf8")).toBe('{"gen":2}');          // which holds the new contents
+  const bak = link + ".joy-bak";
+  expect(fs.lstatSync(bak).isSymbolicLink()).toBe(false);           // the backup is a real file, not a link
+  expect(readFileSync(bak, "utf8")).toBe('{"gen":1}');              // with the previous generation
+  expect(leftovers()).toEqual([]);
+  expect(readdirSync(join(dir, "dotfiles")).filter((f) => f.startsWith("."))).toEqual([]);
+});
+
+test("symlinked destination (async twin) and a relative link target", async () => {
+  fs.mkdirSync(join(dir, "real"));
+  writeFileSync(join(dir, "real", "cfg.toml"), "a = 1\n");
+  const link = join(dir, "cfg.toml");
+  fs.symlinkSync(join("real", "cfg.toml"), link); // relative link
+  await writeFileAtomicAsync(link, "a = 2\n", { backup: true });
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+  expect(readFileSync(join(dir, "real", "cfg.toml"), "utf8")).toBe("a = 2\n");
+  expect(fs.lstatSync(link + ".joy-bak").isSymbolicLink()).toBe(false);
+  expect(readFileSync(link + ".joy-bak", "utf8")).toBe("a = 1\n");
+});
+
+test("a DANGLING symlink is resolved to the place it points at; writing there makes the link valid", () => {
+  const link = join(dir, "dangling.json");
+  fs.symlinkSync(join(dir, "elsewhere", "target.json"), link);
+  writeFileAtomic(link, "{}", { backup: true }); // no previous file → nothing to back up
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+  expect(readFileSync(link, "utf8")).toBe("{}");
+  expect(existsSync(link + ".joy-bak")).toBe(false);
+});

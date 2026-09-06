@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync, writeFileSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { machineOps, cloneForSpawn } from "./operations";
+import { machineOps, cloneForSpawn, gitRepoIdentity } from "./operations";
 
 const op = (name: string) => machineOps.find((o) => o.rpcName === name)!;
 
@@ -149,9 +149,9 @@ describe("cloneForSpawn (#547)", () => {
     writeFileSync(join(dst, "WORK.txt"), "agent's uncommitted work");
     // Same destination, an origin that does not exist: with the OLD code this
     // failure's cleanup was `rmSync(dst, {recursive: true})`. Here the target
-    // already has .git, so it is reused (no clone runs); either way nothing
-    // under dst may be removed.
-    await expect(cloneForSpawn("https://local.test/does-not-exist", dst)).resolves.toBeUndefined();
+    // already holds a DIFFERENT repository, so it is refused (#151 residual;
+    // no clone runs); either way nothing under dst may be removed.
+    await expect(cloneForSpawn("https://local.test/does-not-exist", dst)).rejects.toThrow(/holds a different repository/);
     expect(existsSync(join(dst, "WORK.txt"))).toBe(true);
     // A failing clone into a FRESH target leaves nothing behind at all.
     const other = join(root, "other");
@@ -161,11 +161,85 @@ describe("cloneForSpawn (#547)", () => {
     expect(existsSync(join(dst, "WORK.txt"))).toBe(true);
   });
 
+  // #547 residual (Astra): `rmSync(dir, {recursive: false})` raises EISDIR on
+  // ANY directory, so a pre-created empty cwd (the app makes it before the
+  // spawn) failed every clone and threw the finished checkout away.
+  it("a pre-created EMPTY destination is filled by the clone (#547 residual)", async () => {
+    const dst = join(root, "empty");
+    mkdirSync(dst);
+    useLocalOrigin();
+    await expect(cloneForSpawn("https://local.test/origin", dst)).resolves.toBeUndefined();
+    expect(existsSync(join(dst, ".git"))).toBe(true);
+    expect(existsSync(join(dst, "README"))).toBe(true);
+    expect(readdirSync(root).filter((f) => f.includes("joy-clone"))).toEqual([]);
+  });
+
+  // #151 residual (Astra): `.git` present is not proof it is the REQUESTED repo.
+  it("an existing checkout of the SAME repository is reused, whatever the URL spelling", async () => {
+    const dst = join(root, "same");
+    useLocalOrigin();
+    await cloneForSpawn("https://local.test/origin", dst);
+    writeFileSync(join(dst, "WORK.txt"), "keep");
+    // Trailing slash, .git suffix, upper-case host, other transport: one repo.
+    for (const spelling of ["https://local.test/origin/", "https://LOCAL.test/origin.git", "git@local.test:origin.git", "ssh://git@local.test/origin"]) {
+      await expect(cloneForSpawn(spelling, dst)).resolves.toBeUndefined();
+    }
+    expect(existsSync(join(dst, "WORK.txt"))).toBe(true);
+  });
+
+  it("an existing checkout of a DIFFERENT repository is refused with the URL it holds, and left alone (#151 residual)", async () => {
+    const dst = join(root, "other-repo");
+    useLocalOrigin();
+    await cloneForSpawn("https://local.test/origin", dst);
+    execFileSync("git", ["-C", dst, "remote", "set-url", "origin", "https://github.com/acme/unrelated.git"], { stdio: "pipe" });
+    writeFileSync(join(dst, "WORK.txt"), "theirs");
+    await expect(cloneForSpawn("https://local.test/origin", dst)).rejects.toThrow(/holds a different repository \(https:\/\/github\.com\/acme\/unrelated\.git\)/);
+    expect(existsSync(join(dst, "WORK.txt"))).toBe(true);
+    expect(existsSync(join(dst, ".git"))).toBe(true);
+    // A repo with no origin at all is never adopted either.
+    execFileSync("git", ["-C", dst, "remote", "remove", "origin"], { stdio: "pipe" });
+    await expect(cloneForSpawn("https://local.test/origin", dst)).rejects.toThrow(/different repository \(no origin remote\)/);
+  });
+
+  it("gitRepoIdentity normalizes host case, trailing slash, .git and transport", () => {
+    expect(gitRepoIdentity(" https://GitHub.com/acme/App.git/ ")).toBe("github.com/acme/App");
+    expect(gitRepoIdentity("git@github.com:acme/App.git")).toBe("github.com/acme/App");
+    expect(gitRepoIdentity("ssh://git@github.com:22/acme/App")).toBe("github.com/acme/App");
+    expect(gitRepoIdentity("https://github.com/acme/App")).not.toBe(gitRepoIdentity("https://github.com/acme/app2"));
+  });
+
   it("a non-empty non-repo destination is refused and left alone", async () => {
     const dst = join(root, "notrepo");
     mkdirSync(dst);
     writeFileSync(join(dst, "keep.txt"), "mine");
     await expect(cloneForSpawn("https://local.test/origin", dst)).rejects.toThrow(/exists and is not a git repo/);
     expect(existsSync(join(dst, "keep.txt"))).toBe(true);
+  });
+});
+
+// #567 residual (Astra): with the record's unlink AND tombstone both refused,
+// only this process's memory hid the record and kill still said ok:true — a
+// restart resurrected the session. The adapters now report whether a
+// termination marker landed, and the op refuses to call the kill done otherwise.
+describe("kill reports record_not_terminated when no termination marker is durable (#567)", () => {
+  it("adapter says the record survived → ok:false record_not_terminated, HTTP 503; the session was still torn down", async () => {
+    const { s } = fakeSession("bbbb0004", { durable: true, status: "ended" });
+    const notTerminated = Object.assign(s, { recordTerminated: () => false });
+    const r = (await op("joy-kill-session").handler(fakeRegistry(notTerminated).reg as never, { id: "bbbb0004" }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r).toEqual({ ok: false, error: "record_not_terminated" });
+    expect(op("joy-kill-session").httpShape!(r).status).toBe(503);
+    expect(s.killed).toEqual(["forceKill"]);
+  });
+
+  it("adapter confirms the marker (or predates the method) → ok:true as before", async () => {
+    const { s } = fakeSession("bbbb0005", { durable: true, status: "active" });
+    Object.assign(s, { recordTerminated: () => true });
+    expect(await op("joy-kill-session").handler(fakeRegistry(s).reg as never, { id: "bbbb0005" }, { via: "rpc" })).toEqual({ ok: true });
+  });
+
+  it("archive failure still wins (the app runs its fallback archive)", async () => {
+    const { s } = fakeSession("bbbb0006", { durable: true, status: "active" });
+    Object.assign(s, { awaitArchive: async () => false, recordTerminated: () => false });
+    expect(await op("joy-kill-session").handler(fakeRegistry(s).reg as never, { id: "bbbb0006" }, { via: "rpc" })).toEqual({ ok: false });
   });
 });
