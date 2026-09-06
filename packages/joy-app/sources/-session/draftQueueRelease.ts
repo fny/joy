@@ -4,6 +4,7 @@ import { useDraftQueueStore, draftReason } from './draftQueue';
 import type { SendMessageResult } from '@/sync/sync';
 import { randomUUID } from 'expo-crypto';
 import { useCallback, useEffect, useReducer } from 'react';
+import { t } from '@/text';
 
 /**
  * Auto-release for the app-side message queue (draft queue).
@@ -325,7 +326,7 @@ export function settleAcceptedRelease(
             settleCancel(sessionId, draftId);
             const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
             if (draft?.releaseLocalId) parkedCancelFailures.set(key, draft.releaseLocalId);
-            useDraftQueueStore.getState().revertRelease(sessionId, draftId, `cancel failed: ${e instanceof Error ? e.message : String(e)}`);
+            useDraftQueueStore.getState().revertRelease(sessionId, draftId, t('joyQueue.cancelFailed', { reason: e instanceof Error ? e.message : String(e) }));
             return 'cancel_failed' as const;
         },
     );

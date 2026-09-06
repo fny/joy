@@ -17,6 +17,7 @@ vi.mock('@/sync/serverConfig', () => {
 });
 let uuidN = 0;
 vi.mock('expo-crypto', () => ({ randomUUID: () => `L${++uuidN}` }));
+vi.mock('@/text', () => ({ t: (k: string, a?: Record<string, string>) => a ? `${k}:${JSON.stringify(a)}` : k }));
 
 import { useDraftQueueStore } from './draftQueue';
 import { attemptOwnsDraft, cancelRelease, initDraftQueueRelease, isCancelPending, notifyOutboxAcked, settleAcceptedRelease } from './draftQueueRelease';
@@ -189,7 +190,7 @@ describe('removing an item while its send is in flight (#134)', () => {
         expect(cancelTurn).toHaveBeenCalledWith(S, 'turn-1');
         expect(drafts()).toHaveLength(1);
         expect(head().state).toBe('queued');
-        expect(head().lastError).toBe('cancel failed: http_409');
+        expect(head().lastError).toBe('joyQueue.cancelFailed:{"reason":"http_409"}');
         expect(isCancelPending(S, id)).toBe(false);
 
         // Parked: sweeps do not resend the accepted message...
@@ -210,7 +211,7 @@ describe('removing an item while its send is in flight (#134)', () => {
         cancelRelease(S, id);
         notifyOutboxAcked(S, [{ localId: l1, turnId: 'turn-1' }], cancelTurn);
         await vi.advanceTimersByTimeAsync(TICK);
-        expect(head().lastError).toBe('cancel failed: http_409');
+        expect(head().lastError).toBe('joyQueue.cancelFailed:{"reason":"http_409"}');
 
         useDraftQueueStore.getState().retryRelease(S, id);
         await vi.advanceTimersByTimeAsync(16_000); // past the per-session release backstop
@@ -232,7 +233,7 @@ describe('removing an item while its send is in flight (#134)', () => {
         await vi.advanceTimersByTimeAsync(TICK);
         expect(cancelTurn).not.toHaveBeenCalled();
         expect(drafts()).toHaveLength(1);
-        expect(head().lastError).toMatch(/^cancel failed: /);
+        expect(head().lastError).toMatch(/^joyQueue\.cancelFailed:/);
         expect(isCancelPending(S, id)).toBe(false);
     });
 
@@ -301,7 +302,7 @@ describe('settleAcceptedRelease (#134, pure)', () => {
         await expect(settleAcceptedRelease(S, id, 'turn-1', cancelTurn)).resolves.toBe('cancel_failed');
         expect(drafts()).toHaveLength(1);
         expect(head().state).toBe('queued');
-        expect(head().lastError).toBe('cancel failed: different_turn_active');
+        expect(head().lastError).toBe('joyQueue.cancelFailed:{"reason":"different_turn_active"}');
         expect(isCancelPending(S, id)).toBe(false);
     });
 

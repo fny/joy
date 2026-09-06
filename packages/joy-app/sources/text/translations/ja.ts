@@ -313,12 +313,16 @@ export const ja: TranslationStructure = {
         connectionTooSlow: '接続が遅すぎます — より良いネットワークでもう一度お試しください',
         logoutFailed: 'このデバイスから保存済みのログイン情報を削除できませんでした。もう一度お試しください。',
         syncStartFailedReload: 'アプリが同期を開始できませんでした。アプリを再読み込みしてもう一度お試しください。',
+        answerKeptAsDraft: '回答を送信できませんでした。下に下書きとして保存しました。',
+        spawnDidNotStart: 'セッションは受け付けられましたが、時間内に開始しませんでした。そのマシンのデーモンを確認してください。',
     },
 
     newSession: {
         title: '新しいセッションを開始',
         machineOffline: 'マシンがオフラインです',
         switchMachinesHint: '• 上のマシンをクリックしてマシンを切り替えてください',
+        createDirectoryTitle: 'ディレクトリを作成しますか？',
+        createDirectoryMessage: ({ path }: { path: string }) => `ディレクトリ '${path}' はマシン上に存在しません。作成しますか？`,
     },
 
     sessionHistory: {
@@ -415,6 +419,8 @@ export const ja: TranslationStructure = {
         collapse: '折りたたむ',
         moreItems: ({ count }: { count: number }) => `他 ${count} 件`,
         offlineBanner: '接続がありません — キュー内のメッセージはオンラインに戻ると送信されます',
+        removePending: '送信が確定したら削除します…',
+        cancelFailed: ({ reason }: { reason: string }) => `送信をキャンセルできませんでした: ${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

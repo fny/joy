@@ -112,7 +112,7 @@ describe('v2SpawnAndWait', () => {
     it('#416: a refresh that never settles cannot hold the waiter past the deadline', async () => {
         const h = harness({ refreshSessions: () => new Promise(() => { }) });
         const t0 = h.clock.get();
-        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toThrow(/did not start in time/);
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toThrow(/spawnDidNotStart/);
         // Deadline honoured within one poll+step of 120 s, and the accepted
         // spawn was cancelled so no orphan agent starts.
         expect(h.clock.get() - t0).toBeLessThan(120_000 + 15_000);
@@ -123,7 +123,7 @@ describe('v2SpawnAndWait', () => {
         const h = harness({ refreshSessions: async () => { } });
         h.api.sessionState = () => new Promise(() => { });
         const t0 = h.clock.get();
-        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toThrow(/did not start in time/);
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toThrow(/spawnDidNotStart/);
         expect(h.clock.get() - t0).toBeLessThan(120_000 + 25_000);
     });
 
