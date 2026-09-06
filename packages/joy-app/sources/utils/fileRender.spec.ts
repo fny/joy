@@ -47,3 +47,37 @@ describe('imageDataUri', () => {
         expect(imageDataUri('a.png', {})).toBeNull();
     });
 });
+
+describe('parseDelimited — record boundaries', () => {
+    it('a final quoted empty record is one empty field (#431)', () => {
+        expect(parseDelimited('""', ',').rows).toEqual([['']]);
+        expect(parseDelimited('header\n""', ',').rows).toEqual([['header'], ['']]);
+        expect(parseDelimited('a\t""', '\t').rows).toEqual([['a', '']]);
+    });
+
+    it('a carriage return inside a quoted field is data (#432)', () => {
+        expect(parseDelimited('a\n"carriage\r"\n', ',').rows).toEqual([['a'], ['carriage\r']]);
+        expect(parseDelimited('a\r\n"x\r\ny"\r\n', ',').rows).toEqual([['a'], ['x\r\ny']]);
+    });
+
+    it('a complete table exactly at the row limit is not truncated (#433)', () => {
+        expect(parseDelimited('one\ntwo\n', ',', 2)).toEqual({ rows: [['one'], ['two']], truncated: false });
+        expect(parseDelimited('one\ntwo', ',', 2)).toEqual({ rows: [['one'], ['two']], truncated: false });
+        expect(parseDelimited('one\ntwo\n\n', ',', 2).truncated).toBe(false);
+        expect(parseDelimited('one\ntwo\nthree', ',', 2)).toEqual({ rows: [['one'], ['two']], truncated: true });
+        expect(parseDelimited('one\ntwo\n"three"\n', ',', 2).truncated).toBe(true);
+    });
+
+    it('empty input has no rows', () => {
+        expect(parseDelimited('', ',')).toEqual({ rows: [], truncated: false });
+    });
+});
+
+describe('fileRenderKind — extensionless names (#422)', () => {
+    it('a root file named "png" or "md" is not an image or markdown', () => {
+        expect(fileRenderKind('png')).toBeNull();
+        expect(fileRenderKind('dir/md')).toBeNull();
+        expect(isRasterImagePath('png')).toBe(false);
+        expect(imageDataUri('png', { base64: 'AAAA' })).toBeNull();
+    });
+});
