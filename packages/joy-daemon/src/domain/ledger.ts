@@ -592,6 +592,20 @@ export class Ledger {
     }, "settle");
   }
 
+  /** Import only: an attempt row for a legacy in-flight submission, without
+   *  the generation fence (no generation is open while the import runs). */
+  importAttempt(commandId: string, runtimeRef: string | null, state: AttemptState, at: number): AttemptRow {
+    return this.tx(() => {
+      const cmd = this.getCommand(commandId);
+      if (!cmd) throw new StaleCommandError(commandId, "no such command");
+      const n = (this.#get("SELECT COUNT(*) AS n FROM attempts WHERE command_id=?", commandId)?.n as number) + 1;
+      const id = randomUUID();
+      this.#run("INSERT INTO attempts(id,command_id,session_id,generation,attempt_no,payload_version,runtime_ref,state,submitted_at,settled_at,detail) VALUES(?,?,?,0,?,?,?,?,?,?,'imported')",
+        id, commandId, cmd.sessionId, n, cmd.payloadVersion, runtimeRef, state, at, state === "submitting" ? null : at);
+      return this.getAttempt(id)!;
+    }, "importAttempt");
+  }
+
   getAttempt(id: string): AttemptRow | null {
     const r = this.#get("SELECT * FROM attempts WHERE id=?", id);
     return r ? rowAttempt(r) : null;
