@@ -238,6 +238,23 @@ app.
 - Exit: every coverage issue is closed as fixed, won't-fix, or converted to a
   design follow-up; a final summary in this file.
 
+## Progress log
+
+- 2026-09-06 — Wave 0 done (56 closed). Wave A landed (53d22103 fa8d6de5
+  ddc89de1 40873bd6 9d5c53c9 372f7d54 + residual rounds); 19 highs verified
+  and closed; tunnel binding reviewed by a Fable agent, which also found and
+  fixed request replay to the daemon (9a38bc61). Both single-owner locks
+  (daemon singleton, relay data dir) became SQLite `BEGIN IMMEDIATE` locks
+  after four file-protocol rounds each still had a takeover window
+  (0a0db1cd, 7c973766). Wave B merged as three branches (da868c80 daemon,
+  035ac825 app data, d53685b4 app async); Astra review in progress. Wave C
+  design written (`/tmp/joy-test-tmux/review3/waveC-design.md`; decisions:
+  Node ≥ 22.13 for `node:sqlite`, identity fields stay in the window JSON,
+  7-day retention, new client id per attempt, `/steer` stays fire-and-forget);
+  C3 modules in flight; C1/C2 wait behind the Wave A residual merge. Wave D
+  merged (relay 79 tests) with daemon/app contract follow-ups in flight.
+  Wave E1, E2, E5, E6, E7 in flight as isolated worktree agents.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
