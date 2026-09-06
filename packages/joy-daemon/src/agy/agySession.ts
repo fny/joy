@@ -334,7 +334,7 @@ export class AgySession implements AgentSession {
     proc.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: item.text } }) + "\n");
     // The prompt is with the harness: delivered. (Its RESULT is the turn's
     // outcome, reported through the turn-end record; #finalize settles it.)
-    try { this.#ledger.confirmDelivery(item.id, [], { attemptId }); }
+    try { this.#ledger.confirmDelivery(item.id, [], { attemptId, generation: this.#generation }); }
     catch (e) { process.stderr.write(`[agy ${this.id}] ledger confirm for ${item.id} failed: ${e instanceof Error ? e.message : e}\n`); }
   }
 
@@ -451,7 +451,7 @@ export class AgySession implements AgentSession {
     if (status === "failed") {
       try {
         const cmd = this.#ledger.getCommand(run.commandId);
-        if (cmd && cmd.state === "submitting") this.#ledger.settleAttempt(run.attemptId, "rejected", { detail: why.slice(0, 200) });
+        if (cmd && cmd.state === "submitting") this.#ledger.settleAttempt(run.attemptId, "rejected", { detail: why.slice(0, 200), generation: this.#generation });
       } catch (e) { process.stderr.write(`[agy ${this.id}] ledger settle for ${run.commandId} failed: ${e instanceof Error ? e.message : e}\n`); }
     }
     if (this.#run !== run) return; // retired by end() / superseded — not ours to advance

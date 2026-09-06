@@ -370,11 +370,11 @@ export class OpencodeSession implements AgentSession {
           this.#noteAdmitted(item.id, r.admittedSeq >= 0 ? r.admittedSeq : undefined);
           // A cancel that raced the reply wins: confirmDelivery on a cancelled
           // row only adds the receipt (the terminal state stands).
-          try { this.#ledger.confirmDelivery(item.id, [{ kind: "opencode_msg", ref: r.messageID }, ...(item.seq != null ? [{ kind: "seq", ref: String(item.seq) }] : [])], { attemptId }); }
+          try { this.#ledger.confirmDelivery(item.id, [{ kind: "opencode_msg", ref: r.messageID }, ...(item.seq != null ? [{ kind: "seq", ref: String(item.seq) }] : [])], { attemptId, generation: this.#generation }); }
           catch (e) { process.stderr.write(`[opencode ${this.id}] admission commit for ${item.id} failed: ${e instanceof Error ? e.message : e}\n`); }
           this.#recordOutcome(item.id, "delivered");
         } else {
-          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: "no messageID in the prompt reply" }); } catch { /* logged below on the next pass */ }
+          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: "no messageID in the prompt reply", generation: this.#generation }); } catch { /* logged below on the next pass */ }
         }
         // The HTTP ack is admission evidence too: a prompt cancelled while
         // this request was in flight (tombstoned by cancelQueued) is now
@@ -394,12 +394,12 @@ export class OpencodeSession implements AgentSession {
           // keeps its outcome (the row is already terminal).
           process.stderr.write(`[opencode ${this.id}] prompt rejected: ${msg} — dropped\n`);
           const wasOurs = !this.#cancelledIds.has(item.id) && this.#ledger.getCommand(item.id)?.state === "submitting";
-          try { this.#ledger.settleAttempt(attemptId, "rejected", { detail: msg.slice(0, 200) }); } catch { /* best effort */ }
+          try { this.#ledger.settleAttempt(attemptId, "rejected", { detail: msg.slice(0, 200), generation: this.#generation }); } catch { /* best effort */ }
           if (wasOurs) this.#recordOutcome(item.id, "failed");
         } else {
           process.stderr.write(`[opencode ${this.id}] prompt failed: ${msg}\n`);
           // transport failure: an explicit unknown — the deterministic id makes the retry idempotent.
-          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: msg.slice(0, 200) }); } catch { /* best effort */ }
+          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: msg.slice(0, 200), generation: this.#generation }); } catch { /* best effort */ }
         }
       }
     }
@@ -472,7 +472,7 @@ export class OpencodeSession implements AgentSession {
             // after the HTTP ack's confirm; a cancelled row keeps its state).
             const att = this.#ledger.matchAttemptByRef(this.id, eff.messageID);
             if (att || this.#ledger.getCommand(eff.messageID)?.sessionId === this.id) {
-              try { this.#ledger.confirmDelivery(att?.commandId ?? eff.messageID, [{ kind: "opencode_msg", ref: eff.messageID }], { attemptId: att?.id }); }
+              try { this.#ledger.confirmDelivery(att?.commandId ?? eff.messageID, [{ kind: "opencode_msg", ref: eff.messageID }], { attemptId: att?.id, generation: this.#generation }); }
               catch (e) { process.stderr.write(`[opencode ${this.id}] admission commit for ${eff.messageID} failed: ${e instanceof Error ? e.message : e}\n`); }
             }
             this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);

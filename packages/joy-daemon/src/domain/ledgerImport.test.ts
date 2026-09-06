@@ -136,15 +136,132 @@ test("a legacy outbound entry without the sealing flag stays plaintext on a daem
   l.close();
 });
 
-test("a corrupt legacy file is skipped (left in place) and the rest still imports", () => {
+test("an unparseable legacy file is a FAILED import: left in place, reported with its session, not done; the rest still imports; a repair imports next boot", () => {
   writeFileSync(join(dir, "queue-eeee0005.json"), "{not json");
   write("queue-ffff0006.json", [{ id: "ok", text: "fine", createdAt: 1, source: "rpc", mirrorToRelay: true, visible: true }]);
   const l = Ledger.open(dir);
   const r = importLegacyState(l, dir, { sealsContent: false });
   expect(l.listPending("ffff0006").map((c) => c.id)).toEqual(["ok"]);
   expect(l.listPending("eeee0005")).toEqual([]);
-  // Unparseable = nothing to import; the file is still moved aside so it stops being scanned.
-  expect(existsSync(join(dir, "imported-v1", "queue-eeee0005.json"))).toBe(true);
-  expect(r.files).toContain("queue-eeee0005.json");
+  expect(r.failed).toEqual([{ file: "queue-eeee0005.json", error: expect.stringMatching(/^malformed: not JSON/), sessionId: "eeee0005" }]);
+  expect(r.quarantine).toEqual(["eeee0005"]);
+  expect(r.files).not.toContain("queue-eeee0005.json");
+  expect(existsSync(join(dir, "queue-eeee0005.json"))).toBe(true);
+  expect(existsSync(join(dir, "imported-v1", "queue-eeee0005.json"))).toBe(false);
+  expect(l.getImportSource("queue-eeee0005.json")).toBeNull();
+  expect(l.getMeta("import_v1")).toBeNull();
+  // Repaired by hand: the next boot imports it and the import completes.
+  write("queue-eeee0005.json", [{ id: "late", text: "repaired", createdAt: 1, source: "rpc", mirrorToRelay: true, visible: true }]);
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed).toEqual([]);
+  expect(r2.quarantine).toEqual([]);
+  expect(l.listPending("eeee0005").map((c) => c.id)).toEqual(["late"]);
+  expect(l.getMeta("import_v1")).toBe("done");
   l.close();
 });
+
+test("the review's truncated queue file and a transient read error are failed imports: kept, reported, not done — and a wrong-shape file too", () => {
+  writeFileSync(join(dir, "queue-abcdef12.json"), '{"truncated":');
+  write("queue-ffff0006.json", [{ id: "ok", text: "fine", createdAt: 1, source: "rpc", mirrorToRelay: true, visible: true }]);
+  write("codex-inbound-cccc0003.json", { not: "an array" });
+  const real = fs.readFileSync;
+  vi.spyOn(fs, "readFileSync").mockImplementation(((p: unknown, ...rest: unknown[]) => {
+    if (String(p).endsWith("queue-ffff0006.json")) throw Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+    return (real as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof fs.readFileSync);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  vi.restoreAllMocks();
+  expect(r.failed.map((f) => [f.file, f.sessionId])).toEqual([["codex-inbound-cccc0003.json", "cccc0003"], ["queue-abcdef12.json", "abcdef12"], ["queue-ffff0006.json", "ffff0006"]]);
+  expect(r.failed[0].error).toMatch(/^malformed: a codex inbound file/);
+  expect(r.failed[1].error).toMatch(/^malformed: not JSON/);
+  expect(r.failed[2].error).toMatch(/EIO/);
+  expect(r.quarantine).toEqual(["cccc0003", "abcdef12", "ffff0006"]);
+  expect(l.listPending("abcdef12")).toEqual([]);
+  expect(l.listPending("ffff0006")).toEqual([]);
+  expect(listLegacyFiles(dir)).toEqual(["codex-inbound-cccc0003.json", "queue-abcdef12.json", "queue-ffff0006.json"]);
+  expect(existsSync(join(dir, "imported-v1"))).toBe(false);
+  expect(l.getMeta("import_v1")).toBeNull();
+  // The transient one imports on the next boot; the others still wait for repair.
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed.map((f) => f.file)).toEqual(["codex-inbound-cccc0003.json", "queue-abcdef12.json"]);
+  expect(l.listPending("ffff0006").map((c) => c.id)).toEqual(["ok"]);
+  expect(l.getMeta("import_v1")).toBeNull();
+  l.close();
+});
+
+test("a repeated import of a file that could not be moved is a no-op (marker in the ledger, deterministic synthetic ids): one command, one attempt", () => {
+  write("abcdef12.receipts.json", { received: [{ text: "same", at: NOW }] });
+  const l = Ledger.open(dir, { now: () => NOW });
+  vi.spyOn(fs, "renameSync").mockImplementation(() => { throw new Error("EACCES"); });
+  const first = importLegacyState(l, dir, { sealsContent: false, now: () => NOW });
+  expect(first.unmoved).toEqual(["abcdef12.receipts.json"]);
+  expect([first.commands, first.attempts]).toEqual([1, 1]);
+  const second = importLegacyState(l, dir, { sealsContent: false, now: () => NOW });
+  expect(second.repeated).toEqual(["abcdef12.receipts.json"]);
+  expect(second.files).toEqual([]);
+  expect([second.commands, second.attempts]).toEqual([0, 0]);
+  expect(l.listCommands("abcdef12")).toHaveLength(1);
+  expect(l.attemptsAwaiting("abcdef12")).toHaveLength(1);
+  expect(l.listCommands("abcdef12")[0].id).toMatch(/^import:abcdef12:received:[0-9a-f]{12}:0$/);
+  expect(l.getImportSource("abcdef12.receipts.json")).toMatchObject({ contentHash: expect.stringMatching(/^[0-9a-f]{64}$/), importedAt: NOW });
+  expect(l.getMeta("import_v1")).toBeNull(); // still unmoved: not done, but harmless
+  vi.restoreAllMocks();
+  // "Crash", reopen: the same no-op, and the move now completes.
+  const l2 = Ledger.open(dir, { now: () => NOW });
+  const third = importLegacyState(l2, dir, { sealsContent: false, now: () => NOW });
+  expect(third.repeated).toEqual(["abcdef12.receipts.json"]);
+  expect(l2.listCommands("abcdef12")).toHaveLength(1);
+  expect(l2.attemptsAwaiting("abcdef12")).toHaveLength(1);
+  expect(existsSync(join(dir, "imported-v1", "abcdef12.receipts.json"))).toBe(true);
+  expect(l2.getMeta("import_v1")).toBe("done");
+  l.close(); l2.close();
+});
+
+test("an imported codex checkpoint never moves the ledger's cursor backwards", () => {
+  write("codex-checkpoint-abcdef12.json", { deliveredThroughTurnId: "old" });
+  const l = Ledger.open(dir);
+  vi.spyOn(fs, "renameSync").mockImplementation(() => { throw new Error("EACCES"); });
+  importLegacyState(l, dir, { sealsContent: false });
+  expect(l.getCheckpoint("abcdef12", "codex_turn")?.ref).toBe("old");
+  l.setCheckpoint("abcdef12", "codex_turn", "new", 0); // the ledger advanced while the file stayed
+  const again = importLegacyState(l, dir, { sealsContent: false });
+  expect(again.repeated).toEqual(["codex-checkpoint-abcdef12.json"]);
+  expect(l.getCheckpoint("abcdef12", "codex_turn")?.ref).toBe("new");
+  // Even a CHANGED legacy file (no marker match, imported afresh) cannot rewind it.
+  write("codex-checkpoint-abcdef12.json", { deliveredThroughTurnId: "older-still", knownClientIds: ["k1"] });
+  const changed = importLegacyState(l, dir, { sealsContent: false });
+  expect(changed.files).toEqual(["codex-checkpoint-abcdef12.json"]);
+  expect(l.getCheckpoint("abcdef12", "codex_turn")?.ref).toBe("new");
+  expect(l.hasReceipt("abcdef12", "codex_client", "k1")).toBe(true);
+  l.close();
+});
+
+test("ENOSPC after seven bytes during the window-record strip leaves the record intact (atomic replacement); the strip completes next boot", () => {
+  const file = join(dir, "window-abcdef12.json");
+  const original = JSON.stringify({ launchCwd: "/repo", claudeSessionId: "live", transcriptCheckpoint: { path: "/t", offset: 10 } });
+  writeFileSync(file, original);
+  const real = fs.writeSync;
+  vi.spyOn(fs, "writeSync").mockImplementation(((fd: number, buf: Uint8Array, off: number) => {
+    (real as (fd: number, b: Uint8Array, o: number, l: number) => number)(fd, buf, off, 7);
+    throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+  }) as unknown as typeof fs.writeSync);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  vi.restoreAllMocks();
+  expect(readFileSync(file, "utf8")).toBe(original);
+  expect(r.unmoved).toEqual(["window-abcdef12.json"]);
+  expect(r.failed).toEqual([]);
+  expect(l.getCheckpoint("abcdef12", "claude_transcript")).toMatchObject({ ref: "/t", offset: 10 });
+  expect(l.getMeta("import_v1")).toBeNull();
+  expect(readdirSync(dir).filter((n) => n.startsWith(".window-"))).toEqual([]); // no temp left behind
+  // Next boot: the strip lands; the (now newer) ledger checkpoint is not overwritten by the stale field.
+  l.setCheckpoint("abcdef12", "claude_transcript", "/t", 99);
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.unmoved).toEqual([]);
+  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ launchCwd: "/repo", claudeSessionId: "live" });
+  expect(l.getCheckpoint("abcdef12", "claude_transcript")?.offset).toBe(99);
+  expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
