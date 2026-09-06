@@ -189,3 +189,53 @@ test("#515: ending a session whose thread is active clears busy for busy() and t
   expect(s.toJSON().busy).toBe(false);
 });
 
+test("#518: a later turn's ack never checkpoints past a deferred (non-full) earlier turn; the next recovery replays it once full", async () => {
+  const id = "rec-518";
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "completed", itemsView: "partial", items: [] },
+    { id: "T2", status: "completed", itemsView: "full", items: [{ type: "agentMessage", id: "item-0", text: "second answer" }] },
+  ] } };
+  const r1 = fakeRelay();
+  const { s } = await started(id, { relay: r1.relay });
+  expect(r1.sent.filter((x) => x.t === "text").map((x) => x.text)).toEqual(["second answer"]);
+  expect(r1.receipts).toContainEqual({ uuid: "turn:T2", turn: "T2" });
+  r1.ack("T2"); // the relay acks T2's terminal row
+  expect(ledger().getCheckpoint(id, "codex_turn")?.ref ?? null).toBeNull(); // NOT "T2": T1 is a hole before it
+  s.end("process_exited");
+
+  // Second recovery: T1's items are available now — its answer lands, once.
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "completed", itemsView: "full", items: [{ type: "agentMessage", id: "item-0", text: "first answer" }] },
+    { id: "T2", status: "completed", itemsView: "full", items: [{ type: "agentMessage", id: "item-0", text: "second answer" }] },
+  ] } };
+  const r2 = fakeRelay();
+  const { s: s2 } = await started(id, { relay: r2.relay });
+  expect(r2.sent.filter((x) => x.t === "text").map((x) => x.text)).toEqual(["first answer", "second answer"]);
+  r2.ack("T1"); r2.ack("T2");
+  expect(ledger().getCheckpoint(id, "codex_turn")?.ref).toBe("T2");
+  s2.end("killed");
+});
+
+test("#519: a live answer buffered while thread/read was pending re-uses the identity history replay allocated; a new one after the snapshot keeps its own", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-live", status: "inProgress", items: [
+      { type: "userMessage", id: "item-0", content: [{ type: "text", text: "go" }] },
+      { type: "agentMessage", id: "item-1", text: "the answer" },
+    ] },
+  ] } };
+  // The same answer arrives live (under its live id) while the read is pending.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg-live", text: "" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg-live", text: "the answer" } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s, client } = await started("rec-519", { relay, rejoin: true });
+  const texts = () => sent.filter((x) => x.t === "text").map((x) => x.localId);
+  // Replay, then the flushed live copy: the SAME localId (the relay dedupes it) — never agentMessage:1.
+  expect(texts()).toEqual(["codex:TH:turn:T-live:item:agentMessage:0:text", "codex:TH:turn:T-live:item:agentMessage:0:text"]);
+  // A genuinely new answer after the snapshot is the next ordinal.
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg-next", text: "more" } } });
+  expect(texts().at(-1)).toBe("codex:TH:turn:T-live:item:agentMessage:1:text");
+  s.end("killed");
+});
+
