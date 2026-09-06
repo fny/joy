@@ -87,6 +87,19 @@ export class CommandIdConflictError extends LedgerWriteError {
     this.commandId = commandId; this.ownerSessionId = ownerSessionId;
   }
 }
+/** A relay turn id already names another session's command. The relay-turn
+ *  dedupe is global like the id one, and just as owned: a re-offer of a turn
+ *  dedupes only for the session whose row carries it — a second session
+ *  presenting the same turn (under any command id) is refused rather than
+ *  handed the first session's row (review 11cf51b5). */
+export class RelayTurnConflictError extends LedgerWriteError {
+  relayTurnId: string; commandId: string; ownerSessionId: string;
+  constructor(relayTurnId: string, commandId: string, ownerSessionId: string, sessionId: string) {
+    super("accept", `relay turn ${relayTurnId}: command ${commandId} is owned by session ${ownerSessionId}, not ${sessionId}`);
+    this.name = "RelayTurnConflictError";
+    this.relayTurnId = relayTurnId; this.commandId = commandId; this.ownerSessionId = ownerSessionId;
+  }
+}
 
 // ── rows ─────────────────────────────────────────────────────────────────────
 
@@ -547,8 +560,13 @@ export class Ledger {
    *  seq / id already exists (same id back, no second row); `receipt` = the
    *  seq was already delivered (the retained receipt or the terminal row
    *  says so) — the caller acks the redelivery without dispatching (#516).
-   *  A caller-chosen id that another session already owns is refused
-   *  (CommandIdConflictError): ids are global, dedupe is per owner. */
+   *  Every dedupe result is checked for ownership before it is returned
+   *  (review 7652e686, 11cf51b5): a caller-chosen id another session owns
+   *  is refused (CommandIdConflictError), a relay turn another session's
+   *  row carries is refused (RelayTurnConflictError), and a retained seq
+   *  receipt — already looked up under the caller's session — is honoured
+   *  only if the command it names is not another session's. Ids and turns
+   *  are global; dedupe is per owner. */
   acceptCommand(c: NewCommand): { id: string; deduped: "none" | "pending" | "receipt"; row: CommandRow | null } {
     return this.tx(() => {
       const gen = this.currentGeneration(c.sessionId);
@@ -564,10 +582,15 @@ export class Ledger {
         const bySeq = this.commandForSeq(c.sessionId, c.seq);
         if (bySeq) return { id: bySeq.id, deduped: isTerminalState(bySeq.state) ? "receipt" : "pending", row: bySeq };
         const receipt = this.getReceipt(c.sessionId, "seq", String(c.seq));
-        if (receipt) return { id: receipt.commandId ?? `seq:${c.seq}`, deduped: "receipt", row: null };
+        if (receipt) {
+          const named = receipt.commandId ? this.getCommand(receipt.commandId) : null;
+          if (named && named.sessionId !== c.sessionId) throw new CommandIdConflictError(named.id, named.sessionId, c.sessionId);
+          return { id: receipt.commandId ?? `seq:${c.seq}`, deduped: "receipt", row: null };
+        }
       }
       if (c.relayTurnId) {
         const byTurn = this.commandForRelayTurn(c.relayTurnId);
+        if (byTurn && byTurn.sessionId !== c.sessionId) throw new RelayTurnConflictError(c.relayTurnId, byTurn.id, byTurn.sessionId, c.sessionId);
         if (byTurn) return { id: byTurn.id, deduped: isTerminalState(byTurn.state) ? "receipt" : "pending", row: byTurn };
       }
       const id = c.id ?? randomUUID().slice(0, 8);
