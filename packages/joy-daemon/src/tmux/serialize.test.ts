@@ -7,7 +7,7 @@ import { tmuxQuoteArg, tmuxCommand } from "./serialize";
 
 describe("tmuxQuoteArg — barewords pass through", () => {
   test("window target", () => expect(tmuxQuoteArg("joy:j-abc123")).toBe("joy:j-abc123"));
-  test("pane id", () => expect(tmuxQuoteArg("%5")).toBe("%5"));
+  test("percent inside a word", () => expect(tmuxQuoteArg("50%")).toBe("50%"));
   test("flags", () => { expect(tmuxQuoteArg("-l")).toBe("-l"); expect(tmuxQuoteArg("--")).toBe("--"); });
   test("named keys", () => { for (const k of ["C-c", "C-u", "Escape", "BTab", "Enter", "1"]) expect(tmuxQuoteArg(k)).toBe(k); });
   test("format-free value with =,./", () => expect(tmuxQuoteArg("window-size=manual/path.x")).toBe("window-size=manual/path.x"));
@@ -15,6 +15,11 @@ describe("tmuxQuoteArg — barewords pass through", () => {
 
 describe("tmuxQuoteArg — lexer metacharacters get single-quoted", () => {
   test("empty string → ''", () => expect(tmuxQuoteArg("")).toBe("''"));
+  test("%-prefixed words are quoted: tmux parses bare %if/%endif as directives (#593)", () => {
+    for (const w of ["%if", "%elif", "%else", "%endif"]) expect(tmuxQuoteArg(w)).toBe(`'${w}'`);
+    // A pane id is also %-prefixed; quoted it still resolves as a target (verified live).
+    expect(tmuxQuoteArg("%5")).toBe("'%5'");
+  });
   test("spaces", () => expect(tmuxQuoteArg("hello world")).toBe("'hello world'"));
   test("single quote → '\\'' escape", () => expect(tmuxQuoteArg("a'b")).toBe("'a'\\''b'"));
   test("semicolon stays ONE arg", () => expect(tmuxQuoteArg("semi;colon")).toBe("'semi;colon'"));

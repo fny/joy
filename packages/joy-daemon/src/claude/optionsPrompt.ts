@@ -2,6 +2,7 @@ import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { joyStateDir } from "../paths";
+import { shellQuote } from "../domain/quote";
 
 // Mirrors joy-app's sources/sync/prompt/systemPrompt.ts. The joy app injects
 // this per-message via the SDK so Claude emits <joy-options>…</joy-options> blocks that
@@ -49,5 +50,8 @@ export function optionsPromptArg(baseDir = joyStateDir()): string {
   } catch (e) {
     process.stderr.write(`[options-prompt] failed to write: ${e}\n`);
   }
-  return `"$(cat '${path}')"`;
+  // The path is a shell word inside the substitution: an apostrophe in the
+  // state dir (/tmp/Jane's joy) used to leave the quote unterminated and
+  // Claude never launched (#472).
+  return `"$(cat ${shellQuote(path)})"`;
 }

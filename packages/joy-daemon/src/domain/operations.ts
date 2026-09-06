@@ -27,6 +27,7 @@ import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetc
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
 import { joySessionDir } from "../paths";
 import { ReverseUtf8Assembler } from "./textStream";
+import { shellJoin } from "./quote";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, dirname, join, resolve as resolvePath } from "path";
@@ -117,7 +118,7 @@ function scheduleDaemonRestart(): void {
       // Reconstruct however this process was launched (node + any loader flags
       // like `--import tsx` + the script path) so the replacement runs the same way.
       const argv = [process.execPath, ...process.execArgv, ...process.argv.slice(1)];
-      const cmd = argv.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+      const cmd = shellJoin(argv); // one quoting helper for every generated command line (#470 family)
       spawn("sh", ["-c", `sleep 1; exec ${cmd}`], {
         detached: true,
         stdio: "ignore",
