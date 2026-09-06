@@ -474,6 +474,37 @@ test("#519: a history item under a RUNTIME id is never content-matched — an eq
   s.end("killed");
 });
 
+test.each([
+  ["positional", "item-0"],
+  ["exact runtime", "msg-a"],
+])("#519: a REPEATED completion buffered during the read is the same occurrence — it never consumes a second history slot, and the next live item takes that slot (%s history id)", async (_label, firstId) => {
+  // Two equal answers in history; the live buffer carries msg-a, msg-a
+  // AGAIN (a re-delivered completion), then msg-b — all inside the snapshot.
+  H.history = { thread: { id: "TH", turns: [{ id: "T-live", status: "inProgress", items: [
+    { type: "agentMessage", id: firstId, text: "same answer" },
+    { type: "agentMessage", id: "item-1", text: "same answer" },
+  ] }] } };
+  H.onThreadRead = (client) => {
+    for (const id of ["msg-a", "msg-a", "msg-b"]) client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id, text: "same answer" } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s, client } = await started(`rec-519-repeat-${firstId}`, { relay, rejoin: true });
+  const texts = () => sent.filter((x) => x.t === "text").map((x) => x.localId);
+  expect(texts()).toEqual([
+    "codex:TH:turn:T-live:item:agentMessage:0:text", // replay, first answer
+    "codex:TH:turn:T-live:item:agentMessage:1:text", // replay, second answer
+    "codex:TH:turn:T-live:item:agentMessage:0:text", // msg-a → the first slot
+    "codex:TH:turn:T-live:item:agentMessage:0:text", // msg-a again → the SAME identity (relay-deduped); the repeat used to eat slot :1
+    "codex:TH:turn:T-live:item:agentMessage:1:text", // msg-b → the second slot (it used to be pushed to a third ordinal, :2)
+  ]);
+  expect(new Set(texts()).size).toBe(2); // two occurrences, two identities
+  // An ordinary duplicate after buffering still re-uses its identity.
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg-b", text: "same answer" } } });
+  expect(texts().at(-1)).toBe("codex:TH:turn:T-live:item:agentMessage:1:text");
+  expect(new Set(texts()).size).toBe(2);
+  s.end("killed");
+});
+
 // #625: a FRESH spawn (the old app-server died) finds our prompt in a turn
 // history still calls inProgress. The turn is dead with that server; the row
 // must settle either way — re-sent when nothing came of the prompt, ended

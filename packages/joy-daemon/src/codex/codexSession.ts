@@ -629,14 +629,25 @@ export class CodexSession implements AgentSession {
    *  execution however equal its content — call_old/call_new never alias.
    *  Equality of a command alone is not proof either: a NEW `date` buffered
    *  after the snapshot aliased the old `date` and the relay deduped its
-   *  result away. An ambiguous occurrence keeps its own identity. */
+   *  result away. An ambiguous occurrence keeps its own identity.
+   *  One candidate per (turn, type, live id): a REPEATED completion of the
+   *  same live item is the same occurrence, not another — it is coalesced
+   *  before either pass, so it can neither consume a second history slot
+   *  nor enter the content fallback. Uncoalesced, the repeat of msg-a
+   *  claimed the slot of an equal second answer and the real msg-b was
+   *  pushed to a third ordinal: three relay identities for two occurrences.
+   *  And a slot is consumed only when the normalizer actually binds — an id
+   *  it already knows keeps the identity it has and leaves the slot free. */
   #bindBufferedToHistory(buffered: Array<{ n: CodexNotification; seq: number }>): void {
     const history = this.#historyItems;
     this.#historyItems = new Map();
     const boundary = this.#snapshotBoundary;
     this.#snapshotBoundary = 0;
     if (!history.size) return;
-    const inside: Array<{ turnId: string; type: string; id: string; item: Record<string, unknown> }> = [];
+    type Candidate = { turnId: string; type: string; id: string; item: Record<string, unknown> };
+    // Coalesced by occurrence identity, in first-seen order; a repeat's
+    // payload (the latest word on the item) replaces the earlier one.
+    const inside = new Map<string, Candidate>();
     for (const { n, seq } of buffered) {
       if (seq > boundary || n.method !== "item/completed") continue;
       const p = n.params ?? {};
@@ -645,15 +656,17 @@ export class CodexSession implements AgentSession {
       const id = typeof item.id === "string" ? item.id : "";
       const type = typeof item.type === "string" ? item.type : "";
       if (!history.has(turnId) || !id || !type) continue;
-      inside.push({ turnId, type, id, item });
+      const key = `${turnId}|${type}|${id}`;
+      const seen = inside.get(key);
+      if (seen) seen.item = item; else inside.set(key, { turnId, type, id, item });
     }
     // Pass 1 — exact runtime ids: each binds its own twin, nothing else may.
-    const unbound: typeof inside = [];
-    for (const c of inside) {
+    // A live id the normalizer already knows keeps that identity: no slot.
+    const unbound: Candidate[] = [];
+    for (const c of inside.values()) {
       const hit = history.get(c.turnId)!.find((h) => !h.matched && h.type === c.type && h.id === c.id);
       if (!hit) { unbound.push(c); continue; }
-      hit.matched = true;
-      this.#norm.bindTransient(c.turnId, c.type, c.id, hit.ordinal);
+      if (this.#norm.bindTransient(c.turnId, c.type, c.id, hit.ordinal)) hit.matched = true;
     }
     // Pass 2 — whole-content twins among the still-unclaimed POSITIONAL
     // history items, for the live ids no history id named.
@@ -662,8 +675,7 @@ export class CodexSession implements AgentSession {
       if (!sig) continue;
       const hit = history.get(c.turnId)!.find((h) => !h.matched && h.type === c.type && isPositionalHistoryId(h.id) && h.sig === sig);
       if (!hit) continue;
-      hit.matched = true;
-      this.#norm.bindTransient(c.turnId, c.type, c.id, hit.ordinal);
+      if (this.#norm.bindTransient(c.turnId, c.type, c.id, hit.ordinal)) hit.matched = true;
     }
   }
 
