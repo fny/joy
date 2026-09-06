@@ -1,3 +1,14 @@
+# Sep 6 (2) — Safety fixes
+
+- **A permission mode change shows only once the machine confirms it.** Picking Plan while the change failed used to display Plan while prompts kept running under the old mode — across refreshes and restarts. A failed change is now reported, and the shown mode follows what the agent is actually in.
+- **Cleaning up a folder stops its running sessions first.** Deleting a folder's session records left live agents working with no history behind them. Running sessions are stopped and confirmed stopped before their records go; a session that cannot be stopped keeps its record, and the dialog says so.
+- **Detached-session cleanup leaves a restarted session alone.** The list is re-read after you confirm, and each session is checked with its machine right before it is closed.
+- **Teleport honours the model and permission mode you pick.** The screen sends what it shows, hides the options a teleport cannot apply, starts from the source session's settings, and delivers an initial prompt after the session lands.
+- **Terminal sends no longer interleave.** Pressing the keyboard's Send while a previous message was still landing could merge two messages and press Enter twice. One operation at a time now; your text stays in the box until it can go.
+- **A machine's answers are tied to the request that asked.** A reply recorded for one request can no longer be passed off as the answer to a later one. *Needs the updated daemon — replies from an older daemon are refused.*
+- **Starting a session from a Git URL asks the machine to clone it** into `~/Workspace/<repo>` before launching. *Needs the updated daemon; an older daemon ignores the URL.*
+- **The web build's static HTML export no longer fails** on a theme listener that needs a browser.
+
 # Sep 6 — Review fixes
 
 - **A chat you return to keeps updating.** Going back to a session that stayed open under another screen could leave it frozen: the app had stopped treating it as the one on screen, so it no longer polled. Focus now decides which session is live.

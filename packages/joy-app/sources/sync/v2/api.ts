@@ -150,6 +150,9 @@ export const v2 = {
         fallbackModel?: string;
         forkSession?: boolean;
         extraArgs?: string;
+        /** Clone this repository into cwd before launching (the daemon clones
+         *  first and reports `clone_failed:<msg>` as a spawn failure; #151). */
+        gitUrl?: string;
     }) =>
         v2fetch('POST', '/sessions', {
             mode: 'spawn', daemonId: machineId, creationIntentId: randomUUID(),

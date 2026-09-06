@@ -298,6 +298,7 @@ export const en = {
 
     errors: {
         sendFailedTitle: 'Message Not Sent',
+        spawnFailed: ({ reason }: { reason: string }) => `The session could not start: ${reason}`,
         sendFailedMessage: 'Your message could not be sent. It has been put back in the composer so you can try again.',
         networkError: 'Network error occurred',
         serverError: 'Server error occurred',
@@ -325,6 +326,7 @@ export const en = {
         userNotFound: 'User not found',
         sessionDeleted: 'Session has been deleted',
         sessionDeletedDescription: 'This session has been permanently removed',
+        permissionModeChangeFailed: ({ error }: { error: string }) => `Permission mode was not changed: ${error}. The agent keeps its current mode.`,
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>

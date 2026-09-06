@@ -232,6 +232,7 @@ export const ru: TranslationStructure = {
 
     errors: {
         sendFailedTitle: 'Сообщение не отправлено',
+        spawnFailed: ({ reason }: { reason: string }) => `Не удалось запустить сессию: ${reason}`,
         sendFailedMessage: 'Не удалось отправить сообщение. Оно возвращено в поле ввода, чтобы вы могли попробовать снова.',
         networkError: 'Произошла ошибка сети',
         serverError: 'Произошла ошибка сервера',
@@ -259,6 +260,7 @@ export const ru: TranslationStructure = {
         userNotFound: 'Пользователь не найден',
         sessionDeleted: 'Сессия была удалена',
         sessionDeletedDescription: 'Эта сессия была окончательно удалена',
+        permissionModeChangeFailed: ({ error }: { error: string }) => `Режим разрешений не изменён: ${error}. Агент остаётся в текущем режиме.`,
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>

@@ -89,8 +89,12 @@ setDefaultFontFamily(fontOverride);
 applyAppearance(themePalette, customPalette, accentOverrides);
 applyDarkAppearance(themePaletteDark);
 
-// Re-sync theme when tab becomes visible (web only — Appearance API may miss changes while hidden)
-if (Platform.OS === 'web' && themePreference === 'adaptive') {
+// Re-sync theme when tab becomes visible (web only — Appearance API may miss changes while hidden).
+// Guarded on `document`: this module is also imported by app/+html.tsx, which
+// Expo evaluates in Node during static rendering (Platform.OS is 'web' there
+// but there is no DOM) — an unguarded listener threw "document is not defined"
+// and aborted the HTML export before Root could render (#184).
+if (Platform.OS === 'web' && themePreference === 'adaptive' && typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             const themeName = Appearance.getColorScheme() === 'dark' ? 'dark' : 'light';

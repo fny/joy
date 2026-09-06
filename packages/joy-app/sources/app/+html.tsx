@@ -1,4 +1,8 @@
 import { ScrollViewStyleReset } from 'expo-router/html';
+// Configures Unistyles (themes, breakpoints, CSS vars) for the static render.
+// The module is Node-safe: its only browser hook (the visibilitychange theme
+// re-sync) is guarded on `document` existing, because this file runs without
+// a DOM.
 import '../unistyles';
 
 // This file is web-only and used to configure the root HTML for every

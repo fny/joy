@@ -15,6 +15,7 @@ vi.mock('@/encryption/hmac_sha512', () => ({
 }));
 
 // ── daemon-side implementation (copied from sealedStream.ts) ───────────────
+const bindingOf = (requestWire: Uint8Array) => Buffer.from(requestWire.subarray(0, 16)).toString('hex');
 const hmac512 = (k: Uint8Array, d: Uint8Array) => createHmac('sha512', Buffer.from(k)).update(Buffer.from(d)).digest();
 function daemonDeriveTunnelKey(master: Uint8Array, machineId: string): Uint8Array {
     const I = hmac512(new TextEncoder().encode('Joy Tunnel Master Seed'), master);
@@ -28,7 +29,8 @@ function daemonStreamKey(tunnelKey: Uint8Array, streamId: Uint8Array): Buffer {
 function nonceFor(counter: bigint): Buffer {
     const n = Buffer.alloc(24); n.writeBigUInt64BE(counter, 16); return n;
 }
-/** Daemon seals a response stream (head + body). */
+/** Daemon seals a response stream (head + body). The executor always binds the
+ *  head to the request it answers: r = hex(request streamId) (#418). */
 function daemonSealResponse(tunnelKey: Uint8Array, head: unknown, body: Uint8Array): Uint8Array {
     const streamId = new Uint8Array(randomBytes(16));
     const key = daemonStreamKey(tunnelKey, streamId);
@@ -85,8 +87,9 @@ describe('tunnel crypto interop (app libsodium ↔ daemon node:crypto)', () => {
         const origFetch = globalThis.fetch;
         globalThis.fetch = (async (_u: unknown, init: { body?: Uint8Array }) => {
             captured = init.body as Uint8Array;
-            // reply with a daemon-sealed response so tunnelFetch completes
-            const resp = daemonSealResponse(key, { s: 200, h: { 'content-type': 'application/json' } }, new TextEncoder().encode('{"ok":true}'));
+            // reply with a daemon-sealed response so tunnelFetch completes —
+            // bound to the request, as the executor does
+            const resp = daemonSealResponse(key, { s: 200, h: { 'content-type': 'application/json' }, r: bindingOf(captured!) }, new TextEncoder().encode('{"ok":true}'));
             return { ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => resp.buffer } as never;
         }) as never;
         const r = await mod.tunnelFetch({
@@ -108,16 +111,69 @@ describe('tunnel crypto interop (app libsodium ↔ daemon node:crypto)', () => {
         const mod = await import('./tunnel');
         const master = new Uint8Array(randomBytes(32));
         const key = await mod.deriveTunnelKey(master, 'm2');
-        const full = daemonSealResponse(key, { s: 200, h: {} }, new TextEncoder().encode('body'));
-        const cut = full.subarray(0, full.length - 10); // lose the FINAL frame tail
         const origFetch = globalThis.fetch;
-        globalThis.fetch = (async () => ({
-            ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => cut.buffer.slice(cut.byteOffset, cut.byteOffset + cut.length),
-        }) as never) as never;
+        globalThis.fetch = (async (_u: unknown, init: { body?: Uint8Array }) => {
+            const full = daemonSealResponse(key, { s: 200, h: {}, r: bindingOf(init.body!) }, new TextEncoder().encode('body'));
+            const cut = full.subarray(0, full.length - 10); // lose the FINAL frame tail
+            return { ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => cut.buffer.slice(cut.byteOffset, cut.byteOffset + cut.length) } as never;
+        }) as never;
         await expect(mod.tunnelFetch({
             relayUrl: 'https://relay.test', accountToken: 't', machineKey: master, machineId: 'm2',
             method: 'GET', path: '/v2/status',
         })).rejects.toThrow();
+        globalThis.fetch = origFetch;
+    });
+
+    // #418 — a relay that records the sealed success for one write and hands
+    // it back for a later write on the same machine. Same key, same machine,
+    // a perfectly authentic stream: only the request it was bound to differs.
+    it('a response recorded for another request is refused, never read as this request\'s success', async () => {
+        const mod = await import('./tunnel');
+        const master = new Uint8Array(randomBytes(32));
+        const key = await mod.deriveTunnelKey(master, 'm3');
+        const origFetch = globalThis.fetch;
+        const opts = { relayUrl: 'https://relay.test', accountToken: 't', machineKey: master, machineId: 'm3', method: 'PUT', path: '/v2/sessions/s1/files/content' };
+        // 1st write: the relay forwards honestly and RECORDS the daemon's answer.
+        let recorded: Uint8Array | null = null;
+        globalThis.fetch = (async (_u: unknown, init: { body?: Uint8Array }) => {
+            recorded = daemonSealResponse(key, { s: 200, h: {}, r: bindingOf(init.body!) }, new TextEncoder().encode('{"success":true,"hash":"v1"}'));
+            return { ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => recorded!.buffer.slice(recorded!.byteOffset, recorded!.byteOffset + recorded!.length) } as never;
+        }) as never;
+        const first = await mod.tunnelFetch({ ...opts, body: new TextEncoder().encode('{"content":"v1"}') });
+        expect(first.status).toBe(200);
+        // 2nd write: suppressed by the relay, which returns the recorded bytes.
+        globalThis.fetch = (async () => ({
+            ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => recorded!.buffer.slice(recorded!.byteOffset, recorded!.byteOffset + recorded!.length),
+        }) as never) as never;
+        await expect(mod.tunnelFetch({ ...opts, body: new TextEncoder().encode('{"content":"v2"}') }))
+            .rejects.toMatchObject({ name: 'TunnelError', code: 'unbound_response' });
+        globalThis.fetch = origFetch;
+    });
+
+    it('a response with no binding at all (pre-binding daemon) is refused too', async () => {
+        const mod = await import('./tunnel');
+        const master = new Uint8Array(randomBytes(32));
+        const key = await mod.deriveTunnelKey(master, 'm4');
+        const origFetch = globalThis.fetch;
+        globalThis.fetch = (async () => {
+            const resp = daemonSealResponse(key, { s: 200, h: {} }, new TextEncoder().encode('{}'));
+            return { ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => resp.buffer.slice(resp.byteOffset, resp.byteOffset + resp.length) } as never;
+        }) as never;
+        await expect(mod.tunnelFetch({ relayUrl: 'https://relay.test', accountToken: 't', machineKey: master, machineId: 'm4', method: 'GET', path: '/v2/status' }))
+            .rejects.toMatchObject({ code: 'unbound_response' });
+        globalThis.fetch = origFetch;
+    });
+
+    it('a reflected REQUEST stream is never accepted as a response', async () => {
+        const mod = await import('./tunnel');
+        const master = new Uint8Array(randomBytes(32));
+        const origFetch = globalThis.fetch;
+        globalThis.fetch = (async (_u: unknown, init: { body?: Uint8Array }) => {
+            const b = init.body!;
+            return { ok: true, headers: { get: () => 'application/octet-stream' }, arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.length) } as never;
+        }) as never;
+        await expect(mod.tunnelFetch({ relayUrl: 'https://relay.test', accountToken: 't', machineKey: master, machineId: 'm5', method: 'GET', path: '/v2/status' }))
+            .rejects.toMatchObject({ code: 'bad_response_head' });
         globalThis.fetch = origFetch;
     });
 });

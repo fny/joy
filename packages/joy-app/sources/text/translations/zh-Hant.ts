@@ -253,6 +253,7 @@ export const zhHant: TranslationStructure = {
 
     errors: {
         sendFailedTitle: '訊息未傳送',
+        spawnFailed: ({ reason }: { reason: string }) => `無法啟動工作階段：${reason}`,
         sendFailedMessage: '無法傳送訊息。已將其放回輸入框，您可以重試。',
         networkError: '發生網路錯誤',
         serverError: '發生伺服器錯誤',
@@ -280,6 +281,7 @@ export const zhHant: TranslationStructure = {
         userNotFound: '未找到使用者',
         sessionDeleted: '工作階段已被刪除',
         sessionDeletedDescription: '此工作階段已被永久刪除',
+        permissionModeChangeFailed: ({ error }: { error: string }) => `權限模式未變更：${error}。代理保持目前模式。`,
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>

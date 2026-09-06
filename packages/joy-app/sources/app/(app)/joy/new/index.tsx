@@ -44,7 +44,7 @@ import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
-import { v2SpawnAndWait, waitForLocalSession } from '@/sync/v2/spawn';
+import { v2SpawnAndWait, waitForLocalSession, type V2SpawnSpec } from '@/sync/v2/spawn';
 import type { Machine, Session } from '@/sync/storageTypes';
 import {
     getEffortLevelsForModel,
@@ -123,15 +123,29 @@ function NewJoyTmuxSessionScreen() {
     // and resumes it. Files are never copied — the folder is assumed synced.
     const teleportFrom = params.teleportFrom ?? null;
     const teleportSource = teleportFrom ? (storage.getState().sessions[teleportFrom] ?? null) : null;
+    // A teleport is Claude-only (the transcript is resumed with --fork-session)
+    // and the import applies exactly two options: model and permission mode.
+    // The form shows only what is sent (#152): agent locked, the rows the
+    // import cannot apply hidden, and the two pickers pre-set from the source
+    // session so an untouched form carries the source's settings over.
+    const isTeleport = !!teleportFrom;
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
     const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode' | 'pi' | 'agy'>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
-    const [modelIndex, setModelIndex] = React.useState(0);
+    const [modelIndex, setModelIndex] = React.useState(() => {
+        const src = teleportSource?.modelMode ?? teleportSource?.metadata?.currentModelCode;
+        const i = src ? JOY_CLAUDE_MODELS.findIndex(m => m.key === src) : -1;
+        return i >= 0 ? i : 0;
+    });
     const [effortIndex, setEffortIndex] = React.useState(0);
     // Permission mode, cycled by tapping the row. Index 0 = yolo
     // (bypassPermissions) — the joy-tmux default, since the app drives the
     // session and answering permission prompts through tmux is fragile.
-    const [modeIndex, setModeIndex] = React.useState(0);
+    const [modeIndex, setModeIndex] = React.useState(() => {
+        const src = teleportSource?.permissionMode ?? teleportSource?.metadata?.currentOperatingModeCode;
+        const i = src ? JOY_CLAUDE_PERMISSION_MODES.findIndex(m => m.key === src) : -1;
+        return i >= 0 ? i : 0;
+    });
     // Fallback model (--fallback-model) — index 0 = none.
     const [fallbackIndex, setFallbackIndex] = React.useState(0);
     // When true, joy-tmux launches `claude --continue …`, resuming the most
@@ -459,19 +473,36 @@ function NewJoyTmuxSessionScreen() {
                 if (!sctx || !dctx) throw new Error('Both machines must be online to teleport');
                 const exp = await machineTeleportExport(sctx, srcLocalId);
                 if (!exp.data?.ok || !exp.data.claudeSessionId || !exp.data.transcriptBase64) throw new Error(exp.data?.error || 'Export failed');
+                // The destination gets what the form SHOWS — the picked model
+                // and permission mode — not the source's exported values, which
+                // silently overrode an explicit choice (#152: Plan selected,
+                // bypassPermissions applied).
                 const imp = await machineTeleportImport(dctx, {
                     cwd, claudeSessionId: exp.data.claudeSessionId, transcriptBase64: exp.data.transcriptBase64,
-                    model: exp.data.model, permissionMode: exp.data.permissionMode, createDir: true,
+                    model: currentModel?.key ?? exp.data.model, permissionMode: currentMode.key, createDir: true,
                 });
                 if (!imp.data?.ok || !imp.data.localSessionId) throw new Error(imp.data?.error || 'Import failed');
                 const landed = await waitForLocalSession(imp.data.localSessionId);
                 if (!landed) throw new Error('The teleported session did not appear within a minute');
+                // The prompt box is shown, so it must do something: deliver it
+                // to the landed session like a fresh spawn does.
+                const teleportPrompt = prompt.trim();
+                if (teleportPrompt) {
+                    const sendRes = await sync.sendMessage(landed, teleportPrompt, { source: 'new_session' });
+                    if (!sendRes.ok) Modal.alert(t('common.error'), `Initial message not sent: ${sendRes.reason ?? 'unknown'}`);
+                }
                 router.back();
                 setTimeout(() => router.push(`/session/${landed}` as never), 100);
                 return;
             }
-            const sessionId = await v2SpawnAndWait(selectedMachineId, {
+            // Git-URL spawn: the daemon clones (or reuses) the URL into cwd
+            // BEFORE launching, and the spawn fails — instead of starting an
+            // agent in an empty folder — if the clone does (#151). `gitUrl` is
+            // the daemon create op's own parameter name; the v2 spawn spec
+            // type does not list it yet, hence the widened literal.
+            const spawnSpec: V2SpawnSpec & { gitUrl?: string } = {
                 cwd,
+                gitUrl: gitClone?.url,
                 agent: selectedAgent,
                 // Codex/opencode carry their own model ids from their catalogs;
                 // claude sends its key. Effort is claude/codex only.
@@ -485,7 +516,8 @@ function NewJoyTmuxSessionScreen() {
                 fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
                 forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
                 extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' ? (extraArgs.trim() || undefined) : undefined,
-            });
+            };
+            const sessionId = await v2SpawnAndWait(selectedMachineId, spawnSpec as V2SpawnSpec);
             if (!sessionId) return; // user declined the directory prompt
 
             // Remember this machine+folder so the next new-session pre-selects it.
@@ -585,7 +617,7 @@ function NewJoyTmuxSessionScreen() {
                             {/* Agent badge (tap to toggle claude ↔ codex) + model + effort */}
                             <View style={styles.configRow}>
                                 <Ionicons name="terminal-outline" size={15} color={theme.colors.textSecondary} />
-                                <Pressable onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : a === 'opencode' ? 'pi' : a === 'pi' ? 'agy' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                <Pressable disabled={isTeleport} onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : a === 'opencode' ? 'pi' : a === 'pi' ? 'agy' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
                                     <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : selectedAgent === 'opencode' ? 'opencode' : selectedAgent === 'pi' ? 'pi' : selectedAgent === 'agy' ? 'antigravity' : 'claude code'}</Text>
                                 </Pressable>
                                 {selectedAgent === 'codex' && codexModel && (
@@ -631,7 +663,7 @@ function NewJoyTmuxSessionScreen() {
                                     </>
                                 )}
                                 {/* Claude effort — codex has its own effort item above. */}
-                                {selectedAgent === 'claude' && effortLevels.length > 0 && currentEffort && (
+                                {selectedAgent === 'claude' && !isTeleport && effortLevels.length > 0 && currentEffort && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
                                         <Pressable onPress={cycleEffort} style={(p) => [p.pressed && styles.configRowPressed]}>
@@ -666,6 +698,20 @@ function NewJoyTmuxSessionScreen() {
                             </Pressable>
                             )}
 
+                            {/* Teleport: the import applies model + permission mode only;
+                                everything below is a fresh-spawn option and is hidden so
+                                the form never shows a control that is ignored (#152). */}
+                            {isTeleport && (
+                            <View style={styles.configRow}>
+                                <Ionicons name="airplane-outline" size={15} color={theme.colors.textSecondary} />
+                                <Text style={styles.configLabel} numberOfLines={1}>teleport</Text>
+                                <Text style={styles.configHint} numberOfLines={1}>
+                                    continues the conversation here with the model and mode above
+                                </Text>
+                            </View>
+                            )}
+
+                            {!isTeleport && (<>
                             {/* Claude-only: fallback model (--fallback-model). */}
                             {selectedAgent === 'claude' && (<>
                             {/* Fallback model — tap to cycle. */}
@@ -848,6 +894,7 @@ function NewJoyTmuxSessionScreen() {
                                 />
                             </View>
                             )}
+                            </>)}
                         </View>
                     </View>
 
