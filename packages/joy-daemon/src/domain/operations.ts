@@ -33,7 +33,7 @@ import { ReverseUtf8Assembler } from "./textStream";
 import { shellJoin } from "./quote";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, rmdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { readFile } from "fs/promises";
-import { basename, dirname, join, resolve as resolvePath } from "path";
+import { basename, dirname, join } from "path";
 import { hostname, platform, release, arch } from "os";
 import { spawn, execFile, spawnSync } from "child_process";
 import { randomBytes } from "crypto";
@@ -74,11 +74,18 @@ export function sourcePermissionMode(src: Pick<AgentSession, "id" | "detectPermi
  *  failure was "destination already exists" because a concurrent attempt
  *  had just finished, that deleted the SUCCESSFUL working copy and any work
  *  the launched agent had already done in it. */
-export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<void> {
+/** Resolves to the CANONICAL destination (paths.canonicalCwd — `~` expanded,
+ *  symlinks and `..` resolved the way the kernel enters them, #549 residual):
+ *  the clone used to `path.resolve` the spelling it was given, so a relay
+ *  spawn spec's `~/repo` cloned into `<daemon cwd>/~/repo` while create()
+ *  expanded the same spelling to the home directory and launched the agent
+ *  in an empty folder. Callers MUST launch in the returned path. */
+export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<string> {
   if (!GIT_URL_RE.test(gitUrl)) throw new Error("invalid git url");
-  const canonical = resolvePath(cwd);
+  const canonical = canonicalCwd(cwd);
   const r = await withPathLock(`git-clone:${canonical}`, () => cloneAttempt(gitUrl, canonical));
   if ("error" in r) throw new Error(r.error);
+  return canonical;
 }
 
 /** Is a handoff / handback already running for this session (#53)? The
@@ -548,7 +555,7 @@ export const machineOps: MachineOp[] = [
       if (!rawCwd) return { error: "cwd required" };
       // One canonical cwd for the clone AND the launch (#549): the clone used
       // to land under the literal `~/…` while the registry expanded it.
-      const cwd = canonicalCwd(rawCwd);
+      let cwd = canonicalCwd(rawCwd);
       // Reject unknown agents LOUDLY instead of falling through to claude.
       // The historical fall-through is how a stale daemon turned "pi" requests
       // into surprise claude sessions (2026-08-15): a newer app sent a flavor
@@ -564,7 +571,7 @@ export const machineOps: MachineOp[] = [
       // git-URL spawn: clone (or reuse) into cwd first, then launch inside it.
       const gitUrl = typeof params.gitUrl === "string" ? params.gitUrl.trim() : "";
       if (gitUrl) {
-        try { await cloneForSpawn(gitUrl, cwd); }
+        try { cwd = await cloneForSpawn(gitUrl, cwd); }
         catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
       }
       const session = await registry.create({
@@ -780,39 +787,74 @@ export const machineOps: MachineOp[] = [
       // imported conversation.
       const cwd = canonicalCwd(rawCwd);
       const dir = cwdToTranscriptDir(cwd);
-      mkdirSync(dir, { recursive: true });
       const target = join(dir, `${sid}.jsonl`);
-      // Never clobber a conversation a session HERE is bound to IN THIS
-      // FOLDER (a same-box teleport into the same folder). A same-box
-      // teleport into ANOTHER folder is the supported same-machine fork
-      // (#550): the source keeps its own transcript under its own project
-      // dir and the copy continues under a new id, so a session owning the
-      // conversation elsewhere is no conflict. A file no session owns — an
-      // earlier import's leftover, or the same conversation teleported
-      // again — is replaced: the fork already took what it needed from it,
-      // and refusing made every retry fail (codex review, 2026-09-04).
-      const owned = registry.list().some((s) => s.transcriptPath === target || (s.claudeSessionId === sid && canonicalCwd(s.cwd) === cwd))
-        || registry.listRecords().some((r) => r.claudeSessionId === sid && canonicalCwd(r.launchCwd) === cwd);
-      if (owned) return { error: `conversation ${sid.slice(0, 8)} belongs to a session in ${cwd} on this machine` };
-      writeFileSync(target, Buffer.from(b64, "base64"));
-      // Continue under a NEW claude id (--fork-session): the source keeps its
-      // own id — which may still be live if the two machines are one (a
-      // same-box teleport into another folder), where a plain --resume would
-      // collide. History is intact either way. If the launch fails, remove
-      // the file we wrote so a retry is not refused as "already exists".
-      try {
-        const session = await registry.create({
-          cwd, resume_id: sid, forkSession: true, forceNew: true, createDir: params.createDir === true,
-          model: typeof params.model === "string" ? params.model : undefined,
-          // Fail closed (#50): an export that could not read its mode says
-          // nothing, and create() would default that to bypassPermissions.
-          permissionMode: typeof params.permissionMode === "string" && params.permissionMode ? params.permissionMode : "default",
-        });
-        return { ok: true, session: session.toJSON(), localSessionId: session.id };
-      } catch (e) {
-        try { rmSync(target, { force: true }); } catch { /* best effort */ }
-        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      // Never clobber a transcript a session HERE is bound to. Ownership is
+      // by the TRANSCRIPT PATH, not the folder (#550 residual): Claude's
+      // project-dir encoding is lossy (`project-a` and `project_a` share
+      // one dir), so "a different canonical cwd" did not mean "a different
+      // file" — importing the source's conversation id into a colliding
+      // folder overwrote the source transcript. Every live session and
+      // every record contributes the path its conversation lives at (the
+      // bound transcriptPath, else project dir of its canonical cwd + its
+      // Claude id); the import is refused when any of them IS the
+      // destination. A same-box teleport into a folder whose transcript
+      // path differs is the supported same-machine fork: the source keeps
+      // its own file and the copy continues under a new id. A file no
+      // session owns — an earlier import's leftover, or the same
+      // conversation teleported again — is replaced: the fork already took
+      // what it needed from it, and refusing made every retry fail (codex
+      // review, 2026-09-04).
+      const pathOf = (dirCwd: string, id: string | undefined): string | null =>
+        id ? join(cwdToTranscriptDir(canonicalCwd(dirCwd)), `${id}.jsonl`) : null;
+      const ownedPaths = new Set<string>();
+      for (const s of registry.list()) {
+        if (s.transcriptPath) ownedPaths.add(s.transcriptPath);
+        const derived = pathOf(s.cwd, s.claudeSessionId); if (derived) ownedPaths.add(derived);
       }
+      for (const r of registry.listRecords()) { const derived = pathOf(r.launchCwd, r.claudeSessionId); if (derived) ownedPaths.add(derived); }
+      if (ownedPaths.has(target)) return { error: `conversation ${sid.slice(0, 8)} belongs to a session whose transcript is ${target} on this machine` };
+      // The write and the launch run under the destination's path lock, so
+      // a concurrent import of the same conversation into the same folder
+      // queues behind this one and re-checks ownership. Bytes land in an
+      // attempt-owned temp file and are renamed into place — a crashed or
+      // failed write never leaves a truncated transcript — and prior bytes
+      // at the destination (an unowned leftover) are set aside and put back
+      // if the launch fails: a failed import never costs what was there.
+      return withPathLock(`teleport-import:${target}`, async () => {
+        mkdirSync(dir, { recursive: true });
+        const tmp = join(dir, `.${sid}.joy-import-${randomBytes(4).toString("hex")}`);
+        const prev = existsSync(target) ? `${tmp}.prev` : null;
+        try {
+          writeFileSync(tmp, Buffer.from(b64, "base64"));
+          if (prev) renameSync(target, prev);
+          renameSync(tmp, target);
+        } catch (e) {
+          try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+          if (prev && !existsSync(target)) { try { renameSync(prev, target); } catch { /* the set-aside copy stays beside it */ } }
+          return { ok: false, error: `transcript write failed: ${e instanceof Error ? e.message : String(e)}` };
+        }
+        // Continue under a NEW claude id (--fork-session): the source keeps its
+        // own id — which may still be live if the two machines are one (a
+        // same-box teleport into another folder), where a plain --resume would
+        // collide. History is intact either way. If the launch fails, put the
+        // destination back the way it was (remove the file we wrote, restore
+        // the set-aside one) so a retry is not refused as "already exists".
+        try {
+          const session = await registry.create({
+            cwd, resume_id: sid, forkSession: true, forceNew: true, createDir: params.createDir === true,
+            model: typeof params.model === "string" ? params.model : undefined,
+            // Fail closed (#50): an export that could not read its mode says
+            // nothing, and create() would default that to bypassPermissions.
+            permissionMode: typeof params.permissionMode === "string" && params.permissionMode ? params.permissionMode : "default",
+          });
+          if (prev) { try { rmSync(prev, { force: true }); } catch { /* best effort */ } }
+          return { ok: true, session: session.toJSON(), localSessionId: session.id };
+        } catch (e) {
+          try { rmSync(target, { force: true }); } catch { /* best effort */ }
+          if (prev) { try { renameSync(prev, target); } catch { /* the set-aside copy stays beside it */ } }
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      });
     },
   },
   {

@@ -1,5 +1,5 @@
 import { homedir } from "os";
-import { join, resolve, dirname, basename } from "path";
+import { join, dirname, isAbsolute, sep } from "path";
 import { readFileSync, realpathSync } from "fs";
 
 /** Expand a leading ~ to the daemon user's home. tmux's -c does NOT expand
@@ -17,19 +17,37 @@ export function expandHome(p: string): string {
  *  Code keys its project dir (`~/.claude/projects/<encoded cwd>`) on the
  *  process's physical cwd, so a session launched in `/repo/.` or through a
  *  symlink was pinned to a transcript under a directory Claude never wrote;
- *  every launch, record, transcript path and teleport must use this form. */
+ *  every launch, record, transcript path and teleport must use this form.
+ *
+ *  Resolution walks the path from the root with FILESYSTEM semantics — each
+ *  existing component is realpath'd before the next one is looked at, and a
+ *  `..` steps up from the PHYSICAL directory reached so far — the way the
+ *  kernel enters the directory. A lexical `path.resolve` before the realpath
+ *  folded `shortcut/..` to the link's parent, while `cd shortcut/..` lands in
+ *  the link TARGET's parent: the session launched in a different directory
+ *  (a different repository) from the one the user named (#564 residual).
+ *  Components past the first missing one are folded lexically onto the
+ *  resolved prefix (they exist nowhere yet, so there is nothing to follow). */
 export function canonicalCwd(p: string): string {
-  const abs = resolve(expandHome(p.trim()));
-  let head = abs;
-  const tail: string[] = [];
-  for (;;) {
-    try { return join(realpathSync.native(head), ...tail); }
-    catch { /* not there (yet), or unreadable: try the parent */ }
-    const parent = dirname(head);
-    if (parent === head) return abs;
-    tail.unshift(basename(head));
-    head = parent;
+  // Absolute against the process cwd (already physical: getcwd(3) returns
+  // the resolved directory), split into RAW components — no lexical folding,
+  // so each `..` is applied to the directory actually reached.
+  const spelled = expandHome(p.trim());
+  const startAbs = isAbsolute(spelled) ? spelled : join(process.cwd(), spelled);
+  const parts = startAbs.split(sep).filter((seg) => seg !== "" && seg !== ".");
+  let phys: string = sep;     // the physical directory reached so far
+  const tail: string[] = [];  // components below the first missing one
+  for (const seg of parts) {
+    if (tail.length > 0) {
+      // Below a missing directory nothing exists to follow: fold lexically.
+      if (seg === "..") tail.pop(); else tail.push(seg);
+      continue;
+    }
+    if (seg === "..") { phys = dirname(phys); continue; }
+    try { phys = realpathSync.native(join(phys, seg)); }
+    catch { tail.push(seg); /* not there (yet), or unreadable: lexical from here */ }
   }
+  return join(phys, ...tail);
 }
 
 /** The Joy home — $JOY_HOME_DIR or ~/.joy. Daemon state, per-session dirs,

@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
-import { joyRelayAccessKey } from "../paths";
+import { joyRelayAccessKey, canonicalCwd } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, relaySessionFor, type WireRecord } from "./relay";
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type JobRow, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
@@ -1013,6 +1013,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       log(`spawn ${offer.sessionId.slice(0, 8)}: no usable spawnSpec (need {t:'spawn',cwd,...}) — skipped`);
       return;
     }
+    // ONE canonical cwd for the clone, the intent and the launch (#549
+    // residual): the clone took the spec's raw `~/repo` and put the checkout
+    // under `<daemon cwd>/~/repo`, while create() expanded the same spelling
+    // to the home directory — the agent launched in an empty folder. Same
+    // contract as the `create` op: canonicalise once, before any step.
+    let cwd = canonicalCwd(spec.cwd);
     let localId: string | undefined;
     try {
       // Idempotency across the create→bind gap: a prior attempt that crashed
@@ -1032,7 +1038,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // cloneForSpawn validates the URL and throws a user-facing message
         // ("invalid git url", "git clone failed: …") on any failure.
         let cloneError: string | null = null;
-        try { await cloneForSpawn(gitUrl, spec.cwd); } catch (e) { cloneError = e instanceof Error ? e.message : String(e); }
+        try { cwd = await cloneForSpawn(gitUrl, cwd); } catch (e) { cloneError = e instanceof Error ? e.message : String(e); }
         if (cloneError !== null) {
           if (await reportSpawnFailed(offer, `clone_failed:${cloneError}`, leaseRef)) abandonedSpawns.add(offer.commandId);
           log(`spawn ${offer.sessionId.slice(0, 8)}: clone of ${gitUrl} failed — ${cloneError}`);
@@ -1051,7 +1057,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         spawning.add(localId = chosen);
         session = await registry.create({
           id: chosen,
-          cwd: spec.cwd,
+          cwd,
           agent: (spec.agent as AgentSession["agentFlavor"]) ?? "claude",
           model: spec.model,
           effort: spec.effort,
