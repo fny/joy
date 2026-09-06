@@ -131,13 +131,19 @@ export function enumerateProcessGroup(pgid: number): number[] | null {
     const r = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 5_000 });
     if (r.status !== 0 || !r.stdout) return null;
     const out: number[] = [];
+    let targetListedZombie = false;
     for (const line of r.stdout.split("\n")) {
       const m = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
-      if (m && Number(m[2]) === pgid && !m[3].startsWith("Z")) out.push(Number(m[1]));
+      if (!m) continue;
+      const pid = Number(m[1]); const zombie = m[3].startsWith("Z");
+      if (pid === pgid && zombie) targetListedZombie = true;
+      if (Number(m[2]) === pgid && !zombie) out.push(pid);
     }
-    // ps listed the world: a leader that ps shows outside the group (a
-    // non-leader target pid) still counts when it is alive and not a zombie.
-    if (!out.includes(pgid) && pidAlive(pgid) && procState(pgid) !== "Z") out.push(pgid);
+    // ps listed the world: a target that ps shows outside the group (a
+    // non-leader pid) still counts when alive and not a zombie — and ps's own
+    // positive zombie verdict wins over kill(pid, 0), which cannot tell a
+    // zombie from a live process without /proc (Astra on b8dc2bf6).
+    if (!out.includes(pgid) && !targetListedZombie && pidAlive(pgid) && procState(pgid) !== "Z") out.push(pgid);
     return out;
   } catch { return null; }
 }
@@ -206,9 +212,11 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   const stillThere = (): number[] => {
     const members = enumerateProcessGroup(pid);
     if (members !== null) return members; // a real listing: zombie-only == nobody left
-    // Enumeration unavailable while the group is still addressable: assume
-    // survivors so escalation happens instead of a false "gone".
-    return groupExists() ? [pid] : [];
+    // Enumeration unavailable: keep BOTH kinds of evidence — the group being
+    // addressable, and the target pid itself being alive (the single-process
+    // fallback signals a non-leader pid that kill(-pid) never reaches; Astra
+    // on b8dc2bf6) — so escalation happens instead of a false "gone".
+    return groupExists() || pidAlive(pid) ? [pid] : [];
   };
   for (let i = 0; i < rounds && stillThere().length; i++) await sleep(tick);
   let left = stillThere();

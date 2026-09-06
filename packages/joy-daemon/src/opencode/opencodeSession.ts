@@ -650,7 +650,19 @@ export class OpencodeSession implements AgentSession {
     const cur = this.#lastAdmitted ? this.#admissionSeq.get(this.#lastAdmitted) : undefined;
     const newer = !cur || (rank.server !== undefined && cur.server !== undefined ? rank.server > cur.server : rank.local > cur.local);
     if (newer) this.#lastAdmitted = id;
-    if (this.#admissionSeq.size > 500) { const first = this.#admissionSeq.keys().next().value; if (first !== undefined) this.#admissionSeq.delete(first); }
+    // Admission identity must outlive any tombstone for the same id: evicting
+    // a cancelled prompt's entry while its tombstone stayed let a later
+    // unsequenced duplicate admission count as first-seen → newest → a
+    // session-wide interrupt at current work (Astra on b8dc2bf6). Evict only
+    // ids with no outstanding tombstone; a tombstone that outlives the cache
+    // window is obsolete and retired with its identity.
+    if (this.#admissionSeq.size > 500) {
+      for (const key of this.#admissionSeq.keys()) {
+        if (this.#admissionSeq.size <= 400) break;
+        if (this.#cancelledIds.has(key) && this.#admissionSeq.size < 1000) continue; // keep fencing evidence while the tombstone lives
+        this.#admissionSeq.delete(key); this.#cancelledIds.delete(key); this.#interruptAttempts.delete(key);
+      }
+    }
   }
   #admissionSeq = new Map<string, { server: number | undefined; local: number }>();
   #admissionClock = 0;
