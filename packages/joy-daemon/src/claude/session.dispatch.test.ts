@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, appendFileSync } from "f
 import { tmpdir } from "os";
 import { join } from "path";
 import { Session, isSystemPromptEntry, paneShowsLoginForm } from "./session";
+import { queueFor } from "../domain/queueFacade";
 import { saveWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import { ledgerFor } from "../domain/ledger";
 import type { TmuxDriver } from "../tmux/driver";
@@ -104,12 +105,12 @@ test("#39 sendRawKeys literal mode types multi-line text as lines joined by Ente
 test("#33 a steer never types into an open dialog — it parks on the queue head instead", async () => {
   const { st, driver } = fakeTmux({ pane: PERMISSION_DIALOG });
   const s = mkSession(uid("steer-dialog"), driver);
-  s.enqueue("/steer 2 things: also run the tests");
+  queueFor(s).accept("/steer 2 things: also run the tests", { visible: true });
   await settle(700);
   expect(st.typed.join("")).not.toContain("2 things");
   expect(st.keys).not.toContain("Enter");
-  expect(s.queueState().pendingCount).toBe(1);   // parked, not lost
-  expect(s.queueState().paused).toBe(false);      // nothing is wrong with the pane
+  expect(queueFor(s).state().pendingCount).toBe(1);   // parked, not lost
+  expect(queueFor(s).state().paused).toBe(false);      // nothing is wrong with the pane
   // The dialog resolves → the drain gate delivers it.
   st.pane = READY;
   s.resumeQueue();
@@ -122,14 +123,15 @@ test("#33 a steer never types into an open dialog — it parks on the queue head
 test("#34 the drain pump stands down while a steer owns the pane (no C-u on the steered text)", async () => {
   const { st, driver } = fakeTmux({ pane: GENERATING });
   const s = mkSession(uid("steer-drain"), driver);
-  s.enqueue("queued behind the turn");        // held: pane is generating
+  queueFor(s).accept("queued behind the turn", { visible: true });        // held: pane is generating
   await settle(50);
-  // The turn ends the instant the steer is typed: the box now shows S, idle.
+  // The turn ends the instant the steer is typed: the box now shows S, idle;
+  // Claude takes the steer (UserPromptSubmit) and finishes (Stop).
   st.onLiteral = (t) => { if (t.includes("steer me")) st.pane = boxWith("steer me"); };
-  st.onKey = (k) => { if (k === "Enter") st.pane = READY; };
-  s.enqueue("/steer steer me");
+  st.onKey = (k) => { if (k === "Enter") { st.pane = READY; s.onHookEvent({ event: "UserPromptSubmit", prompt: "steer me" }); s.onHookEvent({ event: "Stop" }); } };
+  queueFor(s).accept("/steer steer me", { visible: true });
   await settle(20);
-  s.enqueue("another queued one");             // a drain trigger landing mid-steer
+  queueFor(s).accept("another queued one", { visible: true });             // a drain trigger landing mid-steer
   await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 3000 });
   // Old behaviour: the drain saw "steer me" as a stray draft and C-u'd it before the Enter.
   expect(st.keys.slice(0, st.keys.indexOf("Enter"))).not.toContain("C-u");
@@ -146,14 +148,14 @@ test("#35 cancelQueued cancels an in-flight item whose Enter has not landed", as
   const held = new Promise<void>((r) => { release = r; });
   st.onLiteral = () => held;                    // the type hangs in the FIFO
   const s = mkSession(uid("cancel-typing"), driver);
-  const item = s.enqueue("cancel me");
-  await vi.waitFor(() => expect(s.queueState().inFlight).toBe("cancel me"));
-  expect(s.cancelQueued(item.id)).toBe(true);   // used to be false: "not in the queue any more"
+  const item = queueFor(s).accept("cancel me", { visible: true });
+  await vi.waitFor(() => expect(queueFor(s).state().inFlight).toBe("cancel me"));
+  expect(queueFor(s).cancel(item.id)).toBe(true);   // used to be false: "not in the queue any more"
   release();
   await settle(600);                            // past ENTER_SUBMIT_DELAY_MS
   expect(st.keys).not.toContain("Enter");
-  expect(s.queueItemState(item.id)).toBe("cancelled");
-  expect(s.queueState().inFlight).toBeNull();
+  expect(queueFor(s).itemState(item.id)).toBe("cancelled");
+  expect(queueFor(s).state().inFlight).toBeNull();
   s.end("killed");
 });
 
@@ -163,8 +165,8 @@ test("#35 abort() during the typing window cancels that dispatch instead of trea
   const held = new Promise<void>((r) => { release = r; });
   st.onLiteral = () => held;
   const s = mkSession(uid("abort-typing"), driver);
-  const item = s.enqueue("abort me");
-  await vi.waitFor(() => expect(s.queueState().inFlight).toBe("abort me"));
+  const item = queueFor(s).accept("abort me", { visible: true });
+  await vi.waitFor(() => expect(queueFor(s).state().inFlight).toBe("abort me"));
   // abort's own capture is what lets the typing finish (the FIFO drains) — the
   // submit timer is armed by the time abort re-reads state, i.e. it appeared
   // DURING abort's await for the same in-flight item.
@@ -174,7 +176,7 @@ test("#35 abort() during the typing window cancels that dispatch instead of trea
   await settle(600);
   expect(st.keys).not.toContain("Enter");       // the Enter was cancelled
   expect(st.keys).toContain("Escape");
-  expect(s.queueItemState(item.id)).toBe("cancelled");
+  expect(queueFor(s).itemState(item.id)).toBe("cancelled");
   s.end("killed");
 });
 
@@ -199,7 +201,7 @@ test("#476 a preserved terminal draft is restored ONCE after a slash-command ech
   const { st, driver } = fakeTmux({ pane: boxWith("human draft") });
   st.onKey = (k) => { if (k === "C-u" || k === "Enter") st.pane = READY; };
   const s = mkSession(uid("draft-once"), driver);
-  s.enqueue("/status");
+  queueFor(s).accept("/status", { visible: true });
   await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 5000 });
   // The command echoes (system/local_command shape) → dispatch confirmed → draft restore.
   s.onTranscriptEntry({ type: "system", subtype: "local_command", content: "<command-name>/status</command-name>", timestamp: new Date().toISOString() } as any);
@@ -280,10 +282,10 @@ test("#483 a UserPromptSubmit hook that confirms before the Enter write resolves
   const s = mkSession(uid("fast-hook"), driver, { claudeSessionId: "sid" });
   const { rs, userRows } = relayStub("rs-fast-hook");
   s.attachRelay(rs, true);
-  s.enqueue("mirror me once", { mirrorToRelay: true, visible: false, source: "rpc" });
+  queueFor(s).accept("mirror me once", { mirrorToRelay: true, visible: false, source: "rpc" });
   await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 3000 });
   s.onHookEvent({ event: "UserPromptSubmit", prompt: "mirror me once" });   // hook lands while the Enter write is pending
-  expect(s.queueState().inFlight).toBeNull();
+  expect(queueFor(s).state().inFlight).toBeNull();
   releaseEnter();
   await settle(50);
   expect(userRows().filter((r) => r.content?.text === "mirror me once")).toHaveLength(1);
@@ -322,22 +324,22 @@ test("#31 a late echo after a dispatch timeout drops the requeued twin and resum
   const s = mkSession(uid("late-echo"), driver, { claudeSessionId: "sid" });
   const { rs, userRows } = relayStub("rs-late-echo");
   s.attachRelay(rs, true);
-  const item = s.enqueue("slow to echo", { mirrorToRelay: false, visible: false, source: "relay", seq: 1 });
+  const item = queueFor(s).accept("slow to echo", { mirrorToRelay: false, visible: false, source: "relay", seq: 1 });
   await vi.advanceTimersByTimeAsync(400);        // typed + Enter
   expect(st.keys).toContain("Enter");
   await vi.advanceTimersByTimeAsync(30_500);     // echo window expires: requeued + paused
-  expect(s.queueState().paused).toBe(true);
-  expect(s.queueState().pauseReason).toBe("dispatch_timeout");
-  expect(s.queueState().pendingCount).toBe(1);
+  expect(queueFor(s).state().paused).toBe(true);
+  expect(queueFor(s).state().pauseReason).toBe("dispatch_timeout");
+  expect(queueFor(s).state().pendingCount).toBe(1);
   // The message DID land — its echo arrives late.
   s.onTranscriptEntry({ type: "user", uuid: "u-late", message: { role: "user", content: "slow to echo" } } as any);
   expect(userRows()).toHaveLength(0);            // old code: mirrored as a second bubble
-  expect(s.queueState().pendingCount).toBe(0);   // old code: twin still queued → re-run on resume
-  expect(s.queueState().paused).toBe(false);
+  expect(queueFor(s).state().pendingCount).toBe(0);   // old code: twin still queued → re-run on resume
+  expect(queueFor(s).state().paused).toBe(false);
   // #31 residual: the late echo COMMITS the delivered outcome (the ledger
   // attempt it matched settles the command) — the lane's per-item state is
   // never "unknown" for work that ran.
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   s.end("killed");
 });
 
@@ -349,13 +351,13 @@ test("#32 a foreign turn start does not confirm a dispatch whose text still sits
   const s = mkSession(uid("swallowed-enter"), driver, { claudeSessionId: "sid" });
   const { rs } = relayStub("rs-swallowed");
   s.attachRelay(rs, true);
-  const item = s.enqueue("P the prompt", { mirrorToRelay: false, source: "rpc" });
+  const item = queueFor(s).accept("P the prompt", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   st.pane = boxWith("P the prompt");             // paste-detection absorbed the Enter: P is still in the box
   s.onTranscriptEntry({ type: "assistant", uuid: "u-foreign", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "handling the task notification" }] } } as any);
-  expect(s.queueState().inFlight).toBe("P the prompt"); // old code: null — "delivered", prompt lost
-  expect(s.queueItemState(item.id)).toBe("pending");
+  expect(queueFor(s).state().inFlight).toBe("P the prompt"); // old code: null — "delivered", prompt lost
+  expect(queueFor(s).itemState(item.id)).toBe("pending");
   s.end("killed");
 });
 
@@ -364,12 +366,12 @@ test("#32 a foreign turn start does not confirm a dispatch whose text still sits
 test("#40 a `!cmd` dispatch is confirmed by its <bash-input> echo", async () => {
   const { st, driver } = fakeTmux({ pane: READY });
   const s = mkSession(uid("bang"), driver, { claudeSessionId: "sid" });
-  const item = s.enqueue("!make deploy", { source: "rpc" });
+  const item = queueFor(s).accept("!make deploy", { source: "rpc" });
   await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 3000 });
-  expect(s.queueState().inFlight).toBe("!make deploy");
+  expect(queueFor(s).state().inFlight).toBe("!make deploy");
   s.onTranscriptEntry({ type: "user", uuid: "u-bash", message: { role: "user", content: "<bash-input>make deploy</bash-input>" } } as any);
-  expect(s.queueState().inFlight).toBeNull();
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).state().inFlight).toBeNull();
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   s.end("killed");
 });
 
@@ -423,7 +425,7 @@ test("#482 the code is typed only into the live login form (a chat pane with the
   const chatWithLink = ["● Open https://claude.ai/oauth/authorize?code=true&state=abc to log in", RULE, "❯ ", RULE, FOOTER_IDLE].join("\n");
   const { st, driver } = fakeTmux({ pane: chatWithLink });
   const s = mkSession(uid("login-code"), driver);
-  s.enqueue("/login-code secret-code-123");
+  queueFor(s).accept("/login-code secret-code-123", { visible: true });
   await settle(500);
   expect(st.typed.join("")).not.toContain("secret-code-123");
   expect(st.keys).not.toContain("Enter");
@@ -438,7 +440,7 @@ test("C1 a restart between the type and the echo: the echo pairs with the persis
   const a = mkSession(id, fakeTmux({ pane: READY }).driver, { claudeSessionId: "sid" });
   const ra = relayStub("rs-" + id);
   a.attachRelay(ra.rs, true);
-  const item = a.enqueue("survive the crash", { mirrorToRelay: false, visible: false, source: "rpc" });
+  const item = queueFor(a).accept("survive the crash", { mirrorToRelay: false, visible: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);        // typed + Enter; attempt committed
   const ledger = ledgerFor();
   expect(ledger.getCommand(item.id)?.state).toBe("submitting");
@@ -449,17 +451,18 @@ test("C1 a restart between the type and the echo: the echo pairs with the persis
   // The old attempt is an explicit unknown; the command is queued again (a
   // typed-but-unconfirmed prompt is retyped, as it always has been)…
   expect(ledger.attemptsForCommand(item.id).map((x) => x.state)).toEqual(["unknown"]);
-  expect(b.queueState().pendingCount).toBe(1);
+  expect(queueFor(b).state().pendingCount).toBe(1);
   // …but the FIRST typing's echo arrives: it matches the persisted attempt,
   // is not mirrored as a user bubble, and the re-dispatch of the same text is
   // dropped instead of running the prompt twice.
   b.onTranscriptEntry({ type: "user", uuid: "u-crash-echo", message: { role: "user", content: "survive the crash" } } as any);
   expect(rb.userRows()).toHaveLength(0);
-  expect(ledger.getCommand(item.id)).toMatchObject({ state: "completed", terminalReason: "delivered" });
+  expect(ledger.getCommand(item.id)).toMatchObject({ state: "running" }); // the echo is delivery; the turn's end completes it
   expect(ledger.hasReceipt(id, "transcript_uuid", "u-crash-echo")).toBe(true);
-  await vi.advanceTimersByTimeAsync(1500);
-  expect(b.queueItemState(item.id)).toBe("delivered");
-  expect(b.queueState().pendingCount).toBe(0);
+  await vi.advanceTimersByTimeAsync(2_500); // past the replacement's reconcile: a running command is never retyped
+  expect(queueFor(b).itemState(item.id)).toBe("delivered");
+  expect(queueFor(b).state().pendingCount).toBe(0);
+  expect(ledger.attemptsForCommand(item.id)).toHaveLength(1);
   a.end("killed"); b.end("killed");
 });
 
@@ -467,7 +470,7 @@ test("C1 a cancel that lands before the dispatch is honoured by the ledger: the 
   vi.useFakeTimers();
   const { st, driver } = fakeTmux({ pane: GENERATING });   // busy: nothing drains yet
   const s = mkSession(uid("cancel-first"), driver, { claudeSessionId: "sid" });
-  const item = s.enqueue("do not run", { mirrorToRelay: false, visible: false, source: "rpc" });
+  const item = queueFor(s).accept("do not run", { mirrorToRelay: false, visible: false, source: "rpc" });
   const ledger = ledgerFor();
   // The cancel reaches the ledger by another path (a control-lane cancel on a
   // replacement, a late callback) — the in-memory copy is still queued.
@@ -476,7 +479,7 @@ test("C1 a cancel that lands before the dispatch is honoured by the ledger: the 
   s.resumeQueue();
   await vi.advanceTimersByTimeAsync(2000);
   expect(st.typed.join("")).not.toContain("do not run");
-  expect(s.queueItemState(item.id)).toBe("cancelled");
+  expect(queueFor(s).itemState(item.id)).toBe("cancelled");
   expect(ledger.getCommand(item.id)?.state).toBe("cancelled");
   s.end("killed");
 });
@@ -489,21 +492,21 @@ test("#32 residual: an UNKNOWN cached box (capture failed / no live box) never l
   const s = mkSession(uid("foreign-unknown"), driver, { claudeSessionId: "sid" });
   const { rs } = relayStub("rs-foreign-unknown");
   s.attachRelay(rs, true);
-  const item = s.enqueue("P not actually submitted", { mirrorToRelay: false, source: "rpc" });
+  const item = queueFor(s).accept("P not actually submitted", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   (driver as any).captureCached = () => ({ ok: false, out: "" });      // no evidence either way
   s.onTranscriptEntry({ type: "assistant", uuid: "foreign", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "background output" }] } } as any);
-  expect(s.queueItemState(item.id)).toBe("pending");                    // old code: delivered — the unsent prompt vanished
-  expect(s.queueState().inFlight).toBe("P not actually submitted");
+  expect(queueFor(s).itemState(item.id)).toBe("pending");                    // old code: delivered — the unsent prompt vanished
+  expect(queueFor(s).state().inFlight).toBe("P not actually submitted");
   // No live box on screen (a dialog is up) is equally not evidence.
   s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 1 } as any);
   (driver as any).captureCached = () => ({ ok: true, out: PERMISSION_DIALOG });
   s.onTranscriptEntry({ type: "assistant", uuid: "foreign-2", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "more" }] } } as any);
-  expect(s.queueItemState(item.id)).toBe("pending");
+  expect(queueFor(s).itemState(item.id)).toBe("pending");
   // The text-matched transcript echo is the evidence that confirms it.
   s.onTranscriptEntry({ type: "user", uuid: "u-echo", message: { role: "user", content: "P not actually submitted" } } as any);
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   s.end("killed");
 });
 
@@ -513,23 +516,24 @@ test("#35 residual: a cancel during the SECOND dispatch's typing window is honou
   const s = mkSession(uid("second-cancel"), driver, { claudeSessionId: "sid" });
   const { rs } = relayStub("rs-second-cancel");
   s.attachRelay(rs, true);
-  s.enqueue("first", { mirrorToRelay: false, source: "rpc" });
+  queueFor(s).accept("first", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);                                // A typed + Enter → its submit mark is set
   s.onTranscriptEntry({ type: "user", uuid: "first", message: { role: "user", content: "first" } } as any); // A delivered
+  s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 5 } as any);                 // A's turn ends: B may go
   let release!: () => void;
   const hold = new Promise<void>((r) => { release = r; });
   st.onLiteral = () => hold;                                             // B's type hangs in the FIFO
-  const item = s.enqueue("second", { mirrorToRelay: false, source: "rpc" });
+  const item = queueFor(s).accept("second", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(1);
-  expect(s.queueState().inFlight).toBe("second");
-  expect(s.cancelQueued(item.id)).toBe(true);                            // old code: false — A's timestamp was still there
+  expect(queueFor(s).state().inFlight).toBe("second");
+  expect(queueFor(s).cancel(item.id)).toBe(true);                            // old code: false — A's timestamp was still there
   const r = await s.abort();
   expect(r.ok).toBe(true);
   release();
   await vi.advanceTimersByTimeAsync(500);
   expect(st.keys.filter((k) => k === "Enter")).toHaveLength(1);         // only A's Enter — B never submits
-  expect(s.queueItemState(item.id)).toBe("cancelled");
-  expect(s.queueState().inFlight).toBeNull();
+  expect(queueFor(s).itemState(item.id)).toBe("cancelled");
+  expect(queueFor(s).state().inFlight).toBeNull();
   s.end("killed");
 });
 
@@ -537,34 +541,38 @@ test("#40 residual: the system/local_command <bash-input> shape confirms a `!cmd
   vi.useFakeTimers();
   const { st, driver } = fakeTmux({ pane: READY });
   const s = mkSession(uid("bash-system"), driver, { claudeSessionId: "sid" });
-  const item = s.enqueue("!make deploy", { source: "rpc" });
+  const item = queueFor(s).accept("!make deploy", { source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   s.onTranscriptEntry({ type: "system", subtype: "local_command", content: "<bash-input>make deploy</bash-input>" } as any);
-  expect(s.queueItemState(item.id)).toBe("delivered");                   // old code: pending → dispatch_timeout at 30s
-  expect(s.queueState().inFlight).toBeNull();
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");                   // old code: pending → dispatch_timeout at 30s
+  expect(queueFor(s).state().inFlight).toBeNull();
   await vi.advanceTimersByTimeAsync(31_000);
-  expect(s.queueState().paused).toBe(false);
+  expect(queueFor(s).state().paused).toBe(false);
   s.end("killed");
 });
 
-test("#34 residual: a steer superseded mid-settle does not release the NEWER steer's pane lease — a queued prompt waits for that steer to land", async () => {
+test("#34 residual: steers are one pane operation at a time — a second steer waits for the first's Enter, and a queued prompt waits for both", async () => {
   const { st, driver } = fakeTmux({ pane: READY });
   const s = mkSession(uid("steer-lease"), driver);
-  s.enqueue("/steer first steer");
+  // Claude takes every submission (UserPromptSubmit) and finishes it (Stop).
+  st.onKey = (k) => { if (k === "Enter") { const last = st.typed[st.typed.length - 1]; s.onHookEvent({ event: "UserPromptSubmit", prompt: last }); s.onHookEvent({ event: "Stop" }); } };
+  queueFor(s).accept("/steer first steer", { visible: true });
   await vi.waitFor(() => expect(st.typed).toContain("first steer"));    // A typed, its Enter pending
   let release!: () => void;
   const hold = new Promise<void>((r) => { release = r; });
   let held = false;
   st.onCapture = () => { if (!held) { held = true; return hold; } };    // B's capture hangs
-  s.enqueue("/steer next steer");                                        // supersedes A (A's promise settles now)
-  s.enqueue("queued prompt");                                            // a drain trigger landing mid-steer
+  queueFor(s).accept("/steer next steer", { visible: true });           // waits for A's Enter (never supersedes it)
+  queueFor(s).accept("queued prompt", { visible: true });               // a plain prompt behind both steers
   await settle(500);
   expect(st.typed).not.toContain("queued prompt");                       // old code: A's finally released B's flag → the drain typed it
   expect(st.typed).not.toContain("next steer");
+  expect(st.keys.filter((k) => k === "Enter")).toHaveLength(1);         // A submitted, once
   release();
-  await vi.waitFor(() => expect(st.typed).toContain("queued prompt"), { timeout: 3000 });
+  await vi.waitFor(() => expect(st.typed).toContain("queued prompt"), { timeout: 5000 });
   expect(st.typed.indexOf("next steer")).toBeLessThan(st.typed.indexOf("queued prompt"));
+  expect(st.typed.indexOf("first steer")).toBeLessThan(st.typed.indexOf("next steer"));
   s.end("killed");
 });
 
@@ -572,7 +580,7 @@ test("#476 residual: a draft restore whose capture outlives the session (restart
   const { st, driver } = fakeTmux({ pane: boxWith("human draft") });
   st.onKey = (k) => { if (k === "C-u" || k === "Enter") st.pane = READY; };
   const s = mkSession(uid("late-draft"), driver);
-  s.enqueue("/status");
+  queueFor(s).accept("/status", { visible: true });
   await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 5000 });
   let release!: () => void;
   const hold = new Promise<void>((r) => { release = r; });
@@ -589,7 +597,7 @@ test("#476 residual: a message queued while the draft restore holds the pane is 
   const { st, driver } = fakeTmux({ pane: boxWith("human draft") });
   st.onKey = (k) => { if (k === "C-u" || k === "Enter") st.pane = READY; };
   const s = mkSession(uid("draft-vs-queue"), driver);
-  s.enqueue("/status");
+  queueFor(s).accept("/status", { visible: true });
   await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 5000 });
   let release!: () => void;
   const hold = new Promise<void>((r) => { release = r; });
@@ -597,7 +605,7 @@ test("#476 residual: a message queued while the draft restore holds the pane is 
   st.onCapture = () => { if (!held) { held = true; return hold; } };
   s.onTranscriptEntry({ type: "system", subtype: "local_command", content: "<command-name>/status</command-name>" } as any);
   await settle(20);
-  s.enqueue("go");                                                       // lands while the restore owns the pane
+  queueFor(s).accept("go", { visible: true });                                                       // lands while the restore owns the pane
   await settle(50);
   expect(st.typed).not.toContain("go");                                  // the drain stood down (lease held)
   release();
@@ -648,9 +656,9 @@ test("#485 residual: a multi-line numbered draft in the bordered box is a draft 
   const { st, driver } = fakeTmux({ pane: [RULE, "❯ 1. first", "  2. second", RULE, FOOTER_IDLE].join("\n") });
   st.onKey = (k) => { if (k === "C-u") st.pane = READY; };
   const s = mkSession(uid("numbered-draft"), driver);
-  s.enqueue("go");
+  queueFor(s).accept("go", { visible: true });
   await vi.waitFor(() => expect(st.typed).toContain("go"), { timeout: 3000 }); // old code: null box → "not ready" retries forever
   expect(st.keys).toContain("C-u");
-  expect(s.queueState().paused).toBe(false);
+  expect(queueFor(s).state().paused).toBe(false);
   s.end("killed");
 });

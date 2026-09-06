@@ -1416,7 +1416,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       for (const row of ledger.listCommands(s.id)) {
         if (!row.relayTurnId) continue;
         if (isTerminalState(row.state)) {
-          if (!ledger.hasOutboundEvent(`term:${row.relayTurnId}`)) void postTerminal(row.relayTurnId, s.id, terminalBody(row.state, row.terminalReason), leaseRef);
+          if (!ledger.hasOutboundEvent(`term:${row.relayTurnId}`)) {
+            log(`turn ${row.relayTurnId.slice(0, 8)} [${s.id}/${row.id}]: ${row.state} in the ledger with no terminal row — posting it (previous daemon died before it could)`);
+            void postTerminal(row.relayTurnId, s.id, terminalBody(row.state, row.terminalReason), leaseRef);
+          }
           continue;
         }
         if (!inFlight.has(row.relayTurnId)) void resumeTurn(row, leaseRef);
@@ -1860,7 +1863,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }
         if (lease) sender.start(); // boot failed mid-way: the outbox still holds the rows
         if (!announced) {
-          log(`${lane} lane idle (${String((e as Error).message ?? e)}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
+          const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+          log(`${lane} lane idle (${String((e as Error).message ?? e)}${cause ? `: ${cause.code ?? cause.message ?? ""}` : ""}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
           announced = true;
         }
         await sleep(lane === "work" ? ACQUIRE_RETRY_MS : 5_000);
