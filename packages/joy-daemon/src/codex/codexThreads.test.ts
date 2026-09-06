@@ -1,5 +1,5 @@
-import { test, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, truncateSync, utimesSync } from "fs";
+import { test, expect, vi } from "vitest";
+import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, truncateSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { findLatestCodexThreadForCwd, parseCodexConfigArgs } from "./codexThreads";
@@ -54,4 +54,28 @@ test("findLatestCodexThreadForCwd: a rollout too large to read whole still yield
   utimesSync(junk, new Date(t + 1000), new Date(t + 1000));
   expect(findLatestCodexThreadForCwd("/proj/big", home)).toBe("thread-huge");
   rmSync(home, { recursive: true, force: true });
+});
+
+// #521 (Astra partial on 4a69e55c): a read may return fewer bytes than asked
+// without being at EOF. One short read of a valid header used to be taken as
+// the whole (newline-less) head → every matching thread skipped → null.
+test("findLatestCodexThreadForCwd: short reads are continued until the newline (#521)", () => {
+  const home = mkdtempSync(join(tmpdir(), "cxh-short-"));
+  const day = join(home, "sessions", "2026", "09", "06");
+  mkdirSync(day, { recursive: true });
+  const meta = (id: string, cwd: string) => JSON.stringify({ type: "session_meta", payload: { id, cwd } }) + "\n";
+  writeFileSync(join(day, "rollout-short.jsonl"), meta("thread-short", "/proj/short") + '{"type":"response_item","payload":{"text":"' + "y".repeat(4096) + '"}}\n');
+  // A one-line file with no trailing newline must still be read to EOF.
+  writeFileSync(join(day, "rollout-noeol.jsonl"), meta("thread-noeol", "/proj/noeol").trimEnd());
+  const real = fs.readSync;
+  const spy = vi.spyOn(fs, "readSync").mockImplementation(((fd: number, buf: NodeJS.ArrayBufferView, off: number, len: number, pos: number | bigint | null) =>
+    real(fd, buf, off, Math.min(len, 16), pos)) as typeof fs.readSync);
+  try {
+    expect(findLatestCodexThreadForCwd("/proj/short", home)).toBe("thread-short");
+    expect(findLatestCodexThreadForCwd("/proj/noeol", home)).toBe("thread-noeol");
+    expect(spy.mock.calls.length).toBeGreaterThan(2); // the loop really continued past the first short read
+  } finally {
+    spy.mockRestore();
+    rmSync(home, { recursive: true, force: true });
+  }
 });
