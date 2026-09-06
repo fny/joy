@@ -4,7 +4,8 @@
 // than something we can get wrong. The SQL is plain, so moving to a real
 // postgres server later is a driver swap, not a rewrite.
 import { PGlite } from '@electric-sql/pglite';
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 /** Ordered, append-only migrations. Tracked in _migrations by index. */
 const MIGRATIONS = [
@@ -233,75 +234,38 @@ const MIGRATIONS = [
 /** Exclusive ownership of a data directory. Two relay processes opening the
  *  same directory (overlapping restart, duplicate launch) each got their own
  *  PGlite cache and the later close silently discarded the other's committed
- *  rows (#615). The lock is an O_EXCL file holding the owner's pid; a stale
- *  lock (owner pid gone) is reclaimed by RENAMING it away first — rename is
- *  atomic, so of two concurrent reclaimers only one proceeds to create. */
+ *  rows (#615). The lock is OS-backed: an SQLite connection holding
+ *  BEGIN IMMEDIATE on `<dir>.lock.db` (node:sqlite; the relay box runs Node
+ *  22.23). It dies with the process, so there is no reclaim protocol — every
+ *  pure-file protocol left a window in which a racing starter could remove a
+ *  live owner's lock (Astra on 372f7d54/a08a2672). `<dir>.lock` is kept as
+ *  an informational pid record only. Aliases (data, data/., symlinks) lock
+ *  the realpath. */
 function acquireDataDirLock(dataDir) {
-  // Canonical directory: /x/data and /x/data/. must contend for ONE lock
-  // (Astra on 372f7d54). The directory may not exist yet — create it first.
   mkdirSync(dataDir, { recursive: true });
   const canon = realpathSync(dataDir).replace(/\/+$/, '');
-  const path = `${canon}.lock`; // beside the dir: PGlite refuses a non-empty data dir that is not yet a database
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const fd = openSync(path, 'wx');
-      writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
-      closeSync(fd);
-      return () => { try { unlinkSync(path); } catch { /* already gone */ } };
-    } catch (e) {
-      if (e?.code !== 'EEXIST') throw e;
-      let holder = null; let raw = '';
-      try { raw = readFileSync(path, 'utf8'); holder = JSON.parse(raw); } catch { /* partial write: treat as in-progress */ }
-      const pid = Number(holder?.pid);
-      if (!holder) {
-        // No pid yet: the other opener is mid-write, not stale (a half-written
-        // lock is an owner, not a leftover).
-        throw new Error(`relay data directory ${dataDir} is being opened by another process`);
-      }
-      if (pidAlive(pid)) throw new Error(`relay data directory ${dataDir} is owned by pid ${pid}`);
-      // Stale (owner dead). Reclaim under a mutex so two reclaimers cannot
-      // both proceed, re-reading under it and unlinking only the byte-identical
-      // record — never a lock a racer published meanwhile. The mutex is stolen
-      // only from a DEAD holder, never by age (same protocol as the daemon's
-      // singleton; Astra on af76c787/372f7d54).
-      if (!reclaimStale(path, raw)) continue;
-    }
-  }
-  throw new Error(`relay data directory ${dataDir} is locked`);
-}
-
-function reclaimStale(path, staleRaw) {
-  const mutex = `${path}.reclaiming`;
-  let fd;
+  const info = `${canon}.lock`;
+  const db = new DatabaseSync(`${canon}.lock.db`);
   try {
-    fd = openSync(mutex, 'wx');
+    db.exec('PRAGMA busy_timeout = 0');
+    db.exec('BEGIN IMMEDIATE');
   } catch (e) {
-    if (e?.code !== 'EEXIST') throw e;
-    let holderPid = NaN;
-    try { holderPid = Number(readFileSync(mutex, 'utf8').trim()); } catch { return false; }
-    if (Number.isInteger(holderPid) && holderPid > 0 && pidAlive(holderPid)) throw new Error(`relay data directory lock ${path} is being reclaimed by pid ${holderPid}`);
-    let age = Infinity;
-    try { age = Date.now() - statSync(mutex).mtimeMs; } catch { return false; }
-    if (!(Number.isInteger(holderPid) && holderPid > 0) && age < 30_000) throw new Error(`relay data directory lock ${path} is being reclaimed by another process`);
-    try { unlinkSync(mutex); } catch { /* racer */ }
-    return false;
+    try { db.close(); } catch { /* best effort */ }
+    if (/locked|busy/i.test(String(e?.message ?? e))) {
+      let pid = null;
+      try { pid = JSON.parse(readFileSync(info, 'utf8'))?.pid ?? null; } catch { /* no record */ }
+      throw new Error(`relay data directory ${dataDir} is owned by ${pid ? `pid ${pid}` : 'another process'}`);
+    }
+    throw e;
   }
-  try {
-    writeSync(fd, `${process.pid}\n`); closeSync(fd);
-    let current = null;
-    try { current = readFileSync(path, 'utf8'); } catch { return false; }
-    if (current !== staleRaw) return false;
-    try { unlinkSync(path); } catch { return false; }
-    return true;
-  } finally {
-    try { unlinkSync(mutex); } catch { /* best effort */ }
-  }
+  try { writeFileSync(info, JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); } catch { /* informational */ }
+  return () => {
+    try { unlinkSync(info); } catch { /* already gone */ }
+    try { db.exec('ROLLBACK'); } catch { /* may be closed */ }
+    try { db.close(); } catch { /* best effort */ }
+  };
 }
 
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (e) { return e?.code === 'EPERM'; }
-}
 
 export async function openDb(dataDir) {
   const release = dataDir === ':memory:' ? () => {} : acquireDataDirLock(dataDir);

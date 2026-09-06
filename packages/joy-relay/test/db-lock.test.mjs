@@ -26,13 +26,14 @@ describe('data directory lock (#615)', () => {
     rmSync(dir, { recursive: true, force: true }); rmSync(`${dir}.lock`, { force: true });
   }, 60_000);
 
-  it('reclaims a lock whose owner is gone, but not a half-written one', async () => {
+  it('a stale or half-written pid record never blocks: the OS lock died with its process', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'joy-relay-lock-'));
-    writeFileSync(`${dir}.lock`, JSON.stringify({ pid: 2 ** 22 - 1, at: 'x' })); // no such pid
+    writeFileSync(`${dir}.lock`, JSON.stringify({ pid: 2 ** 22 - 1, at: 'x' })); // no such pid, no live lock
     const a = await openDb(dir);
     await a.close();
-    writeFileSync(`${dir}.lock`, ''); // an opener mid-write
-    await expect(openDb(dir)).rejects.toThrow(/being opened/);
-    rmSync(dir, { recursive: true, force: true }); rmSync(`${dir}.lock`, { force: true });
+    writeFileSync(`${dir}.lock`, ''); // a torn record, no live lock
+    const b = await openDb(dir);
+    await b.close();
+    rmSync(dir, { recursive: true, force: true }); rmSync(`${dir}.lock`, { force: true }); rmSync(`${dir}.lock.db`, { force: true });
   }, 60_000);
 });
