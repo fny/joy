@@ -2347,6 +2347,25 @@ export class Session {
   #hookSaysIdle(): boolean {
     return this.#hooksLive && this.#hookTurn !== null && !this.#hookTurn.open;
   }
+  /** Does the transcript own the turn-TERMINAL edge an entry stamped
+   *  `entryTimeMs` reports (turn_duration / stop_hook_summary / end_turn /
+   *  the interrupt marker)? Without hooks: yes, within the tail window. With
+   *  hooks live the hook edges own the turn lifecycle, and the transcript
+   *  lags: a terminal for a turn a Stop already closed is a duplicate — and
+   *  once a NEWER hook turn is open, applying it would end that newer run and
+   *  clear its confirmation ref (Astra on e8f8b2cc: Stop A → dispatch B →
+   *  UserPromptSubmit B → A's turn_duration is tailed). So the edge is the
+   *  transcript's only while the hook turn is open AND the entry postdates
+   *  that turn's opening: the current turn ending before its Stop lands (the
+   *  fast path; the net for a lost Stop). An entry stamped at or before the
+   *  hook turn's opening describes an older turn. */
+  #transcriptOwnsTerminal(entryTimeMs: number): boolean {
+    if (entryTimeMs < this.#tailBoundAt - 60_000) return false;
+    if (!this.#hooksLive) return true;
+    const h = this.#hookTurn;
+    if (h === null) return true;
+    return h.open && entryTimeMs > h.at;
+  }
 
   /**
    * Set the permission mode ABSOLUTELY: detect the current mode from the
@@ -4197,10 +4216,15 @@ export class Session {
       this.#turnUsage = null;
       this.#closeOpenTools(entryTimeMs); // a tool abandoned by an errored turn shouldn't spin forever
       this.#turn = null;
-      this.#setThinking(false);
-      // The transcript's turn end (the authority without hooks; a duplicate
-      // of the Stop edge with them — harmless, nothing is executing then).
-      if (entryTimeMs >= this.#tailBoundAt - 60_000) { this.#lastConfirmedRef = null; this.#driver.emit({ kind: "turn_ended", status: "completed" }); }
+      // The transcript's turn end: the authority without hooks; with them a
+      // lagging duplicate of the Stop edge that must not touch the NEXT
+      // hook-owned run — its thinking, its confirmation ref, its command
+      // (#transcriptOwnsTerminal; Astra on e8f8b2cc).
+      if (this.#transcriptOwnsTerminal(entryTimeMs)) {
+        this.#setThinking(false);
+        this.#lastConfirmedRef = null;
+        this.#driver.emit({ kind: "turn_ended", status: "completed" });
+      } else if (!this.#hooksLive || !this.#hookTurn?.open) this.#setThinking(false);
       // 500-error auto-retry: if Claude exhausted its own retries on a 5xx this
       // turn, re-send on the backoff schedule. A turn that ended cleanly while a
       // retry was pending means the re-send worked → clear it.
@@ -4309,10 +4333,15 @@ export class Session {
           this.#turnUsage = null;
           this.#turn = null;
         }
-        this.#setThinking(false);
         // The runtime's own record of the interrupt (a terminal Esc that no
-        // hook reports): whatever was executing is cancelled.
-        if (entryTimeMs >= this.#tailBoundAt - 60_000) { this.#lastConfirmedRef = null; this.#driver.emit({ kind: "turn_ended", status: "cancelled" }); }
+        // hook reports): whatever was executing is cancelled — unless the
+        // marker is a lagging one for a turn a hook already closed while a
+        // newer hook turn runs (#transcriptOwnsTerminal).
+        if (this.#transcriptOwnsTerminal(entryTimeMs)) {
+          this.#setThinking(false);
+          this.#lastConfirmedRef = null;
+          this.#driver.emit({ kind: "turn_ended", status: "cancelled" });
+        } else if (!this.#hooksLive || !this.#hookTurn?.open) this.#setThinking(false);
         this.#maybeDrainQueue();
         return;
       }
@@ -4569,9 +4598,14 @@ export class Session {
           this.#pushContextUsage();
           this.#turnUsage = null;
           this.#turn = null;
-          this.#setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
-          if (entryTimeMs >= this.#tailBoundAt - 60_000) { this.#lastConfirmedRef = null; this.#driver.emit({ kind: "turn_ended", status: "completed" }); }
+          // The transcript's terminal, unless a hook owns this edge and it
+          // describes an older turn than the one running (#transcriptOwnsTerminal).
+          if (this.#transcriptOwnsTerminal(entryTimeMs)) {
+            this.#setThinking(false);
+            this.#lastConfirmedRef = null;
+            this.#driver.emit({ kind: "turn_ended", status: "completed" });
+          } else if (!this.#hooksLive || !this.#hookTurn?.open) this.#setThinking(false);
           this.#maybeDrainQueue(); // turn done → send the next queued message
           // Claude finished responding AND there's genuinely no more queued work
           // → push a "done" notification (the server suppresses it if you're

@@ -268,6 +268,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // command (the re-offer finds the intent row and only re-binds). One row
   // per command, committed on its own (#75): no whole-map rewrite to truncate.
   const ledger = ledgerFor();
+  /** Receipt kinds (keyed on the relay turn id) recording the remote /start
+   *  intent and its acknowledgement separately — see postStart. */
+  const START_INTENT_RECEIPT = "relay_start_intent";
+  const START_ACK_RECEIPT = "relay_start";
   const readSpawnIntent = (commandId: string): string | undefined => ledger.lookupSpawnIntent(commandId) ?? undefined;
   const writeSpawnIntent = (commandId: string, localId: string): void => { ledger.spawnIntent(commandId, localId); };
   // v2 sessionId → local session id, rebuilt from the relay on start and
@@ -671,6 +675,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (settled) freshTerminals.delete(seqs[0]);
     else log(`terminal for turn ${turnId.slice(0, 8)} still unacked after 60s — retrying in the background`);
   }
+
+  /** POST /start for a relay turn with a durable, separately recorded intent
+   *  and acknowledgement (Astra on e8f8b2cc): the intent receipt is committed
+   *  BEFORE the request, the ack receipt AFTER the relay answered, both keyed
+   *  on the turn; the event id is the stable `start:<turn>`, so a retry after
+   *  a crash between the two is ONE event to the relay (a turn already
+   *  running answers `replay`). Boot reconciles from the ack alone: a running
+   *  row with no ack is posted (again); one with an ack never is. */
+  async function postStart(turnId: string, localId: string, commandId: string | null, leaseRef: Lease): Promise<void> {
+    if (ledger.hasReceipt(localId, START_ACK_RECEIPT, turnId)) return;
+    try { ledger.addReceipt(localId, { kind: START_INTENT_RECEIPT, ref: turnId, commandId }); }
+    catch (e) { log(`turn ${turnId.slice(0, 8)}: could not record the /start intent (${errText(e)}) — posting anyway; a boot re-posts under the same event id`); }
+    await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: `start:${turnId}` }, leaseRef);
+    try { ledger.addReceipt(localId, { kind: START_ACK_RECEIPT, ref: turnId, commandId }); }
+    catch (e) { log(`turn ${turnId.slice(0, 8)}: /start acknowledged but the ack could not be recorded (${errText(e)}) — a boot re-posts under the same event id`); }
+  }
+  /** Was this turn's /start acknowledged by the relay (the durable fact a boot trusts)? */
+  const startAcked = (localId: string, turnId: string): boolean => ledger.hasReceipt(localId, START_ACK_RECEIPT, turnId);
 
   /** Raw attachment bytes from the relay store (sealed by the sender). */
   async function fetchAttachment(attachmentId: string): Promise<Uint8Array> {
@@ -1309,7 +1331,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // behind it (live 2026-09-03).
       if (accepted.handled === "command") {
         try {
-          await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+          await postStart(turnId, sess.id, accepted.id, leaseRef);
         } catch (e) {
           if ((e as { status?: number }).status === 409) {
             // The relay refuses the start (cancelled): a /joy-prompt may have
@@ -1403,7 +1425,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // every turn-end from here belongs to THIS relay turn.
       { const t = activeTurns.get(turnId); if (t) t.started = true; }
       try {
-        await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+        await postStart(turnId, localId, commandId, leaseRef);
       } catch (e) {
         const st = (e as { status?: number }).status;
         if (st === 409) {
@@ -1446,10 +1468,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     const turnId = row.relayTurnId!;
     if (inFlight.has(turnId)) return;
     inFlight.add(turnId);
-    const started = row.state === "running" || row.state === "cancelling";
+    // Whether the relay saw /start is the ACK receipt, never the local state:
+    // a daemon that died between the driver's echo (row running) and the
+    // POST looks exactly like one that died after it (Astra on e8f8b2cc).
+    // No ack → posted again under the stable event id (a relay that has it
+    // answers replay; one that never got it starts the turn now).
+    const started = startAcked(row.sessionId, turnId);
     activeTurns.set(turnId, { localId: row.sessionId, commandId: row.id, lease: leaseRef, started });
     const tag = `turn ${turnId.slice(0, 8)} [${row.sessionId}/${row.id}]`;
-    log(`${tag}: resumed from the ledger (${row.state})`);
+    log(`${tag}: resumed from the ledger (${row.state}, /start ${started ? "acknowledged" : ledger.hasReceipt(row.sessionId, START_INTENT_RECEIPT, turnId) ? "intended, unacknowledged — re-posting" : "not yet posted"})`);
     try {
       await driveTurn(turnId, row.sessionId, row.id, leaseRef, { startPosted: started, tag });
     } catch (e) {

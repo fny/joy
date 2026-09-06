@@ -321,6 +321,10 @@ interface Actor {
   unresolved: Set<string>;
   cancelTimers: Map<string, () => void>;
   cancelOps: Map<string, string>;
+  /** Cancelled rows whose late evidence named a turn still running (the
+   *  tombstone rule): commandId → the attempt that surfaced. Owned by the
+   *  same interrupt scheduler as `cancelling` rows. */
+  tombstones: Map<string, string>;
   /** A session-wide interrupt in flight (untargeted drivers). */
   sessionInterrupt: Promise<void> | null;
   /** Aborts the driver's `prepare` wait so the pump re-plans (a steer arrived). */
@@ -389,7 +393,7 @@ export class SessionCoordinator {
       sessionId, driver, generation: driver.generation, ready: false, retired: false, paused: false,
       unsubscribe: () => {}, pumping: false, pumpAgain: false, holdUntil: 0, holdTimer: null,
       abort: new AbortController(), foreignTurn: null, unresolved: new Set(), cancelTimers: new Map(), cancelOps: new Map(),
-      sessionInterrupt: null, prepareAbort: null, drafts: [], reconciling: false,
+      tombstones: new Map(), sessionInterrupt: null, prepareAbort: null, drafts: [], reconciling: false,
     };
     actor.unsubscribe = driver.observe((o) => this.#observe(actor, o));
     this.#actors.set(sessionId, actor);
@@ -444,6 +448,7 @@ export class SessionCoordinator {
     actor.holdTimer?.(); actor.holdTimer = null;
     for (const cancel of actor.cancelTimers.values()) cancel();
     actor.cancelTimers.clear();
+    actor.tombstones.clear();
     if (this.#actors.get(actor.sessionId) === actor) this.#actors.delete(actor.sessionId);
   }
 
@@ -672,7 +677,7 @@ export class SessionCoordinator {
       // An attempt still awaiting its verdict is THE operation in flight.
       if (this.ledger.attemptsAwaiting(sessionId).some((a) => pending.some((p) => p.id === a.commandId && p.state !== "queued"))) return;
       const running = pending.some((r) => r.state === "running" || r.state === "cancelling");
-      const head = pending.find((r) => r.state === "queued" && r.origin === "steer") ?? pending.find((r) => r.state === "queued");
+      const head = this.#queueHead(sessionId);
       if (!head) return;
       // A steer goes through the driver's steer op whenever it has one: into
       // the running turn, or — a turn the coordinator does not own (typed at
@@ -696,11 +701,21 @@ export class SessionCoordinator {
         if (actor.retired) return;
         if (r === "retired") continue; // pre-empted: re-plan
         if (r === "cancelled") continue; // the row is settled (cancelled / gone); the loop takes the next head
-        const again = this.ledger.getCommand(head.id);
-        if (!again || again.state !== "queued") continue;
+        // The gate wait is unbounded and the queue is editable meanwhile: the
+        // head may have been reordered behind another row, cancelled, or
+        // edited (its payload version advanced). Re-plan from the ledger
+        // rather than submit the row — or the text — the wait began with
+        // (Astra on e8f8b2cc); the head that is still current is dispatched.
+        const fresh = this.#queueHead(sessionId);
+        if (!fresh || fresh.id !== head.id || fresh.payloadVersion !== head.payloadVersion) continue;
       }
-      await this.#dispatch(actor, head, asSteer);
+      await this.#dispatch(actor, head.id, asSteer);
     }
+  }
+  /** The row the pump would dispatch next: a steer first, else the FIFO head. */
+  #queueHead(sessionId: string): CommandRow | null {
+    const pending = this.ledger.listPending(sessionId);
+    return pending.find((r) => r.state === "queued" && r.origin === "steer") ?? pending.find((r) => r.state === "queued") ?? null;
   }
   #holdPump(actor: Actor, ms: number): void {
     actor.holdTimer?.();
@@ -718,10 +733,15 @@ export class SessionCoordinator {
    *  distinguishable (campaign decision, 2026-09-06). */
   static runtimeRef(commandId: string, attemptNo: number): string { return attemptNo <= 1 ? commandId : `${commandId}#a${attemptNo}`; }
 
-  async #dispatch(actor: Actor, cmd: CommandRow, asSteer: boolean): Promise<void> {
+  async #dispatch(actor: Actor, commandId: string, asSteer: boolean): Promise<void> {
     const { sessionId, driver } = actor;
     let attempt: AttemptRow;
     const token = randomUUID();
+    // The row is read HERE, in the same synchronous span as the attempt
+    // commit: the text the driver receives and the payload version the
+    // attempt records are one and the same (no await separates them).
+    const cmd = this.ledger.getCommand(commandId);
+    if (!cmd || cmd.state !== "queued") return;
     try {
       const attemptNo = this.ledger.attemptsForCommand(cmd.id).length + 1;
       const ref = driver.runtimeRef ? driver.runtimeRef(this.#view(cmd), attemptNo) : SessionCoordinator.runtimeRef(cmd.id, attemptNo);
@@ -740,6 +760,14 @@ export class SessionCoordinator {
     this.#emitCommand(cmd.id);
     const ref = this.#ref(attempt, token);
     const view = this.#view(cmd);
+    if (attempt.payloadVersion !== view.payloadVersion) {
+      // Cannot happen (same synchronous span) — but a driver must never be
+      // handed a text the committed attempt does not vouch for.
+      this.#log(`${sessionId}: attempt ${attempt.id} records payload v${attempt.payloadVersion} but the row is v${view.payloadVersion} — not sending`);
+      try { this.ledger.settleAttempt(attempt.id, "rejected", { detail: "payload_version_mismatch", command: { to: "queued" }, generation: actor.generation }); } catch { /* the pump re-plans */ }
+      this.#emitCommand(cmd.id);
+      return;
+    }
     let result: SubmitResult;
     try {
       result = await (asSteer ? driver.steer!(view, ref, actor.abort.signal) : driver.submit(view, ref, actor.abort.signal));
@@ -851,21 +879,40 @@ export class SessionCoordinator {
     actor.cancelTimers.set(commandId, this.#schedule(() => { actor.cancelTimers.delete(commandId); void this.#interruptOp(actor, commandId); }, ms));
   }
 
+  /** Is the row still the scheduler's to interrupt: `cancelling`, or a
+   *  cancelled tombstone whose late turn is not yet known to be over? */
+  #interruptLive(actor: Actor, commandId: string): boolean {
+    const r = this.ledger.getCommand(commandId);
+    return !!r && (r.state === "cancelling" || (r.state === "cancelled" && actor.tombstones.has(commandId)));
+  }
+
+  /** THE interrupt path — for a `cancelling` row and for a cancelled
+   *  tombstone alike (Astra on e8f8b2cc: a bare driver.interrupt for late
+   *  evidence bypassed every fence below). Serialized per command, fenced
+   *  against collateral for session-wide interrupts, bounded by the cancel
+   *  budget. */
   async #interruptOp(actor: Actor, commandId: string): Promise<InterruptResult | null> {
     if (actor.retired) return null;
     const row = this.ledger.getCommand(commandId);
-    if (!row || row.state !== "cancelling") return null;
-    const attempt = this.ledger.latestAttempt(commandId);
+    if (!row) return null;
+    const tombstone = row.state === "cancelled" ? actor.tombstones.get(commandId) ?? null : null;
+    if (row.state !== "cancelling" && !tombstone) return null;
+    const attempt = tombstone ? this.ledger.getAttempt(tombstone) : this.ledger.latestAttempt(commandId);
     // The submit is still in flight: its completion consults the cancel flag
     // and schedules the interrupt with the turn identity it learns (#35).
     if (attempt?.state === "submitting") return null;
-    // A session-wide interrupt (opencode, pi) would also stop commands nobody
-    // cancelled: refuse it while such work runs — the cancel keeps retrying
-    // and is surfaced as unresolved rather than stopping the wrong turn
-    // (Astra on af76c787, #77). A second session-wide op in flight already
-    // covers this one: wait for its verdict instead of doubling it.
+    // One interrupt op per command at a time: a second trigger (another late
+    // echo, a re-fired cancel) rides the verdict of the one in flight, which
+    // schedules the retry.
+    if (actor.cancelOps.has(commandId)) return null;
+    // A session-wide interrupt (opencode, pi, claude's Escape) would also
+    // stop commands nobody cancelled: refuse it while such work runs — the
+    // cancel keeps retrying and is surfaced as unresolved rather than
+    // stopping the wrong turn (Astra on af76c787, #77). A second session-wide
+    // op in flight already covers this one: wait for its verdict instead of
+    // doubling it.
     if (!actor.driver.capabilities.targetedInterrupt) {
-      if (actor.sessionInterrupt) { await actor.sessionInterrupt; if (this.ledger.getCommand(commandId)?.state !== "cancelling") return null; }
+      if (actor.sessionInterrupt) { await actor.sessionInterrupt; if (!this.#interruptLive(actor, commandId) || actor.cancelOps.has(commandId)) return null; }
       const collateral = this.ledger.listPending(actor.sessionId).filter((r) => (r.state === "running" || r.state === "accepted") && r.id !== commandId);
       if (collateral.length) {
         // Not an interrupt attempt (the budget is untouched): the cancel
@@ -876,7 +923,7 @@ export class SessionCoordinator {
       }
     }
     const tries = this.ledger.noteCancelAttempt(commandId);
-    if (tries > this.#o.maxCancelAttempts) { this.#markUnresolved(actor, commandId, attempt?.id ?? null, tries - 1); return { kind: "failed", error: "unresolved" }; }
+    if (tries > this.#o.maxCancelAttempts) { actor.tombstones.delete(commandId); this.#markUnresolved(actor, commandId, attempt?.id ?? null, tries - 1); return { kind: "failed", error: "unresolved" }; }
     const token = randomUUID();
     actor.cancelOps.set(commandId, token);
     const call = (async (): Promise<InterruptResult> => {
@@ -887,8 +934,15 @@ export class SessionCoordinator {
     const r = await call;
     if (actor.retired || actor.cancelOps.get(commandId) !== token) return r;
     actor.cancelOps.delete(commandId);
-    const now = this.ledger.getCommand(commandId);
-    if (!now || now.state !== "cancelling") return r; // confirmed meanwhile by an observation
+    if (!this.#interruptLive(actor, commandId)) return r; // confirmed meanwhile by an observation
+    if (tombstone && r.kind === "noop") {
+      // Nothing is running: the late turn is over (or never was). The
+      // tombstone is spent; the row was cancelled all along.
+      this.#dropTombstone(actor, commandId);
+      this.#recordFree(actor, "interrupt", commandId, { result: "noop", tombstone: true });
+      this.#pump(actor.sessionId);
+      return r;
+    }
     if (r.kind === "noop" && (!attempt || attempt.state === "rejected" || attempt.state === "superseded" || attempt.runtimeTurnId == null && attempt.state !== "accepted" && attempt.state !== "done")) {
       // Nothing is running and nothing is known to have landed: the cancel
       // holds. Should the submission surface later, its evidence meets a
@@ -939,14 +993,17 @@ export class SessionCoordinator {
         const attempt = this.ledger.matchAttemptByRef(sid, o.runtimeRef) ?? this.ledger.attemptByRef(sid, o.runtimeRef);
         if (!attempt) { this.#recordFree(actor, "echo", o.runtimeRef, { runtimeTurnId: o.runtimeTurnId ?? null }); return; }
         const cmd = this.ledger.getCommand(attempt.commandId);
+        const fence = cmd ? this.#evidenceFence(cmd, attempt) : null;
+        const owns = fence !== null;
         const receipts: NewReceipt[] = [];
         if (o.receiptKind) receipts.push({ kind: o.receiptKind, ref: o.runtimeRef, commandId: attempt.commandId, attemptId: attempt.id });
         if (cmd?.seq != null) receipts.push({ kind: "seq", ref: String(cmd.seq), commandId: attempt.commandId, attemptId: attempt.id });
-        const t = cmd ? nextState(cmd.state, { type: "evidence" }) : null;
-        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "echo", ref: o.runtimeRef, payload: { runtimeTurnId: o.runtimeTurnId ?? null } }, {
+        const t = cmd && owns ? nextState(cmd.state, { type: "evidence" }) : null;
+        if (cmd && !owns) this.#logLateEvidence(sid, "echo", cmd, attempt);
+        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "echo", ref: o.runtimeRef, payload: { runtimeTurnId: o.runtimeTurnId ?? null, ...(owns ? {} : { late: true }) } }, {
           receipts,
           ...(attempt.state === "submitting" || attempt.state === "accepted" || attempt.state === "unknown" ? { attempt: { id: attempt.id, outcome: "done", runtimeTurnId: o.runtimeTurnId ?? undefined } } : {}),
-          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason } } : {}),
+          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: fence ?? undefined } } : {}),
         });
         if (o.runtimeTurnId && attempt.runtimeTurnId !== o.runtimeTurnId) this.ledger.setAttemptTurn(attempt.id, o.runtimeTurnId);
         if (actor.foreignTurn && (o.runtimeTurnId == null || actor.foreignTurn.runtimeTurnId === o.runtimeTurnId)) actor.foreignTurn = null;
@@ -969,9 +1026,12 @@ export class SessionCoordinator {
           return;
         }
         const cmd = this.ledger.getCommand(attempt.commandId);
-        const t = cmd ? nextState(cmd.state, { type: "evidence" }) : null;
-        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_started", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null } }, {
-          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason } } : {}),
+        const fence = cmd ? this.#evidenceFence(cmd, attempt) : null;
+        const owns = fence !== null;
+        const t = cmd && owns ? nextState(cmd.state, { type: "evidence" }) : null;
+        if (cmd && !owns) this.#logLateEvidence(sid, "turn_started", cmd, attempt);
+        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_started", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, ...(owns ? {} : { late: true }) } }, {
+          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: fence ?? undefined } } : {}),
         });
         if (o.runtimeTurnId && attempt.runtimeTurnId !== o.runtimeTurnId) this.ledger.setAttemptTurn(attempt.id, o.runtimeTurnId);
         const after = cmd ? this.#emitCommand(cmd.id) : null;
@@ -985,6 +1045,8 @@ export class SessionCoordinator {
         const attempts = o.runtimeTurnId ? this.ledger.attemptsByRuntimeTurnId(sid, o.runtimeTurnId)
           : o.runtimeRef ? [this.ledger.attemptByRef(sid, o.runtimeRef)].filter((a): a is AttemptRow => !!a)
           : this.#executingAttempts(sid);
+        if (o.runtimeTurnId == null && o.runtimeRef == null) this.#dropAllTombstones(actor); // "the run ended": no late turn is left to interrupt
+        else for (const a of attempts) if (actor.tombstones.get(a.commandId) === a.id) this.#dropTombstone(actor, a.commandId);
         if (!attempts.length) {
           if (actor.foreignTurn && (o.runtimeTurnId == null || actor.foreignTurn.runtimeTurnId === o.runtimeTurnId || actor.foreignTurn.runtimeTurnId == null)) actor.foreignTurn = null;
           this.#recordFree(actor, "turn_ended", o.runtimeTurnId ?? null, { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status });
@@ -996,11 +1058,20 @@ export class SessionCoordinator {
         }
         for (const attempt of attempts) {
           const cmd = this.ledger.getCommand(attempt.commandId);
-          const t = cmd ? nextState(cmd.state, { type: "turn_ended", status: o.status }) : null;
-          this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_ended", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status, detail: o.detail ?? null } }, {
-            ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason }, attempt: { id: attempt.id, outcome: t.to === "completed" ? "done" : "superseded" } } : {}),
+          const fence = cmd ? this.#evidenceFence(cmd, attempt) : null;
+        const owns = fence !== null;
+          const t = cmd && owns ? nextState(cmd.state, { type: "turn_ended", status: o.status }) : null;
+          if (cmd && !owns) this.#logLateEvidence(sid, "turn_ended", cmd, attempt);
+          this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_ended", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status, detail: o.detail ?? null, ...(owns ? {} : { late: true }) } }, {
+            ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: fence ?? undefined }, attempt: { id: attempt.id, outcome: t.to === "completed" ? "done" : "superseded" } }
+              // An older attempt's turn ended: settled on ITS row (the ledger's
+              // stale rule keeps it history), the command untouched.
+              : cmd && !owns ? { attempt: { id: attempt.id, outcome: o.status === "completed" ? "done" : "superseded" } } : {}),
           });
-          if (cmd) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); this.#emitCommand(cmd.id); }
+          if (cmd) {
+            if (owns) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); }
+            this.#emitCommand(cmd.id);
+          }
         }
         if (actor.foreignTurn && (o.runtimeTurnId == null || actor.foreignTurn.runtimeTurnId === o.runtimeTurnId)) actor.foreignTurn = null;
         actor.holdUntil = 0; // the runtime is free again: a busy-refused head may go now
@@ -1010,6 +1081,7 @@ export class SessionCoordinator {
       case "idle": {
         actor.foreignTurn = null;
         actor.holdUntil = 0;
+        this.#dropAllTombstones(actor);
         for (const row of this.ledger.listPending(sid)) {
           const t = nextState(row.state, { type: "idle" });
           if (!t) continue;
@@ -1027,12 +1099,18 @@ export class SessionCoordinator {
       case "interrupted": {
         const attempt = (o.runtimeTurnId ? this.ledger.attemptByRuntimeTurnId(sid, o.runtimeTurnId) : null) ?? this.#soleExecutingAttempt(sid);
         const cmd = attempt ? this.ledger.getCommand(attempt.commandId) : null;
+        if (o.runtimeTurnId == null) this.#dropAllTombstones(actor); // a session-wide interrupt landed: whatever ran is over
+        else if (attempt && actor.tombstones.get(attempt.commandId) === attempt.id) this.#dropTombstone(actor, attempt.commandId);
         if (!cmd) { actor.foreignTurn = null; this.#recordFree(actor, "interrupted", o.runtimeTurnId ?? null, {}); this.#emit({ type: "session", sessionId: sid }); this.#pump(sid); return; }
-        const t = nextState(cmd.state, cmd.state === "cancelling" ? { type: "interrupt_confirmed" } : { type: "turn_ended", status: "interrupted" });
-        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt!.id, kind: "interrupted", ref: o.runtimeTurnId ?? null }, {
-          ...(t ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason }, attempt: { id: attempt!.id, outcome: "superseded" } } : {}),
+        const fence = this.#evidenceFence(cmd, attempt!);
+        const owns = fence !== null;
+        const t = owns ? nextState(cmd.state, cmd.state === "cancelling" ? { type: "interrupt_confirmed" } : { type: "turn_ended", status: "interrupted" }) : null;
+        if (!owns) this.#logLateEvidence(sid, "interrupted", cmd, attempt!);
+        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt!.id, kind: "interrupted", ref: o.runtimeTurnId ?? null, payload: owns ? undefined : { late: true } }, {
+          ...(t ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: fence ?? undefined }, attempt: { id: attempt!.id, outcome: "superseded" } }
+            : !owns ? { attempt: { id: attempt!.id, outcome: "superseded" } } : {}),
         });
-        actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id);
+        if (owns) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); }
         this.#emitCommand(cmd.id);
         this.#pump(sid);
         return;
@@ -1062,12 +1140,42 @@ export class SessionCoordinator {
    *  identity is known (the tombstone rule, #66). */
   #afterEvidence(actor: Actor, row: CommandRow, attemptId: string): void {
     if (row.state === "cancelling") { this.#scheduleInterrupt(actor, row.id, 0); return; }
-    if (row.state === "cancelled") {
-      const a = this.ledger.getAttempt(attemptId);
-      if (!a) return;
-      this.#log(`${actor.sessionId}: ${row.id} was cancelled — interrupting its late turn ${a.runtimeTurnId ?? "(unnamed)"}`);
-      void actor.driver.interrupt({ attempt: this.#ref(a) }).catch(() => {});
-    }
+    if (row.state !== "cancelled") return;
+    const a = this.ledger.getAttempt(attemptId);
+    if (!a) return;
+    // Already the scheduler's (a second echo of the same late turn): the op
+    // in flight, or the deferred retry, covers it — never a second call.
+    if (actor.tombstones.has(row.id)) return;
+    actor.tombstones.set(row.id, a.id);
+    this.#log(`${actor.sessionId}: ${row.id} was cancelled — its late turn ${a.runtimeTurnId ?? "(unnamed)"} goes to the interrupt scheduler`);
+    void this.#interruptOp(actor, row.id);
+  }
+  #dropTombstone(actor: Actor, commandId: string): void {
+    if (!actor.tombstones.delete(commandId)) return;
+    actor.cancelTimers.get(commandId)?.(); actor.cancelTimers.delete(commandId);
+    actor.cancelOps.delete(commandId); // a verdict still in flight is stale: the runtime spoke
+  }
+  /** The runtime reported an id-less end / idle: every tombstoned turn is over. */
+  #dropAllTombstones(actor: Actor): void {
+    for (const id of [...actor.tombstones.keys()]) this.#dropTombstone(actor, id);
+  }
+
+  /** The payload rule for an observation's COMMAND effect (Astra on
+   *  e8f8b2cc). Evidence may move the command only when the attempt it
+   *  names was made for the row's CURRENT payload version: an older attempt
+   *  of the same text that landed after all is this command's delivery
+   *  (at-least-once — the codex resend contract), but one made for a text
+   *  since edited away is history on that attempt (the ledger's stale rule
+   *  keeps it) and never advances the replacement. Returns the command's
+   *  newest attempt id — the transition's precondition (the row's owner
+   *  must not have changed under the transaction) — or null for history. */
+  #evidenceFence(cmd: CommandRow, attempt: AttemptRow): string | null {
+    const latest = this.ledger.latestAttempt(cmd.id);
+    if (!latest || attempt.payloadVersion !== cmd.payloadVersion) return null;
+    return latest.id;
+  }
+  #logLateEvidence(sid: string, kind: string, cmd: CommandRow, attempt: AttemptRow): void {
+    this.#log(`${sid}: late ${kind} for attempt ${attempt.attemptNo} of ${cmd.id} (payload v${attempt.payloadVersion}, row v${cmd.payloadVersion}) — recorded on that attempt; the command stays ${cmd.state}`);
   }
 
   /** The latest attempt of every command executing (accepted | running |

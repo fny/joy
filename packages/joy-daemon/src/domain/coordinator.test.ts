@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Ledger, LedgerWriteError, SessionEndedError } from "./ledger";
 import { SessionCoordinator, SessionNotAdoptedError, type CoordinatorEvent } from "./coordinator";
-import { FakeDriver, FakeClock, settle, CODEX_LIKE, OPENCODE_LIKE } from "./coordinator.fakeDriver";
+import { FakeDriver, FakeClock, settle, deferred, CODEX_LIKE, OPENCODE_LIKE, CLAUDE_LIKE } from "./coordinator.fakeDriver";
 
 let dir: string;
 let ledger: Ledger;
@@ -618,6 +618,205 @@ test("edit bumps the payload version of a queued row only; reorder moves within 
   expect(coord.snapshot("s1").queue.map((q) => q.id)).toEqual([c.id, b.id]);
   expect(coord.snapshot("s1")).toMatchObject({ pendingCount: 3, inFlight: "A" });
   expect(d.submits).toHaveLength(1);
+});
+
+// ── e8f8b2cc review residuals: the editable queue across the pre-attempt gate ──
+
+test("pane gate (e8f8b2cc): an edit while the head waits at prepare re-plans — the driver receives the edited text and the attempt records that payload version", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const gate = deferred<"ready" | "cancelled" | "retired">();
+  const prepared: string[] = [];
+  d.prepare = (cmd) => { prepared.push(cmd.text); return gate.promise; };
+  const row = accept("s1", "before");
+  await settle();
+  expect(prepared).toEqual(["before"]);
+  expect(d.submits).toHaveLength(0);
+  expect(coord.edit(row.id, "after")).toBe(true);
+  gate.resolve("ready");
+  await settle();
+  // The stale head is never submitted: the loop re-planned on the edited row.
+  expect(d.submits).toHaveLength(1);
+  expect(d.lastSubmit.cmd.text).toBe("after");
+  expect(d.lastSubmit.cmd.payloadVersion).toBe(2);
+  const attempt = ledger.getAttempt(d.lastSubmit.attempt.attemptId)!;
+  expect(attempt.payloadVersion).toBe(2);
+  expect(attempt.payloadVersion).toBe(d.lastSubmit.cmd.payloadVersion);
+  expect(ledger.getCommand(row.id)).toMatchObject({ text: "after", payloadVersion: 2, state: "submitting" });
+});
+
+test("pane gate (e8f8b2cc): a reorder while the head waits at prepare re-plans — the new head is submitted first", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const gate = deferred<"ready" | "cancelled" | "retired">();
+  const prepared: string[] = [];
+  d.prepare = (cmd) => { prepared.push(cmd.text); return gate.promise; };
+  const x = accept("s1", "first");
+  const y = accept("s1", "second");
+  await settle();
+  expect(prepared).toEqual(["first"]);
+  expect(coord.reorder(y.id, 0)).toBe(true);
+  gate.resolve("ready");
+  await settle();
+  expect(d.submits).toHaveLength(1);
+  expect(d.lastSubmit.cmd.id).toBe(y.id);
+  expect(d.lastSubmit.cmd.text).toBe("second");
+  expect(stateOf(y.id)).toBe("submitting");
+  expect(stateOf(x.id)).toBe("queued");
+  // The gate was consulted again for the row that actually went.
+  expect(prepared[prepared.length - 1]).toBe("second");
+});
+
+test("observation fencing (e8f8b2cc): a timed-out attempt's late echo and turn end are history on THAT attempt — the edited, re-submitted replacement moves only on its own evidence", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const row = accept("s1", "old");
+  await settle();
+  const old = d.lastSubmit;
+  old.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  expect(stateOf(row.id)).toBe("queued");
+  expect(coord.edit(row.id, "replacement")).toBe(true);
+  await clock.advance(100);
+  const next = d.lastSubmit;
+  expect(next.attempt.attemptId).not.toBe(old.attempt.attemptId);
+  expect(next.cmd).toMatchObject({ text: "replacement", payloadVersion: 2 });
+  expect(stateOf(row.id)).toBe("submitting");
+  // Attempt 1's evidence arrives while attempt 2 awaits its verdict.
+  d.emit({ kind: "echo", runtimeRef: old.attempt.runtimeRef });
+  expect(stateOf(row.id)).toBe("submitting");
+  d.emit({ kind: "turn_ended", runtimeRef: old.attempt.runtimeRef, status: "completed" });
+  expect(stateOf(row.id)).toBe("submitting");
+  expect(ledger.getAttempt(next.attempt.attemptId)?.state).toBe("submitting");
+  // …and is retained on attempt 1 as history.
+  const history = ledger.listObservations("s1").filter((o) => o.attemptId === old.attempt.attemptId).map((o) => o.kind);
+  expect(history).toEqual(expect.arrayContaining(["echo", "turn_ended"]));
+  // The replacement runs and completes on ITS evidence only.
+  next.settle.resolve({ kind: "accepted" });
+  await settle();
+  expect(stateOf(row.id)).toBe("accepted");
+  d.emit({ kind: "echo", runtimeRef: next.attempt.runtimeRef });
+  expect(stateOf(row.id)).toBe("running");
+  d.emit({ kind: "turn_ended", status: "completed" });
+  expect(stateOf(row.id)).toBe("completed");
+  expect(ledger.getAttempt(next.attempt.attemptId)?.state).toBe("done");
+});
+
+test("observation fencing (e8f8b2cc): a late echo of the pre-edit attempt does not run the edited queued row; without an edit the same late echo still runs it (the timed-out submission landed)", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const edited = accept("s1", "old text");
+  await settle();
+  const first = d.lastSubmit;
+  first.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 60_000 });
+  await settle();
+  expect(coord.edit(edited.id, "new text")).toBe(true);
+  d.emit({ kind: "echo", runtimeRef: first.attempt.runtimeRef });
+  expect(stateOf(edited.id)).toBe("queued"); // the runtime ran the OLD text: not this payload's delivery
+  expect(ledger.getAttempt(first.attempt.attemptId)?.payloadVersion).toBe(1);
+  coord.cancel(edited.id);
+  const plain = accept("s1", "unchanged");
+  await clock.advance(60_000);
+  const second = d.lastSubmit;
+  expect(second.cmd.id).toBe(plain.id);
+  second.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 60_000 });
+  await settle();
+  expect(stateOf(plain.id)).toBe("queued");
+  d.emit({ kind: "echo", runtimeRef: second.attempt.runtimeRef });
+  expect(stateOf(plain.id)).toBe("running"); // same payload, newest attempt: it landed after all
+  d.emit({ kind: "turn_ended", status: "completed" });
+  expect(stateOf(plain.id)).toBe("completed");
+  // Same payload, OLDER attempt (a resend already went out): its late turn end is
+  // still this command's delivery — at-least-once, the codex resend contract.
+  const twice = accept("s1", "sent twice");
+  await settle();
+  const a1 = d.lastSubmit;
+  a1.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 10 });
+  await settle();
+  await clock.advance(10);
+  const a2 = d.lastSubmit;
+  expect(a2.attempt.attemptId).not.toBe(a1.attempt.attemptId);
+  a2.settle.resolve({ kind: "accepted" });
+  await settle();
+  expect(stateOf(twice.id)).toBe("accepted");
+  d.emit({ kind: "echo", runtimeRef: a1.attempt.runtimeRef });
+  expect(stateOf(twice.id)).toBe("running");
+  d.emit({ kind: "turn_ended", runtimeRef: a1.attempt.runtimeRef, status: "completed" });
+  expect(stateOf(twice.id)).toBe("completed");
+});
+
+test("tombstone (e8f8b2cc): late evidence of a cancelled timed-out prompt never issues an untargeted interrupt while the current command runs — deferred through the scheduler, dropped when the run ends", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const old = accept("s1", "old");
+  await settle();
+  const ref = d.lastSubmit.attempt.runtimeRef;
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  expect(coord.cancel(old.id)).toMatchObject({ kind: "cancelled" });
+  const current = accept("s1", "current");
+  await clock.advance(100);
+  expect(d.lastSubmit.cmd.id).toBe(current.id);
+  d.lastSubmit.settle.resolve({ kind: "accepted" });
+  await settle();
+  d.emit({ kind: "echo", runtimeRef: d.lastSubmit.attempt.runtimeRef });
+  expect(stateOf(current.id)).toBe("running");
+  expect(d.interrupts).toHaveLength(0);
+  // The old prompt's echo surfaces while `current` runs: an Escape now would
+  // stop the wrong turn (collateral) — nothing is sent, the retry is parked.
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(0);
+  expect(stateOf(current.id)).toBe("running");
+  expect(stateOf(old.id)).toBe("cancelled");
+  // A second echo of the same late turn coalesces: still nothing in flight.
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(0);
+  expect(clock.pending).toBe(1); // exactly one parked retry
+  // The run ends: the parked retry is dropped, not fired at the next command.
+  d.emit({ kind: "turn_ended", status: "completed" });
+  expect(stateOf(current.id)).toBe("completed");
+  await clock.advance(60_000);
+  expect(d.interrupts).toHaveLength(0);
+  expect(coord.snapshot("s1").unresolvedCancels).toEqual([]);
+});
+
+test("tombstone (e8f8b2cc): with nothing else running the late turn is interrupted ONCE through the scheduler; a failed result retries on the cancel budget and is bounded", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const old = accept("s1", "old");
+  await settle();
+  const ref = d.lastSubmit.attempt.runtimeRef;
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  coord.cancel(old.id);
+  expect(stateOf(old.id)).toBe("cancelled");
+  d.emit({ kind: "echo", runtimeRef: ref });
+  d.emit({ kind: "echo", runtimeRef: ref }); // two echoes → one interrupt in flight
+  await settle();
+  expect(d.interrupts).toHaveLength(1);
+  expect(d.lastInterrupt.attempt?.runtimeRef).toBe(ref);
+  // The Escape failed: retried with the cancel backoff, never a bare re-fire.
+  d.lastInterrupt.settle.resolve({ kind: "failed", error: "pane gone" });
+  await settle();
+  expect(d.interrupts).toHaveLength(1);
+  await clock.advance(1_000);
+  expect(d.interrupts).toHaveLength(2);
+  // The runtime's own interrupt marker confirms it: no further tries.
+  d.lastInterrupt.settle.resolve({ kind: "sent" });
+  await settle();
+  d.emit({ kind: "turn_ended", status: "cancelled" });
+  await clock.advance(120_000);
+  expect(d.interrupts).toHaveLength(2);
+  expect(stateOf(old.id)).toBe("cancelled");
+  // Budget: a tombstone whose interrupts keep failing is bounded and surfaced unresolved.
+  const again = accept("s1", "again");
+  await settle();
+  const ref2 = d.lastSubmit.attempt.runtimeRef;
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  coord.cancel(again.id);
+  d.onInterrupt = () => ({ kind: "failed", error: "still no pane" });
+  d.emit({ kind: "echo", runtimeRef: ref2 });
+  await settle();
+  await clock.advance(600_000);
+  expect(d.interrupts.length).toBe(2 + 5); // maxCancelAttempts (5) for the second tombstone, then unresolved
+  expect(coord.snapshot("s1").unresolvedCancels).toEqual([again.id]);
 });
 
 test("waitFor resolves on the named state, immediately when already there, and with the current state on timeout", async () => {

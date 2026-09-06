@@ -561,6 +561,71 @@ test("hook authority owns readiness: after Stop a queued prompt dispatches again
   s.end("killed");
 });
 
+// ── e8f8b2cc review residual: the lagging transcript terminal vs the next hook-owned run ──
+
+test("late transcript terminal (e8f8b2cc): Stop A → dispatch + UserPromptSubmit B → A's lagging turn_duration arrives → B stays running with its thinking and confirmation ref; B's own Stop ends it", async () => {
+  vi.useFakeTimers();
+  const { st, driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("late-tail"), driver, { claudeSessionId: "sid" });
+  const { rs, thinking } = relayStub("rs-late-tail");
+  s.attachRelay(rs, true);
+  const { coordinatorFor } = await import("../domain/coordinator");
+  const stoppedAt = Date.now();
+  s.onHookEvent({ event: "Stop", session_id: "sid" });                  // A ends (hook-owned terminal)
+  const item = queueFor(s).accept("new command", { mirrorToRelay: false });
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(st.keys).toContain("Enter");
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "new command" });
+  expect(coordinatorFor().state(item.id)).toBe("running");
+  const thinkingBefore = thinking.length;
+  // A's turn_duration is tailed only now: stamped when A ended, before B's admission…
+  s.onTranscriptEntry({ type: "system", subtype: "turn_duration", timestamp: new Date(stoppedAt).toISOString(), durationMs: 5 } as any);
+  expect(coordinatorFor().state(item.id)).toBe("running");               // old code: completed
+  expect(thinking.slice(thinkingBefore)).toEqual([]);                     // B's thinking is not cleared by A's edge
+  // …and the reviewer's exact shape — stamped at the admission instant — is an older edge too.
+  s.onTranscriptEntry({ type: "system", subtype: "turn_duration", timestamp: new Date().toISOString(), durationMs: 5 } as any);
+  expect(coordinatorFor().state(item.id)).toBe("running");
+  expect(s.busy()).toBe(true);
+  // A lagging end_turn assistant entry of A's is the same older edge.
+  s.onTranscriptEntry({ type: "assistant", uuid: "a-tail", timestamp: new Date(stoppedAt).toISOString(), message: { role: "assistant", model: "claude-x", stop_reason: "end_turn", content: [{ type: "text", text: "A's last words" }] } } as any);
+  expect(coordinatorFor().state(item.id)).toBe("running");
+  // A prompt typed into B's turn would still be confirmed by B's evidence: the
+  // confirmation ref survived the older edges (a turn start names it).
+  expect(s.hookState().live).toBe(true);
+  // B's own hook terminal is THE edge.
+  await vi.advanceTimersByTimeAsync(10);
+  s.onHookEvent({ event: "Stop", session_id: "sid" });
+  expect(coordinatorFor().state(item.id)).toBe("completed");
+  expect(s.busy()).toBe(false);
+  // With B closed by its Stop, B's own late turn_duration is a harmless duplicate: nothing re-runs, nothing changes.
+  s.onTranscriptEntry({ type: "system", subtype: "turn_duration", timestamp: new Date().toISOString(), durationMs: 5 } as any);
+  expect(coordinatorFor().state(item.id)).toBe("completed");
+  s.end("killed");
+});
+
+test("late transcript terminal (e8f8b2cc): the interrupt marker keeps its authority for the OPEN hook turn (no Stop fires on Esc) and loses it for an older one", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("late-marker"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-late-marker");
+  s.attachRelay(rs, true);
+  const { coordinatorFor } = await import("../domain/coordinator");
+  const stoppedAt = Date.now();
+  s.onHookEvent({ event: "Stop", session_id: "sid" });
+  const item = queueFor(s).accept("interrupt me", { mirrorToRelay: false });
+  await vi.advanceTimersByTimeAsync(1_000);
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "interrupt me" });
+  expect(coordinatorFor().state(item.id)).toBe("running");
+  // An older turn's interrupt marker (tailed late) changes nothing…
+  s.onTranscriptEntry({ type: "user", uuid: "m-old", timestamp: new Date(stoppedAt).toISOString(), message: { role: "user", content: "[Request interrupted by user]" } } as any);
+  expect(coordinatorFor().state(item.id)).toBe("running");
+  // …the marker for THIS turn (Esc in the pane, no hook reports it) cancels it.
+  await vi.advanceTimersByTimeAsync(500);
+  s.onTranscriptEntry({ type: "user", uuid: "m-now", timestamp: new Date().toISOString(), message: { role: "user", content: "[Request interrupted by user]" } } as any);
+  expect(coordinatorFor().state(item.id)).toBe("cancelled");
+  s.end("killed");
+});
+
 // ── 617dc734 review residuals: launch identity, fresh turn-start evidence, #480 persistence ──
 
 test("launch fence: a hook that does not echo THIS launch's id — the retired predecessor under the same route id and the same conversation id (a --resume replacement) — flips no latch, persists no mode, arms no end, closes no turn and confirms no dispatch", async () => {

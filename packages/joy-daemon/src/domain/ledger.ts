@@ -160,7 +160,10 @@ export interface NewObservation { sessionId: string; generation: number; attempt
 export interface ObservationEffects {
   receipts?: NewReceipt[];
   outbox?: NewOutbound[];
-  command?: { id: string; from?: CommandState[]; to: CommandState; terminalReason?: string };
+  /** `expectedAttemptId` (optional, additive — Astra on e8f8b2cc): the
+   *  transition is refused unless that attempt is still the command's
+   *  newest, so an observation naming an older attempt cannot move it. */
+  command?: { id: string; from?: CommandState[]; to: CommandState; terminalReason?: string; expectedAttemptId?: string };
   attempt?: { id: string; outcome: AttemptState; runtimeTurnId?: string; detail?: string };
   /** Becomes pending until every outbox row this observation (and any
    *  earlier one) produced is acked — see setCheckpoint. */
@@ -786,7 +789,7 @@ export class Ledger {
       for (const rc of effects.receipts ?? []) this.#addReceiptInner(obs.sessionId, rc, now);
       if (effects.attempt) this.settleAttempt(effects.attempt.id, effects.attempt.outcome, { runtimeTurnId: effects.attempt.runtimeTurnId, detail: effects.attempt.detail, command: null, generation: obs.generation });
       if (effects.command) {
-        const ok = this.transition(effects.command.id, effects.command.from ?? NON_TERMINAL_STATES, effects.command.to, { terminalReason: effects.command.terminalReason, generation: obs.generation });
+        const ok = this.transition(effects.command.id, effects.command.from ?? NON_TERMINAL_STATES, effects.command.to, { terminalReason: effects.command.terminalReason, generation: obs.generation, expectedAttemptId: effects.command.expectedAttemptId });
         if (!ok) throw new StaleCommandError(effects.command.id, `not in ${(effects.command.from ?? NON_TERMINAL_STATES).join("|")}`);
       }
       const outboxSeqs = effects.outbox?.length ? this.enqueueOutbound(effects.outbox.map((o) => ({ generation: obs.generation, ...o }))) : [];
