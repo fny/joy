@@ -26,6 +26,7 @@ import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
 import { joySessionDir } from "../paths";
+import { ReverseUtf8Assembler } from "./textStream";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, dirname, join, resolve as resolvePath } from "path";
@@ -174,26 +175,29 @@ function parseLogLine(line: string): { role: "user" | "assistant"; text: string;
   return { role, text, ts: Number.isNaN(tsRaw) ? null : tsRaw };
 }
 
-function readLastLogMessages(file: string, limit: number): Array<{ role: "user" | "assistant"; text: string; ts: number | null }> {
+/** `chunkBytes` is a test seam. Exported for its test only. */
+export function readLastLogMessages(file: string, limit: number, chunkBytes = 256 * 1024): Array<{ role: "user" | "assistant"; text: string; ts: number | null }> {
   // Read the file BACKWARDS in chunks — callers want the last handful of
   // messages (projects-page excerpts use limit=1), and transcripts run to many
   // MB; parsing the whole file per call stalled the daemon event loop.
-  const CHUNK = 256 * 1024;
+  const CHUNK = chunkBytes;
   try {
     const size = statSync(file).size;
     const fd = openSync(file, "r");
     try {
       let start = size;
-      let blockText = "";
+      // Bytes, not per-chunk strings: a character straddling a chunk boundary
+      // is decoded once both halves are present (#548).
+      const block = new ReverseUtf8Assembler();
       for (;;) {
         const readStart = Math.max(0, start - CHUNK);
         if (readStart < start) {
           const buf = Buffer.alloc(start - readStart);
           readSync(fd, buf, 0, buf.length, readStart);
-          blockText = buf.toString("utf-8") + blockText;
+          block.prepend(buf);
           start = readStart;
         }
-        let lines = blockText.split("\n");
+        let lines = block.text().split("\n");
         // Unless we're at the file start, the first line is (possibly) a partial
         // — skip it this round; the next chunk prepend completes it.
         if (start > 0) lines = lines.slice(1);

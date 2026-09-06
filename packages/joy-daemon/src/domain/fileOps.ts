@@ -15,6 +15,7 @@ import { readFile, readdir, stat, lstat, unlink } from "fs/promises";
 import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, tmpdir } from "os";
 import { writeFileAtomicAsync } from "./atomicWrite";
+import { TextAccumulator } from "./textStream";
 
 const execAsync = promisify(exec);
 
@@ -381,8 +382,8 @@ export async function handleGetDirectoryTree(workingDirectory: string, data: Get
 // Spawn an external tool, capture stdout/stderr, return result. Used by
 // ripgrep and difftastic. ANY exit code counts
 // as success — the app inspects exitCode itself. Only spawn errors (ENOENT,
-// permission denied) cause success=false.
-function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+// permission denied) cause success=false. Exported for its test only.
+export function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolveResult, rejectResult) => {
     const child = nodeSpawn(binary, args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -393,11 +394,14 @@ function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record
     // Nothing is ever fed to the tool: close stdin so a tool that would read
     // it (rg with no path operand) exits instead of waiting forever.
     child.stdin.end();
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => { stdout += d.toString(); });
-    child.stderr.on("data", (d) => { stderr += d.toString(); });
-    child.on("close", (code) => { resolveResult({ exitCode: code ?? 0, stdout, stderr }); });
+    // One decoder per stream: a multibyte character split between two pipe
+    // chunks must not become replacement characters in matched text or
+    // filenames (#540).
+    const stdout = new TextAccumulator();
+    const stderr = new TextAccumulator();
+    child.stdout.on("data", (d: Buffer) => { stdout.push(d); });
+    child.stderr.on("data", (d: Buffer) => { stderr.push(d); });
+    child.on("close", (code) => { resolveResult({ exitCode: code ?? 0, stdout: stdout.end(), stderr: stderr.end() }); });
     child.on("error", (err) => { rejectResult(err); });
   });
 }
