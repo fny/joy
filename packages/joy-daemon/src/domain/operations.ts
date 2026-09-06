@@ -12,7 +12,7 @@
 // routes reuse the same result; the few legacy HTTP divergences (create's
 // unwrapped 201, kill's 404) are expressed via the optional httpShape.
 
-import type { Session } from "../claude/session";
+import { parseJoyCommand, type Session } from "../claude/session";
 import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
@@ -935,7 +935,15 @@ export const machineOps: MachineOp[] = [
         // session it never had a card for. Escaped for the attribute.
         const sender = from.startsWith("joy:") ? registry.get(from.slice(4)) : undefined;
         const fromLabel = sender ? `${sessionLabel(sender)}${sender.summary ? ` · ${sender.summary}` : ""}`.replace(/["<>]/g, "") : "";
-        text = `<joy-message from="${from}"${fromLabel ? ` from-label="${fromLabel}"` : ""}${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${text}\n</joy-message>`;
+        const wrap = (body: string) => `<joy-message from="${from}"${fromLabel ? ` from-label="${fromLabel}"` : ""}${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${body}\n</joy-message>`;
+        // A daemon-owned slash command keeps its leading `/command` (#552):
+        // wrapped whole, `/title`, `/steer`, `/login-code` reached the
+        // adapters as ordinary prompts and lost their control behaviour. A
+        // steer's BODY still carries the provenance (the running turn should
+        // know who is talking); the other commands take no message body.
+        const cmd = parseJoyCommand(text);
+        if (!cmd) text = wrap(text);
+        else if ((cmd.name === "steer" || cmd.name === "btw") && cmd.args.trim()) text = `/${cmd.name} ${wrap(cmd.args.trim())}`;
       }
       const trimmed = text;
       const source = meta.via === "http" ? "web" as const : "rpc" as const;
