@@ -385,6 +385,24 @@ app.
   adapters, git projections and stray catalog/probe reads are in three
   parallel residual rounds. New low: #622 parseTable quadratic.
 
+- 2026-09-08 (residual rounds) — hooks residuals verified fixed (829eb0e1:
+  per-launch identity, `promptReadiness()`, fresh-box turn-start
+  confirmation). C2 phases 3/4/6 merged (8ffb05c6: OpenCode/pi/agy
+  drivers, lane on coordinator events, `interrupted{restart}`, boot
+  resume); Astra: partial only for Claude still on `legacyWaitFor` —
+  phase 5 in flight. Merged at 742a0ba5: #107 capability advertised from
+  the lane's key state (50dc6955); daemon round three residuals #491 #543
+  #533 #528 #529 #554 (d5a3e431: env store on a SQLite lock, mtime-bounded
+  quota index, container-aware Markdown code ranges, non-overlapping tag
+  scan, ancestry-attributed CPU ticks); #597 paged history (33f8e04a); C1
+  import idempotence / fail-closed import with quarantine / current-owner
+  settlement fence (75e30a4f); E1 tool-model residuals + #165 durable
+  message links (47de24d4); push deadline owned by the helper (dddf7068).
+  App residual rounds all verified fixed by Astra (E4 store 9b0314f5, file
+  screen 40f56e80, stray reads 3728e257, E8 ad13b617, parser 6f2bf8f3,
+  voice 79022c1d). Closer running over 136 verified-fixed issues. New lows:
+  #622 parseTable quadratic, #623 flaky lane backoff test.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
