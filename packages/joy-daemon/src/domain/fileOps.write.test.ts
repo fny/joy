@@ -93,7 +93,8 @@ test("jailToolArgs: refuses options that read or execute outside the jail", () =
     ["--follow", "-e", "x", "./"],
     ["--ignore-file", "/root/.ssh/config", "-e", "x", "./"],
     ["--type-add", "x:/etc/*", "-e", "x", "./"],
-    ["-in", "x", "./"], // combined short flags are not parsed → refused
+    ["-iL", "x", "./"], // a refused letter inside a short-option cluster
+    ["-f/etc/shadow", "./"], // a refused letter with its value attached
     ["-e", "x", "-"],  // stdin operand
   ]) {
     const r = jailToolArgs("rg", argv, cwd);
@@ -107,11 +108,16 @@ test("jailToolArgs: refuses options that read or execute outside the jail", () =
 test("jailToolArgs: the app's own typed argv shapes pass unchanged", () => {
   mkdirSync(join(cwd, "src"));
   const rgArgv = ["--line-number", "--with-filename", "--no-heading", "-i", "-g", "*.ts", "-m", "100", "-e", "needle", "./"];
-  expect(jailToolArgs("rg", rgArgv, cwd)).toEqual({ ok: true, args: rgArgv, pathOperands: ["./"] });
-  expect(jailToolArgs("rg", ["--files", "src"], cwd).ok).toBe(true);
+  expect(jailToolArgs("rg", rgArgv, cwd)).toEqual({ ok: true, args: rgArgv, pathOperands: ["./"], mode: "search" });
+  expect(jailToolArgs("rg", ["--files", "src"], cwd)).toEqual({ ok: true, args: ["--files", "src"], pathOperands: ["src"], mode: "list" });
   expect(jailToolArgs("rg", ["-C", "3", "--color=never", "needle", "src"], cwd).ok).toBe(true);
+  // Short-option clusters parse the way rg parses them: every letter is
+  // checked, a valued letter takes the rest of the cluster (or the next word).
+  expect(jailToolArgs("rg", ["-inC3", "needle", "src"], cwd)).toEqual({ ok: true, args: ["-inC3", "needle", "src"], pathOperands: ["src"], mode: "search" });
+  expect(jailToolArgs("rg", ["-ie", "needle", "src"], cwd)).toEqual({ ok: true, args: ["-ie", "needle", "src"], pathOperands: ["src"], mode: "search" });
+  expect(jailToolArgs("rg", ["-eneedle", "src"], cwd)).toEqual({ ok: true, args: ["-eneedle", "src"], pathOperands: ["src"], mode: "search" });
   const difftArgv = ["--context", "3", join(cwd, "src", "a.ts"), join(cwd, "src", "b.ts")];
-  expect(jailToolArgs("difft", difftArgv, cwd)).toEqual({ ok: true, args: difftArgv, pathOperands: difftArgv.slice(2) });
+  expect(jailToolArgs("difft", difftArgv, cwd)).toEqual({ ok: true, args: difftArgv, pathOperands: difftArgv.slice(2), mode: "diff" });
   // Extra read roots (the temp dirs) are honored for grep.
   expect(jailToolArgs("rg", ["-e", "x", "/tmp"], cwd, ["/tmp"]).ok).toBe(true);
 });
