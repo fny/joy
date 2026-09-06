@@ -24,6 +24,8 @@ import { startNucleusLane } from "./relay/nucleusLane.ts";
 import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
 import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
+import { ledgerFor } from "./domain/ledger";
+import { importLegacyState } from "./domain/ledgerImport";
 
 // Provider keys for spawned agents live in the sealed store (~/.joy/env.sealed,
 // domain/envStore.ts — set from the app or `joy env set`). A plaintext
@@ -104,6 +106,21 @@ function writeDaemonState(port: number): void {
 // Written before listen so a racing CLI sees it; with a dynamic port (0) the
 // onListening rewrite below fills in the real one and the CLI polls until then.
 writeDaemonState(PORT);
+
+// The durable acceptance ledger (domain/ledger.ts): opened before anything
+// recovers or accepts work, with the one-time import of the legacy per-file
+// stores (queue-*.json, *.receipts.json, v2-outbound.json, codex-*.json,
+// v2-spawns.json, the execution fields of window-*.json) — originals moved
+// to state/imported-v1/. Terminal rows are pruned on a 7-day retention.
+{
+  const ledger = ledgerFor(STATE_DIR);
+  const creds = loadCredentials();
+  const report = importLegacyState(ledger, STATE_DIR, { sealsContent: !!creds?.encryption?.publicKey, log: (line) => process.stderr.write(line + "\n") });
+  if (report.failed.length) process.stderr.write(`[ledger-import] ${report.failed.length} file(s) could not be imported: ${report.failed.map((f) => f.file).join(", ")}\n`);
+  const prune = () => { try { const r = ledger.prune(); if (r.commands || r.outbox || r.receipts) process.stderr.write(`[ledger] pruned ${r.commands} commands, ${r.outbox} outbox rows, ${r.receipts} receipts\n`); } catch (e) { process.stderr.write(`[ledger] prune failed: ${e instanceof Error ? e.message : e}\n`); } };
+  prune();
+  setInterval(prune, 24 * 3_600_000).unref();
+}
 
 const relayClient = initRelay();
 

@@ -4,7 +4,7 @@ import {join,resolve,dirname} from 'node:path';
 process.env.JOY_HOME_DIR=mkdtempSync('/tmp/joy-test-tmux/review3/wave1-astra-second-followup-');
 const root='../src';
 const {startNucleusLane}=await import(root+'/relay/nucleusLane.ts');
-const {OutboundSpool}=await import(root+'/relay/outboundSpool.ts');
+const {spool,seedSpool,blockLedgerWrites,unblockLedgerWrites,codexDeliveredThrough,codexPendingThrough,opencodeDeliveredThrough}=await import('./ledger-spool-shim.mts');
 const {RelaySession,encodeTextEvent}=await import(root+'/relay/relay.ts');
 const {joyStateDir}=await import(root+'/paths.ts');
 const scenario=process.argv[2];
@@ -26,8 +26,8 @@ if(scenario==='duplicates')initial=[out('first'),out('second')];
 if(scenario==='replay_retry')initial=[terminal];
 if(scenario==='fence')initial=[out('first')];
 if(scenario==='cap'||scenario==='growth')initial=Array.from({length:2000},(_,i)=>out('old-'+i));
-writeFileSync(spoolPath,JSON.stringify(initial));
-const pending=()=>new OutboundSpool(spoolPath);
+seedSpool(joyStateDir(),initial as any);
+const pending=()=>spool(joyStateDir());
 const adapter=new RelaySession({client:{creds:{machineId:row.daemonId}} as any,relaySessionId:row.localSessionId,metadata:{}});
 let busy=false,offered=false,claimReady=false;
 const session:any={id:row.localSessionId,status:'active',cardMetadata:()=>null,busy:()=>busy,queueState:()=>({pendingCount:0,paused:false}),queueItemState:()=> 'delivered',abort:async()=>{busy=false;},enqueue(){
@@ -132,7 +132,7 @@ try{
   console.log(JSON.stringify({scenario,result:'fixed',onDisk:disk.size,evictedOldest:false,degraded:true,retainedScheduledOutputs:posts.length}));
  }else if(scenario==='disk_opencode'){
   await until(()=>statusReads>=1);await sleep(20);
-  mkdirSync(spoolPath+'.tmp');
+  blockLedgerWrites(joyStateDir());
   const original=join(root,'opencode/opencodeSession.ts');
   // Expose only a setup/finish seam on a temporary copy; the production method is unchanged.
   const text=readFileSync(original,'utf8').replace('  constructor(init: OpencodeInit, deps: SessionDeps) {', `  __reviewFinish(norm: any) { this.#norm=norm; this.#ocSessionId='oc-session'; this.#endTurn('adapter-turn','completed'); }\n  constructor(init: OpencodeInit, deps: SessionDeps) {`).replace(/(from\s+[\"'])(\.{1,2}\/[^\"']+)([\"'])/g,(_,a,b,c)=>a+resolve(dirname(original),b)+c);
@@ -143,40 +143,40 @@ try{
   oc.attachRelay(adapter);
   oc.__reviewFinish({lastMessageId:'msg_last',currentTurn:'adapter-turn',closeOpenTools:()=>[],setTurn(){}});
   assert.equal(adapter.outboundPersistDegraded,true);
-  assert.equal(loadWindowRecord(row.localSessionId)?.opencodeDeliveredThrough,undefined);
+  assert.equal(opencodeDeliveredThrough(joyStateDir(),row.localSessionId),undefined);
   assert.equal(pending().size,0);
   console.log(JSON.stringify({scenario,result:'fixed',degraded:true,deliveredThrough:null,spooled:0}));
  }else if(scenario==='disk_receipt'||scenario==='sweep_health'||scenario==='late_sink'){
   await until(()=>statusReads>=1);await sleep(20);
   // Block only spool writes; the checkpoint directory remains writable.
-  mkdirSync(spoolPath+'.tmp');
   const {CodexSession}=await import(root+'/codex/codexSession.ts');
-  const {loadCheckpoint}=await import(root+'/codex/codexCheckpointStore.ts');
   const codex=new CodexSession({id:row.localSessionId,cwd:process.env.JOY_HOME_DIR!,status:'active',tmuxWindow:'fake',startedAt:Date.now()},{} as any);
+  // Block only the outbound commits from here (the session's generation is open).
+  blockLedgerWrites(joyStateDir());
   if(scenario!=='late_sink')codex.attachRelay(adapter);
   adapter.send(encodeTextEvent('answer',{turn:'adapter-turn'}),'answer');
   assert.equal(adapter.outboundPersistDegraded,true);
   adapter.stampReceiptOnLastQueued({uuid:'receipt',turn:'adapter-turn'});
-  assert.equal(loadCheckpoint(row.localSessionId).deliveredThroughTurnId,null);
+  assert.equal(codexDeliveredThrough(joyStateDir(),row.localSessionId),null);
   if(scenario==='sweep_health'){
    await until(()=>!adapter.outboundPersistDegraded);
-   assert.equal(loadCheckpoint(row.localSessionId).deliveredThroughTurnId,'adapter-turn');
+   assert.equal(codexPendingThrough(joyStateDir(),row.localSessionId),'adapter-turn'); // recorded, pending its rows' acks (#67)
    assert.equal(calls.filter(c=>c.body.type==='output').length,1);
    assert.equal(events.filter(x=>x.startsWith('ack:')).length,0);
   }else if(scenario==='late_sink'){
    codex.attachRelay(adapter);
    assert.equal(adapter.outboundPersistDegraded,true);
-   assert.equal(loadCheckpoint(row.localSessionId).deliveredThroughTurnId,'adapter-turn');
+   assert.equal(codexPendingThrough(joyStateDir(),row.localSessionId),'adapter-turn'); // recorded, pending its rows' acks (#67)
   }else{
    // A genuine successful save must release the held receipt exactly once.
-   rmSync(spoolPath+'.tmp',{recursive:true});
+   unblockLedgerWrites(joyStateDir());
    adapter.send(encodeTextEvent('second',{turn:'adapter-turn'}),'second');
    assert.equal(adapter.outboundPersistDegraded,false);
-   assert.equal(loadCheckpoint(row.localSessionId).deliveredThroughTurnId,'adapter-turn');
+   assert.equal(codexPendingThrough(joyStateDir(),row.localSessionId),'adapter-turn'); // recorded, pending its rows' acks (#67)
    assert.equal(pending().size,2);
   }
   assert.equal(pending().size,scenario==='disk_receipt'?2:0);
-  console.log(JSON.stringify({scenario,result:scenario==='disk_receipt'?'held until actual save':'defect reproduced',degraded:adapter.outboundPersistDegraded,deliveredThrough:loadCheckpoint(row.localSessionId).deliveredThroughTurnId,spooled:pending().size,outputAcks:events.filter(x=>x.startsWith('ack:')).length}));
+  console.log(JSON.stringify({scenario,result:scenario==='disk_receipt'?'held until actual save':'defect reproduced',degraded:adapter.outboundPersistDegraded,deliveredThrough:codexDeliveredThrough(joyStateDir(),row.localSessionId),pendingThrough:codexPendingThrough(joyStateDir(),row.localSessionId),spooled:pending().size,outputAcks:events.filter(x=>x.startsWith('ack:')).length}));
  }else throw new Error('unknown scenario');
 }finally{await lane.stop();}
 process.exit(0);

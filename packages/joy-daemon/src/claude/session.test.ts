@@ -1,4 +1,12 @@
-import { test, expect } from "vitest";
+import { test, expect, beforeAll, afterAll, vi } from "vitest";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+// Every Session opens a generation in the ledger under joyStateDir(): keep
+// that out of the live daemon's state dir.
+let home: string;
+beforeAll(() => { home = mkdtempSync(join(tmpdir(), "joy-session-test-")); process.env.JOY_HOME_DIR = home; });
+afterAll(() => { delete process.env.JOY_HOME_DIR; rmSync(home, { recursive: true, force: true }); });
 import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, thinkingLeaseMs, THINKING_LEASE_MS, SLASH_THINKING_LEASE_MS, toolResultText, TOOL_RESULT_MAX_CHARS, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
@@ -392,7 +400,7 @@ test("agent event falls back to a fresh timestamp when time omitted", () => {
 });
 
 import { Session } from "./session";
-import { saveQueue } from "../domain/queueStore";
+import { ledgerFor, SessionEndedError, LedgerWriteError } from "../domain/ledger";
 
 function qSession() {
   // status 'ended' so #maybeDrainQueue short-circuits before any tmux call —
@@ -956,14 +964,43 @@ test("enqueue dedupes a re-pulled seq — spool-written/cursor-unwritten replay 
   expect(s.queueState().pendingCount).toBe(1);
 });
 
-test("enqueue with requireDurable throws when the spool write fails — cursor must not advance", () => {
+test("enqueue is durable or throws: a failed ledger commit stages nothing (no ack)", () => {
   const s = mkSession("dd2");
-  // Point the spool at an impossible path via JOY_HOME_DIR? saveQueue takes
-  // baseDir internally — simulate by monkeypatching writeFileSync is brittle;
-  // instead verify the CONTRACT via the exported saveQueue directly:
-  // a failing write returns false (queueStore), and enqueue() maps false to a
-  // throw + unstage (verified by code path below with a poisoned baseDir).
-  expect(saveQueue("x", [{ id: "a", text: "t", createdAt: 1, source: "relay", mirrorToRelay: false, visible: false }], "/dev/null/impossible")).toBe(false);
+  const ledger = ledgerFor();
+  const exec = ledger.db.exec.bind(ledger.db);
+  const spy = vi.spyOn(ledger.db, "exec").mockImplementation((sql: string) => { if (sql === "COMMIT") throw new Error("SQLITE_FULL"); return exec(sql); });
+  try {
+    expect(() => s.enqueue("lost", { seq: 7, source: "relay", mirrorToRelay: false, visible: false })).toThrow(LedgerWriteError);
+  } finally { spy.mockRestore(); }
+  expect(s.queueState().pendingCount).toBe(0);
+  expect(ledger.listPending("dd2")).toEqual([]);
+  // Disk recovered: the same seq is accepted (it was never staged).
+  expect(s.enqueue("lost", { seq: 7, source: "relay", mirrorToRelay: false, visible: false }).id).toBeTruthy();
+  expect(ledger.listPending("dd2")).toHaveLength(1);
+});
+
+test("enqueue into an ended session is refused (session_ended), not queued into the void (#553)", () => {
+  const s = new Session(
+    { id: "dd3", tmuxWindow: "joy:j-dd3", cwd: "/tmp/dd3", flags: [], status: "active", startedAt: 0 } as any,
+    { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
+  );
+  s.end("process_exited");
+  expect(() => s.enqueue("too late")).toThrow(SessionEndedError);
+  expect(ledgerFor().listPending("dd3")).toEqual([]);
+});
+
+test("a re-pulled seq that was already DELIVERED is acked without being staged again (#516)", () => {
+  const s = mkSession("dd4");
+  const ledger = ledgerFor();
+  const first = s.enqueue("run it", { seq: 3, source: "relay", mirrorToRelay: false, visible: false });
+  // Delivered (echo confirmed) and the queue drained.
+  ledger.recordAttempt(first.id, s.ledgerGeneration, "run it");
+  ledger.confirmDelivery(first.id, [{ kind: "transcript_uuid", ref: "u-3" }, { kind: "seq", ref: "3" }]);
+  s.cancelQueued(first.id); // (the in-memory copy; the ledger row is already terminal)
+  const again = s.enqueue("run it", { seq: 3, source: "relay", mirrorToRelay: false, visible: false });
+  expect(again.id).toBe(first.id);
+  expect(s.queueState().pendingCount).toBe(0); // not re-run
+  expect(ledger.listPending("dd4")).toEqual([]);
 });
 
 // ── dialogFromPane — live captures, claude 2.1.198 (2026-07-20) ──────────────

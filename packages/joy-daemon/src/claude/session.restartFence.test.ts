@@ -7,13 +7,16 @@
 //   4. A's awaited write FAILS (its tmux server died with it)
 // #drainOnce used to requeue m1 on the dead instance and persist under the
 // shared id → spool = [m1]: the next daemon restart restored the cancelled
-// prompt and lost the carried one. Uses an isolated JOY_HOME_DIR.
+// prompt and lost the carried one. Uses an isolated JOY_HOME_DIR. The spool
+// is the ledger now: the fence is its generation check, and `loadQueue` here
+// reads the queued rows the way a fresh Session does.
 import { test, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Session } from "./session";
-import { loadQueue } from "../domain/queueStore";
+import { ledgerFor } from "../domain/ledger";
+const loadQueue = (id: string) => ledgerFor().listPending(id, ["queued"]);
 import type { TmuxDriver } from "../tmux/driver";
 
 let home: string;
@@ -94,7 +97,8 @@ test("#481: an old dispatch whose write SUCCEEDS after restart is abandoned, not
 
 test("a retired instance never writes the queue spool (fence at the write)", () => {
   const id = "fence-481-ended";
-  const a = new Session({ id, tmuxWindow: `joy:${id}`, cwd: home, flags: [], status: "ended", startedAt: 0, tmux: fakeTmux(READY, async () => ({ ok: true, out: "" })) }, deps);
-  a.enqueue("ghost");
+  const a = new Session({ id, tmuxWindow: `joy:${id}`, cwd: home, flags: [], status: "active", startedAt: 0, tmux: fakeTmux("booting", async () => ({ ok: true, out: "" })) }, deps);
+  a.end("restart");
+  expect(() => a.enqueue("ghost")).toThrow(/session ended/);
   expect(loadQueue(id)).toEqual([]);
 });

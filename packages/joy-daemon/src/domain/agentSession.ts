@@ -10,8 +10,10 @@
 // type-only imports (erased at runtime — no dependency cycle).
 
 import type { RelaySession } from "../relay/relay";
-import type { DeliverySource } from "./receipts";
 import type { SessionStatus, SessionRecord, QueuedMessage, QueueState, QueueItemState } from "../claude/session";
+
+/** Where an app→agent text came from: the relay lane, the local HTTP surface, or an RPC/CLI call. */
+export type DeliverySource = "relay" | "web" | "rpc";
 
 export interface AgentSession {
   /** Which harness runs this session — drives per-flavor projections
@@ -50,7 +52,11 @@ export interface AgentSession {
 
   // ── app-facing intake / queue ──
   busy(): boolean;
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean; id?: string }): QueuedMessage;
+  /** Accept a text for this session. Returns only after the acceptance is
+   *  COMMITTED to the ledger (domain/ledger.ts) — or throws: LedgerWriteError
+   *  when it could not be committed (nothing staged, no ack), SessionEndedError
+   *  when the session has ended (#553). Durability is not the caller's choice. */
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; id?: string }): QueuedMessage;
   /** Restart support: pluck every prompt that has NOT been dispatched yet so
    *  the replacement can take them (same ids — the relay lane tracks them).
    *  Adapters without a pluckable queue leave this undefined. */

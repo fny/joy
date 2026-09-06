@@ -10,7 +10,11 @@ Run one scenario from `packages/joy-daemon`:
 
     JOY_HOME_DIR=$(mktemp -d) npx tsx test-scenarios/lane-third-followup.mts <scenario>
 
-Scenario names are the `scenario===` literals inside each script. The earliest
+Scenario names are the `scenario===` literals inside each script. The JSON
+spool became the ledger's outbox in Wave C1 (`src/domain/ledger.ts`,
+`src/relay/outbox.ts`); `ledger-spool-shim.mts` gives the scripts the same
+seed / inspect / disk-fault surface over the ledger so their interleavings
+replay unchanged. The earliest
 scripts (`lane-spool.mts`, `lane-followup.mts`) assert that the ORIGINAL bug
 reproduces — an AssertionError from them means the bug is gone; the later ones
 (`lane-second-followup.mts`, `lane-third-followup.mts`, `lane-multi.mts`) assert
