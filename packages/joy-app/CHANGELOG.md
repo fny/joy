@@ -1,3 +1,14 @@
+# Sep 7 (4) — Composer, files and small fixes
+
+- **Dropping or pasting images into the web composer attaches them reliably**; an image copied together with text no longer dumps the text into the box.
+- **Escape closes the autocomplete, and a second Escape stops the running turn.** File autocomplete keeps working after a dot (`@src/file.ts`), completing before an existing space puts the caret after it, and on phones the return key applies the selected suggestion instead of adding a newline.
+- **An answer option that fails to send shows the error and keeps the answer as a draft.**
+- **File viewer**: SVG, WebP and AVIF render; the "changed on disk" warning clears when the change is reverted; Reload always installs what is currently on disk. The Changes view refreshes diffs when contents change and shows Retry on a failed read.
+- **Search reveals matches inside collapsed work groups.**
+- **QR codes use standard square finders and stay scannable on transparent backgrounds.**
+- **Diffs recover after an offline first load** instead of staying blank; resume commands quote paths with apostrophes and never run in the wrong directory when `cd` fails; returning to a web tab keeps your chosen theme and palette.
+- **Leaks fixed**: downloads and shares remove their temporary files; rejected picker files and failed previews release memory.
+
 # Sep 7 (3) — Sync and sending, made durable
 
 - **Sessions deleted on another device disappear on the next refresh** instead of lingering, and reloading a chat during a fetch no longer strands its history behind one message.
