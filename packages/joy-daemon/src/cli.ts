@@ -15,6 +15,7 @@ import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
 import { launchdPlist } from "./launchdPlist";
+import { shellQuote } from "./domain/quote";
 
 // --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
 // invocation addresses. Consumed HERE, before any relay-scoped const below is
@@ -1183,7 +1184,11 @@ export async function cmdNew(rest: string[]): Promise<number> {
     // is the send's.
     const sent = await sendTo(rec, msg, { from: senderIdentity() });
     if (!sent.ok) {
-      console.error(`${bad} session ${rec.id} was created but its first message was not accepted — retry with: joy send ${rec.id} ${JSON.stringify(msg)}`);
+      // The retry line is meant to be pasted into a shell: the prompt goes
+      // through shellQuote (one single-quoted word, nothing expands), not
+      // JSON.stringify — a double-quoted `$(…)` or backtick in the prompt
+      // was an executable substitution that changed the message (#494).
+      console.error(`${bad} session ${rec.id} was created but its first message was not accepted — retry with: joy send ${rec.id} ${shellQuote(msg)}`);
       return sent.code;
     }
   }

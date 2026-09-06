@@ -138,7 +138,20 @@ describe("joy new -m: a rejected first message fails the command (#494)", () => 
     route("POST /send", (_q, res) => json(res, 500, { error: "not_durable" }));
     expect(await cmdNew(["/tmp/x", "-m", "do work"])).toBe(1);
     expect(log.out).toEqual([SID]);
-    expect(log.err.join("\n")).toMatch(/first message was not accepted — retry with: joy send abcdef01 "do work"/);
+    expect(log.err.join("\n")).toMatch(/first message was not accepted — retry with: joy send abcdef01 'do work'/);
+  });
+
+  test("the retry line is shell-quoted: a $(…) or backtick in the prompt is inert when pasted (#494 regression)", async () => {
+    route("POST /sessions", (_q, res) => json(res, 201, { id: SID, cwd: "/tmp/x" }));
+    eventsRoute();
+    route("POST /send", (_q, res) => json(res, 500, { error: "not_durable" }));
+    expect(await cmdNew(["/tmp/x", "-m", "explain $(printf substituted)"])).toBe(1);
+    expect(log.err.join("\n")).toContain("joy send abcdef01 'explain $(printf substituted)'");
+    expect(log.err.join("\n")).not.toContain('"explain $(printf substituted)"');
+    log.err.length = 0;
+    expect(await cmdNew(["/tmp/x", "-m", "run `ls` and it's done"])).toBe(1);
+    // one POSIX word: the apostrophe closes, escapes and reopens the quote
+    expect(log.err.join("\n")).toContain("joy send abcdef01 'run `ls` and it'\\''s done'");
   });
 
   test("the send cannot connect: exit 1, not a silent success", async () => {
