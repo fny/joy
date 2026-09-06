@@ -8,11 +8,15 @@ import type { Machine } from '@/sync/storageTypes';
 // keeps its cached metadata, so it stays in the list as a known, named machine.
 export const MACHINE_ONLINE_WINDOW_MS = 60_000;
 
-export function isMachineOnline(machine: Machine): boolean {
-    // The relay's v2 lease liveness is authoritative when present: it is the
-    // same signal the work queue dispatches on, so "online" here can never
-    // disagree with "a spawn would actually run". The activeAt window is the
-    // fallback for records that predate leaseAlive.
-    if (machine.leaseAlive !== undefined) return machine.leaseAlive;
-    return Date.now() - machine.activeAt < MACHINE_ONLINE_WINDOW_MS;
+export function isMachineOnline(machine: Machine, now: number = Date.now()): boolean {
+    // The relay's v2 lease liveness is authoritative for OFFLINE when present:
+    // it is the same signal the work queue dispatches on, so "online" here can
+    // never disagree with "a spawn would actually run".
+    if (machine.leaseAlive === false) return false;
+    // A live lease is only as current as the record that carried it. The relay
+    // derives activeAt from the same lease (`seenAt`), so a record we stopped
+    // receiving updates for goes stale past the window and reads offline —
+    // instead of a cached `leaseAlive: true` keeping a silent machine online
+    // forever (#323). Records that predate leaseAlive use the same window.
+    return now - machine.activeAt < MACHINE_ONLINE_WINDOW_MS;
 }

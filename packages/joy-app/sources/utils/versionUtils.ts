@@ -5,29 +5,41 @@
 // Minimum required CLI version for full compatibility
 export const MINIMUM_CLI_VERSION = '0.10.0';
 
+// `v?MAJOR[.MINOR[.PATCH]][-prerelease][+build]`. Components must be plain
+// decimal digits: `Number()` used to accept "" (so "1..3" read as 1.0.3),
+// "Infinity", "1e3" and NaN (so "0.invalid.0" compared as supported), and
+// build metadata became part of a numeric component ("0.10.0+build.7" parsed
+// to null but compared as GREATER than 0.10.1) — #462 #463.
+const VERSION_RE = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/;
+
+type ParsedVersion = { major: number; minor: number; patch: number };
+
+function parseStrict(version: string): ParsedVersion | null {
+    if (typeof version !== 'string') return null;
+    const m = VERSION_RE.exec(version.trim());
+    if (!m) return null;
+    const parts = [m[1], m[2] ?? '0', m[3] ?? '0'].map(Number);
+    // Digit-only matches are non-negative; guard the safe-integer range so a
+    // 400-digit component cannot compare as Infinity.
+    if (!parts.every((n) => Number.isSafeInteger(n))) return null;
+    return { major: parts[0], minor: parts[1], patch: parts[2] };
+}
+
 /**
- * Compare two semantic version strings
- * @param version1 First version to compare
- * @param version2 Second version to compare
+ * Compare two semantic version strings. Pre-release tags and build metadata
+ * do not take part in the ordering ("0.10.0-1" == "0.10.0" == "0.10.0+b7").
  * @returns -1 if version1 < version2, 0 if equal, 1 if version1 > version2
+ * @throws when either version is not a valid version string
  */
 export function compareVersions(version1: string, version2: string): number {
-    // Handle pre-release versions by stripping suffix (e.g., "0.10.0-1" -> "0.10.0")
-    const cleanVersion = (v: string) => v.split('-')[0];
-    
-    const v1Parts = cleanVersion(version1).split('.').map(Number);
-    const v2Parts = cleanVersion(version2).split('.').map(Number);
-    
-    // Pad with zeros if needed
-    const maxLength = Math.max(v1Parts.length, v2Parts.length);
-    while (v1Parts.length < maxLength) v1Parts.push(0);
-    while (v2Parts.length < maxLength) v2Parts.push(0);
-    
-    for (let i = 0; i < maxLength; i++) {
-        if (v1Parts[i] > v2Parts[i]) return 1;
-        if (v1Parts[i] < v2Parts[i]) return -1;
+    const a = parseStrict(version1);
+    const b = parseStrict(version2);
+    if (!a) throw new Error(`Invalid version: ${version1}`);
+    if (!b) throw new Error(`Invalid version: ${version2}`);
+    for (const key of ['major', 'minor', 'patch'] as const) {
+        if (a[key] > b[key]) return 1;
+        if (a[key] < b[key]) return -1;
     }
-    
     return 0;
 }
 
@@ -35,15 +47,15 @@ export function compareVersions(version1: string, version2: string): number {
  * Check if a version meets the minimum requirement
  * @param version Version to check
  * @param minimumVersion Minimum required version (defaults to MINIMUM_CLI_VERSION)
- * @returns true if version >= minimumVersion
+ * @returns true if version >= minimumVersion; false for a missing or malformed version
  */
 export function isVersionSupported(version: string | undefined, minimumVersion: string = MINIMUM_CLI_VERSION): boolean {
     if (!version) return false;
-    
+
     try {
         return compareVersions(version, minimumVersion) >= 0;
     } catch {
-        // If version comparison fails, assume it's not supported
+        // A malformed version cannot be shown to satisfy the minimum (#463).
         return false;
     }
 }
@@ -53,17 +65,6 @@ export function isVersionSupported(version: string | undefined, minimumVersion: 
  * @param version Version string to parse
  * @returns Object with major, minor, and patch numbers, or null if invalid
  */
-export function parseVersion(version: string): { major: number; minor: number; patch: number } | null {
-    try {
-        const cleanVersion = version.split('-')[0];
-        const [major, minor, patch] = cleanVersion.split('.').map(Number);
-        
-        if (isNaN(major) || isNaN(minor) || isNaN(patch)) {
-            return null;
-        }
-        
-        return { major, minor, patch };
-    } catch {
-        return null;
-    }
+export function parseVersion(version: string): ParsedVersion | null {
+    return parseStrict(version);
 }

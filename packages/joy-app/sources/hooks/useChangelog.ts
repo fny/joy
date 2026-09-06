@@ -1,40 +1,42 @@
-import { useState, useCallback } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import { MMKV } from 'react-native-mmkv';
 import {
     getLastViewedTitle,
     setLastViewedTitle,
     getLatestTitle
 } from '@/changelog';
+import { createChangelogUnreadStore } from './changelogUnread';
 
 const mmkv = new MMKV();
+const LAST_VIEWED_KEY = 'changelog-last-viewed-title';
+
+// One store for every mounted consumer (#311): marking the changelog read in
+// the banner, or opening the changelog screen (which writes the title
+// directly), updates every unread indicator at once. The MMKV listener catches
+// the direct writes; markAsRead notifies synchronously.
+const store = createChangelogUnreadStore({
+    getLastViewedTitle,
+    setLastViewedTitle,
+    hasLegacyViewedKey: () => mmkv.contains('changelog-last-viewed-version'),
+    onExternalChange: (listener) => {
+        const sub = mmkv.addOnValueChangedListener((key) => {
+            if (key === LAST_VIEWED_KEY) listener();
+        });
+        return () => sub.remove();
+    },
+});
 
 export function useChangelog() {
     const latestTitle = getLatestTitle();
 
-    const [hasUnread, setHasUnread] = useState(() => {
-        const lastViewed = getLastViewedTitle();
-
-        // On first install (no old or new key), mark as read
-        // If old version key exists but new title key doesn't, this is a
-        // migration — show the banner
-        if (!lastViewed && latestTitle) {
-            const hadOldKey = mmkv.contains('changelog-last-viewed-version');
-            if (!hadOldKey) {
-                setLastViewedTitle(latestTitle);
-                return false;
-            }
-            // Migration from old system — treat as unread
-            return true;
-        }
-
-        return latestTitle !== lastViewed;
-    });
+    const hasUnread = useSyncExternalStore(
+        store.subscribe,
+        () => store.getSnapshot(latestTitle),
+        () => store.getSnapshot(latestTitle),
+    );
 
     const markAsRead = useCallback(() => {
-        if (latestTitle) {
-            setLastViewedTitle(latestTitle);
-            setHasUnread(false);
-        }
+        store.markAsRead(latestTitle);
     }, [latestTitle]);
 
     return {

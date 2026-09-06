@@ -54,5 +54,40 @@ describe('versionUtils', () => {
             expect(parseVersion('')).toBe(null);
             expect(parseVersion('1.a.3')).toBe(null);
         });
+
+        // #462: build metadata is not part of the numeric components
+        it('strips build metadata', () => {
+            expect(parseVersion('0.10.0+build.7')).toEqual({ major: 0, minor: 10, patch: 0 });
+            expect(parseVersion('1.2.3-beta.1+sha.abc')).toEqual({ major: 1, minor: 2, patch: 3 });
+            expect(parseVersion('v1.2.3')).toEqual({ major: 1, minor: 2, patch: 3 });
+        });
+
+        // #463: components must be finite non-negative integers, at most three
+        it('rejects coerced or malformed components', () => {
+            expect(parseVersion('1..3')).toBe(null);
+            expect(parseVersion('1.2.3.4')).toBe(null);
+            expect(parseVersion('Infinity')).toBe(null);
+            expect(parseVersion('1e3')).toBe(null);
+            expect(parseVersion('-1.0.0')).toBe(null);
+            expect(parseVersion('0.invalid.0')).toBe(null);
+            expect(parseVersion('1.2.3-')).toBe(null);
+        });
+    });
+
+    describe('build metadata and malformed input in compatibility checks', () => {
+        it('build metadata does not change ordering (#462)', () => {
+            expect(compareVersions('0.10.0+build.7', '0.10.1')).toBe(-1);
+            expect(compareVersions('0.10.0+build.7', '0.10.0')).toBe(0);
+            expect(isVersionSupported('0.10.0+build.7', '0.10.1')).toBe(false);
+            expect(isVersionSupported('0.10.1+build.7', '0.10.1')).toBe(true);
+        });
+
+        it('malformed versions are unsupported instead of passing through as NaN (#463)', () => {
+            expect(isVersionSupported('0.invalid.0')).toBe(false);
+            expect(isVersionSupported('1..3', '0.10.0')).toBe(false);
+            expect(isVersionSupported('Infinity', '0.10.0')).toBe(false);
+            expect(isVersionSupported('1.2.3.4', '0.10.0')).toBe(false);
+            expect(() => compareVersions('0.invalid.0', '0.10.0')).toThrow(/Invalid version/);
+        });
     });
 });
