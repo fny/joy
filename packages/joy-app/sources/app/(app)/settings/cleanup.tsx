@@ -21,7 +21,7 @@ import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { machineSessionInfo } from '@/sync/v2/machine';
 import { joyKillAllSessions, sessionKill, sessionDelete, machineDelete } from '@/sync/ops';
-import { planFolderDeletion, recheckDetached, describeFolderDeletion } from '@/utils/cleanupPlan';
+import { planFolderDeletion, recheckDetached, describeFolderDeletion, tallyDeletions, FOLDER_DELETE_IF_STATUS } from '@/utils/cleanupPlan';
 
 function folderName(path: string): string {
     const segs = path.split(/[\\/]/).filter(Boolean);
@@ -29,19 +29,21 @@ function folderName(path: string): string {
 }
 
 /** Deletes each record; reports the ids that failed so callers can stop
- *  (or retry) instead of treating a partial result as done (#175). */
-async function deleteSessionRecords(ids: string[]): Promise<{ deleted: number; failed: string[] }> {
-    let deleted = 0;
-    const failed: string[] = [];
+ *  (or retry) instead of treating a partial result as done (#175). With
+ *  `ifStatus` the relay itself refuses a record whose session is in any
+ *  other state at the delete (`live` in the tally, #173). */
+async function deleteSessionRecords(ids: string[], opts?: { ifStatus?: string }): Promise<{ deleted: number; failed: string[]; live: string[] }> {
+    const results: { id: string; success: boolean; code?: string }[] = [];
     for (const id of ids) {
         try {
-            const r = await sessionDelete(id);
-            if (r.success) deleted++; else failed.push(id);
+            const r = await sessionDelete(id, opts);
+            results.push({ id, success: r.success, code: r.code });
         } catch {
-            failed.push(id);
+            results.push({ id, success: false });
         }
     }
-    return { deleted, failed };
+    const t = tallyDeletions(results);
+    return { deleted: t.deleted.length, failed: t.failed, live: t.live };
 }
 
 const joyStateOf = (id: string) => storage.getState().sessions[id]?.metadata?.joy__state;
@@ -169,12 +171,18 @@ export default React.memo(function CleanupScreen() {
                 const r = await sessionKill(id);
                 if (r.success) deletable.push(id); else kept.push(id);
             }
-            const { deleted: n, failed } = await deleteSessionRecords(deletable);
+            // The delete itself is conditional: the RELAY refuses any record
+            // whose session is provisioning, starting or active at that
+            // instant (409 status_mismatch), so a kill that reported "not
+            // found" or a card that went stale cannot delete a live agent's
+            // history out from under it (#173).
+            const { deleted: n, failed, live } = await deleteSessionRecords(deletable, { ifStatus: FOLDER_DELETE_IF_STATUS });
             const parts = [`Removed ${n} of ${ids.length} session record${ids.length === 1 ? '' : 's'}.`];
             if (failed.length) parts.push(`${failed.length} record${failed.length === 1 ? '' : 's'} could not be deleted; try again later.`);
+            if (live.length) parts.push(`${live.length} ${live.length === 1 ? 'is' : 'are'} still running according to the relay and ${live.length === 1 ? 'was' : 'were'} kept; stop ${live.length === 1 ? 'it' : 'them'} first.`);
             if (kept.length) parts.push(`${kept.length} running session${kept.length === 1 ? '' : 's'} could not be stopped; ${kept.length === 1 ? 'its record was' : 'their records were'} kept.`);
             if (changed.length) parts.push(`${changed.length} changed state while you were deciding and ${changed.length === 1 ? 'was' : 'were'} left alone.`);
-            Modal.alert(kept.length || changed.length || failed.length ? 'Partly deleted' : 'Deleted', parts.join(' '), [{ text: 'OK' }]);
+            Modal.alert(kept.length || changed.length || failed.length || live.length ? 'Partly deleted' : 'Deleted', parts.join(' '), [{ text: 'OK' }]);
         });
     }, []);
 

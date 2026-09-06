@@ -1,5 +1,6 @@
 # Sep 8 (3) — Review follow-ups
 
+- **Cleanup**: deleting a folder's session records asks the relay to refuse any record whose session is still running at that moment, so a session that restarted while the confirmation was open keeps its record and is reported instead of being deleted under a live agent.
 - **Changes and files**: a failed git status check shows an error with Retry instead of "not a repository" or "no changes", stale results carry a retry line, an edit or refresh that arrives while a read is running is fetched once more instead of being lost, and a slow save acknowledgement can no longer overwrite a newer save.
 - **Starting sessions**: a session whose creation the relay never confirmed is remembered until it is confirmed or refused, across app restarts and however long later; retrying offers to re-send the same request so at most one session starts. The new-session machine picker re-probes when the machine list changes during discovery instead of leaving nothing selected.
 - **Terminal**: a send whose reply was lost is treated as possibly landed, so a retry clears the input line first instead of typing the text twice.

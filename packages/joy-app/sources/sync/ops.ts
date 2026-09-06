@@ -8,7 +8,7 @@
  *    for anything that touches the machine: files, git, bash, kill, restart.
  */
 
-import { v2, v2ActiveTurn, v2CancelTurn } from './v2/api';
+import { v2, v2ActiveTurn, v2CancelTurn, V2ApiError } from './v2/api';
 import { machineReadFile, machineWriteFile, machineDeleteFile, machineGrep, machineHistory, machineHistoryMessages, machineKillSession, type MachineCtx, type MachineOnlyCtx, machineGitDiff, machineAbort } from './v2/machine';
 import { tunnelJson } from './v2/tunnel';
 import { storage } from './storage';
@@ -396,19 +396,36 @@ export async function sessionKill(sessionId: string, opts?: { ifStatus?: 'ended'
     }
 }
 
+export interface SessionDeleteResult {
+    success: boolean;
+    message?: string;
+    /** `status_mismatch`: the relay refused because the record's state was
+     *  not one of `ifStatus` at the delete — `status` names the state it had. */
+    code?: 'status_mismatch';
+    status?: string;
+}
+
 /**
  * Permanently delete a session record from the relay (messages, events and
- * state go with it). The session should be inactive before deletion.
+ * state go with it). The session should be inactive before deletion; pass
+ * `ifStatus` (comma-separated relay states) to have the relay enforce that
+ * at the delete instead of trusting a card read earlier (#173).
  */
-export async function sessionDelete(sessionId: string): Promise<{ success: boolean; message?: string }> {
+export async function sessionDelete(sessionId: string, opts?: { ifStatus?: string }): Promise<SessionDeleteResult> {
     try {
         const v2link = storage.getState().sessions[sessionId]?.metadata?.v2;
         if (!v2link?.sessionId) {
             return { success: false, message: 'Session has no relay link' };
         }
-        await v2.deleteSession(v2link.sessionId);
+        await v2.deleteSession(v2link.sessionId, opts);
         return { success: true };
     } catch (error) {
+        if (error instanceof V2ApiError && error.status === 409 && error.code === 'status_mismatch') {
+            const status = typeof (error.body as { status?: unknown } | null)?.status === 'string'
+                ? (error.body as { status: string }).status
+                : undefined;
+            return { success: false, code: 'status_mismatch', status, message: `status_mismatch${status ? `: ${status}` : ''}` };
+        }
         return { success: false, message: errorMessage(error) };
     }
 }
