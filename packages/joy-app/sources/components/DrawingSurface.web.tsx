@@ -3,8 +3,17 @@
 // and view-shot capture is unreliable there — this made the draw pad dead on
 // desktop. Canvas gives smooth pointer-captured ink and a trivially correct
 // export (toDataURL), no extra deps.
+//
+// Coordinates: ink is stored in ONE fixed drawing space — the pad's size when
+// the first stroke began — and the whole composite (paper, contain-fit
+// background image, strokes) is mapped into the current viewport with the
+// same contain transform (drawingModel.containFit). Before, the image was
+// re-fit to every new size while the strokes kept their pixel positions, so
+// rotating or resizing the pad slid a screenshot away from its annotations
+// and capture exported the mismatch (#213).
 import * as React from 'react';
 import { isLatest, nextGen, useLatestKey } from '@/utils/latest';
+import { InkPointers, containFit, toDoc, traceStroke, type Fit, type Point, type Stroke } from './drawingModel';
 
 export interface DrawingSurfaceHandle {
     undo(): void;
@@ -23,12 +32,6 @@ export interface DrawingSurfaceProps {
     onBackgroundLoad?: (uri: string, ok: boolean) => void;
 }
 
-interface Stroke {
-    color: string;
-    width: number;
-    points: Array<{ x: number; y: number }>;
-}
-
 function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
     if (s.points.length === 0) return;
     ctx.strokeStyle = s.color;
@@ -36,18 +39,7 @@ function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.beginPath();
-    const pts = s.points;
-    if (pts.length < 3) {
-        // Dot: round cap paints a circle over a hairline segment.
-        ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[0].x + 0.1, pts[0].y + 0.1);
-    } else {
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length - 1; i++) {
-            ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
-        }
-        ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-    }
+    traceStroke(ctx, s.points);
     ctx.stroke();
 }
 
@@ -55,11 +47,20 @@ export const DrawingSurface = React.forwardRef<DrawingSurfaceHandle, DrawingSurf
     const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
     const wrapRef = React.useRef<HTMLDivElement | null>(null);
     const strokesRef = React.useRef<Stroke[]>([]);
-    const currentRef = React.useRef<Stroke | null>(null);
+    const inkRef = React.useRef(new InkPointers());
     const bgImgRef = React.useRef<HTMLImageElement | null>(null);
     const sizeRef = React.useRef({ width: 0, height: 0 });
+    // The drawing space: fixed by the first stroke, released when the pad is
+    // empty again so a blank pad simply follows its container.
+    const docRef = React.useRef<{ width: number; height: number } | null>(null);
     const propsRef = React.useRef(props);
     propsRef.current = props;
+
+    const fit = (): Fit => {
+        const { width, height } = sizeRef.current;
+        const doc = docRef.current;
+        return doc ? containFit(doc.width, doc.height, width, height) : { scale: 1, ox: 0, oy: 0 };
+    };
 
     const redraw = React.useCallback(() => {
         const canvas = canvasRef.current;
@@ -70,15 +71,21 @@ export const DrawingSurface = React.forwardRef<DrawingSurfaceHandle, DrawingSurf
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.fillStyle = propsRef.current.paper;
         ctx.fillRect(0, 0, width, height);
+        // Everything below is in drawing coordinates: one transform for the
+        // image AND the ink, so they scale and move together (#213).
+        const f = fit();
+        const doc = docRef.current ?? { width, height };
+        ctx.setTransform(dpr * f.scale, 0, 0, dpr * f.scale, dpr * f.ox, dpr * f.oy);
         const img = bgImgRef.current;
         if (img && img.complete && img.naturalWidth > 0) {
-            // contain-fit, centered
-            const scale = Math.min(width / img.naturalWidth, height / img.naturalHeight);
+            // contain-fit, centered — within the DRAWING space
+            const scale = Math.min(doc.width / img.naturalWidth, doc.height / img.naturalHeight);
             const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
-            ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+            ctx.drawImage(img, (doc.width - w) / 2, (doc.height - h) / 2, w, h);
         }
         for (const s of strokesRef.current) drawStroke(ctx, s);
-        if (currentRef.current) drawStroke(ctx, currentRef.current);
+        const current = inkRef.current.current();
+        if (current) drawStroke(ctx, current);
     }, []);
 
     // Size the backing store to the container × devicePixelRatio.
@@ -129,48 +136,44 @@ export const DrawingSurface = React.forwardRef<DrawingSurfaceHandle, DrawingSurf
     // Paper change repaints.
     React.useEffect(() => { redraw(); }, [props.paper, redraw]);
 
-    const pos = (e: React.PointerEvent): { x: number; y: number } => {
+    /** Pointer position in DRAWING coordinates. */
+    const pos = (e: React.PointerEvent): Point => {
         const r = canvasRef.current!.getBoundingClientRect();
-        return { x: e.clientX - r.left, y: e.clientY - r.top };
+        return toDoc(fit(), { x: e.clientX - r.left, y: e.clientY - r.top });
     };
 
     const onPointerDown = (e: React.PointerEvent) => {
         if (e.button !== 0 && e.pointerType === 'mouse') return;
+        // The first stroke pins the drawing space to the pad's current size.
+        if (!docRef.current) docRef.current = { ...sizeRef.current };
+        // A second pointer while one is drawing is ignored — it must not
+        // replace, feed, or end the active stroke (#212).
+        if (!inkRef.current.begin(e.pointerId, pos(e), { color: propsRef.current.penColor, width: propsRef.current.thickness })) return;
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        currentRef.current = { color: propsRef.current.penColor, width: propsRef.current.thickness, points: [pos(e)] };
         redraw();
     };
     const onPointerMove = (e: React.PointerEvent) => {
-        const s = currentRef.current;
+        if (inkRef.current.extend(e.pointerId, pos(e))) redraw();
+    };
+    const endStroke = (e: React.PointerEvent) => {
+        const s = inkRef.current.end(e.pointerId);
         if (!s) return;
-        const p = pos(e);
-        const last = s.points[s.points.length - 1];
-        if (Math.abs(last.x - p.x) < 1 && Math.abs(last.y - p.y) < 1) return;
-        s.points.push(p);
+        strokesRef.current = [...strokesRef.current, s];
+        propsRef.current.onStrokesChange?.(strokesRef.current.length);
         redraw();
     };
-    const endStroke = () => {
-        const s = currentRef.current;
-        currentRef.current = null;
-        if (s) {
-            strokesRef.current = [...strokesRef.current, s];
-            propsRef.current.onStrokesChange?.(strokesRef.current.length);
-        }
+
+    const setStrokes = (next: Stroke[]) => {
+        strokesRef.current = next;
+        if (next.length === 0 && !inkRef.current.current()) docRef.current = null;
+        propsRef.current.onStrokesChange?.(next.length);
         redraw();
     };
 
     React.useImperativeHandle(ref, () => ({
-        undo: () => {
-            strokesRef.current = strokesRef.current.slice(0, -1);
-            propsRef.current.onStrokesChange?.(strokesRef.current.length);
-            redraw();
-        },
-        clear: () => {
-            strokesRef.current = [];
-            propsRef.current.onStrokesChange?.(0);
-            redraw();
-        },
-        isEmpty: () => strokesRef.current.length === 0 && !currentRef.current,
+        undo: () => setStrokes(strokesRef.current.slice(0, -1)),
+        clear: () => setStrokes([]),
+        isEmpty: () => strokesRef.current.length === 0 && !inkRef.current.current(),
         capture: async () => {
             const canvas = canvasRef.current;
             if (!canvas) throw new Error('capture unavailable');
