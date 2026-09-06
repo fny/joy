@@ -24,6 +24,14 @@ const EVENT_CLIENT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 /** How long the opening-history flush waits for a stalled socket to drain
  *  before the client is dropped (Astra on #597, Wave B). */
 const EVENT_HISTORY_DRAIN_DEADLINE_MS = 10_000;
+/** Largest single socket write during the opening-history flush. One history
+ *  ITEM can be the whole serialized chat (12 MiB in the #597 reproduction):
+ *  written in one res.write() it sits in the response buffer entire before
+ *  any drain check, so the advertised pending-bytes bound held for every
+ *  item but the first (Astra on 4a69e55c). Items are cut into byte chunks
+ *  of this size — a byte slice of the UTF-8 encoding, so the stream and its
+ *  SSE/NDJSON framing arrive unchanged. */
+const EVENT_HISTORY_WRITE_CHUNK_BYTES = 64 * 1024;
 
 /**
  * Stream a long-lived event response: the opening history first, with REAL
@@ -40,7 +48,7 @@ const EVENT_HISTORY_DRAIN_DEADLINE_MS = 10_000;
  * during the flush are buffered (bounded by the same cap) so none are lost,
  * then handed over to the bounded writer once the history is on the wire.
  */
-async function streamHistoryThenFollow(opts: {
+export async function streamHistoryThenFollow(opts: {
   res: ServerResponse;
   history: Iterable<string>;
   /** Live-record source; null for a one-shot (non-follow) response. */
@@ -48,10 +56,12 @@ async function streamHistoryThenFollow(opts: {
   label: string;
   drainDeadlineMs?: number;
   maxBufferedBytes?: number;
+  historyChunkBytes?: number;
 }): Promise<void> {
   const { res, label } = opts;
   const maxBytes = opts.maxBufferedBytes ?? EVENT_CLIENT_MAX_BUFFERED_BYTES;
   const drainMs = opts.drainDeadlineMs ?? EVENT_HISTORY_DRAIN_DEADLINE_MS;
+  const chunkBytes = Math.max(1, opts.historyChunkBytes ?? EVENT_HISTORY_WRITE_CHUNK_BYTES);
   let unsubscribe: () => void = () => {};
   const drop = (why: string) => {
     unsubscribe();
@@ -79,13 +89,19 @@ async function streamHistoryThenFollow(opts: {
     const cleanup = () => { clearTimeout(timer); res.off("drain", ok); res.off("close", gone); res.off("error", gone); };
     res.on("drain", ok); res.on("close", gone); res.on("error", gone);
   });
-  for (const chunk of opts.history) {
-    if (res.destroyed) { unsubscribe(); return; }
-    if (!res.write(chunk)) {
-      if (!(await drained())) {
-        if (!res.destroyed) drop(`did not drain the opening history within ${drainMs}ms`);
-        else unsubscribe();
-        return;
+  for (const item of opts.history) {
+    // Bounded writes: an item larger than the chunk goes out as byte slices,
+    // each one a drain checkpoint, so the pending bytes never exceed the
+    // socket's high-water mark plus one chunk — whatever the item's size.
+    const bytes = Buffer.from(item, "utf8");
+    for (let off = 0; off < bytes.length; off += chunkBytes) {
+      if (res.destroyed) { unsubscribe(); return; }
+      if (!res.write(bytes.subarray(off, off + chunkBytes))) {
+        if (!(await drained())) {
+          if (!res.destroyed) drop(`did not drain the opening history within ${drainMs}ms`);
+          else unsubscribe();
+          return;
+        }
       }
     }
   }
@@ -167,7 +183,7 @@ export function startHttpServer(opts: {
    *  the real port into daemon.json when it asked for a dynamic one (port 0). */
   onListening?: (port: number) => void;
   /** Tests: shorten the history drain deadline / buffered-bytes cap. */
-  eventStream?: { drainDeadlineMs?: number; maxBufferedBytes?: number };
+  eventStream?: { drainDeadlineMs?: number; maxBufferedBytes?: number; historyChunkBytes?: number };
 }): ReturnType<typeof createServer> {
   const { registry, port, publicDir, token, onListening } = opts;
   const eventStream = opts.eventStream ?? {};

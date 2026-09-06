@@ -1505,8 +1505,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // own bind then hit the relay's (daemon, local id) unique constraint on
   // every retry, forever (fny 001c4d93/153f92a0, 2026-09-04).
   const spawning = new Set<string>();
+  // Announcing awaits the relay twice (the recovered-row GET, the POST); a
+  // kill can land in either window. Every persist/bind is fenced on THIS
+  // session handle still being the registry's live one: an announce that
+  // went on after the kill rebound the dead identity to a fresh row and
+  // recreated the record just deleted — the killed session came back as an
+  // unkillable card (Astra on 4a69e55c, #120).
+  const stillLive = (session: AgentSession): boolean =>
+    registry.get(session.id) === session && (session.status === "active" || session.status === "starting");
   async function announceLocalSession(session: AgentSession): Promise<void> {
     if (!lease || boundByLocal.has(session.id) || announcing.has(session.id)) return;
+    if (!stillLive(session)) return;
     announcing.add(session.id);
     try {
       const rec = registry.listRecords().find((r) => r.id === session.id);
@@ -1519,6 +1528,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         let gone = false;
         try { await withTimeout(api("GET", `/sessions/${rec.v2SessionId}`), 15_000); }
         catch (e) { gone = isRowGone(e); /* other failures: transient — trust the record for now */ }
+        if (!stillLive(session)) { log(`${session.id}: ended while its relay row was being checked — not announced`); return; }
         if (!gone) {
           bound.set(rec.v2SessionId, session.id); boundByLocal.set(session.id, rec.v2SessionId);
           if (rec.v2SessionKey) sessionKeys.set(rec.v2SessionId, new Uint8Array(Buffer.from(rec.v2SessionKey, "base64")));
@@ -1550,6 +1560,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       }), 15_000) as { sessionId?: string };
       const v2 = r?.sessionId;
       if (!v2) throw new Error("announce returned no sessionId");
+      if (!stillLive(session)) {
+        // Killed while the announce was in flight: the relay now holds a row
+        // for a session that no longer exists and nothing else will ever
+        // archive it (its owner daemon is us). Archive it here, bind nothing.
+        log(`${session.id}: ended while being announced — archiving the replacement row ${v2.slice(0, 8)}`);
+        if (key) sessionKeys.set(v2, key);
+        const card = { path: session.cwd, host: hostname(), machineId, joy__state: "archived", joy__sessionId: session.id, v2: { sessionId: v2, relay: relayUrl, localSessionId: session.id } };
+        try { await withTimeout(api("PATCH", `/daemon/sessions/${v2}`, { encryptedMetadata: sealCard(card, key), state: "archived" }, lease), 15_000); }
+        catch (e) { log(`archive ${v2.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`); }
+        return;
+      }
       if (key) sessionKeys.set(v2, key);
       registry.saveRecord(session.id, { v2SessionId: v2, ...(key ? { v2SessionKey: Buffer.from(key).toString("base64") } : {}) });
       if (dead) deadRows.delete(session.id);

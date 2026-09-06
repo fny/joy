@@ -143,6 +143,20 @@ test("a value set and reverted while the chain is blocked ends where it was reve
   expect(s.metadataSnapshot!.currentModelCode).toBe("old");
 });
 
+test("an identical assertion after a FAILED publish is the retry, not a duplicate (#587)", async () => {
+  let calls = 0;
+  registerV2CardPublisher(ID, async () => { if (++calls === 1) throw new Error("transient publish failure"); });
+  const s = newSession();
+  await s.updateCompacting({ since: 1 } as any);
+  expect(s.lastPublishOk).toBe(false);            // the relay never got this card
+  await s.updateCompacting({ since: 1 } as any);  // same value: used to be deduped against the unpublished snapshot
+  expect(calls).toBe(2);
+  expect(s.lastPublishOk).toBe(true);
+  // Once the relay has the card, the same assertion is redundant again.
+  await s.updateCompacting({ since: 1 } as any);
+  expect(calls).toBe(2);
+});
+
 test("redundant writes are still skipped (control)", async () => {
   const published: unknown[] = [];
   registerV2CardPublisher(ID, (m) => { published.push(m); });
@@ -183,12 +197,17 @@ test("the 'done' push body never carries the reply snippet or the AI title unles
 function fakeMachineRelay(machineKey: Uint8Array) {
   const kp = tweetnacl.box.keyPair();
   const creds = { token: "tok", serverUrl: "http://relay.test", machineId: "m-61", encryption: { type: "dataKey" as const, publicKey: kp.publicKey, machineKey } };
-  const row: { metadata: Record<string, unknown>; version: number; dataKey: string | null } = { metadata: { displayName: "A", host: "old" }, version: 1, dataKey: "k" };
+  const row: { metadata: Record<string, unknown>; raw: string | null; version: number; dataKey: string | null } = { metadata: { displayName: "A", host: "old" }, raw: null, version: 1, dataKey: "k" };
   const writes: Array<{ method: string; blob: Record<string, unknown>; expected?: number }> = [];
   let failGets = 0;
   let mismatchOnce = false;
-  const seal = (m: Record<string, unknown>) => Buffer.from(encryptWire(machineKey, m)).toString("base64");
+  let sealGetsWith: Uint8Array | null = null;
+  let afterGet: (() => void) | null = null;
+  const seal = (m: Record<string, unknown>, k = machineKey) => Buffer.from(encryptWire(k, m)).toString("base64");
   const open = (b64: string) => decryptWire(machineKey, new Uint8Array(Buffer.from(b64, "base64"))) as Record<string, unknown>;
+  // The stored blob is the exact string last written when the row's fields
+  // still match it (tests edit `row.metadata` directly to play the app).
+  const stored = () => (row.raw && JSON.stringify(open(row.raw)) === JSON.stringify(row.metadata) ? row.raw : seal(row.metadata));
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const fetchImpl = async (input: any, init?: any): Promise<Response> => {
     const url = new URL(String(input));
@@ -196,25 +215,35 @@ function fakeMachineRelay(machineKey: Uint8Array) {
     const body = init?.body ? JSON.parse(init.body) : {};
     if (url.pathname === "/joy/v2/machines/m-61" && method === "GET") {
       if (failGets > 0) { failGets--; return json(503, { error: "unavailable" }); }
-      return json(200, { machine: { id: "m-61", metadata: seal(row.metadata), metadataVersion: row.version, dataEncryptionKey: row.dataKey, daemonStateVersion: 7 } });
+      const res = json(200, { machine: { id: "m-61", metadata: sealGetsWith ? seal(row.metadata, sealGetsWith) : stored(), metadataVersion: row.version, dataEncryptionKey: row.dataKey, daemonStateVersion: 7 } });
+      afterGet?.();
+      return res;
     }
     if (url.pathname === "/joy/v2/machines/m-61" && method === "PATCH") {
       const blob = open(body.metadata);
       writes.push({ method, blob, expected: body.expectedMetadataVersion });
       if (mismatchOnce) { mismatchOnce = false; return json(200, { result: "version-mismatch", metadataVersion: row.version, daemonStateVersion: 7 }); }
       if (body.expectedMetadataVersion !== row.version) return json(200, { result: "version-mismatch", metadataVersion: row.version, daemonStateVersion: 7 });
-      row.metadata = blob; row.version++;
+      row.metadata = blob; row.raw = body.metadata; row.version++;
       return json(200, { result: "success", metadataVersion: row.version, daemonStateVersion: 7 });
     }
     if (url.pathname === "/joy/v2/machines" && method === "POST") {
       const blob = open(body.metadata);
       writes.push({ method, blob });
-      row.metadata = blob; row.version++; row.dataKey = body.dataEncryptionKey;
+      // Like the relay's upsert: an unchanged blob keeps the version.
+      if (body.metadata !== stored()) row.version++;
+      row.metadata = blob; row.raw = body.metadata; row.dataKey = body.dataEncryptionKey;
       return json(200, { machine: { id: "m-61", metadataVersion: row.version, daemonStateVersion: 7 } });
     }
     return json(404, { error: "nope" });
   };
-  return { creds, row, writes, fetchImpl, setFailGets: (n: number) => { failGets = n; }, mismatchOnce: () => { mismatchOnce = true; } };
+  return {
+    creds, row, writes, fetchImpl,
+    setFailGets: (n: number) => { failGets = n; },
+    mismatchOnce: () => { mismatchOnce = true; },
+    sealGetsWith: (k: Uint8Array | null) => { sealGetsWith = k; },
+    afterGet: (fn: (() => void) | null) => { afterGet = fn; },
+  };
 }
 
 test("a command-scan push right after an app rename carries the NEW name (#61)", async () => {
@@ -253,6 +282,41 @@ test("a version mismatch re-reads and retries with the other writer's fields; a 
     expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(false);
     expect(relay.writes.length).toBe(before); // no write on an unknown row state
     expect(relay.row.metadata.displayName).toBe("C");
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test("a sealed blob this daemon cannot open is an unknown read: nothing is written, the app's name survives (#61)", async () => {
+  const key = new Uint8Array(32).fill(8);
+  const relay = fakeMachineRelay(key);
+  relay.sealGetsWith(new Uint8Array(32).fill(9)); // the row's blob opens under a key we do not hold
+  vi.stubGlobal("fetch", relay.fetchImpl);
+  try {
+    const client = new RelayClient(relay.creds as any);
+    expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(false);
+    expect(relay.writes).toEqual([]);
+    expect(relay.row.metadata.displayName).toBe("A");
+    expect(relay.row.version).toBe(1);
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test("a no-data-key repair goes through the CAS write first: an app rename between read and write is kept (#61)", async () => {
+  const key = new Uint8Array(32).fill(10);
+  const relay = fakeMachineRelay(key);
+  relay.row.dataKey = null;                        // the row exists but the relay holds no key envelope
+  // The app renames the machine right after the daemon's read, every time it reads.
+  let renames = 0;
+  relay.afterGet(() => { if (renames++ === 0) { relay.row.metadata = { ...relay.row.metadata, displayName: "B" }; relay.row.version++; } });
+  vi.stubGlobal("fetch", relay.fetchImpl);
+  try {
+    const client = new RelayClient(relay.creds as any);
+    expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(true);
+    expect(relay.row.metadata.displayName).toBe("B");   // used to be replaced by stale "A" via the blind POST
+    expect(relay.row.metadata.homeDir).toBe("/h");
+    expect(relay.row.dataKey).toBeTruthy();              // the repair still landed the key
+    const methods = relay.writes.map((w) => w.method);
+    expect(methods.filter((m) => m === "PATCH").length).toBeGreaterThanOrEqual(1);
+    expect(methods[methods.length - 1]).toBe("POST");    // the key POST comes AFTER the CAS write…
+    expect(relay.writes[relay.writes.length - 1].blob.displayName).toBe("B"); // …carrying the same, fresh blob
   } finally { vi.unstubAllGlobals(); }
 });
 

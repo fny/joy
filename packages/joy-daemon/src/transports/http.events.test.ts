@@ -13,7 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-http-test-"));
-import { startHttpServer } from "./http";
+import { startHttpServer, streamHistoryThenFollow } from "./http";
+import * as http from "node:http";
 import { RelaySession, encodeTextEvent, forgetRecords } from "../relay/relay";
 
 const TOKEN = "tok-http-test";
@@ -123,6 +124,42 @@ test("live records published during the history flush arrive after it, in order,
   for (let i = 1; i < seqs.length; i++) expect(seqs[i]).toBe(seqs[i - 1] + 1); // contiguous, ordered
   const texts = lines.slice(-3).map((l) => JSON.parse(l).record.content.data.ev.text);
   expect(texts).toEqual(["live-0", "live-1", "live-2"]);
+}, 20_000);
+
+test("one oversized history item never sits in the response buffer whole: pending bytes stay under the cap (#597 residual)", async () => {
+  // A single /events `history` frame IS the whole serialized chat (12 MiB
+  // here). Written in one res.write() it exceeded the 8 MiB pending-bytes
+  // bound before the first drain check (Astra on 4a69e55c). Drive the helper
+  // with a real response and a paused client and watch writableLength.
+  const item = `event: history\ndata: ${JSON.stringify(Array.from({ length: RECORDS }, (_, i) => ({ id: String(i), role: "assistant", content: RECORD_TEXT, session_id: SID })))}\n\n`;
+  expect(Buffer.byteLength(item)).toBeGreaterThan(12 * 1024 * 1024);
+  const cap = 8 * 1024 * 1024;
+  let peak = 0; let subs = 0; let unsubscribed = 0; let closed = false;
+  const srv = http.createServer((_req, res) => {
+    const write = res.write.bind(res);
+    (res as any).write = (...args: any[]) => { const ok = (write as any)(...args); peak = Math.max(peak, res.writableLength); return ok; };
+    res.on("close", () => { closed = true; });
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    void streamHistoryThenFollow({
+      res, history: [item, "event: sessions_history\ndata: []\n\n"], label: "test-sse",
+      subscribe: () => { subs++; return () => { unsubscribed++; }; },
+      drainDeadlineMs: 300, maxBufferedBytes: cap,
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const p = (srv.address() as any).port as number;
+  const sock = net.connect(p, "127.0.0.1");
+  await new Promise<void>((r) => sock.once("connect", () => r()));
+  sock.pause();
+  sock.write(`GET /events HTTP/1.1\r\nHost: 127.0.0.1:${p}\r\n\r\n`);
+  await sleep(1_200);
+  expect(peak).toBeLessThan(cap);
+  expect(peak).toBeLessThan(1024 * 1024);           // high-water mark + one 64 KiB chunk, not the whole frame
+  expect(closed).toBe(true);                         // dropped at the drain deadline
+  expect(subs).toBe(1); expect(unsubscribed).toBeGreaterThanOrEqual(1); // drop() and the close listener both unsubscribe (idempotent)
+  sock.destroy();
+  srv.closeAllConnections();
+  await new Promise<void>((r) => srv.close(() => r()));
 }, 20_000);
 
 test("a client that never reads is dropped at the drain deadline instead of parking the history", async () => {

@@ -308,8 +308,11 @@ export class RelayClient {
   /** GET this machine's row: its current (decrypted) metadata, the CAS
    *  version and whether it carries a data key. `missing` = 404 (never
    *  created); null = the read FAILED (network, 5xx) — which says nothing
-   *  about the row, and must never be taken as "no displayName" (#61). */
-  private async fetchOwnMachine(): Promise<{ metadata: Record<string, unknown> | null; version: number; hasDataKey: boolean } | "missing" | null> {
+   *  about the row, and must never be taken as "no displayName" (#61).
+   *  `unreadable` = the row HAS a sealed blob this daemon cannot open (or
+   *  one that is not an object): equally unknown — the app-owned fields in
+   *  it are real, just invisible here. */
+  private async fetchOwnMachine(): Promise<{ metadata: Record<string, unknown> | null; unreadable: boolean; version: number; hasDataKey: boolean } | "missing" | null> {
     try {
       const res = await fetch(this.url(`/machines/${encodeURIComponent(this.creds.machineId)}`), { headers: this.headers() });
       if (res.status === 404) return "missing";
@@ -317,10 +320,15 @@ export class RelayClient {
       const body = await res.json() as { machine?: { metadata?: string; metadataVersion?: number; dataEncryptionKey?: string | null } };
       if (!body?.machine) return "missing";
       let metadata: Record<string, unknown> | null = null;
+      let unreadable = false;
       if (body.machine.metadata) {
-        try { metadata = decryptWire(this.machineKey(), b64decode(body.machine.metadata)) as Record<string, unknown> | null; } catch { metadata = null; }
+        try {
+          const opened = decryptWire(this.machineKey(), b64decode(body.machine.metadata));
+          if (opened && typeof opened === 'object' && !Array.isArray(opened)) metadata = opened as Record<string, unknown>;
+          else unreadable = true;
+        } catch { unreadable = true; }
       }
-      return { metadata, version: Number(body.machine.metadataVersion ?? 0), hasDataKey: !!body.machine.dataEncryptionKey };
+      return { metadata, unreadable, version: Number(body.machine.metadataVersion ?? 0), hasDataKey: !!body.machine.dataEncryptionKey };
     } catch { return null; }
   }
 
@@ -344,7 +352,14 @@ export class RelayClient {
    * cached as "no name" and removed an existing one the same way. Now a
    * version mismatch re-reads and retries; a failed read skips the write.
    * The full POST (which also sets dataEncryptionKey) is used only to CREATE
-   * the row, or to repair one with no data key.
+   * the row, or to repair one with no data key — and a repair writes the
+   * metadata through the CAS PATCH FIRST, then POSTs that same sealed blob
+   * (the relay keeps the version when the blob is unchanged) with the key:
+   * a plain GET→POST let an app rename land in between and be replaced by
+   * the stale name (Astra on 4a69e55c). A blob this daemon cannot open is an
+   * unknown read too: the app-owned fields in it would be dropped by any
+   * write, so the publish is skipped while the row carries a data key (a
+   * row with none is readable by nobody and gets the repair).
    */
   async getOrCreateMachine(metadata: Record<string, unknown>): Promise<boolean> {
     const run = this.#machineUpsert.then(() => this.#upsertMachine(metadata), () => this.#upsertMachine(metadata));
@@ -364,6 +379,10 @@ export class RelayClient {
           log('getOrCreateMachine: could not read the machine row — skipping this publish (nothing overwritten)');
           return false;
         }
+        if (current !== "missing" && current.unreadable && current.hasDataKey) {
+          log('getOrCreateMachine: the machine row holds sealed metadata this daemon cannot open — skipping this publish (nothing overwritten)');
+          return false;
+        }
         const blob = { ...base };
         if (blob.displayName === undefined && current !== "missing") {
           const dn = current.metadata?.displayName;
@@ -371,7 +390,7 @@ export class RelayClient {
         }
         const encryptionKey = this.creds.encryption.machineKey;
         const sealed = b64encode(encryptWire(encryptionKey, blob));
-        if (current === "missing" || !current.hasDataKey) {
+        if (current === "missing") {
           return await this.#createMachine(sealed);
         }
         const r = await fetch(this.url(`/machines/${encodeURIComponent(this.creds.machineId)}`), {
@@ -382,9 +401,16 @@ export class RelayClient {
         if (r.status === 404) return await this.#createMachine(sealed); // vanished between read and write
         if (r.status === 403) return this.#ownedElsewhere(await r.json().catch(() => null) as { error?: string } | null);
         if (!r.ok) { log(`getOrCreateMachine: PATCH HTTP ${r.status}`); return false; }
-        const a = await r.json().catch(() => null) as { result?: string; daemonStateVersion?: number } | null;
+        const a = await r.json().catch(() => null) as { result?: string; metadataVersion?: number; daemonStateVersion?: number } | null;
         if (a?.result === 'version-mismatch') continue; // someone (the app) wrote meanwhile: re-read, carry theirs forward
         if (typeof a?.daemonStateVersion === 'number') this.daemonStateVersion = a.daemonStateVersion;
+        if (!current.hasDataKey) {
+          // Repair: the row exists but the relay holds no key envelope for it.
+          // The metadata just landed under CAS; POST that SAME sealed blob with
+          // the key — an unchanged blob keeps the version, so the reply tells
+          // whether an app edit slipped into the (now tiny) window.
+          return await this.#createMachine(sealed, typeof a?.metadataVersion === 'number' ? a.metadataVersion : undefined);
+        }
         return true;
       }
       log('getOrCreateMachine: metadata kept changing under us — giving up this round');
@@ -396,8 +422,11 @@ export class RelayClient {
   }
 
   /** Full-blob upsert (`POST /machines`) — creates the row and hands the
-   *  relay the enveloped machine key so it can serve it to authorized clients. */
-  async #createMachine(sealedMetadata: string): Promise<boolean> {
+   *  relay the enveloped machine key so it can serve it to authorized clients.
+   *  `expectVersion`: the metadata version the row carried after this
+   *  daemon's own CAS write of the same blob (repair) — a different version
+   *  in the reply means a concurrent edit was replaced, which is logged. */
+  async #createMachine(sealedMetadata: string, expectVersion?: number): Promise<boolean> {
     const encryptionKey = this.creds.encryption.machineKey;
     // Envelope [0x00][box(machineKey → account publicKey)] so the relay can
     // hand the machine key to authorized clients.
@@ -415,8 +444,11 @@ export class RelayClient {
     // Seed the daemonState CAS version from the row so the first
     // daemonState beat lands without a version-mismatch round-trip.
     try {
-      const body = await r.json() as { machine?: { daemonStateVersion?: number } };
+      const body = await r.json() as { machine?: { daemonStateVersion?: number; metadataVersion?: number } };
       if (typeof body?.machine?.daemonStateVersion === 'number') this.daemonStateVersion = body.machine.daemonStateVersion;
+      if (expectVersion !== undefined && typeof body?.machine?.metadataVersion === 'number' && body.machine.metadataVersion !== expectVersion) {
+        log(`getOrCreateMachine: key repair replaced a concurrent metadata edit (version ${expectVersion} → ${body.machine.metadataVersion})`);
+      }
     } catch { /* version self-syncs from the first reply */ }
     return true;
   }
@@ -633,12 +665,18 @@ export class RelaySession {
    * saw joy__compacting still empty at call time and dropped the clear, so
    * the banner stayed set for good; a model set to B and back to A the same
    * way stayed B. Default redundancy: both empty, or deep-equal JSON.
+   *
+   * Redundancy only counts against a card the relay HAS: while the local
+   * snapshot is dirty (its last publish failed — lane down, PATCH error) an
+   * identical assertion is the retry, not a duplicate. Deduping it left the
+   * card stale for good: nothing re-publishes an unchanged card on its own
+   * (Astra on 4a69e55c).
    */
   private mergeKey(key: string, value: unknown, redundant: (cur: unknown) => boolean = (cur) =>
     (value == null && cur == null) || (cur !== undefined && JSON.stringify(cur) === JSON.stringify(value)),
   ): Promise<boolean> {
     const run = this.metadataChain.then(() => {
-      if (redundant(this.metadata[key])) return false;
+      if (!this.dirty && redundant(this.metadata[key])) return false;
       return this.doMergeMetadata({ [key]: value });
     });
     this.metadataChain = run.then(() => undefined, () => undefined);
@@ -648,6 +686,9 @@ export class RelaySession {
   /** Whether the LAST card publish reached the relay (false: not v2-bound
    *  yet, lane down, or the PATCH failed). */
   lastPublishOk = false;
+  /** The local snapshot holds a merge the relay never acknowledged: the next
+   *  write publishes even when it changes nothing locally (#587). */
+  private dirty = false;
 
   private async doMergeMetadata(patch: Record<string, unknown>): Promise<boolean> {
     const merged = { ...this.metadata, ...patch };
@@ -655,6 +696,7 @@ export class RelaySession {
     // v2 card: every metadata change re-publishes the sealed card to the
     // relay's durable plane (the app renders its session list from it).
     this.lastPublishOk = await publishV2Card(this.relaySessionId, merged);
+    this.dirty = !this.lastPublishOk; // merges are chained: `merged` IS the snapshot here
     return true;
   }
 
@@ -805,7 +847,11 @@ export class RelaySession {
 
   /** Publish the current card (attach / restart rebind). Idempotent. */
   start(): void {
-    void publishV2Card(this.relaySessionId, this.metadata).then((ok) => { this.lastPublishOk = ok; });
+    const snapshot = this.metadata;
+    void publishV2Card(this.relaySessionId, snapshot).then((ok) => {
+      this.lastPublishOk = ok;
+      if (ok && this.metadata === snapshot) this.dirty = false;
+    });
   }
 
   /** Detached sessions used to downgrade their poll cadence here; with no
