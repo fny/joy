@@ -1,8 +1,13 @@
 // Pure classification/parsing for the file viewer — NO react-native imports,
 // so unit tests run under node (vitest). UI lives in FileContentRender.tsx.
 
+import { hasOwn, safeGet } from './safeGet';
+
 export type FileRenderKind = 'image' | 'markdown' | 'html' | 'csv' | 'tsv';
 
+// Looked up by the file's extension, which is user data: "data.constructor"
+// or "x.__proto__" used to classify as an image and produce a MIME type of
+// "[object Object]" / the Object function (#434). Own-property reads only.
 const IMAGE_MIME: Record<string, string> = {
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
     webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon', avif: 'image/avif',
@@ -10,7 +15,7 @@ const IMAGE_MIME: Record<string, string> = {
 
 export function fileRenderKind(path: string): FileRenderKind | null {
     const ext = path.split('.').pop()?.toLowerCase() ?? '';
-    if (ext in IMAGE_MIME || ext === 'svg') return 'image';
+    if (hasOwn(IMAGE_MIME, ext) || ext === 'svg') return 'image';
     if (ext === 'md' || ext === 'markdown') return 'markdown';
     if (ext === 'html' || ext === 'htm') return 'html';
     if (ext === 'csv') return 'csv';
@@ -21,13 +26,13 @@ export function fileRenderKind(path: string): FileRenderKind | null {
 /** Images are binary (except svg), so the viewer must fetch base64 for them
  *  instead of bailing at the binary-extension gate. */
 export function isRasterImagePath(path: string): boolean {
-    return (path.split('.').pop()?.toLowerCase() ?? '') in IMAGE_MIME;
+    return hasOwn(IMAGE_MIME, path.split('.').pop()?.toLowerCase() ?? '');
 }
 
 export function imageDataUri(path: string, opts: { base64?: string; utf8?: string }): string | null {
     const ext = path.split('.').pop()?.toLowerCase() ?? '';
     if (ext === 'svg' && opts.utf8) return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(opts.utf8)}`;
-    const mime = IMAGE_MIME[ext];
+    const mime = safeGet(IMAGE_MIME, ext);
     if (mime && opts.base64) return `data:${mime};base64,${opts.base64}`;
     return null;
 }

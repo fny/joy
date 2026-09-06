@@ -1,3 +1,4 @@
+import { safeGet } from '@/utils/safeGet';
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
@@ -285,7 +286,10 @@ export function formatOSPlatform(platform?: string): string {
         'sunos': 'SunOS'
     };
 
-    return osMap[platform.toLowerCase()] || platform;
+    // Own-property read: a platform string of "__proto__"/"constructor" from
+    // machine metadata used to return Object.prototype / the Object function
+    // as the "display string" (#453). Unknown platforms echo the input.
+    return safeGet(osMap, platform.toLowerCase()) ?? platform;
 }
 
 /**

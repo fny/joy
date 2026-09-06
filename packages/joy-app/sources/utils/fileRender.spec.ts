@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDelimited, fileRenderKind, imageDataUri } from '../utils/fileRender';
+import { parseDelimited, fileRenderKind, imageDataUri, isRasterImagePath } from '../utils/fileRender';
 
 describe('fileRenderKind', () => {
     it('classifies by extension', () => {
@@ -11,6 +11,14 @@ describe('fileRenderKind', () => {
         expect(fileRenderKind('icon.svg')).toBe('image');
         expect(fileRenderKind('main.ts')).toBeNull();
     });
+    it.each(['data.__proto__', 'data.constructor', 'x.toString', 'x.hasOwnProperty'])(
+        'does not classify the prototype-named extension of %s as an image (#434)',
+        (path) => {
+            expect(fileRenderKind(path)).toBeNull();
+            expect(isRasterImagePath(path)).toBe(false);
+            expect(imageDataUri(path, { base64: 'AAAA' })).toBeNull();
+        },
+    );
 });
 
 describe('parseDelimited', () => {
