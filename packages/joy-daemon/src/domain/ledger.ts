@@ -519,9 +519,12 @@ export class Ledger {
   }
 
   /** Compare-and-set state transition. A terminal `to` clears active_op and
-   *  settles any attempt still awaiting evidence as superseded (or done when
-   *  the command completed). False = precondition failed, nothing changed. */
-  transition(id: string, from: readonly CommandState[], to: CommandState, patch: { activeOp?: string | null; terminalReason?: string } = {}): boolean {
+   *  (unless `settleAttempts: false` — the runtime's echo for a delivery
+   *  confirmed by another signal is still expected and must pair with the
+   *  attempt) settles any attempt still awaiting evidence as superseded, or
+   *  done when the command completed. False = precondition failed, nothing
+   *  changed. */
+  transition(id: string, from: readonly CommandState[], to: CommandState, patch: { activeOp?: string | null; terminalReason?: string; settleAttempts?: boolean } = {}): boolean {
     return this.tx(() => {
       const now = this.#now();
       const sets = ["state=?", "updated_at=?"];
@@ -530,7 +533,7 @@ export class Ledger {
       else if (patch.activeOp !== undefined) { sets.push("active_op=?"); params.push(patch.activeOp); }
       const r = this.#run(`UPDATE commands SET ${sets.join(",")} WHERE id=? AND state IN (${placeholders(from.length)})`, ...params, id, ...from);
       if (Number(r.changes) === 0) return false;
-      if (isTerminalState(to)) {
+      if (isTerminalState(to) && patch.settleAttempts !== false) {
         this.#run("UPDATE attempts SET state=?, settled_at=? WHERE command_id=? AND state IN ('submitting','accepted','unknown')",
           to === "completed" ? "done" : "superseded", now, id);
       }
@@ -643,10 +646,14 @@ export class Ledger {
       : this.#all("SELECT * FROM observations WHERE session_id=? ORDER BY id", sessionId)).map(rowObservation);
   }
 
-  /** Sugar: the runtime's echo proved delivery — receipt(s) + attempt done +
-   *  command terminal `completed(delivered)` in one commit. Idempotent: a
-   *  second echo for the same command only adds the receipt. */
-  confirmDelivery(commandId: string, receipts: NewReceipt | NewReceipt[], opts: { attemptId?: string | null; to?: CommandState; terminalReason?: string } = {}): CommandRow | null {
+  /** Sugar: delivery was proven — receipt(s) + attempt done + command terminal
+   *  `completed(delivered)` in one commit. Idempotent: a second echo for the
+   *  same command only adds the receipt. `settleAttempts: false` completes
+   *  the command but leaves its attempt awaiting: the proof came from a
+   *  signal other than the runtime's echo (a hook, a dialog) and the echo,
+   *  when it arrives, must still pair with the attempt instead of being
+   *  mirrored back as a new user message. */
+  confirmDelivery(commandId: string, receipts: NewReceipt | NewReceipt[], opts: { attemptId?: string | null; to?: CommandState; terminalReason?: string; settleAttempts?: boolean } = {}): CommandRow | null {
     return this.tx(() => {
       const cmd = this.getCommand(commandId);
       const now = this.#now();
@@ -656,10 +663,10 @@ export class Ledger {
       if (opts.attemptId) {
         const a = this.getAttempt(opts.attemptId);
         if (a && (AWAITING_ATTEMPT_STATES as readonly string[]).includes(a.state)) this.settleAttempt(opts.attemptId, "done", { command: null });
-      } else {
+      } else if (opts.settleAttempts !== false) {
         this.#run("UPDATE attempts SET state='done', settled_at=? WHERE command_id=? AND state IN ('submitting','accepted','unknown')", now, commandId);
       }
-      if (!isTerminalState(cmd.state)) this.transition(commandId, NON_TERMINAL_STATES, opts.to ?? "completed", { terminalReason: opts.terminalReason ?? "delivered" });
+      if (!isTerminalState(cmd.state)) this.transition(commandId, NON_TERMINAL_STATES, opts.to ?? "completed", { terminalReason: opts.terminalReason ?? "delivered", settleAttempts: opts.settleAttempts });
       return this.getCommand(commandId);
     }, "confirm");
   }

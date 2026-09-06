@@ -27,7 +27,7 @@ import {
   type RelaySession,
 } from "../relay/relay";
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
-import type { DeliverySource } from "../domain/receipts";
+import type { DeliverySource } from "../domain/agentSession";
 import type { AgentSession } from "../domain/agentSession";
 import { codexJoyInstructions, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
@@ -823,7 +823,7 @@ export class CodexSession implements AgentSession {
 
   busy(): boolean { return this.#thinking; }
 
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
     // Non-relay intake (app RPC / local). If a seq is provided, dedupe like the
     // relay path; otherwise a random clientId (these are not cursor-replayed).
     const seq = opts?.seq;
@@ -860,7 +860,7 @@ export class CodexSession implements AgentSession {
     }
     const item: CodexInboundItem = { clientId: seq != null ? `codex-in:${this.id}:${seq}` : randomUUID(), text, state: "queued", at: Date.now(), seq };
     this.#inbound.push(item);
-    if (!saveCodexInbound(this.id, this.#inbound) && opts?.requireDurable) {
+    if (!saveCodexInbound(this.id, this.#inbound)) {
       this.#inbound.pop();
       throw new Error("codex inbound persist failed");
     }

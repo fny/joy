@@ -26,7 +26,7 @@ import {
   type RelaySession,
 } from "../relay/relay";
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
-import type { DeliverySource } from "../domain/receipts";
+import type { DeliverySource } from "../domain/agentSession";
 import type { AgentSession } from "../domain/agentSession";
 import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid, killOpencodeServerPid } from "./opencodeClient";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
@@ -554,7 +554,7 @@ export class OpencodeSession implements AgentSession {
 
   busy(): boolean { return this.#thinking; }
 
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
     const seq = opts?.seq;
     // /title — joy-level command, never forwarded to the model. With text:
     // set + lock. Bare: unlock (next agent <joy-title> applies again).
@@ -587,7 +587,7 @@ export class OpencodeSession implements AgentSession {
       text, state: "queued", at: Date.now(), seq,
     };
     this.#inbound.push(item);
-    if (!saveCodexInbound(this.id, this.#inbound) && opts?.requireDurable) {
+    if (!saveCodexInbound(this.id, this.#inbound)) {
       this.#inbound.pop();
       throw new Error("opencode inbound persist failed");
     }

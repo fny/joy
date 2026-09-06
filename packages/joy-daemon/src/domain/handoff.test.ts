@@ -1,7 +1,9 @@
-// #542 — handoff / handback deliver their note prompt with requireDurable and
-// keep the job retryable when the spool cannot be persisted. Runs against a
-// throwaway JOY_HOME_DIR so window records never touch live daemon state.
+// #542 — handoff / handback deliver their note prompt durably (enqueue commits
+// to the ledger or throws) and keep the job retryable when the commit keeps
+// failing. Runs against a throwaway JOY_HOME_DIR so window records never
+// touch live daemon state.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { LedgerWriteError } from "./ledger";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -33,7 +35,7 @@ function fake(id: string, failFirst = 0): Fake {
     id, cwd: "/tmp/w", status: "active", agentFlavor: "claude", enqueued: [], failFirst, handoff: [],
     enqueue(text, opts) {
       this.enqueued.push({ text, opts });
-      if (this.failFirst > 0 && opts.requireDurable) { this.failFirst--; throw new Error("queue spool write failed — message not durably staged"); }
+      if (this.failFirst > 0) { this.failFirst--; throw new LedgerWriteError("accept", new Error("SQLITE_FULL: database or disk is full")); }
       return { id: "q", text, createdAt: 1 };
     },
     setHandoff(info) { this.handoff.push(info); },
@@ -47,7 +49,7 @@ const registryOf = (...ss: Fake[]) => ({
 });
 
 describe("runHandoffJob delivery (#542)", () => {
-  it("passes requireDurable; a transient spool failure is retried and the job then settles", async () => {
+  it("a transient ledger commit failure is retried and the job then settles", async () => {
     const { runHandoffJob, loadWindowRecord, saveWindowRecord } = await mods();
     const src = fake("aaaa1111"), dst = fake("bbbb2222", 1);
     saveWindowRecord(src.id, { launchCwd: src.cwd });
@@ -56,7 +58,6 @@ describe("runHandoffJob delivery (#542)", () => {
     // Resume at the "dst created, not delivered" phase so awaitNote is skipped.
     await runHandoffJob(registryOf(src, dst), src as never, { agent: "claude" }, note, { role: "source", path: note, target: { agent: "claude" }, dst: dst.id, at: 1 }, { enqueueRetryMs: [5] });
     expect(dst.enqueued).toHaveLength(2); // one failure, one success
-    expect(dst.enqueued.every((e) => e.opts.requireDurable === true)).toBe(true);
     expect(dst.enqueued[1].text).toMatch(/picking up work/);
     expect(src.handoff.at(-1)).toMatchObject({ state: "handed_off", peer: dst.id });
     expect(loadWindowRecord(src.id)?.handoffJob).toBeUndefined(); // settled → cleared
@@ -100,7 +101,6 @@ describe("runHandbackJob delivery (#542)", () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await runHandbackJob(registryOf(src, tgt), tgt as never, src.id, note, { enqueueRetryMs: [1] });
     expect(src.enqueued.length).toBeGreaterThanOrEqual(2);
-    expect(src.enqueued.every((e) => e.opts.requireDurable === true)).toBe(true);
     expect(loadWindowRecord(tgt.id)?.handoffJob).toMatchObject({ role: "target", peer: src.id, path: note });
     expect(tgt.handoff.at(-1)).toMatchObject({ state: "failed" });
   }, 15_000); // awaitNote polls every 2s
