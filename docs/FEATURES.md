@@ -81,7 +81,18 @@ every relay; machines register per account.
   turn and returns the turn id, `joy wait --turn` blocks on it, `joy ask`
   returns a typed outcome, `joy events --follow` streams the session's
   records, plus `abort`, `approvals`/`approve`/`deny`, `queue`, `mode`, `pane`,
-  `about`. A message sent from inside a joy session is wrapped by the daemon in
+  `about`. Outcomes of `ask`/`wait`/`run`: `answered` 0 · `needs_input` 6 ·
+  `timeout` 4 · `gone` 1 (the session ended or no longer exists — a 404 from
+  `/check` is never "answered", #496) · `error` 1 with a `reason` (`/check`
+  failed or returned an unknown state; or the record stream broke and its
+  tail could not be recovered, so the reply would be incomplete, #497). Every
+  request inside the wait is bounded by the remaining `--timeout`, so a
+  daemon that accepts `/check` and never answers still yields `timeout` (#501).
+  A queued `ask` returns only ITS turn's text: the boundary is the daemon's
+  mirrored user row carrying the prompt (the dispatch moment as fallback), so
+  the tail of the turn it queued behind is not part of the reply (#498).
+  `joy new -m` fails with the send's exit code when the first message is not
+  accepted (the id is still printed, retry guidance on stderr, #494). A message sent from inside a joy session is wrapped by the daemon in
   `<joy-message from="joy:<id>" reply-to="joy:<id>">` and shown in the chat as
   coming from that session (peer bubble); no `reply-to` means no answer expected
   — `joy send --no-reply` and `joy run` send `replyTo: null`, which the daemon

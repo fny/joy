@@ -339,6 +339,19 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   single SSE event `event: history\ndata: [<records>]\n\n` (byte-identical to
   the whole-array form) and `/sessions/:id/events` still opens with the
   `{ hello, seq }` line followed by one NDJSON line per record.
+- CLI turn wait (`joy ask` / `wait` / `run`, `waitTurn` in `cli.ts`): polls
+  `/sessions/:id/queue` until the turn id has left the queue, then `/check`
+  until an explicit `idle` / `needs_input`; every request carries the
+  remaining `--timeout` as its abort signal and the deadline is re-checked
+  after each (#501). `/check` 404 → `gone` (exit 1); any other non-2xx or an
+  unknown `state` → `error` (exit 1, `reason`) — never `answered` (#496). The
+  `/sessions/:id/events?follow=1` stream is resumed from the last consumed
+  `seq` when it breaks; at the end a tail that cannot be fetched turns an
+  otherwise-answered outcome into `error` ("output stream lost after seq N")
+  instead of a truncated reply (#497). The text of a queued turn starts at the
+  mirrored user row whose (wrapper-stripped) text is the sent prompt, else at
+  the seq seen when the queue poll noticed the dispatch (#498). `joy new -m`
+  reuses the send path and exits with its code on refusal (#494).
 - `joy install` bakes the effective `JOY_RELAY_URL` AND `JOY_HOME_DIR` into
   the systemd unit / launchd plist, so the supervised daemon reads the same
   credentials and state the installing CLI did (an overridden home used to be
