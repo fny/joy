@@ -27,12 +27,20 @@ export default React.memo(function NotificationsSettingsScreen() {
     // pending and is offered for retry until it succeeds.
     const [pendingCleanup, setPendingCleanup] = React.useState(() => hasPendingPushTokenCleanup());
     const [cleaningUp, setCleaningUp] = React.useState(false);
+    // Leaving the screen cancels a removal still in flight; the token stays on
+    // the persisted pending list, so the sync owner finishes it (#181).
+    const lifetime = React.useRef<AbortController | null>(null);
+    if (lifetime.current === null) lifetime.current = new AbortController();
+    React.useEffect(() => {
+        const controller = lifetime.current!;
+        return () => { controller.abort(); };
+    }, []);
 
     const removeDeviceToken = React.useCallback(async (announceFailure: boolean) => {
         if (!auth.credentials || Platform.OS === 'web') return;
         setCleaningUp(true);
         try {
-            const result = await unregisterCurrentDevicePushToken(auth.credentials);
+            const result = await unregisterCurrentDevicePushToken(auth.credentials, { signal: lifetime.current?.signal });
             setPendingCleanup(!result.removed);
             if (!result.removed && announceFailure) {
                 Modal.alert(

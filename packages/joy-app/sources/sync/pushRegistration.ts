@@ -5,7 +5,7 @@ import * as Notifications from 'expo-notifications';
 import { Linking, Platform } from 'react-native';
 import { AuthCredentials } from '@/auth/tokenStorage';
 import { clearRegisteredPushToken, loadRegisteredPushToken, saveRegisteredPushToken } from './persistence';
-import { registerPushToken, unregisterPushToken } from './apiPush';
+import { registerPushToken, unregisterPushToken, type PushApiOptions } from './apiPush';
 import { relayScopedMMKV } from './serverConfig';
 import {
     hasPendingCleanup,
@@ -43,10 +43,12 @@ function pushTokenStore(): PushTokenStore {
     };
 }
 
-function pushTokenApi(credentials: AuthCredentials): PushTokenApi {
+// The caller's cancellation (screen unmount, logout, engine shutdown) rides
+// along on every request; the per-attempt deadline is the API helper's own.
+function pushTokenApi(credentials: AuthCredentials, options?: PushApiOptions): PushTokenApi {
     return {
-        register: (token) => registerPushToken(credentials, token),
-        unregister: (token) => unregisterPushToken(credentials, token),
+        register: (token) => registerPushToken(credentials, token, options),
+        unregister: (token) => unregisterPushToken(credentials, token, options),
     };
 }
 
@@ -182,7 +184,7 @@ export async function getCurrentExpoPushToken(): Promise<string | null> {
     }
 }
 
-export async function syncCurrentPushToken(credentials: AuthCredentials): Promise<SyncCurrentPushTokenResult> {
+export async function syncCurrentPushToken(credentials: AuthCredentials, options?: PushApiOptions): Promise<SyncCurrentPushTokenResult> {
     if (Platform.OS === 'web') {
         return {
             registered: false,
@@ -229,7 +231,7 @@ export async function syncCurrentPushToken(credentials: AuthCredentials): Promis
 
         const tokenData = await Notifications.getExpoPushTokenAsync({ projectId });
         const currentToken = tokenData.data;
-        await reconcileRegistration(pushTokenApi(credentials), pushTokenStore(), currentToken, logCleanup);
+        await reconcileRegistration(pushTokenApi(credentials, options), pushTokenStore(), currentToken, logCleanup);
 
         return {
             registered: true,
@@ -245,11 +247,11 @@ export async function syncCurrentPushToken(credentials: AuthCredentials): Promis
  * relay, so without this the relay kept pushing to the token (#181). A failed
  * deletion stays pending — see `hasPendingPushTokenCleanup` — for a retry.
  */
-export async function unregisterCurrentDevicePushToken(credentials: AuthCredentials): Promise<{ removed: boolean; pending: string[] }> {
+export async function unregisterCurrentDevicePushToken(credentials: AuthCredentials, options?: PushApiOptions): Promise<{ removed: boolean; pending: string[] }> {
     if (Platform.OS === 'web') {
         return { removed: true, pending: [] };
     }
-    return serialized(() => unregisterDevice(pushTokenApi(credentials), pushTokenStore(), logCleanup));
+    return serialized(() => unregisterDevice(pushTokenApi(credentials, options), pushTokenStore(), logCleanup));
 }
 
 /**
@@ -258,10 +260,10 @@ export async function unregisterCurrentDevicePushToken(credentials: AuthCredenti
  * the sync owner's push-token sync, so an offline removal followed by a
  * restart is finished without anyone opening the notifications screen (#181).
  */
-export async function reconcileDisabledPushState(credentials: AuthCredentials): Promise<void> {
+export async function reconcileDisabledPushState(credentials: AuthCredentials, options?: PushApiOptions): Promise<void> {
     if (Platform.OS === 'web') return;
     if (!needsDisabledCleanup(pushTokenStore())) return;
-    await unregisterCurrentDevicePushToken(credentials);
+    await unregisterCurrentDevicePushToken(credentials, options);
 }
 
 /** True while an old (or disabled) token of this device may still be on the relay. */
@@ -270,9 +272,9 @@ export function hasPendingPushTokenCleanup(): boolean {
     return hasPendingCleanup(pushTokenStore());
 }
 
-export async function removePushToken(credentials: AuthCredentials, token: string): Promise<void> {
+export async function removePushToken(credentials: AuthCredentials, token: string, options?: PushApiOptions): Promise<void> {
     await serialized(async () => {
-        await unregisterPushToken(credentials, token);
+        await unregisterPushToken(credentials, token, options);
 
         if (loadRegisteredPushToken() === token) {
             clearRegisteredPushToken();

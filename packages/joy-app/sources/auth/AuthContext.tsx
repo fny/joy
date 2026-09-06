@@ -69,13 +69,23 @@ export function AuthProvider({ children, initialCredentials }: { children: React
         const registeredPushToken = credentials ? loadRegisteredPushToken() : null;
         if (credentials && registeredPushToken) {
             // Best effort, bounded (#9): the relay-side token is nice to
-            // remove, but never worth keeping the account on the device.
-            await Promise.race([
-                unregisterPushToken(credentials, registeredPushToken).catch((error) => {
-                    console.log('Failed to unregister push token during logout:', error);
-                }),
-                new Promise<void>((resolve) => setTimeout(resolve, LOGOUT_UNREGISTER_TIMEOUT_MS)),
-            ]);
+            // remove, but never worth keeping the account on the device. The
+            // logout deadline is also handed down as a signal, so the request
+            // (and its retries) is cancelled rather than left running against
+            // credentials that are about to be deleted.
+            const logoutDeadline = new AbortController();
+            const deadlineTimer = setTimeout(() => logoutDeadline.abort(), LOGOUT_UNREGISTER_TIMEOUT_MS);
+            try {
+                await Promise.race([
+                    unregisterPushToken(credentials, registeredPushToken, { signal: logoutDeadline.signal }).catch((error) => {
+                        console.log('Failed to unregister push token during logout:', error);
+                    }),
+                    new Promise<void>((resolve) => setTimeout(resolve, LOGOUT_UNREGISTER_TIMEOUT_MS)),
+                ]);
+            } finally {
+                clearTimeout(deadlineTimer);
+                logoutDeadline.abort();
+            }
         }
 
         // The credentials must be confirmed gone BEFORE anything else is torn

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, Pressable, Platform } from 'react-native';
 import { useAuth } from '@/auth/AuthContext';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -215,6 +215,17 @@ export default React.memo(() => {
     // newest request only (#167). Token registration/deletion retire whatever
     // is in flight before they start.
     const pushKey = useLatestKey('push-settings');
+    // Push requests this screen starts are cancelled when it unmounts: the
+    // generation check above drops a late RESULT, the signal stops the
+    // REQUEST (and its retries) as well. A user-confirmed token delete is
+    // deliberately not on it — leaving the screen must not undo a delete.
+    const pushLifetime = useRef<AbortController | null>(null);
+    if (pushLifetime.current === null) pushLifetime.current = new AbortController();
+    useEffect(() => {
+        const controller = pushLifetime.current!;
+        return () => { controller.abort(); };
+    }, []);
+    const pushSignal = pushLifetime.current.signal;
     const loadPushSettings = useCallback(async (showError = false) => {
         if (!auth.credentials) {
             retire(pushKey);
@@ -228,7 +239,7 @@ export default React.memo(() => {
         setLoadingPushSettings(true);
         try {
             const [tokens, permission, liveToken] = await Promise.all([
-                fetchPushTokens(auth.credentials),
+                fetchPushTokens(auth.credentials, { signal: pushSignal }),
                 getPushPermissionInfo(),
                 getCurrentExpoPushToken(),
             ]);
@@ -245,7 +256,7 @@ export default React.memo(() => {
         } finally {
             if (isLatest(pushKey, gen)) setLoadingPushSettings(false);
         }
-    }, [auth.credentials, pushKey]);
+    }, [auth.credentials, pushKey, pushSignal]);
 
     // Focus fires on mount as well, so one load per visit (not mount + focus).
     useFocusEffect(
@@ -291,7 +302,7 @@ export default React.memo(() => {
                 // OS permission is not registration: without an Expo project id
                 // (or when the token fetch fails) nothing reaches the relay, and
                 // this used to claim success anyway (#168).
-                const registration = await syncCurrentPushToken(auth.credentials);
+                const registration = await syncCurrentPushToken(auth.credentials, { signal: pushSignal });
                 await loadPushSettings();
                 if (registration.registered && registration.token) {
                     Modal.alert(t('common.success'), 'Push notifications are enabled for this device.');
@@ -315,7 +326,7 @@ export default React.memo(() => {
         } finally {
             setRequestingPushPermission(false);
         }
-    }, [auth.credentials, loadPushSettings, pushKey]);
+    }, [auth.credentials, loadPushSettings, pushKey, pushSignal]);
 
     const handleRefreshCurrentPushToken = useCallback(async () => {
         if (!auth.credentials) {
@@ -325,7 +336,7 @@ export default React.memo(() => {
         setRefreshingPushToken(true);
         retire(pushKey);
         try {
-            const result = await syncCurrentPushToken(auth.credentials);
+            const result = await syncCurrentPushToken(auth.credentials, { signal: pushSignal });
             setPushPermission(result.permission);
             await loadPushSettings();
 
@@ -347,7 +358,7 @@ export default React.memo(() => {
         } finally {
             setRefreshingPushToken(false);
         }
-    }, [auth.credentials, loadPushSettings, pushKey]);
+    }, [auth.credentials, loadPushSettings, pushKey, pushSignal]);
 
     const handleDeletePushToken = useCallback(async (pushToken: PushToken) => {
         if (!auth.credentials) {

@@ -126,6 +126,8 @@ class Sync {
     private profileSync: InvalidateSync;
     private machinesSync: InvalidateSync;
     private pushTokenSync: InvalidateSync;
+    /** Cancels the engine's own push-token requests at shutdown (logout). */
+    private pushLifetime = new AbortController();
     private nativeUpdateSync: InvalidateSync;
     private pendingSettings: Partial<Settings> = loadPendingSettings();
 
@@ -465,6 +467,7 @@ class Sync {
      */
     shutdown() {
         this.stopV2Live();
+        this.pushLifetime.abort();
         this.masterSecret = null;
         this.machineDataKeys.clear();
         this.sessionLastSeq.clear();
@@ -1516,7 +1519,7 @@ class Sync {
         if (!storage.getState().settings.notificationsMobile) {
             log.log('registerPushToken skipped — mobile notifications disabled');
             try {
-                await reconcileDisabledPushState(this.credentials);
+                await reconcileDisabledPushState(this.credentials, { signal: this.pushLifetime.signal });
             } catch (error) {
                 log.log('Failed to remove the push token while disabled: ' + JSON.stringify(error));
             }
@@ -1524,7 +1527,7 @@ class Sync {
         }
         log.log('registerPushToken');
         try {
-            const result = await syncCurrentPushToken(this.credentials);
+            const result = await syncCurrentPushToken(this.credentials, { signal: this.pushLifetime.signal });
             log.log('Push token sync result: ' + JSON.stringify({
                 registered: result.registered,
                 hasToken: !!result.token,
