@@ -384,7 +384,9 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   instead of a truncated reply (#497). The text of a queued turn starts at the
   mirrored user row whose (wrapper-stripped) text is the sent prompt, else at
   the seq seen when the queue poll noticed the dispatch (#498). `joy new -m`
-  reuses the send path and exits with its code on refusal (#494).
+  reuses the send path and exits with its code on refusal (#494); its retry
+  line shell-quotes the prompt (`shellQuote`, one single-quoted word), so a
+  `$(…)` or backtick in the message is inert when pasted.
 - `joy install` bakes the effective `JOY_RELAY_URL` AND `JOY_HOME_DIR` into
   the systemd unit / launchd plist, so the supervised daemon reads the same
   credentials and state the installing CLI did (an overridden home used to be

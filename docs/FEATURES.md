@@ -123,7 +123,7 @@ every relay; machines register per account.
   mirrored user row carrying the prompt (the dispatch moment as fallback), so
   the tail of the turn it queued behind is not part of the reply (#498).
   `joy new -m` fails with the send's exit code when the first message is not
-  accepted (the id is still printed, retry guidance on stderr, #494). A message sent from inside a joy session is wrapped by the daemon in
+  accepted (the id is still printed, shell-quoted retry guidance on stderr, #494). A message sent from inside a joy session is wrapped by the daemon in
   `<joy-message from="joy:<id>" reply-to="joy:<id>">` and shown in the chat as
   coming from that session (peer bubble); no `reply-to` means no answer expected
   — `joy send --no-reply` and `joy run` send `replyTo: null`, which the daemon
