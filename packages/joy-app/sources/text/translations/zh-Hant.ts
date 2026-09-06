@@ -264,6 +264,7 @@ export const zhHant: TranslationStructure = {
         fileNotFound: '檔案未找到',
         invalidFormat: '格式無效',
         operationFailed: '操作失敗',
+        daemonOutdated: '此機器的守護程序已過期 — 請在該機器上執行 `joy update`',
         tryAgain: '請重試',
         contactSupport: '如果問題持續存在，請聯絡支援',
         sessionNotFound: '工作階段未找到',

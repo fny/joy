@@ -263,6 +263,7 @@ export const pt: TranslationStructure = {
         fileNotFound: 'Arquivo não encontrado',
         invalidFormat: 'Formato inválido',
         operationFailed: 'Operação falhou',
+        daemonOutdated: 'O daemon desta máquina está desatualizado — execute `joy update` nela',
         tryAgain: 'Por favor, tente novamente',
         contactSupport: 'Entre em contato com o suporte se o problema persistir',
         sessionNotFound: 'Sessão não encontrada',

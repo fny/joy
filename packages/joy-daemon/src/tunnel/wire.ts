@@ -1,6 +1,6 @@
 // HTTP-over-sealed-stream encoding shared by executor (daemon) and client.
 //
-// Request plaintext stream : frame0 = JSON head { m, p, h }   (method/path/headers)
+// Request plaintext stream : frame0 = JSON head { m, p, h, t } (method/path/headers/client ms clock)
 //                            frame1..N = body bytes; FINAL on the last frame
 //                            (a bodiless request FINALs the head frame itself)
 // Response plaintext stream: frame0 = JSON head { s, h, r }   (status/headers/binding)
@@ -16,7 +16,9 @@
 // a client that was not told what to expect (an older one) ignores it.
 import { SealedWriter, SealedReader, CHUNK_MAX, TamperError } from "./sealedStream";
 
-export interface RequestHead { m: string; p: string; h: Record<string, string> }
+/** `t` (client ms clock) lets the daemon refuse a request the relay held back
+ *  (replayGuard.ts). Optional on the wire: older clients do not send it. */
+export interface RequestHead { m: string; p: string; h: Record<string, string>; t?: number }
 export interface ResponseHead { s: number; h: Record<string, string>; r?: string }
 
 /** The binding a response to this request wire must carry: hex(stream id). */

@@ -7,7 +7,21 @@
  * account master secret, which derives the tunnel key. Both come from the
  * caller so this module stays free of app-state coupling.
  */
-import { tunnelJson, tunnelFetch, TunnelError } from './tunnel';
+import { tunnelJson, tunnelFetch as rawTunnelFetch, TunnelError, type TunnelFetchOpts, type TunnelResponse } from './tunnel';
+import { t } from '@/text';
+
+/** Refusals that mean "this machine's daemon predates the protocol the app
+ *  speaks" (#418: a reply with no request binding is indistinguishable from a
+ *  replay and is refused). Every screen shows `e.message`, so the wording is
+ *  applied here once; `.code` keeps the raw reason for logs. */
+const DAEMON_OUTDATED_CODES = new Set(['unbound_response', 'bad_response_head']);
+async function userFacing<T>(p: Promise<T>): Promise<T> {
+    try { return await p; }
+    catch (e) {
+        if (e instanceof TunnelError && DAEMON_OUTDATED_CODES.has(e.code)) throw new TunnelError(e.status, e.code, t('errors.daemonOutdated'));
+        throw e;
+    }
+}
 
 export interface MachineCtx {
     relayUrl: string;
@@ -19,10 +33,10 @@ export interface MachineCtx {
 }
 
 const j = <T>(ctx: MachineCtx, method: string, path: string, body?: unknown) =>
-    tunnelJson<T>({
+    userFacing(tunnelJson<T>({
         relayUrl: ctx.relayUrl, accountToken: ctx.accountToken, machineKey: ctx.machineKey,
         machineId: ctx.machineId, method, path, json: body,
-    });
+    }));
 
 // ── git ────────────────────────────────────────────────────────────────────
 export interface V2GitStatus {
@@ -122,10 +136,10 @@ export const machineSlashCommands = (ctx: MachineCtx) =>
 export type MachineOnlyCtx = Omit<MachineCtx, 'localSessionId'> & { localSessionId?: string };
 
 const jm = <T>(ctx: MachineOnlyCtx, method: string, path: string, body?: unknown) =>
-    tunnelJson<T>({
+    userFacing(tunnelJson<T>({
         relayUrl: ctx.relayUrl, accountToken: ctx.accountToken, machineKey: ctx.machineKey,
         machineId: ctx.machineId, method, path, json: body,
-    });
+    }));
 
 export const machineHarnessModels = (ctx: MachineOnlyCtx, harness: string) =>
     jm<{ ok?: boolean; models?: Array<Record<string, unknown>>; error?: string }>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/models`);
@@ -179,7 +193,9 @@ export const machineHistoryMessages = (ctx: MachineOnlyCtx, directory: string, s
 export const machineSlashCommandsAll = (ctx: MachineOnlyCtx, refresh = false) =>
     jm<{ slashCommands: string[] }>(ctx, 'GET', `/v2/slash-commands${refresh ? '?refresh=1' : ''}`);
 
-export { TunnelError, tunnelFetch };
+/** Raw-bytes tunnel call with the same user-facing refusal wording as the JSON helpers. */
+export const tunnelFetch = (opts: TunnelFetchOpts): Promise<TunnelResponse> => userFacing(rawTunnelFetch(opts));
+export { TunnelError };
 
 // ── sealed environment store (provider keys every new session inherits) ────
 export const machineEnvList = (ctx: MachineOnlyCtx) =>

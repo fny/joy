@@ -243,6 +243,7 @@ export const ru: TranslationStructure = {
         fileNotFound: 'Файл не найден',
         invalidFormat: 'Неверный формат',
         operationFailed: 'Операция не выполнена',
+        daemonOutdated: 'Демон этой машины устарел — выполните на ней `joy update`',
         tryAgain: 'Пожалуйста, попробуйте снова',
         contactSupport: 'Если проблема сохранится, обратитесь в поддержку',
         sessionNotFound: 'Сессия не найдена',

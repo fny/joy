@@ -264,6 +264,7 @@ export const es: TranslationStructure = {
         fileNotFound: 'Archivo no encontrado',
         invalidFormat: 'Formato inválido',
         operationFailed: 'Operación falló',
+        daemonOutdated: 'El daemon de esta máquina está desactualizado — ejecuta `joy update` en ella',
         tryAgain: 'Intenta de nuevo',
         contactSupport: 'Contacta soporte si el problema persiste',
         sessionNotFound: 'Sesión no encontrada',

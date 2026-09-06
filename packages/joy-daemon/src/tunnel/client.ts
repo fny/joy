@@ -35,7 +35,9 @@ export class TunnelError extends Error {
 
 export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse> {
   const key = deriveTunnelKey(opts.masterSecret, opts.machineId);
-  const wire = sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {} }, opts.body ?? new Uint8Array(0));
+  // `t` lets the daemon refuse this request if the relay holds it back or
+  // re-posts it later (replayGuard.ts).
+  const wire = sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {}, t: Date.now() }, opts.body ?? new Uint8Array(0));
 
   const entry = opts.entryBase ?? "/joy/v2/machines";
   // entryBase is a PATH, never an authority: raw concatenation would let

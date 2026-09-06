@@ -8,7 +8,8 @@
 // the local HTTP surface IS the contract (same code path the CLI hits), so
 // tunneled and local requests cannot drift apart.
 import { deriveTunnelKey, SealedWriter, CHUNK_MAX, TamperError } from "./sealedStream";
-import { openHeadAndBody, requestBinding, type RequestHead, type ResponseHead } from "./wire";
+import { openHeadAndBody, requestBinding, sealResponse, type RequestHead, type ResponseHead } from "./wire";
+import { SeenStreamIds, staleReason } from "./replayGuard";
 
 export interface ExecutorOpts {
   relayUrl: string;            // nucleus base, e.g. http://127.0.0.1:PORT
@@ -24,6 +25,8 @@ export interface ExecutorOpts {
   targetBase: string;          // local surface, e.g. http://127.0.0.1:4997
   targetHeaders?: Record<string, string>; // e.g. X-Joy-Token for the local API
   log?: (line: string) => void;
+  /** Replay guard to share/inspect (tests); defaults to a fresh 10k / 15 min one. */
+  replayGuard?: SeenStreamIds;
 }
 
 export interface ExecutorHandle { stop(): Promise<void>; leaseId: () => string | null }
@@ -35,6 +38,7 @@ const STRIP = new Set(["host", "connection", "content-length", "transfer-encodin
 export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   const log = opts.log ?? (() => {});
   const key = deriveTunnelKey(opts.machineKey, opts.machineId);
+  const seen = opts.replayGuard ?? new SeenStreamIds();
   let stopped = false;
   let lease: { id: string; token: string } | null = null;
   let renewTimer: ReturnType<typeof setInterval> | null = null;
@@ -88,6 +92,17 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
       const w = new SealedWriter(key);
       const headBytes = new TextEncoder().encode(JSON.stringify({ s: 400, h: { "x-tunnel-error": e instanceof TamperError ? "unsealable" : "bad_request" }, r } satisfies ResponseHead));
       await postFrames(Buffer.concat([w.header(), w.push(headBytes, true)]), true);
+      return;
+    }
+
+    // The request is authentic — now is it FRESH? The relay can re-post a
+    // recorded request (same stream id) or hold one back (old `t`); either
+    // gets a sealed 409 bound to it and is never dispatched. Checked only
+    // after a successful open so a spliced stream id cannot poison the guard.
+    const refusal = seen.seenOrRecord(r) ? "replayed_request" : staleReason(head.t);
+    if (refusal) {
+      const body = new TextEncoder().encode(JSON.stringify({ error: refusal }));
+      await postFrames(sealResponse(key, { s: 409, h: { "content-type": "application/json", "x-tunnel-error": refusal }, r }, body), true);
       return;
     }
 

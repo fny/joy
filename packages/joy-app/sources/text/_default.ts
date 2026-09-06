@@ -309,6 +309,7 @@ export const en = {
         fileNotFound: 'File not found',
         invalidFormat: 'Invalid format',
         operationFailed: 'Operation failed',
+        daemonOutdated: 'This machine\'s daemon is out of date — run `joy update` on it',
         tryAgain: 'Please try again',
         contactSupport: 'Contact support if the problem persists',
         sessionNotFound: 'Session not found',

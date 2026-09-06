@@ -6,7 +6,9 @@
  * Wire protocol mirrors packages/joy-daemon/src/tunnel/{sealedStream,wire}.ts:
  *   stream       : streamId(16) ‖ frames[ len(u32 BE) ‖ secretbox(plain) ]
  *   frame plain  : tagByte(0=MSG,1=FINAL) ‖ chunk           (chunk ≤ 128KB)
- *   request      : frame0 = JSON { m, p, h }, then body frames
+ *   request      : frame0 = JSON { m, p, h, t }, then body frames
+ *                  (t = client ms clock: the daemon refuses a request the
+ *                  relay held back or re-posted — replayGuard.ts there)
  *   response     : frame0 = JSON { s, h, r }, then body frames
  *   binding (r)  : hex of the REQUEST's streamId. The relay controls which
  *                  recorded stream it hands back, and the response key was
@@ -33,8 +35,10 @@ const TAG_MESSAGE = 0x00;
 const TAG_FINAL = 0x01;
 
 export class TunnelError extends Error {
-    constructor(public status: number, public code: string) {
-        super(`tunnel: ${status} ${code}`);
+    /** `code` is the stable machine-readable reason (for logs and branching);
+     *  `message` defaults to it and may be replaced with user-facing text. */
+    constructor(public status: number, public code: string, message?: string) {
+        super(message ?? `tunnel: ${status} ${code}`);
         this.name = 'TunnelError';
     }
 }
@@ -172,7 +176,7 @@ export interface TunnelFetchOpts {
  */
 export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse> {
     const key = await deriveTunnelKey(opts.machineKey, opts.machineId);
-    const wire = await sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {} }, opts.body ?? new Uint8Array(0));
+    const wire = await sealRequest(key, { m: opts.method, p: opts.path, h: opts.headers ?? {}, t: Date.now() }, opts.body ?? new Uint8Array(0));
 
     const res = await fetch(`${opts.relayUrl}/joy/v2/machines/${encodeURIComponent(opts.machineId)}/http`, {
         method: 'POST',
