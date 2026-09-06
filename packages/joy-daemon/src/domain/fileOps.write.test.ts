@@ -107,11 +107,11 @@ test("jailToolArgs: refuses options that read or execute outside the jail", () =
 test("jailToolArgs: the app's own typed argv shapes pass unchanged", () => {
   mkdirSync(join(cwd, "src"));
   const rgArgv = ["--line-number", "--with-filename", "--no-heading", "-i", "-g", "*.ts", "-m", "100", "-e", "needle", "./"];
-  expect(jailToolArgs("rg", rgArgv, cwd)).toEqual({ ok: true, args: rgArgv });
+  expect(jailToolArgs("rg", rgArgv, cwd)).toEqual({ ok: true, args: rgArgv, pathOperands: ["./"] });
   expect(jailToolArgs("rg", ["--files", "src"], cwd).ok).toBe(true);
   expect(jailToolArgs("rg", ["-C", "3", "--color=never", "needle", "src"], cwd).ok).toBe(true);
   const difftArgv = ["--context", "3", join(cwd, "src", "a.ts"), join(cwd, "src", "b.ts")];
-  expect(jailToolArgs("difft", difftArgv, cwd)).toEqual({ ok: true, args: difftArgv });
+  expect(jailToolArgs("difft", difftArgv, cwd)).toEqual({ ok: true, args: difftArgv, pathOperands: difftArgv.slice(2) });
   // Extra read roots (the temp dirs) are honored for grep.
   expect(jailToolArgs("rg", ["-e", "x", "/tmp"], cwd, ["/tmp"]).ok).toBe(true);
 });
