@@ -503,14 +503,24 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   ledger's cursor. An unreadable or malformed source is a FAILED import:
   left in place, retried next boot, and its session is quarantined
   (`registry.quarantine`: not recovered, `create`/`restart({id})` refused)
-  until it imports. Settlements obey the current-owner rule:
+  until it imports — and "malformed" is judged per row/field, not per
+  envelope (review 7652e686): a queue or codex-inbound entry without a
+  string id/text (or with a non-numeric seq) fails its whole file with
+  nothing committed, and a window record whose execution field has the
+  wrong shape (`transcriptCheckpoint.offset: "100"`) is neither imported
+  nor stripped until repaired. Settlements obey the current-owner rule:
   `settleAttempt`/`confirmDelivery` change the command only when the claimed
   generation is the session's current one AND the attempt is the command's
   newest; anything else is recorded as a `stale_settlement` observation on
   its own attempt (late-echo ownership kept) and never fails the command or
   supersedes the newer attempt. `transition`/`setCheckpoint`/`acceptCommand`
   take the owner's generation (+ expected attempt) and refuse when stale
-  (review 95c4781e).
+  (review 95c4781e). Command ids are global and owned: `acceptCommand`
+  dedupes a caller-chosen id only for the session that owns it and throws
+  `CommandIdConflictError` when another session presents it (the import
+  fails that file), and the session queue facade (`domain/queueFacade.ts`
+  — every `queueFor(session)` lookup / edit / cancel / reorder / waitFor)
+  treats another session's command id as unknown (review 7652e686).
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.

@@ -15,7 +15,13 @@
 //   - An unreadable or malformed source is a FAILED import: nothing is
 //     written, the file stays where it is, the failure is reported with the
 //     session it belongs to (server.ts quarantines that session) and the
-//     import is NOT marked done — it is retried next boot.
+//     import is NOT marked done — it is retried next boot. "Malformed"
+//     covers the rows, not only the envelope (review 7652e686): a queue or
+//     codex-inbound array with one entry missing its id / text, or a window
+//     record whose execution field has the wrong shape (a string offset),
+//     fails the whole file — nothing of it is committed, nothing stripped,
+//     the session waits for a repair. A command id another session already
+//     owns fails it the same way (CommandIdConflictError).
 //   - A legacy checkpoint never moves the ledger's cursor backwards: it is
 //     installed only while the ledger has none of that kind.
 //   - Window records keep their identity fields; the execution fields are
@@ -185,9 +191,15 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
 
   // Window records: the three execution fields move; the record stays.
   for (const rec of records) {
-    if (!EXEC_FIELDS.some((f) => rec.raw[f] !== undefined)) continue;
+    if (!EXEC_FIELDS.some((f) => rec.raw[f] != null)) continue;
     const file = `window-${rec.id}.json`;
-    try { ledger.tx(() => importRecordFields(ledger, rec.id, rec.raw, report), `import ${file}`); }
+    // Every field is validated BEFORE anything is written or stripped: a
+    // malformed one (a string offset) is a failed import of this record —
+    // it keeps its fields and its session is quarantined until repaired.
+    let fields: RecordFields;
+    try { fields = parseRecordFields(rec.raw); }
+    catch (e) { fail(file, rec.id, "malformed", errMsg(e)); continue; }
+    try { ledger.tx(() => importRecordFields(ledger, rec.id, fields, report), `import ${file}`); }
     catch (e) { fail(file, rec.id, "import failed", errMsg(e)); continue; }
     const stripped: Record<string, unknown> = { ...rec.raw };
     for (const f of EXEC_FIELDS) delete stripped[f];
@@ -224,18 +236,39 @@ function listRecordFiles(stateDir: string): RecordFile[] {
   return out;
 }
 
+/** A non-empty string field, or a MalformedSource naming the row and field. */
+function requireText(row: Record<string, unknown>, field: string, where: string): string {
+  const v = row[field];
+  if (typeof v !== "string" || !v) throw new MalformedSource(`${where}: ${field} must be a non-empty string`);
+  return v;
+}
+/** An optional finite-number field (absent / null = undefined), or a MalformedSource. */
+function optionalNum(row: Record<string, unknown>, field: string, where: string): number | undefined {
+  const v = row[field];
+  if (v == null) return undefined;
+  const n = num(v);
+  if (n === undefined) throw new MalformedSource(`${where}: ${field} must be a number`);
+  return n;
+}
+
 function importQueue(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
   if (!Array.isArray(doc)) throw new MalformedSource("a queue file is an array of items");
-  for (const it of doc) {
-    if (!isRecord(it) || typeof it.id !== "string" || typeof it.text !== "string" || !it.text) continue;
-    const seq = num(it.seq);
+  // Every entry is a command the app accepted: one that cannot be imported
+  // fails the file (nothing committed) rather than vanishing.
+  doc.forEach((it, i) => {
+    const where = `queue item ${i}`;
+    if (!isRecord(it)) throw new MalformedSource(`${where}: not an object`);
+    const id = requireText(it, "id", where);
+    const text = requireText(it, "text", where);
+    const seq = optionalNum(it, "seq", where);
+    const createdAt = optionalNum(it, "createdAt", where);
     const r = ledger.acceptCommand({
-      sessionId, id: it.id, text: it.text, origin: seq != null ? "relay" : "local",
+      sessionId, id, text, origin: seq != null ? "relay" : "local",
       source: str(it.source) ?? "rpc", seq: seq ?? null, visible: it.visible !== false, mirrorToRelay: it.mirrorToRelay !== false,
-      createdAt: num(it.createdAt),
+      createdAt,
     });
     if (r.deduped === "none") report.commands++;
-  }
+  });
 }
 
 function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, sourceHash: string, report: ImportReport, now: number): void {
@@ -299,26 +332,31 @@ function importOutbound(ledger: Ledger, doc: unknown, report: ImportReport, seal
 
 function importCodexInbound(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
   if (!Array.isArray(doc)) throw new MalformedSource("a codex inbound file is an array of items");
-  for (const it of doc) {
-    if (!isRecord(it) || typeof it.clientId !== "string" || !it.clientId) continue;
-    const seq = num(it.seq);
+  // Same rule as the queue file: every entry is a prompt the app handed
+  // over; a malformed one fails the file instead of being dropped.
+  doc.forEach((it, i) => {
+    const where = `codex inbound item ${i}`;
+    if (!isRecord(it)) throw new MalformedSource(`${where}: not an object`);
+    const clientId = requireText(it, "clientId", where);
+    const seq = optionalNum(it, "seq", where);
+    const at = optionalNum(it, "at", where);
     const state = str(it.state);
     if (state === "delivered") {
       // An ownership record: the prompt ran; only the receipts matter.
-      ledger.addReceipt(sessionId, { kind: "codex_client", ref: it.clientId, commandId: it.clientId, at: num(it.at) }); report.receipts++;
-      if (seq != null) { ledger.addReceipt(sessionId, { kind: "seq", ref: String(seq), commandId: it.clientId, at: num(it.at) }); report.receipts++; }
-      continue;
+      ledger.addReceipt(sessionId, { kind: "codex_client", ref: clientId, commandId: clientId, at }); report.receipts++;
+      if (seq != null) { ledger.addReceipt(sessionId, { kind: "seq", ref: String(seq), commandId: clientId, at }); report.receipts++; }
+      return;
     }
-    if (typeof it.text !== "string") continue;
+    if (typeof it.text !== "string") throw new MalformedSource(`${where}: text must be a string`);
     const target: CommandState = state === "sentUnknown" ? "unknown" : "queued";
     const r = ledger.acceptCommand({
-      sessionId, id: it.clientId, text: it.text, origin: seq != null ? "relay" : "local", source: seq != null ? "relay" : "rpc",
-      seq: seq ?? null, visible: false, mirrorToRelay: true, createdAt: num(it.at), state: target,
+      sessionId, id: clientId, text: it.text, origin: seq != null ? "relay" : "local", source: seq != null ? "relay" : "rpc",
+      seq: seq ?? null, visible: false, mirrorToRelay: true, createdAt: at, state: target,
     });
-    if (r.deduped !== "none") continue;
+    if (r.deduped !== "none") return;
     report.commands++;
-    if (target === "unknown") { ledger.importAttempt(it.clientId, it.clientId, "unknown", num(it.at) ?? Date.now()); report.attempts++; }
-  }
+    if (target === "unknown") { ledger.importAttempt(clientId, clientId, "unknown", at ?? Date.now()); report.attempts++; }
+  });
 }
 
 function importCodexCheckpoint(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
@@ -347,19 +385,46 @@ function importSpawns(ledger: Ledger, doc: unknown, report: ImportReport): void 
   }
 }
 
-function importRecordFields(ledger: Ledger, sessionId: string, raw: Record<string, unknown>, report: ImportReport): void {
+/** The execution fields of a window record, validated. A field that is
+ *  absent or null is simply not there; one present with the wrong shape is
+ *  a MalformedSource — the record is neither imported nor stripped. */
+interface RecordFields {
+  transcriptCheckpoint?: { path: string; offset: number };
+  opencodeDeliveredThrough?: string;
+  handoffJob?: Record<string, unknown>;
+}
+function parseRecordFields(raw: Record<string, unknown>): RecordFields {
+  const out: RecordFields = {};
   const cp = raw.transcriptCheckpoint;
-  if (isRecord(cp) && typeof cp.path === "string" && typeof cp.offset === "number") {
-    if (!ledger.getCheckpoint(sessionId, "claude_transcript")) { ledger.setCheckpoint(sessionId, "claude_transcript", cp.path, cp.offset); report.checkpoints++; }
+  if (cp != null) {
+    if (!isRecord(cp)) throw new MalformedSource("transcriptCheckpoint: not an object");
+    const path = requireText(cp, "path", "transcriptCheckpoint");
+    const offset = num(cp.offset);
+    if (offset === undefined || offset < 0) throw new MalformedSource("transcriptCheckpoint: offset must be a non-negative number");
+    out.transcriptCheckpoint = { path, offset };
   }
   const oc = raw.opencodeDeliveredThrough;
-  if (typeof oc === "string" && oc) {
-    if (!ledger.getCheckpoint(sessionId, "opencode_msg")) { ledger.setCheckpoint(sessionId, "opencode_msg", oc, 0); report.checkpoints++; }
+  if (oc != null) {
+    if (typeof oc !== "string" || !oc) throw new MalformedSource("opencodeDeliveredThrough: must be a non-empty string");
+    out.opencodeDeliveredThrough = oc;
   }
   const job = raw.handoffJob;
-  if (isRecord(job) && typeof job.role === "string" && typeof job.path === "string") {
-    if (!ledger.getJob(sessionId)) { ledger.putJob({ id: sessionId, sessionId, kind: "handoff", payload: job }); report.jobs++; }
+  if (job != null) {
+    if (!isRecord(job)) throw new MalformedSource("handoffJob: not an object");
+    requireText(job, "role", "handoffJob");
+    requireText(job, "path", "handoffJob");
+    out.handoffJob = job;
   }
+  return out;
+}
+
+function importRecordFields(ledger: Ledger, sessionId: string, fields: RecordFields, report: ImportReport): void {
+  const cp = fields.transcriptCheckpoint;
+  if (cp && !ledger.getCheckpoint(sessionId, "claude_transcript")) { ledger.setCheckpoint(sessionId, "claude_transcript", cp.path, cp.offset); report.checkpoints++; }
+  const oc = fields.opencodeDeliveredThrough;
+  if (oc && !ledger.getCheckpoint(sessionId, "opencode_msg")) { ledger.setCheckpoint(sessionId, "opencode_msg", oc, 0); report.checkpoints++; }
+  const job = fields.handoffJob;
+  if (job && !ledger.getJob(sessionId)) { ledger.putJob({ id: sessionId, sessionId, kind: "handoff", payload: job }); report.jobs++; }
 }
 
 export { LedgerWriteError };

@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  Ledger, ledgerFor, closeAllLedgers, SessionEndedError, StaleGenerationError, StaleCommandError, LedgerWriteError,
+  Ledger, ledgerFor, closeAllLedgers, SessionEndedError, StaleGenerationError, StaleCommandError, LedgerWriteError, CommandIdConflictError,
   OUTBOX_MAX_ROWS, NON_TERMINAL_STATES, STALE_SETTLEMENT_KIND,
 } from "./ledger";
 
@@ -381,4 +381,25 @@ test("a replacement reconciling its predecessor's attempt names its OWN generati
   expect(ledger.getCommand(c.id)?.state).toBe("running");
   expect(ledger.getAttempt(a1.id)).toMatchObject({ state: "accepted", runtimeTurnId: "t1" });
   expect(ledger.listObservations("s1", STALE_SETTLEMENT_KIND)).toEqual([]);
+});
+
+// ── review 7652e686: command ids are global; a second session cannot claim one ──
+
+test("acceptCommand refuses a caller id another session already owns (CommandIdConflictError): b never receives a's row; the owner's re-accept still dedupes", () => {
+  const a = accept("a", "same", { id: "same" });
+  expect(a).toMatchObject({ id: "same", deduped: "none", row: { sessionId: "a" } });
+  let err: unknown;
+  try { accept("b", "same", { id: "same" }); } catch (e) { err = e; }
+  expect(err).toBeInstanceOf(CommandIdConflictError);
+  expect(err).toBeInstanceOf(LedgerWriteError);
+  expect(err).toMatchObject({ name: "CommandIdConflictError", phase: "accept", commandId: "same", ownerSessionId: "a" });
+  expect(ledger.listCommands("b")).toEqual([]);
+  expect(ledger.getCommand("same")).toMatchObject({ sessionId: "a", text: "same", state: "queued" });
+  // The owner: the same id back, no second row (the dedupe the id exists for).
+  expect(accept("a", "retry", { id: "same" })).toMatchObject({ id: "same", deduped: "pending", row: { sessionId: "a", text: "same" } });
+  expect(ledger.listCommands("a")).toHaveLength(1);
+  // A terminal row is owned just the same: the other session is refused, not handed a receipt.
+  expect(ledger.transition("same", ["queued"], "completed")).toBe(true);
+  expect(() => accept("b", "same", { id: "same" })).toThrow(CommandIdConflictError);
+  expect(accept("a", "same", { id: "same" }).deduped).toBe("receipt");
 });
