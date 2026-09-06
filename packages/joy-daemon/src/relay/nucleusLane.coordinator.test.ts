@@ -259,9 +259,113 @@ describe("nucleusLane on the coordinator", () => {
     handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m4", log: () => {} });
     await until(() => !!relay.terminal("t5"), 10_000);
     expect(relay.terminal("t5")).toMatchObject({ terminalState: "cancelled" });
-    expect(relay.count("/turns/t4/start")).toBe(0); // already running before the restart: not re-started
+    // The row is running but NO /start was ever acknowledged (this fixture is
+    // exactly "died between the driver's echo and the POST", Astra on
+    // e8f8b2cc): the resumed loop posts it — once, under the stable event id.
+    await until(() => relay.count("/turns/t4/start") === 1, 10_000);
+    await sleep(500);
+    expect(relay.count("/turns/t4/start")).toBe(1);
+    expect(relay.calls.find((c) => c.path === "/daemon/turns/t4/start")?.body).toMatchObject({ runtimeEventId: "start:t4" });
+    expect(ledger.hasReceipt("cs000004", "relay_start", "t4")).toBe(true);
     driver.emit({ kind: "turn_ended", runtimeTurnId: "T4", status: "completed" });
     await until(() => !!relay.terminal("t4"), 10_000);
     expect(relay.terminal("t4")).toMatchObject({ terminalState: "completed" });
   }, 25_000);
+
+  // ── e8f8b2cc review residual: a REAL daemon replacement — fresh coordinator,
+  // new generation, new driver over the same ledger — with the /start
+  // acknowledgement as the durable fact, not the local running state.
+
+  /** The daemon "restarts": the process-wide coordinator is forgotten, the
+   *  session's next generation opens over the same ledger (running rows →
+   *  unknown), and a NEW driver is adopted whose reconcile finds the turn
+   *  still running (codex thread/read). */
+  function replaceDaemon(id: string, runtimeTurnId: string) {
+    resetCoordinators();
+    const ledger = ledgerFor();
+    const gen = ledger.openGeneration(id, "codex");
+    const driver = new FakeDriver(id, gen);
+    driver.onReconcile = (call) => call.pending.map((p) => ({ attemptId: p.attemptId, outcome: "running" as const, runtimeTurnId }));
+    const coordinator = coordinatorFor(ledger);
+    coordinator.adopt(id, driver);
+    driver.ready();
+    const s: any = {
+      id, status: "active", cwd: "/tmp/x", claudeSessionId: undefined, agentFlavor: "codex",
+      busy: () => coordinator.busy(id),
+      abort: () => coordinator.abortRunning(id),
+      end(reason: "killed" | "process_exited" | "restart") { s.status = "ended"; coordinator.retire(id, reason); return true; },
+    };
+    return { s, driver, coordinator, ledger, generation: gen };
+  }
+
+  it("driver replacement, crash after the echo but BEFORE /start: the new generation reconciles the turn running and the resumed loop posts /start exactly once, then one terminal", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const first = coordinatedSession("cs000007");
+    // Daemon 1: the prompt is delivered (echo → running) and the daemon dies
+    // before POST /start — no lane ever ran for this turn.
+    const c = first.coordinator.accept({ sessionId: "cs000007", text: "survive a real restart", source: "rpc", visible: false, mirrorToRelay: false, relayTurnId: "t8", relayCommandId: "c8" });
+    await settle();
+    first.driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T8" });
+    await settle();
+    first.driver.emit({ kind: "echo", runtimeRef: c.id, runtimeTurnId: "T8" });
+    expect(first.ledger.getCommand(c.id)?.state).toBe("running");
+    expect(first.ledger.hasReceipt("cs000007", "relay_start_intent", "t8")).toBe(false);
+    expect(first.ledger.hasReceipt("cs000007", "relay_start", "t8")).toBe(false);
+    // Daemon 2: a fresh coordinator + generation 2 + a new driver over the same ledger.
+    const next = replaceDaemon("cs000007", "T8");
+    expect(next.generation).toBe(first.driver.generation + 1);
+    expect(next.coordinator).not.toBe(first.coordinator);
+    await until(() => next.ledger.getCommand(c.id)?.state === "running");
+    expect(next.ledger.latestAttempt(c.id)?.generation).toBe(first.driver.generation); // the SAME attempt: never resent
+    const registry: any = { get: (i: string) => (i === "cs000007" ? next.s : undefined), list: () => [next.s], create: async () => next.s, chatHistory: () => [], listRecords: () => [{ id: "cs000007", v2SessionId: "v2s7" }], saveRecord: () => {} };
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m7", log: () => {} });
+    await until(() => relay.count("/turns/t8/start") === 1, 10_000);
+    await sleep(1_000);
+    expect(relay.count("/turns/t8/start")).toBe(1); // exactly once
+    expect(relay.calls.find((cl) => cl.path === "/daemon/turns/t8/start")?.body).toMatchObject({ runtimeEventId: "start:t8" });
+    expect(next.ledger.hasReceipt("cs000007", "relay_start", "t8")).toBe(true);
+    expect(relay.terminal("t8")).toBeUndefined();
+    next.driver.emit({ kind: "turn_ended", runtimeTurnId: "T8", status: "completed" });
+    await until(() => relay.terminals("t8").length > 0, 10_000);
+    await sleep(500);
+    expect(relay.terminals("t8")).toHaveLength(1);
+    expect(relay.terminals("t8")[0]).toMatchObject({ terminalState: "completed" });
+    expect(first.driver.submits).toHaveLength(1);
+    expect(next.driver.submits).toHaveLength(0);
+  }, 30_000);
+
+  it("driver replacement, crash AFTER /start: the acknowledged start is never re-posted by the new generation's loop; one terminal", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const first = coordinatedSession("cs000008");
+    const registry1: any = { get: (i: string) => (i === "cs000008" ? first.s : undefined), list: () => [first.s], create: async () => first.s, chatHistory: () => [], listRecords: () => [{ id: "cs000008", v2SessionId: "v2s8" }], saveRecord: () => {} };
+    let lane1: NucleusLaneHandle | null = startNucleusLane({ registry: registry1, relayUrl: url, token: "tok", machineId: "m8", log: () => {} });
+    relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s8", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
+    await until(() => relay.count("/bind") === 1);
+    relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s8", kind: "prompt", turnId: "t9", ciphertext: enc("long one") });
+    await until(() => first.driver.submits.length === 1);
+    const row = first.ledger.commandForRelayTurn("t9")!;
+    first.driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T9" });
+    await settle();
+    first.driver.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "T9" });
+    await until(() => relay.count("/turns/t9/start") === 1);
+    await until(() => first.ledger.hasReceipt("cs000008", "relay_start", "t9"));
+    expect(first.ledger.hasReceipt("cs000008", "relay_start_intent", "t9")).toBe(true);
+    // The daemon dies after the acknowledged /start.
+    await lane1.stop(); lane1 = null;
+    const next = replaceDaemon("cs000008", "T9");
+    await until(() => next.ledger.getCommand(row.id)?.state === "running");
+    const registry2: any = { get: (i: string) => (i === "cs000008" ? next.s : undefined), list: () => [next.s], create: async () => next.s, chatHistory: () => [], listRecords: () => [{ id: "cs000008", v2SessionId: "v2s8" }], saveRecord: () => {} };
+    handle = startNucleusLane({ registry: registry2, relayUrl: url, token: "tok", machineId: "m8", log: () => {} });
+    await sleep(1_500);
+    expect(relay.count("/turns/t9/start")).toBe(1); // zero new /start: the ack is the durable fact
+    expect(relay.terminal("t9")).toBeUndefined();
+    next.driver.emit({ kind: "turn_ended", runtimeTurnId: "T9", status: "failed" });
+    await until(() => relay.terminals("t9").length > 0, 10_000);
+    await sleep(500);
+    expect(relay.terminals("t9")).toHaveLength(1);
+    expect(relay.terminals("t9")[0]).toMatchObject({ terminalState: "failed", meta: { reason: "agent_reported_failed" } });
+    expect(relay.count("/turns/t9/start")).toBe(1);
+  }, 30_000);
 });
