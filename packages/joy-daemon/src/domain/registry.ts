@@ -29,6 +29,7 @@ import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowReco
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 import { stampTmuxServerOwner, sweepOrphanTmuxServers } from "./orphanSweep";
+import { claimTranscript, claimedTranscriptPaths, type TranscriptClaim } from "./transcriptClaims";
 
 export interface CreateSessionOpts {
   cwd: string;
@@ -63,6 +64,11 @@ export interface CreateSessionOpts {
   forceNew?: boolean;
   /** --fork-session: new session id when resuming. Ignored without continue/resume_id. */
   forkSession?: boolean;
+  /** The caller already holds the reservation for the transcript this launch
+   *  binds (a teleport import that just wrote `<cwd project dir>/<resume_id>.jsonl`
+   *  under its exclusive claim): create() launches under it instead of taking
+   *  its own, and leaves releasing it to the caller. */
+  transcriptClaim?: TranscriptClaim;
   /** --chrome: Claude in Chrome integration. */
   chrome?: boolean;
   /** Raw extra CLI arguments appended verbatim to the claude command line. */
@@ -322,9 +328,18 @@ export class SessionRegistry {
     if (pendingRestart && !this.#replacing.has(id)) return pendingRestart;
     if (this.#creating.has(id)) throw new Error(`session ${id} is being created (id_in_use)`);
     this.#creating.add(id);
-    try { return await this.#createInner(opts, id, cwd); } finally { this.#creating.delete(id); }
+    try { return await this.#createInner(opts, id, cwd); } finally {
+      this.#creating.delete(id);
+      // The transcript reservation lives exactly as long as the create: once
+      // the Session is registered the path is owned visibly, and an aborted
+      // launch must not keep refusing imports of a file it never took.
+      this.#transcriptClaims.get(id)?.release();
+      this.#transcriptClaims.delete(id);
+    }
   }
   #creating = new Set<string>();
+  /** Bind claims taken by in-flight creates, by session id (see create's finally). */
+  #transcriptClaims = new Map<string, TranscriptClaim>();
   /** Ids whose restart is currently running its replacement create (see create). */
   #replacing = new Set<string>();
   async #createInner(opts: CreateSessionOpts, id: string, cwd: string): Promise<AgentSession> {
@@ -548,6 +563,23 @@ export class SessionRegistry {
     const freshTranscriptPath = freshClaudeId
       ? join(cwdToTranscriptDir(cwd), `${freshClaudeId}.jsonl`)
       : undefined;
+    // Reserve the transcript this launch binds BEFORE the first await (#550
+    // residual): from here to `#sessions.set` the tmux setup yields many
+    // times, and a teleport import that checked ownership in one of those
+    // gaps saw no session and no record for a file this launch was about to
+    // read — then replaced its bytes. The claim is what the import's check
+    // sees. Binds coexist (two forks of one conversation read the same file);
+    // only an import's exclusive replace claim refuses this launch, and the
+    // import's own launch arrives holding that claim and adopts it.
+    const pinnedTranscript = opts.resume_id ? join(cwdToTranscriptDir(cwd), `${opts.resume_id}.jsonl`) : freshTranscriptPath;
+    if (pinnedTranscript) {
+      const adopted = opts.transcriptClaim?.path === pinnedTranscript && opts.transcriptClaim.held();
+      if (!adopted) {
+        const bind = claimTranscript(pinnedTranscript, `session:${id}`, "bind");
+        if (!bind) throw new Error(`transcript ${pinnedTranscript} is being replaced by a teleport import; retry once it finishes`);
+        this.#transcriptClaims.set(id, bind);
+      }
+    }
     // Flag list builder, parameterized on whether --continue is included.
     const buildFlags = (withContinue: boolean): string[] => {
       const f: string[] = [];
@@ -1191,9 +1223,13 @@ export class SessionRegistry {
       // windows would otherwise bind the same (newest) conversation and mirror
       // each other's turns. Better to stay unbound and let pollForTranscript
       // pick up a fresh transcript when it appears.
-      const claimed = new Set(
-        [...this.#sessions.values()].filter(s => s.status !== "ended").map(s => s.transcriptPath).filter((p): p is string => !!p),
-      );
+      // A transcript a teleport import is replacing at this moment is not
+      // project history either: its bytes belong to the session the import
+      // is about to launch (#550 residual).
+      const claimed = new Set([
+        ...[...this.#sessions.values()].filter(s => s.status !== "ended").map(s => s.transcriptPath).filter((p): p is string => !!p),
+        ...claimedTranscriptPaths("replace"),
+      ]);
       const ledgerCp = ledgerFor().getCheckpoint(id, "claude_transcript");
       const checkpoint = ledgerCp ? { path: ledgerCp.ref, offset: ledgerCp.offset } : undefined;
       const bound = resolveRecoveredTranscript(rec ? { claudeSessionId: rec.claudeSessionId, transcriptCheckpoint: checkpoint } : null, cwdToTranscriptDir(cwd), claimed, () => findLatestTranscript(cwdToTranscriptDir(cwd), 0));

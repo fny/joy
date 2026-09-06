@@ -25,12 +25,14 @@ import { saveWindowRecord } from "./windowRecord";
 import { saveHandoffJob, loadHandoffJob } from "./handoff";
 import { cwdToTranscriptDir } from "../claude/transcript";
 import { parseJoyCommand } from "../claude/session";
+import { withPathLock } from "./fileOps";
+import { claimTranscript, transcriptClaims, resetTranscriptClaims } from "./transcriptClaims";
 
 const op = (name: string) => machineOps.find((o) => o.rpcName === name)!;
 let home: string;
 const realHome = process.env.JOY_HOME_DIR;
 const cleanupDirs: string[] = [];
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "joy-ops-session-")); process.env.JOY_HOME_DIR = home; closeAllLedgers(); resetCoordinators(); });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "joy-ops-session-")); process.env.JOY_HOME_DIR = home; closeAllLedgers(); resetCoordinators(); resetTranscriptClaims(); });
 afterEach(() => {
   resetCoordinators(); closeAllLedgers(); // coordinators first: a pump must not wake on a closed ledger
   if (realHome === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = realHome;
@@ -299,6 +301,92 @@ describe("same-machine teleport into another folder (#550)", () => {
     const r3 = (await op("joy-teleport-import").handler({ list: () => [], listRecords: () => [], create: failing } as never, { cwd: dst, claudeSessionId: sid2, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
     expect(r3.ok).toBe(false);
     expect(existsSync(join(dir, `${sid2}.jsonl`))).toBe(false);
+  });
+
+  it("#550 residual: an owner that binds the destination WHILE the import waits for the lock is honoured — the import is refused and the owner's bytes are intact", async () => {
+    const { readFileSync } = await import("node:fs");
+    const dst = join(home, "project-d"); mkdirSync(dst);
+    const dir = cwdToTranscriptDir(dst); mkdirSync(dir, { recursive: true }); cleanupDirs.push(dir);
+    const sid = "abc-5504"; const target = join(dir, `${sid}.jsonl`);
+    writeFileSync(target, "UNOWNED LEFTOVER\n");
+    const owners: Array<Record<string, unknown>> = [];
+    const create = vi.fn(async () => ({ id: "fa005505", toJSON: () => ({}) }));
+    const reg = { list: () => owners, listRecords: () => [], create } as never;
+    // Another holder sits on the destination's lock; the import parks behind it
+    // having passed its pre-lock ownership check against an empty registry.
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    let entered!: () => void; const held = new Promise<void>((r) => { entered = r; });
+    const holder = withPathLock(`teleport-import:${target}`, async () => { entered(); await gate; });
+    await held;
+    const pending = op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" }) as Promise<Record<string, unknown>>;
+    // While it waits, a session binds the destination transcript and writes to it.
+    owners.push({ id: "fa005506", cwd: dst, status: "active", claudeSessionId: sid, transcriptPath: target });
+    writeFileSync(target, "NOW OWNED BY A LIVE SESSION\n");
+    release(); await holder;
+    const r = await pending;
+    expect(r.error).toMatch(/belongs to a session whose transcript is/);              // old code: ok:true, the owner's transcript overwritten
+    expect(readFileSync(target, "utf8")).toBe("NOW OWNED BY A LIVE SESSION\n");
+    expect(create).not.toHaveBeenCalled();
+    expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+  });
+
+  it("#550 residual: a launch that has decided on the destination but not registered its session yet is an owner; an import in progress refuses any launch binding its destination", async () => {
+    const { readFileSync } = await import("node:fs");
+    const dst = join(home, "project-e"); mkdirSync(dst);
+    const dir = cwdToTranscriptDir(dst); mkdirSync(dir, { recursive: true }); cleanupDirs.push(dir);
+    const sid = "abc-5505"; const target = join(dir, `${sid}.jsonl`);
+    writeFileSync(target, "READ BY AN IN-FLIGHT LAUNCH\n");
+    // create() reserved the file (its Session is not in list() yet — the tmux setup is still running).
+    const bind = claimTranscript(target, "session:fa005507", "bind")!;
+    const create = vi.fn(async (opts: { transcriptClaim?: { path: string; mode: string; held(): boolean } }) => {
+      // The import's launch arrives holding the exclusive claim; nothing else can bind the file meanwhile.
+      expect(opts.transcriptClaim).toMatchObject({ path: target, mode: "replace" });
+      expect(opts.transcriptClaim!.held()).toBe(true);
+      expect(claimTranscript(target, "session:fa005509", "bind")).toBeNull();
+      return { id: "fa005508", toJSON: () => ({}) };
+    });
+    const reg = { list: () => [], listRecords: () => [], create } as never;
+    const r1 = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r1.error).toMatch(/belongs to a session whose transcript is/);
+    expect(readFileSync(target, "utf8")).toBe("READ BY AN IN-FLIGHT LAUNCH\n");
+    expect(create).not.toHaveBeenCalled();
+    bind.release();
+    const r2 = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r2.ok).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(transcriptClaims(target)).toEqual([]);                                    // released with the import, success or not
+    expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+  });
+
+  it("#550 residual: a launch failure after another owner took the destination leaves that owner's file untouched", async () => {
+    const { readFileSync } = await import("node:fs");
+    const dst = join(home, "project-f"); mkdirSync(dst);
+    const dir = cwdToTranscriptDir(dst); mkdirSync(dir, { recursive: true }); cleanupDirs.push(dir);
+    const sid = "abc-5506"; const target = join(dir, `${sid}.jsonl`);
+    writeFileSync(target, "UNOWNED LEFTOVER\n");
+    const owners: Array<Record<string, unknown>> = [];
+    // During the launch, a path that binds without claiming (a recovered window) takes the transcript; then the launch fails.
+    const create = vi.fn(async () => {
+      owners.push({ id: "fa005510", cwd: dst, status: "active", claudeSessionId: sid, transcriptPath: target });
+      writeFileSync(target, "OWNER BYTES\n");
+      throw new Error("tmux refused");
+    });
+    const reg = { list: () => owners, listRecords: () => [], create } as never;
+    const r = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^tmux refused \(the transcript at .* was taken by another session meanwhile and was left untouched; the prior bytes are set aside at /);
+    expect(readFileSync(target, "utf8")).toBe("OWNER BYTES\n");                     // old code: removed, then the leftover restored over the owner
+    const setAside = readdirSync(dir).filter((f) => f.includes("joy-import"));
+    expect(setAside).toHaveLength(1); expect(setAside[0]).toMatch(/\.prev$/);
+    expect(readFileSync(join(dir, setAside[0]), "utf8")).toBe("UNOWNED LEFTOVER\n");
+    expect(transcriptClaims(target)).toEqual([]);
+    // The same failure with NO takeover still restores the leftover (the existing contract).
+    owners.length = 0;
+    const failing = vi.fn(async () => { throw new Error("tmux refused"); });
+    writeFileSync(target, "UNOWNED AGAIN\n");
+    const r2 = (await op("joy-teleport-import").handler({ list: () => [], listRecords: () => [], create: failing } as never, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r2).toMatchObject({ ok: false, error: "tmux refused" });
+    expect(readFileSync(target, "utf8")).toBe("UNOWNED AGAIN\n");
   });
 });
 
