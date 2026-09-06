@@ -905,7 +905,15 @@ export class CodexSession implements AgentSession {
     // pending held the lane until its dispatch cap (Astra on 170ec279, #78).
     const it = this.#inbound.find((i) => i.clientId === id);
     if (it) return it.state === "delivered" ? "delivered" : "pending";
-    return this.#itemOutcome.get(id) ?? "unknown";
+    const local = this.#itemOutcome.get(id);
+    if (local) return local;
+    // A recovered adapter suppresses a redelivered seq from its persisted
+    // receipts but had no in-process outcome for it, so the lane saw
+    // 'unknown', took the untracked path and waited 180 s before failing
+    // no_agent_activity (Astra on ddc89de1, #516). The receipt IS the outcome.
+    const cp = this.#checkpoint;
+    if ((cp.seqReceipts ?? []).some((r) => r.clientId === id) || (cp.knownClientIds ?? []).includes(id)) return "delivered";
+    return "unknown";
   }
 
   queueState(): QueueState {

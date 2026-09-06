@@ -18,6 +18,9 @@ export type V2SpawnSpec = Parameters<typeof v2.createSession>[1];
  *  machine; short enough that a misconfigured daemon surfaces instead of
  *  spinning forever. */
 const SPAWN_DEADLINE_MS = 120_000;
+/** A git-URL spawn clones first; the daemon allows the clone 220 s, so the
+ *  wait must outlast it or a valid clone is abandoned mid-way (#151). */
+const CLONE_EXTRA_MS = 220_000;
 const POLL_MS = 2000;
 
 /**
@@ -34,7 +37,7 @@ const POLL_MS = 2000;
 export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec): Promise<string | null> {
     const created = await v2.createSession(machineId, spec);
     const v2id: string = created.sessionId;
-    const deadline = Date.now() + SPAWN_DEADLINE_MS;
+    const deadline = Date.now() + SPAWN_DEADLINE_MS + (spec?.gitUrl ? CLONE_EXTRA_MS : 0);
     let promptedForDir = false;
 
     while (Date.now() < deadline) {
@@ -77,7 +80,10 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec): Prom
             if (link?.sessionId === v2id && link.localSessionId && link.keyEnvelope) return sid;
         }
     }
-    throw new Error('v2 spawn accepted but the session did not start within 2 minutes. Check the daemon lane on that machine.');
+    // The relay still holds the accepted spawn: cancel it so it cannot start
+    // an agent nobody is waiting for (Astra on 40873bd6).
+    await v2.deleteSession(v2id).catch(() => { });
+    throw new Error('v2 spawn accepted but the session did not start in time. Check the daemon lane on that machine.');
 }
 
 

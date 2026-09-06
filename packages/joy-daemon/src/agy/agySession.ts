@@ -477,8 +477,8 @@ export class AgySession implements AgentSession {
     }
     this.#proc = null;
     this.#inFlight = null;
-    if (run) this.#endTurn(run, "cancelled");
-    this.#run = null; // whatever the dying child still emits is not ours (#466)
+    if (run) { this.#endTurn(run, "cancelled"); run.finalized = true; } // stragglers from the dying child are rejected by #onEvent
+    this.#run = null; // whatever the dying child still emits is not ours (#466; Astra on ddc89de1: clearing #run alone let a drained answer reach the ended session)
     this.#relay?.setThinking(false);
     if (reason === "process_exited") {
       void this.#relay?.updateJoyState("detached");

@@ -793,8 +793,15 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // because the local override outranks daemon metadata (#123).
     const modeChangeSeq = React.useRef(0);
     const updatePermissionMode = React.useCallback((mode: PermissionMode) => {
-        if (!(isJoyDaemon && machineId && joySessionId)) {
+        if (!isJoyDaemon) {
             storage.getState().updateSessionPermissionMode(sessionId, mode.key);
+            return;
+        }
+        // A Joy session with incomplete metadata is NOT a non-Joy session: it
+        // used to fall into the local-persist branch and claim a mode the
+        // daemon was never asked for (Astra on 40873bd6, #123).
+        if (!machineId || !joySessionId) {
+            Modal.alert(t('common.error'), t('errors.permissionModeChangeFailed', { error: 'session metadata incomplete' }));
             return;
         }
         // Absolute set, server-side: joy-tmux reads the CURRENT mode off
