@@ -81,7 +81,11 @@ function readFrontmatterField(path: string, field: string): string | undefined {
     const text = readFileSync(path, "utf8");
     const fm = text.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
     if (!fm) return undefined;
-    const m = fm[1].match(new RegExp(`^\\s*${field}:\\s*(.+?)\\s*$`, "m"));
+    // Separator whitespace is SAME-LINE only: `\s*` after the colon crossed
+    // the newline, so an empty `name:` returned the NEXT line
+    // ("description: Deploy the app") as the skill's name (#531). An empty
+    // scalar is undefined, and the caller falls back to the directory name.
+    const m = fm[1].match(new RegExp(`^[ \\t]*${field}:[ \\t]*(.*?)[ \\t\\r]*$`, "m"));
     if (!m) return undefined;
     const v = m[1].replace(/^["']|["']$/g, "").trim();
     return v || undefined;
@@ -215,9 +219,14 @@ export class CommandRegistry {
   // project-subfolder commands, so the app can't tell them apart by name).
   #plugins = new Set<string>();
   #projects = new Map<string, Map<string, Set<CmdTag>>>();
-  // name → frontmatter description, accumulated across machine + every scanned
-  // project (union; never shrinks, stale entries are filtered out on push).
-  #descriptions = new Map<string, string>();
+  // name → frontmatter description, owned PER SOURCE (the machine scan, and
+  // each project cwd) and rebuilt from that source's latest scan. A single
+  // accumulating map only ever grew: a `description:` removed from the file
+  // survived every rescan and the relay published it for as long as the
+  // command existed (#532). Rebuilding per source drops it while keeping a
+  // description another current source still supplies.
+  #machineDescriptions = new Map<string, string>();
+  #projectDescriptions = new Map<string, Map<string, string>>();
   #lastPushed: string | null = null;
   // Serializes machine-metadata upserts so concurrent callers (boot, periodic
   // rescan, per-session attach) can't land out of order and leave a stale union.
@@ -229,21 +238,23 @@ export class CommandRegistry {
     this.#home = opts.homeDir ?? homedir();
   }
 
-  #mergeDescriptions(cmds: ScannedCommand[]): void {
-    for (const c of cmds) {
-      if (c.description) this.#descriptions.set(c.name, c.description);
-    }
+  /** The descriptions ONE scan currently supplies (#532). */
+  static #descriptionsOf(cmds: ScannedCommand[]): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const c of cmds) if (c.description) out.set(c.name, c.description);
+    return out;
   }
 
   rescanMachine(): void {
     const machine = scanMachine(this.#home);
     this.#machine = new Map(machine.map((c) => [c.name, new Set(c.tags)]));
     this.#plugins = new Set(); // plugin commands excluded from autocomplete entirely (see scanMachine)
-    this.#mergeDescriptions(machine);
+    this.#machineDescriptions = CommandRegistry.#descriptionsOf(machine);
   }
 
   setProject(cwd: string, cmds: ScannedCommand[]): void {
     this.#projects.set(cwd, new Map(cmds.map((c) => [c.name, new Set(c.tags)])));
+    this.#projectDescriptions.set(cwd, CommandRegistry.#descriptionsOf(cmds));
   }
 
   /** The list for one session = machine ∪ that project, filtered to what the
@@ -272,15 +283,18 @@ export class CommandRegistry {
   /** Re-upsert machine metadata with the union, only when it actually changed.
    *  Serialized via #pushChain; the union is re-read inside the critical section
    *  so the latest set always wins, and #lastPushed advances only on success. */
-  /** union + plugin subset + descriptions for currently-known commands (stale
-   *  entries filtered out), plus a string key for change detection. */
+  /** union + plugin subset + descriptions rebuilt from every CURRENT source
+   *  (machine first, then projects in registration order; the first source
+   *  to describe a name wins), plus a string key for change detection. */
   #snapshot(): { union: string[]; plugins: string[]; descriptions: Record<string, string>; key: string } {
     const union = this.union();
     const plugins = [...this.#plugins].sort();
     const names = new Set(union);
-    const descriptions = Object.fromEntries(
-      [...this.#descriptions].filter(([name]) => names.has(name)).sort((a, b) => a[0].localeCompare(b[0])),
-    );
+    const merged = new Map<string, string>();
+    for (const src of [this.#machineDescriptions, ...this.#projectDescriptions.values()]) {
+      for (const [name, d] of src) if (names.has(name) && !merged.has(name)) merged.set(name, d);
+    }
+    const descriptions = Object.fromEntries([...merged].sort((a, b) => a[0].localeCompare(b[0])));
     const key = union.join("\n") + "\u0000" + plugins.join("\n") + "\u0000" +
       Object.entries(descriptions).map(([k, v]) => `${k}=${v}`).join("\n");
     return { union, plugins, descriptions, key };
@@ -307,9 +321,7 @@ export class CommandRegistry {
   /** On relay attach (launch / recover / reconnect): scan this session's
    *  project, push its list, and fold the project into machine knowledge. */
   async onSessionAttached(cwd: string, rs: RelaySession, flavor: AgentFlavor = "claude"): Promise<void> {
-    const scanned = scanProject(cwd);
-    this.setProject(cwd, scanned);
-    this.#mergeDescriptions(scanned);
+    this.setProject(cwd, scanProject(cwd));
     try { await rs.updateSlashCommands(this.forProject(cwd, flavor)); } catch { /* best-effort */ }
     await this.pushMachineIfChanged();
   }
@@ -318,11 +330,7 @@ export class CommandRegistry {
    *  (a project whose commands were removed drops out), then push + return. */
   refresh(): { slashCommands: string[] } {
     this.rescanMachine();
-    for (const cwd of [...this.#projects.keys()]) {
-      const scanned = scanProject(cwd);
-      this.setProject(cwd, scanned);
-      this.#mergeDescriptions(scanned);
-    }
+    for (const cwd of [...this.#projects.keys()]) this.setProject(cwd, scanProject(cwd));
     void this.pushMachineIfChanged();
     return { slashCommands: this.union() };
   }

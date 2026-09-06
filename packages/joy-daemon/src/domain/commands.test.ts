@@ -57,6 +57,39 @@ describe("scanSkillsDir", () => {
   });
 });
 
+describe("frontmatter edge cases (#531)", () => {
+  it("an empty name: does not swallow the next field; the dir name is the fallback", () => {
+    write(".claude/skills/deploy/SKILL.md", "---\nname:\ndescription: Deploy the app\n---\nbody");
+    write(".claude/skills/spaced/SKILL.md", "---\nname:   \t\ndescription:\t  Tabs and spaces  \n---\nbody");
+    const byDir = Object.fromEntries(scanSkillsDir(join(root, ".claude/skills"), "claude:skill").map((c) => [c.description, c.name]));
+    expect(byDir["Deploy the app"]).toBe("deploy");
+    expect(byDir["Tabs and spaces"]).toBe("spaced");
+  });
+});
+
+describe("description ownership (#532)", () => {
+  it("a description removed from the source disappears from the next push", async () => {
+    const pushed: Array<Record<string, unknown>> = [];
+    const relay = { getOrCreateMachine: async (meta: Record<string, unknown>) => { pushed.push(meta); return true; } };
+    const reg = new CommandRegistry({ relayClient: relay as never, baseMachineMetadata: {}, homeDir: join(root, "nohome") });
+    write(".claude/commands/deploy.md", "---\ndescription: Old description\n---");
+    reg.setProject(root, []); // register the project cwd; refresh() rescans it
+    reg.refresh();
+    await reg.pushMachineIfChanged();
+    expect(pushed.at(-1)?.slashCommandDescriptions).toEqual({ deploy: "Old description" });
+    write(".claude/commands/deploy.md", "no frontmatter any more");
+    reg.refresh();
+    await reg.pushMachineIfChanged();
+    expect(pushed.at(-1)?.slashCommandDescriptions).toEqual({});
+    // a description supplied by ANOTHER current source survives a rescan of this one
+    write("other/.claude/commands/deploy.md", "---\ndescription: From project B\n---");
+    reg.setProject(join(root, "other"), scanProject(join(root, "other")));
+    reg.refresh();
+    await reg.pushMachineIfChanged();
+    expect(pushed.at(-1)?.slashCommandDescriptions).toEqual({ deploy: "From project B" });
+  });
+});
+
 describe("scanProject", () => {
   it("merges commands + skills, deduped and sorted", () => {
     write(".claude/commands/deploy.md");

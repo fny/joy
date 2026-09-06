@@ -31,9 +31,35 @@ export interface ProcessTreeStats {
 
 const SAMPLE_MS = 400;
 
-function linuxTree(root: number): Map<number, { ppid: number; ticks: number; rssBytes: number }> {
-  const all = new Map<number, { ppid: number; ticks: number; rssBytes: number }>();
+/** One process as read from /proc/<pid>/stat. Ticks are clock ticks. */
+export interface ProcSample {
+  ppid: number;
+  /** utime + stime: CPU this process consumed itself. */
+  ticks: number;
+  /** cutime + cstime: CPU of children it has already waited for (reaped). */
+  childTicks: number;
+  rssBytes: number;
+  /** starttime: clock ticks after boot when the process started. */
+  startTicks: number;
+}
+/** The tree at one instant plus the boot-relative clock at that instant. */
+export interface TreeSnapshot { procs: Map<number, ProcSample>; uptimeTicks: number }
+
+function clockTicksPerSecond(): number {
+  return clkTckCache || (clkTckCache = sysconf("CLK_TCK", 100));
+}
+
+function uptimeTicks(): number {
+  try {
+    const secs = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]);
+    return Number.isFinite(secs) ? secs * clockTicksPerSecond() : 0;
+  } catch { return 0; }
+}
+
+function linuxTree(root: number): TreeSnapshot {
+  const all = new Map<number, ProcSample>();
   const pageSize = pageSizeCache || (pageSizeCache = sysconf("PAGESIZE", 4096));
+  const uptime = uptimeTicks();
   for (const name of readdirSync("/proc")) {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
@@ -42,12 +68,14 @@ function linuxTree(root: number): Map<number, { ppid: number; ticks: number; rss
     // comm can contain spaces/parens: fields start after the LAST ')'.
     const close = stat.lastIndexOf(")");
     const f = stat.slice(close + 2).split(" ");
-    // After ')': state(0) ppid(1) … utime(11) stime(12) … rss(21) — in the
-    // post-comm indexing used here.
+    // After ')': state(0) ppid(1) … utime(11) stime(12) cutime(13) cstime(14)
+    // … starttime(19) … rss(21) — in the post-comm indexing used here.
     const ppid = Number(f[1]);
     const ticks = Number(f[11]) + Number(f[12]);
+    const childTicks = Number(f[13]) + Number(f[14]);
+    const startTicks = Number(f[19]);
     const rssBytes = Number(f[21]) * pageSize;
-    all.set(pid, { ppid, ticks, rssBytes });
+    all.set(pid, { ppid, ticks, childTicks, rssBytes, startTicks });
   }
   // Keep only root + descendants.
   const keep = new Set<number>([root]);
@@ -58,32 +86,55 @@ function linuxTree(root: number): Map<number, { ppid: number; ticks: number; rss
       if (!keep.has(pid) && keep.has(p.ppid)) { keep.add(pid); grew = true; }
     }
   }
-  const out = new Map<number, { ppid: number; ticks: number; rssBytes: number }>();
-  for (const pid of keep) { const p = all.get(pid); if (p) out.set(pid, p); }
-  return out;
+  const procs = new Map<number, ProcSample>();
+  for (const pid of keep) { const p = all.get(pid); if (p) procs.set(pid, p); }
+  return { procs, uptimeTicks: uptime };
 }
 
-function clockTicksPerSecond(): number {
-  return clkTckCache || (clkTckCache = sysconf("CLK_TCK", 100));
+/**
+ * Clock ticks the tree consumed between snapshots `a` and `b`. Pairing pids
+ * present in both was the whole story before, so a tool child that started
+ * AND did its work inside the 400 ms window contributed nothing — a tree
+ * burning most of a core read 0% (#554). Now:
+ *  - a pid in both: its own delta plus the delta of children it reaped;
+ *  - a pid only in `b` that STARTED after `a` was taken: everything it has
+ *    (all of it happened inside the window); a pre-existing process that
+ *    merely joined the tree (reparented) is skipped — its split is unknown;
+ *  - a pid only in `a` (exited): its post-`a` CPU reaches an ancestor's
+ *    cutime/cstime once reaped and is counted there, so its PRE-window ticks
+ *    (what it had at `a`) are taken back out — once, never below zero.
+ */
+export function treeCpuTicks(a: TreeSnapshot, b: TreeSnapshot): number {
+  let own = 0;
+  let reaped = 0;
+  for (const [pid, pb] of b.procs) {
+    const pa = a.procs.get(pid);
+    if (pa) {
+      own += Math.max(0, pb.ticks - pa.ticks);
+      reaped += Math.max(0, pb.childTicks - pa.childTicks);
+    } else if (pb.startTicks >= a.uptimeTicks) {
+      own += pb.ticks;
+      reaped += pb.childTicks;
+    }
+  }
+  let preWindow = 0;
+  for (const [pid, pa] of a.procs) if (!b.procs.has(pid)) preWindow += pa.ticks;
+  return own + Math.max(0, reaped - preWindow);
 }
 
 async function linuxStats(root: number): Promise<ProcessTreeStats | null> {
   const a = linuxTree(root);
-  if (a.size === 0) return null;
+  if (a.procs.size === 0) return null;
   const t0 = Date.now();
   await new Promise((r) => setTimeout(r, SAMPLE_MS));
   const b = linuxTree(root);
   const t1 = Date.now();
-  let dTicks = 0;
-  for (const [pid, pb] of b) {
-    const pa = a.get(pid);
-    if (pa) dTicks += Math.max(0, pb.ticks - pa.ticks);
-  }
+  const dTicks = treeCpuTicks(a, b);
   const seconds = Math.max(0.001, (t1 - t0) / 1000);
   const cpuPercent = (dTicks / clockTicksPerSecond() / seconds) * 100;
   let rssBytes = 0;
-  for (const p of b.values()) rssBytes += p.rssBytes;
-  return { cpuPercent: Math.round(cpuPercent * 10) / 10, rssBytes, processCount: b.size, sampledAt: t1 };
+  for (const p of b.procs.values()) rssBytes += p.rssBytes;
+  return { cpuPercent: Math.round(cpuPercent * 10) / 10, rssBytes, processCount: b.procs.size, sampledAt: t1 };
 }
 
 function psStats(root: number): Promise<ProcessTreeStats | null> {
