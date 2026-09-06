@@ -490,17 +490,17 @@ describe("a broken event stream never yields a successful partial answer (#497)"
 describe("a queued ask is bound to its durable command and its runtime turn (#498)", () => {
   const turnEnd = (seq: number, turn: string, usage?: unknown) => rec(seq, { role: "session", content: { type: "session", data: { turn, ev: { t: "turn-end", status: "completed", ...(usage ? { usage } : {}) } } } });
   /** GET /sessions/:id/queue/:qid over a scripted sequence of states (the last one repeats). */
-  const commandRoute = (qid: string, states: Array<Partial<{ state: string; terminalReason: string | null; runtimeTurnId: string | null }> | Handler>) => {
+  const commandRoute = (qid: string, states: Array<Partial<{ state: string; terminalReason: string | null; attemptId: string | null; runtimeTurnId: string | null; turnStarted: boolean }> | Handler>) => {
     let n = 0;
     route(`GET /sessions/${SID}/queue/${qid}`, (q, res, url, body) => {
       const v = states[Math.min(n++, states.length - 1)];
       if (typeof v === "function") return (v as Handler)(q, res, url, body);
-      json(res, 200, { ok: true, id: qid, text: "…", createdAt: 0, state: "queued", terminalReason: null, runtimeTurnId: null, attempts: 1, ...v });
+      json(res, 200, { ok: true, id: qid, text: "…", createdAt: 0, state: "queued", terminalReason: null, attemptId: "at-1", runtimeTurnId: null, turnStarted: true, attempts: 1, ...v });
     });
     return { polls: () => n };
   };
 
-  test("B queued behind A: A's tail after the send is excluded, B's own turn (the first started after the send) is the reply", async () => {
+  test("B queued behind A: A's tail after the send is excluded, B's own turn (the one the daemon named for it) is the reply", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
     let dispatched = false;
@@ -514,11 +514,89 @@ describe("a queued ask is bound to its durable command and its runtime turn (#49
         await delay(50); ev.push(agentText(4, "B's answer", "b")); ev.push(turnEnd(5, "b", { output: 7 }));
       })();
     });
-    route(`GET /sessions/${SID}/queue/q2`, (_q, res) => json(res, 200, { ok: true, id: "q2", state: dispatched ? "completed" : "queued", terminalReason: dispatched ? "delivered" : null, runtimeTurnId: null }));
+    route(`GET /sessions/${SID}/queue/q2`, (_q, res) => json(res, 200, { ok: true, id: "q2", state: dispatched ? "completed" : "queued", terminalReason: dispatched ? "completed" : null, attemptId: dispatched ? "at-2" : null, runtimeTurnId: dispatched ? "b" : null, turnStarted: dispatched }));
     checkRoute(() => ({ state: "busy" }));
     expect(await cmdAsk([SID, "what", "is", "B", "--json"])).toBe(0);
     const out = JSON.parse(log.out[0]);
     expect(out).toMatchObject({ state: "answered", text: "B's answer", turn: "q2", usage: { output: 7 } });
+  });
+
+  // Astra F9 (#498 residual): A was ALREADY queued when B was sent, so A's
+  // turn is the first to start after the send. The CLI used to take that
+  // turn as B's and returned A's answer labelled qB. Claude's session now
+  // names the transcript turn each dispatch opened; the daemon reports it and
+  // the reply is exactly that turn's records.
+  const aThenB = (ev: ReturnType<typeof eventsRoute>) => {
+    ev.push(turnStart(1, "A")); ev.push(agentText(2, "A was already queued", "A")); ev.push(turnEnd(3, "A"));
+    ev.push(turnStart(4, "B")); ev.push(agentText(5, "B requested answer", "B")); ev.push(turnEnd(6, "B"));
+  };
+  test("claude, A already queued when B is sent: B's reply is the turn the daemon named for qB, not A's (the first started after the send)", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    commandRoute("qB", [{ state: "queued" }, { state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: "B", turnStarted: true }]);
+    checkRoute(() => ({ state: "busy" }));
+    expect(await cmdAsk([SID, "B", "--json", "--timeout", "3"])).toBe(0);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "answered", turn: "qB", text: "B requested answer" });
+  });
+
+  test("the daemon names qB's turn late (the hook ended it before the transcript named it): re-read within the grace, then B's reply", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    const c = commandRoute("qB", [{ state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: null, turnStarted: true }, { state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: null, turnStarted: true }, { state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: "B", turnStarted: true }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B", "--timeout", "5"])).toBe(0);
+    expect(log.out).toEqual(["B requested answer"]);
+    expect(c.polls()).toBeGreaterThanOrEqual(3);
+  });
+
+  test("completed, a turn started for it, but the daemon never attributes one: an explicit attribution error (exit 1), not the first turn or everything after the send", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    commandRoute("qB", [{ state: "completed", terminalReason: "completed", attemptId: "at-b", runtimeTurnId: null, turnStarted: true }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B", "--json", "--timeout", "8"])).toBe(1);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "error", text: "", reason: expect.stringMatching(/turn qB completed but the daemon attributed no runtime turn to it \(attempt at-b\) — the reply cannot be told from other turns' output/) });
+  }, 15_000);
+
+  test("an older daemon that reports neither attemptId nor turnStarted: the same attribution error, never a guess", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => aThenB(ev), 15); });
+    route(`GET /sessions/${SID}/queue/qB`, (_q, res) => json(res, 200, { ok: true, id: "qB", state: "completed", terminalReason: "completed", runtimeTurnId: null }));
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B", "--timeout", "8"])).toBe(1);
+    expect(log.out).toEqual([]);
+    expect(log.err.join("\n")).toMatch(/turn qB completed but the daemon attributed no runtime turn to it — the reply cannot be told/);
+  }, 15_000);
+
+  // Astra F9: a /title the daemon handled itself completes with no runtime
+  // turn; with no new turn-start the CLI fell back to ALL later records and
+  // returned an unrelated active turn's tail as the answer.
+  test("a handled command (/title): completed with no runtime output → exit 0, EMPTY reply, no foreign tail", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qTitle" }); ev.push(agentText(1, "unrelated active turn tail", "A")); });
+    route(`GET /sessions/${SID}/queue/qTitle`, (_q, res) => json(res, 200, { ok: true, id: "qTitle", state: "completed", terminalReason: "handled_as_command", attemptId: null, runtimeTurnId: null, turnStarted: false }));
+    checkRoute(() => ({ state: "busy" }));
+    expect(await cmdAsk([SID, "/title new title", "--json", "--timeout", "3"])).toBe(0);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "answered", turn: "qTitle", text: "", reason: expect.stringMatching(/turn qTitle completed without runtime output \(handled by the daemon itself\)/) });
+    // and in plain mode: nothing on stdout, the note on stderr
+    expect(await cmdAsk([SID, "/title again", "--timeout", "3"])).toBe(0);
+    expect(log.out).toHaveLength(1);
+    expect(log.err.join("\n")).toMatch(/completed without runtime output/);
+  });
+
+  test("a slash command claude took (no turn started for its attempt): the same empty reply, exit 0", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qC" }); ev.push(agentText(1, "some other turn's text", "A")); });
+    route(`GET /sessions/${SID}/queue/qC`, (_q, res) => json(res, 200, { ok: true, id: "qC", state: "completed", terminalReason: "completed", attemptId: "at-c", runtimeTurnId: null, turnStarted: false }));
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "/compact", "--json", "--timeout", "3"])).toBe(0);
+    expect(JSON.parse(log.out[0])).toMatchObject({ state: "answered", text: "", reason: expect.stringMatching(/turn qC completed without runtime output \(completed, no runtime turn started for it\)/) });
   });
 
   // Astra's early-mirror order: the real codex adapter mirrors the prompt at
@@ -542,11 +620,11 @@ describe("a queued ask is bound to its durable command and its runtime turn (#49
     expect(log.out).toEqual(["B answer"]);
   });
 
-  test("early mirror, no runtime turn from the daemon (claude): the first turn started after the send is the reply — not A's tail, not C", async () => {
+  test("early mirror, the turn named while running (claude: the transcript opened it): exactly that turn — not A's tail, not C", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
     route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => earlyMirrorBurst(ev), 20); });
-    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "delivered" }]);
+    commandRoute("qB", [{ state: "running" }, { state: "running", runtimeTurnId: "B" }, { state: "completed", terminalReason: "completed", runtimeTurnId: "B" }]);
     checkRoute((n) => ({ state: n === 1 ? "busy" : "idle" }));
     expect(await cmdAsk([SID, "B"])).toBe(0);
     expect(log.out).toEqual(["B answer"]);
@@ -639,8 +717,8 @@ describe("a queued ask is bound to its durable command and its runtime turn (#49
   });
 
   test("joy wait --turn binds the same way: completed → idle exit 0, failed → exit 1", async () => {
-    sessionsRoute(); eventsRoute();
-    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "delivered" }]);
+    sessionsRoute(); eventsRoute([turnStart(1, "b"), turnEnd(2, "b")]);
+    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "completed", runtimeTurnId: "b" }]);
     checkRoute(() => ({ state: "busy" }));
     expect(await cmdWaitIdle([SID, "--turn", "qB"])).toBe(0);
     expect(log.out.join("\n")).toContain(`${SID} idle`);

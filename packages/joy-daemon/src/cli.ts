@@ -1099,11 +1099,13 @@ const CATCHUP_MS = 3000;    // the final tail fetch when the stream was down
 const CLEANUP_MS = 10_000;  // `joy run` teardown requests (session lookup + delete)
 
 /** A command as the daemon's durable ledger sees it (GET
- *  /sessions/:id/queue/:qid): its state, terminal reason and the runtime
- *  turn attributed to it. A read that fails is reported as exactly that —
- *  never as "the queue is empty, so it must have been dispatched" (#498). */
+ *  /sessions/:id/queue/:qid): its state, terminal reason, the attempt that
+ *  state describes, the runtime turn attributed to it and whether the runtime
+ *  started a turn for it at all (`turnStarted`; null from a daemon that does
+ *  not report it). A read that fails is reported as exactly that — never as
+ *  "the queue is empty, so it must have been dispatched" (#498). */
 type CommandView =
-  | { ok: true; id: string; state: string; terminalReason: string | null; runtimeTurnId: string | null }
+  | { ok: true; id: string; state: string; terminalReason: string | null; attemptId: string | null; runtimeTurnId: string | null; turnStarted: boolean | null }
   | { ok: false; kind: "gone" | "unknown_command" | "unreadable"; reason: string };
 async function fetchCommand(id: string, qid: string, signal: AbortSignal): Promise<CommandView> {
   const r = await api("GET", `/sessions/${id}/queue/${encodeURIComponent(qid)}`, undefined, { signal }).catch((e) => (e instanceof Error ? e : new Error(String(e))));
@@ -1112,12 +1114,23 @@ async function fetchCommand(id: string, qid: string, signal: AbortSignal): Promi
   if (r.status === 404 && body?.error === "session_not_found") return { ok: false, kind: "gone", reason: "session_not_found" };
   if (r.status === 404 && body?.error === "command_not_found") return { ok: false, kind: "unknown_command", reason: `the daemon has no record of turn ${qid} (never accepted here, or pruned)` };
   if (!r.ok || !body?.ok || typeof body.state !== "string") return { ok: false, kind: "unreadable", reason: body?.error ? String(body.error) : `HTTP ${r.status}` };
-  return { ok: true, id: String(body.id ?? qid), state: body.state, terminalReason: typeof body.terminalReason === "string" ? body.terminalReason : null, runtimeTurnId: typeof body.runtimeTurnId === "string" && body.runtimeTurnId ? body.runtimeTurnId : null };
+  return {
+    ok: true, id: String(body.id ?? qid), state: body.state,
+    terminalReason: typeof body.terminalReason === "string" ? body.terminalReason : null,
+    attemptId: typeof body.attemptId === "string" && body.attemptId ? body.attemptId : null,
+    runtimeTurnId: typeof body.runtimeTurnId === "string" && body.runtimeTurnId ? body.runtimeTurnId : null,
+    turnStarted: typeof body.turnStarted === "boolean" ? body.turnStarted : null,
+  };
 }
 const COMMAND_TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 /** Consecutive unreadable command reads tolerated (a daemon re-exec) before
  *  the wait ends as `error`. */
 const QUEUE_READ_FAILURES = 3;
+/** How long a completed command whose runtime turn started but is not yet
+ *  NAMED is re-read before the wait gives up on attribution: claude's hook
+ *  reports the turn's end (the command completes) while the transcript
+ *  tailer, which names the turn, may still be behind (#498). */
+const ATTRIBUTION_GRACE_MS = 3000;
 const turnOf = (r: LoggedRecord): string | null => { const t = r.record?.content?.data?.turn; return typeof t === "string" && t ? t : null; };
 
 /**
@@ -1133,13 +1146,19 @@ const turnOf = (r: LoggedRecord): string | null => { const t = r.record?.content
  * short run of unreadable reads is tolerated for a daemon re-exec, then it is
  * the outcome), not the id having left a listing. `/check` still ends the
  * wait early for `needs_input` (an approval / question, exit 6) and `ended`.
- * The reply's text is the records of the runtime turn attributed to the
- * command: the `runtimeTurnId` the daemon reports for its accepted attempt
- * (codex, opencode, pi name their turns) — for an adapter that does not
- * (claude), the first turn that STARTS after the send (turn-start records of
- * the turn in flight at send time predate `afterSeq`, so its tail, and any
- * later turn's output, are excluded even when the prompt was mirrored early).
- * The turn's own turn-end record must be in hand for `answered`.
+ * The reply's text is the records of the runtime turn the daemon attributed
+ * to the command: the `runtimeTurnId` it reports for the delivered attempt
+ * (codex, opencode, pi name their turns; claude's session names the
+ * transcript turn its dispatch opened). Nothing is inferred from the record
+ * order: a turn started after the send may be an EARLIER queued message's
+ * (#498 residual), so a completed command the daemon has not attributed is
+ * an `error` ("the reply cannot be attributed") — after a short grace for a
+ * turn that ended by hook before the transcript named it — never the first
+ * turn started after the send or everything after it. A completed command
+ * for which the runtime started no turn (a handled slash command, a `!`
+ * command) is `answered` with an EMPTY reply and a reason saying so — its
+ * completion is its result, another turn's tail is not. The attributed
+ * turn's own turn-end record must be in hand for `answered`.
  *
  * Without a `queuedId` (a bare `wait`, an exclusive send the daemon did not
  * id): everything after `afterSeq`, ending at an explicit idle.
@@ -1167,19 +1186,19 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
   let advertised = opts.afterSeq;
   let sawActivity = false;
   let lastStreamError: string | null = null;
-  // The runtime turn this wait is about (#498): named by the daemon for the
-  // command, else the first turn that starts after the send.
+  // The runtime turn this wait is about (#498): the one the daemon attributed
+  // to the command — never guessed from the record order.
   let turnId: string | null = null;
-  let turnFromDaemon = false;
+  // The command completed with no runtime output to attribute (a handled
+  // command): the reply is empty by construction, not another turn's tail.
+  let noOutput = false;
   const consume = (line: any): void => {
     if (typeof line?.seq !== "number") return;
     lastSeq = line.seq;
     records.push(line);
     const ev = evOf(line);
-    if (!ev || line.seq <= opts.afterSeq) return;
-    if (opts.queuedId) {
-      if (turnId === null && ev.t === "turn-start") turnId = turnOf(line);
-    } else if (ev.t === "turn-start" || ev.t === "text" || ev.t === "tool-call-start") sawActivity = true;
+    if (!ev || line.seq <= opts.afterSeq || opts.queuedId) return;
+    if (ev.t === "turn-start" || ev.t === "text" || ev.t === "tool-call-start") sawActivity = true;
   };
   const pump = (async () => {
     let backoff = 200;
@@ -1246,11 +1265,17 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
         // through its head. Not finding it means the attributed turn is not
         // the one that completed: say so rather than return a guess (#498).
         state = "error";
-        reason = `turn ${opts.queuedId} completed but the turn-end record of its runtime turn ${turnId}${turnFromDaemon ? "" : " (inferred: the first turn started after the send)"} is not in the log through seq ${lastSeq} — the reply cannot be attributed; \`joy events ${id} --json\` has the records`;
+        reason = `turn ${opts.queuedId} completed but the turn-end record of its runtime turn ${turnId} is not in the log through seq ${lastSeq} — the reply cannot be attributed; \`joy events ${id} --json\` has the records`;
       }
     }
-    const mine = opts.queuedId && turnId
-      ? records.filter((r) => turnOf(r) === turnId)
+    // The reply: the attributed turn's records; without one, everything after
+    // the send only as the "so far" of a wait that did NOT conclude (input
+    // needed, the deadline) — a concluded durable wait with no attributed
+    // turn has NO reply (#498): an empty one for a command with no runtime
+    // output, none for one the daemon could not attribute.
+    const mine = opts.queuedId
+      ? turnId ? records.filter((r) => turnOf(r) === turnId)
+        : (state === "needs_input" || state === "timeout") && !noOutput ? records.filter((r) => r.seq > opts.afterSeq) : []
       : records.filter((r) => r.seq > opts.afterSeq);
     const text = mine.map((r) => (r.record.role !== "user" ? textOf(r) : null)).filter((t): t is string => !!t && t.trim().length > 0).join("\n\n").trim();
     return { state, text, check, records: mine, ...(reason ? { reason } : {}) };
@@ -1258,6 +1283,7 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
   const startedAt = Date.now();
   let lastCheck: any = null;
   let unreadable = 0;
+  let attributionSince: number | null = null;
   for (;;) {
     if (timedOut()) return finish("timeout", lastCheck);
     if (opts.queuedId) {
@@ -1271,8 +1297,28 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
         continue;
       }
       unreadable = 0;
-      if (cmd.runtimeTurnId && (!turnFromDaemon || turnId !== cmd.runtimeTurnId)) { turnId = cmd.runtimeTurnId; turnFromDaemon = true; }
+      if (cmd.runtimeTurnId) turnId = cmd.runtimeTurnId;
       if (COMMAND_TERMINAL.has(cmd.state)) {
+        if (cmd.state === "completed" && !turnId) {
+          // Completed, but the daemon names no runtime turn for it (#498).
+          // Two different things: the runtime never STARTED a turn for it (a
+          // handled command) — its completion is the whole result, the reply
+          // is empty; or a turn started and has not been named (yet: claude's
+          // hook ends the turn before the transcript names it) — re-read for
+          // a bounded grace, then refuse to attribute rather than guess.
+          if (cmd.terminalReason === "handled_as_command" || cmd.turnStarted === false) {
+            noOutput = true;
+            const ck = lastCheck ?? await checkState(id, { signal: life.signal });
+            return finish("answered", ck, `turn ${opts.queuedId} completed without runtime output (${cmd.terminalReason === "handled_as_command" ? "handled by the daemon itself" : `${cmd.terminalReason ?? "completed"}, no runtime turn started for it`}) — nothing to reply`);
+          }
+          attributionSince ??= Date.now();
+          if (Date.now() - attributionSince < ATTRIBUTION_GRACE_MS && !timedOut()) {
+            await wait(Math.min(POLL_MS, remaining()), life.signal);
+            continue;
+          }
+          const ck = lastCheck ?? await checkState(id, { signal: life.signal });
+          return finish("error", ck, `turn ${opts.queuedId} completed but the daemon attributed no runtime turn to it${cmd.attemptId ? ` (attempt ${cmd.attemptId})` : ""} — the reply cannot be told from other turns' output; \`joy events ${id} --json\` has the records`);
+        }
         const ck = lastCheck ?? await checkState(id, { signal: life.signal });
         if (cmd.state === "completed") return finish("answered", ck);
         if (cmd.state === "failed") return finish("error", ck, `turn ${opts.queuedId} failed: ${cmd.terminalReason ?? "no reason recorded"}`);
@@ -1463,6 +1509,7 @@ export async function cmdAsk(rest: string[]): Promise<number> {
       usage: [...out.records].reverse().map((r) => evOf(r)?.usage).find(Boolean) ?? null, ...(out.reason ? { reason: out.reason } : {}) }));
   } else {
     if (out.text) console.log(out.text);
+    if (out.state === "answered" && !out.text && out.reason) console.error(`${c.dim(out.reason)}`); // a command with no runtime output: the empty reply is the answer
     if (out.state === "needs_input") console.error(`${c.y("?")} ${rec.id} is waiting for input${out.check?.approvals?.length ? ` (approval: ${out.check.approvals[0].title})` : ""}`);
     else if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`);
     else if (out.state === "gone") console.error(`${bad} session ${rec.id} gone${out.reason ? ` (${out.reason})` : ""}`);

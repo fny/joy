@@ -836,6 +836,14 @@ export class Session {
    *  #turnRunning / #hookSaysIdle); the transcript's #turn is then output-
    *  drain bookkeeping, and the pane's generating footer a safety check only. */
   #hookTurn: { open: boolean; at: number } | null = null;
+  /** The runtime ref of the dispatch the runtime took whose transcript turn
+   *  has not opened yet (#498): the confirmation (a hook's UserPromptSubmit,
+   *  the transcript's user echo) lands BEFORE Claude's first assistant entry
+   *  opens the relay turn, so the turn is named for the attempt when it
+   *  opens (#nameRuntimeTurn). Cleared once named, when a prompt reaches
+   *  Claude by another route (that turn is not this dispatch's), and at the
+   *  transcript's turn terminal. */
+  #pendingTurnRef: string | null = null;
 
   // ── Dispatch ───────────────────────────────────────────────────────────────
   // The queue itself is the session coordinator's (domain/coordinator.ts):
@@ -2123,10 +2131,30 @@ export class Session {
       if (opts.echo !== false) this.#driver.emit({ kind: "echo", runtimeRef: ref });
       const isCommand = /^\s*!/.test(item.text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(item.text);
       if (isCommand) this.#driver.emit({ kind: "turn_ended", runtimeRef: ref, status: "completed" });
+      // The runtime turn this dispatch runs as (#498): a transcript turn that
+      // opened AFTER this submit (a dialog / turn-start confirm) is the one it
+      // opened — name it now; otherwise the turn is named when the transcript
+      // opens it. A command runs no turn of its own.
+      else if (this.#turn && this.#dispatchSubmittedAt !== null && this.#turn.since >= this.#dispatchSubmittedAt) this.#nameRuntimeTurn(ref);
+      else this.#pendingTurnRef = ref;
     }
     settle?.(result);
     this.#broadcastQueue();
     if (result.kind === "accepted") void this.#restoreDraftIfAny();
+  }
+
+  /** Bind the transcript turn now open to the dispatch that opened it (#498):
+   *  a turn_started carrying both the dispatch's ref and the turn id pairs
+   *  with its delivered attempt in the coordinator (`setAttemptTurn`), and
+   *  GET /sessions/:id/queue/:qid then reports the `turn` the reply's
+   *  /events records carry — what `joy ask` filters the reply by. Claude
+   *  never names its turns itself: without this, the CLI guessed the first
+   *  turn started after the send, and an earlier queued message's answer
+   *  came back labelled as this one's. */
+  #nameRuntimeTurn(ref: string): void {
+    this.#pendingTurnRef = null;
+    if (!this.#turn) return;
+    this.#driver.emit({ kind: "turn_started", runtimeRef: ref, runtimeTurnId: this.#turn.turnId });
   }
 
   /** Delivery confirmed by a post-submit interactive DIALOG (not by echo):
@@ -3623,6 +3651,7 @@ export class Session {
           // text still QUEUED would re-deliver later as a duplicate turn (seen
           // live with a steered "/goal clear" stuck in the spool): cancel it.
           this.#driver.emit({ kind: "echo", runtimeRef: flat });
+          this.#pendingTurnRef = null; // the next transcript turn is this prompt's, not an earlier dispatch's (#498)
           const dup = this.#coordinator.snapshot(this.id).commands.find((c) => c.state === "queued" && flattenForMatch(c.text) === flat);
           if (dup) {
             process.stderr.write(`[hook] ${this.id} UserPromptSubmit dropped queued duplicate ${dup.id}\n`);
@@ -4568,8 +4597,16 @@ export class Session {
           // message still sitting unsent in the box, #32).
           this.#confirmDispatchIfAwaiting({ byTurnStart: true });
           // Without hooks the transcript is the turn edge: the turn belongs to
-          // the last dispatch the runtime took, else it is foreign (#78).
-          if (!this.#hooksLive && entryTimeMs >= this.#tailBoundAt - 60_000) this.#driver.emit({ kind: "turn_started", runtimeRef: this.#lastConfirmedRef });
+          // the last dispatch the runtime took, else it is foreign (#78). With
+          // hooks the edge was the hook's; the dispatch it confirmed is still
+          // waiting for its turn's NAME (#498) — this is it. Either way the
+          // turn id rides along so the attempt is bound to it.
+          const owner = this.#pendingTurnRef;
+          this.#pendingTurnRef = null;
+          if (entryTimeMs >= this.#tailBoundAt - 60_000) {
+            if (!this.#hooksLive) this.#driver.emit({ kind: "turn_started", runtimeRef: this.#lastConfirmedRef, runtimeTurnId: this.#turn.turnId });
+            else if (owner) this.#nameRuntimeTurn(owner);
+          }
         }
         // Capture token usage (cumulative per message) to report at turn-end —
         // AFTER the turn-start reset above so the first entry's usage isn't wiped.
@@ -4618,6 +4655,7 @@ export class Session {
           if (this.#transcriptOwnsTerminal(entryTimeMs)) {
             this.#setThinking(false);
             this.#lastConfirmedRef = null;
+            this.#pendingTurnRef = null;
             this.#driver.emit({ kind: "turn_ended", status: "completed" });
           } else if (!this.#hooksLive || !this.#hookTurn?.open) this.#setThinking(false);
           this.#maybeDrainQueue(); // turn done → send the next queued message
