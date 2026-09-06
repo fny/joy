@@ -978,7 +978,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             if (attachments.length && composerHandleRef.current) addImages(attachments);
             // Attachment refusals already showed their own, more specific modal.
             if (!res.reason.startsWith('attachment upload failed')) {
-                Modal.alert(t('errors.sendFailedTitle'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
+                Modal.alert(t('errors.sendFailedTitle'), (res.reason === t('errors.sessionFull') ? res.reason : t('errors.sendFailedMessage')), [{ text: t('common.ok'), style: 'cancel' }]);
             }
         });
     }, [sessionId, isJoyDaemon, selectedImages, clearImages, addImages]);
