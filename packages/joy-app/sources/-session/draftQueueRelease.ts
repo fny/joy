@@ -1,6 +1,6 @@
 import { storage, isFresh } from '@/sync/storage';
 import { isJoyDaemonSource } from '@/sync/storageTypes';
-import { useDraftQueueStore, draftReason } from './draftQueue';
+import { useDraftQueueStore, draftReason, type QueuedDraft } from './draftQueue';
 import type { SendMessageResult } from '@/sync/sync';
 import { randomUUID } from 'expo-crypto';
 import { useCallback, useEffect, useReducer } from 'react';
@@ -83,14 +83,16 @@ export function attemptOwnsDraft(
 }
 
 function revertIfOwned(sessionId: string, draftId: string, releaseLocalId: string, token: number, error: string): void {
-    const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
+    const draft = findDraft(sessionId, draftId);
     if (!attemptOwnsDraft(draft, releaseLocalId, token, attemptTokens.get(draftKey(sessionId, draftId)))) return;
     attemptTokens.delete(draftKey(sessionId, draftId));
     // The user asked for this item to go while its send was in flight
     // (#134): a definite failure means nothing reached the relay, so the
     // removal completes now instead of reverting to 'queued' for a retry.
-    if (pendingCancels.has(draftKey(sessionId, draftId))) {
-        settleCancel(sessionId, draftId);
+    const intent = cancelIntentOf(sessionId, draft);
+    if (intent) {
+        cancelIntents.delete(intent[0]);
+        notifyCancelListeners();
         useDraftQueueStore.getState().remove(sessionId, draftId);
         return;
     }
@@ -100,50 +102,81 @@ function revertIfOwned(sessionId: string, draftId: string, releaseLocalId: strin
 // ── Removal during release (#134) ───────────────────────────────────────────
 // An app-held item whose POST is in flight cannot be removed locally: the
 // draft would vanish while the send still lands and the agent runs a message
-// the user believes is gone. Removal is instead RECORDED and settles with the
-// send: failure → removed here (nothing reached the relay); acceptance → the
-// turn the ack named is CANCELLED through the relay (settleAcceptedRelease)
-// and only then does the draft leave the queue — a cancel that fails keeps
-// the item visible with the error, parked (no auto-resend). Subscribers
-// (WaitingStack) render the in-between state.
-const pendingCancels = new Set<string>();
+// the user believes is gone. Removal is instead RECORDED as an intent keyed
+// to the SEND IDENTITY (releaseLocalId) — not the draft id, and not the
+// lease — and settles with that send: failure → removed here (nothing
+// reached the relay); acceptance → the turn the ack named is CANCELLED
+// through the relay (settleAcceptedRelease) and only then does the draft
+// leave the queue. Why the identity:
+//  · an expired lease licenses a RETRY (same identity, idempotent), it is no
+//    proof the first POST died — the intent must outlive the lease and ride
+//    every retry until an ack or a failure settles the send;
+//  · an edit clears the identity and makes the draft a NEW composition, so a
+//    cancel continuation for the old identity must never touch it;
+//  · a cancel that fails keeps the intent (bounded retries): a replayed ack
+//    for the same identity — a lease-expiry retry that also landed — retries
+//    the cancel instead of quietly dropping the draft the relay still runs.
+// Subscribers (WaitingStack) render the in-between state.
+type CancelPhase =
+    | 'pending'     // removal recorded; the send has not settled yet
+    | 'cancelling'  // accepted; the relay cancel is in flight
+    | 'failed';     // accepted; the cancel failed — parked, visible with the error
+type CancelIntent = { draftId: string; phase: CancelPhase; attempts: number };
+// sendKey(sessionId, releaseLocalId) → the removal intent for that send.
+const cancelIntents = new Map<string, CancelIntent>();
+const sendKey = (sessionId: string, releaseLocalId: string) => `${sessionId}\u0000${releaseLocalId}`;
+/** Relay cancels attempted per accepted send before the draft stays parked. */
+export const MAX_CANCEL_ATTEMPTS = 3;
 const pendingCancelListeners = new Set<() => void>();
-// Drafts whose relay cancel is in flight: the sweep must not resend them and
-// a second ack (lease-expiry replay) must not fire a second cancel.
-const cancelsInFlight = new Set<string>();
-// draftKey → releaseLocalId of a draft whose accepted turn could NOT be
-// cancelled. It stays visible with the error; the sweep leaves it alone while
-// it still carries that release identity and error (an edit or a manual
-// retry clears one of them and the draft flows again).
-const parkedCancelFailures = new Map<string, string>();
-function settleCancel(sessionId: string, draftId: string): void {
-    if (!pendingCancels.delete(draftKey(sessionId, draftId))) return;
+function notifyCancelListeners(): void {
     pendingCancelListeners.forEach((l) => l());
+}
+
+function findDraft(sessionId: string, draftId: string): QueuedDraft | undefined {
+    return (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
+}
+
+/** The removal intent a draft still carries, by its CURRENT release identity
+ *  (an edited draft carries none — its old send's intent no longer applies). */
+function cancelIntentOf(sessionId: string, draft: QueuedDraft | undefined): [string, CancelIntent] | undefined {
+    if (!draft?.releaseLocalId) return undefined;
+    const key = sendKey(sessionId, draft.releaseLocalId);
+    const intent = cancelIntents.get(key);
+    return intent && intent.draftId === draft.id ? [key, intent] : undefined;
 }
 
 export type CancelReleaseOutcome = 'removed' | 'pending';
 
 /** Remove an app-held item, or — while its send is in flight — mark it for
  *  removal once the send settles. Returns which of the two happened. */
-export function cancelRelease(sessionId: string, draftId: string, now = Date.now()): CancelReleaseOutcome {
-    const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
-    const inFlight = !!draft && (
-        (draft.state === 'releasing' && (draft.leaseUntil ?? 0) > now)
-        || cancelsInFlight.has(draftKey(sessionId, draftId))
-    );
+export function cancelRelease(sessionId: string, draftId: string): CancelReleaseOutcome {
+    const draft = findDraft(sessionId, draftId);
+    const intent = cancelIntentOf(sessionId, draft);
+    // In flight while the draft is 'releasing' — lease or no lease: the send
+    // settles through its ack or its failure, and an expired lease only means
+    // a retry may go out (same identity; the intent rides along) — or while
+    // the accepted turn's cancel is out.
+    const inFlight = !!draft && (draft.state === 'releasing' || intent?.[1].phase === 'cancelling');
     if (!inFlight) {
-        settleCancel(sessionId, draftId);
-        parkedCancelFailures.delete(draftKey(sessionId, draftId));
+        // A parked cancel failure: the user removes the item locally, knowing
+        // (from the error) that the relay kept the message.
+        if (intent) cancelIntents.delete(intent[0]);
+        notifyCancelListeners();
         useDraftQueueStore.getState().remove(sessionId, draftId);
         return 'removed';
     }
-    pendingCancels.add(draftKey(sessionId, draftId));
-    pendingCancelListeners.forEach((l) => l());
+    if (!intent) {
+        cancelIntents.set(sendKey(sessionId, draft.releaseLocalId!), { draftId, phase: 'pending', attempts: 0 });
+    } else if (intent[1].phase === 'failed') {
+        intent[1].phase = 'pending';
+    }
+    notifyCancelListeners();
     return 'pending';
 }
 
 export function isCancelPending(sessionId: string, draftId: string): boolean {
-    return pendingCancels.has(draftKey(sessionId, draftId));
+    const phase = cancelIntentOf(sessionId, findDraft(sessionId, draftId))?.[1].phase;
+    return phase === 'pending' || phase === 'cancelling';
 }
 
 /** Re-render hook for the pending-removal state of one session's drafts. */
@@ -205,15 +238,19 @@ export function initDraftQueueRelease(send: SendFn, cancelTurn?: CancelTurnFn): 
             // remove only on {ok}; revert with the error otherwise.
             if (head.state === 'releasing' && (head.leaseUntil ?? 0) > now) continue; // another pass owns it
             if ((head.attempt ?? 0) >= MAX_AUTO_ATTEMPTS) continue; // parked for manual action
-            // Accepted-and-being-cancelled, or accepted-and-uncancellable
-            // (#134): resending would only replay the acceptance the user
-            // asked to undo. Parked until an edit or a manual retry.
-            const key = draftKey(sessionId, head.id);
-            if (cancelsInFlight.has(key)) continue;
-            const parkedId = parkedCancelFailures.get(key);
-            if (parkedId !== undefined) {
-                if (parkedId === head.releaseLocalId && head.lastError != null) continue;
-                parkedCancelFailures.delete(key);
+            // Removal intents (#134). Accepted-and-being-cancelled: resending
+            // would only replay the acceptance the user asked to undo.
+            // Accepted-and-uncancellable: parked while it shows the error; a
+            // manual retry clears the error and WITHDRAWS the removal — the
+            // user asked to send after all. A still-pending intent (send not
+            // settled, lease expired) rides the retry: same identity, so the
+            // ack that finally lands still cancels.
+            const intent = cancelIntentOf(sessionId, head);
+            if (intent?.[1].phase === 'cancelling') continue;
+            if (intent?.[1].phase === 'failed') {
+                if (head.lastError != null) continue;
+                cancelIntents.delete(intent[0]);
+                notifyCancelListeners();
             }
             // FRESH random id when the draft has none (5.6-sol verify #7):
             // the deterministic `${sessionId}-${id}` fallback meant an EDITED
@@ -283,49 +320,76 @@ export function notifyOutboxAcked(sessionId: string, acks: Iterable<ReleaseAck>,
         // message either way, so it must leave the queue (#133). An edit
         // clears releaseLocalId, which is what keeps a stale ack out.
         const ack = d.releaseLocalId ? acked.get(d.releaseLocalId) : undefined;
-        if (ack) void settleAcceptedRelease(sessionId, d.id, ack.turnId, cancelTurn);
+        if (ack) {
+            acked.delete(ack.localId);
+            void settleAcceptedRelease(sessionId, d.id, ack.turnId, cancelTurn);
+        }
+    }
+    // An acked identity no draft carries any more: its removal intent (if
+    // any) is moot — the composition it named was edited or removed.
+    for (const localId of acked.keys()) {
+        const key = sendKey(sessionId, localId);
+        if (cancelIntents.get(key)?.phase !== 'cancelling') cancelIntents.delete(key);
     }
 }
 
-export type AcceptedSettle = 'removed' | 'cancelled' | 'cancel_failed' | 'cancelling';
+export type AcceptedSettle = 'removed' | 'cancelled' | 'cancel_failed' | 'cancelling' | 'superseded';
 
 /** Settle ONE draft whose send the relay accepted. Without a pending removal
  *  the draft simply leaves the queue (synchronously — the relay owns the
  *  message). With one (#134), the accepted turn is cancelled first and the
  *  draft leaves only once that lands; a failed cancel keeps the draft
  *  visible with the error and parks it — the message is the relay's now, so
- *  the app must neither pretend it is gone nor resend it. */
+ *  the app must neither pretend it is gone nor resend it. Both continuations
+ *  settle by the RELEASE IDENTITY the draft carried at the ack: a draft
+ *  edited meanwhile is a new composition and is left alone. */
 export function settleAcceptedRelease(
     sessionId: string,
     draftId: string,
     turnId: string | undefined,
     cancelTurn: CancelTurnFn | undefined,
 ): Promise<AcceptedSettle> {
-    const key = draftKey(sessionId, draftId);
-    if (cancelsInFlight.has(key)) return Promise.resolve('cancelling');
+    const draft = findDraft(sessionId, draftId);
+    if (!draft) return Promise.resolve('removed');
+    const localId = draft.releaseLocalId;
+    if (!localId) return Promise.resolve('superseded');
+    const key = sendKey(sessionId, localId);
+    const intent = cancelIntents.get(key);
+    if (intent?.phase === 'cancelling') return Promise.resolve('cancelling');
     // The send settled: no late failure callback may act on this draft.
-    attemptTokens.delete(key);
-    if (!pendingCancels.has(key)) {
+    attemptTokens.delete(draftKey(sessionId, draftId));
+    if (!intent || intent.draftId !== draftId) {
         useDraftQueueStore.getState().remove(sessionId, draftId);
         return Promise.resolve('removed');
     }
-    cancelsInFlight.add(key);
+    // Every cancel already failed: the draft stays parked with its error —
+    // a replayed ack must not drop what the relay still runs.
+    if (intent.attempts >= MAX_CANCEL_ATTEMPTS) return Promise.resolve('cancel_failed');
+    intent.phase = 'cancelling';
+    intent.attempts += 1;
+    notifyCancelListeners();
+    // Still carrying the identity this cancel was for? An edit reclaims the
+    // draft as a new composition; the old send's outcome is not its business.
+    const stillOwns = () => findDraft(sessionId, draftId)?.releaseLocalId === localId;
     return (async () => {
         if (!turnId) throw new Error('the relay accepted the message without naming its turn');
         if (!cancelTurn) throw new Error('no cancel path is wired');
         await cancelTurn(sessionId, turnId);
     })().then(
         () => {
-            cancelsInFlight.delete(key);
-            settleCancel(sessionId, draftId);
-            useDraftQueueStore.getState().remove(sessionId, draftId);
+            cancelIntents.delete(key);
+            notifyCancelListeners();
+            if (stillOwns()) useDraftQueueStore.getState().remove(sessionId, draftId);
             return 'cancelled' as const;
         },
         (e: unknown) => {
-            cancelsInFlight.delete(key);
-            settleCancel(sessionId, draftId);
-            const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
-            if (draft?.releaseLocalId) parkedCancelFailures.set(key, draft.releaseLocalId);
+            if (!stillOwns()) {
+                cancelIntents.delete(key);
+                notifyCancelListeners();
+                return 'cancel_failed' as const;
+            }
+            intent.phase = 'failed';
+            notifyCancelListeners();
             useDraftQueueStore.getState().revertRelease(sessionId, draftId, t('joyQueue.cancelFailed', { reason: e instanceof Error ? e.message : String(e) }));
             return 'cancel_failed' as const;
         },
