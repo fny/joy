@@ -1,7 +1,13 @@
 import type { MarkdownSpan } from "./parseMarkdown";
+import { exceedsInputBudget, parseBudget } from "@/utils/parseBudget";
 
-// Updated pattern to handle nested markdown and asterisks
-const pattern = /(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\]]+)\](?:\(([^)]+)\))?)|(`(.*?)(?:`|$))/g;
+// Inline pattern: bold, italic, link, code. Every bracketed class is LINEAR:
+//  - the link text is `[^\[\]]+`, not `[^\]]+`: with the latter, a run of
+//    unclosed "[" made each "[" rescan to the end of the input (quadratic —
+//    50k brackets froze the app);
+//  - the link URL allows one level of balanced parentheses and stops at an
+//    unbalanced "(" or a newline, so "[x](" repeated cannot rescan either.
+const pattern = /(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\[\]]+)\](?:\(((?:[^()\n]|\([^()\n]*\))+)\))?)|(`(.*?)(?:`|$))/g;
 
 function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles']) {
     const urlPattern = /https?:\/\/[^\s<]+/g;
@@ -41,7 +47,7 @@ function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: Mark
 // only auto-linked — a markdown link inside bold rendered as raw "[text](url)"
 // (seen live with "**[ENG-5297 — …](linear.app/…)**"). Re-parse links here;
 // everything between them still gets the bare-URL auto-linking.
-const nestedLinkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+const nestedLinkPattern = /\[([^\[\]]+)\]\(((?:[^()\n]|\([^()\n]*\))+)\)/g;
 function pushStyledContent(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles']) {
     let last = 0;
     let m: RegExpExecArray | null;
@@ -60,11 +66,22 @@ function pushStyledContent(spans: MarkdownSpan[], text: string, styles: Markdown
 
 export function parseMarkdownSpans(markdown: string, header: boolean) {
     const spans: MarkdownSpan[] = [];
+
+    // Plain-text fallback for absurdly long paragraphs: the whole text is
+    // still shown, just undecorated (work budget, see utils/parseBudget).
+    if (exceedsInputBudget(markdown)) {
+        spans.push({ styles: [], text: markdown, url: null });
+        return spans;
+    }
+
+    const budget = parseBudget();
     let lastIndex = 0;
     let match: RegExpExecArray | null;
     pattern.lastIndex = 0;
 
     while ((match = pattern.exec(markdown)) !== null) {
+        if (!budget.spend()) break; // the remainder is emitted as plain text below
+
         // Capture the text between the end of the last match and the start of this match as plain text
         const plainText = markdown.slice(lastIndex, match.index);
         if (plainText) {
@@ -91,6 +108,8 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
         }
 
         lastIndex = pattern.lastIndex;
+        // A zero-length match would otherwise spin forever at one index.
+        if (match[0].length === 0) pattern.lastIndex++;
     }
 
     // If there's any text remaining after the last match, treat it as plain

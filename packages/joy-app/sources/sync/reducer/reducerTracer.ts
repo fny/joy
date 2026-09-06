@@ -131,44 +131,56 @@ function isSubagentToolCall(name: string): boolean {
     return name === 'Task' || name === 'Agent';
 }
 
-// Process orphan messages recursively when their parent becomes available
+// Release the orphans waiting on `parentUuid` and, transitively, everything
+// waiting on them. ITERATIVE with an explicit stack (depth-first, so emit
+// order matches the old recursion): a long sidechain buffered while paging
+// history backward — 10,000 chained messages — overflowed the JS stack in the
+// recursive version, and the RangeError left thousands of messages marked
+// processed but never returned, so the retry produced nothing (#389). Each
+// orphan is marked processed only in the same step that emits it, and the
+// loop cannot throw, so a batch is either returned whole or left retryable.
 function processOrphans(state: TracerState, parentUuid: string, sidechainId: string): TracedMessage[] {
     const results: TracedMessage[] = [];
-    const orphans = state.orphanMessages.get(parentUuid);
-    
-    if (!orphans) {
+
+    const take = (uuid: string): NormalizedMessage[] | undefined => {
+        const orphans = state.orphanMessages.get(uuid);
+        if (orphans) state.orphanMessages.delete(uuid);
+        return orphans;
+    };
+
+    const rootOrphans = take(parentUuid);
+    if (!rootOrphans) {
         return results;
     }
-    
-    // Remove from orphan map
-    state.orphanMessages.delete(parentUuid);
-    
-    // Process each orphan
-    for (const orphan of orphans) {
+
+    type Frame = { orphans: NormalizedMessage[]; index: number };
+    const stack: Frame[] = [{ orphans: rootOrphans, index: 0 }];
+
+    while (stack.length > 0) {
+        const frame = stack[stack.length - 1];
+        if (frame.index >= frame.orphans.length) {
+            stack.pop();
+            continue;
+        }
+        const orphan = frame.orphans[frame.index++];
         const uuid = getMessageUuid(orphan);
-        
-        // Mark as processed
+
+        // Mark as processed and emit in the same step
         state.processedIds.add(orphan.id);
-        
-        // Assign sidechain ID
         if (uuid) {
             state.uuidToSidechainId.set(uuid, sidechainId);
         }
-        
-        // Create traced message
-        const tracedMessage: TracedMessage = {
-            ...orphan,
-            sidechainId
-        };
-        results.push(tracedMessage);
-        
-        // Recursively process any orphans waiting for this message
+        results.push({ ...orphan, sidechainId });
+
+        // Descend into the orphans waiting for this message before its siblings
         if (uuid) {
-            const childOrphans = processOrphans(state, uuid, sidechainId);
-            results.push(...childOrphans);
+            const children = take(uuid);
+            if (children && children.length > 0) {
+                stack.push({ orphans: children, index: 0 });
+            }
         }
     }
-    
+
     return results;
 }
 
