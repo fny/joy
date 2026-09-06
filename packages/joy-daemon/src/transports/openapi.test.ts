@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildOpenApiSpec } from "./openapi";
+import { machineOps } from "../domain/operations";
 
 describe("buildOpenApiSpec", () => {
   const spec = buildOpenApiSpec({ port: 1234, version: "9.9.9" }) as any;
@@ -40,5 +41,21 @@ describe("buildOpenApiSpec", () => {
 
   it("RPC-only ops are listed, not pathed", () => {
     expect(spec["x-rpc-only"].map((o: any) => o.rpcName)).toContain("killSession");
+  });
+
+  it("ops with an httpShape document their HTTP contract, not the RPC result (#598)", () => {
+    const create = spec.paths["/sessions"].post;
+    expect(Object.keys(create.responses)).not.toContain("200"); // the wire says 201
+    expect(create.responses["201"].content["application/json"].schema.description).toMatch(/SessionRecord/);
+    expect(create.responses["400"]).toBeTruthy();
+    const kill = spec.paths["/sessions/{id}"].delete;
+    expect(kill.responses["404"]).toBeTruthy();
+    expect(kill.responses["409"]).toBeTruthy();
+    // Every shaped op is documented — a new httpShape without an HTTP contract fails here.
+    for (const op of machineOps) {
+      if (!op.httpShape || !op.http) continue;
+      const entry = spec.paths[op.http.path.replace(/:([\w-]+)/g, "{$1}")][op.http.method.toLowerCase()];
+      expect([op.name, entry["x-http-shaped"]]).toEqual([op.name, true]);
+    }
   });
 });

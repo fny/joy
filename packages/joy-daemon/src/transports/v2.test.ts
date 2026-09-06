@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync
 import { tmpdir, homedir } from "os";
 import { join } from "path";
 import { execFileSync } from "child_process";
+import { request as httpRequest } from "http";
 import { startHttpServer } from "./http";
 import { parsePorcelainV2, decodeBase64Strict } from "./v2";
 import type { SessionRegistry } from "../domain/registry";
@@ -433,5 +434,57 @@ describe("#174 DELETE /v2/sessions/:id ifStatus pass-through", () => {
     expect(plain.status).toBe(200);
     expect(plain.json.ok).toBe(true);
     expect(killed).toContain("killed");
+  });
+});
+
+describe("wave C transport fixes", () => {
+  test("#62 a UTF-8 character split across body chunks decodes intact", async () => {
+    const bytes = Buffer.from(JSON.stringify({ path: "utf8.txt", content: "€ café" }), "utf8");
+    const cut = bytes.indexOf(0xe2) + 1; // split INSIDE "€" (0xE2 0x82 0xAC): one lead byte, then the rest
+    const status = await new Promise<number>((resolve, reject) => {
+      const u = new URL(base + "/v2/sessions/abcd1234/files/content");
+      const req = httpRequest({
+        hostname: u.hostname, port: u.port, path: u.pathname, method: "PUT",
+        headers: { "content-type": "application/json", "x-joy-token": TOKEN, "transfer-encoding": "chunked" },
+      }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
+      req.on("error", reject);
+      req.write(bytes.subarray(0, cut));
+      setTimeout(() => { req.write(bytes.subarray(cut)); req.end(); }, 30);
+    });
+    expect(status).toBe(200);
+    expect(readFileSync(join(repo, "utf8.txt"), "utf8")).toBe("€ café");
+    unlinkSync(join(repo, "utf8.txt"));
+  });
+
+  test("#600 codex resets_at in Unix seconds is normalized to an ISO timestamp", async () => {
+    const home = mkdtempSync(join(tmpdir(), "joy-codex-home-"));
+    const day = join(home, "sessions", "2026", "09", "05");
+    mkdirSync(day, { recursive: true });
+    writeFileSync(join(day, "rollout-2026-09-05T10-00-00-aaaa.jsonl"), JSON.stringify({
+      timestamp: "2026-09-05T10:00:00.000Z", type: "event_msg",
+      payload: { type: "token_count", rate_limits: {
+        primary: { used_percent: 25, window_minutes: 300, resets_at: 2000000000 },
+        secondary: { used_percent: 10, window_minutes: 10080, resets_in_seconds: 3600 },
+      } },
+    }) + "\n");
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    try {
+      const r = await call("GET", "/v2/harnesses/codex/limits");
+      expect(r.status).toBe(200);
+      const primary = r.json.limits.find((l: any) => l.id === "primary");
+      expect(primary.resetsAt).toBe("2033-05-18T03:33:20.000Z"); // seconds → ISO, not 1970
+      const secondary = r.json.limits.find((l: any) => l.id === "secondary");
+      expect(typeof secondary.resetsAt).toBe("string");
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("#604 a model filter the aggregated report cannot honour is refused, not half-applied", async () => {
+    const r = await call("GET", "/v2/usage?model=Sonnet&period=today");
+    expect(r.status).toBe(422);
+    expect(r.json.error).toBe("unsupported_filter");
   });
 });

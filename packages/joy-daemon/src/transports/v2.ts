@@ -21,6 +21,7 @@ import { validatePath, withPathLock } from "../domain/fileOps";
 import { writeFileAtomicAsync } from "../domain/atomicWrite";
 import { readAgentConfig, writeAgentConfigRaw, applyAgentConfigAssignments, fetchAgentSchema, agentConfigSpec } from "../domain/agentConfig";
 import { fetchClaudeLimits, readCodexLimits, claudeLimitRows } from "../domain/limits";
+import { TextAccumulator } from "../domain/textStream";
 
 const HARNESSES = ["claude", "codex", "opencode", "pi", "agy"] as const;
 type Harness = (typeof HARNESSES)[number];
@@ -98,15 +99,23 @@ type BodyResult = { ok: true; body: Record<string, unknown> } | { ok: false; sta
 function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
   const MAX_BODY = 10 * 1024 * 1024;
   return new Promise(resolve => {
-    let data = "";
+    // ONE decoder for the whole body: `data += chunk` stringified each Buffer
+    // on its own, so a multibyte character whose bytes straddled a chunk
+    // boundary became U+FFFD before JSON.parse ever ran — a PUT of "café"
+    // wrote "caf��" and reported success (#62). The cap counts BYTES, which
+    // is what actually arrives on the socket.
+    const acc = new TextAccumulator();
+    let bytes = 0;
     let overflow = false;
-    req.on("data", chunk => {
+    req.on("data", (chunk: Buffer | string) => {
       if (overflow) return;
-      data += chunk;
-      if (data.length > MAX_BODY) { overflow = true; data = ""; req.destroy(); resolve({ ok: false, status: 413, error: "body_too_large" }); }
+      bytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+      if (bytes > MAX_BODY) { overflow = true; req.destroy(); resolve({ ok: false, status: 413, error: "body_too_large" }); return; }
+      acc.push(chunk);
     });
     req.on("end", () => {
       if (overflow) return;
+      const data = acc.end();
       if (data === "") return resolve({ ok: true, body: {} });
       try {
         const parsed = JSON.parse(data);
@@ -203,12 +212,17 @@ route("GET", "/v2/usage", async (ctx) => {
     // a harness we cannot answer must fail loudly, never silently zero.
     return ok({ error: "unsupported_filter", detail: "usage covers harness=claude only" }, 422);
   }
-  const result = await mcall("usage", ctx.registry, { period: ctx.url.searchParams.get("period") ?? "30days" }) as Record<string, unknown>;
-  const model = ctx.url.searchParams.get("model");
-  if (model && Array.isArray(result.models)) {
-    result.models = (result.models as Array<{ name: string }>).filter(m => m.name === model);
+  if (ctx.url.searchParams.get("model")) {
+    // The report arrives here ALREADY aggregated (computeUsage), and only
+    // models[] carries a per-model axis. Filtering that one array left
+    // overview/daily/projects/sessions describing every model beside a
+    // single-model row — a $10 Sonnet line under a $30 total (#604). No
+    // caller sends this filter (the app reads models[] from the full
+    // report), so the honest answer is the same loud refusal harness= gets,
+    // not a half-applied selection.
+    return ok({ error: "unsupported_filter", detail: "usage cannot be filtered by model; read models[] from the full report" }, 422);
   }
-  return ok(result);
+  return ok(await mcall("usage", ctx.registry, { period: ctx.url.searchParams.get("period") ?? "30days" }));
 });
 
 // ── machine: harnesses ──────────────────────────────────────────────────────
@@ -264,13 +278,22 @@ route("GET", "/v2/harnesses/:harness/limits", async (_ctx, p) => {
       try { return readCodexLimits(); } catch (e) { return { ok: false, error: String(e) }; }
     })();
     if (!r.ok) return ok({ ok: true, harness: "codex", limits: [], status: { state: "unknown" }, error: { code: "read_failed", message: r.error }, observedAt });
-    const limits = Object.entries(r.limits as Record<string, { used_percent?: number; window_minutes?: number; resets_at?: string; resets_in_seconds?: number } | undefined>)
-      .filter((e): e is [string, { used_percent?: number; window_minutes?: number; resets_at?: string; resets_in_seconds?: number }] =>
-        !!e[1] && typeof e[1] === "object" && typeof e[1].used_percent === "number")
+    type CodexWindow = { used_percent?: number; window_minutes?: number; resets_at?: string | number; resets_in_seconds?: number };
+    // The normalized contract is an ISO string or null. Codex writes resets_at
+    // as Unix SECONDS; passing the number through made `new Date(resetsAt)`
+    // read it as milliseconds — a reset in January 1970 instead of 2033 (#600).
+    const resetIso = (w: CodexWindow): string | null => {
+      if (typeof w.resets_at === "string") return w.resets_at;
+      if (typeof w.resets_at === "number" && Number.isFinite(w.resets_at)) return new Date(w.resets_at * 1000).toISOString();
+      if (typeof w.resets_in_seconds === "number" && Number.isFinite(w.resets_in_seconds)) return new Date(observedAt + w.resets_in_seconds * 1000).toISOString();
+      return null;
+    };
+    const limits = Object.entries(r.limits as Record<string, CodexWindow | undefined>)
+      .filter((e): e is [string, CodexWindow] => !!e[1] && typeof e[1] === "object" && typeof e[1].used_percent === "number")
       .map(([id, w]) => ({
         id, kind: "window" as const, usedPercent: w.used_percent ?? 0,
         windowMinutes: w.window_minutes,
-        resetsAt: w.resets_at ?? (typeof w.resets_in_seconds === "number" ? new Date(observedAt + w.resets_in_seconds * 1000).toISOString() : null),
+        resetsAt: resetIso(w),
         unit: "percent",
       }));
     return ok({ ok: true, harness: "codex", limits, status: { state: "ok" }, source: "rollout-rate-limits", observedAt, stale: false, raw: r.limits });
