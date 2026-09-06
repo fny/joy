@@ -135,3 +135,65 @@ test("#519: rejoin over a real socket — a NEW identical answer coalesced behin
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("#519: rejoin over a real socket — a REPEATED completion ahead of the thread/read response is one occurrence: it never consumes a second history slot, and the second real item takes that slot", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-rejoin-repeat-"));
+  const prev = process.env.JOY_HOME_DIR;
+  process.env.JOY_HOME_DIR = dir;
+  const id = "rejoin-519-repeat-real";
+  mkdirSync(joyStateDir(), { recursive: true });
+  const sock = join(joyStateDir(), `codex-${id}.sock`);
+  const sends: Array<{ t: string; text?: string; localId?: string }> = [];
+  const wire: string[] = [];
+  let reads = 0;
+  const server = await appServer(sock, (_ws, msg, { respond, notify, corked }) => {
+    if (msg.method === "initialize") respond({});
+    if (msg.method === "thread/resume") respond({ thread: { id: "TH" } });
+    if (msg.method === "thread/read") {
+      // Two equal answers in the snapshot; on the wire AHEAD of the response:
+      // msg-a, msg-a again (a re-delivered completion), msg-b — one write.
+      const snapshot = { thread: { id: "TH", turns: [{ id: "T-live", status: "inProgress", items: [
+        { id: "item-0", type: "agentMessage", text: "same answer" },
+        { id: "item-1", type: "agentMessage", text: "same answer" },
+      ] }] } };
+      if (reads++ > 0) { respond(snapshot); return; }
+      corked(() => {
+        for (const item of ["msg-a", "msg-a", "msg-b"]) { wire.push(item); notify("item/completed", { threadId: "TH", turnId: "T-live", item: { id: item, type: "agentMessage", text: "same answer" } }); }
+        wire.push("response (two occurrences)"); respond(snapshot);
+      });
+    }
+  });
+  const ok = async () => ({ ok: true, out: "" });
+  const tmux = { literal: ok, key: ok, command: ok, commandOnce: ok, captureFresh: ok, captureCached: () => ({ ok: true, out: "" }), runSync: () => ({ ok: true, out: "" }), track() {}, untrack() {} } as unknown as TmuxDriver;
+  const relayImpl: Record<string, unknown> = {
+    relaySessionId: "relay-1", metadataSnapshot: null, outboundPersistDegraded: false,
+    send: (w: any, localId?: string) => { const ev = w?.content?.data?.ev; sends.push({ t: String(ev?.t), text: ev?.text, localId }); },
+  };
+  const relay = new Proxy(relayImpl, { get: (t, k) => (k in t ? t[k as string] : () => Promise.resolve(true)) });
+  const deps: SessionDeps = { relayClient: null, broadcast: () => {}, addChatMessage: () => {} };
+  const s = new CodexSession({ id, tmuxWindow: "none", tmux, cwd: dir, status: "starting", startedAt: 0, codexThreadId: "TH", permissionMode: "bypassPermissions" }, deps);
+  try {
+    s.attachRelay(relay as any);
+    s.beginWatching();
+    for (let i = 0; i < 200 && s.status === "starting"; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(s.status).toBe("active");
+    expect(wire).toEqual(["msg-a", "msg-a", "msg-b", "response (two occurrences)"]);
+    const texts = sends.filter((x) => x.t === "text");
+    // Two occurrences, two identities. The repeat of msg-a re-emits under
+    // the identity it already has (relay-deduped); it used to consume the
+    // second history slot and push msg-b to a third ordinal (:2).
+    expect(texts.map((x) => x.localId)).toEqual([
+      "codex:TH:turn:T-live:item:agentMessage:0:text", // replay item-0
+      "codex:TH:turn:T-live:item:agentMessage:1:text", // replay item-1
+      "codex:TH:turn:T-live:item:agentMessage:0:text", // msg-a
+      "codex:TH:turn:T-live:item:agentMessage:0:text", // msg-a again
+      "codex:TH:turn:T-live:item:agentMessage:1:text", // msg-b
+    ]);
+    expect(new Set(texts.map((x) => x.localId)).size).toBe(2);
+  } finally {
+    s.end("killed");
+    await server.close();
+    if (prev === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = prev;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
