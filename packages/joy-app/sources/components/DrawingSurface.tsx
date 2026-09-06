@@ -21,6 +21,8 @@ export interface DrawingSurfaceProps {
     bgImage: string | null;
     /** Fires whenever stroke count changes (enables/disables undo & save). */
     onStrokesChange?: (count: number) => void;
+    /** The background source finished loading (ok) or failed — Save waits for it (#161). */
+    onBackgroundLoad?: (uri: string, ok: boolean) => void;
 }
 
 interface Stroke {
@@ -116,7 +118,13 @@ export const DrawingSurface = React.forwardRef<DrawingSurfaceHandle, DrawingSurf
                 {...responder.panHandlers}
             >
                 {props.bgImage && (
-                    <Image source={{ uri: props.bgImage }} style={[RNStyleSheet.absoluteFill, { resizeMode: 'contain' }]} />
+                    <Image
+                        key={props.bgImage}
+                        source={{ uri: props.bgImage }}
+                        style={[RNStyleSheet.absoluteFill, { resizeMode: 'contain' }]}
+                        onLoad={() => props.onBackgroundLoad?.(props.bgImage!, true)}
+                        onError={() => props.onBackgroundLoad?.(props.bgImage!, false)}
+                    />
                 )}
                 <Svg style={RNStyleSheet.absoluteFill} pointerEvents="none">
                     {all.map((s, i) => (

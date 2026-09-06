@@ -7,7 +7,8 @@ import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
 import {sessionReadFile, sessionGitDiff, sessionDeleteFile } from '@/sync/ops';
-import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
+import { storage, useSession, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
+import { pickDownloadPayload } from '@/utils/fileDownloadSource';
 import { isBinaryPath } from '@/utils/binaryFile';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { copyToClipboard } from '@/utils/clipboard';
@@ -100,7 +101,12 @@ export default React.memo(function FileScreen() {
     const columnParam = searchParams.column as string | undefined;
     const requestedLine = lineParam ? Number.parseInt(lineParam, 10) : null;
     const requestedColumn = columnParam ? Number.parseInt(columnParam, 10) : null;
-    const session = storage.getState().sessions[sessionId!];
+    // Reactive: a cold-opened deep link renders before sessions hydrate. With
+    // a one-shot getState() read the "unknown session → empty file" branch
+    // was final; subscribing lets the load rerun when the session arrives (#162).
+    const session = useSession(sessionId!);
+    const sessionsReady = storage((s) => s.isDataReady);
+    const hasSession = !!session;
     const sessionPath = session?.metadata?.path ?? null;
     let rawPath = '';
 
@@ -126,6 +132,9 @@ export default React.memo(function FileScreen() {
     const [displayMode, setDisplayMode] = React.useState<'file' | 'diff' | 'rendered'>('diff');
     // Raster images arrive as base64 (never decoded to text) — rendered-only.
     const [imageBase64, setImageBase64] = React.useState<string | null>(null);
+    // The daemon's base64 as received — Download writes THESE bytes. The text
+    // shown is a UTF-8 decode that is lossy for Latin-1 / BOM files (#164).
+    const [rawBase64, setRawBase64] = React.useState<string | null>(null);
     const renderKind = fileRenderKind(filePath);
     const [fontSize, setFontSize] = useLocalSettingMutable('fileViewerFontSize');
     const [wrap, setWrap] = useLocalSettingMutable('fileViewerWrap');
@@ -257,10 +266,16 @@ export default React.memo(function FileScreen() {
 
         const loadFile = async () => {
             try {
+                // Sessions still hydrating: stay in the loading state; this effect
+                // reruns once the session record lands (#162).
+                if (sessionId && !isDemoSession(sessionId) && !hasSession && !sessionsReady) {
+                    if (!isCancelled && !cached) setIsLoading(true);
+                    return;
+                }
                 // Preview/demo or unknown session (no real session record, hence
                 // no encryption) — there's no backend to read from, so skip the
                 // RPC instead of throwing "Session encryption not found".
-                if (!sessionId || isDemoSession(sessionId) || !storage.getState().sessions[sessionId]) {
+                if (!sessionId || isDemoSession(sessionId) || !hasSession) {
                     if (!isCancelled) {
                         setFileContent({ content: '', encoding: 'utf8', isBinary: false });
                         setIsLoading(false);
@@ -324,6 +339,7 @@ export default React.memo(function FileScreen() {
                         // unreachable (#87).
                         let rawBytes: Uint8Array;
                         let decodedContent: string;
+                        setRawBase64(response.content ?? '');
                         try {
                             rawBytes = decodeBase64ToBytes(response.content ?? '');
                             decodedContent = decodeUtf8Bytes(rawBytes);
@@ -359,12 +375,13 @@ export default React.memo(function FileScreen() {
             }
         };
 
+        setRawBase64(null); // bytes belong to one path; a stale buffer must not download under a new name
         loadFile();
 
         return () => {
             isCancelled = true;
         };
-    }, [filePath, gitDiffPath, isBinaryFile, sessionId, sessionPath]);
+    }, [filePath, gitDiffPath, isBinaryFile, sessionId, sessionPath, hasSession, sessionsReady]);
 
     // Show error modal if there's an error
     React.useEffect(() => {
@@ -406,15 +423,25 @@ export default React.memo(function FileScreen() {
     // viewer only shows the "binary file" notice — so fetch its bytes now.
     // Before this, such files had no download at all on this screen, and
     // the toolbar's download would have written an empty file.
+    // Text downloads use the ORIGINAL bytes too: re-encoding the displayed
+    // UTF-8 decode rewrote Latin-1 bytes as U+FFFD and dropped BOMs (#164).
+    // Content that only exists as cached text is re-read from the machine.
     const downloadCurrent = React.useCallback(async () => {
-        if (imageBase64) return downloadFile(fileName, { base64: imageBase64 });
-        if (fileContent?.isBinary && sessionId) {
-            const res = await sessionReadFile(sessionId, filePath);
+        const payload = pickDownloadPayload({
+            imageBase64,
+            rawBase64,
+            isBinary: !!fileContent?.isBinary,
+            displayText: fileContent?.content ?? null,
+            canRefetch: !!sessionId && !isDemoSession(sessionId) && hasSession,
+        });
+        if (payload.kind === 'base64') return downloadFile(fileName, { base64: payload.base64 });
+        if (payload.kind === 'refetch') {
+            const res = await sessionReadFile(sessionId!, filePath);
             if (!res.success) throw new Error(res.error || 'read failed');
             return downloadFile(fileName, { base64: res.content ?? '' }); // an empty file downloads as an empty file
         }
-        return downloadFile(fileName, { utf8: fileContent?.content ?? '' });
-    }, [imageBase64, fileContent, sessionId, filePath, fileName]);
+        return downloadFile(fileName, { utf8: payload.text });
+    }, [imageBase64, rawBase64, fileContent, sessionId, hasSession, filePath, fileName]);
     const language = getFileLanguage(filePath);
 
     if (isLoading) {

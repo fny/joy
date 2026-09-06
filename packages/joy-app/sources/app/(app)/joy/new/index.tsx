@@ -41,6 +41,8 @@ import { sync } from '@/sync/sync';
 import { machineStatusOnly, machineHarnessModels, machineHistoryLogs, machineOpencodeSessions, machineTeleportExport, machineTeleportImport } from '@/sync/v2/machine';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
+import { pastSessionsContextKey } from '@/utils/pastSessionsContext';
+import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
@@ -339,43 +341,55 @@ function NewJoyTmuxSessionScreen() {
     }, [selectedAgent, selectedMachineId]);
     const agyModel = agyModels[agyModelIndex];
     const cycleAgyModel = React.useCallback(() => { setAgyModelIndex(i => agyModels.length ? (i + 1) % agyModels.length : 0); }, [agyModels.length]);
-    // Past-sessions picker: on-demand list of opencode sessions recorded for
-    // the chosen directory (daemon boots a short-lived server, so first load
-    // takes a few seconds).
+    // Past-sessions pickers (opencode / claude). The list belongs to ONE
+    // machine + directory + harness: a change of any of them clears the rows,
+    // closes the picker and retires the in-flight request, so a row fetched
+    // for project A can never be submitted as a resume id against project B,
+    // and A's slow response cannot repopulate the list after the change (#153).
+    const pastCwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
+    const pastContextKey = pastSessionsContextKey({ machineId: selectedMachineId, cwd: pastCwd, agent: selectedAgent });
+    const pastGenKey = useLatestKey('new-session-past');
+    // On-demand list of opencode sessions recorded for the chosen directory
+    // (daemon boots a short-lived server, so first load takes a few seconds).
     const [ocPastOpen, setOcPastOpen] = React.useState(false);
     const [ocPastLoading, setOcPastLoading] = React.useState(false);
     const [ocPast, setOcPast] = React.useState<{ id: string; title: string; updatedAt: number }[]>([]);
-    const toggleOcPast = React.useCallback(() => {
-        if (ocPastOpen) { setOcPastOpen(false); return; }
-        setOcPastOpen(true);
-        if (!selectedMachineId) return;
-        setOcPastLoading(true);
-        const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
-        const sctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!sctx) { setOcPastLoading(false); return; }
-        machineOpencodeSessions(sctx, cwd).then(r => ({ ok: r.data?.ok, sessions: r.data?.sessions as typeof ocPast | undefined }))
-            .then((res) => { setOcPast(res.sessions ?? []); })
-            .catch(() => { setOcPast([]); })
-            .finally(() => setOcPastLoading(false));
-    }, [ocPastOpen, selectedMachineId, pathInput, selectedMachine?.metadata?.homeDir]);
     // Claude: past conversations in this directory — the transcript JSONLs the
     // daemon can resume (joy-list-logs is stat-only, so this is instant).
     const [ccPastOpen, setCcPastOpen] = React.useState(false);
     const [ccPastLoading, setCcPastLoading] = React.useState(false);
     const [ccPast, setCcPast] = React.useState<{ sessionId: string; sizeBytes: number; mtimeMs: number }[]>([]);
+    React.useEffect(() => {
+        retire(pastGenKey);
+        setOcPastOpen(false); setOcPastLoading(false); setOcPast([]);
+        setCcPastOpen(false); setCcPastLoading(false); setCcPast([]);
+    }, [pastContextKey, pastGenKey]);
+    const toggleOcPast = React.useCallback(() => {
+        if (ocPastOpen) { setOcPastOpen(false); return; }
+        setOcPastOpen(true);
+        if (!selectedMachineId) return;
+        const sctx = sync.machineOnlyCtx(selectedMachineId);
+        if (!sctx) return;
+        setOcPastLoading(true);
+        const gen = nextGen(pastGenKey);
+        machineOpencodeSessions(sctx, pastCwd).then(r => ({ ok: r.data?.ok, sessions: r.data?.sessions as typeof ocPast | undefined }))
+            .then((res) => { if (isLatest(pastGenKey, gen)) setOcPast(res.sessions ?? []); })
+            .catch(() => { if (isLatest(pastGenKey, gen)) setOcPast([]); })
+            .finally(() => { if (isLatest(pastGenKey, gen)) setOcPastLoading(false); });
+    }, [ocPastOpen, selectedMachineId, pastCwd, pastGenKey]);
     const toggleCcPast = React.useCallback(() => {
         if (ccPastOpen) { setCcPastOpen(false); return; }
         setCcPastOpen(true);
         if (!selectedMachineId) return;
-        setCcPastLoading(true);
-        const cwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
         const lctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!lctx) { setCcPastLoading(false); return; }
-        machineHistoryLogs(lctx, cwd).then(r => ({ ok: r.data?.ok, logs: r.data?.logs as typeof ccPast | undefined }))
-            .then((res) => { setCcPast((res.logs ?? []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs)); })
-            .catch(() => { setCcPast([]); })
-            .finally(() => setCcPastLoading(false));
-    }, [ccPastOpen, selectedMachineId, pathInput, selectedMachine?.metadata?.homeDir]);
+        if (!lctx) return;
+        setCcPastLoading(true);
+        const gen = nextGen(pastGenKey);
+        machineHistoryLogs(lctx, pastCwd).then(r => ({ ok: r.data?.ok, logs: r.data?.logs as typeof ccPast | undefined }))
+            .then((res) => { if (isLatest(pastGenKey, gen)) setCcPast((res.logs ?? []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs)); })
+            .catch(() => { if (isLatest(pastGenKey, gen)) setCcPast([]); })
+            .finally(() => { if (isLatest(pastGenKey, gen)) setCcPastLoading(false); });
+    }, [ccPastOpen, selectedMachineId, pastCwd, pastGenKey]);
 
     const ocAge = (ts: number): string => {
         const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
