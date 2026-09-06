@@ -13,7 +13,11 @@ export interface DebounceOptions<T> {
  */
 function createTrailing<T>(fn: (args: T) => void, delay: number, reducer?: (previous: T, current: T) => T) {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let pendingArgs: T | null = null;
+    // "Is a call pending" is tracked apart from its argument: `null` used to
+    // double as the no-pending-call sentinel, so a nullable T queued as null
+    // (a state-clearing update) was never delivered, not even on flush (#428).
+    let pending = false;
+    let pendingArgs: T | undefined = undefined;
 
     const clearTimer = () => {
         if (timeoutId) {
@@ -24,21 +28,24 @@ function createTrailing<T>(fn: (args: T) => void, delay: number, reducer?: (prev
 
     const fire = () => {
         clearTimer();
-        if (pendingArgs === null) return;
-        const args = pendingArgs;
-        pendingArgs = null;
+        if (!pending) return;
+        const args = pendingArgs as T;
+        pending = false;
+        pendingArgs = undefined;
         fn(args);
     };
 
     return {
         queue(args: T): void {
-            pendingArgs = pendingArgs !== null && reducer ? reducer(pendingArgs, args) : args;
+            pendingArgs = pending && reducer ? reducer(pendingArgs as T, args) : args;
+            pending = true;
             clearTimer();
             timeoutId = setTimeout(fire, delay);
         },
         cancel(): void {
             clearTimer();
-            pendingArgs = null;
+            pending = false;
+            pendingArgs = undefined;
         },
         flush: fire,
     };
