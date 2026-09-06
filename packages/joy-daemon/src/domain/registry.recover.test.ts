@@ -88,6 +88,18 @@ test("#51 restart relaunches with the CURRENT effort, not the launch-time one", 
   expect(seen.launchCmd).not.toContain("CLAUDE_EFFORT=low");
 }, 20_000);
 
+// ── #55 ─────────────────────────────────────────────────────────────────────
+
+test("#55 a fresh per-session server is stamped with this daemon's state dir before the record is written", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { TMUX_OWNER_VAR, tmuxOwnerStamp } = await import("./orphanSweep");
+  const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+  await expect(reg.create({ cwd })).rejects.toThrow(/launch-claude/);
+  const stamp = seen.runSync.find((a) => a[0] === "set-environment");
+  expect(stamp).toEqual(["set-environment", "-g", TMUX_OWNER_VAR, tmuxOwnerStamp()]);
+  expect(tmuxOwnerStamp().startsWith(home)).toBe(true);
+}, 20_000);
+
 // ── #564 ────────────────────────────────────────────────────────────────────
 
 test("#564 a non-canonical cwd (`/.`, `..`, a symlink) is canonicalised before the launch record is written", async () => {

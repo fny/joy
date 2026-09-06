@@ -4,7 +4,7 @@
 // and fanning out events to the debug page (SSE + bounded chat log).
 
 import { setTimeout as sleep } from "timers/promises";
-import { existsSync, mkdirSync, statSync, readFileSync, readdirSync } from "fs";
+import { existsSync, mkdirSync, statSync, readFileSync } from "fs";
 import { join, basename, resolve } from "path";
 import { run } from "../tmux/shell";
 import { tmux, tmuxHandleFor, disposeTmuxHandle, type TmuxDriver } from "../tmux/driver";
@@ -28,6 +28,7 @@ import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTran
 import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord, resolveRecoveredTranscript } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
+import { stampTmuxServerOwner, sweepOrphanTmuxServers } from "./orphanSweep";
 
 export interface CreateSessionOpts {
   cwd: string;
@@ -1259,29 +1260,27 @@ export class SessionRegistry {
     }
     drv.runSync("set-window-option", "-t", `${session}:${TMUX_AGENT_WINDOW}`, "automatic-rename", "off");
     drv.runSync("set-hook", "-t", session, "client-attached", CLIENT_ATTACHED_HOOK);
+    // Stamped with THIS daemon's identity so the orphan sweep of another
+    // daemon universe on the box (another JOY_HOME_DIR / relay) leaves it
+    // alone (#55). Before the record is written: the stamp is what makes a
+    // crash between here and the record write sweepable by US only.
+    stampTmuxServerOwner(drv);
     return true;
   }
 
   /** Retire per-session tmux servers with NO window record (a crash between
    *  server-spawn and record write, or manual mischief). Conservative: only
-   *  sockets matching OUR label scheme, only when no human client is
-   *  attached. Never touches the shared server or foreign sockets. */
+   *  sockets matching OUR label scheme, only servers stamped with THIS
+   *  daemon's state dir (#55: another daemon universe on the box — the e2e
+   *  stack under ~/.joy-test, any JOY_HOME_DIR checkout — uses the same
+   *  label scheme and the same /tmp/tmux-<uid>, and its live sessions are
+   *  unknown to our records), only when no human client is attached. Never
+   *  touches the shared server, foreign sockets or unstamped servers. */
   #sweepOrphanTmuxServers(): void {
     try {
       const dir = process.env.TMUX_TMPDIR || `/tmp/tmux-${process.getuid?.() ?? ""}`;
-      // Only OUR per-session label shapes (`joy-<8 hex>` and the legacy
-      // `joy-<relayKey>-s-<8 hex>`): the shared server's socket is `joy-<relayKey>`
-      // and must never be swept.
-      const ours = /^joy-[0-9a-f]{8}$|-s-[0-9a-f]{8}$/;
-      const known = new Set(listWindowRecords().map(r => r.socket).filter(Boolean));
-      for (const name of (existsSync(dir) ? readdirSync(dir) : [])) {
-        if (!ours.test(name) || known.has(name)) continue;
-        if (!run("tmux", "-L", name, "has-session").ok) continue; // dead socket file; tmux cleans it
-        const clients = run("tmux", "-L", name, "list-clients").out.trim();
-        if (clients) continue; // a human is attached — leave it alone
-        run("tmux", "-L", name, "kill-server");
-        process.stderr.write(`[recover] retired orphan tmux server ${name} (no record, no clients)\n`);
-      }
+      const known = new Set(listWindowRecords().map(r => r.socket).filter((x): x is string => !!x));
+      sweepOrphanTmuxServers({ dir, known, log: (line) => process.stderr.write(`[recover] ${line}\n`) });
     } catch { /* sweep is best-effort */ }
   }
 
