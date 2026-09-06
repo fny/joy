@@ -1372,6 +1372,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         return finish("failed", "dispatch_timeout");
       }
       log(`${tag}: started (delivery confirmed)`);
+      // The adapter's verdicts count from DELIVERY, not from the relay's
+      // acknowledgement of it (#584 residual, Astra on 4a69e55c). This used
+      // to be set after the /start round trip below, so a legacy adapter that
+      // emitted `turn-end failed` while /start was in flight had its verdict
+      // discarded and the lane terminalized `completed` on idle alone — the
+      // relay's response time deciding whether an already-executed failure
+      // counted. The prompt is running the moment the delivery is confirmed;
+      // every turn-end from here belongs to THIS relay turn.
+      { const t = activeTurns.get(turnId); if (t) t.started = true; }
       try {
         await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
       } catch (e) {
@@ -1391,7 +1400,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         throw e;
       }
     }
-    { const t = activeTurns.get(turnId); if (t) t.started = true; } // adapter verdicts count from here (#584)
+    { const t = activeTurns.get(turnId); if (t) t.started = true; } // idempotent: also covers a resumed turn whose /start was already posted (#584)
 
     // Phase C — the command's terminal IS the turn's: completed/failed from
     // the runtime's turn-end, cancelled once the interrupt is confirmed,
