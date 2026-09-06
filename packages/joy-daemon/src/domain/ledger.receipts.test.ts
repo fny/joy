@@ -243,6 +243,58 @@ describe("transcript-uuid receipts are bounded (#560)", () => {
     expect(has("s1", "u49")).toBe(false);
   });
 
+  it("under an UNCHANGED cursor, every covered insert past the cap prunes at the write (review a57bf97e)", () => {
+    // The cached covered count used to be refreshed only when the cursor
+    // moved and never counted the receipt that just landed, so once it hit
+    // zero every later covered insert was retained until the sweep: with a
+    // fixed cursor, cap 2 and twenty covered receipts, seventeen survived.
+    ledger.close();
+    ledger = Ledger.open(dir, { now: () => now, transcriptReceiptsPerSession: 2 });
+    commitCursor("s1", 10_000);                              // fixed for the whole test
+    for (let i = 1; i <= 20; i++) {
+      ledger.addReceipt("s1", { kind: "transcript_uuid", ref: `u${i}`, at: (now += 1_000), transcriptPath: FILE, byteOffset: i });
+      expect(count("s1")).toBeLessThanOrEqual(2);            // never more than the cap after any insert
+    }
+    expect(count("s1")).toBe(2);
+    expect(has("s1", "u20")).toBe(true);                     // the newest two remain
+    expect(has("s1", "u19")).toBe(true);
+    expect(has("s1", "u18")).toBe(false);
+    expect(ledger.prune(policy(2)).receipts).toBe(0);        // the sweep finds nothing left to do
+    expect(count("s1")).toBe(2);
+  });
+
+  it("an insert ABOVE the cursor is not counted as covered until a later cursor covers it", () => {
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    ledger.close();
+    ledger = Ledger.open(dir, { now: () => now, transcriptReceiptsPerSession: 2 });
+    commitCursor("s1", 10);
+    forward("s1", 6, 0, undefined, 100);                     // u0..u5 at bytes 100..105: beyond the cursor
+    expect(count("s1")).toBe(6);                             // over the cap, nothing covered → all kept
+    const uncovered = () => warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("none of the excess positionally covered")).length;
+    expect(uncovered()).toBe(1);
+    // One covered receipt among them: it is the only thing the cap may take.
+    ledger.addReceipt("s1", { kind: "transcript_uuid", ref: "low", at: (now += 1_000), transcriptPath: FILE, byteOffset: 5 });
+    expect(count("s1")).toBe(6);
+    expect(has("s1", "low")).toBe(false);
+    for (let i = 0; i < 6; i++) expect(has("s1", `u${i}`)).toBe(true);
+    // The cursor moves past them: the next insert re-counts and prunes to the cap.
+    commitCursor("s1", 200);
+    ledger.addReceipt("s1", { kind: "transcript_uuid", ref: "u6", at: (now += 1_000), transcriptPath: FILE, byteOffset: 106 });
+    expect(count("s1")).toBe(2);
+    expect(has("s1", "u6")).toBe(true);
+    expect(has("s1", "u5")).toBe(true);
+    expect(has("s1", "u4")).toBe(false);
+    // ...and stays there as covered inserts keep arriving under that cursor.
+    for (let i = 7; i < 12; i++) {
+      ledger.addReceipt("s1", { kind: "transcript_uuid", ref: `u${i}`, at: (now += 1_000), transcriptPath: FILE, byteOffset: 100 + i });
+      expect(count("s1")).toBe(2);
+    }
+    expect(has("s1", "u11")).toBe(true);
+    expect(has("s1", "u10")).toBe(true);
+    expect(has("s1", "u9")).toBe(false);
+    expect(uncovered()).toBe(1);                             // the one warning from before; never again
+  });
+
   it("age retires a transcript receipt only when the committed cursor covers it; other kinds keep the 7-day rule", () => {
     const old = () => now - 30 * 24 * 3_600_000;
     forward("s1", 5, 0, old);                                // u0..u4 at bytes 0..4, long past the cut, below the cursor

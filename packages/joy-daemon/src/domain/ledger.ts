@@ -1011,7 +1011,7 @@ export class Ledger {
     }
     this.#run("INSERT INTO receipts(session_id,kind,ref,command_id,attempt_id,at,ord,transcript_path,byte_offset) VALUES(?,?,?,?,?,?,?,?,?)",
       sessionId, rc.kind, rc.ref, rc.commandId ?? null, rc.attemptId ?? null, rc.at ?? now, this.#nextReceiptOrd(), pos?.path ?? null, pos?.offset ?? null);
-    if (rc.kind === TRANSCRIPT_RECEIPT_KIND) this.#capTranscriptReceiptsOnInsert(sessionId);
+    if (rc.kind === TRANSCRIPT_RECEIPT_KIND) this.#capTranscriptReceiptsOnInsert(sessionId, pos);
   }
   /** The session's committed transcript cursor (path + offset), if any. */
   #committedCursor(sessionId: string): { ref: string; offset: number } | null {
@@ -1029,10 +1029,14 @@ export class Ledger {
    *  the committed cursor covers positionally go, as many as the excess —
    *  never one the cursor does not cover (those are what a replay still
    *  reaches, and a receipt with no known position might be). The covered
-   *  count is re-read only when the cursor moves (a commit or a promotion)
-   *  or a receipt is re-placed, so a session whose excess is all uncovered
-   *  costs nothing beyond one warning per process. */
-  #capTranscriptReceiptsOnInsert(sessionId: string): void {
+   *  count is re-read from the table only when the cursor moves (a commit
+   *  or a promotion) or a receipt is re-placed; under an unchanged cursor
+   *  the receipt that just landed is counted here if that cursor already
+   *  covers it (same file, below the offset — review a57bf97e: it used to
+   *  go uncounted, so once the cached count hit zero every later covered
+   *  insert was kept until the sweep). A session whose excess is all
+   *  uncovered still costs nothing beyond one warning per process. */
+  #capTranscriptReceiptsOnInsert(sessionId: string, pos: { path: string; offset: number } | null): void {
     let st = this.#transcriptSets.get(sessionId);
     if (!st) {
       const n = Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}'`, sessionId)?.n ?? 0);
@@ -1047,7 +1051,9 @@ export class Ledger {
     const key = `${cursor.offset}\n${cursor.ref}`;
     if (key !== st.cursor) {
       st.cursor = key;
-      st.covered = this.#coveredCount(sessionId, cursor);
+      st.covered = this.#coveredCount(sessionId, cursor);   // includes the row just inserted
+    } else if (pos && pos.path === cursor.ref && pos.offset < cursor.offset) {
+      st.covered++;
     }
     if (st.covered <= 0) { this.#warnUncovered(sessionId, st.n, cursor); return; }
     // INDEXED BY: the planner otherwise takes the byte_offset range and sorts
