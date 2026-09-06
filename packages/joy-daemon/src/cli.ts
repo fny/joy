@@ -37,14 +37,34 @@ const STATE_DIR = joyStateDir();
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
 // pnpm global installs resolve import.meta.url into pnpm's versioned content-addressed
-// store (…/.pnpm/@fny+joy-daemon@1.0.15_…/node_modules/@fny/joy-daemon). Baking THAT into a
-// launchd/systemd service breaks on the next `pnpm add -g`: pnpm makes a fresh store dir
-// for the new version and deletes the old one, so the service's server.ts path vanishes
-// and the daemon crash-loops. Collapse it to pnpm's stable top-level node_modules symlink
-// (always repointed at the current version). No-op for source checkouts / npm-global,
+// store (…/node_modules/.pnpm/@fny+joy-daemon@1.0.15_…/node_modules/@fny/joy-daemon). Baking
+// THAT into a launchd/systemd service breaks on the next `pnpm add -g`: pnpm makes a fresh
+// store dir for the new version and deletes the old one, so the service's server.ts path
+// vanishes and the daemon crash-loops. Collapse it to pnpm's stable top-level node_modules
+// symlink (always repointed at the current version). No-op for source checkouts / npm-global,
 // which have no .pnpm segment. (NODE = process.execPath is already a stable, canonical
 // version-install path — verified — so it needs no such treatment.)
-const PKG_DIR = moduleDir(import.meta.url).replace(/\/\.pnpm\/[^/]+\/node_modules\//, "/node_modules/");
+//
+// The virtual store always hangs off a `node_modules` directory, so the rewrite must
+// swallow "node_modules/.pnpm/<pkg>/node_modules/" as ONE unit: replacing only the
+// ".pnpm/<pkg>/node_modules/" tail left the leading node_modules standing and produced
+// …/node_modules/node_modules/@fny/joy-daemon — a directory that does not exist, so
+// `joy start` spawned nothing and `joy install` baked a dead path into the unit (#503).
+// The collapsed path is used only when server.ts is actually there; otherwise the
+// real (store) path stands, which at least works until the next upgrade.
+export function resolvePkgDir(dir: string, exists: (p: string) => boolean = existsSync): string {
+  const candidates = [
+    dir.replace(/\/node_modules\/\.pnpm\/[^/]+\/node_modules\//, "/node_modules/"),
+    // A virtual store not under node_modules (custom virtual-store-dir): the
+    // .pnpm segment's parent is the install root.
+    dir.replace(/\/\.pnpm\/[^/]+\/node_modules\//, "/node_modules/"),
+  ];
+  for (const c of candidates) {
+    if (c !== dir && exists(join(c, "server.ts"))) return c;
+  }
+  return dir;
+}
+const PKG_DIR = resolvePkgDir(moduleDir(import.meta.url));
 const SERVER_TS = join(PKG_DIR, "server.ts");
 const NODE = process.execPath;
 
@@ -161,6 +181,12 @@ async function cmdStart(): Promise<number> {
     console.log(`${ok} already running (pid ${st?.pid ?? "?"})`);
     return 0;
   }
+  if (!existsSync(SERVER_TS)) {
+    // Never spawn a path we cannot see (#503): the failure would surface as
+    // "daemon did not come up" ten seconds later with a node ENOENT in the log.
+    console.log(`${bad} daemon source not found at ${SERVER_TS} — reinstall @fny/joy-daemon`);
+    return 1;
+  }
   mkdirSync(STATE_DIR, { recursive: true });
   const out = openSync(LOG_FILE, "a");
   const child = spawn(NODE, ["--import", "tsx", SERVER_TS], {
@@ -180,10 +206,81 @@ async function cmdStart(): Promise<number> {
   return 1;
 }
 
+/** What the OS says process `pid` is: its command line and, where the kernel
+ *  tells us (Linux /proc), when it started. null = no such process. */
+export interface ProcessIdentity { command: string; startedAt?: number }
+export function processIdentity(pid: number): ProcessIdentity | null {
+  if (osPlatform() === "linux") {
+    let command: string;
+    try {
+      command = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ");
+    } catch { return null; }
+    let startedAt: number | undefined;
+    try {
+      // /proc/<pid>/stat: "pid (comm) state ppid …"; comm may contain spaces
+      // and parens, so split after the LAST ')'. starttime is field 22 overall
+      // = index 19 after the comm, in clock ticks since boot (CLK_TCK = 100 on
+      // every Linux Node ships for); btime is the boot time in epoch seconds.
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      const ticks = Number(fields[19]);
+      const btimeLine = readFileSync("/proc/stat", "utf8").split("\n").find((l) => l.startsWith("btime "));
+      const btime = btimeLine ? Number(btimeLine.slice(6).trim()) : NaN;
+      if (Number.isFinite(ticks) && Number.isFinite(btime)) startedAt = (btime + ticks / 100) * 1000;
+    } catch { /* command alone still identifies it */ }
+    return { command, startedAt };
+  }
+  const r = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+  const command = r.status === 0 ? r.stdout.trim() : "";
+  return command ? { command } : null;
+}
+
+/** Is this command line the daemon we launch (`node --import tsx …/server.ts`,
+ *  from a joy-daemon checkout or install)? */
+export function looksLikeJoyDaemon(command: string): boolean {
+  return /(^|[\s/])server\.ts(\s|$)/.test(command) && /joy-daemon|tsx/.test(command);
+}
+
+/** daemon.json wrote startedAt a moment after the process started (module
+ *  load, then listen). Anything further apart than this is a different
+ *  process that inherited the pid. */
+const START_SKEW_MS = 120_000;
+
+/** Is `pid` the daemon `state` (daemon.json) describes — not merely a live
+ *  process that inherited its number? A pid in a file outlives the process
+ *  that wrote it; `joy stop` used to SIGTERM whatever now held it (#495). */
+export function verifyDaemonPid(
+  pid: number,
+  state: { startedAt?: number } | null,
+  identity: ProcessIdentity | null,
+): { ok: true } | { ok: false; reason: string } {
+  if (!identity) return { ok: false, reason: `pid ${pid} is not running` };
+  if (!looksLikeJoyDaemon(identity.command)) {
+    return { ok: false, reason: `pid ${pid} is not a joy-daemon (${identity.command.slice(0, 80) || "unknown command"})` };
+  }
+  if (identity.startedAt && state?.startedAt && Math.abs(identity.startedAt - state.startedAt) > START_SKEW_MS) {
+    return { ok: false, reason: `pid ${pid} started at a different time than daemon.json records — a reused pid` };
+  }
+  return { ok: true };
+}
+
 async function cmdStop(): Promise<number> {
   const s = await probe();
-  const pid = s?.pid ?? readState()?.pid;
-  if (!pid) { console.log("daemon not running"); return 0; }
+  const st = readState();
+  // A daemon that answered the token-authenticated /status IS the daemon:
+  // its own pid is authoritative. Without an answer the only evidence is
+  // daemon.json, which outlives its writer — verify before signalling (#495).
+  let pid: number | undefined = s?.pid;
+  if (!pid) {
+    if (!st?.pid) { console.log("daemon not running"); return 0; }
+    const v = verifyDaemonPid(st.pid, st, processIdentity(st.pid));
+    if (!v.ok) {
+      try { rmSync(STATE_FILE); } catch { /* already gone */ }
+      console.log(`${warn} stale daemon.json removed (${v.reason}) — nothing signalled`);
+      return 0;
+    }
+    pid = st.pid;
+  }
   try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
   for (let i = 0; i < 25; i++) {
     await new Promise(r => setTimeout(r, 200));
@@ -379,6 +476,11 @@ function removeService(): void {
 
 function cmdInstall(): number {
   const plat = osPlatform();
+  if (!existsSync(SERVER_TS)) {
+    // A unit pointing at a missing server.ts crash-loops forever (#503).
+    console.log(`${bad} daemon source not found at ${SERVER_TS} — not installing a service that cannot start`);
+    return 1;
+  }
   removeService(); // idempotent: start from a clean slate so the new config takes effect
   // Bake the relay into the unit so the service supervises the daemon for
   // exactly the relay it was installed for.
@@ -1262,4 +1364,5 @@ async function main(): Promise<void> {
   process.exit(code);
 }
 
-void main();
+// Under vitest this module is imported for its exported helpers, not run.
+if (!process.env.VITEST) void main();

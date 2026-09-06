@@ -9,7 +9,7 @@ import { tmpdir, homedir } from "os";
 import { join } from "path";
 import { execFileSync } from "child_process";
 import { startHttpServer } from "./http";
-import { parsePorcelainV2 } from "./v2";
+import { parsePorcelainV2, decodeBase64Strict } from "./v2";
 import type { SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 
@@ -17,6 +17,8 @@ const TOKEN = "test-token-v2";
 let base = "";
 let repo = "";
 let pub = "";
+/** What each fake session was asked to enqueue (route-targeting proof, #599). */
+const enqueued: Record<string, string[]> = { abcd1234: [], sub00001: [] };
 
 const g = (args: string[]) => execFileSync("git", args, { cwd: repo });
 
@@ -43,6 +45,8 @@ beforeAll(async () => {
     agentFlavor: "claude",
     cwd: repo,
     toJSON: () => ({ id: "abcd1234", cwd: repo, agent: "claude" }),
+    enqueue: (text: string) => { enqueued.abcd1234.push(text); return { id: "q1" }; },
+    queueState: () => ({ pendingCount: enqueued.abcd1234.length, paused: false }),
   } as unknown as AgentSession;
   // A session whose cwd is a SUBDIRECTORY of the repository — git must not
   // report the rest of the worktree to it.
@@ -51,7 +55,12 @@ beforeAll(async () => {
     agentFlavor: "claude",
     cwd: join(repo, "sub"),
     toJSON: () => ({ id: "sub00001", cwd: join(repo, "sub"), agent: "claude" }),
+    enqueue: (text: string) => { enqueued.sub00001.push(text); return { id: "q2" }; },
+    queueState: () => ({ pendingCount: enqueued.sub00001.length, paused: false }),
   } as unknown as AgentSession;
+  // Exposed so the DELETE test can stub kill-side methods on the live object.
+  (fakeSession as any).status = "active";
+  (globalThis as any).__v2KillSession = fakeSession;
   const registry = {
     get: (id: string) => (id === "abcd1234" ? fakeSession : id === "sub00001" ? subSession : undefined),
     list: () => [fakeSession],
@@ -252,8 +261,16 @@ describe("review fixes: regression coverage", () => {
   test("git status is scoped to a subdirectory cwd", async () => {
     const r = await call("GET", "/v2/sessions/sub00001/git/status");
     expect(r.json.ok).toBe(true);
-    // Only the subdir's change is visible — nothing from the repo root.
-    expect(r.json.entries.map((e: any) => e.path)).toEqual(["sub/inner.txt"]);
+    // Only the subdir's change is visible — nothing from the repo root — and
+    // the path is relative to the SESSION CWD like every other path on this
+    // surface, not to the repository root (#601: "sub/inner.txt" fed back to
+    // files/content went looking for sub/sub/inner.txt).
+    expect(r.json.entries.map((e: any) => e.path)).toEqual(["inner.txt"]);
+    const back = await call("GET", "/v2/sessions/sub00001/files/content?path=" + encodeURIComponent(r.json.entries[0].path));
+    expect(back.json.success).toBe(true);
+    // the root session still sees root-relative paths (prefix is empty there)
+    const root = await call("GET", "/v2/sessions/abcd1234/git/status");
+    expect(root.json.entries.map((e: any) => e.path)).toContain("sub/inner.txt");
     const diff = await call("GET", "/v2/sessions/sub00001/git/diff");
     expect(diff.json.diff).toContain("+changed");
     expect(diff.json.diff).not.toContain("tracked.txt");
@@ -325,5 +342,96 @@ describe("review fixes: regression coverage", () => {
     });
     expect(r.status).toBe(400);
     expect(((await r.json()) as { error: string }).error).toBe("bad_json");
+  });
+
+  test("#599 body id/qid never redirect an operation away from the URL's session", async () => {
+    enqueued.abcd1234.length = 0; enqueued.sub00001.length = 0;
+    const r = await call("POST", "/v2/sessions/abcd1234/queue", { body: { id: "sub00001", text: "dangerous-command" } });
+    expect(r.status).toBe(200);
+    expect(r.json.ok).toBe(true);
+    expect(enqueued.abcd1234).toEqual(["dangerous-command"]); // the URL's session
+    expect(enqueued.sub00001).toEqual([]);                    // never the body's
+    // an unknown URL session is a 404 even when the body names a real one
+    expect((await call("POST", "/v2/sessions/nope0000/queue", { body: { id: "abcd1234", text: "x" } })).status).toBe(404);
+  });
+
+  test("#605 invalid base64 is a 400 and the existing file is untouched; valid and empty payloads write", async () => {
+    writeFileSync(join(repo, "keep.txt"), "precious bytes\n");
+    const bad = await call("PUT", "/v2/sessions/abcd1234/files/content", { body: { path: "keep.txt", content: "%%%", encoding: "base64" } });
+    expect(bad.status).toBe(400);
+    expect(bad.json.error).toBe("invalid_base64");
+    expect(readFileSync(join(repo, "keep.txt"), "utf8")).toBe("precious bytes\n");
+    // truncated (unpadded) and non-canonical payloads are refused the same way
+    for (const content of ["QUJD", "QUJDR", "QR=="]) {
+      const r = await call("PUT", "/v2/sessions/abcd1234/files/content", { body: { path: "keep.txt", content, encoding: "base64" } });
+      expect([content, r.status]).toEqual([content, content === "QUJD" ? 200 : 400]);
+    }
+    expect(readFileSync(join(repo, "keep.txt"), "utf8")).toBe("ABC"); // the one valid write landed
+    const unknown = await call("PUT", "/v2/sessions/abcd1234/files/content", { body: { path: "keep.txt", content: "x", encoding: "hex" } });
+    expect(unknown.status).toBe(400);
+    // a deliberately empty file is still expressible
+    const empty = await call("PUT", "/v2/sessions/abcd1234/files/content", { body: { path: "keep.txt", content: "", encoding: "base64" } });
+    expect(empty.status).toBe(200);
+    expect(readFileSync(join(repo, "keep.txt"), "utf8")).toBe("");
+    unlinkSync(join(repo, "keep.txt"));
+  });
+
+  test("decodeBase64Strict: exactly what Buffer.from would have mangled is refused", () => {
+    expect(decodeBase64Strict("")).toEqual(Buffer.alloc(0));
+    expect(decodeBase64Strict("aGVsbG8=")?.toString()).toBe("hello");
+    expect(decodeBase64Strict("aGVs\nbG8=\n")?.toString()).toBe("hello"); // wrapped lines are fine
+    expect(decodeBase64Strict("%%%")).toBeNull();
+    expect(decodeBase64Strict("aGVsbG8")).toBeNull();   // missing padding
+    expect(decodeBase64Strict("QR==")).toBeNull();      // non-canonical trailing bits
+    expect(decodeBase64Strict("aGVsbG8=====")).toBeNull();
+  });
+
+  test("#603 a tracked symlink is diffed as ITSELF, not as its target", async () => {
+    writeFileSync(join(repo, "target.txt"), "one\n");
+    writeFileSync(join(repo, "target2.txt"), "two\n");
+    symlinkSync("target.txt", join(repo, "link.txt"));
+    g(["add", "target.txt", "target2.txt", "link.txt"]);
+    g(["commit", "-q", "-m", "symlink"]);
+    try {
+      // Stage a retarget: link.txt → target2.txt. Nothing about target2.txt
+      // itself changed, so resolving the operand to the target hid the change.
+      unlinkSync(join(repo, "link.txt"));
+      symlinkSync("target2.txt", join(repo, "link.txt"));
+      g(["add", "link.txt"]);
+      const d = await call("GET", "/v2/sessions/abcd1234/git/diff?staged=1&path=link.txt");
+      expect(d.json.ok).toBe(true);
+      expect(d.json.diff).toContain("-target.txt");
+      expect(d.json.diff).toContain("+target2.txt");
+      const e = await call("GET", "/v2/sessions/abcd1234/git/entries?path=link.txt");
+      expect(e.json.files).toEqual(["link.txt"]);
+    } finally {
+      g(["reset", "-q", "HEAD", "link.txt"]);
+      unlinkSync(join(repo, "link.txt"));
+      symlinkSync("target.txt", join(repo, "link.txt"));
+    }
+  });
+});
+
+describe("#174 DELETE /v2/sessions/:id ifStatus pass-through", () => {
+  test("ifStatus from the query string and from a body both reach the kill op; a plain kill still answers 200", async () => {
+    // The kill op reads ifStatus and answers status_mismatch when the live
+    // status differs (operations.ts, #174) — the transport maps that to 409.
+    // Here the fake session's kill path records what the op was handed.
+    const killed: any[] = [];
+    const s = (globalThis as any).__v2KillSession as any;
+    s.end = (reason: string) => { killed.push(reason); };
+    s.awaitArchive = async () => true;
+    const q = await call("DELETE", "/v2/sessions/abcd1234?ifStatus=ended");
+    expect([200, 409]).toContain(q.status);
+    if (q.status === 409) {
+      expect(q.json).toMatchObject({ ok: false, error: "status_mismatch", status: "active" });
+      expect(killed).toEqual([]); // a mismatch never kills
+    }
+    const b = await call("DELETE", "/v2/sessions/abcd1234", { body: { ifStatus: "ended" } });
+    expect(b.status).toBe(q.status); // the body form is honoured exactly like the query form
+    const plain = await call("DELETE", "/v2/sessions/abcd1234");
+    expect(plain.status).toBe(200);
+    expect(plain.json.ok).toBe(true);
+    expect(killed).toContain("killed");
   });
 });

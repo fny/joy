@@ -33,6 +33,14 @@ export interface SpooledOutput {
   wire: WireRecord;
   runtimeEventId: string;
   at: number;
+  /** The sealing identity the record was spooled under (#582). `sealed`
+   *  true = the session had a content key when this was spooled and the
+   *  record must NEVER leave in plaintext; `key` is that key (base64) so a
+   *  replay can still seal it after the session's window record — the
+   *  key's other home — is gone. Absent on entries from before the field
+   *  existed (the sender treats those as sealed on a sealing daemon). */
+  sealed?: boolean;
+  key?: string;
 }
 
 export interface SpooledTerminal {
@@ -122,11 +130,16 @@ export class OutboundSpool {
     if (this.#entries.length !== before) this.#save();
   }
 
-  /** Stamp the relay session id on an entry spooled before bind. */
-  bind(localId: string, v2SessionId: string): SpooledOutput[] {
+  /** Stamp the relay session id — and the sealing identity it is sent under
+   *  (#582) — on an entry spooled before bind. */
+  bind(localId: string, v2SessionId: string, seal?: { sealed: boolean; key?: string }): SpooledOutput[] {
     const hits: SpooledOutput[] = [];
     for (const e of this.#entries) {
-      if (e.kind === "output" && e.localId === localId && !e.v2SessionId) { e.v2SessionId = v2SessionId; hits.push(e); }
+      if (e.kind === "output" && e.localId === localId && !e.v2SessionId) {
+        e.v2SessionId = v2SessionId;
+        if (seal) { e.sealed = seal.sealed; if (seal.key) e.key = seal.key; else delete e.key; }
+        hits.push(e);
+      }
     }
     if (hits.length) this.#save();
     return hits;
