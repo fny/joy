@@ -16,7 +16,7 @@ import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
 import { launchdPlist } from "./launchdPlist";
 import { shellQuote } from "./domain/quote";
-import { SUPERVISOR_ENV, type DaemonLauncher } from "./daemonLauncher";
+import { SUPERVISOR_ENV, processStartId, type DaemonLauncher } from "./daemonLauncher";
 
 // --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
 // invocation addresses. Consumed HERE, before any relay-scoped const below is
@@ -83,10 +83,11 @@ const ok = c.g("✓");
 const bad = c.r("✗");
 const warn = c.y("!");
 
-/** daemon.json. `entry`/`exec` (#495 residual) are the daemon's own
- *  process.argv[1] and process.execPath, recorded at start so a stale pid can
- *  be checked against the exact script it should be running. */
-type DaemonState = { token: string; pid: number; port: number; relay?: string; startedAt: number; version: string; entry?: string; exec?: string; launcher?: DaemonLauncher };
+/** daemon.json. `startId`/`entry`/`exec` (#495) are the daemon's own kernel
+ *  start identity (processStartId), process.argv[1] and process.execPath,
+ *  recorded at start so a pid found in the file can be proven to still be
+ *  the process that wrote it before `joy stop` signals it. */
+type DaemonState = { token: string; pid: number; port: number; relay?: string; startedAt: number; version: string; startId?: string | null; entry?: string; exec?: string; launcher?: DaemonLauncher };
 
 
 function readState(): DaemonState | null {
@@ -220,24 +221,32 @@ async function cmdStart(): Promise<number> {
   return 1;
 }
 
-/** What the OS says process `pid` is: its command line and, where the kernel
- *  tells us (Linux /proc), when it started and its working directory (to
- *  resolve a relative script operand). null = no such process. */
-export interface ProcessIdentity { command: string; startedAt?: number; cwd?: string }
+/** What the OS says process `pid` is: its argv (OS boundaries preserved where
+ *  the kernel gives them — Linux /proc/<pid>/cmdline is NUL-delimited; macOS
+ *  `ps` prints one joined string, split on whitespace as a best effort), its
+ *  executable (Linux /proc/<pid>/exe), its kernel start identity
+ *  (processStartId), when it started, and its working directory (to resolve
+ *  a relative script operand). null = no such process. */
+export interface ProcessIdentity { argv: string[]; command: string; exe?: string; startId?: string; startedAt?: number; cwd?: string }
 export function processIdentity(pid: number): ProcessIdentity | null {
   if (osPlatform() === "linux") {
-    let command: string;
+    let argv: string[];
     try {
-      command = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ");
+      argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+      if (argv[argv.length - 1] === "") argv.pop(); // the trailing NUL terminator
     } catch { return null; }
     let cwd: string | undefined;
     try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { /* a foreign uid's process; the command alone decides */ }
+    let exe: string | undefined;
+    // "/path/to/node (deleted)" when the binary was replaced (a node upgrade
+    // under a running daemon): still the binary it started from.
+    try { exe = readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, ""); } catch { /* foreign uid, or a kernel thread */ }
     let startedAt: number | undefined;
     try {
-      // /proc/<pid>/stat: "pid (comm) state ppid …"; comm may contain spaces
-      // and parens, so split after the LAST ')'. starttime is field 22 overall
-      // = index 19 after the comm, in clock ticks since boot (CLK_TCK = 100 on
-      // every Linux Node ships for); btime is the boot time in epoch seconds.
+      // starttime (field 22 of /proc/<pid>/stat) in clock ticks since boot
+      // (CLK_TCK = 100 on every Linux Node ships for); btime is the boot time
+      // in epoch seconds. For the legacy skew check only — the exact identity
+      // is startId.
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
       const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
       const ticks = Number(fields[19]);
@@ -245,38 +254,63 @@ export function processIdentity(pid: number): ProcessIdentity | null {
       const btime = btimeLine ? Number(btimeLine.slice(6).trim()) : NaN;
       if (Number.isFinite(ticks) && Number.isFinite(btime)) startedAt = (btime + ticks / 100) * 1000;
     } catch { /* command alone still identifies it */ }
-    return { command, startedAt, cwd };
+    return { argv, command: argv.join(" "), exe, startId: processStartId(pid) ?? undefined, startedAt, cwd };
   }
   const r = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
   const command = r.status === 0 ? r.stdout.trim() : "";
-  return command ? { command } : null;
+  if (!command) return null;
+  return { argv: command.split(/\s+/), command, startId: processStartId(pid) ?? undefined };
 }
 
-/** The script operand of a `node [flags] <script>` command line, when it is a
- *  server.ts: the first whitespace-separated token ending in `server.ts`. */
-export function serverEntryOf(command: string): string | null {
-  // The script operand is the first argument after the executable that is
-  // neither a flag nor a flag's value — not "any token ending in server.ts":
-  // `python3 unrelated.py …/server.ts` named our entry as a trailing argument
-  // and passed (Astra on 6d994569, #495).
-  const argv = command.trim().split(/\s+/);
-  const valued = new Set(["--import", "--require", "-r", "--loader", "--experimental-loader", "--conditions", "-C", "--env-file", "--eval", "-e", "--print", "-p", "--input-type", "--title", "--stack-size", "--max-old-space-size", "--openssl-config", "--icu-data-dir", "--inspect-port", "--report-directory"]);
-  for (let i = 1; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith("-")) { if (valued.has(a) && !a.includes("=")) i++; continue; }
+/** Node options that consume the next argument. `-e`/`-p` are deliberately
+ *  NOT here: a process running them is executing inline code, not a script,
+ *  and is handled as such below. */
+const NODE_VALUED_FLAGS = new Set(["--import", "--require", "-r", "--loader", "--experimental-loader", "--conditions", "-C", "--env-file", "--env-file-if-exists", "--input-type", "--title", "--stack-size", "--max-old-space-size", "--openssl-config", "--icu-data-dir", "--inspect-port", "--report-directory", "--disable-warning", "--experimental-default-type", "--redirect-warnings", "--secure-heap", "--secure-heap-min", "--snapshot-blob", "--test-name-pattern", "--test-reporter", "--test-reporter-destination", "--unhandled-rejections", "--watch-path", "--heapsnapshot-signal", "--diagnostic-dir", "--dns-result-order", "--experimental-config-file", "--localstorage-file", "--max-http-header-size", "--openssl-shared-config", "--tls-cipher-list", "--tls-keylog", "--use-largepages", "--v8-options"]);
+/** Node switches under which the process is NOT running a script: it is
+ *  evaluating inline code, reading a program from stdin, or sitting in the
+ *  REPL. Whatever arguments follow are that program's data. */
+const NODE_NO_SCRIPT_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-i", "--interactive", "-", "-c", "--check"]);
+
+/** The script a `node [options] <script> [args…]` argv actually launches,
+ *  when it is a server.ts; null when the process is running something else.
+ *  Takes the OS argv (boundaries intact — a loader path with a space is one
+ *  argument) or, from macOS `ps`, the joined command line.
+ *
+ *  Role, not occurrence (#495): the script is the FIRST operand after node's
+ *  own options and their values. A path to our server.ts anywhere else on
+ *  the line — `python3 unrelated.py …/server.ts`, `node -e "…" …/server.ts`
+ *  (data to the inline program), `node other.js …/server.ts` — does not make
+ *  the process our daemon. */
+export function serverEntryOf(argv: string[] | string): string | null {
+  const args = Array.isArray(argv) ? argv : argv.trim().split(/\s+/);
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") { const next = args[i + 1]; return next && next.endsWith("server.ts") ? next : null; }
+    if (NODE_NO_SCRIPT_FLAGS.has(a)) return null;
+    if (a.startsWith("-")) {
+      const name = a.includes("=") ? a.slice(0, a.indexOf("=")) : a;
+      if (NODE_NO_SCRIPT_FLAGS.has(name)) return null; // --eval=code, --print=code
+      if (NODE_VALUED_FLAGS.has(a)) i++; // `--import x`; `--import=x` carries its value
+      continue;
+    }
     return a.endsWith("server.ts") ? a : null; // the first operand IS the script; anything else is another program
   }
   return null;
 }
 
-/** Does the live command's executable match the recorded process.execPath?
- *  argv[0] is often a bare `node` or a symlink, so both sides are resolved
- *  through PATH and realpath; an executable that cannot be resolved is not
- *  evidence either way (Astra on 6d994569, #495). */
-export function execMatches(command: string, recordedExec: string | undefined): boolean {
+/** Does the live process run the recorded process.execPath? The kernel's
+ *  answer (Linux /proc/<pid>/exe) is authoritative when readable; otherwise
+ *  argv[0] is resolved through PATH and realpath like process.execPath is.
+ *  `null` = no evidence either way (argv[0] unresolvable, or the recorded
+ *  binary gone): NOT a match — the caller decides whether the other
+ *  evidence carries it (Astra on 1e11fd5f, #495). */
+export function execMatches(identity: Pick<ProcessIdentity, "argv" | "exe">, recordedExec: string | undefined): boolean | null {
   if (!recordedExec) return true;
-  const argv0 = command.trim().split(/\s+/)[0] ?? "";
-  if (!argv0) return true;
+  const canon = (p: string): string => { try { return realpathSync(p); } catch { return p; } };
+  const want = canon(recordedExec);
+  if (identity.exe) return canon(identity.exe) === want;
+  const argv0 = identity.argv[0] ?? "";
+  if (!argv0) return null;
   const resolveExec = (p: string): string | null => {
     try {
       if (p.includes("/")) return realpathSync(p);
@@ -284,58 +318,81 @@ export function execMatches(command: string, recordedExec: string | undefined): 
       return null;
     } catch { return null; }
   };
-  const a = resolveExec(argv0); const b = resolveExec(recordedExec);
-  if (!a || !b) return true;
-  return a === b;
+  const got = resolveExec(argv0);
+  if (!got) return null;
+  return got === want;
 }
 
 /** LEGACY identity, for a daemon.json written before `entry` was recorded
- *  (#495 residual): the server.ts must sit under a `joy-daemon/` path segment
- *  — a checkout (packages/joy-daemon/src/server.ts) or an install
+ *  (#495): the server.ts must sit under a `joy-daemon/` path segment — a
+ *  checkout (packages/joy-daemon/src/server.ts) or an install
  *  (@fny/joy-daemon/src/server.ts). The old rule, "contains server.ts and
  *  tsx", accepted `node --import tsx /home/u/unrelated/server.ts`. */
-export function looksLikeJoyDaemon(command: string): boolean {
-  const entry = serverEntryOf(command);
+export function looksLikeJoyDaemon(argv: string[] | string): boolean {
+  const entry = serverEntryOf(argv);
   return !!entry && /(^|\/)joy-daemon\//.test(entry);
 }
 
-/** daemon.json wrote startedAt a moment after the process started (module
- *  load, then listen). Anything further apart than this is a different
- *  process that inherited the pid. */
+/** LEGACY daemon.json (no startId) wrote startedAt a moment after the
+ *  process started (module load, then listen). Anything further apart than
+ *  this is a different process that inherited the pid. */
 const START_SKEW_MS = 120_000;
 
 /** Is `pid` the daemon `state` (daemon.json) describes — not merely a live
  *  process that inherited its number? A pid in a file outlives the process
- *  that wrote it; `joy stop` used to SIGTERM whatever now held it (#495). */
+ *  that wrote it; `joy stop` used to SIGTERM whatever now held it (#495).
+ *
+ *  `stale: true` = proven to be some OTHER process (or none): the record can
+ *  go. `stale: false` = the OS gave too little evidence to prove it either
+ *  way: the record stays and nothing is signalled.
+ *
+ *  A record with `startId` is verified exactly: the live pid's kernel start
+ *  identity must equal the recorded one (pid + start time is the OS's own
+ *  notion of process identity — a reused pid cannot reproduce it), its
+ *  script operand must be exactly the recorded entry, and its executable
+ *  must match the recorded one wherever the OS gives executable evidence.
+ *  A legacy record falls back to the joy-daemon/ path rule and the
+ *  startedAt skew. */
 export function verifyDaemonPid(
   pid: number,
-  state: { startedAt?: number; entry?: string; exec?: string } | null,
+  state: { startedAt?: number; startId?: string | null; entry?: string; exec?: string } | null,
   identity: ProcessIdentity | null,
-): { ok: true } | { ok: false; reason: string } {
-  if (!identity) return { ok: false, reason: `pid ${pid} is not running` };
+): { ok: true } | { ok: false; stale: boolean; reason: string } {
+  if (!identity) return { ok: false, stale: true, reason: `pid ${pid} is not running` };
   const shown = identity.command.slice(0, 80) || "unknown command";
+  if (state?.startId) {
+    if (!identity.startId) return { ok: false, stale: false, reason: `the OS did not report when pid ${pid} started, so it cannot be matched to daemon.json` };
+    if (identity.startId !== state.startId) {
+      return { ok: false, stale: true, reason: `stale pid: pid ${pid} started at a different time than daemon.json records — the number was reused (running: ${shown})` };
+    }
+  }
   if (state?.entry) {
     // The daemon recorded the script it runs (process.argv[1], absolute): the
-    // live command line must name EXACTLY that file (#495 residual) — a
-    // same-looking joy-daemon from another install, or any other server.ts,
-    // is not the process daemon.json describes. A relative operand (`tsx
-    // src/server.ts` from the package dir) is resolved against the process's
-    // cwd where the kernel reports it. `exec` is recorded for the log but not
-    // enforced: process.execPath is the real binary while argv[0] is often a
-    // bare `node` or a symlink, so it would only produce false "stale"s.
-    const operand = serverEntryOf(identity.command);
+    // live argv must launch EXACTLY that file — a same-looking joy-daemon
+    // from another install, or any other server.ts, is not the process
+    // daemon.json describes. A relative operand (`tsx src/server.ts` from the
+    // package dir) is resolved against the process's cwd where the kernel
+    // reports it.
+    const operand = serverEntryOf(identity.argv);
     const entry = operand && !isAbsolute(operand) && identity.cwd ? resolve(identity.cwd, operand) : operand;
     if (entry !== state.entry) {
-      return { ok: false, reason: `pid ${pid} is not the daemon daemon.json records (expected ${state.entry}; running: ${shown})` };
+      return { ok: false, stale: true, reason: `stale pid: pid ${pid} is not the daemon daemon.json records (expected ${state.entry}; running: ${shown})` };
     }
-    if (!execMatches(identity.command, state.exec)) {
-      return { ok: false, reason: `pid ${pid} runs a different executable than daemon.json records (${shown})` };
+    const exec = execMatches(identity, state.exec);
+    if (exec === false) {
+      return { ok: false, stale: true, reason: `stale pid: pid ${pid} runs a different executable than daemon.json records (${shown})` };
     }
-  } else if (!looksLikeJoyDaemon(identity.command)) {
-    return { ok: false, reason: `pid ${pid} is not a joy-daemon (${shown})` };
+    // No executable evidence at all: the exact start identity carries a new
+    // record on its own; a legacy record has only the skew below, which is
+    // not proof.
+    if (exec === null && !state.startId) {
+      return { ok: false, stale: false, reason: `pid ${pid}'s executable could not be resolved to compare with daemon.json (${shown})` };
+    }
+  } else if (!looksLikeJoyDaemon(identity.argv)) {
+    return { ok: false, stale: true, reason: `stale pid: pid ${pid} is not a joy-daemon (${shown})` };
   }
-  if (identity.startedAt && state?.startedAt && Math.abs(identity.startedAt - state.startedAt) > START_SKEW_MS) {
-    return { ok: false, reason: `pid ${pid} started at a different time than daemon.json records — a reused pid` };
+  if (!state?.startId && identity.startedAt && state?.startedAt && Math.abs(identity.startedAt - state.startedAt) > START_SKEW_MS) {
+    return { ok: false, stale: true, reason: `stale pid: pid ${pid} started at a different time than daemon.json records — the number was reused` };
   }
   return { ok: true };
 }
@@ -451,17 +508,34 @@ export function resolveOwnership(pid: number, deps: StopDeps, state: Pick<Daemon
 export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number> {
   const s = await probe();
   const st = readState();
-  // A daemon that answered the token-authenticated /status IS the daemon:
-  // its own pid is authoritative. Without an answer the only evidence is
-  // daemon.json, which outlives its writer — verify before signalling (#495).
-  let pid: number | undefined = s?.pid;
+  // A daemon that answered /status under daemon.json's token IS the daemon
+  // the record describes (the token is minted per launch, so it names this
+  // instance): the pid it reports for itself is authoritative. Without an
+  // answer the only evidence is daemon.json, which outlives its writer — the
+  // pid must be proven to still be OUR daemon before anything is signalled
+  // (#495): exact kernel start identity, exact entry script, matching
+  // executable. A reused pid is refused as stale; too little OS evidence is
+  // refused as unverifiable. Neither gets a signal.
+  let pid: number | undefined = Number.isInteger(s?.pid) && s.pid > 0 ? s.pid : undefined;
   if (!pid) {
     if (!st?.pid) { console.log("daemon not running"); return 0; }
-    const v = verifyDaemonPid(st.pid, st, processIdentity(st.pid));
+    const identity = processIdentity(st.pid);
+    const v = verifyDaemonPid(st.pid, st, identity);
     if (!v.ok) {
-      try { rmSync(STATE_FILE); } catch { /* already gone */ }
-      console.log(`${warn} stale daemon.json removed (${v.reason}) — nothing signalled`);
-      return 0;
+      if (!identity) {
+        try { rmSync(STATE_FILE); } catch { /* already gone */ }
+        console.log(`daemon not running (${v.reason}; stale daemon.json removed)`);
+        return 0;
+      }
+      if (v.stale) {
+        try { rmSync(STATE_FILE); } catch { /* already gone */ }
+        console.log(`${bad} ${v.reason}`);
+        console.log(`  ${c.dim("stale daemon.json removed — nothing signalled")}`);
+        return 1;
+      }
+      console.log(`${bad} cannot prove pid ${st.pid} is the daemon daemon.json records (${v.reason}) — nothing signalled`);
+      console.log(`  ${c.dim(`if it is your daemon, signal pid ${st.pid} yourself; if not, remove ${STATE_FILE}`)}`);
+      return 1;
     }
     pid = st.pid;
   }

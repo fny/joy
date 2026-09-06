@@ -1,16 +1,20 @@
 // CLI helpers that decide WHAT to launch and WHAT to signal. Pure functions
 // exported from cli.ts; the module's main() is gated off under vitest.
 import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "node:url";
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import * as http from "node:http";
+import type { ProcessIdentity } from "./cli";
 
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
 delete process.env.JOY_SESSION_ID;
-const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn } = await import("./cli");
-const { launcherFromEnv } = await import("./daemonLauncher");
+const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, execMatches, processIdentity, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn } = await import("./cli");
+const { launcherFromEnv, processStartId } = await import("./daemonLauncher");
 const { joyStateDir } = await import("./paths");
 
 // ── a fake daemon: the CLI finds it through daemon.json in the (isolated) state dir ──
@@ -774,89 +778,268 @@ describe("resolvePkgDir (#503)", () => {
   });
 });
 
-describe("verifyDaemonPid (#495)", () => {
-  const daemonCmd = "/usr/bin/node --import tsx /home/u/.local/share/pnpm/global/5/node_modules/@fny/joy-daemon/src/server.ts";
+// ── #495: a pid in daemon.json is a number, not a process ──────────────────
+/** An OS identity from an argv (or a `ps`-style joined command line). */
+const ident = (argv: string[] | string, extra: Partial<ProcessIdentity> = {}): ProcessIdentity => {
+  const a = Array.isArray(argv) ? argv : argv.trim().split(/\s+/);
+  return { argv: a, command: a.join(" "), ...extra };
+};
+const linux = process.platform === "linux";
 
-  test("recognizes the daemon's command line and nothing else (legacy rule: a joy-daemon/ path segment)", () => {
-    expect(looksLikeJoyDaemon(daemonCmd)).toBe(true);
+describe("verifyDaemonPid (#495)", () => {
+  const entry = "/home/u/.local/share/pnpm/global/5/node_modules/@fny/joy-daemon/src/server.ts";
+  const daemonArgv = ["/usr/bin/node", "--import", "tsx", entry];
+  const daemonCmd = daemonArgv.join(" ");
+
+  test("legacy rule: a joy-daemon/ path segment on the script operand, nothing else", () => {
+    expect(looksLikeJoyDaemon(daemonArgv)).toBe(true);
+    expect(looksLikeJoyDaemon(daemonCmd)).toBe(true); // macOS ps: joined
     expect(looksLikeJoyDaemon("node --import tsx /w/joy/packages/joy-daemon/src/server.ts")).toBe(true);
     expect(looksLikeJoyDaemon("/usr/bin/vim notes.txt")).toBe(false);
     expect(looksLikeJoyDaemon("node server.ts")).toBe(false);            // some other server.ts, not ours
-    expect(looksLikeJoyDaemon("bash -c 'echo joy-daemon server.tsx'")).toBe(false);
-    expect(looksLikeJoyDaemon("")).toBe(false);
-    // #495 residual (Astra): "server.ts and tsx" is not Joy. An unrelated tsx
-    // app must never be signalled on the strength of a stale daemon.json.
+    expect(looksLikeJoyDaemon(["bash", "-c", "echo joy-daemon server.tsx"])).toBe(false);
+    expect(looksLikeJoyDaemon([])).toBe(false);
+    // "server.ts and tsx" is not Joy: an unrelated tsx app must never be
+    // signalled on the strength of a stale daemon.json (Astra on 53d22103).
     expect(looksLikeJoyDaemon("node --import tsx /home/u/unrelated/server.ts")).toBe(false);
     expect(looksLikeJoyDaemon("/usr/bin/node /home/u/node_modules/tsx/dist/cli.mjs server.ts")).toBe(false);
     expect(looksLikeJoyDaemon("node --import tsx /home/u/joy-daemon-notes/server.ts")).toBe(false); // segment, not substring
   });
 
-  test("serverEntryOf picks the script operand", () => {
-    expect(serverEntryOf(daemonCmd)).toBe("/home/u/.local/share/pnpm/global/5/node_modules/@fny/joy-daemon/src/server.ts");
+  test("serverEntryOf: the script is the first operand after node's options — its ROLE, not its occurrence", () => {
+    expect(serverEntryOf(daemonArgv)).toBe(entry);
     expect(serverEntryOf("node --import tsx src/server.ts")).toBe("src/server.ts");
+    expect(serverEntryOf(["node", "--import=tsx", entry])).toBe(entry);           // --flag=value carries its value
+    expect(serverEntryOf(["node", "--", entry])).toBe(entry);                      // `--` ends the options
     expect(serverEntryOf("node --import tsx /x/server.tsx")).toBeNull();
     expect(serverEntryOf("vim notes.txt")).toBeNull();
+    // our path as a trailing ARGUMENT to another program (Astra on 6d994569)
+    expect(serverEntryOf(["/usr/bin/python3", "/home/u/unrelated.py", entry])).toBeNull();
+    expect(serverEntryOf(["node", "/home/u/other.js", entry])).toBeNull();
   });
 
-  describe("with the recorded entry (#495 residual)", () => {
-    const entry = "/home/u/.local/share/pnpm/global/5/node_modules/@fny/joy-daemon/src/server.ts";
+  test("serverEntryOf: node -e / -p / stdin / REPL run inline code, not a script — our path after them is that program's data (Astra on 1e11fd5f)", () => {
+    expect(serverEntryOf(["node", "-e", "setInterval(() => {}, 1000)", entry])).toBeNull();
+    expect(serverEntryOf(["node", "--eval", "setInterval(() => {}, 1000)", entry])).toBeNull();
+    expect(serverEntryOf(["node", `--eval=setInterval(() => {}, 1000)`, entry])).toBeNull();
+    expect(serverEntryOf(["node", "--import", "tsx", "-e", "1", entry])).toBeNull();
+    expect(serverEntryOf(["node", "-p", "1", entry])).toBeNull();
+    expect(serverEntryOf(["node", "-", entry])).toBeNull();
+    expect(serverEntryOf(["node", "-i", entry])).toBeNull();
+    expect(serverEntryOf(["node", "--check", entry])).toBeNull(); // syntax-checked, not run
+  });
+
+  test("serverEntryOf: OS argv boundaries survive — a loader path with a space is one argument (Astra on 1e11fd5f)", () => {
+    const argv = ["/usr/bin/node", "--import", "/home/u/My Tools/tsx.mjs", entry];
+    expect(serverEntryOf(argv)).toBe(entry);
+    // flattened to a string the same command misparses: that is why the
+    // kernel's argv, not a joined command line, is what gets verified on Linux
+    expect(serverEntryOf(argv.join(" "))).toBeNull();
+  });
+
+  test("execMatches: the kernel's exe is authoritative; argv[0] is resolved through PATH; no evidence is NOT a match", () => {
+    const node = process.execPath;
+    expect(execMatches(ident(["node"], { exe: node }), node)).toBe(true);
+    expect(execMatches(ident([node], { exe: "/usr/bin/python3" }), node)).toBe(false); // kernel beats argv[0]
+    expect(execMatches(ident([node]), node)).toBe(true);
+    expect(execMatches(ident(["/usr/bin/python3"]), node)).toBe(false);
+    expect(execMatches(ident(["no-such-binary-495"]), node)).toBeNull();
+    expect(execMatches(ident([]), node)).toBeNull();
+    expect(execMatches(ident(["anything"]), undefined)).toBe(true); // legacy record: nothing recorded to compare
+  });
+
+  describe("with a recorded start identity (daemon.json startId)", () => {
+    const startId = "linux:4772d6e9-boot:450459409";
+    const rec = { startedAt: Date.now(), startId, entry, exec: "/usr/bin/node" };
+    const live = (extra: Partial<ProcessIdentity> = {}) => ident(daemonArgv, { startId, exe: "/usr/bin/node", ...extra });
+
+    test("the live pid's start identity must EQUAL the recorded one — a different start is a reused pid, stale", () => {
+      const v = verifyDaemonPid(4242, rec, live({ startId: "linux:4772d6e9-boot:450459999" }));
+      expect(v).toMatchObject({ ok: false, stale: true });
+      if (!v.ok) expect(v.reason).toMatch(/^stale pid: .*reused/);
+      // ...even across a reboot (same tick count, another boot id)
+      expect(verifyDaemonPid(4242, rec, live({ startId: "linux:other-boot:450459409" }))).toMatchObject({ ok: false, stale: true });
+      // a 120 s skew on startedAt is NOT the fence any more: same wall-clock, different start identity → stale
+      expect(verifyDaemonPid(4242, rec, live({ startId: "linux:4772d6e9-boot:450459410", startedAt: rec.startedAt }))).toMatchObject({ ok: false, stale: true });
+    });
+
+    test("no start identity from the OS: unverifiable (the record stays), never a signal", () => {
+      const v = verifyDaemonPid(4242, rec, live({ startId: undefined }));
+      expect(v).toMatchObject({ ok: false, stale: false });
+    });
+
+    test("same start identity but the process is not our daemon: stale", () => {
+      // pid reused by an unrelated program
+      expect(verifyDaemonPid(4242, rec, ident(["sleep", "300"], { startId, exe: "/usr/bin/sleep" }))).toMatchObject({ ok: false, stale: true });
+      // node -e with our server.ts as data
+      expect(verifyDaemonPid(4242, rec, ident(["/usr/bin/node", "-e", "setInterval(()=>{},1e3)", entry], { startId, exe: "/usr/bin/node" }))).toMatchObject({ ok: false, stale: true });
+      // an unrelated tsx server.ts, a joy-daemon from ANOTHER install
+      expect(verifyDaemonPid(4242, rec, ident(["/usr/bin/node", "--import", "tsx", "/home/u/unrelated/server.ts"], { startId, exe: "/usr/bin/node" }))).toMatchObject({ ok: false, stale: true });
+      expect(verifyDaemonPid(4242, rec, ident(["/usr/bin/node", "--import", "tsx", "/opt/joy/packages/joy-daemon/src/server.ts"], { startId, exe: "/usr/bin/node" }))).toMatchObject({ ok: false, stale: true });
+      // right script, different binary
+      expect(verifyDaemonPid(4242, rec, live({ exe: "/usr/bin/python3" }))).toMatchObject({ ok: false, stale: true });
+    });
+
+    test("the recorded daemon passes: exact start identity, exact entry, matching binary", () => {
+      expect(verifyDaemonPid(4242, rec, live())).toEqual({ ok: true });
+      expect(verifyDaemonPid(4242, rec, live({ startedAt: rec.startedAt - 3_600_000 }))).toEqual({ ok: true }); // startedAt is not consulted once the exact identity matches
+      // a loader path with a space, from the kernel's argv
+      expect(verifyDaemonPid(4242, rec, ident(["/usr/bin/node", "--import", "/home/u/My Tools/tsx.mjs", entry], { startId, exe: "/usr/bin/node" }))).toEqual({ ok: true });
+      // a relative operand resolved against the process cwd
+      const r = { ...rec, entry: "/w/joy/packages/joy-daemon/src/server.ts" };
+      expect(verifyDaemonPid(4242, r, ident(["node", "--import", "tsx", "src/server.ts"], { startId, exe: "/usr/bin/node", cwd: "/w/joy/packages/joy-daemon" }))).toEqual({ ok: true });
+      expect(verifyDaemonPid(4242, r, ident(["node", "--import", "tsx", "src/server.ts"], { startId, exe: "/usr/bin/node" }))).toMatchObject({ ok: false, stale: true }); // no cwd to resolve it against
+      // macOS: no kernel exe and a bare `node` that PATH cannot resolve — the exact start identity carries a NEW record
+      expect(verifyDaemonPid(4242, rec, ident(["node-495-unresolvable", "--import", "tsx", entry], { startId: "darwin:Sun Sep  6 10:00:00 2026" }))).toMatchObject({ ok: false, stale: true });
+      expect(verifyDaemonPid(4242, { ...rec, startId: "darwin:Sun Sep  6 10:00:00 2026" }, ident(["node-495-unresolvable", "--import", "tsx", entry], { startId: "darwin:Sun Sep  6 10:00:00 2026" }))).toEqual({ ok: true });
+    });
+  });
+
+  describe("legacy daemon.json (no startId)", () => {
     const t = Date.now();
 
-    test("the exact recorded entry path is required — an unrelated tsx server.ts is stale, even with tsx and a matching start time", () => {
-      const v = verifyDaemonPid(4242, { startedAt: t, entry }, { command: "/usr/bin/node --import tsx /home/u/unrelated/server.ts", startedAt: t - 1_000 });
-      expect(v.ok).toBe(false);
-      if (!v.ok) expect(v.reason).toMatch(/not the daemon daemon.json records/);
-      // ...and so is a real joy-daemon from ANOTHER install (a different file).
-      const other = verifyDaemonPid(4242, { startedAt: t, entry }, { command: "/usr/bin/node --import tsx /opt/joy/packages/joy-daemon/src/server.ts", startedAt: t - 1_000 });
-      expect(other.ok).toBe(false);
-      // no kernel start time at all (macOS): the entry check alone still refuses
-      expect(verifyDaemonPid(4242, { startedAt: t, entry }, { command: "node --import tsx /home/u/unrelated/server.ts" }).ok).toBe(false);
+    test("with entry/exec: exact entry required; an unresolvable executable is unverifiable, not a pass (Astra on 1e11fd5f)", () => {
+      const rec = { startedAt: t, entry, exec: "/usr/bin/node" };
+      expect(verifyDaemonPid(4242, rec, ident("/usr/bin/node --import tsx /home/u/unrelated/server.ts", { startedAt: t - 1_000 }))).toMatchObject({ ok: false, stale: true });
+      expect(verifyDaemonPid(4242, rec, ident(daemonArgv, { exe: "/usr/bin/node", startedAt: t - 3_000 }))).toEqual({ ok: true });
+      expect(verifyDaemonPid(4242, rec, ident(["node-495-unresolvable", "--import", "tsx", entry], { startedAt: t - 3_000 }))).toMatchObject({ ok: false, stale: false });
+      expect(verifyDaemonPid(4242, { startedAt: t - 3_600_000, entry, exec: "/usr/bin/node" }, ident(daemonArgv, { exe: "/usr/bin/node", startedAt: t }))).toMatchObject({ ok: false, stale: true });
     });
 
-    test("the recorded daemon passes: exact entry, and a relative operand resolved against the process cwd", () => {
-      expect(verifyDaemonPid(4242, { startedAt: t, entry }, { command: `/usr/bin/node --import tsx ${entry}`, startedAt: t - 3_000 })).toEqual({ ok: true });
-      expect(verifyDaemonPid(4242, { startedAt: t, entry }, { command: `/usr/bin/node --import tsx ${entry}` })).toEqual({ ok: true }); // macOS: no start time
-      expect(verifyDaemonPid(4242, { startedAt: t, entry: "/w/joy/packages/joy-daemon/src/server.ts" }, { command: "node --import tsx src/server.ts", cwd: "/w/joy/packages/joy-daemon" })).toEqual({ ok: true });
-      // a relative operand with no cwd to resolve it against cannot be confirmed
-      expect(verifyDaemonPid(4242, { startedAt: t, entry: "/w/joy/packages/joy-daemon/src/server.ts" }, { command: "node --import tsx src/server.ts" }).ok).toBe(false);
+    test("without entry: the joy-daemon/ segment rule and the startedAt skew", () => {
+      expect(verifyDaemonPid(4242, { startedAt: t }, ident("node --import tsx /home/u/unrelated/server.ts", { startedAt: t }))).toMatchObject({ ok: false, stale: true });
+      expect(verifyDaemonPid(4242, { startedAt: t }, ident(daemonArgv, { startedAt: t - 3_000 }))).toEqual({ ok: true });
+      expect(verifyDaemonPid(4242, { startedAt: t }, ident(daemonArgv))).toEqual({ ok: true }); // macOS ps: no start time
+      expect(verifyDaemonPid(4242, {}, ident(daemonArgv, { startedAt: t }))).toEqual({ ok: true });
+      const v = verifyDaemonPid(4242, { startedAt: t }, ident(["/usr/bin/vim", "notes.txt"]));
+      expect(v).toMatchObject({ ok: false, stale: true });
+      if (!v.ok) expect(v.reason).toContain("not a joy-daemon");
+      const reused = verifyDaemonPid(4242, { startedAt: t - 3_600_000 }, ident(daemonArgv, { startedAt: t }));
+      expect(reused).toMatchObject({ ok: false, stale: true });
+      if (!reused.ok) expect(reused.reason).toContain("reused");
     });
 
-    test("the start-time check still applies on top of the entry match", () => {
-      const v = verifyDaemonPid(4242, { startedAt: t - 3_600_000, entry }, { command: `/usr/bin/node --import tsx ${entry}`, startedAt: t });
-      expect(v.ok).toBe(false);
-      if (!v.ok) expect(v.reason).toContain("reused pid");
-    });
-
-    test("legacy daemon.json without entry: the joy-daemon/ segment rule, never tsx alone", () => {
-      expect(verifyDaemonPid(4242, { startedAt: t }, { command: "node --import tsx /home/u/unrelated/server.ts", startedAt: t }).ok).toBe(false);
-      expect(verifyDaemonPid(4242, { startedAt: t }, { command: daemonCmd, startedAt: t })).toEqual({ ok: true });
+    test("a pid that no longer exists is stale", () => {
+      expect(verifyDaemonPid(4242, { startedAt: t }, null)).toMatchObject({ ok: false, stale: true });
     });
   });
 
-  test("a reused pid running something else is stale — never signalled", () => {
-    const v = verifyDaemonPid(4242, { startedAt: Date.now() }, { command: "/usr/bin/vim notes.txt" });
-    expect(v.ok).toBe(false);
-    if (!v.ok) expect(v.reason).toContain("not a joy-daemon");
-  });
-
-  test("a pid that no longer exists is stale", () => {
-    const v = verifyDaemonPid(4242, { startedAt: Date.now() }, null);
-    expect(v.ok).toBe(false);
-  });
-
-  test("the daemon daemon.json describes: same command, start time within skew", () => {
-    const t = Date.now();
-    expect(verifyDaemonPid(4242, { startedAt: t }, { command: daemonCmd, startedAt: t - 3_000 })).toEqual({ ok: true });
-    // no kernel start time available (macOS ps): the command line decides
-    expect(verifyDaemonPid(4242, { startedAt: t }, { command: daemonCmd })).toEqual({ ok: true });
-    // legacy daemon.json without startedAt: the command line decides
-    expect(verifyDaemonPid(4242, {}, { command: daemonCmd, startedAt: t })).toEqual({ ok: true });
-  });
-
-  test("another joy daemon that inherited the pid later is NOT the recorded one", () => {
-    const t = Date.now();
-    const v = verifyDaemonPid(4242, { startedAt: t - 3_600_000 }, { command: daemonCmd, startedAt: t });
-    expect(v.ok).toBe(false);
-    if (!v.ok) expect(v.reason).toContain("reused pid");
+  test.runIf(linux)("processIdentity + processStartId read the kernel: a live process's argv (boundaries intact), exe and start identity", async () => {
+    // not this process: vitest rewrites its own title, and on Linux that overwrites /proc/self/cmdline
+    const child = spawn("sleep", ["300", "two words"], { stdio: "ignore" });
+    await once(child, "spawn");
+    try {
+      const it = processIdentity(child.pid!)!;
+      expect(it).not.toBeNull();
+      expect(it.argv).toEqual(["sleep", "300", "two words"]);
+      expect(it.exe && realpathSync(it.exe)).toMatch(/\/sleep$/);
+      expect(it.startId).toMatch(/^linux:[0-9a-f-]+:\d+$/);
+      expect(it.startId).toBe(processStartId(child.pid!));
+      expect(it.startedAt).toBeGreaterThan(Date.now() - 60_000);
+    } finally { child.kill("SIGKILL"); }
+    expect(processIdentity(2 ** 22 - 1)).toBeNull(); // pid_max: nothing there
+    expect(processStartId(2 ** 22 - 1)).toBeNull();
   });
 });
+
+describe("joy stop never signals a pid that is not the daemon (#495, live processes)", () => {
+  const stateFile = () => join(joyStateDir(), "daemon.json");
+  const record = (pid: number, extra: Record<string, unknown>) => writeFileSync(stateFile(), JSON.stringify({ token: "tok", pid, port: daemonPort, startedAt: Date.now(), version: "test", launcher: "detached", ...extra }));
+  /** A `joy stop` with the unit inactive (no supervisor) — the direct-signal path. */
+  const unsupervised = (killed: [number, string][]) => ({ platform: "linux", run: (cmd: string, args: string[]) => cmd === "systemctl" && args.includes("show") ? { status: 0, stdout: "MainPID=0\n" } : { status: 1, stdout: "" }, kill: (pid: number, sig: string) => { killed.push([pid, sig]); } });
+  const children: ChildProcess[] = [];
+  const spawned = async (cmd: string, args: string[], cwd?: string): Promise<ChildProcess> => {
+    const child = spawn(cmd, args, { stdio: "ignore", cwd });
+    children.push(child);
+    await once(child, "spawn"); // exec has happened: /proc/<pid>/cmdline is the child's, not ours
+    return child;
+  };
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  afterAll(() => { for (const c of children) { try { c.kill("SIGKILL"); } catch { /* gone */ } } });
+
+  test.runIf(linux)("(a) the recorded pid was reused by an unrelated live process (different start identity): stale pid, exit 1, no signal", async () => {
+    const sleep = await spawned("sleep", ["300"]);
+    const pid = sleep.pid!;
+    record(pid, { startId: "linux:some-earlier-boot:1", entry: "/x/joy-daemon/src/server.ts", exec: process.execPath });
+    const killed: [number, string][] = [];
+    expect(await cmdStop(unsupervised(killed))).toBe(1);
+    expect(killed).toEqual([]);
+    expect(log.out.join("\n")).toMatch(/stale pid: pid \d+ started at a different time .* reused/);
+    expect(existsSync(stateFile())).toBe(false); // the stale record is gone…
+    expect(alive(pid)).toBe(true);               // …and the stranger is untouched
+  });
+
+  test.runIf(linux)("(b) same pid, same start identity, but the process is not a daemon: no signal, exit 1", async () => {
+    const sleep = await spawned("sleep", ["300"]);
+    const pid = sleep.pid!;
+    record(pid, { startId: processStartId(pid), entry: "/x/joy-daemon/src/server.ts", exec: process.execPath });
+    const killed: [number, string][] = [];
+    expect(await cmdStop(unsupervised(killed))).toBe(1);
+    expect(killed).toEqual([]);
+    expect(log.out.join("\n")).toMatch(/stale pid: pid \d+ is not the daemon daemon.json records/);
+    expect(alive(pid)).toBe(true);
+    // a LEGACY record (no startId/entry) pointing at the same sleep: the command-line rule refuses it
+    log.out.length = 0;
+    record(pid, {});
+    expect(await cmdStop(unsupervised(killed))).toBe(1);
+    expect(killed).toEqual([]);
+    expect(log.out.join("\n")).toMatch(/stale pid: pid \d+ is not a joy-daemon/);
+    expect(alive(pid)).toBe(true);
+  });
+
+  test.runIf(linux)("(c) a genuine daemon record — exact start identity, entry and binary — gets SIGTERM (and a supervised one goes through systemctl)", async () => {
+    // A stand-in daemon with the real command shape: node --import tsx <…/joy-daemon/src/server.ts>
+    const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const fakeHome = mkdtempSync(join(tmpdir(), "joy-495-"));
+    const entry = join(fakeHome, "node_modules", "@fny", "joy-daemon", "src", "server.ts");
+    mkdirSync(dirname(entry), { recursive: true });
+    writeFileSync(entry, "setInterval(() => {}, 60_000);\n");
+    const child = await spawned(process.execPath, ["--import", "tsx", entry], pkgDir);
+    const pid = child.pid!;
+    // what server.ts records about itself at launch
+    const genuine = { startId: processStartId(pid), entry, exec: process.execPath };
+    expect(genuine.startId).toMatch(/^linux:/);
+    // sanity: the kernel identity of the stand-in verifies against its record
+    expect(verifyDaemonPid(pid, genuine, processIdentity(pid))).toEqual({ ok: true });
+
+    record(pid, genuine);
+    const killed: [number, string][] = [];
+    expect(await cmdStop(unsupervised(killed))).toBe(0); // the fake daemon has no /status route: "stopped" once probe stays silent
+    expect(killed).toEqual([[pid, "SIGTERM"]]);
+    expect(log.out.join("\n")).toContain(`stopped (pid ${pid})`);
+
+    // #502 path unchanged: the unit owns the pid → systemctl stop, no direct signal
+    log.out.length = 0;
+    record(pid, genuine);
+    const direct: [number, string][] = []; let stopped = false;
+    const run = (cmd: string, args: string[]) => {
+      if (cmd === "systemctl" && args.includes("show")) return { status: 0, stdout: `MainPID=${pid}\n` };
+      if (cmd === "systemctl" && args.includes("stop")) { stopped = true; return { status: 0, stdout: "" }; }
+      return { status: 1, stdout: "" };
+    };
+    expect(await cmdStop({ platform: "linux", run, kill: (p, s) => { direct.push([p, s]); } })).toBe(0);
+    expect(stopped).toBe(true);
+    expect(direct).toEqual([]);
+    expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+
+    // the same record after the stand-in has exited and its pid is (simulated) taken by a sleep: stale, no signal
+    child.kill("SIGKILL"); await once(child, "exit");
+    const sleep = await spawned("sleep", ["300"]);
+    record(sleep.pid!, genuine); // the record still describes the daemon; the pid now belongs to `sleep`
+    const late: [number, string][] = [];
+    expect(await cmdStop(unsupervised(late))).toBe(1);
+    expect(late).toEqual([]);
+    expect(log.out.join("\n")).toMatch(/stale pid/);
+    expect(alive(sleep.pid!)).toBe(true);
+  });
+
+  test("a dead pid in daemon.json is just 'not running': the record is cleaned up, exit 0", async () => {
+    record(2 ** 22 - 1, { startId: "linux:x:1", entry: "/x/joy-daemon/src/server.ts" });
+    const killed: [number, string][] = [];
+    expect(await cmdStop(unsupervised(killed))).toBe(0);
+    expect(killed).toEqual([]);
+    expect(log.out.join("\n")).toContain("not running");
+    expect(existsSync(stateFile())).toBe(false);
+  });
+});
+
