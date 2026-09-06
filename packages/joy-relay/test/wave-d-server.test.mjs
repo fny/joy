@@ -20,7 +20,11 @@ describe('docs (#616, #617)', () => {
 
   // Caddy's reverse_proxy (infra/Caddyfile) sets For/Proto/Host together.
   const caddy = { 'x-forwarded-for': '203.0.113.9', 'x-forwarded-host': 'joy.example:4997' };
-  const serverUrl = (headers, socket = {}, opts = {}) => {
+  // Proxied requests arrive over loopback (Caddy on the same box); a direct
+  // client comes from elsewhere.
+  const LOOP = { remoteAddress: '127.0.0.1' };
+  const DIRECT = { remoteAddress: '203.0.113.9' };
+  const serverUrl = (headers, socket = LOOP, opts = {}) => {
     const res = fakeRes();
     handleDocs({ method: 'GET', url: `/openapi.json?token=${token}`, headers, socket }, res, { version: 't', routeTable, ...opts });
     expect(res.status).toBe(200);
@@ -30,29 +34,31 @@ describe('docs (#616, #617)', () => {
   it('#617 the advertised server matches the scheme the request arrived on', () => {
     expect(serverUrl({ host: 'localhost:3105' })).toBe('http://localhost:3105');
     expect(serverUrl({ host: 'joy.example:4997', 'x-forwarded-proto': 'https', ...caddy })).toBe('https://joy.example:4997');
-    expect(serverUrl({ host: 'joy.example' }, { encrypted: true })).toBe('https://joy.example');
+    expect(serverUrl({ host: 'joy.example' }, { ...LOOP, encrypted: true })).toBe('https://joy.example');
   });
 
   it('#617 x-forwarded-proto is validated: only http/https, first of a comma list, case-insensitive', () => {
     expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'bogus', ...caddy })).toBe('http://h');
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'javascript:', ...caddy }, { encrypted: true })).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'javascript:', ...caddy }, { ...LOOP, encrypted: true })).toBe('https://h');
     expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'HTTPS', ...caddy })).toBe('https://h');
     expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https, http', ...caddy })).toBe('https://h');
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'http', ...caddy }, { encrypted: true })).toBe('http://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'http', ...caddy }, { ...LOOP, encrypted: true })).toBe('http://h');
     expect(serverUrl({ host: 'h', 'x-forwarded-proto': '', ...caddy })).toBe('http://h');
   });
 
-  it('#617 x-forwarded-proto is honoured only when the request looks proxied, or JOY_RELAY_TRUST_PROXY says so', () => {
-    // A lone x-forwarded-proto straight at the listener is ignored.
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' })).toBe('http://h');
-    // Either companion header Caddy sends is enough.
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', 'x-forwarded-for': '203.0.113.9' })).toBe('https://h');
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'h' })).toBe('https://h');
-    // Explicit trust: honour unconditionally / never.
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' }, {}, { trustProxy: true })).toBe('https://h');
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', ...caddy }, {}, { trustProxy: false })).toBe('http://h');
-    // Validation still applies under explicit trust.
-    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'bogus' }, {}, { trustProxy: true })).toBe('http://h');
+  it('#617 x-forwarded-proto is honoured only from the proxy (loopback), or when JOY_RELAY_TRUST_PROXY says so', () => {
+    // A direct client cannot promote itself to https, whatever headers it sends
+    // (Astra on 098f188e: forwarded-for/host are client-controlled too).
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' }, DIRECT)).toBe('http://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', 'x-forwarded-for': '127.0.0.1' }, DIRECT)).toBe('http://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'h' }, DIRECT)).toBe('http://h');
+    // The proxy on the same box is trusted by address.
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' }, LOOP)).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' }, { remoteAddress: '::1' })).toBe('https://h');
+    // Explicit overrides win in both directions; validation still applies.
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' }, DIRECT, { trustProxy: true })).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', ...caddy }, LOOP, { trustProxy: false })).toBe('http://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'bogus' }, DIRECT, { trustProxy: true })).toBe('http://h');
   });
 
   it('#616 the docs page embeds its specification instead of fetching it without the perimeter key', () => {

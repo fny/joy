@@ -140,8 +140,14 @@ export function requestScheme(req, trustProxy = TRUST_PROXY) {
   const h = req.headers ?? {};
   const forwarded = String(h['x-forwarded-proto'] ?? '').split(',')[0].trim().toLowerCase();
   if (forwarded !== 'http' && forwarded !== 'https') return socketScheme;
-  const looksProxied = trustProxy === true
-    || (trustProxy === undefined && (h['x-forwarded-for'] !== undefined || h['x-forwarded-host'] !== undefined));
+  // Default trust is decided by WHERE the connection comes from, not by
+  // client-controlled headers: Caddy proxies from the same box, so a request
+  // with forwarded headers arriving over loopback is the proxy's; the same
+  // headers on a non-loopback connection are a direct client lying about the
+  // scheme (Astra on 098f188e, #617). JOY_RELAY_TRUST_PROXY=1/0 overrides.
+  const remote = String(req.socket?.remoteAddress ?? '');
+  const fromLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1' || remote.startsWith('127.');
+  const looksProxied = trustProxy === true || (trustProxy === undefined && fromLoopback);
   return looksProxied ? forwarded : socketScheme;
 }
 
