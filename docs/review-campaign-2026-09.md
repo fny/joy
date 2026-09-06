@@ -549,6 +549,21 @@ app.
   (adoption unavailability, derived terminals). **13 open**, all awaiting
   verdicts or inside those two agents.
 
+- 2026-09-09 (night) — pushed: lane restart round two (2ccd65dd daemon /
+  05267cf1 relay: an unavailable adoption answer is unresolved with backoff
+  and `adoption_pending`, never a cancel; a ledger-terminal turn gets its
+  outbox row before orphan cleanup; adopting a never-started turn takes the
+  first-start budget decision), #48/#69 residuals (4ca66f07: owner-only
+  daemon.log/state dir at the CLI opener, import strip via the secret
+  writer, boot-time `tightenSecretDir`; 13723512: BoundedTail copies only
+  the retained suffix), #628 regression fix (76490a7c: group identity
+  registered at spawn, captured members signalled after the leader exits,
+  pre-entry pid reuse refused, marker/identity at runTool, picker servers
+  and recorded-server recovery), and the #514 test injection moved to
+  statement execution after the ledger statement cache. Daemon 1223 tests
+  in three shards. In flight: #130 round three (archive repair, unknown
+  budget reads). **13 open.**
+
 ## Campaign summary (as of 2026-09-09 afternoon)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
