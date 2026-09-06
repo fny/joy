@@ -28,7 +28,6 @@ import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
 import { joySessionDir } from "../paths";
 import { ReverseUtf8Assembler } from "./textStream";
 import { shellJoin } from "./quote";
-import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, rmdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, dirname, join, resolve as resolvePath } from "path";
