@@ -358,3 +358,28 @@ describe('parseMarkdownBlock - malformed options fallback (#264 residual)', () =
         expect(parseMarkdown(huge)).toEqual([{ type: 'text', content: [{ styles: [], text: huge, url: null }] }]);
     });
 });
+
+describe('parseMarkdownBlock - pipe runs that are not tables (#622)', () => {
+    const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 500);
+
+    it('a long run of pipe lines with no separator is decided once per line, not re-collected', () => {
+        // Every line used to gather the WHOLE remaining run before failing
+        // the separator check — quadratic in the run length.
+        const run = 'a|b\n'.repeat(20_000);
+        const t0 = performance.now();
+        const blocks = parseMarkdown(run);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
+        expect(blocks.some((b) => b.type === 'table')).toBe(false);
+        expect(blocks.every((b) => b.type === 'text')).toBe(true);
+    });
+
+    it('a table preceded by a stray pipe line still parses, blank line between header and separator included', () => {
+        expect(parseMarkdown('x|y\nh1|h2\n---|---\nc1|c2')).toEqual([
+            { type: 'text', content: spans('x|y') },
+            { type: 'table', headers: [spans('h1'), spans('h2')], rows: [[spans('c1'), spans('c2')]] },
+        ]);
+        expect(parseMarkdown('h1|h2\n\n---|---\nc1|c2')).toEqual([
+            { type: 'table', headers: [spans('h1'), spans('h2')], rows: [[spans('c1'), spans('c2')]] },
+        ]);
+    });
+});
