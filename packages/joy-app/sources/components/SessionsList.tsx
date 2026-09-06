@@ -22,6 +22,7 @@ import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { useSettingMutable } from '@/sync/storage';
 import { t } from '@/text';
 import { isTouchWeb } from '@/utils/isTouchWeb';
+import { DROPPED_COLOR } from '@/-session/EventBudgetBar';
 
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
@@ -491,6 +492,16 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     <View style={styles.statusDotContainer}>
                         <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />
                     </View>
+                    {session.outputDropped && (
+                        <Ionicons
+                            name="warning"
+                            size={12}
+                            color={DROPPED_COLOR}
+                            style={{ marginRight: 4 }}
+                            accessibilityLabel={t('status.outputDropped')}
+                            testID="session-output-dropped"
+                        />
+                    )}
                     <Text style={[
                         styles.statusText,
                         { color: status.color }

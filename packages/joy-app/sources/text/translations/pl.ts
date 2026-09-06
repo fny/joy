@@ -93,6 +93,7 @@ export const pl: TranslationStructure = {
         permissionRequired: 'wymagane uprawnienie',
         detached: 'odłączony',
         compacting: 'kompaktowanie',
+        outputDropped: 'utracono wyjście — sesja pełna',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} zadań`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agentów`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -396,6 +397,13 @@ export const pl: TranslationStructure = {
         label: 'WYMAGANE DZIAŁANIE',
         fallbackTitle: 'Claude Code zadaje pytanie',
         openTerminal: 'Otwórz terminal, aby odpowiedzieć',
+    },
+    joyEventBudget: {
+        label: 'UTRACONO WYJŚCIE',
+        title: 'Ta sesja jest pełna — część rozmowy nie została zapisana',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `Nie udało się zapisać ${dropped} ${dropped === 1 ? 'rekordu' : 'rekordów'} wyjścia od ${since}, bo budżet relay dla tej sesji się wyczerpał. To się nie odnowi; nic nowego wysłanego tutaj nie zostanie zachowane.`,
+        action: 'Rozpocznij nową sesję',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins

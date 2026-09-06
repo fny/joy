@@ -84,6 +84,7 @@ export const ja: TranslationStructure = {
         permissionRequired: '権限が必要です',
         detached: 'デタッチ',
         compacting: '圧縮中',
+        outputDropped: '出力が失われました — セッション上限',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `タスク${done}/${total}`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `エージェント ${done}/${total}`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -380,6 +381,13 @@ export const ja: TranslationStructure = {
         label: '要対応',
         fallbackTitle: 'Claude Code が質問しています',
         openTerminal: 'ターミナルを開いて回答してください',
+    },
+    joyEventBudget: {
+        label: '出力が失われました',
+        title: 'このセッションは上限に達しました — 会話の一部は保存されていません',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `${since} 以降の出力 ${dropped} 件は、このセッションのリレー予算が尽きたため保存できませんでした。回復はしません。ここに新しく送っても保存されません。`,
+        action: '新しいセッションを開始',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins

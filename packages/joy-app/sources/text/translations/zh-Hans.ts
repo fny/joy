@@ -84,6 +84,7 @@ export const zhHans: TranslationStructure = {
         permissionRequired: '需要权限',
         detached: '已分离',
         compacting: '压缩中',
+        outputDropped: '输出已丢失 — 会话已满',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} 个任务`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} 智能体`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -380,6 +381,13 @@ export const zhHans: TranslationStructure = {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提问',
         openTerminal: '打开终端进行回答',
+    },
+    joyEventBudget: {
+        label: '输出已丢失',
+        title: '此会话已满 — 部分对话未保存',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `自 ${since} 起有 ${dropped} 条输出因中继对此会话的配额已用尽而无法保存。此状态不会恢复；在此发送的新内容不会被保留。`,
+        action: '开始新会话',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins

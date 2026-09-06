@@ -82,6 +82,7 @@ export const ca: TranslationStructure = {
         permissionRequired: 'permís requerit',
         detached: 'separat',
         compacting: 'compactant',
+        outputDropped: 'sortida perduda — sessió plena',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} tasques`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agents`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -379,6 +380,13 @@ export const ca: TranslationStructure = {
         label: 'ACCIÓ REQUERIDA',
         fallbackTitle: 'Claude Code està fent una pregunta',
         openTerminal: 'Obre el terminal per respondre',
+    },
+    joyEventBudget: {
+        label: 'SORTIDA PERDUDA',
+        title: 'Aquesta sessió està plena — part de la conversa no s\'ha desat',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `${dropped} ${dropped === 1 ? 'registre' : 'registres'} de sortida des de ${since} no s'han pogut desar perquè el pressupost del relay per a aquesta sessió s'ha esgotat. No es recuperarà; res de nou enviat aquí no es conservarà.`,
+        action: 'Inicia una sessió nova',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins

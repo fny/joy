@@ -81,6 +81,7 @@ export const it: TranslationStructure = {
         permissionRequired: 'permesso richiesto',
         detached: 'scollegato',
         compacting: 'compattazione',
+        outputDropped: 'output perso — sessione piena',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} attività`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agenti`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -377,6 +378,13 @@ export const it: TranslationStructure = {
         label: 'AZIONE RICHIESTA',
         fallbackTitle: 'Claude Code sta facendo una domanda',
         openTerminal: 'Apri il terminale per rispondere',
+    },
+    joyEventBudget: {
+        label: 'OUTPUT PERSO',
+        title: 'Questa sessione è piena — parte della conversazione non è stata salvata',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `${dropped} record di output da ${since} non ${dropped === 1 ? 'è stato salvato' : 'sono stati salvati'} perché il budget del relay per questa sessione è esaurito. Non si recupera; nulla di nuovo inviato qui verrà conservato.`,
+        action: 'Avvia una nuova sessione',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
