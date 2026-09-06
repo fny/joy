@@ -20,6 +20,7 @@ import { useElapsedTime } from '@/hooks/useElapsedTime';
 import { t } from '@/text';
 import { Message, ToolCall, ToolCallMessage } from '@/sync/typesMessage';
 import { getToolSummaryCategory, getToolSummaryDetail, getToolSummaryTitle, ToolSummaryCategory } from '@/utils/toolDisplay';
+import { messageDetailPath } from '@/utils/messageLink';
 import { useRouter } from 'expo-router';
 import { formatMCPTitle } from './tools/views/MCPToolView';
 import { nestedGroupContaining, RevealLayout, RevealTarget } from './searchReveal';
@@ -151,7 +152,7 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
             router.push(`/session/${sessionId}/file?path=${encodePathParam(filePath)}`);
             return;
         }
-        router.push(`/session/${sessionId}/message/${singleToolMessage.id}`);
+        router.push(messageDetailPath(sessionId, singleToolMessage));
     }, [onToggle, group.id, router, sessionId, singleToolMessage]);
     const renderGroupMessage = React.useCallback((msg: Message) => {
         const row = (
@@ -512,8 +513,8 @@ function ToolSummaryRow(props: {
             router.push(`/session/${props.sessionId}/file?path=${encodePathParam(filePath)}`);
             return;
         }
-        router.push(`/session/${props.sessionId}/message/${props.message.id}`);
-    }, [filePath, props.message.id, props.sessionId, router]);
+        router.push(messageDetailPath(props.sessionId, props.message));
+    }, [filePath, props.message, props.sessionId, router]);
 
     const content = (
         <>
