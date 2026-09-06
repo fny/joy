@@ -18,17 +18,41 @@ describe('docs (#616, #617)', () => {
   const token = process.env.JOY_RELAY_DOCS_TOKEN || 'farazyashar';
   const routeTable = { routes: [{ method: 'GET', pattern: '/joy/v2/capabilities', auth: false, summary: 'probe', params: [] }] };
 
+  // Caddy's reverse_proxy (infra/Caddyfile) sets For/Proto/Host together.
+  const caddy = { 'x-forwarded-for': '203.0.113.9', 'x-forwarded-host': 'joy.example:4997' };
+  const serverUrl = (headers, socket = {}, opts = {}) => {
+    const res = fakeRes();
+    handleDocs({ method: 'GET', url: `/openapi.json?token=${token}`, headers, socket }, res, { version: 't', routeTable, ...opts });
+    expect(res.status).toBe(200);
+    return JSON.parse(res.body).servers[0].url;
+  };
+
   it('#617 the advertised server matches the scheme the request arrived on', () => {
-    const plain = fakeRes();
-    handleDocs({ method: 'GET', url: `/openapi.json?token=${token}`, headers: { host: 'localhost:3105' }, socket: {} }, plain, { version: 't', routeTable });
-    expect(plain.status).toBe(200);
-    expect(JSON.parse(plain.body).servers).toEqual([{ url: 'http://localhost:3105' }]);
-    const proxied = fakeRes();
-    handleDocs({ method: 'GET', url: `/openapi.json?token=${token}`, headers: { host: 'joy.example:4997', 'x-forwarded-proto': 'https' }, socket: {} }, proxied, { version: 't', routeTable });
-    expect(JSON.parse(proxied.body).servers).toEqual([{ url: 'https://joy.example:4997' }]);
-    const tls = fakeRes();
-    handleDocs({ method: 'GET', url: `/openapi.json?token=${token}`, headers: { host: 'joy.example' }, socket: { encrypted: true } }, tls, { version: 't', routeTable });
-    expect(JSON.parse(tls.body).servers).toEqual([{ url: 'https://joy.example' }]);
+    expect(serverUrl({ host: 'localhost:3105' })).toBe('http://localhost:3105');
+    expect(serverUrl({ host: 'joy.example:4997', 'x-forwarded-proto': 'https', ...caddy })).toBe('https://joy.example:4997');
+    expect(serverUrl({ host: 'joy.example' }, { encrypted: true })).toBe('https://joy.example');
+  });
+
+  it('#617 x-forwarded-proto is validated: only http/https, first of a comma list, case-insensitive', () => {
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'bogus', ...caddy })).toBe('http://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'javascript:', ...caddy }, { encrypted: true })).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'HTTPS', ...caddy })).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https, http', ...caddy })).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'http', ...caddy }, { encrypted: true })).toBe('http://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': '', ...caddy })).toBe('http://h');
+  });
+
+  it('#617 x-forwarded-proto is honoured only when the request looks proxied, or JOY_RELAY_TRUST_PROXY says so', () => {
+    // A lone x-forwarded-proto straight at the listener is ignored.
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' })).toBe('http://h');
+    // Either companion header Caddy sends is enough.
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', 'x-forwarded-for': '203.0.113.9' })).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'h' })).toBe('https://h');
+    // Explicit trust: honour unconditionally / never.
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https' }, {}, { trustProxy: true })).toBe('https://h');
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'https', ...caddy }, {}, { trustProxy: false })).toBe('http://h');
+    // Validation still applies under explicit trust.
+    expect(serverUrl({ host: 'h', 'x-forwarded-proto': 'bogus' }, {}, { trustProxy: true })).toBe('http://h');
   });
 
   it('#616 the docs page embeds its specification instead of fetching it without the perimeter key', () => {

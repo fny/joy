@@ -368,7 +368,10 @@ export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIM
    *  Each device gets its own deadline that covers the request AND the body
    *  read, and devices are contacted a few at a time: a 200 whose JSON never
    *  completed used to hold a serial loop forever, so every later device on
-   *  the account got nothing (#608). */
+   *  the account got nothing (#608). The body is settled on EVERY response
+   *  path — 2xx, non-2xx, and abort — before the deadline timer is cleared:
+   *  a non-2xx used to return with its body unread, so a stalled 500 kept
+   *  its connection pinned long after the device was written off. */
   async function sendPush(accountId, { title, body, data }) {
     if (typeof title !== 'string' || !title) throw new ApiError(400, 'missing_title');
     const { tokens: list } = await listPushTokens(accountId);
@@ -379,22 +382,33 @@ export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIM
     const deliverOne = async (token) => {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(new Error('expo_timeout')), pushTimeoutMs);
+      let r = null;
       try {
-        const r = await doFetch(EXPO_PUSH_URL, {
+        r = await doFetch(EXPO_PUSH_URL, {
           method: 'POST',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: message(token),
           signal: ac.signal,
         });
-        const j = r.ok ? await underAbort(r.json().catch(() => null), ac.signal) : null;
+        // Read the body under the deadline whatever the status: Expo puts
+        // request-level errors ({errors:[{code,message}]}) in non-2xx bodies,
+        // and an unread body is an open connection.
+        const j = await underAbort(r.json().catch(() => null), ac.signal);
         const ticket = j?.data?.[0];
         if (r.ok && ticket?.status === 'ok') return { ok: true };
-        const detail = ticket?.details?.error ?? ticket?.message ?? `HTTP ${r.status}`;
+        const requestError = j?.errors?.[0];
+        const detail = ticket?.details?.error ?? ticket?.message
+          ?? (requestError ? `HTTP ${r.status} ${requestError.code ?? requestError.message ?? ''}`.trim() : `HTTP ${r.status}`);
         if (ticket?.details?.error === 'DeviceNotRegistered') await dropPushToken(token);
         return { ok: false, error: detail };
       } catch (e) {
         return { ok: false, error: ac.signal.aborted ? 'timeout' : String(e?.message ?? e) };
       } finally {
+        // Whatever path got us here, no byte of this response is read after
+        // this point: abort tears down anything still open (a body the JSON
+        // parser gave up on, a read the deadline cut short) so the connection
+        // is released with the device, not whenever the peer feels like it.
+        if (!ac.signal.aborted && r?.body && !r.bodyUsed) { try { r.body.cancel().catch(() => {}); } catch { /* not a stream */ } }
         clearTimeout(timer);
       }
     };

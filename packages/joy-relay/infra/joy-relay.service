@@ -16,6 +16,9 @@ Environment=JOY_RELAY_DATA_DIR=/home/ubuntu/joy-relay-data/stable
 #                           into $JOY_RELAY_DATA_DIR/token.secret
 #   JOY_RELAY_TOKEN_ISSUERS comma list of accepted token issuers, first mints
 #                           (default "joy")
+#   JOY_RELAY_TRUST_PROXY   1 = always honour x-forwarded-proto for the docs'
+#                           server URL, 0 = never; unset = honour it only when
+#                           x-forwarded-for/host arrive too (caddy sends all)
 EnvironmentFile=-/home/ubuntu/joy-relay.env
 ExecStart=/usr/bin/node server.mjs
 Restart=always

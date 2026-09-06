@@ -5,7 +5,7 @@
 // died between the two steps (ENOSPC, a kill) left an EMPTY token.secret,
 // every later start read it, createTokenAuthority refused it, and the relay
 // never came back even after the disk was fixed.
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
@@ -36,18 +36,44 @@ export function loadOrCreateTokenSecret(dataDir, { env = process.env, generate =
   }
   const secret = generate();
   // Atomic publish: write + fsync a sibling temp file, then rename it over
-  // the final name — the final path is either absent or complete.
+  // the final name — the final path is either absent or complete. "Complete"
+  // is CHECKED, not assumed: writeSync may write fewer bytes than asked (a
+  // filling disk, a signal), so a single call could have fsynced and renamed
+  // a truncated secret into place as a valid-looking one. Loop until every
+  // byte is down, then confirm the file size before the rename; any failure
+  // removes the temp file so the next start retries from scratch.
   const tmp = `${file}.${process.pid}.tmp`;
+  const bytes = Buffer.from(secret, 'utf8');
   const fd = openSync(tmp, 'w', 0o600);
   try {
-    writeSync(fd, secret);
+    writeAll(fd, bytes, tmp);
     fsyncSync(fd);
+    const { size } = fstatSync(fd);
+    if (size !== bytes.length) throw shortWrite(tmp, size, bytes.length);
+    closeSync(fd);
   } catch (e) {
     try { closeSync(fd); } catch { /* already closed */ }
     try { unlinkSync(tmp); } catch { /* best effort */ }
     throw e;
   }
-  closeSync(fd);
   renameSync(tmp, file);
   return secret;
+}
+
+/** Write every byte of `bytes` to `fd`, honouring short writes. A zero-byte
+ *  write is treated as failure (a full disk that stops reporting ENOSPC would
+ *  otherwise spin forever). */
+function writeAll(fd, bytes, path) {
+  let written = 0;
+  while (written < bytes.length) {
+    const n = writeSync(fd, bytes, written, bytes.length - written);
+    if (!(n > 0)) throw shortWrite(path, written, bytes.length);
+    written += n;
+  }
+}
+
+function shortWrite(path, got, want) {
+  const e = new Error(`short write to ${path}: ${got} of ${want} bytes (disk full?) — the secret was not published; fix the disk and restart`);
+  e.code = 'ENOSPC';
+  return e;
 }
