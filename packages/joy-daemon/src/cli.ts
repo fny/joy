@@ -10,7 +10,7 @@ import { join, dirname, resolve, basename, sep, isAbsolute } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
-import { joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
+import { joyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
 import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay/pairing";
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
@@ -540,30 +540,29 @@ function removeService(): void {
   }
 }
 
-function cmdInstall(): number {
-  const plat = osPlatform();
-  if (!existsSync(SERVER_TS)) {
-    // A unit pointing at a missing server.ts crash-loops forever (#503).
-    console.log(`${bad} daemon source not found at ${SERVER_TS} — not installing a service that cannot start`);
-    return 1;
-  }
-  removeService(); // idempotent: start from a clean slate so the new config takes effect
-  // Bake the relay into the unit so the service supervises the daemon for
-  // exactly the relay it was installed for.
-  // Always explicit: the unit should say which relay it serves rather than
-  // inheriting a default that may move under it.
-  const relayEnvSystemd = `Environment=JOY_RELAY_URL=${joyRelayUrl()}\n`;
-  if (plat === "linux") {
-    const unit = `[Unit]
-Description=joy-daemon daemon (relay ${joyRelayUrl()})
+/** The systemd user unit `joy install` writes on Linux — pure so its
+ *  environment is testable. The relay AND the Joy home are baked in
+ *  explicitly: the unit must say which relay it serves and which ~/.joy it
+ *  reads, rather than inheriting defaults that may move under it. Installing
+ *  with JOY_HOME_DIR=/isolated/joy used to produce a service that started
+ *  against ~/.joy — missing the credentials and state the installing CLI was
+ *  using (#499). Values are quoted: systemd splits Environment= on
+ *  whitespace. */
+export interface SystemdUnitValues { node: string; serverTs: string; pkgDir: string; path: string; relayUrl: string; homeDir: string }
+export function systemdUnit(v: SystemdUnitValues): string {
+  const q = (s: string) => `"${s.replace(/(["\\])/g, "\\$1")}"`;
+  return `[Unit]
+Description=joy-daemon daemon (relay ${v.relayUrl})
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${NODE} --import tsx ${SERVER_TS}
-WorkingDirectory=${PKG_DIR}
-Environment=PATH=${process.env.PATH ?? ""}
-${relayEnvSystemd}
+ExecStart=${v.node} --import tsx ${v.serverTs}
+WorkingDirectory=${v.pkgDir}
+Environment=${q(`PATH=${v.path}`)}
+Environment=${q(`JOY_RELAY_URL=${v.relayUrl}`)}
+Environment=${q(`JOY_HOME_DIR=${v.homeDir}`)}
+
 # Restart=always, NOT on-failure: the daemon self-restarts (joy-restart-daemon
 # RPC + the update flow) by exiting 0 after spawning a detached replacement.
 # Under systemd the default KillMode=control-group reaps that replacement when
@@ -582,6 +581,18 @@ KillMode=process
 [Install]
 WantedBy=default.target
 `;
+}
+
+function cmdInstall(): number {
+  const plat = osPlatform();
+  if (!existsSync(SERVER_TS)) {
+    // A unit pointing at a missing server.ts crash-loops forever (#503).
+    console.log(`${bad} daemon source not found at ${SERVER_TS} — not installing a service that cannot start`);
+    return 1;
+  }
+  removeService(); // idempotent: start from a clean slate so the new config takes effect
+  if (plat === "linux") {
+    const unit = systemdUnit({ node: NODE, serverTs: SERVER_TS, pkgDir: PKG_DIR, path: process.env.PATH ?? "", relayUrl: joyRelayUrl(), homeDir: joyHomeDir() });
     const path = systemdUnitPath();
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
@@ -602,6 +613,7 @@ WantedBy=default.target
       pkgDir: PKG_DIR,
       path: process.env.PATH ?? "",
       relayUrl: joyRelayUrl(),
+      homeDir: joyHomeDir(),
       logFile: LOG_FILE,
     });
     const path = launchdPlistPath();

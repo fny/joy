@@ -15,6 +15,9 @@ export interface LaunchdPlistValues {
   pkgDir: string;
   path: string;
   relayUrl: string;
+  /** The effective Joy home ($JOY_HOME_DIR or ~/.joy) of the installing CLI.
+   *  Baked in so the service reads the SAME credentials and state (#499). */
+  homeDir: string;
   logFile: string;
 }
 
@@ -29,7 +32,7 @@ export function launchdPlist(v: LaunchdPlistValues): string {
   <array><string>${e(v.node)}</string><string>--import</string><string>tsx</string><string>${e(v.serverTs)}</string></array>
   <key>WorkingDirectory</key><string>${e(v.pkgDir)}</string>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${e(v.path)}</string><key>JOY_RELAY_URL</key><string>${e(v.relayUrl)}</string></dict>
+  <dict><key>PATH</key><string>${e(v.path)}</string><key>JOY_RELAY_URL</key><string>${e(v.relayUrl)}</string><key>JOY_HOME_DIR</key><string>${e(v.homeDir)}</string></dict>
   <key>RunAtLoad</key><true/>
   <!-- KeepAlive=true (restart on ANY exit, incl. clean exit 0) is load-bearing:
        the daemon self-restarts by exiting 0 (see scheduleDaemonRestart). Do not
