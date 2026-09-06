@@ -29,6 +29,10 @@ const H = vi.hoisted(() => ({
   onTurnStart: null as null | ((client: any, clientId: string | undefined, turnId: string) => void),
   /** Runs INSIDE thread/read before it resolves — live traffic during the read. */
   onThreadRead: null as null | ((client: any) => void),
+  /** Runs when the session persists its window record — on a rejoin that is
+   *  AFTER thread/read resolved and BEFORE the buffer flush: live traffic
+   *  past the snapshot boundary. */
+  onWindowRecordSaved: null as null | (() => void),
   /** The app-server refuses turn/start while this turn runs (its real answer). */
   busyTurn: null as string | null,
 }));
@@ -61,6 +65,11 @@ vi.mock("./appServerClient", async (importOriginal) => {
   return { ...orig, CodexAppServerClient: FakeClient as any, spawnCodexAppServer: vi.fn(() => fakeProc()) };
 });
 
+vi.mock("../domain/windowRecord", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../domain/windowRecord")>();
+  return { ...orig, saveWindowRecord: (...args: Parameters<typeof orig.saveWindowRecord>) => { const r = orig.saveWindowRecord(...args); H.onWindowRecordSaved?.(); return r; } };
+});
+
 import { CodexSession } from "./codexSession";
 import { ledgerFor } from "../domain/ledger";
 import { queueFor } from "../domain/queueFacade";
@@ -74,7 +83,7 @@ afterAll(() => { delete process.env.JOY_HOME_DIR; rmSync(home, { recursive: true
 beforeEach(() => {
   H.turnStarts.length = 0; H.interrupts.length = 0;
   H.history = { thread: { id: "TH", turns: [] } };
-  H.onTurnStart = null; H.onThreadRead = null; H.busyTurn = null;
+  H.onTurnStart = null; H.onThreadRead = null; H.onWindowRecordSaved = null; H.busyTurn = null;
 });
 
 const deps: SessionDeps = { relayClient: null, broadcast: () => {}, addChatMessage: () => {} };
@@ -83,7 +92,7 @@ const fakeTmux = { literal: ok, key: ok, command: ok, commandOnce: ok, captureFr
 const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ledger = () => ledgerFor();
 
-interface Sent { localId: string | undefined; t: string; text?: string }
+interface Sent { localId: string | undefined; t: string; text?: string; result?: string }
 /** A relay that records what is sent, in order, and lets a test ack a
  *  turn's terminal row (the receipt sink → delivered-turn checkpoint). */
 function fakeRelay() {
@@ -95,7 +104,7 @@ function fakeRelay() {
     relaySessionId: "relay-1", metadataSnapshot: null, outboundPersistDegraded: false,
     send: (w: any, localId?: string) => {
       const ev = w?.content?.data?.ev;
-      sent.push(ev ? { localId, t: String(ev.t), text: ev.text } : { localId, t: w?.role === "user" || w?.content?.type === "text" ? "user" : String(w?.content?.type), text: w?.content?.text });
+      sent.push(ev ? { localId, t: String(ev.t), text: ev.text, result: ev.result } : { localId, t: w?.role === "user" || w?.content?.type === "text" ? "user" : String(w?.content?.type), text: w?.content?.text });
     },
     setReceiptSink: (s: any) => { sink = s; },
     stampReceiptOnLastQueued: (r: any) => { receipts.push(r); },
@@ -269,6 +278,84 @@ test("#519: a live answer buffered while thread/read was pending re-uses the ide
   // A genuinely new answer after the snapshot is the next ordinal.
   client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg-next", text: "more" } } });
   expect(texts().at(-1)).toBe("codex:TH:turn:T-live:item:agentMessage:1:text");
+  s.end("killed");
+});
+
+test("#519: a NEW execution of the same command buffered during the read is not the old one — both results reach the relay under distinct ids", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-live", status: "inProgress", items: [{ type: "commandExecution", id: "item-0", command: "date", aggregatedOutput: "old timestamp", exitCode: 0 }] },
+  ] } };
+  // The same command runs AGAIN while the read is pending: equal input, a different output.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "new-command", command: "date" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "new-command", command: "date", aggregatedOutput: "new timestamp", exitCode: 0 } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-repeat", { relay, rejoin: true });
+  const ends = sent.filter((x) => x.t === "tool-call-end");
+  expect(ends.map((x) => [x.localId, x.result])).toEqual([
+    ["codex:TH:turn:T-live:item:commandExecution:0:tool-end", "old timestamp"],
+    ["codex:TH:turn:T-live:item:commandExecution:1:tool-end", "new timestamp"],
+  ]);
+  expect(sent.filter((x) => x.t === "tool-call-start").map((x) => x.localId)).toEqual([
+    "codex:TH:turn:T-live:item:commandExecution:0:tool-start",
+    "codex:TH:turn:T-live:item:commandExecution:1:tool-start",
+  ]);
+  s.end("killed");
+});
+
+test("#519: the snapshot boundary — an occurrence that arrives AFTER thread/read resolved is new even when its whole content equals a replayed item; the same runtime id binds", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-live", status: "inProgress", items: [
+      { type: "commandExecution", id: "call_same", command: "echo hi", aggregatedOutput: "hi", exitCode: 0 },
+      { type: "commandExecution", id: "item-1", command: "echo hi", aggregatedOutput: "hi", exitCode: 0 },
+    ] },
+  ] } };
+  // Inside the boundary: the runtime's own id names the first item (its
+  // content differs — the snapshot had it before the output settled).
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "call_same", command: "echo hi", aggregatedOutput: "hi\n", exitCode: 0 } } });
+  };
+  // Past the boundary (read resolved, flush pending): identical content, but
+  // the snapshot cannot contain it — a third `echo hi`.
+  H.onWindowRecordSaved = () => {
+    H.onWindowRecordSaved = null; // the first save on a rejoin is the post-read one
+    const client = H.clients.at(-1);
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "call_third", command: "echo hi" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "commandExecution", id: "call_third", command: "echo hi", aggregatedOutput: "hi", exitCode: 0 } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-boundary", { relay, rejoin: true });
+  expect(sent.filter((x) => x.t === "tool-call-end").map((x) => [x.localId, x.result])).toEqual([
+    ["codex:TH:turn:T-live:item:commandExecution:0:tool-end", "hi"],
+    ["codex:TH:turn:T-live:item:commandExecution:1:tool-end", "hi"],
+    ["codex:TH:turn:T-live:item:commandExecution:0:tool-end", "hi\n"], // bound by id: the replayed identity, re-sent
+    ["codex:TH:turn:T-live:item:commandExecution:2:tool-end", "hi"],   // past the boundary: its own
+  ]);
+  s.end("killed");
+});
+
+test("#519: an equal-text NEW prompt during the read is its own user row, not the replayed one", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "completed", items: [
+      { type: "userMessage", id: "item-0", content: [{ type: "text", text: "hi" }] },
+      { type: "agentMessage", id: "item-1", text: "hello" },
+    ] },
+  ] } };
+  // The user types the same prompt again in the TUI while the read is pending: a new turn.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "turn/started", params: { threadId: "TH", turn: { id: "T2" } } });
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T2", item: { type: "userMessage", id: "msg_2" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T2", item: { type: "userMessage", id: "msg_2", text: "hi" } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-user", { relay, rejoin: true });
+  expect(sent.filter((x) => x.t === "user").map((x) => [x.localId, x.text])).toEqual([
+    ["turn:T1:item:userMessage:0:user", "hi"],
+    ["turn:T2:item:userMessage:0:user", "hi"],
+  ]);
+  // …and the new prompt lands BEFORE its turn bracket (#131).
+  expect(sent.map((x) => x.t)).toEqual(["user", "turn-start", "text", "turn-end", "user", "turn-start"]);
   s.end("killed");
 });
 
