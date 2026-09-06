@@ -90,6 +90,29 @@ export function handoffInProgress(s: AgentSession): boolean {
   return meta?.state === "writing";
 }
 
+/** Durably queue the note-request prompt and only THEN publish `writing`.
+ *
+ *  The op used to mark the card first (#53 regression): a refused ledger
+ *  commit (SQLITE_FULL) left the card in `writing` with no prompt and no job,
+ *  nothing ever rolled it back, and the in-progress guard then refused every
+ *  retry as "already in progress". Acceptance is synchronous, so
+ *  guard → accept → publish runs with no yield in between: a double tap still
+ *  meets the guard, and a failed intake leaves the previous card state exactly
+ *  as it was. A refused commit is the same retryable `not_durable` a `send`
+ *  returns (#551); a session that ended under the request is refused as such. */
+function acceptHandoffNote(s: AgentSession, text: string, verb: "handing off" | "handing back"): { ok: true } | { ok: false; error: string; detail?: string } {
+  try {
+    queueFor(s).accept(text, { source: "rpc", mirrorToRelay: true });
+    return { ok: true };
+  } catch (e) {
+    if (e instanceof SessionEndedError) return { ok: false, error: `This session has ended; restart it before ${verb}.` };
+    return { ok: false, error: "not_durable", detail: e instanceof Error ? e.message : String(e) };
+  }
+}
+/** `not_durable` is a 503 (retry later), like `send`; every other refusal
+ *  keeps the app-facing `{ok:false, error}` sentence at 200. */
+const handoffHttpShape = (result: unknown) => ({ status: (result as { error?: string }).error === "not_durable" ? 503 : 200, body: result });
+
 /** The repository a git URL names, for "is this the same repo" comparisons
  *  (#151 residual): host lower-cased, trailing `/` and `.git` dropped,
  *  transport/user ignored — `git@github.com:acme/app.git`,
@@ -653,11 +676,14 @@ export const machineOps: MachineOp[] = [
       const target = { agent: agent as HandoffTarget["agent"], model: typeof params.model === "string" ? params.model : undefined, effort: typeof params.effort === "string" ? params.effort : undefined, permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined };
       const targetLabel = `${({ claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "pi", agy: "Antigravity" } as Record<string, string>)[target.agent]}${target.model ? ` (${target.model})` : ""}`;
       const path = notePath(src.id);
+      // Reserve the card only once the prompt is durably queued (see acceptHandoffNote).
+      const accepted = acceptHandoffNote(src, noteRequestPrompt(path, "to", targetLabel), "handing off");
+      if (!accepted.ok) return accepted;
       src.setHandoff?.({ state: "writing", peerLabel: targetLabel, note: path, at: Date.now() });
-      queueFor(src).accept(noteRequestPrompt(path, "to", targetLabel), { source: "rpc", mirrorToRelay: true });
       void runHandoffJob(registry, src, target, path);
       return { ok: true, pending: true, note: path };
     },
+    httpShape: handoffHttpShape,
   },
   {
     name: "handback",
@@ -670,6 +696,10 @@ export const machineOps: MachineOp[] = [
       if (!/^[0-9a-f]{8}$/.test(id)) return { ok: false, error: "invalid session id" };
       const tgt = registry.get(id);
       if (!tgt) return { ok: false, error: "session_not_found" };
+      // The TARGET writes the note: an ended one can neither take the prompt
+      // nor write anything, and used to fall through to the source-only
+      // check and a `writing` card nothing could settle (#53 regression).
+      if (tgt.status === "ended") return { ok: false, error: "This session has ended; restart it before handing back." };
       const meta = tgt.cardMetadata?.()?.joy__handoff as { state?: string; peer?: string } | undefined;
       const peerId = meta?.peer;
       const src = peerId ? registry.get(peerId) : undefined;
@@ -677,11 +707,13 @@ export const machineOps: MachineOp[] = [
       if (src.status === "ended") return { ok: false, error: `The original session ${peerId} has ended; restart it first.` };
       if (handoffInProgress(tgt)) return { ok: false, error: "handback already in progress" };
       const path = notePath(tgt.id);
+      const accepted = acceptHandoffNote(tgt, noteRequestPrompt(path, "back to", sessionLabel(src)), "handing back");
+      if (!accepted.ok) return accepted;
       tgt.setHandoff?.({ state: "writing", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
-      queueFor(tgt).accept(noteRequestPrompt(path, "back to", sessionLabel(src)), { source: "rpc", mirrorToRelay: true });
       void runHandbackJob(registry, tgt, src.id, path);
       return { ok: true, pending: true, note: path };
     },
+    httpShape: handoffHttpShape,
   },
   {
     name: "teleportExport",

@@ -18,11 +18,11 @@ vi.mock("./handoff", async (importOriginal) => {
 });
 
 import { machineOps, sourcePermissionMode } from "./operations";
-import { closeAllLedgers } from "./ledger";
-import { resetCoordinators } from "./coordinator";
+import { closeAllLedgers, ledgerFor, LedgerWriteError } from "./ledger";
+import { resetCoordinators, SessionCoordinator } from "./coordinator";
 import { fakeCoordinatedSession } from "./coordinator.fakeDriver";
 import { saveWindowRecord } from "./windowRecord";
-import { saveHandoffJob } from "./handoff";
+import { saveHandoffJob, loadHandoffJob } from "./handoff";
 import { cwdToTranscriptDir } from "../claude/transcript";
 import { parseJoyCommand } from "../claude/session";
 
@@ -138,6 +138,70 @@ describe("handoff / handback in-progress guard (#53)", () => {
     expect(infos.at(-1)).toMatchObject({ state: "writing", peer: srcId });
     const second = await op("joy-handback").handler(reg, { id: tgtId }, { via: "rpc" });
     expect(second).toEqual({ ok: false, error: "handback already in progress" });
+  });
+
+  // A refused ledger commit (SQLITE_FULL) used to be published as `writing`
+  // FIRST: no prompt, no job, and the guard above then refused every retry.
+  const refuseNextAccept = () => vi.spyOn(SessionCoordinator.prototype, "accept").mockImplementationOnce(() => { throw new LedgerWriteError("accept", new Error("SQLITE_FULL")); });
+
+  it("handoff: the note cannot be durably queued → card untouched, no job, not_durable — and the retry goes through", async () => {
+    const id = uid();
+    const { s, infos } = handoffCapable(id, home);
+    const reg = { get: (x: string) => (x === id ? s : undefined) } as never;
+    const spy = refuseNextAccept();
+    try {
+      const r = (await op("joy-handoff").handler(reg, { id, agent: "codex" }, { via: "rpc" })) as Record<string, unknown>;
+      expect(r).toMatchObject({ ok: false, error: "not_durable" });
+      expect(String(r.detail)).toContain("SQLITE_FULL");
+      expect(op("joy-handoff").httpShape!(r).status).toBe(503);
+      expect(infos).toEqual([]); // never marked writing, nothing to roll back
+      expect(loadHandoffJob(id)).toBeNull();
+      expect(ledgerFor().listCommands(id)).toEqual([]);
+      // The disk cleared: the same request is accepted, the guard did not lock the session.
+      const retry = (await op("joy-handoff").handler(reg, { id, agent: "codex" }, { via: "rpc" })) as Record<string, unknown>;
+      expect(retry).toMatchObject({ ok: true, pending: true });
+      expect(infos.at(-1)).toMatchObject({ state: "writing" });
+      expect(ledgerFor().listCommands(id)).toHaveLength(1);
+      // …and once in flight the double-tap guard still holds.
+      const third = await op("joy-handoff").handler(reg, { id, agent: "codex" }, { via: "rpc" });
+      expect(third).toEqual({ ok: false, error: "handoff already in progress" });
+    } finally { spy.mockRestore(); }
+  });
+
+  it("handback: the note cannot be durably queued → target card untouched, no job, not_durable — and the retry goes through", async () => {
+    const srcId = uid(), tgtId = uid();
+    const { s: src } = handoffCapable(srcId, home);
+    const { s: tgt, infos } = handoffCapable(tgtId, home);
+    tgt.setHandoff!({ state: "picked_up", peer: srcId, at: Date.now() });
+    const reg = { get: (x: string) => (x === srcId ? src : x === tgtId ? tgt : undefined) } as never;
+    const spy = refuseNextAccept();
+    try {
+      const r = (await op("joy-handback").handler(reg, { id: tgtId }, { via: "rpc" })) as Record<string, unknown>;
+      expect(r).toMatchObject({ ok: false, error: "not_durable" });
+      expect(op("joy-handback").httpShape!(r).status).toBe(503);
+      expect(infos.at(-1)).toMatchObject({ state: "picked_up" }); // the previous card state survives
+      expect(loadHandoffJob(tgtId)).toBeNull();
+      expect(ledgerFor().listCommands(tgtId)).toEqual([]);
+      const retry = (await op("joy-handback").handler(reg, { id: tgtId }, { via: "rpc" })) as Record<string, unknown>;
+      expect(retry).toMatchObject({ ok: true, pending: true });
+      expect(infos.at(-1)).toMatchObject({ state: "writing", peer: srcId });
+      expect(await op("joy-handback").handler(reg, { id: tgtId }, { via: "rpc" })).toEqual({ ok: false, error: "handback already in progress" });
+    } finally { spy.mockRestore(); }
+  });
+
+  it("handback from an ENDED target is refused outright (only the source used to be checked)", async () => {
+    const srcId = uid(), tgtId = uid();
+    const { s: src } = handoffCapable(srcId, home);
+    const { s: tgt, infos } = handoffCapable(tgtId, home);
+    tgt.setHandoff!({ state: "picked_up", peer: srcId, at: Date.now() });
+    (tgt as { status: string }).status = "ended";
+    const reg = { get: (x: string) => (x === srcId ? src : x === tgtId ? tgt : undefined) } as never;
+    const r = (await op("joy-handback").handler(reg, { id: tgtId }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/has ended; restart it before handing back/);
+    expect(infos.at(-1)).toMatchObject({ state: "picked_up" }); // never `writing`
+    expect(loadHandoffJob(tgtId)).toBeNull();
+    expect(ledgerFor().listCommands(tgtId)).toEqual([]);
   });
 });
 
