@@ -213,23 +213,74 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   and turn terminal, in persisted order), `receipts` (retained proof of
   delivery, independent of the pending row), `checkpoints` (transcript /
   turn / message replay cursors), `spawn_intents`, `jobs` (handoffs).
-  `enqueue` on every adapter returns only after the accept committed, else
-  throws (`not_durable` 503; `session_ended` 404 for a session whose
-  generation is closed). A dispatch attempt is committed before the first
-  key / socket write; the harness's echo commits the receipt, the attempt's
-  outcome and the command's terminal state together; a crash in between is
-  an explicit `unknown` reconciled by the next generation (Codex resends
-  under a NEW client id per attempt; Claude retypes; pi/agy resend). A
-  redelivered relay seq dedupes against the pending row or the retained
-  receipt — never a second turn (#516). Every write naming a session
-  generation is refused once a newer one opened (#481). Terminal rows are
-  pruned after 7 days; legacy files are imported once at boot
-  (`domain/ledgerImport.ts`, originals in `state/imported-v1/`).
+  Acceptance returns only after the commit, else throws (`not_durable` 503;
+  `session_ended` 404 for a session whose generation is closed). A dispatch
+  attempt is committed before the first key / socket write; a crash in
+  between is an explicit `unknown` reconciled by the next generation (Codex
+  resends under a NEW client id per attempt — the deterministic
+  `codex-in:<id>:<seq>` scheme is gone, attempts and receipts carry
+  ownership; OpenCode resends under the SAME idempotent message id; Claude
+  retypes; pi/agy resend). A redelivered relay seq dedupes against the
+  pending row or the retained receipt — never a second turn (#516). Every
+  write naming a session generation is refused once a newer one opened
+  (#481). Terminal rows are pruned after 7 days; legacy files are imported
+  once at boot (`domain/ledgerImport.ts`, originals in `state/imported-v1/`).
+- **The session coordinator** (`domain/coordinator.ts`, Wave C2) owns the
+  execution policy the adapters used to duplicate. Every command is a ledger
+  row moving through `queued → submitting → accepted | unknown → running →
+  completed | failed | cancelled | interrupted` (plus `cancelling`); the
+  table `nextState(state, event)` decides every pair and is tested
+  exhaustively. Adapters are **drivers** (`submit`, `interrupt`, `observe`,
+  `reconcile`, optional `steer`, `handleCommand`, `runtimeRef`) that keep
+  protocol buffering only — Codex, OpenCode, pi and agy today; Claude still
+  runs its own queue behind the queue facade (`domain/queueFacade.ts`) until
+  its driver lands. Rules: one driver operation per session at a time
+  (`concurrentSubmit` drivers may submit while a turn runs; an attempt
+  awaiting its verdict always serializes); the op token committed with the
+  attempt is checked when the driver's result is applied — a stale result
+  is an orphan (interrupted if it accepted a turn), never applied; a
+  transient rejection re-queues and retries with backoff, three of them (busy
+  refusals excluded) fail the row; a submit that throws or times out is
+  `unknown`, reconciled by the driver (`accepted | running | absent → resend
+  | unknown → held`), never blindly resent. The driver's **echo** (Codex
+  clientId, OpenCode admission, pi rpc response, agy stdin) moves a command
+  to `running`; the runtime's **turn end** for that turn is the terminal
+  (`completed`, or `failed` / `cancelled` / `interrupted` with
+  `agent_reported_*`); an idle runtime with no turn end for the running
+  attempt is `interrupted{idle_without_terminal}` (#463); a turn nobody
+  submitted is a **foreign** turn (`provenance: "terminal"` in the queue
+  snapshot) and never confirms an attempt. **Cancel** is durable: a queued
+  row is cancelled at once; a row in flight becomes `cancelling`, the
+  driver's interrupt is retried with backoff until the runtime confirms
+  (turn end, `interrupted`, idle) and after five tries is flagged
+  `unresolved` (snapshot `unresolvedCancels`, journal line) instead of being
+  reported cancelled; a session-wide interrupt (OpenCode, pi) is withheld
+  while uncancelled work would be collateral and resolves with the turn's
+  own end; late evidence for a cancelled row interrupts the turn it names.
+  **Generations**: `retire(restart | process_exited)` leaves queued rows for
+  the replacement, ends a running command `interrupted{restart}` (the turn
+  was live in a runtime torn down on purpose — it is never re-run), and turns
+  a submission with no delivery evidence into `unknown` for reconcile;
+  `retire(killed)` interrupts everything. The queue snapshot (`joy__queue`,
+  `queueList`) adds `running`, `busy`, `provenance`, `unresolvedCancels`,
+  `drafts` and `commands` (every non-terminal row with its state) to the
+  pre-C2 fields. `send … exclusive` refuses when anything is running OR
+  queued on a coordinator-driven session.
 - **One outbox sender per session** (`relay/outbox.ts`): rows post in `seq`
   order, retried by `runtimeEventId` with the backoff persisted in the row (a
   restart resumes the schedule), dropped on a permanent refusal, parked on an
   unbound session until its bind. A turn terminal is written the instant the
-  outcome is known and lands after that session's earlier outputs (#74). A
+  outcome is known and lands after that session's earlier outputs (#74).
+  The nucleus lane runs a relay turn as one coordinator command: the row is
+  accepted with `relay_turn_id` (a re-offer is the same row), `/start` is
+  posted when the command reaches `running` (the driver's echo — no busy()
+  guess, no activity gate), the terminal fact is the command's terminal
+  state with its reason as `meta.reason`, and a cancel offer is the row's
+  durable cancel (a re-offer of one already requested is not new work). A
+  restart mid-turn closes the relay turn `interrupted{restart}`. At boot the
+  lane resumes every relay turn the ledger still carries for a
+  coordinator-driven session and writes the terminal row (`term:<turn>`,
+  idempotent) for any that ended while no lane was alive (R13). A
   local checkpoint recorded while its rows are unacked stays pending until
   the acks arrive, so a crash replays instead of skipping (#67). Backlog over
   2000 rows / 64 MiB per session pauses new prompt dispatch and holds

@@ -321,6 +321,29 @@ app.
   outcomes, cancelling/unresolved surfacing, idle-without-terminal →
   interrupted, relay_turn_id plumbing, `/steer`.
 
+- 2026-09-08 (C2) — The session coordinator (`domain/coordinator.ts`,
+  branch c2-session-coordinator): pure `nextState` table over the ledger's
+  ten states (exhaustively tested), op tokens that serialize transitions
+  not I/O, one driver op per session, a rejection budget read from attempt
+  rows, durable cancel retried until confirmed or `unresolved`, foreign-turn
+  provenance, idle-without-terminal = interrupted (#463), R18 look-back for
+  a turn that ended before its submit response. Drivers: Codex
+  (`codexDriver.ts`), OpenCode, pi, agy — their private queues, dispatch
+  loops, tombstones, admission ranking and outcome caches are gone; Claude
+  waits for the hooks residual merge and runs behind `queueFacade.ts`.
+  `operations.ts` send/queue ops, handoff and the nucleus lane go through
+  the facade; the lane accepts a relay turn as a command row
+  (`relay_turn_id`), posts `/start` on the driver's echo, terminalizes on the
+  command's state, cancels through the durable flag, resumes ledger turns at
+  boot (R13); `activeTurns`' cancel bookkeeping, the 180 s activity gate and
+  the registry's turn canceller are deleted. Deviations recorded: the echo
+  now means `running` and `completed` comes from the runtime's turn end
+  (C1's "delivered = completed" is gone); `exclusive` send refuses on a
+  non-empty queue, not only on busy; the deterministic `codex-in:<id>:<seq>`
+  ids are dropped (attempts/receipts carry ownership); attachment
+  materialization stays lane-side, so a cancel during the download aborts
+  the preparation rather than cancelling a row; a restart mid-turn closes
+  the relay turn `interrupted{restart}` (was `cancelled`).
 - 2026-09-08 (later) — E1 tool-model residuals landed (7ead9a3d); #107
   sealed spawn specs end to end (705ef5f6: the relay holds ciphertext when
   the daemon advertises `capabilities.spawnSpecSealed`). Astra's E6 review:

@@ -40,8 +40,17 @@ every relay; machines register per account.
   the outbound records — a send is acknowledged only once its row committed,
   the queue survives restarts, a redelivered relay seq dedupes against the
   pending row or the retained receipt, and a crash between a submit and its
-  echo is an explicit unknown reconciled before any resend. Claude adds
-  verified typing into the pane. Queued rows render app-side in a
+  echo is an explicit unknown reconciled before any resend. One **session
+  coordinator** (`domain/coordinator.ts`) runs the queue for every harness:
+  the harness's own echo (codex clientId, opencode admission, pi response,
+  agy stdin) is when a message counts as running, the harness's turn end is
+  its outcome (a failed turn stays failed; an idle runtime with no turn end
+  is `interrupted`, never "done"), a cancel is durable and retried until the
+  harness confirms or is shown as unresolved, and a restart mid-turn ends
+  that message `interrupted` while the rest of the queue carries over. Codex,
+  opencode, pi and agy are drivers of it; claude still runs its own queue
+  behind the same facade. Claude adds verified typing into the pane.
+  Queued rows render app-side in a
   drafts-style collapsible strip (`QUEUED · N`) with per-item
   edit/cancel/**steer** (arrow = cancel + `/steer` immediate send).
 - **Steer**: `/steer` bypasses the queue mid-turn (claude); codex/opencode/pi
@@ -392,7 +401,14 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   its pending row is gone (#516); a write from a superseded generation is
   refused (#481); a checkpoint commits only once the outbound rows it covers
   are acked (#67); terminals are posted after their session's outputs by
-  one sender per session (#74). Window records (identity/config only) and
+  one sender per session (#74). Execution policy lives in one place: a
+  command's state is the ledger row the coordinator moves, a submit is
+  applied only while its op token and generation still own the row (#34
+  #481), a turn start never confirms a submission (#32 #40), the terminal
+  state is the attempt's own outcome (#463 #584), cancel is a durable flag
+  consulted at every operation boundary and retried until confirmed or
+  surfaced as unresolved (#35 #66 #77 #79), and the queue of a restarted
+  session is the replacement's (#36 #49). Window records (identity/config only) and
   user files still use atomic replacement (#567).
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
