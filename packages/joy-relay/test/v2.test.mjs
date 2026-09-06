@@ -715,6 +715,76 @@ describe('wave 1: durability contract (#57, #74, #116)', () => {
     expect(next.ciphertext).toBe('y');
   });
 
+  it('a newer epoch of the same daemon ADOPTS a predecessor\'s live or orphaned turn as running (start bookkeeping, cancel preserved, idempotent); foreign and stale daemons cannot (C9)', async () => {
+    const d = makeDaemon('mach-adopt');
+    await d.acquire();
+    const sessionId = await makeSession(d);
+    const m1 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'x' } })).json;
+    // Delivered and submitted under epoch 1, never started: the daemon died
+    // between the runtime's echo and POST /start.
+    const offer = (await d.claim('work')).find((o) => o.sessionId === sessionId && o.kind === 'prompt');
+    expect((await d.received(offer.deliveryId)).status).toBe(200);
+    expect((await d.submitted(m1.turnId)).status).toBe(200);
+    // Epoch 2 of the same machine boots before any sweep orphaned the turn…
+    const d2 = makeDaemon('mach-adopt');
+    await d2.acquire();
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}`)).json.execution.state).toBe('dispatching');
+    // …a foreign daemon may not touch it…
+    const other = makeDaemon('mach-adopt-other');
+    await other.acquire();
+    expect([403, 409]).toContain((await other.reconcile(m1.turnId, { resolution: 'running' })).status);
+    // …the new epoch adopts it: running, fenced to epoch 2, with the start
+    // bookkeeping /start would have done (the app sees a delivered message).
+    const adopt = await d2.reconcile(m1.turnId, { resolution: 'running', runtimeEventId: `start:${m1.turnId}`, meta: { reason: 'daemon_restart' } });
+    expect(adopt.status).toBe(200);
+    expect(adopt.json).toMatchObject({ state: 'running', adopted: true });
+    const turnRow = async () => (await db.query(`SELECT state, lease_epoch, started_at, run_token, terminal_state FROM turns WHERE id = $1`, [m1.turnId])).rows[0];
+    const startedEvents = async () => (await db.query(`SELECT count(*)::int AS n FROM session_events WHERE session_id = $1 AND kind = 'turn.started'`, [sessionId])).rows[0].n;
+    let turn = await turnRow();
+    expect(turn.state).toBe('running');
+    expect(String(turn.lease_epoch)).toBe(String(d2.epoch));
+    expect(turn.started_at).toBeTruthy();
+    expect(turn.run_token).toBeTruthy();
+    expect(await startedEvents()).toBe(1);
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}`)).json.execution).toMatchObject({ state: 'running', turnId: m1.turnId });
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`)).json.status).toBe('delivered');
+    // Idempotent: a second adoption and the daemon's own /start under the
+    // stable event id both replay — still ONE start.
+    expect((await d2.reconcile(m1.turnId, { resolution: 'running' })).json).toMatchObject({ state: 'running', replay: true });
+    expect((await d2.start(m1.turnId, { runtimeEventId: `start:${m1.turnId}` })).json).toMatchObject({ state: 'running', replay: true });
+    expect(await startedEvents()).toBe(1);
+    // The app cancels; the daemon dies again — lease expired and swept, the
+    // turn orphaned with its cancel request intact.
+    expect((await call('POST', `/joy/v2/sessions/${sessionId}/turns/${m1.turnId}/cancellations`, { body: {} })).status).toBe(200);
+    await db.query(`UPDATE daemon_leases SET expires_at = now() - interval '1 second' WHERE id = $1`, [d2.leaseId]);
+    await core.sweepExpiredLeases();
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}`)).json.execution).toMatchObject({ state: 'orphaned', cancelRequested: true });
+    // Epoch 3 adopts: the cancellation survives as `cancelling`; the swept
+    // epoch is fenced out.
+    const d3 = makeDaemon('mach-adopt');
+    await d3.acquire();
+    expect([401, 412]).toContain((await d2.reconcile(m1.turnId, { resolution: 'running' })).status);
+    const again = await d3.reconcile(m1.turnId, { resolution: 'running' });
+    expect(again.status).toBe(200);
+    expect(again.json).toMatchObject({ state: 'cancelling', adopted: true });
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}`)).json.execution).toMatchObject({ state: 'cancelling', turnId: m1.turnId });
+    expect(await startedEvents()).toBe(1); // already started: no second start event
+    // The terminal lands under the adopting epoch; the cancel resolves.
+    expect((await d3.fact(m1.turnId, { type: 'terminal', terminalState: 'cancelled', runtimeEventId: randomUUID() })).status).toBe(200);
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}`)).json.execution.state).toBe('idle');
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}/messages/${m1.messageId}`)).json.status).toBe('cancelled');
+    turn = await turnRow();
+    expect(turn).toMatchObject({ state: 'terminal', terminal_state: 'cancelled' });
+    // A closed turn answers its terminal to an adoption attempt (replay), never a 409.
+    expect((await d3.reconcile(m1.turnId, { resolution: 'running' })).json).toMatchObject({ state: 'terminal', terminalState: 'cancelled', replay: true });
+    // A turn already under the caller's own epoch is a replay of its state,
+    // not an error — and its owner may still release it (#74).
+    const m2 = (await call('POST', `/joy/v2/sessions/${sessionId}/messages`, { body: { ciphertext: 'y' } })).json;
+    await deliverHead(d3, sessionId);
+    expect((await d3.reconcile(m2.turnId, { resolution: 'running' })).json).toMatchObject({ state: 'running', replay: true });
+    expect((await d3.reconcile(m2.turnId, { resolution: 'terminal', terminalState: 'interrupted' })).json).toMatchObject({ state: 'terminal', terminalState: 'interrupted' });
+  });
+
   it('an idempotent re-bind takes the envelope the daemon is sealing under now (#116)', async () => {
     const d = makeDaemon('mach-rebind');
     await d.acquire();

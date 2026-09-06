@@ -916,29 +916,58 @@ export function createCore(db, notify) {
     return rest;
   }
 
-  /** Post-restart resolution — ONLY for orphaned turns (the sweep or a fence
-   *  violation put them there). `running` re-fences to the new epoch;
+  /** Post-restart resolution. `running` ADOPTS the turn under the calling
+   *  lease: an orphaned turn (the sweep or a fence violation put it there),
+   *  or a live dispatching/running/cancelling turn a PREDECESSOR epoch of
+   *  the same daemon left behind — the new generation's ledger still carries
+   *  the command and its driver has confirmed the runtime is executing it,
+   *  so the turn re-fences to the new epoch instead of being terminalized.
+   *  Cancellation state is preserved (a cancel-requested turn comes back
+   *  `cancelling`); a turn already under the calling epoch answers its
+   *  current state as a replay; one that was submitted but never started
+   *  gets the start bookkeeping here (started_at, run token, prompt command
+   *  applied, `turn.started` event) so it reads like any running turn.
    *  `terminal` goes through the shared terminalization (cancel commands
    *  resolve, slot clears). */
   async function reconcileTurn(turnId, leaseRef, body) {
     return withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
       if (turn.state === 'terminal') return { turnId, state: 'terminal', terminalState: turn.terminal_state, replay: true };
+      const live = ['dispatching', 'running', 'cancelling'].includes(turn.state);
       // The OWNER daemon (same lease epoch) may also resolve a turn that is
       // still dispatching/running/cancelling: it is telling us it has no
       // worker for it any more — a terminal that never landed, a loop that
       // died — and nothing else can release the execution slot while its
-      // renewals keep the lease alive (#74). Anyone else needs it orphaned.
-      const ownerLive = String(turn.lease_epoch) === String(lease.epoch) && ['dispatching', 'running', 'cancelling'].includes(turn.state);
-      if (turn.state !== 'orphaned' && !(ownerLive && body.resolution === 'terminal')) throw new ApiError(409, 'turn_not_orphaned');
+      // renewals keep the lease alive (#74). Anyone else needs it orphaned —
+      // except the same daemon's NEWER epoch adopting it as running (below).
+      const ownerLive = live && String(turn.lease_epoch) === String(lease.epoch);
       if (body.resolution === 'running') {
+        if (ownerLive) return { turnId, state: turn.state, replay: true };
+        const predecessorLive = live && turn.lease_epoch != null && Number(turn.lease_epoch) < Number(lease.epoch);
+        if (turn.state !== 'orphaned' && !predecessorLive) throw new ApiError(409, 'turn_not_orphaned');
+        requireLiveSession(s);
         if (s.active_turn_id && s.active_turn_id !== turnId) throw new ApiError(409, 'another_turn_active');
-        await t.query(`UPDATE turns SET state = $2, lease_epoch = $3, last_progress_at = now() WHERE id = $1`,
-          [turnId, turn.cancel_requested ? 'cancelling' : 'running', lease.epoch]);
-        await t.query(`UPDATE native_sessions SET active_turn_id = $2, recovery_required = FALSE, updated_at = now() WHERE id = $1`,
+        const state = turn.cancel_requested ? 'cancelling' : 'running';
+        if (turn.started_at) {
+          await t.query(`UPDATE turns SET state = $2, lease_epoch = $3, last_progress_at = now() WHERE id = $1`,
+            [turnId, state, lease.epoch]);
+        } else {
+          // Adopted before /start ever landed (the predecessor died between
+          // the runtime's echo and the POST): the same bookkeeping /start
+          // does, so the app's projection and a later /start (replay) agree.
+          const runToken = body.runToken ?? randomUUID();
+          await t.query(
+            `UPDATE turns SET state = $2, lease_epoch = $3, run_token = $4, started_at = now(), last_progress_at = now() WHERE id = $1`,
+            [turnId, state, lease.epoch, runToken]);
+          await t.query(`UPDATE commands SET state = 'applied', disposition = 'started' WHERE id = $1`, [turn.prompt_command_id]);
+          const { seq } = await nextSeq(t, s.id);
+          await appendEvent(t, s.id, seq, { kind: 'turn.started', turnId, runtimeEventId: body.runtimeEventId ?? null });
+        }
+        await t.query(`UPDATE native_sessions SET active_turn_id = $2, state = 'active', recovery_required = FALSE, updated_at = now() WHERE id = $1`,
           [s.id, turnId]);
-        return { turnId, state: turn.cancel_requested ? 'cancelling' : 'running' };
+        return { turnId, state, adopted: true };
       }
       if (body.resolution === 'terminal') {
+        if (turn.state !== 'orphaned' && !ownerLive) throw new ApiError(409, 'turn_not_orphaned');
         const terminalState = body.terminalState ?? 'interrupted';
         if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(terminalState)) {
           throw new ApiError(400, 'bad_terminal_state');

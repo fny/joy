@@ -730,6 +730,37 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   /** Was this turn's /start acknowledged by the relay (the durable fact a boot trusts)? */
   const startAcked = (localId: string, turnId: string): boolean => ledger.hasReceipt(localId, START_ACK_RECEIPT, turnId);
 
+  /** ADOPT a relay turn under this lease (reconcile `running`). A turn a
+   *  previous daemon generation left dispatching/running on the relay — or
+   *  that the sweep already orphaned — whose command the ledger still
+   *  carries and whose runtime the new driver generation has confirmed
+   *  running is re-fenced to the current epoch instead of being
+   *  terminalized as interrupted while the agent keeps working (Astra, C9).
+   *  The relay preserves the cancellation state (`cancelling`), answers a
+   *  replay for a turn already ours, and its terminal for one it has
+   *  already closed. `none` = nothing to adopt: not a predecessor's turn
+   *  (409 turn_not_orphaned), or a relay without the resolution. */
+  type Adoption = { kind: "running" } | { kind: "cancelling" } | { kind: "terminal"; terminalState: string } | { kind: "none"; detail?: string };
+  async function adoptRelayTurn(turnId: string, leaseRef: Lease, reason: string): Promise<Adoption> {
+    let r: { state?: string; terminalState?: string } | null;
+    try {
+      r = await api("POST", `/daemon/turns/${turnId}/reconcile`, { resolution: "running", runtimeEventId: `start:${turnId}`, meta: { reason } }, leaseRef);
+    } catch (e) {
+      const x = e as { status?: number; relayError?: string };
+      if (x.status === 409 && (x.relayError === "turn_not_orphaned" || x.relayError === "another_turn_active")) return { kind: "none", detail: x.relayError };
+      throw e;
+    }
+    if (r?.state === "terminal") return { kind: "terminal", terminalState: String(r.terminalState ?? "interrupted") };
+    if (r?.state === "cancelling") return { kind: "cancelling" };
+    if (r?.state === "running") return { kind: "running" };
+    return { kind: "none", detail: r?.state };
+  }
+  /** /start refusals that MEAN "stop the prompt": a cancellation that beat
+   *  the control offer here, a session closed under the turn (#614), a
+   *  budget the relay failed the turn on (#613). Every other 409 is a
+   *  recovery question the relay's reconcile answers — never a cancel. */
+  const START_CANCEL_CLASS = new Set(["turn_cancelled", "session_archived", "session_failed", "session_event_budget_exhausted"]);
+
   /** Raw attachment bytes from the relay store (sealed by the sender). */
   async function fetchAttachment(attachmentId: string): Promise<Uint8Array> {
     const res = await fetch(`${relayUrl}/joy/v2/attachments/${attachmentId}`, {
@@ -829,6 +860,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // We cannot resume such a turn — the local dispatch state died with the
   // process — so terminalize it as `interrupted`, which is what actually
   // happened, and let the queue behind it flow.
+  // Orphaned turns a live local command still owns, logged once each (the
+  // sweep re-reads wedged-looking rows every tick).
+  const notedOwnedOrphans = new Set<string>();
   async function reconcileOrphanedTurns(
     rows: Array<{ sessionId: string; daemonId: string; localSessionId?: string | null }>,
   ): Promise<void> {
@@ -846,6 +880,29 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // The session's sender resolves it with the recorded outcome; a
           // generic "interrupted" here would win the relay's first-terminal rule.
           sender.wake(s.localSessionId);
+          continue;
+        }
+        // A LIVE local command still owns this turn: a previous generation's
+        // dispatch, carried in the ledger, whose runtime survived the
+        // restart. This pass used to interrupt it on the relay regardless —
+        // /start then 409'd and the loop cancelled a working agent on every
+        // restart (Astra, C9). The ledger is consulted BEFORE any cleanup:
+        // the loop that resumes the row (resumeLedgerTurns, right after the
+        // boot pass) adopts the turn under this lease once the driver has
+        // confirmed the runtime running; a turn orphaned later, under a loop
+        // that already passed that point, is adopted here.
+        const owner = ledger.commandForRelayTurn(ex.turnId);
+        if (owner && !isTerminalState(owner.state)) {
+          const loop = activeTurns.get(ex.turnId);
+          if (loop?.started && (owner.state === "running" || owner.state === "cancelling")) {
+            const a = await adoptRelayTurn(ex.turnId, l, "orphan_sweep");
+            if (a.kind === "cancelling" && owner.cancelRequestedAt == null) coordinator.cancel(owner.id);
+            log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned but ${owner.id} still runs it here → ${a.kind === "none" ? "left to its loop" : `adopted (${a.kind})`}`);
+            notedOwnedOrphans.delete(ex.turnId);
+          } else if (!notedOwnedOrphans.has(ex.turnId)) {
+            notedOwnedOrphans.add(ex.turnId);
+            log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} is orphaned on the relay but ${owner.id} (${owner.state}) still owns it here — left to its loop`);
+          }
           continue;
         }
         await api("POST", `/daemon/turns/${ex.turnId}/reconcile`, {
@@ -1444,7 +1501,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  "busy()" guess, no 180 s activity gate), POST /start, wait for the
    *  terminal state and post it. The states are the ledger's, so this loop
    *  can be resumed from the row after a daemon restart (R13). */
-  async function driveTurn(turnId: string, localId: string, commandId: string, leaseRef: Lease, opts: { startPosted: boolean; dropFiles?: () => void; tag: string }): Promise<void> {
+  async function driveTurn(turnId: string, localId: string, commandId: string, leaseRef: Lease, opts: { startPosted: boolean; resumed?: boolean; dropFiles?: () => void; tag: string }): Promise<void> {
     const { tag } = opts;
     const sessionNow = () => registry.get(localId);
     // The command is the coordinator's whatever object (or none) is under
@@ -1455,10 +1512,56 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       await postTerminal(turnId, localId, terminalBody(state, reason), leaseRef);
       log(`${tag} ${state}${state !== "completed" && reason ? ` (${reason})` : ""}`);
     };
-    if (!opts.startPosted) {
+    /** The prompt is running locally but the relay will not have it: cancel
+     *  it (the coordinator interrupts and retries) and say cancelled — never
+     *  `failed`; the relay leaves executing turns to their owner. */
+    const cancelLocally = async (reason: string) => {
+      q().cancel(commandId);
+      try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
+      await finish("cancelled", reason);
+    };
+    let startPosted = opts.startPosted;
+    /** Act on the relay's adoption answer. `continue` → the loop goes on to
+     *  the terminal; `done` → the turn is closed here; `none` → the relay
+     *  had nothing to adopt (the caller decides). */
+    const honourAdoption = async (a: Adoption, via: string): Promise<"continue" | "done" | "none"> => {
+      switch (a.kind) {
+        case "running":
+          log(`${tag}: adopted on the relay under this lease (${via})`);
+          return "continue";
+        case "cancelling":
+          // The relay had a cancel requested for it — preserved through the
+          // adoption: honour it here; the coordinator interrupts and the
+          // turn ends cancelled through Phase C.
+          log(`${tag}: adopted on the relay with a cancel pending (${via}) → cancelling locally`);
+          q().cancel(commandId);
+          return "continue";
+        case "terminal":
+          if (a.terminalState === "cancelled") {
+            await cancelLocally("relay_cancelled");
+            log(`${tag}: the relay closed this turn cancelled (${via}) → cancelled locally`);
+            return "done";
+          }
+          // The relay closed the turn without us (an earlier generation's
+          // sweep, an operator): completed / failed / interrupted. The agent
+          // is still working on it here — a recovery 409 is no proof that a
+          // runtime should be cancelled. It keeps running; its outcome is
+          // reported through the terminal fact when it ends (the relay
+          // answers replay), and no /start is posted for a closed turn.
+          log(`${tag}: the relay already closed this turn ${a.terminalState} (${via}) — the local command keeps running; its outcome posts as the terminal fact`);
+          startPosted = true;
+          return "continue";
+        case "none":
+          return "none";
+      }
+    };
+    if (!startPosted || opts.resumed) {
       // Phase A — OUR prompt reaches the agent and its turn is running. A
       // message legitimately queued behind a long turn must not time out,
-      // so the wait is as long as the turn itself may run.
+      // so the wait is as long as the turn itself may run. A resumed turn
+      // waits here even with its /start acknowledged: adopting it on the
+      // relay (below) is right only once the new driver generation has
+      // confirmed the runtime is executing it.
       const r = await q().waitFor(commandId, ["running", ...TERMINAL_STATES], { timeoutMs: TURN_CAP_MS });
       if (r.state === null) return finish("failed", "command_lost");
       if (isTerminal(r.state)) return finish(r.state, r.reason);
@@ -1468,7 +1571,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
         return finish("failed", "dispatch_timeout");
       }
-      log(`${tag}: started (delivery confirmed)`);
+      if (!startPosted) log(`${tag}: started (delivery confirmed)`);
       // The adapter's verdicts count from DELIVERY, not from the relay's
       // acknowledgement of it (#584 residual, Astra on 4a69e55c). This used
       // to be set after the /start round trip below, so a legacy adapter that
@@ -1478,23 +1581,56 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // counted. The prompt is running the moment the delivery is confirmed;
       // every turn-end from here belongs to THIS relay turn.
       { const t = activeTurns.get(turnId); if (t) t.started = true; }
-      try {
-        await postStart(turnId, localId, commandId, leaseRef);
-      } catch (e) {
-        const st = (e as { status?: number }).status;
-        if (st === 409) {
-          // The relay refuses the start — typically turn_cancelled from a
-          // cancellation that beat the control offer here, or the session
-          // is over (#614). The prompt is running locally: cancel it (the
-          // coordinator interrupts and retries) and say cancelled — never
-          // `failed`; the relay leaves executing turns to their owner.
-          q().cancel(commandId);
-          try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
-          await finish("cancelled", sessionGone(e) ?? "start_rejected");
-          log(`${tag}: /start refused (${(e as Error).message}) → cancelled locally`);
-          return;
+      if (opts.resumed) {
+        // A resumed turn is a previous daemon generation's on the relay:
+        // dispatching/running under the old epoch, or already orphaned by
+        // the sweep. The runtime is confirmed running here, so ADOPT it
+        // under this lease instead of letting the orphan pass terminalize
+        // it — that was the restart that cancelled a live agent (Astra, C9).
+        // A relay that has nothing to adopt (or no such resolution) leaves
+        // the plain path: /start under the stable event id, or none if acked.
+        let a: Adoption;
+        try { a = await adoptRelayTurn(turnId, leaseRef, "daemon_restart"); }
+        catch (e) { log(`${tag}: adoption failed (${errText(e)}) — continuing on the plain path`); a = { kind: "none" }; }
+        if ((await honourAdoption(a, "resumed")) === "done") return;
+      }
+      if (!startPosted) {
+        try {
+          await postStart(turnId, localId, commandId, leaseRef);
+        } catch (e) {
+          const st = (e as { status?: number }).status;
+          if (st !== 409) throw e;
+          const code = (e as { relayError?: string }).relayError ?? "";
+          // The relay refuses the start. A cancellation that beat the
+          // control offer here, or a session that is over (#614): cancel
+          // locally. Any OTHER refusal (turn_terminal, no_current_delivery,
+          // turn_orphaned_reconcile_first) is a recovery question — the
+          // turn is a predecessor's, or the relay already closed it — and
+          // the relay's reconcile answers it; a running agent is never
+          // cancelled on that 409 alone.
+          let verdict: "continue" | "done" | "none" = "none";
+          if (!START_CANCEL_CLASS.has(code)) {
+            let a: Adoption;
+            try { a = await adoptRelayTurn(turnId, leaseRef, "start_refused"); }
+            catch (e2) { log(`${tag}: reconcile after the refused /start failed (${errText(e2)})`); a = { kind: "none" }; }
+            verdict = await honourAdoption(a, "after /start refused");
+            if (verdict === "done") return;
+            if (a.kind === "running") {
+              try { await postStart(turnId, localId, commandId, leaseRef); }
+              catch (e3) {
+                if ((e3 as { status?: number }).status !== 409) throw e3;
+                await cancelLocally(sessionGone(e3) ?? "start_rejected");
+                log(`${tag}: /start refused again after adoption (${(e3 as Error).message}) → cancelled locally`);
+                return;
+              }
+            }
+          }
+          if (verdict === "none") {
+            await cancelLocally(sessionGone(e) ?? "start_rejected");
+            log(`${tag}: /start refused (${(e as Error).message}) → cancelled locally`);
+            return;
+          }
         }
-        throw e;
       }
     }
     { const t = activeTurns.get(turnId); if (t) t.started = true; } // idempotent: also covers a resumed turn whose /start was already posted (#584)
@@ -1532,7 +1668,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     const tag = `turn ${turnId.slice(0, 8)} [${row.sessionId}/${row.id}]`;
     log(`${tag}: resumed from the ledger (${row.state}, /start ${started ? "acknowledged" : ledger.hasReceipt(row.sessionId, START_INTENT_RECEIPT, turnId) ? "intended, unacknowledged — re-posting" : "not yet posted"})`);
     try {
-      await driveTurn(turnId, row.sessionId, row.id, leaseRef, { startPosted: started, tag });
+      await driveTurn(turnId, row.sessionId, row.id, leaseRef, { startPosted: started, resumed: true, tag });
     } catch (e) {
       log(`${tag} error: ${String(e)}`);
       try { await postTerminal(turnId, row.sessionId, { type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason: "lane_error", detail: String(e).slice(0, 300) } }, leaseRef); } catch { /* lease-expiry orphaning */ }
@@ -1908,6 +2044,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (!lease) {
           if (lane === "control") { await sleep(1_000); continue; } // work loop owns acquire
           await acquire();
+          // The boot pass (bindings, keys, cards, orphan cleanup) consults
+          // the LEDGER before it touches any orphaned turn: a turn whose
+          // command is still pending here is a survivor, never interrupted
+          // — its loop below adopts it under this lease once the driver
+          // confirms the runtime running (Astra, C9).
           await refreshBindings();
           bootReady = true; // bindings + content keys loaded: the outbox may send
           sender.start(); // every session with unacked rows resumes from the ledger — in order
