@@ -280,6 +280,15 @@ app.
   a80f0aca. Astra reviews queued for Wave E and the daemon round; a Fable
   reviewer on the tunnel executor. Four merges still await approval.
 
+- 2026-09-07 (evening) — Faraz delegated conflict resolution for the
+  campaign's branch merges; the four held branches landed: Wave A residuals
+  (6d994569), C3 daemon modules (7bfa9248), E1 tool model (6256547c), E6
+  settings/auth/modal (4b419100), with union imports/strings, main's diff
+  counter kept over E1's, E6's auth files taken. Daemon 775 tests, app 1363.
+  C1 ledger, the hooks-as-authority step, E4 query slice and the leftover
+  strings are in flight; Astra reviews queued for the daemon round, the
+  four merges and Wave E.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
