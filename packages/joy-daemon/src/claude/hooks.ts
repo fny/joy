@@ -23,10 +23,11 @@
 // heuristics carry the session exactly as before — hooks tighten state, they
 // are never load-bearing.
 import { execPath } from "node:process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { joyStateDir } from "../paths";
 import { shellJoin } from "../domain/quote";
+import { writeFileAtomic } from "../domain/atomicWrite";
 
 // The generic hook script. Reads the hook payload from stdin, forwards a
 // compact subset to POST /sessions/$JOY_SESSION_ID/hook. Daemon coordinates
@@ -89,6 +90,12 @@ function hookStamp(): string {
 
 let cachedSettingsPath: string | null = null;
 
+/** The settings file is only "installed" if Claude can parse it: an existence
+ *  check alone once accepted a JSON truncated by a failed write (#471). */
+function settingsIntact(settingsPath: string): boolean {
+  try { JSON.parse(readFileSync(settingsPath, "utf8")); return true; } catch { return false; }
+}
+
 /**
  * Ensure the managed Claude settings file + hook script exist in the joy state
  * dir, and return the settings path to pass to `claude --settings`.
@@ -106,8 +113,15 @@ export function ensureHookSettings(): string {
     mkdirSync(dir, { recursive: true });
     const stamp = existsSync(stampPath) ? readFileSync(stampPath, "utf8") : "";
     try { rmSync(join(dir, "precompact-hook.version"), { force: true }); } catch {}
-    if (stamp !== hookStamp() || !existsSync(hookPath) || !existsSync(settingsPath)) {
-      writeFileSync(hookPath, HOOK_SCRIPT);
+    if (stamp !== hookStamp() || !existsSync(hookPath) || !settingsIntact(settingsPath)) {
+      // The stamp means "both files are complete and current". Drop it BEFORE
+      // touching either file: a repair that dies between the script and the
+      // settings (ENOSPC) used to leave the still-current stamp vouching for
+      // whatever the second write left behind, and the next call cached that
+      // as usable (#471). Each file lands by temp + rename, so a failed write
+      // never replaces a complete file with a partial one either.
+      rmSync(stampPath, { force: true });
+      writeFileAtomic(hookPath, HOOK_SCRIPT);
       // Run via the daemon's own node (absolute path) so the hook works
       // regardless of the login shell's PATH. Claude runs the command through
       // a shell, so both paths are shell-quoted as LITERAL words: double
@@ -124,8 +138,9 @@ export function ensureHookSettings(): string {
           Notification: entry,
         },
       };
-      writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-      writeFileSync(stampPath, hookStamp());
+      writeFileAtomic(settingsPath, JSON.stringify(settings, null, 2));
+      // Restored last, only once both files are complete on disk (#471).
+      writeFileAtomic(stampPath, hookStamp());
     }
   } catch {
     return "";
