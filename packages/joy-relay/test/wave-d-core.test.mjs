@@ -180,6 +180,66 @@ describe('#613 the event budget is enforced at claim and at start, not only at a
     expect((await turnRow(b.turnId)).terminal_state).toBe('failed');
     expect((await call('GET', `/joy/v2/sessions/${sid}`)).json.sessionState).not.toBe('failed'); // the SESSION is not failed, only the turn
   }, 30_000);
+
+  it('adopting a never-started turn (reconcile running) takes the first-start budget decision: 409 session_event_budget_exhausted, the turn committed failed, idempotent — re-fencing an already-started turn is not gated (F14)', async () => {
+    const d = makeDaemon('mach-613e'); await d.acquire();
+    const sid = await makeSession(d);
+    await fill(sid, MAX_EVENTS_PER_SESSION - 8);
+    const b = (await post(sid, { ciphertext: 'B' })).json;
+    const offer = offerFor(await d.claim('work'), sid);
+    expect(offer.turnId).toBe(b.turnId);
+    await d.received(offer.deliveryId);
+    await d.submitted(b.turnId);
+    // The predecessor dies between the runtime's echo and POST /start; the
+    // budget vanishes meanwhile (out-of-turn output eats the reserve).
+    for (let i = 0; i < 20; i++) {
+      const r = await call('POST', `/joy/v2/daemon/sessions/${sid}/facts`,
+        { body: { type: 'output', ciphertext: 't' + i, runtimeEventId: randomUUID() }, headers: d.headers() });
+      if (r.status === 429) break;
+      expect(r.status).toBe(200);
+    }
+    await db.query(`UPDATE daemon_leases SET expires_at = now() - interval '1 second' WHERE id = $1`, [d.leaseId]);
+    await core.sweepExpiredLeases();
+    expect((await call('GET', `/joy/v2/sessions/${sid}`)).json.execution.state).toBe('orphaned');
+    // The new epoch adopts: the same answer /start gives — committed despite the 409.
+    const d2 = makeDaemon('mach-613e'); await d2.acquire();
+    const adopt = await call('POST', `/joy/v2/daemon/turns/${b.turnId}/reconcile`,
+      { body: { resolution: 'running', runtimeEventId: `start:${b.turnId}`, meta: { reason: 'daemon_restart' } }, headers: d2.headers() });
+    expect(adopt.status).toBe(409);
+    expect(adopt.json.error).toBe('session_event_budget_exhausted');
+    expect(await turnRow(b.turnId)).toMatchObject({ state: 'terminal', terminal_state: 'failed', terminal_meta: { reason: 'session_event_budget_exhausted' } });
+    expect((await getMsg(sid, b.messageId)).json.status).toBe('failed');
+    expect((await call('GET', `/joy/v2/sessions/${sid}`)).json.execution.state).toBe('idle');
+    const started = await db.query(`SELECT count(*)::int AS n FROM session_events WHERE session_id = $1 AND kind = 'turn.started'`, [sid]);
+    expect(started.rows[0].n).toBe(0); // never started: no start bookkeeping leaked past the refusal
+    // Idempotent: a repeat adoption and a /start both answer the committed terminal, not a second failure.
+    expect((await call('POST', `/joy/v2/daemon/turns/${b.turnId}/reconcile`, { body: { resolution: 'running' }, headers: d2.headers() })).json)
+      .toMatchObject({ state: 'terminal', terminalState: 'failed', replay: true });
+    expect((await d2.start(b.turnId, { runtimeEventId: `start:${b.turnId}` })).json.error).toBe('turn_terminal');
+    expect(offerFor(await d2.claim('work'), sid)).toBeUndefined();
+    expect((await call('GET', `/joy/v2/sessions/${sid}`)).json.sessionState).not.toBe('failed');
+
+    // Control: a turn that already STARTED under the predecessor is re-fenced
+    // regardless of the budget — its first start was authorized then; its
+    // output is refused per fact, as always.
+    const d3 = makeDaemon('mach-613f'); await d3.acquire();
+    const sid2 = await makeSession(d3);
+    const c = (await post(sid2, { ciphertext: 'C' })).json;
+    const offer2 = offerFor(await d3.claim('work'), sid2);
+    await d3.received(offer2.deliveryId);
+    await d3.submitted(c.turnId);
+    expect((await d3.start(c.turnId, { runtimeEventId: `start:${c.turnId}` })).status).toBe(200);
+    await fill(sid2, MAX_EVENTS_PER_SESSION);
+    await db.query(`UPDATE daemon_leases SET expires_at = now() - interval '1 second' WHERE id = $1`, [d3.leaseId]);
+    await core.sweepExpiredLeases();
+    const d4 = makeDaemon('mach-613f'); await d4.acquire();
+    const refence = await call('POST', `/joy/v2/daemon/turns/${c.turnId}/reconcile`, { body: { resolution: 'running' }, headers: d4.headers() });
+    expect(refence.status).toBe(200);
+    expect(refence.json).toMatchObject({ state: 'running', adopted: true });
+    expect(String((await turnRow(c.turnId)).lease_epoch)).toBe(String(d4.epoch));
+    expect((await d4.fact(c.turnId, { type: 'output', ciphertext: 'o', runtimeEventId: randomUUID() })).status).toBe(429);
+    expect((await d4.fact(c.turnId, { type: 'terminal', terminalState: 'completed', runtimeEventId: randomUUID() })).status).toBe(200);
+  }, 30_000);
 });
 
 describe('#613 an exhausted session refuses new prompts at admission', () => {
