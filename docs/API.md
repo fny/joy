@@ -268,11 +268,14 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   runs, one op per command at a time (a second echo coalesces), retried on
   the cancel budget, dropped once an id-less turn end / idle / interrupt
   says the run is over. **Observation fencing**: an echo / turn start /
-  turn end / interrupt moves a command only when the attempt it names is
-  the command's newest AND was made for the row's current payload version;
-  late evidence of an older attempt (a timed-out submission that landed
-  after the row was edited and re-submitted) is recorded on that attempt
-  as history and never advances the replacement. A row waiting at the
+  turn end / interrupt moves a command only when the attempt it names was
+  made for the row's current payload version (an older attempt of the same
+  text that landed after all is this command's delivery — at-least-once),
+  and the transition is preconditioned on the command's newest attempt;
+  late evidence of an attempt made for a text since edited away (a
+  timed-out submission that landed after the row was edited and
+  re-submitted) is recorded on that attempt as history and never advances
+  the replacement. A row waiting at the
   driver's `prepare` gate is re-read when the gate opens: an edit (payload
   version) or a reorder (queue head) meanwhile re-plans instead of
   submitting the stale row, and the committed attempt records the payload
