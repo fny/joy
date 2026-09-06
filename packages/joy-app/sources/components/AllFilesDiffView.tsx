@@ -128,7 +128,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     }
 
     const fileSignature = (f: GitFileStatus) =>
-        `${f.status}|${f.isStaged ? 1 : 0}|${f.linesAdded}|${f.linesRemoved}`;
+        `${f.status}|${f.isStaged ? 1 : 0}|${f.lines === 'unavailable' ? 'u' : `${f.lines.added}/${f.lines.removed}`}`;
 
     React.useEffect(() => {
         if (files.length === 0) {
@@ -202,7 +202,8 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                 if (isImagePath(file.fullPath)) {
                     return { file, content: { kind: 'image' as const, path: resolved.absolutePath }, error: null };
                 }
-                if (isBinaryPath(file.fullPath)) {
+                // git's own verdict first (numstat "-"), then the extension list.
+                if (file.binary || isBinaryPath(file.fullPath)) {
                     return { file, content: { kind: 'binary' as const }, error: null };
                 }
                 if (file.status === 'untracked') {
@@ -400,7 +401,7 @@ const FileDiffSection = React.memo(function FileDiffSection({
     const { file, content, error } = result;
     const [collapsed, setCollapsed] = React.useState(false);
 
-    const fileName = file.fullPath.split('/').pop() || file.fullPath;
+    const fileName = file.fileName; // display text; file.fullPath stays the identity
     const isBinary = content?.kind === 'binary';
     const isImage = content?.kind === 'image';
     const isEmpty =
@@ -440,13 +441,16 @@ const FileDiffSection = React.memo(function FileDiffSection({
                     ellipsizeMode="middle"
                     style={[styles.headerPath, { color: theme.colors.textSecondary }]}
                 >
-                    {file.fullPath}
+                    {file.displayPath}
                 </Text>
                 {file.status === 'deleted' && (
                     <Text style={[styles.statusBadge, { color: '#FF3B30' }]}>deleted</Text>
                 )}
                 {file.status === 'untracked' && (
                     <Text style={[styles.statusBadge, { color: '#34C759' }]}>new</Text>
+                )}
+                {file.status === 'conflicted' && (
+                    <Text style={[styles.statusBadge, { color: '#FF9500' }]}>{t('files.conflicted')}</Text>
                 )}
                 {stats && (stats.additions > 0 || stats.deletions > 0) && (
                     <View style={styles.stats}>

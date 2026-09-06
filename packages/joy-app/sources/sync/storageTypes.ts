@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { GitLineCount } from "./v2/machine";
 
 /** True when a session was created by the joy machine daemon (joy-daemon).
  *  Accepts the historical values too — sessions created before the 2026-08
@@ -316,24 +317,24 @@ export interface Machine {
 //
 
 export interface GitStatus {
+    /** Branch name (the unborn branch's name before the first commit); null when detached. */
     branch: string | null;
+    head: 'branch' | 'detached' | 'unborn';
     isDirty: boolean;
     modifiedCount: number;
     untrackedCount: number;
     stagedCount: number;
+    conflictedCount: number;
     lastUpdatedAt: number;
-    // Line change statistics - separated by staged vs unstaged
-    stagedLinesAdded: number;
-    stagedLinesRemoved: number;
-    unstagedLinesAdded: number;
-    unstagedLinesRemoved: number;
-    // Computed totals
-    linesAdded: number;      // stagedLinesAdded + unstagedLinesAdded
-    linesRemoved: number;    // stagedLinesRemoved + unstagedLinesRemoved
-    linesChanged: number;    // Total lines that were modified (added + removed)
-    // Branch tracking information (from porcelain v2)
+    // Line change statistics per side: exact counts from the daemon's structured
+    // status, or 'unavailable' when they could not be read — never a stand-in zero.
+    stagedLines: GitLineCount;
+    unstagedLines: GitLineCount;
+    /** staged + unstaged; 'unavailable' when either side is. */
+    totalLines: GitLineCount;
+    // Branch tracking information
     upstreamBranch?: string | null; // Name of upstream branch
-    aheadCount?: number; // Commits ahead of upstream
-    behindCount?: number; // Commits behind upstream
+    aheadCount?: number | null; // Commits ahead of upstream (null: upstream gone)
+    behindCount?: number | null; // Commits behind upstream
     stashCount?: number; // Number of stash entries
 }
