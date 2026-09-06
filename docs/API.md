@@ -330,7 +330,15 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   secret and accepts base64url backup codes (#586 #64).
 - Local event routes stream their opening history with drain-aware pacing
   (10 s deadline) before the bounded live feed, so a large history reaches a
-  reading client and a stalled one is dropped (#597).
+  reading client and a stalled one is dropped (#597). The history is paged
+  from its store in bounded batches (256 records, ~1 MiB serialized) and
+  framed one record at a time into 64 KiB socket chunks; the next batch is
+  read only once the previous one is on the wire, so a stream retains one
+  batch of record references, one framed record and one chunk — never the
+  serialized history. On the wire the `/events` `history` frame is still the
+  single SSE event `event: history\ndata: [<records>]\n\n` (byte-identical to
+  the whole-array form) and `/sessions/:id/events` still opens with the
+  `{ hello, seq }` line followed by one NDJSON line per record.
 - `joy stop` signals only a verified daemon: the pid from an authenticated
   `/status`, or the daemon.json pid whose command line and start time match;
   a stale record is removed without signalling (#495). The single-daemon lock

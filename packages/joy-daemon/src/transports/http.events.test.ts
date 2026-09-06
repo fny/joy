@@ -6,6 +6,10 @@
 //    12 MiB history (192 × 64 KiB records) in full; a NON-READING client is
 //    dropped at the drain deadline; live records published during the flush
 //    are delivered after it, in order, none lost.
+//  - #597 Wave C: the history is PAGED from its store in bounded batches and
+//    framed one record at a time — the serialized history never exists as
+//    one string, the next batch is read only after the previous one drained,
+//    and the bytes on the wire equal the whole-array frame exactly.
 import { test, expect, beforeAll, afterAll, vi } from "vitest";
 import * as net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -13,8 +17,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-http-test-"));
-import { startHttpServer, streamHistoryThenFollow, sseJsonArrayEvent } from "./http";
+import { startHttpServer, streamHistoryThenFollow, sseJsonArrayEvent, sseJsonArrayFraming, arrayHistory } from "./http";
 import * as http from "node:http";
+import { EventEmitter } from "node:events";
 import { RelaySession, encodeTextEvent, forgetRecords } from "../relay/relay";
 
 const TOKEN = "tok-http-test";
@@ -89,15 +94,17 @@ test("/events: a reading client receives a 12 MiB opening history (#597 Wave B)"
   // quadratic string-append client would itself be the slow reader here).
   const chunks: Uint8Array[] = [];
   const tail = () => Buffer.concat(chunks.slice(-2)).toString("latin1");
-  while (!tail().includes("event: sessions_history")) {
+  while (!tail().includes("event: sessions_history\ndata: []\n\n")) {
     const { value, done } = await reader.read();
     if (done) break;
     chunks.push(value);
   }
-  const got = Buffer.concat(chunks).toString("utf8");
-  const m = /^event: history\ndata: (.*)\n\n/m.exec(got);
-  expect(m).toBeTruthy();
-  expect(JSON.parse(m![1]).length).toBe(RECORDS);
+  const got = Buffer.concat(chunks);
+  // Byte-identical to the whole-array frame the pre-Wave-C implementation
+  // wrote: the paged, per-record framing changes nothing on the wire.
+  const expected = Buffer.from(`event: history\ndata: ${JSON.stringify(chat)}\n\nevent: sessions_history\ndata: []\n\n`);
+  expect(got.length).toBe(expected.length);
+  expect(got.equals(expected)).toBe(true);
   ctrl.abort();
   chat.length = 0;
 }, 20_000);
@@ -126,16 +133,19 @@ test("live records published during the history flush arrive after it, in order,
   expect(texts).toEqual(["live-0", "live-1", "live-2"]);
 }, 20_000);
 
-test("one oversized history item never sits in the response buffer whole: pending bytes stay under the cap (#597 residual)", async () => {
-  // A single /events `history` frame IS the whole serialized chat (12 MiB
-  // here). Written in one res.write() it exceeded the 8 MiB pending-bytes
-  // bound before the first drain check (Astra on 4a69e55c). Drive the helper
-  // with a real response and a paused client and watch writableLength.
-  const item = `event: history\ndata: ${JSON.stringify(Array.from({ length: RECORDS }, (_, i) => ({ id: String(i), role: "assistant", content: RECORD_TEXT, session_id: SID })))}\n\n`;
-  expect(Buffer.byteLength(item)).toBeGreaterThan(12 * 1024 * 1024);
+test("a 12 MiB history to a paused client: pending bytes stay under the cap, no write retains more than one chunk, no frame string exceeds one record, and the store is paged only between drains (#597 residual)", async () => {
+  // The /events `history` frame IS the whole serialized chat (12 MiB here).
+  // Written in one res.write() it exceeded the 8 MiB pending-bytes bound
+  // before the first drain check (Astra on 4a69e55c); cut into owned 64 KiB
+  // chunks it was still built — and retained — as one string until the
+  // response closed (Astra on 6c737d7b). Drive the helper with a real
+  // response and a paused client: watch writableLength, what each write
+  // retains, the largest string ever framed, and when the store is read.
+  const rows = Array.from({ length: RECORDS }, (_, i) => ({ id: String(i), role: "assistant", content: RECORD_TEXT, session_id: SID }));
   const cap = 8 * 1024 * 1024;
   let peak = 0; let subs = 0; let unsubscribed = 0; let closed = false;
-  let peakWrite = 0; let peakBacking = 0;
+  let peakWrite = 0; let peakBacking = 0; let peakFrame = 0;
+  const reads: Array<{ cursor: number; limit: number; needDrain: boolean; pending: number }> = [];
   const srv = http.createServer((_req, res) => {
     const write = res.write.bind(res);
     (res as any).write = (...args: any[]) => {
@@ -148,8 +158,19 @@ test("one oversized history item never sits in the response buffer whole: pendin
     };
     res.on("close", () => { closed = true; });
     res.writeHead(200, { "Content-Type": "text/event-stream" });
+    const framing = sseJsonArrayFraming("history");
+    const paged = arrayHistory(rows);
     void streamHistoryThenFollow({
-      res, history: [item, "event: sessions_history\ndata: []\n\n"], label: "test-sse",
+      res, label: "test-sse",
+      history: {
+        ...framing, ...paged,
+        read: (cursor, limit) => {
+          reads.push({ cursor, limit, needDrain: res.writableNeedDrain, pending: res.writableLength });
+          return paged.read(cursor, limit);
+        },
+        frame: (row, index) => { const s = framing.frame(row, index); peakFrame = Math.max(peakFrame, s.length); return s; },
+        close: framing.close + "event: sessions_history\ndata: []\n\n",
+      },
       subscribe: () => { subs++; return () => { unsubscribed++; }; },
       drainDeadlineMs: 300, maxBufferedBytes: cap,
     });
@@ -165,12 +186,89 @@ test("one oversized history item never sits in the response buffer whole: pendin
   expect(peak).toBeLessThan(1024 * 1024);           // high-water mark + one 64 KiB chunk, not the whole frame
   expect(peakWrite).toBeLessThanOrEqual(64 * 1024);
   expect(peakBacking).toBeLessThanOrEqual(64 * 1024); // a chunk owns its allocation: no whole-frame buffer behind it
+  expect(peakFrame).toBeLessThan(RECORD_TEXT.length + 256); // the largest string ever built is ONE framed record
+  // The store was paged — never asked for everything — and every read
+  // happened with the previous batch already taken by the socket: at no
+  // read was a drain pending. The stalled client got no batch read on its
+  // behalf once its socket stopped taking bytes.
+  expect(reads.length).toBeGreaterThan(1);
+  expect(reads.length).toBeLessThan(RECORDS);
+  expect(reads[0]).toMatchObject({ cursor: 0, needDrain: false });
+  for (const r of reads) { expect(r.needDrain).toBe(false); expect(r.limit).toBeLessThanOrEqual(256); }
+  for (let i = 1; i < reads.length; i++) expect(reads[i].cursor).toBeGreaterThan(reads[i - 1].cursor); // continues from the last record written
   expect(closed).toBe(true);                         // dropped at the drain deadline
   expect(subs).toBe(1); expect(unsubscribed).toBeGreaterThanOrEqual(1); // drop() and the close listener both unsubscribe (idempotent)
   sock.destroy();
   srv.closeAllConnections();
   await new Promise<void>((r) => srv.close(() => r()));
 }, 20_000);
+
+test("the next history batch is read only after the previous one drained; a byte cap closes a batch early; the bytes equal the whole-array frame (#597 residual, Wave C)", async () => {
+  // A scripted response — writes are taken until a high-water mark, then
+  // refused until the test drains — pins the pacing exactly: while a drain
+  // is pending the store is not read; once 'drain' fires, one more batch.
+  class ScriptedRes extends EventEmitter {
+    destroyed = false; ended = false; writableNeedDrain = false;
+    pending = 0; readonly out: Buffer[] = [];
+    constructor(readonly hwm: number) { super(); }
+    get writableLength() { return this.pending; }
+    write(buf: Buffer): boolean {
+      this.out.push(Buffer.from(buf)); this.pending += buf.length;
+      if (this.pending >= this.hwm) { this.writableNeedDrain = true; return false; }
+      return true;
+    }
+    drain(): void { this.pending = 0; this.writableNeedDrain = false; this.emit("drain"); }
+    end(): void { this.ended = true; }
+    destroy(): void { this.destroyed = true; this.emit("close"); }
+  }
+  const settle = () => new Promise<void>((r) => setTimeout(r, 20));
+  const rows = Array.from({ length: RECORDS }, (_, i) => ({ id: String(i), role: "assistant", content: RECORD_TEXT, session_id: SID }));
+  const expected = Buffer.from(`event: history\ndata: ${JSON.stringify(rows)}\n\nevent: sessions_history\ndata: []\n\n`);
+  expect(expected.length).toBeGreaterThan(12 * 1024 * 1024);
+  const run = async (batch: { historyBatchRecords?: number; historyBatchBytes?: number }) => {
+    const res = new ScriptedRes(256 * 1024);
+    const reads: Array<{ cursor: number; needDrain: boolean; pendingAtRead: number }> = [];
+    const framing = sseJsonArrayFraming("history");
+    const paged = arrayHistory(rows);
+    const done = streamHistoryThenFollow({
+      res: res as any, label: "scripted", subscribe: null, drainDeadlineMs: 5_000, ...batch,
+      history: {
+        ...framing, ...paged,
+        read: (cursor, limit) => { reads.push({ cursor, needDrain: res.writableNeedDrain, pendingAtRead: res.pending }); return paged.read(cursor, limit); },
+        close: framing.close + "event: sessions_history\ndata: []\n\n",
+      },
+    });
+    let stalls = 0;
+    while (!res.ended) {
+      await settle();
+      if (!res.writableNeedDrain) continue;
+      // Stalled: nothing more may be read from the store until we drain.
+      const before = reads.length;
+      await settle(); await settle();
+      expect(reads.length).toBe(before);
+      stalls++;
+      res.drain();
+    }
+    await done;
+    expect(stalls).toBeGreaterThan(10);                       // 12 MiB through a 256 KiB high-water mark
+    for (const r of reads) expect(r.needDrain).toBe(false);   // every read: the previous batch already taken
+    for (let i = 1; i < reads.length; i++) expect(reads[i].cursor).toBeGreaterThan(reads[i - 1].cursor);
+    const got = Buffer.concat(res.out);
+    expect(got.length).toBe(expected.length);
+    expect(got.equals(expected)).toBe(true);                  // byte-identical to the pre-Wave-C whole-array frame
+    expect(Math.max(...res.out.map((b) => b.length))).toBeLessThanOrEqual(64 * 1024);
+    return reads;
+  };
+  // 16 records per batch, no byte cap: 12 full batches, then the empty read
+  // that says "exhausted" — the cursor is the position after the last record.
+  const byCount = await run({ historyBatchRecords: 16, historyBatchBytes: 1 << 30 });
+  expect(byCount.map((r) => r.cursor)).toEqual(Array.from({ length: RECORDS / 16 + 1 }, (_, i) => i * 16));
+  // 256 per batch under a 1 MiB byte cap: each 64 KiB record pushes a batch
+  // past the cap after 16, so the batch closes early and the next read
+  // continues from the last record written, not from the end of the page.
+  const byBytes = await run({ historyBatchRecords: 256, historyBatchBytes: 1024 * 1024 });
+  expect(byBytes.map((r) => r.cursor)).toEqual(Array.from({ length: RECORDS / 16 + 1 }, (_, i) => i * 16));
+}, 30_000);
 
 test("a client that never reads is dropped at the drain deadline instead of parking the history", async () => {
   const sock = net.connect(port, "127.0.0.1");
@@ -196,14 +294,18 @@ test("history chunks never split a multi-byte character or a surrogate pair; the
   const text = "aé€🙂é🙂€aa€🙂🙂éé€a".repeat(200);
   const rows = Array.from({ length: 50 }, (_, i) => ({ id: String(i), role: "assistant", content: text, session_id: SID }));
   const expected = `event: history\ndata: ${JSON.stringify(rows)}\n\n` + "hello 🙂\n";
-  // One oversized string item AND per-record generator items go through the same encoder.
-  const history = (function* () { yield* sseJsonArrayEvent("history", rows); yield "hello 🙂\n"; })();
+  // Tiny batches (7 records, ~10 KiB) so batch boundaries — partial-chunk
+  // flushes — fall inside characters too.
+  const framing = sseJsonArrayFraming("history");
   const writes: number[] = [];
   const srv = http.createServer((_req, res) => {
     const write = res.write.bind(res);
     (res as any).write = (...args: any[]) => { writes.push((args[0] as Buffer).length); return (write as any)(...args); };
     res.writeHead(200, { "Content-Type": "text/event-stream" });
-    void streamHistoryThenFollow({ res, history, label: "test-utf8", subscribe: null, historyChunkBytes: 5 });
+    void streamHistoryThenFollow({
+      res, label: "test-utf8", subscribe: null, historyChunkBytes: 5, historyBatchRecords: 7, historyBatchBytes: 10 * 1024,
+      history: { ...framing, ...arrayHistory(rows), close: framing.close + "hello 🙂\n" },
+    });
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
   const p = (srv.address() as any).port as number;

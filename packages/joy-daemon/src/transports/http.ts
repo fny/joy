@@ -11,7 +11,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
-import { sessionRecords, latestRecordSeq, subscribeRecords } from "../relay/relay";
+import { sessionRecords, latestRecordSeq, subscribeRecords, type LoggedRecord } from "../relay/relay";
 import { buildOpenApiSpec } from "./openapi";
 import { handleV2 } from "./v2";
 import { boundedWriter } from "../domain/bounded";
@@ -34,25 +34,80 @@ const EVENT_HISTORY_DRAIN_DEADLINE_MS = 10_000;
  *  `Buffer.from(item)` of the whole frame, then sliced, kept the entire
  *  12 MiB backing store alive behind every pending 64 KiB slice while a
  *  stalled response awaited drain (Astra on b2aa492d) — now no more than
- *  one chunk plus one history item is resident per stream. */
+ *  one chunk plus one framed record is resident per stream. */
 const EVENT_HISTORY_WRITE_CHUNK_BYTES = 64 * 1024;
+/** Records per opening-history batch. The history is never read from its
+ *  store whole, let alone serialized whole: owned 64 KiB chunks cut from ONE
+ *  complete history string still retained that string (>12 MiB for a large
+ *  session) until the response closed, so the retained peak was never bound
+ *  by the 8 MiB cap (Astra on 6c737d7b). The store is now PAGED — this many
+ *  records at a time, each record framed and encoded on its own — and the
+ *  next page is read only once the previous one is on the wire. */
+const EVENT_HISTORY_BATCH_RECORDS = 256;
+/** Soft serialized-bytes cap per batch: once a batch's framed records pass
+ *  it the batch closes early (flushed, drained) and the next read continues
+ *  from the last record written — 256 records of 64 KiB would otherwise be a
+ *  16 MiB batch between batch boundaries. */
+const EVENT_HISTORY_BATCH_BYTES = 1024 * 1024;
 
 /**
- * Frame an SSE event whose data is a JSON array, one element at a time. The
- * bytes are exactly `event: <name>\ndata: ${JSON.stringify([...items])}\n\n`,
- * but no whole-array string is ever built: the /events opening `history`
- * frame is the largest allocation on this surface (12 MiB for a full chat),
- * and building it per client, per connect, is what the incremental encoder
- * in streamHistoryThenFollow is there to avoid (#597 residual).
+ * The opening history of a long-lived event response, as its store pages it.
+ * streamHistoryThenFollow reads it in bounded batches (`read`), frames each
+ * record on its own (`frame`) straight into socket chunks, and continues
+ * from the cursor of the last record written — so what is resident per
+ * stream is one batch of record references, one framed record and one
+ * chunk, never the serialized history (#597 residual, Wave C).
  */
+export interface HistorySource<T> {
+  /** Bytes before the first record (an SSE array opener, an NDJSON hello line). */
+  open?: string;
+  /** Page the store: up to `limit` records after `cursor`, ascending; `[]`
+   *  once exhausted. Invoked only after the previous batch is on the wire —
+   *  a stalled client never has a second batch read on its behalf. */
+  read: (cursor: number, limit: number) => readonly T[] | Promise<readonly T[]>;
+  /** The cursor a later read continues from once `record` (the `index`-th of
+   *  the whole history, from 0) has been written: its seq, or its position
+   *  when the store pages by position. */
+  cursor: (record: T, index: number) => number;
+  /** Frame one record; `index` counts from 0 across the whole history. */
+  frame: (record: T, index: number) => string;
+  /** Bytes after the last record. */
+  close?: string;
+  /** Cursor of the first read (default 0). */
+  start?: number;
+}
+
+/**
+ * SSE framing of a JSON array, one element at a time: `open`, the frames of
+ * every element, `close` are byte for byte `event: <name>\ndata:
+ * ${JSON.stringify([...items])}\n\n` — without the whole-array string, which
+ * for the /events opening `history` was a 12 MiB allocation per connecting
+ * client.
+ */
+export function sseJsonArrayFraming(event: string): Required<Pick<HistorySource<unknown>, "open" | "frame" | "close">> {
+  return {
+    open: `event: ${event}\ndata: [`,
+    frame: (item, index) => (index === 0 ? "" : ",") + (JSON.stringify(item) ?? "null"),
+    close: "]\n\n",
+  };
+}
+
+/** The same framing as a generator of fragments (tests: the byte oracle). */
 export function* sseJsonArrayEvent(event: string, items: Iterable<unknown>): Generator<string> {
-  yield `event: ${event}\ndata: [`;
-  let first = true;
-  for (const item of items) {
-    yield (first ? "" : ",") + (JSON.stringify(item) ?? "null");
-    first = false;
-  }
-  yield "]\n\n";
+  const f = sseJsonArrayFraming(event);
+  yield f.open;
+  let index = 0;
+  for (const item of items) yield f.frame(item, index++);
+  yield f.close;
+}
+
+/** Page a resident array of records by position. */
+export function arrayHistory<T>(rows: readonly T[]): Pick<HistorySource<T>, "read" | "cursor" | "start"> {
+  return {
+    start: 0,
+    read: (cursor, limit) => rows.slice(cursor, cursor + limit),
+    cursor: (_record, index) => index + 1,
+  };
 }
 
 /**
@@ -64,27 +119,34 @@ export function* sseJsonArrayEvent(event: string, items: Iterable<unknown>): Gen
  * records of 64 KiB — within the record-count limits) exceeds it in one
  * synchronous loop before the socket has flushed a single byte: a FAST reader
  * was destroyed before receiving any body (Astra, Wave B). The history is now
- * written one item at a time; whenever res.write() reports a full buffer the
- * loop awaits 'drain' — a reading client receives everything, a non-reading
- * one is dropped when the drain deadline passes. Live records that arrive
- * during the flush are buffered (bounded by the same cap) so none are lost,
- * then handed over to the bounded writer once the history is on the wire.
+ * paged from its store one bounded batch at a time and framed one record at
+ * a time into fixed-size chunks; whenever res.write() reports a full buffer
+ * the loop awaits 'drain' before the next chunk — and the next batch is read
+ * only once the previous one is on the wire. A reading client receives
+ * everything, a non-reading one is dropped when the drain deadline passes.
+ * Live records that arrive during the flush are buffered (bounded by the
+ * same cap) so none are lost, then handed over to the bounded writer once
+ * the history is on the wire.
  */
-export async function streamHistoryThenFollow(opts: {
+export async function streamHistoryThenFollow<T>(opts: {
   res: ServerResponse;
-  history: Iterable<string>;
+  history: HistorySource<T>;
   /** Live-record source; null for a one-shot (non-follow) response. */
   subscribe: ((fn: (chunk: string) => void) => () => void) | null;
   label: string;
   drainDeadlineMs?: number;
   maxBufferedBytes?: number;
   historyChunkBytes?: number;
+  historyBatchRecords?: number;
+  historyBatchBytes?: number;
 }): Promise<void> {
-  const { res, label } = opts;
+  const { res, label, history } = opts;
   const maxBytes = opts.maxBufferedBytes ?? EVENT_CLIENT_MAX_BUFFERED_BYTES;
   const drainMs = opts.drainDeadlineMs ?? EVENT_HISTORY_DRAIN_DEADLINE_MS;
   // ≥ 4: the widest UTF-8 sequence must fit an empty chunk, else no progress.
   const chunkBytes = Math.max(4, opts.historyChunkBytes ?? EVENT_HISTORY_WRITE_CHUNK_BYTES);
+  const batchRecords = Math.max(1, opts.historyBatchRecords ?? EVENT_HISTORY_BATCH_RECORDS);
+  const batchBytes = Math.max(1, opts.historyBatchBytes ?? EVENT_HISTORY_BATCH_BYTES);
   let unsubscribe: () => void = () => {};
   const drop = (why: string) => {
     unsubscribe();
@@ -92,8 +154,9 @@ export async function streamHistoryThenFollow(opts: {
     try { res.destroy(); } catch { /* already closed */ }
   };
   // Subscribe FIRST (buffering) so nothing published while the history is on
-  // the wire is lost; the caller computed `history` synchronously before this
-  // call, so every buffered record is newer than it.
+  // the wire is lost. The caller fixed the history's upper bound (a seq, a
+  // snapshot of the store's index) synchronously before this call, so every
+  // buffered record is newer than anything `read` returns.
   const buffered: string[] = [];
   let bufferedBytes = 0;
   let live: (chunk: string) => void = (chunk) => {
@@ -116,12 +179,13 @@ export async function streamHistoryThenFollow(opts: {
   // chunks (whole characters only — encodeInto never splits a surrogate pair
   // or a multi-byte sequence), each chunk a drain checkpoint, so the pending
   // bytes never exceed the socket's high-water mark plus one chunk — whatever
-  // an item's size. Each chunk is its own allocation (never the shared pool,
+  // a record's size. Each chunk is its own allocation (never the shared pool,
   // never a slice of a whole-frame buffer): what a pending write retains is
   // that chunk and nothing more.
   const encoder = new TextEncoder();
   let chunk = Buffer.allocUnsafeSlow(chunkBytes);
   let filled = 0;
+  let encoded = 0; // bytes encoded since the current batch began
   // Send the filled chunk; false → this response is over (destroyed, or it
   // did not drain in time and was dropped).
   const flush = async (): Promise<boolean> => {
@@ -142,26 +206,51 @@ export async function streamHistoryThenFollow(opts: {
     }
     return true;
   };
-  for (const item of opts.history) {
+  // Encode one fragment into the chunks, shipping each as it fills.
+  const write = async (text: string): Promise<boolean> => {
     let pos = 0;
-    while (pos < item.length) {
-      const { read, written } = encoder.encodeInto(pos === 0 ? item : item.slice(pos), chunk.subarray(filled));
+    while (pos < text.length) {
+      const { read, written } = encoder.encodeInto(pos === 0 ? text : text.slice(pos), chunk.subarray(filled));
       pos += read;
       filled += written;
+      encoded += written;
       // Chunk full (or the next character does not fit its remainder): ship it.
-      if (pos < item.length && !(await flush())) return;
+      if (pos < text.length && !(await flush())) return false;
     }
+    return true;
+  };
+  if (history.open && !(await write(history.open))) return;
+  let cursor = history.start ?? 0;
+  let index = 0;
+  for (;;) {
+    // Invariant at every read: the previous batch was accepted by the socket
+    // (flush returned true — res.write() took it, or 'drain' fired since).
+    const batch = await history.read(cursor, batchRecords);
+    if (batch.length === 0) break;
+    encoded = 0;
+    for (const record of batch) {
+      if (!(await write(history.frame(record, index)))) return;
+      cursor = history.cursor(record, index);
+      index++;
+      // Past the byte cap: close the batch here; the next read continues
+      // from this record, the rest of the batch is re-read.
+      if (encoded >= batchBytes) break;
+    }
+    // Batch boundary: what is framed goes to the socket, and the next read
+    // waits for the socket to take it.
+    if (!(await flush())) return;
   }
+  if (history.close && !(await write(history.close))) return;
   if (!(await flush())) return;
   if (!opts.subscribe) { res.end(); return; }
   // Hand over: what arrived meanwhile, then live records, all bounded.
-  const write = boundedWriter(res, maxBytes, () => {
+  const writeLive = boundedWriter(res, maxBytes, () => {
     unsubscribe();
     process.stderr.write(`[http] ${label} client exceeded ${maxBytes} pending bytes — dropped\n`);
   });
-  for (const chunk of buffered) write(chunk);
+  for (const chunk of buffered) writeLive(chunk);
   buffered.length = 0;
-  live = write;
+  live = writeLive;
 }
 
 interface CompiledRoute {
@@ -229,8 +318,8 @@ export function startHttpServer(opts: {
   /** Fires with the BOUND port once listening — the daemon uses this to write
    *  the real port into daemon.json when it asked for a dynamic one (port 0). */
   onListening?: (port: number) => void;
-  /** Tests: shorten the history drain deadline / buffered-bytes cap. */
-  eventStream?: { drainDeadlineMs?: number; maxBufferedBytes?: number; historyChunkBytes?: number };
+  /** Tests: shorten the history drain deadline / buffered-bytes cap, shrink the chunk and batch bounds. */
+  eventStream?: { drainDeadlineMs?: number; maxBufferedBytes?: number; historyChunkBytes?: number; historyBatchRecords?: number; historyBatchBytes?: number };
 }): ReturnType<typeof createServer> {
   const { registry, port, publicDir, token, onListening } = opts;
   const eventStream = opts.eventStream ?? {};
@@ -368,16 +457,31 @@ export function startHttpServer(opts: {
       const last = url.searchParams.has("last") ? Number(url.searchParams.get("last")) : undefined;
       const follow = url.searchParams.get("follow") === "1";
       res.writeHead(200, { ...corsHeaders, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
-      const history = sessionRecords(sid, { after, last });
-      const upTo = latestRecordSeq(sid);
       // History with backpressure, then live records through the bound
       // (#597; Astra on da868c80 and Wave B) — see streamHistoryThenFollow.
-      const lines = (function* () {
-        yield JSON.stringify({ hello: true, seq: upTo }) + "\n";
-        for (const r of history) yield JSON.stringify(r) + "\n";
-      })();
-      await streamHistoryThenFollow({
-        res, history: lines, label: `/sessions/${sid}/events`, ...eventStream,
+      // The history is the log up to `upTo` (fixed here, synchronously with
+      // the subscription the streamer opens first): anything appended later
+      // is live, buffered and delivered after it — never read twice. The
+      // log is PAGED by seq, a batch at a time, not read whole (Wave C).
+      const upTo = latestRecordSeq(sid);
+      const tail = last !== undefined ? sessionRecords(sid, { after, last }) : null;
+      const start = tail ? (tail.length > 0 ? tail[0].seq - 1 : upTo) : (after ?? 0);
+      await streamHistoryThenFollow<LoggedRecord>({
+        res, label: `/sessions/${sid}/events`, ...eventStream,
+        history: {
+          open: JSON.stringify({ hello: true, seq: upTo }) + "\n",
+          start,
+          read: (cursor, limit) => {
+            const page: LoggedRecord[] = [];
+            for (const r of sessionRecords(sid, { after: cursor })) {
+              if (r.seq > upTo || page.length >= limit) break;
+              page.push(r);
+            }
+            return page;
+          },
+          cursor: (r) => r.seq,
+          frame: (r) => JSON.stringify(r) + "\n",
+        },
         subscribe: follow ? (fn) => subscribeRecords(sid, (r) => fn(JSON.stringify(r) + "\n")) : null,
       });
       return;
@@ -392,14 +496,19 @@ export function startHttpServer(opts: {
       });
       // The opening history is the largest write of all: streamed with
       // backpressure, then live events through the bound (#597, Wave B).
-      // The chat rows are framed one record at a time (sseJsonArrayEvent):
-      // the whole-array string was a 12 MiB allocation per connecting client.
-      const opening = (function* () {
-        yield* sseJsonArrayEvent("history", registry.chatHistory());
-        yield `event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`;
-      })();
+      // The chat rows are paged from the registry's snapshot (record
+      // references, taken synchronously with the subscription the streamer
+      // opens first) and framed one record at a time (sseJsonArrayFraming):
+      // the whole-array string was a 12 MiB allocation per connecting client,
+      // and it stayed resident behind every pending chunk (Wave C).
+      const framing = sseJsonArrayFraming("history");
       await streamHistoryThenFollow({
-        res, history: opening, label: "/events", ...eventStream,
+        res, label: "/events", ...eventStream,
+        history: {
+          ...framing,
+          ...arrayHistory(registry.chatHistory()),
+          close: framing.close + `event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`,
+        },
         subscribe: (fn) => registry.subscribeSse((s) => fn(s)),
       });
       return;
