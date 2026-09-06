@@ -126,6 +126,22 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
     const cancelled = () => !isLatest(START_KEY, attempt);
     storage.getState().setRealtimeStatus('connecting');
 
+    // Focus can move while any await below is pending (the permission prompt,
+    // the token mint, the SDK connect). Each boundary re-reads it, so the
+    // context the agent is briefed with and the session the SDK is told about
+    // are the focused session at that moment, not the one captured when the
+    // call was made (#338). currentSessionId is what onSessionFocus moves.
+    const focused = () => currentSessionId ?? sessionId;
+    const buildPrompt = (forSession: string) => {
+        const sessionContext = voiceHooks.onVoiceStarted(forSession);
+        contextSessionId = forSession;
+        return buildVoiceSystemPrompt({
+            sessionContext,
+            isContinuation,
+            voiceTranscript: isContinuation ? getRecentVoiceTranscript() : null,
+        });
+    };
+
     let outcome: StartOutcome = 'failed';
     try {
         // The SDK needs the microphone to itself.
@@ -143,13 +159,7 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
             return false;
         }
 
-        const sessionContext = voiceHooks.onVoiceStarted(sessionId);
-        contextSessionId = sessionId;
-        const systemPrompt = buildVoiceSystemPrompt({
-            sessionContext,
-            isContinuation,
-            voiceTranscript: isContinuation ? getRecentVoiceTranscript() : null,
-        });
+        let systemPrompt = buildPrompt(focused());
         const firstMessage = buildVoiceFirstMessage({ isContinuation, silentWake: opts.silentWake === true, soundWake: opts.soundWake === true });
 
         let conversationToken: string | undefined;
@@ -157,8 +167,11 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
             conversationToken = await mintConversationToken(agent.agentId, agent.apiKey);
             if (cancelled()) { outcome = 'cancelled'; return false; }
         }
+        // Focus moved while the token was minted: brief the agent about the
+        // session that is on screen now, not the one the prompt was built for.
+        if (focused() !== contextSessionId) systemPrompt = buildPrompt(focused());
         await voiceSession.startSession({
-            sessionId,
+            sessionId: contextSessionId ?? sessionId,
             systemPrompt,
             firstMessage,
             ...(conversationToken ? { conversationToken } : { agentId: agent.agentId }),
@@ -170,6 +183,9 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
             try { await voiceSession.endSession(); } catch (e) { console.error('[voice] late end failed:', e); }
             return false;
         }
+        // Focus moved during the SDK connect. If the line is already up the
+        // agent is told now; otherwise notifyVoiceConnected does it on connect.
+        syncContextToFocus();
         outcome = 'connected';
         return true;
     } catch (error) {
@@ -197,6 +213,19 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
             // armed (a hang-up, not an end) go back to listening.
             maybeListenWhileIdle();
         }
+    }
+}
+
+/** Focus moved while the connect was in flight: the system prompt named the
+ *  old session as focused, so tell the agent about the new one (#338). Only
+ *  while connected — announcing to a line that is not up yet would be lost,
+ *  and the connect callback runs this again. */
+function syncContextToFocus(): void {
+    if (!isVoiceConnected()) return;
+    const focused = currentSessionId;
+    if (focused && contextSessionId && focused !== contextSessionId) {
+        contextSessionId = focused;
+        voiceHooks.onFocusChangedWhileConnecting(focused);
     }
 }
 
@@ -273,13 +302,7 @@ export function notifyVoiceConnected(): void {
     clearReconnectTimer();
     connectedAt = Date.now();
     armIdleTimer();
-    // Focus moved while the connect was in flight: the system prompt named
-    // the old session as focused, so tell the agent about the new one (#338).
-    const focused = currentSessionId;
-    if (focused && contextSessionId && focused !== contextSessionId) {
-        contextSessionId = focused;
-        voiceHooks.onFocusChangedWhileConnecting(focused);
-    }
+    syncContextToFocus();
     // Anything queued while the line was down is spoken now.
     setTimeout(flushPendingPrompts, 300);
 }
