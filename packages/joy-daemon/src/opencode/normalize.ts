@@ -30,7 +30,7 @@ import { parseJoyTags } from "../domain/agentTagsPrompt";
 export type OpencodeEffect =
   | { kind: "wire"; record: WireRecord; localId: string }
   | { kind: "thinking"; value: boolean }
-  | { kind: "confirmPrompt"; messageID: string }
+  | { kind: "confirmPrompt"; messageID: string; seq?: number }
   | { kind: "model"; code: string }
   | { kind: "receipt"; uuid: string; turn: string }
   // Terminal step (finish !== 'tool-calls') / turn failure. /wait is 503
@@ -116,10 +116,13 @@ export class OpencodeNormalizer {
         // steered message joining THAT turn (verified live 2026-08-03: the
         // assistant flow continues, no new turn) — confirm delivery but do
         // NOT open a second turn; the original turn's end closes everything.
-        if (this.#turn) return [{ kind: "confirmPrompt", messageID }];
+        // The server's own ordering (durable.seq) rides along so the session
+        // can rank admissions by SERVER order, not arrival order (#77).
+        const seq = typeof e.durable?.seq === "number" ? e.durable.seq : undefined;
+        if (this.#turn) return [{ kind: "confirmPrompt", messageID, seq }];
         this.#turn = messageID;
         return [
-          { kind: "confirmPrompt", messageID },
+          { kind: "confirmPrompt", messageID, seq },
           { kind: "thinking", value: true },
           this.#wire(encodeTurnStart({ turn: messageID }), `${messageID}:turn-start`),
         ];

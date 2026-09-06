@@ -120,7 +120,7 @@ describe("steer-into-open-turn", () => {
     expect(wireTypes(first)).toEqual(["turn-start"]);
     // steered message joins the RUNNING turn: no turn-start, no thinking toggle
     const steer = n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user2", delivery: "steer" }));
-    expect(steer).toEqual([{ kind: "confirmPrompt", messageID: "msg_user2" }]);
+    expect(steer).toEqual([{ kind: "confirmPrompt", messageID: "msg_user2", seq: 2 }]) // seq = the server's durable.seq, forwarded for admission ordering (#77);
     expect(n.currentTurn).toBe("msg_user1");
     // output continues under the original turn
     const text = n.handle(ev("session.next.text.ended", { assistantMessageID: AMID, textID: "text-0", text: "done with banana" }));
