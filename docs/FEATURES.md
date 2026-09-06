@@ -347,6 +347,35 @@ sync can no longer overwrite its replacement's status. An older daemon (no
 - Local acceptance is durable: `send`, `queueAdd` and handoff notes are
   acknowledged only after the queue spool is persisted, else `not_durable`
   (#551, #542); queue and window-record writes are atomic (#555, #567).
+- Claude session state: hooks and the transcript are the authority, the pane
+  parser is a tie-breaker. The daemon launches `claude --settings` with a
+  managed hook set (`claude/hooks.ts`, HOOK_VERSION 4: SessionStart/End,
+  UserPromptSubmit, Stop, StopFailure, PostToolUse, PermissionRequest,
+  SubagentStop, Notification, PreCompact, each forwarding `permission_mode`,
+  `notification_type`, `end_reason`, `error_type`, `tool_name`, `prompt_id`).
+  Hooks are best-effort, so each session carries a `hooksLive` latch that flips
+  on the first hook event from its own claude process and gates every
+  authority swap; until it flips (adopted sessions, old settings snapshots,
+  daemon downtime) the pane rules apply unchanged. Once live: a plain prompt
+  is "delivered" only when `UserPromptSubmit` (or the transcript's user echo)
+  text-matches it — a foreign turn start never confirms it (#32); the pane's
+  "esc to interrupt" read never sets thinking and clears it only after six
+  idle polls past the lease (#479) — `UserPromptSubmit`/`PostToolUse` mark
+  generating, `Stop`/`StopFailure`/`Notification` mark idle; `permission_mode`
+  from any hook is persisted and verifies `setPermissionMode` (the live
+  footer under a located box is still read, since Shift+Tab fires no hook;
+  the hook value fills in when no box is on screen) (#480); `SessionEnd`
+  (exit-class reasons; `clear`/`resume` rotate the conversation) ends the
+  session as `process_exited` once the pid is not alive after a 1.5s grace —
+  the pid probe and the pane's frozen frame no longer decide alone (#30);
+  `StopFailure(authentication_failed)` opens an auth episode and
+  `/login-code` types only inside one (or under a surfaced login bar) AND
+  into the real form (#482); `PermissionRequest`/`Notification` set the
+  `needs_input` that `joy check`/`wait`/`ask` report. The pane stays the only
+  source for what hooks cannot see: draft text, dialogs, the login form, the
+  shells footer, API-retry spinners — and for the interrupt edge `Stop` does
+  not report (the transcript's interrupt marker covers it first). Spike:
+  `docs/review-campaign-2026-09-claude-runtime-spike.md`.
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.

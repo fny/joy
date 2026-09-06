@@ -96,5 +96,8 @@ export interface AgentSession {
   setHandoff?(info: import("../relay/relay").JoyHandoffInfo | null): void;
   /** Tool-call approvals the harness is holding for a human (codex). */
   listApprovals?(): Array<{ requestId: string; kind: string; title: string; detail?: string; since: number }>;
+  /** The harness reported it is waiting on a human (claude: PermissionRequest /
+   *  Notification hooks) without a first-class approval object to answer. */
+  needsInput?(): { kind: string; tool?: string; since: number } | null;
   answerApproval?(params: Record<string, unknown> | undefined): { ok: boolean };
 }
