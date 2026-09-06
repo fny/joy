@@ -147,13 +147,14 @@ describe('pathUtils', () => {
             expect(resolvePath('/Users/steve/project', metadata)).toBe('<root>');
         });
 
-        it('should handle case insensitive matching', () => {
+        it('does not fold case: a path that differs only by case stays absolute', () => {
             const metadata = {
-                path: '/Users/Steve/Project',
+                path: '/srv/Steve/Project',
                 host: 'localhost',
-                homeDir: '/Users/Steve'
+                homeDir: '/srv/Steve'
             };
-            expect(resolvePath('/users/steve/project/src/file.ts', metadata)).toBe('src/file.ts');
+            expect(resolvePath('/srv/steve/project/src/file.ts', metadata)).toBe('/srv/steve/project/src/file.ts');
+            expect(resolvePath('/srv/Steve/Project/src/file.ts', metadata)).toBe('src/file.ts');
         });
 
         it('should return original path if not under metadata path', () => {
@@ -244,7 +245,7 @@ describe('formatPathRelativeToHome', () => {
     });
 });
 
-describe('resolvePath is case-sensitive off Windows (#441)', () => {
+describe('resolvePath compares case exactly on every host (#441)', () => {
     const meta = (path: string, os?: string) => ({ path, host: 'h', os } as unknown as import('@/sync/storageTypes').Metadata);
 
     it('a directory that differs only by case is NOT the session directory', () => {
@@ -254,12 +255,20 @@ describe('resolvePath is case-sensitive off Windows (#441)', () => {
         expect(resolvePath('/srv/Project', meta('/srv/Project'))).toBe('<root>');
     });
 
-    it('still folds case on a Windows or macOS host, by os or by the path shape', () => {
-        expect(resolvePath('c:/work/proj/file.txt', meta('C:/work/Proj', 'win32'))).toBe('file.txt');
-        expect(resolvePath('c:/work/proj/file.txt', meta('C:/work/Proj'))).toBe('file.txt');
-        expect(resolvePath('/users/steve/proj/file.txt', meta('/Users/Steve/Proj'))).toBe('file.txt');
-        expect(resolvePath('/tmp/proj/file.txt', meta('/tmp/Proj', 'darwin'))).toBe('file.txt');
+    it('neither the platform nor the path spelling implies case folding', () => {
+        // A /Users path is no proof of a case-insensitive volume (no os).
+        expect(resolvePath('/Users/project/file', meta('/Users/Project'))).toBe('/Users/project/file');
+        expect(resolvePath('/users/steve/proj/file.txt', meta('/Users/Steve/Proj'))).toBe('/users/steve/proj/file.txt');
+        // macOS mounts case-sensitive volumes: os=darwin folds nothing either.
+        expect(resolvePath('/Volumes/CS/project/file', meta('/Volumes/CS/Project', 'darwin'))).toBe('/Volumes/CS/project/file');
+        expect(resolvePath('/tmp/proj/file.txt', meta('/tmp/Proj', 'darwin'))).toBe('/tmp/proj/file.txt');
+        // Nor does a drive letter or os=win32: a directory there can be case-sensitive too.
+        expect(resolvePath('c:/work/proj/file.txt', meta('C:/work/Proj', 'win32'))).toBe('c:/work/proj/file.txt');
+        expect(resolvePath('c:/work/proj/file.txt', meta('C:/work/Proj'))).toBe('c:/work/proj/file.txt');
         expect(resolvePath('/srv/project/file.txt', meta('/srv/Project', 'linux'))).toBe('/srv/project/file.txt');
+        // An exact match still resolves on every host.
+        expect(resolvePath('C:/work/Proj/file.txt', meta('C:/work/Proj', 'win32'))).toBe('file.txt');
+        expect(resolvePath('/Volumes/CS/Project/file', meta('/Volumes/CS/Project', 'darwin'))).toBe('file');
     });
 });
 
