@@ -90,6 +90,12 @@ function writeDaemonState(port: number): void {
       token: SERVER_TOKEN, pid: process.pid, port,
       relay: joyRelayUrl(), relayKey: joyRelayKey(),
       startedAt: Date.now(), version: "joy-daemon/0.1.0",
+      // Process identity for `joy stop` (#495 residual): the entry script this
+      // daemon runs (process.argv[1] — absolute, the way the command line shows
+      // it) and the node binary. verifyDaemonPid requires a pid's command line
+      // to name exactly this entry before it signals anything; "contains
+      // server.ts and tsx" also matched an unrelated `tsx ~/x/server.ts`.
+      entry: process.argv[1], exec: process.execPath,
     }));
   } catch (e) {
     process.stderr.write(`[server] failed to write daemon state: ${e}\n`);
