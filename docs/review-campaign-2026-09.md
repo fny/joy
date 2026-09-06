@@ -430,6 +430,22 @@ app.
   the cc196d26 batch and the C2 phase 5 merge are the last gates before the
   Wave F sweep.
 
+- 2026-09-08 (Wave F) — the untouched backlog went out in six area rounds:
+  app (#138 #428 #441 #442 #460 #622 #210 #212 #213 #128; #418 #332 #248
+  already fixed), relay (#84 gap, #127 pairing proof of possession +
+  follow-ups behind `JOY_RELAY_PAIRING_PROOF_ACCOUNT`, #173 conditional
+  delete), CLI verbs (#112 #494 #496 #497 #498 #499 #501 #502), Codex family
+  (#513 #515 #518 #519 #521 #131 #561; #511 #512 #517 #523 proven
+  impossible), session/registry (#50 #51 #53 #55 #474 #549 #550 #552 #562
+  #564), lane/io (#48 #69 #525 #538 #560 #573 #581 #584 #588 #130). C2
+  phase 5 (Claude driver, e8f8b2cc) merged; Astra's boundary findings on it
+  and the ledger's malformed-row/cross-session residuals are in follow-up
+  rounds. Daemon suite 112 files / 1038 tests at 2ac34c48. Gotchas: a
+  worktree agent's `pnpm add` through a symlinked node_modules broke the
+  main checkout (reinstalled from the offline store; worktrees now install
+  their own modules), and the Codex TUI silently downgraded Astra to a
+  smaller model (restored to gpt-6-astra xhigh).
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
