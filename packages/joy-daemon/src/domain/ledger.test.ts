@@ -226,9 +226,9 @@ test("recordObservation commits the echo, its receipts, the command transition a
   expect(ledger.getCommand(c.id)?.state).toBe("completed");
   expect(ledger.getAttempt(a.id)).toMatchObject({ state: "done", runtimeTurnId: "turn-1" });
   expect(ledger.getReceipt("s1", "seq", "9")?.attemptId).toBe(a.id);
-  expect(ledger.getCheckpoint("s1", "codex_turn")).toMatchObject({ ref: "turn-1", pendingRef: "turn-1", pendingThroughSeq: 1, offset: 0 });
+  expect(ledger.getCheckpoint("s1", "codex_turn")).toMatchObject({ ref: "", pendingRef: "turn-1", pendingThroughSeq: 1, offset: 0 }); // nothing committed yet
   ledger.ackOutbound(1);
-  expect(ledger.getCheckpoint("s1", "codex_turn")?.pendingRef).toBeNull();
+  expect(ledger.getCheckpoint("s1", "codex_turn")).toMatchObject({ ref: "turn-1", pendingRef: null });
   expect(ledger.listObservations("s1", "echo")).toHaveLength(1);
 });
 

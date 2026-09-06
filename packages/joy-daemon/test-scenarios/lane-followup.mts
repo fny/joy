@@ -4,7 +4,7 @@ import {join,resolve,dirname} from 'node:path';
 process.env.JOY_HOME_DIR=mkdtempSync('/tmp/joy-test-tmux/review3/wave1-astra-followup-');
 const root='../src';
 const {startNucleusLane}=await import(root+'/relay/nucleusLane.ts');
-const {OutboundSpool}=await import(root+'/relay/outboundSpool.ts');
+const {spool,seedSpool,blockLedgerWrites,unblockLedgerWrites,codexDeliveredThrough,opencodeDeliveredThrough}=await import('./ledger-spool-shim.mts');
 const {RelaySession,encodeTextEvent}=await import(root+'/relay/relay.ts');
 const {joyStateDir}=await import(root+'/paths.ts');
 const scenario=process.argv[2];
@@ -26,8 +26,8 @@ if(scenario==='duplicates')initial=[out('first'),out('second')];
 if(scenario==='replay_retry')initial=[terminal];
 if(scenario==='fence')initial=[out('first')];
 if(scenario==='cap')initial=Array.from({length:2000},(_,i)=>out('old-'+i));
-writeFileSync(spoolPath,JSON.stringify(initial));
-const pending=()=>new OutboundSpool(spoolPath);
+seedSpool(joyStateDir(),initial as any);
+const pending=()=>spool(joyStateDir());
 const adapter=new RelaySession({client:{creds:{machineId:row.daemonId}} as any,relaySessionId:row.localSessionId,metadata:{}});
 let busy=false,offered=false,claimReady=false;
 const session:any={id:row.localSessionId,status:'active',cardMetadata:()=>null,busy:()=>busy,queueState:()=>({pendingCount:0,paused:false}),queueItemState:()=> 'delivered',abort:async()=>{busy=false;},enqueue(){
@@ -119,7 +119,7 @@ try{
   console.log(JSON.stringify({scenario,result:'defect reproduced',onDisk:disk.size,evictedOldest:true,degraded:false,retainedScheduledOutputs:posts.length}));
  }else if(scenario==='disk_opencode'){
   await until(()=>statusReads>=1);await sleep(20);
-  mkdirSync(spoolPath+'.tmp');
+  blockLedgerWrites(joyStateDir());
   const original=join(root,'opencode/opencodeSession.ts');
   // Expose only a setup/finish seam on a temporary copy; the production method is unchanged.
   const text=readFileSync(original,'utf8').replace('  constructor(init: OpencodeInit, deps: SessionDeps) {', `  __reviewFinish(norm: any) { this.#norm=norm; this.#ocSessionId='oc-session'; this.#endTurn('adapter-turn','completed'); }\n  constructor(init: OpencodeInit, deps: SessionDeps) {`).replace(/(from\s+[\"'])(\.{1,2}\/[^\"']+)([\"'])/g,(_,a,b,c)=>a+resolve(dirname(original),b)+c);
@@ -130,23 +130,22 @@ try{
   oc.attachRelay(adapter);
   oc.__reviewFinish({lastMessageId:'msg_last',currentTurn:'adapter-turn',closeOpenTools:()=>[],setTurn(){}});
   assert.equal(adapter.outboundPersistDegraded,true);
-  assert.equal(loadWindowRecord(row.localSessionId)?.opencodeDeliveredThrough,'msg_last');
+  assert.equal(opencodeDeliveredThrough(joyStateDir(),row.localSessionId),'msg_last');
   assert.equal(pending().size,0);
   console.log(JSON.stringify({scenario,result:'defect reproduced',degraded:true,deliveredThrough:'msg_last',spooled:0}));
  }else if(scenario==='disk_receipt'){
   await until(()=>statusReads>=1);await sleep(20);
   // Block only spool writes; the checkpoint directory remains writable.
-  mkdirSync(spoolPath+'.tmp');
+  blockLedgerWrites(joyStateDir());
   const {CodexSession}=await import(root+'/codex/codexSession.ts');
-  const {loadCheckpoint}=await import(root+'/codex/codexCheckpointStore.ts');
   const codex=new CodexSession({id:row.localSessionId,cwd:process.env.JOY_HOME_DIR!,status:'active',tmuxWindow:'fake',startedAt:Date.now()},{} as any);
   codex.attachRelay(adapter);
   adapter.send(encodeTextEvent('answer',{turn:'adapter-turn'}),'answer');
   assert.equal(adapter.outboundPersistDegraded,true);
   adapter.stampReceiptOnLastQueued({uuid:'receipt',turn:'adapter-turn'});
-  assert.equal(loadCheckpoint(row.localSessionId).deliveredThroughTurnId,'adapter-turn');
+  assert.equal(codexDeliveredThrough(joyStateDir(),row.localSessionId),'adapter-turn');
   assert.equal(pending().size,0);
-  console.log(JSON.stringify({scenario,result:'defect reproduced',degraded:true,deliveredThrough:loadCheckpoint(row.localSessionId).deliveredThroughTurnId,spooled:0}));
+  console.log(JSON.stringify({scenario,result:'defect reproduced',degraded:true,deliveredThrough:codexDeliveredThrough(joyStateDir(),row.localSessionId),spooled:0}));
  }else throw new Error('unknown scenario');
 }finally{await lane.stop();}
 process.exit(0);

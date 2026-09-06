@@ -90,17 +90,24 @@ export class OutboxSender {
   /** Is a loop active for the session? */
   active(sessionId: string): boolean { return this.#running.has(sessionId); }
 
-  /** Resolves once the row is acked or dropped, or after `timeoutMs`
-   *  (false). The row keeps being retried in the background either way. */
+  /** Resolves once the row is acked or dropped, or after `timeoutMs` on the
+   *  sender's clock (false). The row keeps being retried in the background
+   *  either way. */
   awaitSettled(seq: number, timeoutMs: number): Promise<boolean> {
     const row = this.#o.ledger.getOutbound(seq);
     if (!row || row.ackedAt != null) return Promise.resolve(true);
+    const deadline = this.#o.now() + timeoutMs;
     return new Promise<boolean>((resolve) => {
       const list = this.#waiters.get(seq) ?? [];
       let done = false;
-      const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, timeoutMs);
-      timer.unref?.();
-      list.push(() => { if (!done) { done = true; clearTimeout(timer); resolve(true); } });
+      const tick = () => {
+        if (done) return;
+        if (this.#o.now() >= deadline || this.#stopped) { done = true; resolve(false); return; }
+        const t = setTimeout(tick, Math.min(250, Math.max(1, deadline - this.#o.now())));
+        t.unref?.();
+      };
+      tick();
+      list.push(() => { if (!done) { done = true; resolve(true); } });
       this.#waiters.set(seq, list);
     });
   }
@@ -118,14 +125,21 @@ export class OutboxSender {
 
   async #loop(sessionId: string): Promise<void> {
     const { ledger, post, ready, sleep, now, idleMs } = this.#o;
+    // The row whose backoff this loop has already slept through (below): its
+    // persisted next_retry_at is for a RESTART's benefit, not a second wait.
+    let waited: number | null = null;
     for (;;) {
       if (this.#stopped) return;
       this.#wanted.delete(sessionId);
       const row = ledger.nextOutbound(sessionId);
       if (!row) return;
       if (!ready()) { await sleep(idleMs); continue; }
-      const wait = row.nextRetryAt - now();
-      if (wait > 0) { await sleep(Math.min(wait, this.#o.maxBackoffMs)); continue; }
+      if (waited !== row.seq) {
+        const wait = row.nextRetryAt - now();
+        if (wait > this.#o.maxBackoffMs) { await sleep(this.#o.maxBackoffMs); continue; }
+        if (wait > 0) await sleep(wait);
+      }
+      waited = null;
       let r: PostResult;
       try { r = await post(row); }
       catch (e) { r = { ok: false, fate: "transient", error: e instanceof Error ? e.message : String(e) }; }
@@ -147,6 +161,9 @@ export class OutboxSender {
       if (r.fate === "unbound") return; // parked: bindOutbound + wake() resumes the line
       const delay = r.retryAfterMs ?? this.backoffFor(cur.attempts);
       ledger.failOutbound(row.seq, r.error, now() + delay);
+      // Sleep the backoff here (the persisted next_retry_at is for a restart).
+      await sleep(Math.min(delay, this.#o.maxBackoffMs));
+      waited = row.seq;
     }
   }
 }
