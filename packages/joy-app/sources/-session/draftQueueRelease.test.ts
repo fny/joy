@@ -20,7 +20,7 @@ vi.mock('expo-crypto', () => ({ randomUUID: () => `L${++uuidN}` }));
 vi.mock('@/text', () => ({ t: (k: string, a?: Record<string, string>) => a ? `${k}:${JSON.stringify(a)}` : k }));
 
 import { useDraftQueueStore } from './draftQueue';
-import { attemptOwnsDraft, cancelRelease, initDraftQueueRelease, isCancelPending, notifyOutboxAcked, settleAcceptedRelease } from './draftQueueRelease';
+import { MAX_CANCEL_ATTEMPTS, attemptOwnsDraft, cancelRelease, initDraftQueueRelease, isCancelPending, notifyOutboxAcked, settleAcceptedRelease } from './draftQueueRelease';
 
 type Deferred = { resolve: (v: { ok: true; localId: string } | { ok: false; reason: string }) => void; reject: (e: unknown) => void; localId: string; text: string };
 const sends: Deferred[] = [];
@@ -253,11 +253,148 @@ describe('removing an item while its send is in flight (#134)', () => {
         expect(drafts()).toHaveLength(0);
     });
 
-    it('removes immediately once the lease has expired', async () => {
+    it('removes immediately once a failed attempt reverted the draft (no send in flight)', async () => {
         useDraftQueueStore.getState().add(S, 'A', 'busy');
         await sweep();
         const id = head().id;
+        sends[0].resolve({ ok: false, reason: 'offline' });
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(head().state).toBe('queued');
+        expect(cancelRelease(S, id)).toBe('removed');
+        expect(drafts()).toHaveLength(0);
+    });
+
+    // ── Residuals (codex astra, third round) ─────────────────────────────
+    it('an expired lease is not proof the send died: the removal waits and the late ack still cancels', async () => {
+        cancelTurn.mockResolvedValue(undefined);
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        const id = head().id;
+        const l1 = head().releaseLocalId!;
+        await vi.advanceTimersByTimeAsync(31_000); // lease gone, POST still pending
+        expect(cancelRelease(S, id)).toBe('pending');
+        expect(isCancelPending(S, id)).toBe(true);
+        expect(drafts()).toHaveLength(1);
+
+        // The first POST lands after all.
+        sends[0].resolve({ ok: true, localId: l1 });
+        notifyOutboxAcked(S, [{ localId: l1, turnId: 'late-accepted' }], cancelTurn);
+        expect(cancelTurn).toHaveBeenCalledWith(S, 'late-accepted');
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(drafts()).toHaveLength(0);
+        expect(isCancelPending(S, id)).toBe(false);
+    });
+
+    it('the removal intent rides a lease-expiry retry (same identity) until its ack cancels', async () => {
+        cancelTurn.mockResolvedValue(undefined);
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        const id = head().id;
+        const l1 = head().releaseLocalId!;
+        expect(cancelRelease(S, id)).toBe('pending');
+
         await vi.advanceTimersByTimeAsync(31_000);
+        await sweep(); // retry with the SAME identity — the intent is not lost
+        expect(sends).toHaveLength(2);
+        expect(sends[1].localId).toBe(l1);
+        expect(isCancelPending(S, id)).toBe(true);
+
+        notifyOutboxAcked(S, [{ localId: l1, turnId: 'turn-1' }], cancelTurn);
+        expect(cancelTurn).toHaveBeenCalledWith(S, 'turn-1');
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(drafts()).toHaveLength(0);
+    });
+
+    it('a successful cancel of A leaves a draft edited to B during the cancel alone', async () => {
+        let finish!: () => void;
+        cancelTurn.mockImplementation(() => new Promise<void>((r) => { finish = r; }));
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        const id = head().id;
+        const l1 = head().releaseLocalId!;
+        cancelRelease(S, id);
+        notifyOutboxAcked(S, [{ localId: l1, turnId: 'A-turn' }], cancelTurn);
+        expect(isCancelPending(S, id)).toBe(true);
+
+        useDraftQueueStore.getState().update(S, id, 'B'); // a new composition
+        expect(isCancelPending(S, id)).toBe(false);
+        finish();
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(drafts()).toHaveLength(1);
+        expect(head().text).toBe('B');
+        expect(head().state).toBe('queued');
+        expect(head().lastError).toBeUndefined();
+
+        // B releases on its own, with a fresh identity.
+        await vi.advanceTimersByTimeAsync(16_000);
+        await sweep();
+        expect(sends).toHaveLength(2);
+        expect(sends[1].text).toBe('B');
+        expect(sends[1].localId).not.toBe(l1);
+        expect(isCancelPending(S, id)).toBe(false);
+    });
+
+    it("a failed cancel of A does not park or mark a draft edited to B meanwhile", async () => {
+        let fail!: (e: Error) => void;
+        cancelTurn.mockImplementation(() => new Promise<void>((_r, rej) => { fail = rej; }));
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        const id = head().id;
+        const l1 = head().releaseLocalId!;
+        cancelRelease(S, id);
+        notifyOutboxAcked(S, [{ localId: l1, turnId: 'A-turn' }], cancelTurn);
+        useDraftQueueStore.getState().update(S, id, 'B');
+        fail(new Error('http_409'));
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(drafts()).toHaveLength(1);
+        expect(head().text).toBe('B');
+        expect(head().lastError).toBeUndefined();
+        expect(head().attempt ?? 0).toBe(0);
+        expect(isCancelPending(S, id)).toBe(false);
+    });
+
+    it('a replayed ack after a failed cancel retries the cancel instead of dropping the draft', async () => {
+        cancelTurn.mockRejectedValueOnce(new Error('network failure')).mockResolvedValueOnce(undefined);
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        const id = head().id;
+        const l1 = head().releaseLocalId!;
+        cancelRelease(S, id);
+        await vi.advanceTimersByTimeAsync(31_000);
+        await sweep(); // lease-expiry retry already out
+        expect(sends).toHaveLength(2);
+
+        notifyOutboxAcked(S, [{ localId: l1, turnId: 'A-turn' }], cancelTurn); // ack of send #1
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(head().lastError).toContain('cancelFailed');
+        expect(isCancelPending(S, id)).toBe(false);
+
+        notifyOutboxAcked(S, [{ localId: l1, turnId: 'A-turn' }], cancelTurn); // ack of send #2
+        expect(cancelTurn).toHaveBeenCalledTimes(2);
+        expect(isCancelPending(S, id)).toBe(true); // visible as removing again
+        expect(drafts()).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(drafts()).toHaveLength(0);
+    });
+
+    it('cancel retries are bounded: past the limit a replayed ack leaves the parked draft in place', async () => {
+        cancelTurn.mockRejectedValue(new Error('http_409'));
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        const id = head().id;
+        const l1 = head().releaseLocalId!;
+        cancelRelease(S, id);
+        for (let i = 0; i < MAX_CANCEL_ATTEMPTS; i++) {
+            notifyOutboxAcked(S, [{ localId: l1, turnId: 'A-turn' }], cancelTurn);
+            await vi.advanceTimersByTimeAsync(TICK);
+        }
+        expect(cancelTurn).toHaveBeenCalledTimes(MAX_CANCEL_ATTEMPTS);
+        notifyOutboxAcked(S, [{ localId: l1, turnId: 'A-turn' }], cancelTurn);
+        await vi.advanceTimersByTimeAsync(TICK);
+        expect(cancelTurn).toHaveBeenCalledTimes(MAX_CANCEL_ATTEMPTS);
+        expect(drafts()).toHaveLength(1);
+        expect(head().lastError).toContain('cancelFailed');
+        // The user still decides: × removes locally, knowing the relay kept it.
         expect(cancelRelease(S, id)).toBe('removed');
         expect(drafts()).toHaveLength(0);
     });
@@ -304,6 +441,14 @@ describe('settleAcceptedRelease (#134, pure)', () => {
         expect(head().state).toBe('queued');
         expect(head().lastError).toBe('joyQueue.cancelFailed:{"reason":"different_turn_active"}');
         expect(isCancelPending(S, id)).toBe(false);
+    });
+
+    it('a draft that no longer carries the accepted identity is left alone', async () => {
+        const id = releasing();
+        useDraftQueueStore.getState().update(S, id, 'B');
+        await expect(settleAcceptedRelease(S, id, 'turn-1', cancelTurn)).resolves.toBe('superseded');
+        expect(drafts()).toHaveLength(1);
+        expect(cancelTurn).not.toHaveBeenCalled();
     });
 
     it('a second ack while the cancel is in flight does not fire a second cancel', async () => {
