@@ -37,6 +37,7 @@ import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboun
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 import {
   loadCheckpoint, saveCheckpoint, clearCheckpoint, isTurnDelivered, markTurnDelivered,
+  recordSeqReceipt, seqReceiptFor,
   type CodexCheckpoint,
 } from "./codexCheckpointStore";
 
@@ -61,6 +62,9 @@ export interface CodexInit {
   /** `-c key=value` config overrides for the app-server spawn (user extraArgs). */
   config?: Record<string, string>;
 }
+
+/** Delay before re-attempting a failed pre-send spool write (#514). */
+const PERSIST_RETRY_MS = 2_000;
 
 interface PendingApproval {
   info: { requestId: string; kind: "command" | "patch"; title: string; detail?: string; since: number; threadId?: string; turnId?: string; itemId?: string };
@@ -166,6 +170,7 @@ export class CodexSession implements AgentSession {
       this.#checkpoint = loadCheckpoint(init.id);
       for (const it of this.#inbound) this.#dispatched.add(it.clientId); // recovered spool entries are ours (#78)
       for (const id of this.#checkpoint.knownClientIds ?? []) this.#dispatched.add(id); // …and the ones already echoed before the crash
+      for (const r of this.#checkpoint.seqReceipts ?? []) this.#dispatched.add(r.clientId); // seq receipts are ours too (#516)
       // Do NOT seed pendingEffort on resume/recover (finding #8).
     } else {
       clearCodexInbound(init.id);
@@ -387,7 +392,7 @@ export class CodexSession implements AgentSession {
     if (!/^\/joy-prompt(?:\s|$)/.test(text.trim())) return false;
     this.#developerInstructions = codexJoyInstructions();
     this.#persistWindowRecord();
-    if (mirror && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? Date.now()}`);
+    if (mirror && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? randomUUID()}`);
     const rein = this.enqueue(joyPromptReinjection(codexJoyInstructions()), { mirrorToRelay: false });
     return rein.id; // the reinjection item, so a cancelled relay turn can pluck it (#77)
   }
@@ -431,7 +436,16 @@ export class CodexSession implements AgentSession {
     // codex accepts but before the response is processed must NOT leave it
     // 'queued' (which would blindly resend). Ambiguous outcomes stay sentUnknown.
     item.state = "sentUnknown";
-    saveCodexInbound(this.id, this.#inbound);
+    if (!saveCodexInbound(this.id, this.#inbound)) {
+      // The durable spool still says 'queued' — sending now would let a crash
+      // before the echo make recovery resend a prompt codex already accepted
+      // (clientUserMessageId is not idempotent). Restore the in-memory state,
+      // never send, and retry the persistence (not the send) shortly (#514).
+      item.state = "queued";
+      process.stderr.write(`[codex ${this.id}] could not persist sentUnknown for ${item.clientId} — holding the send, retrying persistence\n`);
+      setTimeout(() => this.#pumpDispatch(), PERSIST_RETRY_MS).unref();
+      return;
+    }
     this.#dispatched.add(item.clientId);
     this.#inflightItem = item;
     try {
@@ -512,6 +526,10 @@ export class CodexSession implements AgentSession {
       // 'delivered' — never dispatched, never requeued) as that copy.
       const known = [...(this.#checkpoint.knownClientIds ?? []), clientId].slice(-200);
       this.#checkpoint = { ...this.#checkpoint, knownClientIds: known };
+      // The seq receipt rides in the SAME write: from here on the spool no
+      // longer holds this seq, so the receipt is what stops a redelivery of it
+      // from starting the prompt a second time (#516).
+      if (was?.seq != null) this.#checkpoint = recordSeqReceipt(this.#checkpoint, was.seq, clientId);
       const saved = saveCheckpoint(this.id, this.#checkpoint);
       if (!saved) {
         const kept = this.#inbound.length; // restore the entry as an ownership record
@@ -818,7 +836,7 @@ export class CodexSession implements AgentSession {
       saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: this.#titleLocked });
       if (t) { this.summary = t; void this.#relay?.updateSummary(t); }
       this.#deps.broadcast("session_update", this.toJSON());
-      if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? Date.now()}`);
+      if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `codex:in:${this.id}:${seq ?? randomUUID()}`);
       // handled: the lane must terminalize its turn now — waiting for agent
       // activity a title change never produces held the queue for 3 min (#65).
       return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" };
@@ -830,6 +848,15 @@ export class CodexSession implements AgentSession {
     if (seq != null) {
       const dup = this.#inbound.find((i) => i.seq === seq);
       if (dup) { this.#pumpDispatch(); return { id: dup.clientId, text, createdAt: dup.at }; }
+      // Already ACCEPTED and confirmed (or settled) earlier: the echo removed
+      // it from the spool, so only the receipts remember it. Redelivered seqs
+      // are the same logical message — never a second turn/start (#516).
+      const settled = this.#settledClientIdForSeq(seq);
+      if (settled) {
+        process.stderr.write(`[codex ${this.id}] dedupe redelivered seq=${seq} (already confirmed as ${settled})\n`);
+        this.#pumpDispatch();
+        return { id: settled, text, createdAt: Date.now() };
+      }
     }
     const item: CodexInboundItem = { clientId: seq != null ? `codex-in:${this.id}:${seq}` : randomUUID(), text, state: "queued", at: Date.now(), seq };
     this.#inbound.push(item);
@@ -837,12 +864,31 @@ export class CodexSession implements AgentSession {
       this.#inbound.pop();
       throw new Error("codex inbound persist failed");
     }
-    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `codex:in:${this.id}:${seq ?? item.at}`);
+    // The mirror row's localId must be unique per MESSAGE: two non-relay sends
+    // in the same millisecond shared `codex:in:<id>:<ms>` and the relay deduped
+    // the second user row away as a replay (Astra medium, codexSession.ts:731).
+    // Relay sends keep the seq (stable across a redelivery — that dedupe is wanted).
+    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `codex:in:${this.id}:${seq ?? item.clientId}`);
     this.#pumpDispatch();
     // The durable clientId IS the queue item id: cancelQueued/queueItemState
     // address the spool by it, and the lane tracks THIS prompt's delivery by
     // the userMessage echo instead of another turn's busy flag (#66).
     return { id: item.clientId, text, createdAt: item.at };
+  }
+
+  /** The clientId a relay seq was already accepted under, when the spool no
+   *  longer holds it: the persisted seq receipt, the legacy knownClientIds
+   *  entry (checkpoints written before receipts existed — the clientId for a
+   *  seq is deterministic), or a per-item outcome this process recorded
+   *  (delivered / cancelled / failed — a redelivery must not resurrect any of
+   *  them). Null = genuinely new (#516). */
+  #settledClientIdForSeq(seq: number): string | null {
+    const fromReceipt = seqReceiptFor(this.#checkpoint, seq);
+    if (fromReceipt) return fromReceipt;
+    const deterministic = `codex-in:${this.id}:${seq}`;
+    if ((this.#checkpoint.knownClientIds ?? []).includes(deterministic)) return deterministic;
+    if (this.#itemOutcome.has(deterministic)) return deterministic;
+    return null;
   }
 
   /** Per-item outcomes for the lane (see Session.queueItemState). */

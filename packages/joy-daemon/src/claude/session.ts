@@ -1583,6 +1583,15 @@ export class Session {
 
   /** Returns whether the spool persisted — the inbound path's durable ack. */
   #broadcastQueue(): boolean {
+    // FENCE (#481): a retired instance never writes the spool. After
+    // end("restart") the SAME session id belongs to the replacement, which
+    // already persisted the prompts carried over to it; a late write from this
+    // object (a dispatch whose awaited tmux write failed after the restart)
+    // would overwrite that file with a cancelled item and the next daemon
+    // restart would restore the cancelled prompt and lose the carried one.
+    // end() already cleared this object's queue and spool, so there is nothing
+    // truthful left for it to persist — report "not durable".
+    if (this.status === "ended") return false;
     const state = this.queueState();
     this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...state });
     // Push to the app via session metadata so it doesn't have to poll.
@@ -1829,17 +1838,40 @@ export class Session {
     const next = this.#queue.shift()!;
     this.#dispatchInFlight = next; // whole item — timeout re-queues it intact
     this.#broadcastQueue();
+    // OWNERSHIP CHECK for everything after the awaited write (#481). While the
+    // keystrokes are in flight this instance can be RETIRED — a restart plucks
+    // the rest of the queue for its replacement (takeQueuedForRestart) and
+    // end("restart") cancels this dispatch — or the dispatch can be settled by
+    // another path (a kill, a command echo). Either way `next` is no longer
+    // ours to requeue, pause on, or arm timers for: the old code requeued the
+    // cancelled item and persisted it under the shared session id, clobbering
+    // the replacement's spool.
+    const stillOurs = () => this.status !== "ended" && this.#dispatchInFlight === next;
     try {
       // Type DIRECTLY (not via sendText) — the gate proved the pane is ready + empty,
       // and a "starting" session must type now to bootstrap its transcript. Awaited:
       // the keystrokes go over control mode and a failure must reach the catch below.
       await this.#typeIntoTmux(next.text, { seq: next.seq, source: next.source, mirrorToRelay: next.mirrorToRelay });
     } catch (e) {
+      if (!stillOurs()) {
+        // Retired (or superseded) mid-write: the write failing is expected — its
+        // tmux server was killed with the old process. Nothing to requeue.
+        process.stderr.write(`[queue] ${this.id}: dispatch ${next.id} write failed after the session was ${this.status === "ended" ? `ended (${this.endReason})` : "superseded"} — not requeued (#481)\n`);
+        return;
+      }
       // Send failed outright — put it back at the head and pause.
       this.#queue.unshift(next);
       this.#dispatchInFlight = null;
       this.#pauseDispatch("dispatch_failed");
       process.stderr.write(`[queue] dispatch send failed for ${this.id}: ${e}\n`);
+      return;
+    }
+    if (!stillOurs()) {
+      // Typed into a window that no longer belongs to a live dispatch: drop the
+      // submit Enter #typeIntoTmux just armed (its target is already gone) and
+      // arm no echo timeout for it.
+      this.#clearSubmitTimer();
+      process.stderr.write(`[queue] ${this.id}: dispatch ${next.id} completed typing after the session was ${this.status === "ended" ? `ended (${this.endReason})` : "superseded"} — abandoned (#481)\n`);
       return;
     }
     this.#holdLoggedAt = 0; // the hold is over — the next one logs promptly

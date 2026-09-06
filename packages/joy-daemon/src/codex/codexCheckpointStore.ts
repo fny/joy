@@ -28,7 +28,21 @@ export interface CodexCheckpoint {
   /** clientIds this session dispatched and saw echoed (last 200): ownership
    *  for userMessage items seen again on recovery (#78). */
   knownClientIds?: string[];
+  /** Relay seq → clientId receipts for prompts whose userMessage echo landed
+   *  (last SEQ_RECEIPT_CAP). The echo REMOVES the spool entry, so the spool
+   *  alone forgot a seq the moment it was confirmed — a redelivery of that seq
+   *  after completion (crash-before-cursor-persist) started the prompt again
+   *  (#516). clientUserMessageId is correlation, not server idempotency, so
+   *  the daemon must remember what it already accepted. Consulted by enqueue
+   *  live AND after a restart (loaded with the checkpoint). */
+  seqReceipts?: SeqReceipt[];
 }
+
+export interface SeqReceipt { seq: number; clientId: string }
+
+/** Bound on remembered seq receipts. The relay redelivers only the seqs after
+ *  its confirmed cursor — a window of a few messages — so 500 is generous. */
+export const SEQ_RECEIPT_CAP = 500;
 
 function empty(): CodexCheckpoint {
   return { threadId: null, deliveredThroughTurnId: null };
@@ -47,6 +61,9 @@ export function loadCheckpoint(id: string, baseDir = joyStateDir()): CodexCheckp
       threadId: typeof parsed.threadId === "string" ? parsed.threadId : null,
       deliveredThroughTurnId: typeof parsed.deliveredThroughTurnId === "string" ? parsed.deliveredThroughTurnId : null,
       knownClientIds: Array.isArray(parsed.knownClientIds) ? parsed.knownClientIds.filter((x): x is string => typeof x === "string") : undefined,
+      seqReceipts: Array.isArray(parsed.seqReceipts)
+        ? parsed.seqReceipts.filter((r): r is SeqReceipt => !!r && typeof r === "object" && typeof (r as SeqReceipt).seq === "number" && typeof (r as SeqReceipt).clientId === "string")
+        : undefined,
     };
   } catch { return empty(); }
 }
@@ -85,4 +102,16 @@ export function markTurnDelivered(cp: CodexCheckpoint, turnId: string): CodexChe
     return { ...cp, deliveredThroughTurnId: turnId };
   }
   return cp;
+}
+
+/** Remember that the prompt for relay `seq` (dispatched as `clientId`) was
+ *  confirmed by its echo (#516). Returns a NEW checkpoint; bounded FIFO. */
+export function recordSeqReceipt(cp: CodexCheckpoint, seq: number, clientId: string): CodexCheckpoint {
+  const prior = (cp.seqReceipts ?? []).filter((r) => r.seq !== seq);
+  return { ...cp, seqReceipts: [...prior, { seq, clientId }].slice(-SEQ_RECEIPT_CAP) };
+}
+
+/** The clientId a confirmed relay `seq` was delivered under, if remembered. */
+export function seqReceiptFor(cp: CodexCheckpoint, seq: number): string | null {
+  return cp.seqReceipts?.find((r) => r.seq === seq)?.clientId ?? null;
 }

@@ -53,6 +53,13 @@ const TOOL_MCP = "McpTool";
 
 type Item = Record<string, unknown>;
 
+/** Per-turn canonical identity state (#522): ordinal counters per item type and
+ *  the transient-id → core mappings allocated within THIS turn only. */
+interface TurnIdentity { ordinals: Map<string, number>; byId: Map<string, string> }
+
+/** How many ended turns keep their identity state for late completions. */
+const RETAINED_ENDED_TURNS = 16;
+
 function itemType(item: Item): string { return typeof item.type === "string" ? item.type : ""; }
 function str(v: unknown): string { return typeof v === "string" ? v : ""; }
 
@@ -76,8 +83,23 @@ export class CodexNormalizer {
   // (turnId, itemType): the Nth commandExecution of a turn is `…:commandExecution:N`
   // in BOTH live and history, because items appear in the same order. We map
   // each transient id → its canonical core on first sighting and reuse it.
-  #ordinals = new Map<string, number>();       // `${turnId}|${type}` → next ordinal
-  #canonicalById = new Map<string, string>();  // transient item id → `${type}:${ord}`
+  //
+  // The transient→canonical map is scoped PER TURN and PER TYPE (#522). History
+  // reuses positional ids across turns (every turn has an item-0, item-1, …),
+  // so a flat map keyed by the transient id alone let turn 2's `item-1` inherit
+  // turn 1's `commandExecution:0`: recovery then minted ids live delivery never
+  // produced, duplicating one answer and suppressing another against the wrong
+  // relay row. A mapping is only ever reused within the turn that allocated it.
+  #turns = new Map<string, TurnIdentity>();
+  // transient item id → where it was allocated. A completion that arrives AFTER
+  // its turn ended (a late tool completion) is attributed to the turn that
+  // STARTED the item, never to whatever turn is current — otherwise it consumed
+  // the next turn's `commandExecution:0` completion id and the real one deduped
+  // away as a replay (Astra medium, normalize.ts:264).
+  #byTransient = new Map<string, { turn: string; type: string; core: string }>();
+  // Ended turns, oldest first — identity state is retained for a few turns so a
+  // late completion still resolves, then pruned so a long session stays bounded.
+  #endedTurns: string[] = [];
 
   // The joy wire `turn` field IS the codex turn id (a stable UUIDv7). Using it
   // directly — rather than minting a random id per turn — makes turn identity
@@ -89,17 +111,49 @@ export class CodexNormalizer {
 
   setThreadId(id: string): void { if (id) this.#threadId = id; }
 
+  #turnState(turnId: string): TurnIdentity {
+    let t = this.#turns.get(turnId);
+    if (!t) { t = { ordinals: new Map(), byId: new Map() }; this.#turns.set(turnId, t); }
+    return t;
+  }
+
   /** Allocate (or reuse) the canonical `${type}:${ordinal}` core for an item,
-   *  keyed by its transient id. Same order of items → same ordinals live vs
-   *  history, regardless of the transient id strings. */
+   *  keyed by (turn, type, transient id). Same order of items → same ordinals
+   *  live vs history, regardless of the transient id strings; a transient id
+   *  seen in ANOTHER turn (history's positional ids) never shares a mapping (#522). */
   #canonicalCore(turnId: string, type: string, transientId: string): string {
-    if (transientId && this.#canonicalById.has(transientId)) return this.#canonicalById.get(transientId)!;
-    const key = `${turnId}|${type}`;
-    const ord = this.#ordinals.get(key) ?? 0;
-    this.#ordinals.set(key, ord + 1);
+    const state = this.#turnState(turnId);
+    const key = `${type}|${transientId}`;
+    if (transientId && state.byId.has(key)) return state.byId.get(key)!;
+    const ord = state.ordinals.get(type) ?? 0;
+    state.ordinals.set(type, ord + 1);
     const core = `${type}:${ord}`;
-    if (transientId) this.#canonicalById.set(transientId, core);
+    if (transientId) {
+      state.byId.set(key, core);
+      this.#byTransient.set(transientId, { turn: turnId, type, core });
+    }
     return core;
+  }
+
+  /** The turn an item/completed belongs to. An item whose start we saw resolves
+   *  to the turn that allocated it — even after that turn ended and a new one
+   *  began (late tool completion). An explicit turnId that names a DIFFERENT
+   *  turn means the transient id was reused (history positional ids) and wins. */
+  #turnForCompleted(p: Item, type: string, transientId: string): string {
+    const explicit = str(p.turnId);
+    const seen = transientId ? this.#byTransient.get(transientId) : undefined;
+    if (seen && seen.type === type && (!explicit || explicit === seen.turn) && this.#turns.has(seen.turn)) return seen.turn;
+    return explicit || (this.#currentTurn ?? "");
+  }
+
+  /** Forget the identity state of turns that ended long enough ago that no
+   *  late completion can still reference them (bounded memory; #522). */
+  #pruneEndedTurns(): void {
+    while (this.#endedTurns.length > RETAINED_ENDED_TURNS) {
+      const old = this.#endedTurns.shift()!;
+      this.#turns.delete(old);
+      for (const [id, meta] of this.#byTransient) if (meta.turn === old) this.#byTransient.delete(id);
+    }
   }
 
   /** Deterministic relay localId for a wire event — a reconnect replay of the
@@ -190,6 +244,7 @@ export class CodexNormalizer {
     }
     for (const [call, meta] of [...this.#openTools]) if (meta.turn === codexTurnId) this.#openTools.delete(call);
     this.#currentTurn = null;
+    if (!this.#endedTurns.includes(codexTurnId)) { this.#endedTurns.push(codexTurnId); this.#pruneEndedTurns(); }
     out.push(this.#wire(encodeTurnEnd(status, { turn: codexTurnId }), `turn:${codexTurnId}:complete`));
     // Delivery receipt on the turn's TERMINAL row (the turn-end just queued).
     // The session advances the delivered-turn checkpoint only when THIS row is
@@ -231,9 +286,10 @@ export class CodexNormalizer {
 
   #itemCompleted(p: Item): CodexEffect[] {
     const item = (p.item ?? {}) as Item;
-    const joyTurn = this.#turnFor(p);
     const type = itemType(item);
-    const core = this.#canonicalCore(joyTurn, type, str(item.id));
+    const transientId = str(item.id);
+    const joyTurn = this.#turnForCompleted(p, type, transientId);
+    const core = this.#canonicalCore(joyTurn, type, transientId);
     switch (type) {
       case "agentMessage": {
         const raw = str(item.text).trim();
@@ -268,7 +324,11 @@ export class CodexNormalizer {
 
   #toolEnd(joyTurn: string, core: string, item?: Item): CodexEffect[] {
     const call = `${joyTurn}:${core}`;
-    const turn = this.#openTools.get(call)?.turn ?? this.#currentTurn ?? joyTurn;
+    // The end row belongs to the turn that owns the call — NOT to #currentTurn.
+    // A completion landing after its turn closed (and the next one opened) used
+    // to be stamped with the new turn, so its localId collided with the next
+    // turn's first `…:tool-end` and the relay deduped the real one away.
+    const turn = this.#openTools.get(call)?.turn ?? joyTurn;
     this.#openTools.delete(call);
     // Carry the harness's output and failure status: a completion with an
     // empty result was indistinguishable from success in the app (#68).

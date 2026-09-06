@@ -157,3 +157,123 @@ test("replaying the SAME events yields the SAME localIds (idempotent reconciliat
   };
   expect(build()).toEqual(build());
 });
+
+// ── #522: canonical identities are scoped per turn ───────────────────────────
+// History (thread/read) reuses POSITIONAL item ids in every turn (item-0,
+// item-1, …). A transient→canonical map keyed by the transient id alone let
+// turn 2's `item-1` inherit turn 1's `commandExecution:0`, so recovery minted
+// ids live delivery never produced: one answer duplicated, another suppressed
+// against the wrong relay row. The exact two-turn sequence from the issue:
+// turn 1 = user / command / answer, turn 2 = user / answer / answer.
+const T1 = "019f9261-aaaa-7062-91be-000000000001";
+const T2 = "019f9261-aaaa-7062-91be-000000000002";
+
+function wireIds(notifs: CodexNotification[]): string[] {
+  const n = new CodexNormalizer(() => "x");
+  n.setThreadId("TH");
+  const out: string[] = [];
+  for (const notif of notifs) for (const e of n.handle(notif)) if (e.kind === "wire") out.push(e.localId);
+  return out;
+}
+
+const TWO_TURNS_LIVE: CodexNotification[] = [
+  { method: "turn/started", params: { threadId: "TH", turn: { id: T1 } } },
+  { method: "item/started", params: { threadId: "TH", turnId: T1, item: { type: "userMessage", id: "msg_u1", clientId: "joy-1" } } },
+  { method: "item/started", params: { threadId: "TH", turnId: T1, item: { type: "commandExecution", id: "call_1", command: "ls", cwd: "/" } } },
+  { method: "item/completed", params: { threadId: "TH", turnId: T1, item: { type: "commandExecution", id: "call_1", status: "completed" } } },
+  { method: "item/completed", params: { threadId: "TH", turnId: T1, item: { type: "agentMessage", id: "msg_a1", text: "one" } } },
+  { method: "turn/completed", params: { threadId: "TH", turn: { id: T1, status: "completed" } } },
+  { method: "turn/started", params: { threadId: "TH", turn: { id: T2 } } },
+  { method: "item/started", params: { threadId: "TH", turnId: T2, item: { type: "userMessage", id: "msg_u2", clientId: "joy-2" } } },
+  { method: "item/completed", params: { threadId: "TH", turnId: T2, item: { type: "agentMessage", id: "msg_a2", text: "two-a" } } },
+  { method: "item/completed", params: { threadId: "TH", turnId: T2, item: { type: "agentMessage", id: "msg_a3", text: "two-b" } } },
+  { method: "turn/completed", params: { threadId: "TH", turn: { id: T2, status: "completed" } } },
+];
+
+// The same two turns as #reconcileHistoryInner feeds them: positional ids that
+// RESTART at item-0 in every turn, started+completed per item.
+function historyTurn(tid: string, items: Record<string, unknown>[]): CodexNotification[] {
+  const out: CodexNotification[] = [{ method: "turn/started", params: { turn: { id: tid } } }];
+  items.forEach((item, i) => {
+    const withId = { ...item, id: `item-${i}` };
+    out.push({ method: "item/started", params: { turnId: tid, item: withId } });
+    out.push({ method: "item/completed", params: { turnId: tid, item: withId } });
+  });
+  out.push({ method: "turn/completed", params: { turn: { id: tid, status: "completed" } } });
+  return out;
+}
+const TWO_TURNS_HISTORY: CodexNotification[] = [
+  ...historyTurn(T1, [
+    { type: "userMessage", clientId: "joy-1" },
+    { type: "commandExecution", command: "ls", cwd: "/", status: "completed" },
+    { type: "agentMessage", text: "one" },
+  ]),
+  ...historyTurn(T2, [
+    { type: "userMessage", clientId: "joy-2" },
+    { type: "agentMessage", text: "two-a" },
+    { type: "agentMessage", text: "two-b" },
+  ]),
+];
+
+test("#522: a second turn reusing positional item ids gets its OWN canonical ids (live == history)", () => {
+  const live = wireIds(TWO_TURNS_LIVE);
+  const history = wireIds(TWO_TURNS_HISTORY);
+  // Turn 2's two answers are agentMessage:0 and agentMessage:1 in BOTH paths —
+  // never turn 1's commandExecution:0 / agentMessage:0 borrowed via `item-1`.
+  const t2Texts = [`codex:TH:turn:${T2}:item:agentMessage:0:text`, `codex:TH:turn:${T2}:item:agentMessage:1:text`];
+  expect(live.filter((id) => id.includes(`turn:${T2}:item`))).toEqual(t2Texts);
+  expect(history.filter((id) => id.includes(`turn:${T2}:item`))).toEqual(t2Texts);
+  expect(history).not.toContain(`codex:TH:turn:${T2}:item:commandExecution:0:text`);
+  // And the whole live id set is reproduced by the replay (idempotent dedupe).
+  for (const id of live) expect(history).toContain(id);
+});
+
+test("#522: the same transient id under two turns never shares a mapping, even across types", () => {
+  const n = new CodexNormalizer(() => "x");
+  n.setThreadId("TH");
+  n.handle({ method: "turn/started", params: { turn: { id: T1 } } });
+  n.handle({ method: "item/started", params: { turnId: T1, item: { type: "commandExecution", id: "item-1", command: "ls", cwd: "/" } } });
+  n.handle({ method: "turn/completed", params: { turn: { id: T1, status: "completed" } } });
+  n.handle({ method: "turn/started", params: { turn: { id: T2 } } });
+  const eff = n.handle({ method: "item/completed", params: { turnId: T2, item: { type: "agentMessage", id: "item-1", text: "hi" } } });
+  const wire = eff.find((e) => e.kind === "wire") as any;
+  expect(wire.localId).toBe(`codex:TH:turn:${T2}:item:agentMessage:0:text`);
+  expect(wire.record.content.data.turn).toBe(T2);
+});
+
+// A tool completion can land AFTER its turn's turn/completed and after the
+// next turn/started. It used to be stamped with the CURRENT turn, so its
+// localId became the next turn's `commandExecution:0:tool-end` — and the next
+// turn's real completion then deduped away as a replay.
+test("late tool completion stays on the turn that started it, not the next turn", () => {
+  const n = new CodexNormalizer(() => "x");
+  n.setThreadId("TH");
+  const wire = (effs: CodexEffect[]) => effs.filter((e) => e.kind === "wire") as Array<{ localId: string; record: any }>;
+  n.handle({ method: "turn/started", params: { turn: { id: T1 } } });
+  n.handle({ method: "item/started", params: { turnId: T1, item: { type: "commandExecution", id: "call_slow", command: "sleep", cwd: "/" } } });
+  n.handle({ method: "turn/completed", params: { turn: { id: T1, status: "completed" } } }); // closes call_slow synthetically
+  n.handle({ method: "turn/started", params: { turn: { id: T2 } } });
+  // The straggler: codex reports call_slow done, tagged with ITS turn.
+  const late = wire(n.handle({ method: "item/completed", params: { turnId: T1, item: { type: "commandExecution", id: "call_slow", status: "completed", exitCode: 0 } } }));
+  expect(late).toHaveLength(1);
+  expect(late[0].localId).toBe(`codex:TH:turn:${T1}:item:commandExecution:0:tool-end`); // dedupes against the synthetic close
+  expect(late[0].record.content.data.turn).toBe(T1);
+  expect(late[0].record.content.data.ev.call).toBe(`${T1}:commandExecution:0`);
+  // Turn 2's own first command keeps ordinal 0 and its completion id intact.
+  const start2 = wire(n.handle({ method: "item/started", params: { turnId: T2, item: { type: "commandExecution", id: "call_next", command: "ls", cwd: "/" } } }));
+  const end2 = wire(n.handle({ method: "item/completed", params: { turnId: T2, item: { type: "commandExecution", id: "call_next", status: "completed" } } }));
+  expect(start2[0].localId).toBe(`codex:TH:turn:${T2}:item:commandExecution:0:tool-start`);
+  expect(end2[0].localId).toBe(`codex:TH:turn:${T2}:item:commandExecution:0:tool-end`);
+  expect(end2[0].record.content.data.turn).toBe(T2);
+});
+
+test("late tool completion WITHOUT a turnId still resolves to the turn that started the item", () => {
+  const n = new CodexNormalizer(() => "x");
+  n.setThreadId("TH");
+  n.handle({ method: "turn/started", params: { turn: { id: T1 } } });
+  n.handle({ method: "item/started", params: { turnId: T1, item: { type: "commandExecution", id: "call_slow", command: "sleep", cwd: "/" } } });
+  n.handle({ method: "turn/completed", params: { turn: { id: T1, status: "completed" } } });
+  n.handle({ method: "turn/started", params: { turn: { id: T2 } } });
+  const late = n.handle({ method: "item/completed", params: { item: { type: "commandExecution", id: "call_slow", status: "completed" } } }).filter((e) => e.kind === "wire") as any[];
+  expect(late[0].localId).toBe(`codex:TH:turn:${T1}:item:commandExecution:0:tool-end`);
+});
