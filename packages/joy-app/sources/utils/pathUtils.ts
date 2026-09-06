@@ -9,29 +9,19 @@ import { Metadata } from '@/sync/storageTypes';
  * @param metadata - Optional metadata containing the root path
  * @returns The resolved absolute path
  */
-/** Case folds only where the remote filesystem is known to: Windows and the
- *  default macOS volume. On a case-sensitive host /srv/Project and
- *  /srv/project are different directories, and folding both mislabeled the
- *  second one's files as the session's own (#441). With no `os` on the
- *  metadata the session path itself tells: a drive letter or backslashes
- *  mean Windows, /Users/… means macOS, anything else is treated as
- *  case-sensitive. */
-function foldsCase(metadata: Metadata): boolean {
-    const os = (metadata.os ?? '').toLowerCase();
-    if (os === 'win32' || os === 'windows' || os === 'darwin' || os === 'macos') return true;
-    if (os !== '') return false;
-    const root = metadata.path;
-    return /^[A-Za-z]:/.test(root) || root.includes('\\') || root.startsWith('/Users/');
-}
-
+/** Exact-case comparison, always. Neither the platform nor the spelling of
+ *  the path is evidence of how the remote filesystem compares names: Linux
+ *  hosts have /Users paths, macOS mounts case-sensitive volumes, a Windows
+ *  directory can be flagged case-sensitive. Folding by `os` or by a
+ *  `/Users/` prefix mislabeled /Volumes/CS/project's files as the session's
+ *  own /Volumes/CS/Project (#441). Nothing the daemon reports carries real
+ *  filesystem semantics, so a path that does not match exactly is kept
+ *  absolute — a longer label beats a wrong one. */
 export function resolvePath(path: string, metadata: Metadata | null): string {
     if (!metadata) {
         return path;
     }
-    const fold = foldsCase(metadata);
-    const candidate = fold ? path.toLowerCase() : path;
-    const root = fold ? metadata.path.toLowerCase() : metadata.path;
-    if (candidate.startsWith(root)) {
+    if (path.startsWith(metadata.path)) {
         // Check that the path is actually within the metadata path by ensuring
         // there's either an exact match or a path separator after the metadata path
         const remainder = path.slice(metadata.path.length);
