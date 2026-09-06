@@ -333,6 +333,15 @@ app.
   session-file residuals in flight, design follow-ups (#127–#131), and the
   lows scheduled for Wave F.
 
+- 2026-09-08 (session round) — Claude session-file residuals and the
+  hooks-authority regressions landed (b2274858: flush-left numbered drafts,
+  fresh-capture mode verification, evidence-only confirmation, pane-writer
+  lease, cancel reset before the first write, local_command bash echo,
+  re-fenced draft restore; hooks v5 with end_reason/agent ids, ingress fence,
+  subagent events excluded, hook-owned readiness). #31 and #577 are moot on
+  the ledger. C2 coordinator started in a worktree; daemon round-two and
+  voice round-two residual agents in flight.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
