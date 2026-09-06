@@ -354,3 +354,18 @@ test("a malformed sibling field blocks the whole record (a valid checkpoint next
   l.close();
 });
 
+test("a legacy queue entry whose id another session already owns fails that file's import (quarantined, nothing committed) — the row is never re-homed", () => {
+  write("queue-aaaa0001.json", [{ id: "same", text: "mine", createdAt: 1 }]);
+  write("queue-bbbb0002.json", [{ id: "fresh", text: "ok", createdAt: 2 }, { id: "same", text: "stolen", createdAt: 3 }]);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([{ file: "queue-bbbb0002.json", error: expect.stringMatching(/^ledger accept failed: same: owned by session aaaa0001, not bbbb0002/), sessionId: "bbbb0002" }]);
+  expect(r.quarantine).toEqual(["bbbb0002"]);
+  expect(r.files).toEqual(["queue-aaaa0001.json"]);
+  expect(l.getCommand("same")).toMatchObject({ sessionId: "aaaa0001", text: "mine" });
+  expect(l.listCommands("bbbb0002")).toEqual([]); // "fresh" rolled back with its file
+  expect(existsSync(join(dir, "queue-bbbb0002.json"))).toBe(true);
+  expect(l.getMeta("import_v1")).toBeNull();
+  l.close();
+});
+
