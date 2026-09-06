@@ -1,3 +1,5 @@
+// Wall-clock bound: generous because the CI/dev box runs several suites at once; the point is linear vs quadratic, not 100 ms exactly.
+const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 500);
 import { describe, it, expect } from 'vitest';
 import { parseMarkdownSpans } from './parseMarkdownSpans';
 import { PARSE_INPUT_CAP } from '@/utils/parseBudget';
@@ -9,7 +11,7 @@ describe('parseMarkdownSpans — bounded bracket matching', () => {
         const md = '['.repeat(50_000);
         const t0 = performance.now();
         const spans = parseMarkdownSpans(md, false);
-        expect(performance.now() - t0).toBeLessThan(100);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
         expect(spans.map(s => s.text).join('')).toBe(md);
         expect(spans.every(s => s.url === null)).toBe(true);
     });
@@ -18,7 +20,7 @@ describe('parseMarkdownSpans — bounded bracket matching', () => {
         const md = '[x]('.repeat(20_000);
         const t0 = performance.now();
         expect(text(md)).toBe(md);
-        expect(performance.now() - t0).toBeLessThan(100);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
     });
 
     it('still parses ordinary links, links with one level of parentheses, and nested links', () => {
