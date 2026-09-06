@@ -29,6 +29,7 @@
 import { readdirSync, statSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { codexHome } from "../codex/codexHome";
 import type { RelayClient, RelaySession } from "../relay/relay.ts";
 
 function safeReaddir(dir: string): string[] {
@@ -181,9 +182,10 @@ export function scanMachine(home: string): ScannedCommand[] {
   return dedupeSorted([
     ...scanCommandsDir(join(home, ".claude", "commands"), "claude:command"),
     ...scanSkillsDir(join(home, ".claude", "skills"), "claude:skill"),
-    // codex custom prompts are top-level-only by codex's own scan rules.
-    ...scanCommandsDir(join(home, ".codex", "prompts"), "codex:command", { topLevelOnly: true }),
-    ...scanSkillsDir(join(home, ".codex", "skills"), "codex:skill"),
+    // codex custom prompts are top-level-only by codex's own scan rules. Under
+    // $CODEX_HOME when set (#524 family), else <home>/.codex.
+    ...scanCommandsDir(join(codexHome(home), "prompts"), "codex:command", { topLevelOnly: true }),
+    ...scanSkillsDir(join(codexHome(home), "skills"), "codex:skill"),
     ...scanCommandsDir(join(home, ".config", "opencode", "commands"), "opencode:command"),
     ...scanSkillsDir(join(home, ".config", "opencode", "skills"), "opencode:skill"),
     ...scanSkillsDir(join(home, ".agents", "skills"), "agents:skill"),
