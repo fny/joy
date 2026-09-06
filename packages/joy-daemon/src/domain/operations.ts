@@ -19,6 +19,7 @@ import type { AgentSession } from "./agentSession";
 import { SessionEndedError } from "./ledger";
 import { queueFor } from "./queueFacade";
 import type { SessionRegistry } from "./registry";
+import { claimTranscript, transcriptClaims, type TranscriptClaim } from "./transcriptClaims";
 import { processTreeStats } from "./procStats";
 import { loadWindowRecord } from "./windowRecord";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
@@ -816,53 +817,84 @@ export const machineOps: MachineOp[] = [
       // review, 2026-09-04).
       const pathOf = (dirCwd: string, id: string | undefined): string | null =>
         id ? join(cwdToTranscriptDir(canonicalCwd(dirCwd)), `${id}.jsonl`) : null;
-      const ownedPaths = new Set<string>();
-      for (const s of registry.list()) {
-        if (s.transcriptPath) ownedPaths.add(s.transcriptPath);
-        const derived = pathOf(s.cwd, s.claudeSessionId); if (derived) ownedPaths.add(derived);
-      }
-      for (const r of registry.listRecords()) { const derived = pathOf(r.launchCwd, r.claudeSessionId); if (derived) ownedPaths.add(derived); }
-      if (ownedPaths.has(target)) return { error: `conversation ${sid.slice(0, 8)} belongs to a session whose transcript is ${target} on this machine` };
-      // The write and the launch run under the destination's path lock, so
-      // a concurrent import of the same conversation into the same folder
-      // queues behind this one and re-checks ownership. Bytes land in an
-      // attempt-owned temp file and are renamed into place — a crashed or
-      // failed write never leaves a truncated transcript — and prior bytes
-      // at the destination (an unowned leftover) are set aside and put back
-      // if the launch fails: a failed import never costs what was there.
-      return withPathLock(`teleport-import:${target}`, async () => {
-        mkdirSync(dir, { recursive: true });
-        const tmp = join(dir, `.${sid}.joy-import-${randomBytes(4).toString("hex")}`);
-        const prev = existsSync(target) ? `${tmp}.prev` : null;
-        try {
-          writeFileSync(tmp, Buffer.from(b64, "base64"));
-          if (prev) renameSync(target, prev);
-          renameSync(tmp, target);
-        } catch (e) {
-          try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
-          if (prev && !existsSync(target)) { try { renameSync(prev, target); } catch { /* the set-aside copy stays beside it */ } }
-          return { ok: false, error: `transcript write failed: ${e instanceof Error ? e.message : String(e)}` };
+      const refusal = { error: `conversation ${sid.slice(0, 8)} belongs to a session whose transcript is ${target} on this machine` };
+      /** Is the destination owned RIGHT NOW — by a live session, a record, or
+       *  an acquisition still in flight (a launch that decided on this
+       *  transcript but has not registered its Session yet, another import
+       *  replacing it)? `mine` is this import's own claim, not an owner. */
+      const owned = (mine?: TranscriptClaim): boolean => {
+        for (const s of registry.list()) {
+          if (s.transcriptPath === target || pathOf(s.cwd, s.claudeSessionId) === target) return true;
         }
-        // Continue under a NEW claude id (--fork-session): the source keeps its
-        // own id — which may still be live if the two machines are one (a
-        // same-box teleport into another folder), where a plain --resume would
-        // collide. History is intact either way. If the launch fails, put the
-        // destination back the way it was (remove the file we wrote, restore
-        // the set-aside one) so a retry is not refused as "already exists".
+        for (const r of registry.listRecords()) if (pathOf(r.launchCwd, r.claudeSessionId) === target) return true;
+        return transcriptClaims(target).some((c) => c !== mine);
+      };
+      // A request that can never succeed does not wait for the lock.
+      if (owned()) return refusal;
+      // The write and the launch run under the destination's path lock, so a
+      // concurrent import of the same conversation into the same folder
+      // queues behind this one. Ownership is checked AGAIN inside the lock:
+      // the snapshot above is as old as the wait, and an owner that bound the
+      // destination meanwhile used to be overwritten (Astra on 79bf4a34). The
+      // import then holds the path's exclusive claim until it returns, so no
+      // launch can bind the file between the check, the write and the launch
+      // (its own launch adopts the claim). Bytes land in an attempt-owned temp
+      // file and are renamed into place — a crashed or failed write never
+      // leaves a truncated transcript — and prior bytes at the destination
+      // (an unowned leftover) are set aside and put back if the launch fails:
+      // a failed import never costs what was there.
+      return withPathLock(`teleport-import:${target}`, async () => {
+        if (owned()) return refusal;
+        const claim = claimTranscript(target, `teleport-import:${sid.slice(0, 8)}`, "replace");
+        if (!claim) return refusal; // owned() saw no claim and nothing yielded since; defensive
         try {
-          const session = await registry.create({
-            cwd, resume_id: sid, forkSession: true, forceNew: true, createDir: params.createDir === true,
-            model: typeof params.model === "string" ? params.model : undefined,
-            // Fail closed (#50): an export that could not read its mode says
-            // nothing, and create() would default that to bypassPermissions.
-            permissionMode: typeof params.permissionMode === "string" && params.permissionMode ? params.permissionMode : "default",
-          });
-          if (prev) { try { rmSync(prev, { force: true }); } catch { /* best effort */ } }
-          return { ok: true, session: session.toJSON(), localSessionId: session.id };
-        } catch (e) {
-          try { rmSync(target, { force: true }); } catch { /* best effort */ }
-          if (prev) { try { renameSync(prev, target); } catch { /* the set-aside copy stays beside it */ } }
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+          mkdirSync(dir, { recursive: true });
+          const tmp = join(dir, `.${sid}.joy-import-${claim.gen}-${randomBytes(4).toString("hex")}`);
+          const prev = existsSync(target) ? `${tmp}.prev` : null;
+          try {
+            writeFileSync(tmp, Buffer.from(b64, "base64"));
+            if (prev) renameSync(target, prev);
+            renameSync(tmp, target);
+          } catch (e) {
+            try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+            if (prev && !existsSync(target)) { try { renameSync(prev, target); } catch { /* the set-aside copy stays beside it */ } }
+            return { ok: false, error: `transcript write failed: ${e instanceof Error ? e.message : String(e)}` };
+          }
+          // Continue under a NEW claude id (--fork-session): the source keeps its
+          // own id — which may still be live if the two machines are one (a
+          // same-box teleport into another folder), where a plain --resume would
+          // collide. History is intact either way. If the launch fails, put the
+          // destination back the way it was (remove the file we wrote, restore
+          // the set-aside one) so a retry is not refused as "already exists".
+          try {
+            const session = await registry.create({
+              cwd, resume_id: sid, forkSession: true, forceNew: true, createDir: params.createDir === true,
+              model: typeof params.model === "string" ? params.model : undefined,
+              // Fail closed (#50): an export that could not read its mode says
+              // nothing, and create() would default that to bypassPermissions.
+              permissionMode: typeof params.permissionMode === "string" && params.permissionMode ? params.permissionMode : "default",
+              transcriptClaim: claim,
+            });
+            if (prev) { try { rmSync(prev, { force: true }); } catch { /* best effort */ } }
+            return { ok: true, session: session.toJSON(), localSessionId: session.id };
+          } catch (e) {
+            const error = e instanceof Error ? e.message : String(e);
+            // Fenced to this import's own generation (#550 residual): the
+            // destination is removed or restored over only while the claim
+            // this import took is still the one on record AND nothing else
+            // owns the path. An owner that took the file meanwhile through a
+            // path that binds without claiming (a recovered window, a tailer
+            // learning its file) keeps its bytes; the set-aside copy stays
+            // beside it rather than clobbering them.
+            if (!claim.held() || owned(claim)) {
+              return { ok: false, error: `${error} (the transcript at ${target} was taken by another session meanwhile and was left untouched${prev ? `; the prior bytes are set aside at ${prev}` : ""})` };
+            }
+            try { rmSync(target, { force: true }); } catch { /* best effort */ }
+            if (prev) { try { renameSync(prev, target); } catch { /* the set-aside copy stays beside it */ } }
+            return { ok: false, error };
+          }
+        } finally {
+          claim.release();
         }
       });
     },
