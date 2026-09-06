@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 7 (2) — Git status and Markdown, exact",
+      "summary": "",
+      "markdown": "- **File names are shown exactly as they are** (trailing spaces, quotes, pipes, accents, emoji); the file you see is the file that opens. Line counts are exact or absent: binary, untracked and unread files show no number instead of 0, and a failed read no longer wipes known counts. *Needs the updated daemon for exact names and counts; an older daemon still lists files without them.*\n- **Renames, conflicts and states read correctly**: renamed files show the new name with the old alongside, add/add and delete/delete conflicts are listed as conflicts, a rebase in progress or a linked worktree is reported as such, and a file deleted in the index but recreated on disk can be opened again from Changes.\n- **Git refreshes retry after a dropped connection**, and a closed screen's late refresh no longer overwrites a newer one.\n- **Markdown tables and fences behave**: escaped pipes stay in one cell, two tables separated by a blank line stay two tables, a four-backtick fence can quote a three-backtick example, and an inline options block no longer swallows the text after it.\n- **Links with parentheses open the full address**; Mermaid diagrams size to their content on phones and several diagrams in one message no longer overwrite each other.\n- **Remote images in agent replies load only when tapped**, and the code-block Copy button is available on phones and tablets.\n- **File references link correctly**: `/repo/a.ts and /repo/b.ts`, `index.ts:12`, quoted paths, `file://` URLs and `~/…` paths.\n- **Task notifications that arrive with a prompt no longer hide the prompt**; slash commands keep their arguments when mixed with other text.\n- **Codex diffs keep `--`/`++` lines, name deleted files correctly and show final-newline-only edits**; the +/− badges are accurate. CSV previews scroll vertically and preserve quoted empty records and carriage returns; the rendered HTML preview works on iOS."
+    },
+    {
       "title": "Sep 7 — Voice, steadier",
       "summary": "",
       "markdown": "- **Voice's idle listener learns the room before waking**, so steady background noise no longer reopens the conversation over and over.\n- **A failed voice start shows once in the status strip** instead of alerting on every sound; tap to retry.\n- **Ending or closing voice while it is still connecting really cancels it**, and when you ask Joy to end the call it stays ended.\n- **Voice no longer announces approvals you already answered in the app**, and stops replaying old events after a long idle.\n- **Sound wake no longer leaves recordings in the app cache.**\n- **The composer shows Send, not the microphone, when only an image is attached.**"
@@ -311,5 +316,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 7 — Voice, steadier"
+  "latestTitle": "Sep 7 (2) — Git status and Markdown, exact"
 }

@@ -50,7 +50,7 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
                 }
                 sendFailed(scope, localId);
                 useDraftQueueStore.getState().revertRelease(sessionId, d.id, res.reason);
-                if (!res.reason.startsWith('attachment upload failed')) Modal.alert(t('errors.sendFailedTitle'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
+                if (!res.reason.startsWith('attachment upload failed')) Modal.alert(t('errors.sendFailedTitle'), (res.reason === t('errors.sessionFull') ? res.reason : t('errors.sendFailedMessage')), [{ text: t('common.ok'), style: 'cancel' }]);
             }).finally(() => { sendingDrafts.delete(sendKey); });
         },
     })), [drafts, sessionId, update, remove]);

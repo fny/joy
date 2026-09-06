@@ -1,3 +1,15 @@
+# Sep 7 (2) — Git status and Markdown, exact
+
+- **File names are shown exactly as they are** (trailing spaces, quotes, pipes, accents, emoji); the file you see is the file that opens. Line counts are exact or absent: binary, untracked and unread files show no number instead of 0, and a failed read no longer wipes known counts. *Needs the updated daemon for exact names and counts; an older daemon still lists files without them.*
+- **Renames, conflicts and states read correctly**: renamed files show the new name with the old alongside, add/add and delete/delete conflicts are listed as conflicts, a rebase in progress or a linked worktree is reported as such, and a file deleted in the index but recreated on disk can be opened again from Changes.
+- **Git refreshes retry after a dropped connection**, and a closed screen's late refresh no longer overwrites a newer one.
+- **Markdown tables and fences behave**: escaped pipes stay in one cell, two tables separated by a blank line stay two tables, a four-backtick fence can quote a three-backtick example, and an inline options block no longer swallows the text after it.
+- **Links with parentheses open the full address**; Mermaid diagrams size to their content on phones and several diagrams in one message no longer overwrite each other.
+- **Remote images in agent replies load only when tapped**, and the code-block Copy button is available on phones and tablets.
+- **File references link correctly**: `/repo/a.ts and /repo/b.ts`, `index.ts:12`, quoted paths, `file://` URLs and `~/…` paths.
+- **Task notifications that arrive with a prompt no longer hide the prompt**; slash commands keep their arguments when mixed with other text.
+- **Codex diffs keep `--`/`++` lines, name deleted files correctly and show final-newline-only edits**; the +/− badges are accurate. CSV previews scroll vertically and preserve quoted empty records and carriage returns; the rendered HTML preview works on iOS.
+
 # Sep 7 — Voice, steadier
 
 - **Voice's idle listener learns the room before waking**, so steady background noise no longer reopens the conversation over and over.
