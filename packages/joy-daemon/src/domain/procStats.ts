@@ -96,20 +96,30 @@ function linuxTree(root: number): TreeSnapshot {
  * present in both was the whole story before, so a tool child that started
  * AND did its work inside the 400 ms window contributed nothing — a tree
  * burning most of a core read 0% (#554). Now:
- *  - a pid in both: its own delta plus the delta of children it reaped;
+ *  - a pid in both WITH the same start time: its own delta plus the delta of
+ *    children it reaped. A different start time is a REUSED pid — a new
+ *    process that happens to wear a departed one's number — and is treated
+ *    as one new process plus one exited process;
  *  - a pid only in `b` that STARTED after `a` was taken: everything it has
  *    (all of it happened inside the window); a pre-existing process that
  *    merely joined the tree (reparented) is skipped — its split is unknown;
- *  - a pid only in `a` (exited): its post-`a` CPU reaches an ancestor's
- *    cutime/cstime once reaped and is counted there, so its PRE-window ticks
- *    (what it had at `a`) are taken back out — once, never below zero.
+ *  - a pid only in `a` (exited): once reaped, its ancestor's cutime/cstime
+ *    grows by the departed process's OWN ticks plus everything IT had already
+ *    reaped (Linux folds the child's cutime/cstime in too). Both are
+ *    cumulative since that process started, so its whole pre-window subtree
+ *    accounting (own ticks + childTicks at `a`) is taken back out — once,
+ *    never below zero. Subtracting only the own ticks charged a departed
+ *    child's historic reaped time as fresh work: an idle child with 100 old
+ *    ticks read as 250% of a core.
  */
 export function treeCpuTicks(a: TreeSnapshot, b: TreeSnapshot): number {
   let own = 0;
   let reaped = 0;
+  let preWindow = 0;
+  const sameProcess = (pa: ProcSample, pb: ProcSample) => pa.startTicks === pb.startTicks;
   for (const [pid, pb] of b.procs) {
     const pa = a.procs.get(pid);
-    if (pa) {
+    if (pa && sameProcess(pa, pb)) {
       own += Math.max(0, pb.ticks - pa.ticks);
       reaped += Math.max(0, pb.childTicks - pa.childTicks);
     } else if (pb.startTicks >= a.uptimeTicks) {
@@ -117,8 +127,10 @@ export function treeCpuTicks(a: TreeSnapshot, b: TreeSnapshot): number {
       reaped += pb.childTicks;
     }
   }
-  let preWindow = 0;
-  for (const [pid, pa] of a.procs) if (!b.procs.has(pid)) preWindow += pa.ticks;
+  for (const [pid, pa] of a.procs) {
+    const pb = b.procs.get(pid);
+    if (!pb || !sameProcess(pa, pb)) preWindow += pa.ticks + pa.childTicks;
+  }
   return own + Math.max(0, reaped - preWindow);
 }
 

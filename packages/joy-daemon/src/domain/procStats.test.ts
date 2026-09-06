@@ -34,3 +34,31 @@ describe("treeCpuTicks (#554)", () => {
     expect(treeCpuTicks(a, b)).toBe(44);
   });
 });
+
+describe("treeCpuTicks — departed subtree accounting (#554 residual)", () => {
+  it("an idle child that exits with historic reaped time is not charged as new work", () => {
+    // Child 2 had 10 own ticks and 100 ticks of ALREADY-reaped grandchildren
+    // at `a`. It exits idle inside the window; the root's cutime/cstime
+    // absorbs all 110. Nothing new happened → 0, not 100 (250% of a core).
+    const a: TreeSnapshot = { uptimeTicks: 100, procs: new Map([[1, proc(0, 0, 1, 0)], [2, proc(1, 10, 1, 100)]]) };
+    const b: TreeSnapshot = { uptimeTicks: 140, procs: new Map([[1, proc(0, 0, 1, 110)]]) };
+    expect(treeCpuTicks(a, b)).toBe(0);
+  });
+
+  it("a departed child's in-window work still counts once, on top of its historic subtree", () => {
+    // Child 2: 10 own + 100 reaped at `a`; burns 25 more and reaps a
+    // grandchild's 5 fresh ticks before exiting → root absorbs 140.
+    const a: TreeSnapshot = { uptimeTicks: 100, procs: new Map([[1, proc(0, 0, 1, 0)], [2, proc(1, 10, 1, 100)]]) };
+    const b: TreeSnapshot = { uptimeTicks: 140, procs: new Map([[1, proc(0, 0, 1, 140)]]) };
+    expect(treeCpuTicks(a, b)).toBe(30);
+  });
+
+  it("a reused pid is a new process plus an exited one, matched on start time", () => {
+    // pid 2 at `a` (started at tick 50, 200 own ticks) exits and is reaped;
+    // a NEW pid 2 (started at 120) has burned 7 ticks. In-window: 7 + the
+    // reaped delta (200) minus the old process's pre-window 200 = 7.
+    const a: TreeSnapshot = { uptimeTicks: 100, procs: new Map([[1, proc(0, 0, 1, 0)], [2, proc(1, 200, 50)]]) };
+    const b: TreeSnapshot = { uptimeTicks: 140, procs: new Map([[1, proc(0, 0, 1, 200)], [2, proc(1, 7, 120)]]) };
+    expect(treeCpuTicks(a, b)).toBe(7);
+  });
+});

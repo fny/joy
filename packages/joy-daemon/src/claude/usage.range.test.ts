@@ -19,7 +19,7 @@ function root(): string {
 
 const entry = (o: Record<string, unknown>) => JSON.stringify(o) + "\n";
 
-function assistant(opts: { ts: string; msgId: string; model?: string; input?: number; out?: number; cwd?: string | null; tool?: string }): string {
+function assistant(opts: { ts: string; msgId: string; model?: string; input?: number; out?: number; cwd?: string | null; tool?: string; toolId?: string }): string {
   return entry({
     type: "assistant",
     timestamp: opts.ts,
@@ -27,7 +27,7 @@ function assistant(opts: { ts: string; msgId: string; model?: string; input?: nu
     message: {
       id: opts.msgId,
       model: opts.model ?? "claude-fable-5",
-      content: opts.tool ? [{ type: "tool_use", name: opts.tool, input: {} }] : [{ type: "text", text: "hi" }],
+      content: opts.tool ? [{ type: "tool_use", ...(opts.toolId ? { id: opts.toolId } : {}), name: opts.tool, input: {} }] : [{ type: "text", text: "hi" }],
       usage: { input_tokens: opts.input ?? 100, output_tokens: opts.out ?? 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     },
   });
@@ -94,6 +94,56 @@ test("the same message.id in two transcripts is charged once; the oldest file ow
   // The copied user prompt is a turn in each file that holds it (turns have
   // no API identity); the fork's own turns are what it adds.
   expect(byId["zz-original"].turns).toBe(1);
+});
+
+test("a copied message is charged at its most complete observation, and its copied tool call once (#491 residual)", async () => {
+  const r = root();
+  const proj = join(r, "-home-u-proj");
+  mkdirSync(proj, { recursive: true });
+  // The original file holds an EARLY streaming snapshot of the shared call
+  // (1 output token, a Bash block); the fork copied the FINAL entry (100
+  // output tokens, the same Bash block id) and added a 5-token Read call.
+  const original = join(proj, "aa-original.jsonl");
+  const fork = join(proj, "zz-fork.jsonl");
+  writeFileSync(original, assistant({ ts: "2026-09-05T12:00:00Z", msgId: "shared", out: 1, tool: "Bash", toolId: "toolu_shared" }));
+  writeFileSync(fork, [
+    assistant({ ts: "2026-09-05T12:00:00Z", msgId: "shared", out: 100, tool: "Bash", toolId: "toolu_shared" }),
+    assistant({ ts: "2026-09-05T12:01:00Z", msgId: "new", out: 5, tool: "Read", toolId: "toolu_new" }),
+  ].join(""));
+  const t0 = new Date("2026-09-05T12:00:00Z"), t1 = new Date("2026-09-05T12:01:00Z");
+  utimesSync(original, t0, t0);
+  utimesSync(fork, t1, t1);
+
+  const rep = await computeUsage({ fromDay: "2026-09-05", toDay: "2026-09-05", root: r });
+  expect(rep.overview.calls).toBe(2);
+  expect(rep.overview.tokens.output).toBe(105); // 100 + 5, not 1 + 5
+  expect(rep.tools).toEqual([{ name: "Bash", calls: 1 }, { name: "Read", calls: 1 }]);
+  // Attribution is unchanged: the older file owns the shared call (at its
+  // final usage); the fork keeps only what it added.
+  const byId = Object.fromEntries(rep.sessions.map((s) => [s.id, s]));
+  expect(byId["aa-original"].calls).toBe(1);
+  expect(byId["aa-original"].cost).toBeCloseTo((100 * 10 + 100 * 50) / 1e6, 9);
+  expect(byId["zz-fork"].calls).toBe(1);
+});
+
+test("a genuine prompt that happens to be HTML/XML is a turn (#492 residual)", async () => {
+  const r = root();
+  const proj = join(r, "-home-u-proj");
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, "s.jsonl"), [
+    user("2026-09-05T10:00:00Z", "<div>Explain this HTML</div>"),
+    assistant({ ts: "2026-09-05T10:00:01Z", msgId: "m1" }),
+    user("2026-09-05T10:01:00Z", [{ type: "text", text: "<system-reminder>context</system-reminder>" }, { type: "text", text: "<xml>and this</xml>" }]),
+    assistant({ ts: "2026-09-05T10:01:01Z", msgId: "m2" }),
+    // Still synthetic: the compaction summary, a hook envelope, `!cmd` capture.
+    user("2026-09-05T10:02:00Z", "<summary>compacted</summary>", { isCompactSummary: true }),
+    user("2026-09-05T10:02:01Z", "<user-prompt-submit-hook>hook says hi</user-prompt-submit-hook>"),
+    user("2026-09-05T10:02:02Z", "<bash-input>ls</bash-input>"),
+    user("2026-09-05T10:02:03Z", "<bash-stdout>a b</bash-stdout><bash-stderr></bash-stderr>"),
+    user("2026-09-05T10:02:04Z", [{ type: "text", text: "<task-notification>\n<task-id>x</task-id>\n</task-notification>" }]),
+  ].join(""));
+  const rep = await computeUsage({ fromDay: "2026-09-05", toDay: "2026-09-05", root: r });
+  expect(rep.sessions[0].turns).toBe(2);
 });
 
 test("isMeta and CLI wrapper user entries are not counted as prompts (#492)", async () => {

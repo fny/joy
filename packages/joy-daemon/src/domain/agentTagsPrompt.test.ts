@@ -43,4 +43,60 @@ describe("parseJoyTags", () => {
     const t = parseJoyTags('<joy-title foo="x" value="Title" />');
     expect(t.title).toBe("Title");
   });
+
+  it("a multiline inline span and an indented code block are documentation, not control (#528 residual)", () => {
+    const multi = parseJoyTags('`inline\n<joy-title value="example" />\ncode`');
+    expect(multi.title).toBeNull();
+    expect(multi.text).toBe('`inline\n<joy-title value="example" />\ncode`');
+    const indented = parseJoyTags('    <joy-title value="example" />');
+    expect(indented.title).toBeNull();
+    expect(indented.text).toBe('<joy-title value="example" />');
+    // Indented code after a blank line, inside a list item, and a fence
+    // nested in a list item / blockquote are all code too.
+    const nested = parseJoyTags([
+      "Examples:",
+      "",
+      '    <joy-notify message="Indented" />',
+      "",
+      "- item",
+      "",
+      '      <joy-notify message="In list" />',
+      "- other",
+      "  ```",
+      '  <joy-notify message="Nested fence" />',
+      "  ```",
+      '> ```',
+      '> <joy-notify message="Quoted fence" />',
+      '> ```',
+      '<joy-title value="Real" />',
+    ].join("\n"));
+    expect(nested.notifies).toEqual([]);
+    expect(nested.title).toBe("Real");
+    expect(nested.text).toContain('<joy-notify message="Indented" />');
+    expect(nested.text).toContain('<joy-notify message="In list" />');
+    expect(nested.text).toContain('<joy-notify message="Nested fence" />');
+    expect(nested.text).toContain('<joy-notify message="Quoted fence" />');
+    expect(nested.text).not.toContain("Real");
+  });
+
+  it("an indented line continuing a paragraph is not code; a span never crosses a blank line", () => {
+    const lazy = parseJoyTags('Some text\n    <joy-title value="Continued" />');
+    expect(lazy.title).toBe("Continued");
+    expect(lazy.text).toBe("Some text");
+    const broken = parseJoyTags('a `tick\n\n<joy-title value="Open" />\n\nb` end');
+    expect(broken.title).toBe("Open");
+  });
+
+  it("a `>` inside a quoted attribute does not end the tag (#529 residual)", () => {
+    const r = parseJoyTags('<joy-notify message="Tests > baseline" detail="ok" />');
+    expect(r.notifies).toEqual([{ headline: "Tests > baseline", detail: "ok" }]);
+    expect(r.text).toBe("");
+    const t = parseJoyTags('Done.\n<joy-title value="a > b" />\n<joy-notify detail=\'x > y\' message="m" />');
+    expect(t.title).toBe("a > b");
+    expect(t.notifies).toEqual([{ headline: "m", detail: "x > y" }]);
+    expect(t.text).toBe("Done.");
+    // An unterminated tag is left alone and does not swallow the next one.
+    const open = parseJoyTags('<joy-title value="never closed\n<joy-title value="Closed" />');
+    expect(open.title).toBe("Closed");
+  });
 });

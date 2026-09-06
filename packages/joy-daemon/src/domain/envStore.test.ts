@@ -3,10 +3,11 @@
 // of applyEnvStore. Runs against a throwaway JOY_HOME_DIR with a minted
 // access.key (the store needs a machineKey to exist).
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, utimesSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes, createCipheriv } from "node:crypto";
+import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+import { spawn } from "node:child_process";
 
 let home: string;
 const RELAY = "http://127.0.0.1:3199";
@@ -145,5 +146,100 @@ describe("envStore", () => {
     mod.migrateLegacyEnvFile((l) => lines.push(l));
     expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_A: "ok" } });
     expect(lines.join("\n")).toMatch(/JOY_ENV_TEST_B/);
+  });
+
+  /** Seal `data` by hand under `key` in the store's framing. */
+  const sealWith = (key: Buffer, data: Record<string, string>) => {
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    const enc = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(data), "utf8")), cipher.final()]);
+    return Buffer.concat([Buffer.from([0]), nonce, enc, cipher.getAuthTag()]).toString("base64") + "\n";
+  };
+  /** The raw names in the sealed file, decoded under the local key. */
+  const sealedNames = () => {
+    const key = Buffer.from(readFileSync(join(home, "env.key"), "utf8").trim(), "base64");
+    const buf = Buffer.from(readFileSync(join(home, "env.sealed"), "utf8").trim(), "base64");
+    const d = createDecipheriv("aes-256-gcm", key, buf.subarray(1, 13));
+    d.setAuthTag(buf.subarray(buf.length - 16));
+    return Object.keys(JSON.parse(Buffer.concat([d.update(buf.subarray(13, buf.length - 16)), d.final()]).toString("utf8"))).sort();
+  };
+
+  it("a NUL value sealed by the previous version is neither applied nor resealed (#535 residual)", () => {
+    mod.setEnvVar("JOY_ENV_TEST_B", "fine"); // mints env.key
+    const key = Buffer.from(readFileSync(join(home, "env.key"), "utf8").trim(), "base64");
+    writeFileSync(join(home, "env.sealed"), sealWith(key, { JOY_ENV_TEST_A: "before\0after", JOY_ENV_TEST_B: "fine" }));
+    expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_B: "fine" }, dropped: ["JOY_ENV_TEST_A"] });
+    expect(mod.listEnvVars()).toEqual({ ok: true, names: ["JOY_ENV_TEST_B"] });
+    mod.applyEnvStore();
+    expect(process.env.JOY_ENV_TEST_A).toBeUndefined(); // not "before"
+    expect(process.env.JOY_ENV_TEST_B).toBe("fine");
+    // The next write reseals without it; a replacement value is accepted.
+    expect(mod.setEnvVar("JOY_ENV_TEST_SVC", "x")).toEqual({ ok: true });
+    expect(sealedNames()).toEqual(["JOY_ENV_TEST_B", "JOY_ENV_TEST_SVC"]);
+    expect(mod.setEnvVar("JOY_ENV_TEST_A", "clean")).toEqual({ ok: true });
+    mod.applyEnvStore();
+    expect(process.env.JOY_ENV_TEST_A).toBe("clean");
+  });
+
+  it("a legacy relay-key store carrying a NUL value is migrated without it (#535 residual)", () => {
+    const ak = JSON.parse(readFileSync(join(paths.joyRelayCredsDir(RELAY), "access.key"), "utf8"));
+    writeFileSync(join(home, "env.sealed"), sealWith(Buffer.from(ak.encryption.machineKey, "base64"), { JOY_ENV_TEST_A: "bad\0", JOY_ENV_TEST_B: "ok" }));
+    expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_B: "ok" }, dropped: ["JOY_ENV_TEST_A"] });
+    expect(existsSync(join(home, "env.key"))).toBe(true); // re-sealed under the local key…
+    expect(sealedNames()).toEqual(["JOY_ENV_TEST_B"]);   // …without the value it cannot carry
+    expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_B: "ok" } });
+  });
+
+  it("concurrent first writers from separate daemons serialize: one key, no lost variable (#533 residual)", async () => {
+    // Three processes, each a fresh daemon with no key yet, each writing five
+    // variables at once. The old code let the second minter replace the first
+    // key and its store; now every write lands under the one key.
+    const script = `const m = await import(${JSON.stringify(join(__dirname, "envStore.ts"))});
+      for (let i = 0; i < 5; i++) { const r = m.setEnvVar("JOY_ENV_RACE_" + process.argv[1] + "_" + i, "v" + i); if (!r.ok) { console.error(JSON.stringify(r)); process.exit(1); } }`;
+    const run = (tag: string) => new Promise<{ code: number | null; err: string }>((resolve) => {
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, tag], {
+        env: { ...process.env, JOY_HOME_DIR: home }, stdio: ["ignore", "ignore", "pipe"],
+      });
+      let err = "";
+      child.stderr.on("data", (d) => { err += d; });
+      child.on("close", (code) => resolve({ code, err }));
+    });
+    const results = await Promise.all(["A", "B", "C"].map(run));
+    for (const r of results) expect(r, r.err).toMatchObject({ code: 0 });
+    const r = mod.readEnvStore();
+    expect(r.ok && Object.keys(r.env).sort()).toEqual(
+      ["A", "B", "C"].flatMap((t) => [0, 1, 2, 3, 4].map((i) => `JOY_ENV_RACE_${t}_${i}`)).sort(),
+    );
+    // One key, no leftover attempt files, no lock left behind.
+    expect(readdirSync(home).filter((f) => f.startsWith("env")).sort()).toEqual(["env.key", "env.sealed"]);
+  }, 30_000);
+
+  it("a lock left by a dead writer is broken; a live one makes the write wait, then fail closed", () => {
+    const lock = join(home, "env.lock");
+    writeFileSync(lock, "999999\n");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    expect(mod.setEnvVar("JOY_ENV_TEST_A", "after-stale")).toEqual({ ok: true });
+    expect(existsSync(lock)).toBe(false);
+    mod.__setEnvLockTimingForTests({ waitMs: 50 });
+    try {
+      writeFileSync(lock, "999999\n"); // fresh: a writer is (as far as we know) inside its transaction
+      expect(mod.setEnvVar("JOY_ENV_TEST_B", "blocked")).toEqual({ ok: false, error: "store_busy" });
+      expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_A: "after-stale" } });
+    } finally {
+      mod.__setEnvLockTimingForTests({ waitMs: 5000 });
+      rmSync(lock, { force: true });
+    }
+  });
+
+  it("a key published by another daemon between our read and our mint is adopted, not replaced", () => {
+    // Simulate the loser of a first-mint race: the sealed store and key
+    // appear from elsewhere; our own write must seal under THAT key.
+    const foreign = randomBytes(32);
+    writeFileSync(join(home, "env.key"), foreign.toString("base64") + "\n");
+    writeFileSync(join(home, "env.sealed"), sealWith(foreign, { JOY_ENV_TEST_A: "theirs" }));
+    expect(mod.setEnvVar("JOY_ENV_TEST_B", "ours")).toEqual({ ok: true });
+    expect(readFileSync(join(home, "env.key"), "utf8").trim()).toBe(foreign.toString("base64"));
+    expect(sealedNames()).toEqual(["JOY_ENV_TEST_A", "JOY_ENV_TEST_B"]);
   });
 });

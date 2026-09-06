@@ -166,21 +166,28 @@ export interface CodexLimits {
   observedAt?: string;
 }
 
-/** Newest-CREATED rollout files first — sessions/YYYY/MM/DD/*.jsonl sorts
- *  lexically everywhere, so descending directory walks give newest first.
- *  Bounded by BOTH a file count and a day count so a long-running rollout
- *  from earlier in the week is still a candidate on a busy day. */
-function newestRollouts(root: string, opts: { minFiles: number; minDays: number }): string[] {
-  const out: string[] = [];
-  let days = 0;
-  const desc = (dir: string) => { try { return readdirSync(dir).sort().reverse(); } catch { return []; } };
-  for (const y of desc(root)) {
-    for (const m of desc(join(root, y))) {
-      for (const d of desc(join(root, y, m))) {
-        if (out.length >= opts.minFiles && days >= opts.minDays) return out;
-        days++;
-        for (const f of desc(join(root, y, m, d))) {
-          if (f.endsWith(".jsonl")) out.push(join(root, y, m, d, f));
+/** Every rollout file under sessions/, with its mtime — the ONE index the
+ *  reader ranks by. The previous walk enumerated the newest-CREATED day
+ *  directories (60 files / 7 days) and only then sorted by mtime, so a
+ *  long-running session from an older day — the one actually recording fresh
+ *  quota — fell off the candidate list after a week of newer sessions;
+ *  raising the cutoff only postponed the same defect (#543). A file's mtime
+ *  says nothing about its creation directory, so the index must cover the
+ *  whole store: a few thousand readdir/stat calls, milliseconds. */
+function indexRollouts(root: string): Array<{ file: string; mtime: number }> {
+  const out: Array<{ file: string; mtime: number }> = [];
+  const list = (dir: string) => { try { return readdirSync(dir, { withFileTypes: true }); } catch { return []; } };
+  for (const y of list(root)) {
+    if (!y.isDirectory()) continue;
+    for (const m of list(join(root, y.name))) {
+      if (!m.isDirectory()) continue;
+      for (const d of list(join(root, y.name, m.name))) {
+        if (!d.isDirectory()) continue;
+        const dayDir = join(root, y.name, m.name, d.name);
+        for (const f of list(dayDir)) {
+          if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
+          const file = join(dayDir, f.name);
+          try { out.push({ file, mtime: statSync(file).mtimeMs }); } catch { /* vanished mid-walk */ }
         }
       }
     }
@@ -218,17 +225,16 @@ function lastRateLimitEvent(file: string): { limits: CodexLimits; at: number } |
 const CODEX_READ_MAX = 8;
 
 /** Default root honours $CODEX_HOME — the store the running codex writes (#546).
- *  Picks the newest OBSERVATION across recently modified rollouts, not the
- *  first event in the newest-created file: a long-running session from
- *  yesterday keeps recording fresh quota while a session created today may
- *  have gone quiet hours ago, and the old walk returned the stale figure —
- *  or, past five newer files, never looked at the live rollout at all (#543). */
+ *  Picks the newest OBSERVATION across the most recently MODIFIED rollouts
+ *  in the whole store, not the first event in the newest-created file: a
+ *  long-running session from an earlier day keeps recording fresh quota
+ *  while a session created today may have gone quiet hours ago, and the old
+ *  walk returned the stale figure — or, past a few newer files (or days),
+ *  never looked at the live rollout at all (#543). */
 export function readCodexLimits(root = codexSessionsDir()): { ok: true; limits: CodexLimits } | { ok: false; error: string } {
   if (!existsSync(root)) return { ok: false, error: `no ${root} on this machine` };
-  const candidates = newestRollouts(root, { minFiles: 60, minDays: 7 })
-    .map((file) => { try { return { file, mtime: statSync(file).mtimeMs }; } catch { return null; } })
-    .filter((c): c is { file: string; mtime: number } => c !== null)
-    .sort((a, b) => b.mtime - a.mtime)
+  const candidates = indexRollouts(root)
+    .sort((a, b) => b.mtime - a.mtime || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0))
     .slice(0, CODEX_READ_MAX);
   let best: { limits: CodexLimits; at: number } | null = null;
   for (const { file } of candidates) {

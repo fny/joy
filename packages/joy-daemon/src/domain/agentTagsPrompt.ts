@@ -133,8 +133,10 @@ export interface JoyTagParse {
 
 // One tag grammar, attributes parsed separately — a fixed `message="…"
 // (…detail="…")?` order dropped a detail written BEFORE message (#529).
-const TAG_RE = /<joy-(title|notify)\b([^>]*?)\/?>/gi;
+const TAG_OPEN_RE = /<joy-(title|notify)\b/gi;
 const ATTR_RE = /([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+/** Longest tag the scanner will chase before giving up on a close. */
+const TAG_MAX = 4096;
 
 function attributes(s: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -142,40 +144,137 @@ function attributes(s: string): Record<string, string> {
   return out;
 }
 
+interface TagMatch { start: number; end: number; name: "title" | "notify"; attrs: string }
+
 /**
- * [start, end) offsets of Markdown code in `raw`: fenced blocks (``` or ~~~,
- * whole lines, an unclosed fence runs to the end) and inline code spans (a
- * backtick run closed by an equal-length run on the same line). Tags inside
- * these are DOCUMENTATION — an agent explaining the syntax with a fenced
- * example used to retitle the session and push "Example push" (#528). The
+ * Every <joy-title>/<joy-notify> in `raw`, with the tag end found OUTSIDE
+ * quoted attribute values: a `[^>]*` grammar stopped at the `>` in
+ * `message="Tests > baseline"`, lost the notification and left the tail of
+ * the tag in the reply (#529). A tag whose close never comes (end of text,
+ * an unterminated quote, or a `<` starting something else) is not a tag.
+ */
+function findTags(raw: string): TagMatch[] {
+  const out: TagMatch[] = [];
+  for (const m of raw.matchAll(TAG_OPEN_RE)) {
+    const start = m.index!;
+    const bodyStart = start + m[0].length;
+    const limit = Math.min(raw.length, bodyStart + TAG_MAX);
+    let i = bodyStart;
+    let end = -1;
+    while (i < limit) {
+      const ch = raw[i];
+      if (ch === '"' || ch === "'") {
+        const q = raw.indexOf(ch, i + 1);
+        if (q < 0 || q >= limit) break;
+        i = q + 1;
+        continue;
+      }
+      if (ch === ">") { end = i + 1; break; }
+      if (ch === "<") break;
+      i++;
+    }
+    if (end < 0) continue;
+    out.push({ start, end, name: m[1].toLowerCase() as "title" | "notify", attrs: raw.slice(bodyStart, end - 1).replace(/\/\s*$/, "") });
+  }
+  return out;
+}
+
+const INDENT_RE = /^( {0,3})(?:> ?)/;
+const LIST_MARKER_RE = /^( {0,3})([-*+]|\d{1,9}[.)])( {1,4})(?=\S)/;
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/** Leading indentation in columns (a tab is four). */
+function indentOf(s: string): number {
+  let n = 0;
+  for (const ch of s) {
+    if (ch === " ") n++;
+    else if (ch === "\t") n += 4;
+    else break;
+  }
+  return n;
+}
+
+/**
+ * [start, end) offsets of Markdown code in `raw`, following CommonMark's
+ * block structure closely enough that a documented example never fires:
+ *  - fenced blocks (``` or ~~~; whole lines; an unclosed fence runs to the
+ *    end), including fences nested in list items and blockquotes;
+ *  - indented code blocks (four columns past the enclosing container after a
+ *    blank line — a paragraph's lazy continuation line is not code);
+ *  - inline code spans: a backtick run closed by an equal-length run, on the
+ *    same line OR a later line of the same paragraph (a span cannot cross a
+ *    blank line).
+ * Tags inside these are DOCUMENTATION — an agent explaining the syntax with a
+ * fenced example used to retitle the session and push "Example push" (#528);
+ * the first fix parsed inline spans one line at a time and knew no indented
+ * code, so a multiline span or an indented example still executed. The
  * instructions say "not inside a code block"; the parser now agrees.
  */
 function codeRanges(raw: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   let pos = 0;
   let fence: { ch: string; len: number; start: number } | null = null;
+  // Content indents of the open list items, outermost first.
+  const lists: number[] = [];
+  // The previous line was paragraph text: an indented line continues it.
+  let inParagraph = false;
+  // Backtick runs of the current paragraph (absolute offsets), flushed at
+  // every block boundary into inline-span ranges.
+  let runs: Array<{ at: number; len: number }> = [];
+  const flushRuns = () => {
+    for (let i = 0; i < runs.length; i++) {
+      const close = runs.findIndex((r, j) => j > i && r.len === runs[i].len);
+      if (close < 0) continue;
+      ranges.push([runs[i].at, runs[close].at + runs[close].len]);
+      i = close;
+    }
+    runs = [];
+  };
   for (const line of raw.split("\n")) {
     const end = pos + line.length;
-    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    // Peel the containers this line sits in: blockquote markers, then the
+    // indentation of every open list item it stays inside, then any new
+    // list markers it opens. `rest` is the line as its innermost block sees it.
+    let rest = line;
+    let q: RegExpExecArray | null;
+    while ((q = INDENT_RE.exec(rest))) rest = rest.slice(q[0].length);
+    const blank = rest.trim() === "";
+    if (!blank) {
+      let depth = 0;
+      for (const ci of lists) {
+        if (indentOf(rest) >= ci) { rest = rest.slice(ci); depth++; } else break;
+      }
+      lists.length = depth;
+      let lm: RegExpExecArray | null;
+      while (!fence && (lm = LIST_MARKER_RE.exec(rest))) {
+        lists.push(lm[0].length);
+        rest = rest.slice(lm[0].length);
+        inParagraph = false;
+      }
+    }
+    const f = FENCE_RE.exec(rest);
     if (fence) {
-      if (f && f[1][0] === fence.ch && f[1].length >= fence.len && /^\s*$/.test(line.slice(f[0].length))) {
+      if (f && f[1][0] === fence.ch && f[1].length >= fence.len && /^\s*$/.test(f[2])) {
         ranges.push([fence.start, end]);
         fence = null;
       }
-    } else if (f) {
+    } else if (f && !(f[1][0] === "`" && f[2].includes("`"))) {
+      flushRuns();
       fence = { ch: f[1][0], len: f[1].length, start: pos };
+      inParagraph = false;
+    } else if (blank) {
+      flushRuns();
+      inParagraph = false;
+    } else if (indentOf(rest) >= 4 && !inParagraph) {
+      flushRuns();
+      ranges.push([pos, end]);
     } else {
-      const runs: Array<{ at: number; len: number }> = [];
-      for (const m of line.matchAll(/`+/g)) runs.push({ at: m.index!, len: m[0].length });
-      for (let i = 0; i < runs.length; i++) {
-        const close = runs.findIndex((r, j) => j > i && r.len === runs[i].len);
-        if (close < 0) continue;
-        ranges.push([pos + runs[i].at, pos + runs[close].at + runs[close].len]);
-        i = close;
-      }
+      inParagraph = true;
+      for (const m of rest.matchAll(/`+/g)) runs.push({ at: pos + (line.length - rest.length) + m.index!, len: m[0].length });
     }
     pos = end + 1;
   }
+  flushRuns();
   if (fence) ranges.push([fence.start, raw.length]);
   return ranges;
 }
@@ -189,12 +288,11 @@ export function parseJoyTags(raw: string): JoyTagParse {
   let title: string | null = null;
   const notifies: JoyTagParse["notifies"] = [];
   const spans: Array<[number, number]> = []; // control tags to strip, in document order
-  for (const m of raw.matchAll(TAG_RE)) {
-    const start = m.index!;
-    if (inCode(start)) continue;
-    spans.push([start, start + m[0].length]);
-    const a = attributes(m[2]);
-    if (m[1].toLowerCase() === "title") {
+  for (const t of findTags(raw)) {
+    if (inCode(t.start)) continue;
+    spans.push([t.start, t.end]);
+    const a = attributes(t.attrs);
+    if (t.name === "title") {
       title = (a.value ?? "").trim() || title; // last non-empty wins
     } else {
       const headline = (a.message ?? "").trim();
