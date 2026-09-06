@@ -43,7 +43,15 @@ export interface ProcSample {
   startTicks: number;
 }
 /** The tree at one instant plus the boot-relative clock at that instant. */
-export interface TreeSnapshot { procs: Map<number, ProcSample>; uptimeTicks: number }
+export interface TreeSnapshot {
+  procs: Map<number, ProcSample>;
+  uptimeTicks: number;
+  /** EVERY process on the host at that instant (the tree included) — the
+   *  observation that tells a descendant which left the tree but is still
+   *  alive (reparented) from one that exited and was reaped. Optional for
+   *  hand-built snapshots. */
+  all?: Map<number, ProcSample>;
+}
 
 function clockTicksPerSecond(): number {
   return clkTckCache || (clkTckCache = sysconf("CLK_TCK", 100));
@@ -88,7 +96,7 @@ function linuxTree(root: number): TreeSnapshot {
   }
   const procs = new Map<number, ProcSample>();
   for (const pid of keep) { const p = all.get(pid); if (p) procs.set(pid, p); }
-  return { procs, uptimeTicks: uptime };
+  return { procs, uptimeTicks: uptime, all };
 }
 
 /**
@@ -103,35 +111,56 @@ function linuxTree(root: number): TreeSnapshot {
  *  - a pid only in `b` that STARTED after `a` was taken: everything it has
  *    (all of it happened inside the window); a pre-existing process that
  *    merely joined the tree (reparented) is skipped — its split is unknown;
- *  - a pid only in `a` (exited): once reaped, its ancestor's cutime/cstime
+ *  - a pid only in `a` (departed): once reaped, its ancestor's cutime/cstime
  *    grows by the departed process's OWN ticks plus everything IT had already
  *    reaped (Linux folds the child's cutime/cstime in too). Both are
- *    cumulative since that process started, so its whole pre-window subtree
- *    accounting (own ticks + childTicks at `a`) is taken back out — once,
- *    never below zero. Subtracting only the own ticks charged a departed
- *    child's historic reaped time as fresh work: an idle child with 100 old
- *    ticks read as 250% of a core.
+ *    cumulative since that process started, so its pre-window subtree
+ *    accounting (own ticks + childTicks at `a`) is taken back out of the
+ *    reaped delta of the SURVIVING ancestor that absorbed it — never below
+ *    zero, per ancestor. Subtracting only the own ticks charged a departed
+ *    child's historic reaped time as fresh work (an idle child with 100 old
+ *    ticks read as 250% of a core); subtracting EVERY departed pid from one
+ *    undifferentiated total assumed each was reaped into this tree, and a
+ *    grandchild that outlived its parent — reparented outside the tree,
+ *    still running — erased the real work of a sibling (#554 regression).
+ *    A departed pid still alive in the host-wide table (`b.all`) was not
+ *    reaped by anyone here and subtracts nothing. Without that table, a
+ *    departed pid whose parent departed too cannot be placed (reaped by
+ *    that parent before it died, or orphaned) and is treated as not reaped.
  */
 export function treeCpuTicks(a: TreeSnapshot, b: TreeSnapshot): number {
-  let own = 0;
-  let reaped = 0;
-  let preWindow = 0;
+  let total = 0;
   const sameProcess = (pa: ProcSample, pb: ProcSample) => pa.startTicks === pb.startTicks;
+  // Survivors: own delta now; reaped delta once the departed are attributed.
+  const reapedDelta = new Map<number, number>();
   for (const [pid, pb] of b.procs) {
     const pa = a.procs.get(pid);
     if (pa && sameProcess(pa, pb)) {
-      own += Math.max(0, pb.ticks - pa.ticks);
-      reaped += Math.max(0, pb.childTicks - pa.childTicks);
+      total += Math.max(0, pb.ticks - pa.ticks);
+      reapedDelta.set(pid, Math.max(0, pb.childTicks - pa.childTicks));
     } else if (pb.startTicks >= a.uptimeTicks) {
-      own += pb.ticks;
-      reaped += pb.childTicks;
+      total += pb.ticks + pb.childTicks;
     }
   }
+  // Departed: charge each one's pre-window subtree accounting to the nearest
+  // surviving ancestor — the process whose cutime/cstime absorbed it.
+  const baseline = new Map<number, number>();
   for (const [pid, pa] of a.procs) {
-    const pb = b.procs.get(pid);
-    if (!pb || !sameProcess(pa, pb)) preWindow += pa.ticks + pa.childTicks;
+    if (reapedDelta.has(pid)) continue;
+    const elsewhere = b.all?.get(pid);
+    if (elsewhere && sameProcess(pa, elsewhere)) continue; // alive, reparented out: not reaped
+    let anc = pa.ppid;
+    if (!b.all && !reapedDelta.has(anc)) continue;         // no liveness data: cannot be placed
+    for (let hops = 0; !reapedDelta.has(anc); hops++) {
+      const p = a.procs.get(anc);
+      if (!p || hops > a.procs.size) { anc = -1; break; }
+      anc = p.ppid;
+    }
+    if (anc < 0) continue;                                 // reaped outside the tree
+    baseline.set(anc, (baseline.get(anc) ?? 0) + pa.ticks + pa.childTicks);
   }
-  return own + Math.max(0, reaped - preWindow);
+  for (const [pid, delta] of reapedDelta) total += Math.max(0, delta - (baseline.get(pid) ?? 0));
+  return total;
 }
 
 async function linuxStats(root: number): Promise<ProcessTreeStats | null> {

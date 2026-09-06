@@ -3,11 +3,14 @@
 // of applyEnvStore. Runs against a throwaway JOY_HOME_DIR with a minted
 // access.key (the store needs a machineKey to exist).
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, utimesSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as { DatabaseSync: new (p: string) => { exec(sql: string): void; close(): void } };
 
 let home: string;
 const RELAY = "http://127.0.0.1:3199";
@@ -30,6 +33,8 @@ beforeEach(async () => {
   for (const k of ["JOY_ENV_TEST_A", "JOY_ENV_TEST_B", "JOY_ENV_TEST_SVC"]) delete process.env[k];
 });
 afterEach(() => {
+  mod.__setEnvStoreHooksForTests({ beforePublish: undefined });
+  mod.__setEnvLockTimingForTests({ waitMs: 5000 });
   rmSync(home, { recursive: true, force: true });
   for (const k of ["JOY_ENV_TEST_A", "JOY_ENV_TEST_B", "JOY_ENV_TEST_SVC"]) delete process.env[k];
 });
@@ -210,27 +215,100 @@ describe("envStore", () => {
     expect(r.ok && Object.keys(r.env).sort()).toEqual(
       ["A", "B", "C"].flatMap((t) => [0, 1, 2, 3, 4].map((i) => `JOY_ENV_RACE_${t}_${i}`)).sort(),
     );
-    // One key, no leftover attempt files, no lock left behind.
-    expect(readdirSync(home).filter((f) => f.startsWith("env")).sort()).toEqual(["env.key", "env.sealed"]);
+    // One key, no leftover attempt files; the lock database is the only extra.
+    expect(readdirSync(home).filter((f) => f.startsWith("env")).sort()).toEqual(["env.key", "env.lock.db", "env.sealed"]);
   }, 30_000);
 
-  it("a lock left by a dead writer is broken; a live one makes the write wait, then fail closed", () => {
-    const lock = join(home, "env.lock");
-    writeFileSync(lock, "999999\n");
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(lock, old, old);
-    expect(mod.setEnvVar("JOY_ENV_TEST_A", "after-stale")).toEqual({ ok: true });
-    expect(existsSync(lock)).toBe(false);
+  it("a held lock makes the write wait, then fail closed; release lets it through", () => {
+    expect(mod.setEnvVar("JOY_ENV_TEST_A", "before")).toEqual({ ok: true });
+    // Another writer's transaction: a second connection holding BEGIN IMMEDIATE.
+    const holder = new DatabaseSync(join(home, "env.lock.db"));
+    holder.exec("BEGIN IMMEDIATE");
     mod.__setEnvLockTimingForTests({ waitMs: 50 });
     try {
-      writeFileSync(lock, "999999\n"); // fresh: a writer is (as far as we know) inside its transaction
+      const t0 = Date.now();
       expect(mod.setEnvVar("JOY_ENV_TEST_B", "blocked")).toEqual({ ok: false, error: "store_busy" });
-      expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_A: "after-stale" } });
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(40); // it waited, not failed at once
+      expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_A: "before" } });
     } finally {
       mod.__setEnvLockTimingForTests({ waitMs: 5000 });
-      rmSync(lock, { force: true });
+      holder.exec("ROLLBACK");
+      holder.close();
     }
+    expect(mod.setEnvVar("JOY_ENV_TEST_B", "after")).toEqual({ ok: true });
+    expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_A: "before", JOY_ENV_TEST_B: "after" } });
   });
+
+  /** A real second daemon process: writes `name` and prints the result plus
+   *  the time it finished. `marker` is touched just before it takes the lock. */
+  const secondWriter = (name: string, marker: string) => {
+    const script = `import { writeFileSync } from "node:fs";
+      const m = await import(${JSON.stringify(join(__dirname, "envStore.ts"))});
+      writeFileSync(${JSON.stringify(marker)}, "");
+      const r = m.setEnvVar(${JSON.stringify(name)}, "accepted");
+      console.log(JSON.stringify({ ...r, doneAt: Date.now() }));`;
+    return new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+        env: { ...process.env, JOY_HOME_DIR: home }, stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "", err = "";
+      child.stdout.on("data", (d) => { out += d; });
+      child.stderr.on("data", (d) => { err += d; });
+      child.on("close", (code) => resolve({ code, out, err }));
+    });
+  };
+  const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+  it("a writer paused at its rename keeps its lock: a second process waits for it and neither write is lost (#533 residual)", async () => {
+    // Writer A (this process) is paused inside the lock between writing its
+    // temporary file and renaming it into place — a stopped or slow holder.
+    // Writer B, a real second process, arrives meanwhile. Under the aged
+    // env.lock, B stole the lock and saved SECOND, then A's stale FIRST
+    // snapshot was renamed over it: both reported ok, SECOND was gone.
+    expect(mod.setEnvVar("JOY_ENV_TEST_SEED", "seed")).toEqual({ ok: true });
+    const marker = join(home, "b-ready");
+    let b: ReturnType<typeof secondWriter> | null = null;
+    let releasedAt = 0;
+    mod.__setEnvStoreHooksForTests({
+      beforePublish: () => {
+        b = secondWriter("JOY_ENV_TEST_SECOND", marker);
+        const deadline = Date.now() + 20_000;
+        while (!existsSync(marker) && Date.now() < deadline) sleepSync(20);
+        expect(existsSync(marker)).toBe(true);
+        sleepSync(400); // B is now inside its BEGIN IMMEDIATE wait
+        releasedAt = Date.now();
+      },
+    });
+    try {
+      expect(mod.setEnvVar("JOY_ENV_TEST_FIRST", "accepted")).toEqual({ ok: true });
+    } finally {
+      mod.__setEnvStoreHooksForTests({ beforePublish: undefined });
+    }
+    const r = await b!;
+    expect(r, r.err).toMatchObject({ code: 0 });
+    const parsed = JSON.parse(r.out.trim()) as { ok: boolean; doneAt: number };
+    expect(parsed.ok).toBe(true);
+    expect(parsed.doneAt).toBeGreaterThanOrEqual(releasedAt); // B waited for A
+    expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_SEED: "seed", JOY_ENV_TEST_FIRST: "accepted", JOY_ENV_TEST_SECOND: "accepted" } });
+  }, 40_000);
+
+  it("a holder that dies mid-transaction releases the lock with it — nothing to break, nothing to steal", async () => {
+    const marker = join(home, "dying-ready");
+    const script = `import { writeFileSync } from "node:fs";
+      const m = await import(${JSON.stringify(join(__dirname, "envStore.ts"))});
+      m.__setEnvStoreHooksForTests({ beforePublish: () => { writeFileSync(${JSON.stringify(marker)}, ""); process.kill(process.pid, "SIGKILL"); } });
+      m.setEnvVar("JOY_ENV_TEST_DYING", "never");`;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      env: { ...process.env, JOY_HOME_DIR: home }, stdio: ["ignore", "ignore", "inherit"],
+    });
+    const signal = await new Promise<NodeJS.Signals | null>((resolve) => child.on("close", (_code, sig) => resolve(sig)));
+    expect(signal).toBe("SIGKILL");
+    expect(existsSync(marker)).toBe(true);
+    const t0 = Date.now();
+    expect(mod.setEnvVar("JOY_ENV_TEST_A", "after-death")).toEqual({ ok: true });
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(mod.readEnvStore()).toEqual({ ok: true, env: { JOY_ENV_TEST_A: "after-death" } });
+  }, 30_000);
 
   it("a key published by another daemon between our read and our mint is adopted, not replaced", () => {
     // Simulate the loser of a first-mint race: the sealed store and key

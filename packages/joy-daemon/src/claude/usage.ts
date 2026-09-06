@@ -428,10 +428,6 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
       if (o2 > o1 || (o2 === o1 && t2 > t1)) finalMsg.set(m.id, m);
     }
   }
-  // Tool calls copied along with their message carry the same block id;
-  // the same ownership rule counts each once.
-  const ownedTools = new Set<string>();
-
   const total = zeroTok();
   const daily = new Map<string, { cost: number; calls: number }>();
   const models = new Map<string, Tok>();
@@ -505,15 +501,23 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
     s.turns += turns;
     if (agg.firstTs < s._firstTs) s._firstTs = agg.firstTs;
     for (const [m, c] of sessionModels) s._models.set(m, (s._models.get(m) ?? 0) + c);
+  }
 
-    // Tools/MCP obey the same day range as the tokens (#490): they used to be
-    // lifetime-per-file, so "today" reported every tool the session ever ran.
-    // A block id seen in an older file is that file's call (#491); a block
-    // without an id has no identity to share and counts where it is.
+  // Tools/MCP obey the same day range as the tokens (#490): they used to be
+  // lifetime-per-file, so "today" reported every tool the session ever ran.
+  // Collected from EVERY file, independently of which file is charged for an
+  // API call: a copy may carry a message's final observation — and the
+  // tool_use block that streamed in after the original's early snapshot —
+  // while owning no in-range call of its own, and collecting tools only from
+  // charged files dropped that block (#491 residual). A block id seen in an
+  // older file is that file's call; a block without an id has no identity to
+  // share and counts where it is.
+  const seenTools = new Set<string>();
+  for (const agg of aggs) {
     for (const { id, day, name } of agg.tools) {
       if (id) {
-        if (ownedTools.has(id)) continue;
-        ownedTools.add(id);
+        if (seenTools.has(id)) continue;
+        seenTools.add(id);
       }
       if (!inRange(day)) continue;
       const mcpMatch = /^mcp__([^_]+(?:_[^_]+)*?)__/.exec(name);
