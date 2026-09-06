@@ -83,7 +83,9 @@ every relay; machines register per account.
   records, plus `abort`, `approvals`/`approve`/`deny`, `queue`, `mode`, `pane`,
   `about`. A message sent from inside a joy session is wrapped by the daemon in
   `<joy-message from="joy:<id>" reply-to="joy:<id>">` and shown in the chat as
-  coming from that session (peer bubble); no `reply-to` means no answer expected.
+  coming from that session (peer bubble); no `reply-to` means no answer expected
+  — `joy send --no-reply` and `joy run` send `replyTo: null`, which the daemon
+  honours as exactly that (it used to fall back to the sender, #112).
 - **Machine environment**: the machine page lists the sealed provider keys
   (`~/.joy/env.sealed`) and can add/remove them over the tunnel; every new
   session on that machine inherits them. `joy env ls|set|unset` from a shell.
