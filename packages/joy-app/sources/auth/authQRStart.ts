@@ -2,7 +2,7 @@ import { getRandomBytes } from 'expo-crypto';
 import sodium from '@/encryption/libsodium.lib';
 import axios from 'axios';
 import { encodeBase64 } from '../encryption/base64';
-import { getServerUrl } from '@/sync/serverConfig';
+import { getServerUrl, relayAccessKeyHeaders } from '@/sync/serverConfig';
 import { getJoyClientId } from '@/sync/clientId';
 
 export interface QRAuthKeyPair {
@@ -32,6 +32,8 @@ export async function authQRStart(keypair: QRAuthKeyPair): Promise<boolean> {
         }, {
             headers: {
                 'X-Joy-Client': getJoyClientId(),
+                // axios bypasses the fetch interceptor (#186)
+                ...relayAccessKeyHeaders(serverUrl),
             }
         });
 

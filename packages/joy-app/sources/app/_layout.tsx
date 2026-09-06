@@ -5,7 +5,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import * as Fonts from 'expo-font';
 import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
-import { AuthCredentials, TokenStorage } from '@/auth/tokenStorage';
+import { AuthCredentials, TokenStorage, areCredentialsUsable } from '@/auth/tokenStorage';
 import { AuthProvider } from '@/auth/AuthContext';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
@@ -288,6 +288,23 @@ export default function RootLayout() {
                 setInitState({ credentials });
             } catch (error) {
                 console.error('Error initializing:', error);
+                // A failed boot used to leave initState null forever: RootLayout
+                // rendered nothing, the splash never hid, and the only way out
+                // was clearing app data (#88). A stored secret that no longer
+                // decodes, or a syncRestore that throws, must instead land on
+                // the connect screen. Credentials that cannot decode are
+                // dropped so the next boot does not trip over them again; an
+                // environmental failure (no WebCrypto on an insecure origin,
+                // a font that failed to load) keeps them for the next boot.
+                try {
+                    const stored = await TokenStorage.getCredentials();
+                    if (stored && !areCredentialsUsable(stored)) {
+                        await TokenStorage.removeCredentials();
+                    }
+                } catch (removeError) {
+                    console.error('Error discarding unusable credentials:', removeError);
+                }
+                setInitState({ credentials: null });
             }
         })();
     }, []);

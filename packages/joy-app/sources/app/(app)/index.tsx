@@ -14,6 +14,8 @@ import { HomeHeaderNotAuth } from "@/components/HomeHeader";
 import { MainView } from "@/components/MainView";
 import { JoyLogoTypeDynamic } from "@/components/JoyLogotype";
 import { t } from '@/text';
+import { createAccountOnce, isCreatingAccount } from '@/auth/createAccountFlow';
+import { guarded, alertError } from '@/utils/guardAsync';
 
 export default function Home() {
     const auth = useAuth();
@@ -36,17 +38,23 @@ function NotAuthenticated() {
     const isLandscape = useIsLandscape();
     const insets = useSafeAreaInsets();
 
-    const createAccount = async () => {
+    // One creation at a time for the whole app, held through login (#149):
+    // the spinner lives here, not in RoundButton, because a rotation swaps
+    // the portrait/landscape trees and remounts the button mid-request.
+    const [creating, setCreating] = React.useState(isCreatingAccount());
+    const createAccount = guarded(async () => {
+        setCreating(true);
         try {
-            const secret = await getRandomBytesAsync(32);
-            const token = await authGetToken(secret);
-            if (token && secret) {
-                await auth.login(token, encodeBase64(secret, 'base64url'));
-            }
-        } catch (error) {
-            console.error('Error creating account', error);
+            await createAccountOnce({
+                randomBytes: (n) => getRandomBytesAsync(n),
+                getToken: (secret) => authGetToken(secret),
+                login: (token, secret) => auth.login(token, encodeBase64(secret, 'base64url')),
+            });
+        } finally {
+            setCreating(isCreatingAccount());
         }
-    }
+    }, alertError());
+    const createButtonProps = { onPress: createAccount, loading: creating, disabled: creating };
 
     const portraitLayout = (
         <View style={styles.portraitContainer}>
@@ -71,7 +79,7 @@ function NotAuthenticated() {
                         <RoundButton
                             size="normal"
                             title={t('welcome.createAccount')}
-                            action={createAccount}
+                            {...createButtonProps}
                             display="inverted"
                         />
                     </View>
@@ -81,7 +89,7 @@ function NotAuthenticated() {
                     <View style={styles.buttonContainer}>
                         <RoundButton
                             title={t('welcome.createAccount')}
-                            action={createAccount}
+                            {...createButtonProps}
                         />
                     </View>
                     <View style={styles.buttonContainerSecondary}>
@@ -126,7 +134,7 @@ function NotAuthenticated() {
                                 <RoundButton
                                     size="normal"
                                     title={t('welcome.createAccount')}
-                                    action={createAccount}
+                                    {...createButtonProps}
                                     display="inverted"
                                 />
                             </View>
@@ -135,7 +143,7 @@ function NotAuthenticated() {
                             <View style={styles.landscapeButtonContainer}>
                                 <RoundButton
                                     title={t('welcome.createAccount')}
-                                    action={createAccount}
+                                    {...createButtonProps}
                                 />
                             </View>
                             <View style={styles.landscapeButtonContainerSecondary}>

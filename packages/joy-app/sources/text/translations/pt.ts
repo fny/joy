@@ -304,6 +304,9 @@ export const pt: TranslationStructure = {
         failedToRemoveFriend: 'Falha ao remover amigo',
         searchFailed: 'A busca falhou. Por favor, tente novamente.',
         failedToSendRequest: 'Falha ao enviar solicitação de amizade',
+        logoutFailed: 'Não foi possível remover o login salvo deste dispositivo. Tente novamente.',
+        syncStartFailedReload: 'O aplicativo não conseguiu iniciar a sincronização. Recarregue o aplicativo e tente novamente.',
+        pairingCodeExpired: 'O código expirou — escaneie novamente',
     },
 
     newSession: {
@@ -445,7 +448,8 @@ export const pt: TranslationStructure = {
         failedToConnectToServer: 'Falha ao conectar com o servidor',
         currentlyUsingCustomServer: 'Atualmente usando servidor personalizado',
         customServerUrlLabel: 'URL do servidor personalizado',
-        advancedFeatureFooter: 'Este é um recurso avançado. Altere o servidor apenas se souber o que está fazendo. Você precisará sair e entrar novamente após alterar servidores.'
+        advancedFeatureFooter: 'Este é um recurso avançado. Altere o servidor apenas se souber o que está fazendo. Você precisará sair e entrar novamente após alterar servidores.',
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requer uma chave de acesso. Insira a chave deste relay.`,
     },
 
     sessionInfo: {
@@ -838,6 +842,7 @@ export const pt: TranslationStructure = {
         clientSideProcessing: 'Processamento do lado cliente',
         linkProcessedLocally: 'Link processado localmente no navegador',
         linkProcessedOnDevice: 'Link processado localmente no dispositivo',
+        pairingRequestNotFound: 'Nenhuma solicitação de conexão pendente foi encontrada para este link. Ele pode ter expirado ou pertencer a outro relay — gere um novo link no terminal e tente novamente.',
     },
 
     modals: {

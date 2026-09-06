@@ -1,7 +1,7 @@
 import { authChallenge } from "./authChallenge";
 import axios from 'axios';
 import { encodeBase64 } from "../encryption/base64";
-import { getServerUrl } from "@/sync/serverConfig";
+import { getServerUrl, relayAccessKeyHeaders } from "@/sync/serverConfig";
 import { getJoyClientId } from '@/sync/clientId';
 
 export async function authGetToken(secret: Uint8Array, serverUrl?: string) {
@@ -10,6 +10,10 @@ export async function authGetToken(secret: Uint8Array, serverUrl?: string) {
     const response = await axios.post(`${API_ENDPOINT}/joy/v2/auth`, { challenge: encodeBase64(challenge), signature: encodeBase64(signature), publicKey: encodeBase64(publicKey) }, {
         headers: {
             'X-Joy-Client': getJoyClientId(),
+            // axios bypasses the fetch interceptor; a gated relay needs the
+            // key on the login call too — for the TARGET relay, which for
+            // loginToRelay is not the active one (#186).
+            ...relayAccessKeyHeaders(API_ENDPOINT),
         }
     });
     const data = response.data;

@@ -284,6 +284,9 @@ export const ru: TranslationStructure = {
         failedToRemoveFriend: 'Не удалось удалить друга',
         searchFailed: 'Поиск не удался. Пожалуйста, попробуйте снова.',
         failedToSendRequest: 'Не удалось отправить запрос в друзья',
+        logoutFailed: 'Не удалось удалить сохранённый вход с этого устройства. Попробуйте ещё раз.',
+        syncStartFailedReload: 'Приложение не смогло запустить синхронизацию. Перезагрузите приложение и попробуйте ещё раз.',
+        pairingCodeExpired: 'Код истёк — отсканируйте его снова',
     },
 
     newSession: {
@@ -333,7 +336,8 @@ export const ru: TranslationStructure = {
         failedToConnectToServer: 'Не удалось подключиться к серверу',
         currentlyUsingCustomServer: 'Сейчас используется пользовательский сервер',
         customServerUrlLabel: 'URL пользовательского сервера',
-        advancedFeatureFooter: 'Это расширенная функция. Изменяйте сервер только если знаете, что делаете. Вам нужно будет выйти и войти снова после изменения серверов.'
+        advancedFeatureFooter: 'Это расширенная функция. Изменяйте сервер только если знаете, что делаете. Вам нужно будет выйти и войти снова после изменения серверов.',
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} требует ключ доступа. Введите ключ для этого релея.`,
     },
 
     sessionInfo: {
@@ -843,6 +847,7 @@ export const ru: TranslationStructure = {
         clientSideProcessing: 'Обработка на стороне клиента',
         linkProcessedLocally: 'Ссылка обработана локально в браузере',
         linkProcessedOnDevice: 'Ссылка обработана локально на устройстве',
+        pairingRequestNotFound: 'Для этой ссылки не найден ожидающий запрос на подключение. Возможно, она устарела или относится к другому релею — создайте новую ссылку в терминале и попробуйте ещё раз.',
     },
 
     modals: {
