@@ -4,8 +4,12 @@
 // the turn start and the assistant's answer but never the question, so the
 // imported history permanently lost the user's side. The replay projection is
 // pure, so the whole record stream a card would receive is asserted here.
-import { describe, it, expect } from "vitest";
-import { historyReplay, messageText } from "./opencodeSession";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { historyReplay, messageText, replayPlan, userHistoryBackfill, REPLAY_PROJECTION_KIND, REPLAY_PROJECTION_VERSION } from "./opencodeSession";
+import { Ledger, closeAllLedgers } from "../domain/ledger";
 
 const SID = "ses_abc";
 const user = (id: string, text: string, created: number) => ({
@@ -77,5 +81,100 @@ describe("opencode history replay (#573)", () => {
     expect(messageText(user("m", "  hello  ", 1))).toBe("hello");
     expect(messageText({ content: "plain body" })).toBe("plain body");
     expect(messageText({ content: [{ type: "tool", id: "t" }] })).toBe("");
+  });
+});
+
+// #573 residual (Astra on f5cf85a3): a card whose `opencode_msg` checkpoint a
+// PRE-FIX daemon wrote — the answer replayed, the question omitted — never got
+// its missing prompt, because messagesForReplay drops everything at or below
+// the checkpoint before the projection runs. The projection is versioned now:
+// a stored version older than the current one runs ONE backfill pass over the
+// delivered history, emitting the missing user rows under their stable ids.
+describe("opencode replay projection version (#573 residual)", () => {
+  const LOCAL = "local-session";
+  let dir: string;
+  let ledger: Ledger;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "oc-replay-")); ledger = Ledger.open(dir, { now: () => 1_000 }); });
+  afterEach(() => { ledger.close(); closeAllLedgers(); rmSync(dir, { recursive: true, force: true }); });
+
+  /** What #reconcileHistory does with the ledger around replayPlan. */
+  const reconcile = (all: Array<Record<string, unknown>>, ourPrompt?: (mid: string) => boolean) => {
+    const plan = replayPlan(SID, all, {
+      deliveredThrough: ledger.getCheckpoint(LOCAL, "opencode_msg")?.ref || undefined,
+      projectionVersion: Number(ledger.getCheckpoint(LOCAL, REPLAY_PROJECTION_KIND)?.ref ?? 0) || 0,
+      ourPrompt: ourPrompt ?? ((mid) => ledger.ownsRuntimeRef(LOCAL, mid, "opencode_msg")),
+    });
+    if (plan.completedThrough) ledger.setCheckpoint(LOCAL, "opencode_msg", plan.completedThrough, 0, { throughSeq: "latest" });
+    if (plan.completedThrough || plan.projectionStale) ledger.setCheckpoint(LOCAL, REPLAY_PROJECTION_KIND, String(REPLAY_PROJECTION_VERSION), 0, { throughSeq: "latest" });
+    return plan;
+  };
+  // The reviewer's fixture: question + finished answer, and a checkpoint an
+  // older daemon wrote after replaying only the answer (no version row).
+  const msgs = () => [user("u", "question", 1), assistant("a", "answer", 2)];
+  const seedPreFixCheckpoint = () => ledger.setCheckpoint(LOCAL, "opencode_msg", "a", 0);
+
+  it("a pre-fix checkpoint gets its missing question backfilled once; the next replay emits nothing", () => {
+    seedPreFixCheckpoint();
+    const first = reconcile(msgs());
+    expect(first.projectionStale).toBe(true);
+    expect(first.emissions.map((e) => e.localId)).toEqual([`oc:${SID}:u:user`]);
+    expect((first.emissions[0].record.content as any).text).toBe("question");
+    expect((first.emissions[0].record.meta as any).joyTime).toBe(1);
+    // Nothing new completed, so the delivered mark stays put and the version is stamped on its own.
+    expect(ledger.getCheckpoint(LOCAL, "opencode_msg")?.ref).toBe("a");
+    expect(ledger.getCheckpoint(LOCAL, REPLAY_PROJECTION_KIND)?.ref).toBe(String(REPLAY_PROJECTION_VERSION));
+    const second = reconcile(msgs());
+    expect(second.projectionStale).toBe(false);
+    expect(second.emissions).toEqual([]);
+  });
+
+  it("the backfill dedupes a prompt this daemon submitted, exactly like the live path", () => {
+    seedPreFixCheckpoint();
+    ledger.addReceipt(LOCAL, { kind: "opencode_msg", ref: "u" });
+    const plan = reconcile(msgs());
+    expect(plan.projectionStale).toBe(true);
+    expect(plan.emissions).toEqual([]);
+    // …and the pass is still marked done.
+    expect(ledger.getCheckpoint(LOCAL, REPLAY_PROJECTION_KIND)?.ref).toBe(String(REPLAY_PROJECTION_VERSION));
+    expect(reconcile(msgs()).projectionStale).toBe(false);
+  });
+
+  it("backfills only history at or below the checkpoint; the tail replays whole, in order", () => {
+    seedPreFixCheckpoint();
+    const all = [...msgs(), user("u2", "follow-up", 3), assistant("a2", "more", 4)];
+    const plan = reconcile(all);
+    expect(plan.emissions.map((e) => e.localId)).toEqual([
+      `oc:${SID}:u:user`,
+      `oc:${SID}:u2:user`,
+      `oc:${SID}:u2:turn-start`,
+      `oc:${SID}:a2:a2_p0:text`,
+      `oc:${SID}:u2:turn-end`,
+    ]);
+    expect(plan.completedThrough).toBe("a2");
+    expect(ledger.getCheckpoint(LOCAL, "opencode_msg")?.ref).toBe("a2");
+    expect(reconcile(all).emissions).toEqual([]);
+  });
+
+  it("a checkpoint this daemon wrote carries the version, so a restart never backfills", () => {
+    const first = reconcile(msgs());
+    expect(first.emissions.map((e) => e.localId)).toContain(`oc:${SID}:u:user`);
+    expect(ledger.getCheckpoint(LOCAL, "opencode_msg")?.ref).toBe("a");
+    expect(ledger.getCheckpoint(LOCAL, REPLAY_PROJECTION_KIND)?.ref).toBe(String(REPLAY_PROJECTION_VERSION));
+    const again = reconcile(msgs());
+    expect(again.projectionStale).toBe(false);
+    expect(again.emissions).toEqual([]);
+  });
+
+  it("an unknown checkpoint (server rewound) replays everything and needs no backfill", () => {
+    ledger.setCheckpoint(LOCAL, "opencode_msg", "gone", 0);
+    const plan = reconcile(msgs());
+    expect(plan.emissions.filter((e) => e.localId.endsWith(":user")).map((e) => e.localId)).toEqual([`oc:${SID}:u:user`]);
+    expect(plan.replayed).toBe(2);
+  });
+
+  it("userHistoryBackfill skips assistant messages, owned prompts and textless prompts", () => {
+    const delivered = [user("mine", "app send", 1), assistant("a", "x", 2), { id: "blank", type: "user", time: { created: 3 }, content: [] }, user("tui", "typed in the TUI", 4)];
+    const out = userHistoryBackfill(SID, delivered, { ourPrompt: (mid) => mid === "mine" });
+    expect(out.map((e) => e.localId)).toEqual([`oc:${SID}:tui:user`]);
   });
 });

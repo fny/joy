@@ -172,8 +172,10 @@ describe("nucleusLane: spawn-failed report acknowledged before abandoning (#581)
         const offer = { deliveryId: "dA1", commandId: "sp9", sessionId: "v2s9", kind: "spawn_session", ciphertext: spawnSpec("/tmp/nope-missing") };
         relay.pushWork(offer);
         await until(() => relay.count("POST", "/daemon/sessions/v2s9/spawn-failed") === 1);
-        // The relay recovers; the command is re-offered (same commandId, no createDir).
-        relay.answers.delete(report);
+        // The relay recovers and applies the report (the real answer shape —
+        // a bare `{ok:true}` is no acknowledgement); the command is re-offered
+        // (same commandId, no createDir).
+        relay.answers.set(report, { status: 200, body: { ok: true, applied: true } });
         relay.pushWork({ ...offer, deliveryId: "dA2" });
         await until(() => relay.count("POST", "/daemon/sessions/v2s9/spawn-failed") === 2, 10_000);
         const second = relay.calls.filter(c => c.path === "/daemon/sessions/v2s9/spawn-failed")[1];
@@ -220,6 +222,46 @@ describe("nucleusLane: spawn-failed report acknowledged before abandoning (#581)
         await sleep(800);
         expect(relay.count("POST", "/daemon/sessions/v2s8/spawn-failed")).toBe(3);
     }, 25_000);
+
+    // #581 residual (Astra on 48a93cd2): the check was `applied === false`,
+    // so a 200 that said nothing — `{ok:false}`, `{}`, a null body — still
+    // abandoned the command. No positive acknowledgement was ever received;
+    // it is an unknown outcome and only the delivery is retired.
+    it("a 200 without applied:true is an unknown outcome — {ok:false}, {} and null retry; applied:true abandons", async () => {
+        const relay = makeFakeRelay();
+        const url = await relay.listen(); srv = relay.server;
+        const registry: any = {
+            get: () => undefined,
+            create: async () => { throw new DirectoryCreationApprovalRequired("/tmp/nope-missing"); },
+            chatHistory: () => [], listRecords: () => [], saveRecord: () => {},
+        };
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: () => {} });
+        const path = "/daemon/sessions/v2s7/spawn-failed";
+        const report = `POST ${path}`;
+        const offer = { deliveryId: "dC1", commandId: "sp7", sessionId: "v2s7", kind: "spawn_session", ciphertext: spawnSpec("/tmp/nope-missing") };
+        // Astra's scripted relay: HTTP 200 `{ok:false}`.
+        relay.answers.set(report, { status: 200, body: { ok: false } });
+        relay.pushWork(offer);
+        await until(() => relay.count("POST", path) === 1);
+        // Re-offered under a new delivery → a SECOND spawn-failed POST.
+        relay.answers.set(report, { status: 200, body: null });
+        relay.pushWork({ ...offer, deliveryId: "dC2" });
+        await until(() => relay.count("POST", path) === 2, 10_000);
+        expect(relay.calls.filter(c => c.path === path)[1].body).toEqual({ reason: "dir_missing:/tmp/nope-missing", deliveryId: "dC2" });
+        // A null body is just as unknown → a third report.
+        relay.answers.set(report, { status: 200, body: {} });
+        relay.pushWork({ ...offer, deliveryId: "dC3" });
+        await until(() => relay.count("POST", path) === 3, 10_000);
+        // `{}` too → a fourth; this one the relay finally applies.
+        relay.answers.set(report, { status: 200, body: { ok: true, applied: true } });
+        relay.pushWork({ ...offer, deliveryId: "dC4" });
+        await until(() => relay.count("POST", path) === 4, 10_000);
+        // Acknowledged now → abandoned: the next offer gets only its receipt.
+        relay.pushWork({ ...offer, deliveryId: "dC5" });
+        await until(() => relay.calls.some(c => c.path === "/daemon/deliveries/dC5/received"));
+        await sleep(800);
+        expect(relay.count("POST", path)).toBe(4);
+    }, 30_000);
 });
 
 describe("nucleusLane: a handled joy command is an immediately-terminal turn (#115, lane side)", () => {

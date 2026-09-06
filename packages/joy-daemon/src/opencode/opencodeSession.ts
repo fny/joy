@@ -94,12 +94,21 @@ export function messagesForReplay(
   msgs: Array<Record<string, unknown>>,
   deliveredThrough?: string,
 ): Array<Record<string, unknown>> {
+  return splitAtCheckpoint(msgs, deliveredThrough).pending;
+}
+
+/** History oldest-first, cut at the delivered checkpoint: `delivered` is
+ *  everything at or below it (empty when the checkpoint is unknown — the
+ *  whole list is then pending, see messagesForReplay). */
+function splitAtCheckpoint(
+  msgs: Array<Record<string, unknown>>,
+  deliveredThrough?: string,
+): { delivered: Array<Record<string, unknown>>; pending: Array<Record<string, unknown>> } {
   const time = (m: Record<string, unknown>): number =>
     Number((m.time as Record<string, unknown> | undefined)?.created ?? 0);
   const asc = [...msgs].sort((a, b) => time(a) - time(b));
-  if (!deliveredThrough) return asc;
-  const at = asc.findIndex((m) => String(m.id ?? "") === deliveredThrough);
-  return at >= 0 ? asc.slice(at + 1) : asc;
+  const at = deliveredThrough ? asc.findIndex((m) => String(m.id ?? "") === deliveredThrough) : -1;
+  return at >= 0 ? { delivered: asc.slice(0, at + 1), pending: asc.slice(at + 1) } : { delivered: [], pending: asc };
 }
 
 /** The text of a stored opencode message: its `text` parts joined, or a plain
@@ -111,6 +120,65 @@ export function messageText(m: Record<string, unknown>): string {
 }
 
 export interface ReplayEmission { record: WireRecord; localId: string; chat?: string }
+
+/** Version of the projection `historyReplay` produces. Bumped whenever the
+ *  projection starts emitting rows for history it used to skip, so a card
+ *  whose `opencode_msg` checkpoint an OLDER daemon wrote gets those rows
+ *  backfilled once instead of never (#573 residual: v1 replayed the answer
+ *  and omitted the question, then its checkpoint hid the question for good
+ *  because messagesForReplay drops everything at or below it).
+ *    1 — turn start / assistant parts / turn end, no user rows
+ *    2 — the user's prompt before its turn (`oc:<sid>:<mid>:user`) */
+export const REPLAY_PROJECTION_VERSION = 2;
+/** Ledger checkpoint kind (additive) whose `ref` is the projection version the
+ *  delivered history — everything at or below `opencode_msg` — was projected
+ *  under. Absent on a card an older daemon wrote: version 0. */
+export const REPLAY_PROJECTION_KIND = "opencode_replay_projection";
+
+/** The user row for a stored prompt: stable `oc:<sid>:<mid>:user` identity,
+ *  stamped with the stored time so it lands in history, not "now". Null for a
+ *  prompt with no text at all. */
+function userEmission(sid: string, m: Record<string, unknown>): ReplayEmission | null {
+  const text = messageText(m);
+  if (!text) return null;
+  const at = Number((m.time as Record<string, unknown> | undefined)?.created ?? 0) || undefined;
+  return { record: encodeUserMessage(text, at), localId: `oc:${sid}:${String(m.id ?? "")}:user` };
+}
+
+/** The user rows projection v1 never emitted, for history ALREADY behind the
+ *  checkpoint: one pass over the delivered slice. Same identity and the same
+ *  owned-prompt dedupe as the live projection, so a row the app already has
+ *  (its own send, the live mirror) is not duplicated and a repeat of the pass
+ *  is idempotent at the relay. */
+export function userHistoryBackfill(
+  sid: string,
+  delivered: Array<Record<string, unknown>>,
+  opts: { ourPrompt?: (messageId: string) => boolean } = {},
+): ReplayEmission[] {
+  const out: ReplayEmission[] = [];
+  for (const m of delivered) {
+    if (String(m.type ?? "") !== "user" || opts.ourPrompt?.(String(m.id ?? ""))) continue;
+    const e = userEmission(sid, m);
+    if (e) out.push(e);
+  }
+  return out;
+}
+
+/** What one reconcile emits, in order: the backfill of delivered history
+ *  projected under an older version (once — the caller stamps
+ *  `REPLAY_PROJECTION_VERSION` whenever `projectionStale`), then the replay of
+ *  everything past the checkpoint. */
+export function replayPlan(
+  sid: string,
+  all: Array<Record<string, unknown>>,
+  opts: { deliveredThrough?: string; projectionVersion?: number; ourPrompt?: (messageId: string) => boolean } = {},
+): { emissions: ReplayEmission[]; completedThrough: string | null; projectionStale: boolean; replayed: number } {
+  const { delivered, pending } = splitAtCheckpoint(all, opts.deliveredThrough);
+  const projectionStale = (opts.projectionVersion ?? 0) < REPLAY_PROJECTION_VERSION;
+  const backfill = projectionStale ? userHistoryBackfill(sid, delivered, opts) : [];
+  const { emissions, completedThrough } = historyReplay(sid, pending, opts);
+  return { emissions: [...backfill, ...emissions], completedThrough, projectionStale, replayed: pending.length };
+}
 
 /**
  * Project stored opencode history onto the records a Joy card shows.
@@ -144,12 +212,9 @@ export function historyReplay(
     const mid = String(m.id ?? "");
     if (type === "user") {
       turn = mid;
-      const text = messageText(m);
       // The question BEFORE the turn it opened, the order a reader expects.
-      if (text && !opts.ourPrompt?.(mid)) {
-        const at = Number((m.time as Record<string, unknown> | undefined)?.created ?? 0) || undefined;
-        emissions.push({ record: encodeUserMessage(text, at), localId: `oc:${sid}:${mid}:user` });
-      }
+      const userRow = opts.ourPrompt?.(mid) ? null : userEmission(sid, m);
+      if (userRow) emissions.push(userRow);
       emissions.push({ record: encodeTurnStart({ turn }), localId: `oc:${sid}:${turn}:turn-start` });
       continue;
     }
@@ -268,6 +333,7 @@ export class OpencodeSession implements AgentSession {
     this.#deliveredThrough = init.opencodeSessionId ? (this.#ledger.getCheckpoint(init.id, "opencode_msg")?.ref || undefined) : undefined; // "" = pending, nothing committed
     if (!init.opencodeSessionId) {
       this.#ledger.clearCheckpoint(init.id, "opencode_msg");
+      this.#ledger.clearCheckpoint(init.id, REPLAY_PROJECTION_KIND);
       // A fresh opencode session under this id: nothing queued for an earlier
       // one can run here.
       for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session" });
@@ -402,9 +468,25 @@ export class OpencodeSession implements AgentSession {
     try {
       this.#ledger.setCheckpoint(this.id, "opencode_msg", messageId, 0, { throughSeq: "latest" });
       this.#deliveredThrough = messageId;
+      // The mark and the projection version it was written under travel
+      // together, so a restart never mistakes THIS daemon's mark for an
+      // older one's (#573 residual).
+      this.#stampProjectionVersion();
     } catch (e) {
       process.stderr.write(`[opencode ${this.id}] checkpoint ${messageId} failed: ${e instanceof Error ? e.message : e}\n`);
     }
+  }
+
+  /** The projection version the delivered history was last projected under
+   *  (0 = a mark an older daemon wrote, or one still pending its ack). */
+  #projectionVersion(): number {
+    return Number(this.#ledger.getCheckpoint(this.id, REPLAY_PROJECTION_KIND)?.ref ?? 0) || 0;
+  }
+
+  /** Same pending-until-acked rule as the delivered mark (#67): a crash before
+   *  the backfill's rows are acked repeats the pass, deduped by localId. */
+  #stampProjectionVersion(): void {
+    this.#ledger.setCheckpoint(this.id, REPLAY_PROJECTION_KIND, String(REPLAY_PROJECTION_VERSION), 0, { throughSeq: "latest" });
   }
 
   #persistRecord(): void {
@@ -564,23 +646,28 @@ export class OpencodeSession implements AgentSession {
     if (!client || !sid || !this.#norm) return;
     try {
       const all = await client.messages(sid);
-      const msgs = messagesForReplay(all, this.#deliveredThrough);
-      if (this.#deliveredThrough && msgs.length < all.length) {
-        process.stderr.write(`[opencode ${this.id}] reconcile: ${all.length - msgs.length} messages already delivered, replaying ${msgs.length}\n`);
-      }
-      const { emissions, completedThrough } = historyReplay(sid, msgs, {
+      const version = this.#projectionVersion();
+      const plan = replayPlan(sid, all, {
+        deliveredThrough: this.#deliveredThrough,
+        projectionVersion: version,
         // A prompt THIS daemon submitted already has a user row on the relay
         // — the app's own `turn.queued` for an app send, or #mirrorAccepted's
         // mirror for a terminal/CLI one. Its admission left an
         // `opencode_msg` receipt, so that receipt is the shared identity
-        // between the live mirror and this replay (#573).
+        // between the live mirror, this replay and its backfill (#573).
         ourPrompt: (mid) => this.#ledger.ownsRuntimeRef(this.id, mid, "opencode_msg"),
       });
-      for (const e of emissions) {
+      if (this.#deliveredThrough && plan.replayed < all.length) {
+        process.stderr.write(`[opencode ${this.id}] reconcile: ${all.length - plan.replayed} messages already delivered, replaying ${plan.replayed}`
+          + (plan.projectionStale ? ` (+ their user rows: projection v${version} → v${REPLAY_PROJECTION_VERSION})` : "") + "\n");
+      }
+      for (const e of plan.emissions) {
         this.#relay?.send(e.record, e.localId);
         if (e.chat) this.#mirrorChat(e.localId, e.chat);
       }
-      if (completedThrough && !this.#relay?.outboundPersistDegraded) this.#advanceDeliveredThrough(completedThrough);
+      if (this.#relay?.outboundPersistDegraded) return; // records only in RAM: hold every mark
+      if (plan.completedThrough) this.#advanceDeliveredThrough(plan.completedThrough); // stamps the version too
+      else if (plan.projectionStale) this.#stampProjectionVersion();
     } catch (e) {
       process.stderr.write(`[opencode ${this.id}] reconcile failed: ${e}\n`);
     }

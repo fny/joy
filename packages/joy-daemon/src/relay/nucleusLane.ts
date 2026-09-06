@@ -958,29 +958,40 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
 
   /** Returns whether the spawn COMMAND may now be abandoned (#581).
    *
-   *  Two ways it must not be. A report lost to a transient 503 used to leave
-   *  the command abandoned AND unreported — the relay kept offering it, the
-   *  lane answered every offer with a bare receipt, and the app never saw the
-   *  directory approval it needed. And a report the relay answered
+   *  Only a POSITIVE answer abandons it: `applied:true` (the relay applied the
+   *  failure to the live attempt) or a settled reason (the command already
+   *  moved on). Everything else keeps the command live so the next offer — a
+   *  fresh delivery — retries the spawn, hits the same failure, and reports
+   *  again. Three ways it must not be abandoned. A report lost to a transient
+   *  503 used to leave the command abandoned AND unreported — the relay kept
+   *  offering it, the lane answered every offer with a bare receipt, and the
+   *  app never saw the directory approval it needed. A report answered
    *  `applied:false, reason:'stale_attempt'` was read as an acknowledgement,
    *  which abandoned the whole command even though the relay had explicitly
-   *  NOT applied the failure to the still-live spawn: same silent dead end,
-   *  one HTTP round trip later. Either way the next offer — a fresh delivery,
-   *  so no longer stale — retries the spawn, hits the same failure, and
-   *  reports again. */
+   *  NOT applied the failure: same silent dead end, one HTTP round trip
+   *  later. And a 200 that says nothing at all — a null body, `{}`, or
+   *  `{ok:false}` with no application result — was read the same way
+   *  (Astra on 48a93cd2); that is an UNKNOWN outcome, not an acknowledgement,
+   *  so it retires only this delivery. */
   async function reportSpawnFailed(offer: WorkOffer, reason: string, leaseRef: Lease): Promise<boolean> {
     const kind = reason.split(":")[0];
+    const who = `spawn ${offer.sessionId.slice(0, 8)}`;
     try {
-      const r = await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`,
-        { reason, deliveryId: offer.deliveryId }, leaseRef) as { ok?: boolean; applied?: boolean; reason?: string } | null;
-      if (r && r.applied === false) {
-        const why = r.reason ?? "unknown";
-        const settled = SPAWN_COMMAND_SETTLED.has(why);
-        log(`spawn ${offer.sessionId.slice(0, 8)}: ${kind} report not applied (${why}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt`
-          + (settled ? "; the command already moved on" : "; the command is still live — reporting again on its next offer"));
-        return settled;
+      const raw = await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`,
+        { reason, deliveryId: offer.deliveryId }, leaseRef) as unknown;
+      const r = raw && typeof raw === "object" ? raw as { ok?: unknown; applied?: unknown; reason?: unknown } : null;
+      const why = typeof r?.reason === "string" ? r.reason : null;
+      if (why && SPAWN_COMMAND_SETTLED.has(why)) {
+        log(`${who}: ${kind} report settled (${why}) — the command already moved on`);
+        return true;
       }
-      return true;
+      if (r?.applied === true) return true;
+      if (r?.applied === false) {
+        log(`${who}: ${kind} report not applied (${why ?? "unknown"}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt; the command is still live — reporting again on its next offer`);
+        return false;
+      }
+      log(`${who}: ${kind} report answered without an application result (${raw == null ? String(raw) : JSON.stringify(raw)}) — outcome unknown, reporting again on its next offer`);
+      return false;
     } catch (e2) {
       log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report ${kind}: ${String(e2)} — will retry on the next offer`);
       return false;
