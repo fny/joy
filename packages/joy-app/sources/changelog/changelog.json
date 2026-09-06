@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 7 (4) — Composer, files and small fixes",
+      "summary": "",
+      "markdown": "- **Dropping or pasting images into the web composer attaches them reliably**; an image copied together with text no longer dumps the text into the box.\n- **Escape closes the autocomplete, and a second Escape stops the running turn.** File autocomplete keeps working after a dot (`@src/file.ts`), completing before an existing space puts the caret after it, and on phones the return key applies the selected suggestion instead of adding a newline.\n- **An answer option that fails to send shows the error and keeps the answer as a draft.**\n- **File viewer**: SVG, WebP and AVIF render; the \"changed on disk\" warning clears when the change is reverted; Reload always installs what is currently on disk. The Changes view refreshes diffs when contents change and shows Retry on a failed read.\n- **Search reveals matches inside collapsed work groups.**\n- **QR codes use standard square finders and stay scannable on transparent backgrounds.**\n- **Diffs recover after an offline first load** instead of staying blank; resume commands quote paths with apostrophes and never run in the wrong directory when `cd` fails; returning to a web tab keeps your chosen theme and palette.\n- **Leaks fixed**: downloads and shares remove their temporary files; rejected picker files and failed previews release memory."
+    },
+    {
       "title": "Sep 7 (3) — Sync and sending, made durable",
       "summary": "",
       "markdown": "- **Sessions deleted on another device disappear on the next refresh** instead of lingering, and reloading a chat during a fetch no longer strands its history behind one message.\n- **A send whose response was lost after the relay accepted it stays in the chat**, and sending into a session the app had evicted from memory no longer hides its older history.\n- **Starting a session after a dropped connection no longer creates a duplicate**, startup no longer hangs when the relay stops answering after accepting, and a long-open \"Create directory?\" prompt no longer reports a false failure.\n- **Queue actions report daemon failures**; steering or removing a queued message can no longer lose it or leave a ghost send; clearing the composer no longer restores the saved draft.\n- **Approving or denying a tool request reports failure when the daemon did not apply it**, and renaming a machine cannot overwrite concurrent updates after a decrypt hiccup.\n- **Settings written by a newer app version are preserved** instead of being stripped and synced back.\n- **Terminal: failed sends put your text back**, and the window size is retried once the daemon is reachable. Attachments survive resizing across the sidebar breakpoint, session search keeps its place when matches change, and the model chip on Codex, pi and Antigravity sessions no longer types into the terminal.\n- **Live updates no longer stall** when the relay's event stream splits a line ending across chunks."
@@ -321,5 +326,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 7 (3) — Sync and sending, made durable"
+  "latestTitle": "Sep 7 (4) — Composer, files and small fixes"
 }
