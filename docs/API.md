@@ -221,11 +221,20 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   needed`, `Clarification needed`); `JOY_PUSH_SNIPPETS=1` opts the reply
   snippet and AI title back in (#118). Machine metadata is merged with a
   compare-and-set on a fresh read, never overwriting an app-side rename (#61).
-- Tunnel executor: the sealed request path is resolved against the local
-  base (`/`-rooted, same origin, no userinfo) or answered 400 `bad_path`
-  (#119); every relay call carries `x-joy-relay-key` so flipping the gate does
-  not kill the tunnel plane (#82). Pairing sends the perimeter key derived
-  from the account secret and accepts base64url backup codes (#586 #64).
+- Tunnel executor: the sealed request path (`p`) MUST be `/`-rooted,
+  same-origin and URL-encoded — a daemon-local request-target such as
+  `/v2/files/content?path=%2Fhome%2Fme%2FMy%20Docs`. It is resolved against
+  the local base (no `//`, `\\` or `@` after the leading `/`, no userinfo,
+  no absolute URL) and the request-target actually sent must re-parse to the
+  same origin, path and query — so a `..`-collapsed `/..//host/x` is refused
+  like `//host/x`. A raw space is tolerated (encoded to `%20`); tab, CR, LF
+  and every other C0/C1 control are refused. Anything else is answered with a
+  sealed 400 `bad_path` and never reaches the local surface (#119). Every
+  relay call carries `x-joy-relay-key`; a gate refusal (`relay key required`)
+  is logged once per outage and again after a later flip or key rotation, and
+  an own-lease executor retries a failed first lease with backoff instead of
+  crashing (#82). Pairing sends the perimeter key derived from the account
+  secret and accepts base64url backup codes (#586 #64).
 - Local event routes stream their opening history with drain-aware pacing
   (10 s deadline) before the bounded live feed, so a large history reaches a
   reading client and a stalled one is dropped (#597).

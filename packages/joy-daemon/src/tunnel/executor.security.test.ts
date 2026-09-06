@@ -88,13 +88,41 @@ test("resolveLocalPath: only /-rooted paths on the target origin are dispatchabl
   const base = "http://127.0.0.1:4997";
   expect(resolveLocalPath(base, "/sessions")).toBe("http://127.0.0.1:4997/sessions");
   expect(resolveLocalPath(base, "/v2/files?path=a%20b")).toBe("http://127.0.0.1:4997/v2/files?path=a%20b");
-  for (const bad of ["@evil.example/x", "//evil.example/x", "/\\evil.example/x", "/@evil.example/x", "http://evil.example/x", "sessions", "", "/a b", undefined, 42]) {
+  for (const bad of ["@evil.example/x", "//evil.example/x", "/\\evil.example/x", "/@evil.example/x", "http://evil.example/x", "sessions", "", undefined, 42]) {
     expect(resolveLocalPath(base, bad), String(bad)).toBeNull();
   }
 });
 
+test("resolveLocalPath: the local parser sees exactly what was validated — no `..`-collapsed `//host` request-target", () => {
+  const base = "http://127.0.0.1:4997";
+  // Each resolves on OUR origin, but the wire request-target would be
+  // `//evil.example/x`, which http.ts's `new URL(req.url, base)` reads as
+  // host evil.example, path /x.
+  for (const bad of ["/..//evil.example/x", "/.//evil.example/x", "/%2e%2e//evil.example/x", "/a/..//evil.example/x", "//"]) {
+    expect(resolveLocalPath(base, bad), bad).toBeNull();
+  }
+  // Dot segments that collapse to an ordinary path are still fine, and the
+  // wire carries what was validated.
+  expect(resolveLocalPath(base, "/v2/../sessions")).toBe("http://127.0.0.1:4997/sessions");
+  expect(resolveLocalPath(base, "/v2//files")).toBe("http://127.0.0.1:4997/v2//files");
+  expect(resolveLocalPath(base, "/x?a=1#frag")).toBe("http://127.0.0.1:4997/x?a=1"); // never a fragment
+  expect(resolveLocalPath("http://[::1]:4997", "/x")).toBe("http://[::1]:4997/x");
+});
+
+test("resolveLocalPath: raw spaces and unicode are encoded, control characters are refused", () => {
+  const base = "http://127.0.0.1:4997";
+  expect(resolveLocalPath(base, "/a b")).toBe("http://127.0.0.1:4997/a%20b");
+  expect(resolveLocalPath(base, "/v2/files?path=/My Docs/r\u00e9sum\u00e9.txt")).toBe("http://127.0.0.1:4997/v2/files?path=/My%20Docs/r%C3%A9sum%C3%A9.txt");
+  expect(resolveLocalPath(base, "/\u00fcn\u00efcode/\u65e5\u672c")).toBe("http://127.0.0.1:4997/%C3%BCn%C3%AFcode/%E6%97%A5%E6%9C%AC");
+  expect(resolveLocalPath(base, "/a\u00a0b")).toBe("http://127.0.0.1:4997/a%C2%A0b"); // NBSP is unicode, not a control
+  // `new URL` would silently strip tab/LF/CR; every C0/C1 control and DEL is refused instead.
+  for (const bad of ["/x\ty", "/x\ny", "/x\ry", "/x\u0000y", "/x\u001by", "/x\u007fy", "/x\u0085y", "/x\u009fy", " /x"]) {
+    expect(resolveLocalPath(base, bad), JSON.stringify(bad)).toBeNull();
+  }
+});
+
 test("a rehoming path never reaches the target: sealed 400 bad_path, bound to the request (#119)", async () => {
-  const ids = ["@evil.example/x", "//evil.example/x", "sessions"].map(deliver);
+  const ids = ["@evil.example/x", "//evil.example/x", "sessions", "/..//evil.example/x", "/x\ty"].map(deliver);
   await until(() => ids.every((id) => (frames.get(id)?.length ?? 0) > 0));
   for (const id of ids) {
     const { head, body } = response(id);
@@ -112,6 +140,13 @@ test("a legitimate path still reaches the target (control)", async () => {
   await until(() => { try { return response(id).head.s === 200; } catch { return false; } });
   expect(targetHits).toEqual(["/ok?x=1"]);
   expect(response(id).body).toBe("hello");
+});
+
+test("a raw-space / unicode path reaches the target percent-encoded, as the old concatenation did", async () => {
+  targetHits.length = 0;
+  const id = deliver("/v2/files?path=/My Docs/r\u00e9sum\u00e9.txt");
+  await until(() => { try { return response(id).head.s === 200; } catch { return false; } });
+  expect(targetHits).toEqual(["/v2/files?path=/My%20Docs/r%C3%A9sum%C3%A9.txt"]);
 });
 
 test("every relay fetch carries the perimeter key: lease acquire, tunnel claims, frame posts (#82)", async () => {
