@@ -110,7 +110,12 @@ export function formatReadyEvent(sessionId: string, session?: Session): string {
 }
 
 export function formatPermissionRequest(sessionId: string, requestId: string, toolName: string, toolArgs: unknown, session?: Session): string {
-    const args = toolArgs === undefined ? '' : `\n<tool_args>${clip(JSON.stringify(toolArgs))}</tool_args>`;
+    // LIMITED_TOOL_CALLS promises that only tool names and descriptions leave
+    // the device; a held Write/Edit/Bash approval must not ship file contents
+    // or the exact command to the voice provider (#23).
+    const args = toolArgs === undefined || VOICE_CONFIG.LIMITED_TOOL_CALLS
+        ? ''
+        : `\n<tool_args>${clip(JSON.stringify(toolArgs))}</tool_args>`;
     return `${agentLabel(session)} in session "${sessionTitle(session, sessionId)}" is asking permission to use ${toolName}. Ask the user; answer with processPermissionRequest.\n<request_id>${requestId}</request_id>\n<tool_name>${toolName}</tool_name>${args}`;
 }
 

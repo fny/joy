@@ -13,23 +13,36 @@
 //             detector (soundWake.ts) reopens the conversation when it hears
 //             speech-like sound, so no tap is needed.
 //
+//   ERROR   — a connect failed. Still ARMED, but parked: no sound listening
+//             until a tap or a session event retries (#20).
+//
 // Ending voice from the status bar disarms: clears the transcript, no wakes.
 import type { VoiceSession } from './types';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { requestMicrophonePermission, showMicrophonePermissionDeniedAlert } from '@/utils/microphonePermissions';
 import { storage } from '@/sync/storage';
+import { isLatest, nextGen, retire } from '@/utils/latest';
 import { buildVoiceFirstMessage, buildVoiceSystemPrompt } from './voiceSystemPrompt';
 import { clearVoiceTranscript, getRecentVoiceTranscript, hasVoiceTranscript } from './voiceTranscript';
 import { activeVoiceAgent, mintConversationToken } from './elevenLabs';
 import { flushPendingPrompts, hasPendingPrompts, voiceHooks } from './hooks/voiceHooks';
 import { startSoundWake, stopSoundWake } from './soundWake';
+import { canListenWhileIdle } from './voiceRules';
 import { AppState } from 'react-native';
 
 let voiceSession: VoiceSession | null = null;
 let currentSessionId: string | null = null;
+// The session the current (or last) connect's system prompt described. Focus
+// can move while a connect is in flight; onConnect compares the two (#338).
+let contextSessionId: string | null = null;
 let connectedAt: number | null = null;
 let connecting = false;
+
+// One generation per startVoice. hangUp/endVoice retire it, and startVoice
+// re-checks after every await, so closing the strip while the token or the
+// SDK connect is pending really ends the attempt (#244).
+const START_KEY = 'voice.start';
 
 // ── Reconnect on unexpected drops ─────────────────────────────────────────
 const MAX_RECONNECT_ATTEMPTS = 4;
@@ -84,16 +97,18 @@ function onIdleTimer(): void {
 }
 
 type ConnectOptions = { silentWake?: boolean; soundWake?: boolean };
+type StartOutcome = 'connected' | 'failed' | 'denied' | 'cancelled';
 
 /**
  * Arm voice for `sessionId` and open a conversation. `silentWake` is the
- * event-driven path: no greeting, the queued update is spoken instead, and
- * failures are quiet.
+ * event-driven path: no greeting, the queued update is spoken instead.
+ * Unattended starts (event or sound wake) fail quietly: an alert for every
+ * ambient sound after a broken key was the #20 loop.
  */
 export async function startVoice(sessionId: string, opts: ConnectOptions = {}): Promise<boolean> {
     if (connecting || isVoiceConnected()) return true;
     if (!voiceSession) { console.warn('[voice] no SDK session registered'); return false; }
-    const silent = opts.silentWake === true;
+    const silent = opts.silentWake === true || opts.soundWake === true;
 
     const agent = activeVoiceAgent(storage.getState().settings);
     if (!agent) {
@@ -107,29 +122,40 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
     currentSessionId = sessionId;
     intentionalStop = false;
     connecting = true;
+    const attempt = nextGen(START_KEY);
+    const cancelled = () => !isLatest(START_KEY, attempt);
     storage.getState().setRealtimeStatus('connecting');
-    // The SDK needs the microphone to itself.
-    await stopSoundWake();
 
+    let outcome: StartOutcome = 'failed';
     try {
+        // The SDK needs the microphone to itself.
+        await stopSoundWake();
+        if (cancelled()) { outcome = 'cancelled'; return false; }
+
         const perm = await requestMicrophonePermission();
+        if (cancelled()) { outcome = 'cancelled'; return false; }
         if (!perm.granted) {
-            storage.getState().setRealtimeStatus('disconnected');
+            outcome = 'denied';
+            // Armed without a microphone, every session event and every
+            // return to the foreground would prompt for it again (#25).
+            disarm();
             if (!silent) showMicrophonePermissionDeniedAlert(perm.canAskAgain);
             return false;
         }
 
         const sessionContext = voiceHooks.onVoiceStarted(sessionId);
+        contextSessionId = sessionId;
         const systemPrompt = buildVoiceSystemPrompt({
             sessionContext,
             isContinuation,
             voiceTranscript: isContinuation ? getRecentVoiceTranscript() : null,
         });
-        const firstMessage = buildVoiceFirstMessage({ isContinuation, silentWake: silent, soundWake: opts.soundWake === true });
+        const firstMessage = buildVoiceFirstMessage({ isContinuation, silentWake: opts.silentWake === true, soundWake: opts.soundWake === true });
 
         let conversationToken: string | undefined;
         if (agent.apiKey) {
             conversationToken = await mintConversationToken(agent.agentId, agent.apiKey);
+            if (cancelled()) { outcome = 'cancelled'; return false; }
         }
         await voiceSession.startSession({
             sessionId,
@@ -137,27 +163,65 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
             firstMessage,
             ...(conversationToken ? { conversationToken } : { agentId: agent.agentId }),
         });
+        if (cancelled()) {
+            // The strip was closed while the SDK was connecting; a late
+            // success must not leave a live microphone behind (#244).
+            outcome = 'cancelled';
+            try { await voiceSession.endSession(); } catch (e) { console.error('[voice] late end failed:', e); }
+            return false;
+        }
+        outcome = 'connected';
         return true;
     } catch (error) {
+        if (cancelled()) { outcome = 'cancelled'; return false; }
+        outcome = 'failed';
         console.error('[voice] start failed:', error);
-        storage.getState().setRealtimeStatus('disconnected');
         if (!silent) {
             Modal.alert(t('common.error'), t('voice.startFailed', { reason: error instanceof Error ? error.message : String(error) }));
         }
-        maybeListenWhileIdle();
         return false;
     } finally {
+        // Cleared BEFORE any recovery decision. maybeListenWhileIdle used to
+        // run inside the catch with this guard still up, so a failed
+        // sound-wake connect left voice armed with no listener (#337).
         connecting = false;
+        if (outcome === 'failed') {
+            // Parked and visible in the strip. canListenWhileIdle does not
+            // listen in 'error', so the detector cannot retry-and-fail on
+            // every sound; a tap or a session event retries (#20).
+            storage.getState().setRealtimeStatus('error');
+        } else if (outcome === 'denied') {
+            storage.getState().setRealtimeStatus('disconnected');
+        } else if (outcome === 'cancelled') {
+            // Whoever retired the attempt owns the status; if voice is still
+            // armed (a hang-up, not an end) go back to listening.
+            maybeListenWhileIdle();
+        }
     }
 }
 
+/** Forget the armed session: no wakes, no transcript, no queued prompts. */
+function disarm(): void {
+    storage.getState().setVoiceArmedSessionId(null);
+    clearVoiceTranscript();
+    voiceHooks.onVoiceStopped();
+    currentSessionId = null;
+    contextSessionId = null;
+}
+
 /** While armed, hung up and in the foreground, listen locally for speech and
- *  reconnect on it. No-op when the setting is off or a connection is up. */
+ *  reconnect on it. No-op when the setting is off, a connection is up or
+ *  being made, or the last start failed (see voiceRules.canListenWhileIdle). */
 export function maybeListenWhileIdle(): void {
     const s = storage.getState();
-    if (s.voiceArmedSessionId === null || !s.settings.voiceWakeOnSound) return;
-    if (connecting || status() !== 'disconnected') return;
-    if (AppState.currentState !== 'active') return;
+    const ok = canListenWhileIdle({
+        armed: s.voiceArmedSessionId !== null,
+        wakeOnSound: s.settings.voiceWakeOnSound,
+        connecting,
+        status: s.realtimeStatus,
+        appState: AppState.currentState,
+    });
+    if (!ok) return;
     void startSoundWake(() => {
         const sid = currentSessionId ?? storage.getState().voiceArmedSessionId;
         if (!sid || isVoiceConnected() || connecting) return;
@@ -175,6 +239,7 @@ AppState.addEventListener('change', (state) => {
 /** Close the conversation but stay armed: events keep waking it. */
 export async function hangUp(): Promise<void> {
     intentionalStop = true;
+    retire(START_KEY); // a connect still in flight is abandoned (#244)
     clearReconnectTimer();
     clearIdleTimer();
     reconnectAttempts = 0;
@@ -190,9 +255,7 @@ export async function endVoice(): Promise<void> {
     storage.getState().setVoiceArmedSessionId(null);
     await hangUp();
     await stopSoundWake();
-    clearVoiceTranscript();
-    voiceHooks.onVoiceStopped();
-    currentSessionId = null;
+    disarm();
 }
 
 /** A session event wants the agent to speak. Connects if armed and hung up. */
@@ -210,8 +273,27 @@ export function notifyVoiceConnected(): void {
     clearReconnectTimer();
     connectedAt = Date.now();
     armIdleTimer();
+    // Focus moved while the connect was in flight: the system prompt named
+    // the old session as focused, so tell the agent about the new one (#338).
+    const focused = currentSessionId;
+    if (focused && contextSessionId && focused !== contextSessionId) {
+        contextSessionId = focused;
+        voiceHooks.onFocusChangedWhileConnecting(focused);
+    }
     // Anything queued while the line was down is spoken now.
     setTimeout(flushPendingPrompts, 300);
+}
+
+/** SDK onDisconnect because the agent itself ended the call — its end_call
+ *  tool, on the user's say-so. Stay armed and hung up; reconnecting would
+ *  undo the hang-up the user just asked for (#343). */
+export function notifyVoiceAgentEnded(): void {
+    clearIdleTimer();
+    clearReconnectTimer();
+    reconnectAttempts = 0;
+    connectedAt = null;
+    intentionalStop = false;
+    maybeListenWhileIdle();
 }
 
 /** SDK onDisconnect for a drop the user did not ask for. Reconnects with
@@ -224,10 +306,10 @@ export function notifyVoiceUnexpectedDisconnect(): void {
     const sessionId = currentSessionId;
     if (!sessionId) return;
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.warn('[voice] reconnect budget exhausted — staying armed, waiting for sound, an event or a tap');
+        console.warn('[voice] reconnect budget exhausted — staying armed; a tap or a session event retries');
         clearReconnectTimer();
         reconnectAttempts = 0;
-        maybeListenWhileIdle();
+        storage.getState().setRealtimeStatus('error');
         return;
     }
     const attempt = reconnectAttempts++;
