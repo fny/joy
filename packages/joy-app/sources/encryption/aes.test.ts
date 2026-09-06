@@ -61,10 +61,30 @@ describe('aes (native wrapper) against a string-only AES-GCM bridge', () => {
         expect(new TextDecoder().decode((await decryptAESGCM(legacyText, KEY))!)).toBe('not base64!');
     });
 
-    it('#303: new byte payloads carry the version marker inside the plaintext', async () => {
+    it('#303: new byte payloads are versioned by a leading carrier byte, and the plaintext is bare base64', async () => {
         const sealed = await encryptAESGCM(new Uint8Array([65, 66, 67]), KEY);
-        const plaintext = await decryptAESGCMString(Buffer.from(sealed).toString('base64'), KEY);
-        expect(plaintext).toBe('joy-aes-bytes-v1:QUJD');
+        expect(sealed[0]).toBe(0x01);
+        const plaintext = await decryptAESGCMString(Buffer.from(sealed.subarray(1)).toString('base64'), KEY);
+        expect(plaintext).toBe('QUJD');
+        // The bundle without its version byte is NOT a legacy blob of "QUJD" bytes.
+        expect(await decryptAESGCMString(Buffer.from(sealed).toString('base64'), KEY)).toBeNull();
+    });
+
+    it('#303 residual: a legacy plaintext that starts with the old in-band marker is returned verbatim, not decoded', async () => {
+        // The marker lived INSIDE the authenticated plaintext, so arbitrary
+        // legacy text beginning with it masqueraded as a new envelope.
+        const legacy = new Uint8Array(Buffer.from(await encryptAESGCMString('joy-aes-bytes-v1:QUJD', KEY), 'base64'));
+        expect(new TextDecoder().decode((await decryptAESGCM(legacy, KEY))!)).toBe('joy-aes-bytes-v1:QUJD');
+    });
+
+    it('#303: a legacy blob whose random nonce begins with 0x01 still opens as legacy', async () => {
+        // Seal until the nonce starts with the v1 carrier byte: the v1 open
+        // fails its GCM tag (misaligned nonce) and the decoder falls back.
+        let legacy: Uint8Array;
+        do {
+            legacy = new Uint8Array(Buffer.from(await encryptAESGCMString('QUJD', KEY), 'base64'));
+        } while (legacy[0] !== 0x01);
+        expect(new TextDecoder().decode((await decryptAESGCM(legacy, KEY))!)).toBe('QUJD');
     });
 
     it('a wrong key yields null (parity with aes.web) instead of throwing', async () => {

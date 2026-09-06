@@ -33,6 +33,12 @@
 import sodium from '@/encryption/libsodium.lib';
 import { deriveKey } from '@/encryption/deriveKey';
 import { decodeUTF8, encodeUTF8 } from '@/encryption/text';
+import { standaloneBytes } from '@/encryption/standalone';
+
+// Every view handed to sodium is materialized first (native byte-ownership
+// sweep, #305/#307): the native bridge reads a typed array's WHOLE backing
+// store, so a key that is a view into larger material sealed/opened with the
+// wrong bytes. See @/encryption/standalone.
 
 export const SPAWN_SPEC_KEY_USAGE = 'Joy Spawn Spec';
 const SEALED_PREFIX = 'v2e1:';
@@ -51,7 +57,7 @@ export function encodeSpawnSpec(spec: SpawnSpecPayload, key: Uint8Array | null):
     if (!key) return json;
     const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
     // encodeUTF8, not sodium.from_string: the native module has no from_string.
-    const ct = sodium.crypto_secretbox_easy(encodeUTF8(json), nonce, key);
+    const ct = sodium.crypto_secretbox_easy(standaloneBytes(encodeUTF8(json)), nonce, standaloneBytes(key));
     const buf = new Uint8Array(nonce.length + ct.length);
     buf.set(nonce, 0);
     buf.set(ct, nonce.length);
@@ -70,7 +76,7 @@ export function openSpawnSpec(wire: string | null | undefined, key: Uint8Array |
             const raw = sodium.from_base64(wire.slice(SEALED_PREFIX.length), sodium.base64_variants.ORIGINAL);
             const n = sodium.crypto_secretbox_NONCEBYTES;
             if (raw.length < n + sodium.crypto_secretbox_MACBYTES) return null;
-            json = decodeUTF8(sodium.crypto_secretbox_open_easy(raw.slice(n), raw.slice(0, n), key));
+            json = decodeUTF8(sodium.crypto_secretbox_open_easy(standaloneBytes(raw.subarray(n)), standaloneBytes(raw.subarray(0, n)), standaloneBytes(key)));
         } else {
             json = wire;
         }

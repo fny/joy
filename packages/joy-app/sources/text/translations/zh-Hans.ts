@@ -324,6 +324,8 @@ export const zhHans: TranslationStructure = {
         switchMachinesHint: '• 点击上方的设备来切换设备',
         createDirectoryTitle: '创建目录？',
         createDirectoryMessage: ({ path }: { path: string }) => `目录 '${path}' 在该机器上不存在。是否创建？`,
+        creationUncertainTitle: '会话未确认',
+        creationUncertainMessage: '中继未确认新会话。重试会再次发送同一请求，因此最多只会启动一个会话。',
     },
 
     sessionHistory: {

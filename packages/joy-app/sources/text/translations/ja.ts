@@ -324,6 +324,8 @@ export const ja: TranslationStructure = {
         switchMachinesHint: '• 上のマシンをクリックしてマシンを切り替えてください',
         createDirectoryTitle: 'ディレクトリを作成しますか？',
         createDirectoryMessage: ({ path }: { path: string }) => `ディレクトリ '${path}' はマシン上に存在しません。作成しますか？`,
+        creationUncertainTitle: 'セッションが確認できません',
+        creationUncertainMessage: 'リレーが新しいセッションを確認しませんでした。再試行すると同じリクエストをもう一度送るため、開始されるセッションは最大1つです。',
     },
 
     sessionHistory: {
