@@ -179,7 +179,7 @@ export const SessionView = React.memo((props: { id: string }) => {
     }, []);
 
     const handleSidebarFilePress = React.useCallback((file: GitFileStatus) => {
-        if (file.status === 'deleted') return;
+        if (file.status === 'deleted' || file.unaddressable) return; // no openable path for a non-UTF-8 name
         pushOverlay({ kind: 'diff', file: file.fullPath });
     }, [pushOverlay]);
     const handleAllFilesFilePress = React.useCallback((filePath: string) => {
