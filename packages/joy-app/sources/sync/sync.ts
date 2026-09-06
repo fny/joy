@@ -10,7 +10,7 @@ import { InvalidateSync } from '@/utils/sync';
 import { randomUUID } from 'expo-crypto';
 import * as Crypto from 'expo-crypto';
 import { sealV2Content, sealV2Bytes, openV2Bytes, type V2Attachment } from './v2/crypto';
-import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, connectV2Stream, V2ApiError, getV2BaseUrl } from './v2/api';
+import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, v2CancelTurn, connectV2Stream, V2ApiError, getV2BaseUrl } from './v2/api';
 import { staleSessionIds } from './sessionListReconcile';
 import { FetchGeneration, StaleFetchError, isSendAcknowledged, cursorsNeedReanchor } from './sessionSyncGuards';
 import { v2LinkForRow } from './sessionLink';
@@ -64,8 +64,11 @@ type SendMessageOptions = {
 /** sendMessage's success contract: ok only once the relay has ACCEPTED the
  *  prompt (there is no optimistic row and no outbox on v2 — the user row
  *  arrives from the relay log). Any ok:false must be handled by the caller:
- *  the composer puts the message back, the draft-release lease reverts. */
-export type SendMessageResult = { ok: true; localId: string } | { ok: false; reason: string };
+ *  the composer puts the message back, the draft-release lease reverts.
+ *  `turnId` is the relay turn the POST ack named (absent only when the ack
+ *  was lost and the event log vouched for the send, #410) — it is what a
+ *  removal that raced the send cancels (#134). */
+export type SendMessageResult = { ok: true; localId: string; turnId?: string } | { ok: false; reason: string };
 
 /**
  * Thinking state implied by a message's embedded turn-lifecycle event:
@@ -263,9 +266,18 @@ class Sync {
         // reload, including every relay switch) came up with NO release valve
         // and queued messages sat forever. Lazy import — the module reads
         // storage + sync only at runtime, avoiding a static cycle.
+        // The second hook cancels an accepted turn whose draft the user
+        // removed while its POST was in flight (#134) — the same relay
+        // control-lane cancel sessionAbort uses, keyed on the ack's turnId.
         void import('@/-session/draftQueueRelease').then(({ initDraftQueueRelease }) => {
-            initDraftQueueRelease((sessionId, text, localId) =>
-                this.sendMessage(sessionId, text, { source: 'chat', localId }));
+            initDraftQueueRelease(
+                (sessionId, text, localId) => this.sendMessage(sessionId, text, { source: 'chat', localId }),
+                async (sessionId, turnId) => {
+                    const v2link = storage.getState().sessions[sessionId]?.metadata?.v2;
+                    if (!v2link?.sessionId) throw new Error('session has no relay link');
+                    await v2CancelTurn(v2link.relay, v2link.sessionId, turnId);
+                },
+            );
         });
 
         // Invalidate sync
@@ -571,9 +583,10 @@ class Sync {
                 return { ok: false, reason: `attachment upload failed: ${e instanceof Error ? e.message : e}` };
             }
         }
+        let ack: { messageId: string; turnId: string };
         try {
             const ciphertext = sealV2Content(text, key, attachments);
-            const ack = await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext, localId, attachments.map(a => a.id));
+            ack = await v2SendCiphertext(v2link.relay, v2link.sessionId, ciphertext, localId, attachments.map(a => a.id));
             // Accepted: 80%, and the ack names the turn — bind it now so the
             // receipted/started events can find this row even before the
             // relay's own turn.queued row has been read back.
@@ -587,13 +600,17 @@ class Sync {
             // agent may be running it. Dismissing the row then deleted a
             // delivered prompt with the forward cursor already past it, so no
             // sync ever restored it (#410). Treat the acknowledgment as the ack.
-            if (isSendAcknowledged(this.localRow(sessionId, localId))) {
+            const row = this.localRow(sessionId, localId);
+            if (isSendAcknowledged(row)) {
                 log.log(`💬 sendMessage: POST failed for ${localId} but the event log already acknowledged it — keeping the row (#410)`);
                 storage.getState().applyDeliveryStage(sessionId, { localId }, 'relay');
+                // The turn is whatever the event log bound to the row, if it
+                // has yet — a pending removal needs it to cancel (#134).
+                const turnId = row?.turnId;
                 void import('@/-session/draftQueueRelease').then(({ notifyOutboxAcked }) => {
-                    notifyOutboxAcked(sessionId, [localId]);
+                    notifyOutboxAcked(sessionId, [{ localId, turnId }]);
                 });
-                return { ok: true, localId };
+                return { ok: true, localId, turnId };
             }
             // The text goes back to the composer (caller); the ghost row must go.
             storage.getState().dismissLocalMessage(sessionId, localId);
@@ -607,18 +624,19 @@ class Sync {
             return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
         }
         // The relay's accepted response IS the durable ack: a draft released
-        // with this localId may now leave the draft queue.
+        // with this localId may now leave the draft queue — or, if the user
+        // removed it while the POST was in flight, cancel the turn it became.
         void import('@/-session/draftQueueRelease').then(({ notifyOutboxAcked }) => {
-            notifyOutboxAcked(sessionId, [localId]);
+            notifyOutboxAcked(sessionId, [{ localId, turnId: ack.turnId }]);
         });
-        return { ok: true, localId };
+        return { ok: true, localId, turnId: ack.turnId };
     }
 
     /** The store's row for one of this client's sends, by localId. */
-    private localRow(sessionId: string, localId: string): { seq?: number | null; deliveryStage?: string } | undefined {
+    private localRow(sessionId: string, localId: string): { seq?: number | null; deliveryStage?: string; turnId?: string } | undefined {
         const store = storage.getState().sessionMessages[sessionId];
         const internalId = store?.reducerState.localIds.get(localId);
-        return internalId ? (store?.messagesMap[internalId] as { seq?: number | null; deliveryStage?: string } | undefined) : undefined;
+        return internalId ? (store?.messagesMap[internalId] as { seq?: number | null; deliveryStage?: string; turnId?: string } | undefined) : undefined;
     }
 
     /** Drop every trace of a session the relay no longer lists (#406): its

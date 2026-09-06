@@ -24,6 +24,11 @@ import { useCallback, useEffect, useReducer } from 'react';
  */
 
 type SendFn = (sessionId: string, text: string, localId: string) => Promise<SendMessageResult>;
+/** Cancels the relay turn an accepted send became (sync wires v2CancelTurn). */
+export type CancelTurnFn = (sessionId: string, turnId: string) => Promise<void>;
+/** One accepted send as the relay's POST ack described it (#134). */
+export type ReleaseAck = { localId: string; turnId?: string };
+let cancelTurnFn: CancelTurnFn | undefined;
 
 const inFlightUntil = new Map<string, number>();
 const RELEASE_BACKSTOP_MS = 15_000;
@@ -96,11 +101,20 @@ function revertIfOwned(sessionId: string, draftId: string, releaseLocalId: strin
 // draft would vanish while the send still lands and the agent runs a message
 // the user believes is gone. Removal is instead RECORDED and settles with the
 // send: failure → removed here (nothing reached the relay); acceptance → the
-// draft leaves the queue as usual and the message is now a daemon queue row,
-// whose × cancels it for real. Subscribers (WaitingStack) render the
-// in-between state.
+// turn the ack named is CANCELLED through the relay (settleAcceptedRelease)
+// and only then does the draft leave the queue — a cancel that fails keeps
+// the item visible with the error, parked (no auto-resend). Subscribers
+// (WaitingStack) render the in-between state.
 const pendingCancels = new Set<string>();
 const pendingCancelListeners = new Set<() => void>();
+// Drafts whose relay cancel is in flight: the sweep must not resend them and
+// a second ack (lease-expiry replay) must not fire a second cancel.
+const cancelsInFlight = new Set<string>();
+// draftKey → releaseLocalId of a draft whose accepted turn could NOT be
+// cancelled. It stays visible with the error; the sweep leaves it alone while
+// it still carries that release identity and error (an edit or a manual
+// retry clears one of them and the draft flows again).
+const parkedCancelFailures = new Map<string, string>();
 function settleCancel(sessionId: string, draftId: string): void {
     if (!pendingCancels.delete(draftKey(sessionId, draftId))) return;
     pendingCancelListeners.forEach((l) => l());
@@ -112,9 +126,13 @@ export type CancelReleaseOutcome = 'removed' | 'pending';
  *  removal once the send settles. Returns which of the two happened. */
 export function cancelRelease(sessionId: string, draftId: string, now = Date.now()): CancelReleaseOutcome {
     const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
-    const inFlight = !!draft && draft.state === 'releasing' && (draft.leaseUntil ?? 0) > now;
+    const inFlight = !!draft && (
+        (draft.state === 'releasing' && (draft.leaseUntil ?? 0) > now)
+        || cancelsInFlight.has(draftKey(sessionId, draftId))
+    );
     if (!inFlight) {
         settleCancel(sessionId, draftId);
+        parkedCancelFailures.delete(draftKey(sessionId, draftId));
         useDraftQueueStore.getState().remove(sessionId, draftId);
         return 'removed';
     }
@@ -137,9 +155,10 @@ export function useCancelPending(sessionId: string): (draftId: string) => boolea
     return useCallback((draftId: string) => isCancelPending(sessionId, draftId), [sessionId]);
 }
 
-export function initDraftQueueRelease(send: SendFn): void {
+export function initDraftQueueRelease(send: SendFn, cancelTurn?: CancelTurnFn): void {
     if (initialized) return;
     initialized = true;
+    cancelTurnFn = cancelTurn;
 
     const releasePass = () => {
         const state = storage.getState();
@@ -185,6 +204,16 @@ export function initDraftQueueRelease(send: SendFn): void {
             // remove only on {ok}; revert with the error otherwise.
             if (head.state === 'releasing' && (head.leaseUntil ?? 0) > now) continue; // another pass owns it
             if ((head.attempt ?? 0) >= MAX_AUTO_ATTEMPTS) continue; // parked for manual action
+            // Accepted-and-being-cancelled, or accepted-and-uncancellable
+            // (#134): resending would only replay the acceptance the user
+            // asked to undo. Parked until an edit or a manual retry.
+            const key = draftKey(sessionId, head.id);
+            if (cancelsInFlight.has(key)) continue;
+            const parkedId = parkedCancelFailures.get(key);
+            if (parkedId !== undefined) {
+                if (parkedId === head.releaseLocalId && head.lastError != null) continue;
+                parkedCancelFailures.delete(key);
+            }
             // FRESH random id when the draft has none (5.6-sol verify #7):
             // the deterministic `${sessionId}-${id}` fallback meant an EDITED
             // draft regenerated the same localId as its pre-edit send — the
@@ -242,8 +271,9 @@ export function initDraftQueueRelease(send: SendFn): void {
  *  localIds now, so their releasing drafts can finally be removed. Matches on
  *  releaseLocalId (NOT draft id) — an edited draft cleared its release
  *  identity and must survive the stale ack (5.6-sol audit #7). */
-export function notifyOutboxAcked(sessionId: string, localIds: Iterable<string>): void {
-    const acked = new Set(localIds);
+export function notifyOutboxAcked(sessionId: string, acks: Iterable<ReleaseAck>, cancelTurn: CancelTurnFn | undefined = cancelTurnFn): void {
+    const acked = new Map<string, ReleaseAck>();
+    for (const a of acks) acked.set(a.localId, a);
     const drafts = useDraftQueueStore.getState().bySession[sessionId] ?? [];
     for (const d of drafts) {
         // Matched on the release identity ALONE, not on state: a stale
@@ -251,10 +281,52 @@ export function notifyOutboxAcked(sessionId: string, localIds: Iterable<string>)
         // while its retry (same releaseLocalId) landed — the relay owns the
         // message either way, so it must leave the queue (#133). An edit
         // clears releaseLocalId, which is what keeps a stale ack out.
-        if (d.releaseLocalId && acked.has(d.releaseLocalId)) {
-            attemptTokens.delete(draftKey(sessionId, d.id));
-            settleCancel(sessionId, d.id);
-            useDraftQueueStore.getState().remove(sessionId, d.id);
-        }
+        const ack = d.releaseLocalId ? acked.get(d.releaseLocalId) : undefined;
+        if (ack) void settleAcceptedRelease(sessionId, d.id, ack.turnId, cancelTurn);
     }
+}
+
+export type AcceptedSettle = 'removed' | 'cancelled' | 'cancel_failed' | 'cancelling';
+
+/** Settle ONE draft whose send the relay accepted. Without a pending removal
+ *  the draft simply leaves the queue (synchronously — the relay owns the
+ *  message). With one (#134), the accepted turn is cancelled first and the
+ *  draft leaves only once that lands; a failed cancel keeps the draft
+ *  visible with the error and parks it — the message is the relay's now, so
+ *  the app must neither pretend it is gone nor resend it. */
+export function settleAcceptedRelease(
+    sessionId: string,
+    draftId: string,
+    turnId: string | undefined,
+    cancelTurn: CancelTurnFn | undefined,
+): Promise<AcceptedSettle> {
+    const key = draftKey(sessionId, draftId);
+    if (cancelsInFlight.has(key)) return Promise.resolve('cancelling');
+    // The send settled: no late failure callback may act on this draft.
+    attemptTokens.delete(key);
+    if (!pendingCancels.has(key)) {
+        useDraftQueueStore.getState().remove(sessionId, draftId);
+        return Promise.resolve('removed');
+    }
+    cancelsInFlight.add(key);
+    return (async () => {
+        if (!turnId) throw new Error('the relay accepted the message without naming its turn');
+        if (!cancelTurn) throw new Error('no cancel path is wired');
+        await cancelTurn(sessionId, turnId);
+    })().then(
+        () => {
+            cancelsInFlight.delete(key);
+            settleCancel(sessionId, draftId);
+            useDraftQueueStore.getState().remove(sessionId, draftId);
+            return 'cancelled' as const;
+        },
+        (e: unknown) => {
+            cancelsInFlight.delete(key);
+            settleCancel(sessionId, draftId);
+            const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
+            if (draft?.releaseLocalId) parkedCancelFailures.set(key, draft.releaseLocalId);
+            useDraftQueueStore.getState().revertRelease(sessionId, draftId, `cancel failed: ${e instanceof Error ? e.message : String(e)}`);
+            return 'cancel_failed' as const;
+        },
+    );
 }
