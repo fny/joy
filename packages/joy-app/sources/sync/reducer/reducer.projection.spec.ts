@@ -197,6 +197,78 @@ describe('identity-based projection', () => {
         expect(messages.filter((m) => m.kind === 'tool-call')).toHaveLength(1);
     });
 
+    it('a result that settled a root permission placeholder also settles the nested row projected later (#392)', () => {
+        const state = createReducer('s');
+        reducer(state, [claudeToolCall('a', 'Task', { prompt: 'Look' }, 1)]);
+        reducer(state, [], { requests: { b: { tool: 'Read', arguments: { file_path: '/b' }, createdAt: 2 } } });
+        const nestedResult: NormalizedMessage = {
+            id: 'res', localId: null, createdAt: 3000, seq: 3, role: 'agent', isSidechain: true,
+            content: [{ type: 'tool-result', tool_use_id: 'b', content: 'FINAL CONTENT', is_error: false, uuid: 'res-uuid', parentUUID: 'a' }],
+        };
+        reducer(state, [nestedResult]);
+        const placeholder = state.messages.get(state.toolIdToMessageId.get('b')!)!;
+        expect(placeholder.tool?.state).toBe('completed');
+        const nestedCall: NormalizedMessage = {
+            id: 'call', localId: null, createdAt: 2000, seq: 2, role: 'agent', isSidechain: true,
+            content: [{ type: 'tool-call', id: 'b', name: 'Read', input: { file_path: '/b' }, description: null, uuid: 'b-uuid', parentUUID: 'a' }],
+        };
+        const out = reducer(state, [nestedCall]);
+        const task = out.messages.find((m) => m.kind === 'tool-call' && m.tool.model?.identity.callId === 'a') as ToolCallMessage | undefined;
+        expect(task).toBeDefined();
+        const nested = task!.children.find((c) => c.kind === 'tool-call') as ToolCallMessage;
+        expect(nested.tool.state).toBe('completed');
+        expect(nested.tool.result).toBe('FINAL CONTENT');
+        expect(nested.tool.model?.outcome).toBe('succeeded');
+        expect(nested.tool.model?.outputText).toBe('FINAL CONTENT');
+        expect(nested.tool.permission?.status).toBe('pending');
+    });
+
+    it('a new child of a nested Task that has a root permission placeholder refreshes the outer Task (#394)', () => {
+        const state = createReducer('s');
+        reducer(state, [claudeToolCall('a', 'Task', { prompt: 'Outer' }, 1)]);
+        reducer(state, [], { requests: { b: { tool: 'Task', arguments: { prompt: 'Inner' }, createdAt: 2 } } });
+        const innerCall: NormalizedMessage = {
+            id: 'task-b', localId: null, createdAt: 2000, seq: 2, role: 'agent', isSidechain: true,
+            content: [{ type: 'tool-call', id: 'b', name: 'Task', input: { prompt: 'Inner' }, description: null, uuid: 'b-uuid', parentUUID: 'a' }],
+        };
+        reducer(state, [innerCall]);
+        const grandchild: NormalizedMessage = {
+            id: 'grandchild', localId: null, createdAt: 3000, seq: 3, role: 'agent', isSidechain: true,
+            content: [{ type: 'text', text: 'NEW GRANDCHILD', uuid: 'gc', parentUUID: 'b' }],
+        };
+        const out = reducer(state, [grandchild]);
+        const emitted = out.messages.filter((m): m is ToolCallMessage => m.kind === 'tool-call').map((m) => m.tool.model!.identity.callId);
+        expect(emitted).toContain('a');
+        const outer = out.messages.find((m) => m.kind === 'tool-call' && m.tool.model?.identity.callId === 'a') as ToolCallMessage;
+        const inner = outer.children.find((c) => c.kind === 'tool-call') as ToolCallMessage;
+        expect(inner.tool.model?.identity.callId).toBe('b');
+        expect(inner.children.map((c) => (c as { text?: string }).text)).toEqual(['NEW GRANDCHILD']);
+        // The root placeholder for b is a visible projection too and is refreshed as well.
+        expect(emitted).toContain('b');
+    });
+
+    it('a root delivered twice before its Task claims ONE Task, so a second same-prompt Task stays free (#388)', () => {
+        const state = createReducer('s');
+        const root: NormalizedMessage = { id: 'root', localId: null, createdAt: 1000, seq: 1, role: 'agent', isSidechain: true, content: [{ type: 'sidechain', uuid: 'root-uuid', prompt: 'Same' }] };
+        reducer(state, [root]);
+        reducer(state, [root]);
+        const tasks: NormalizedMessage = {
+            id: 'tasks', localId: null, createdAt: 2000, seq: 2, role: 'agent', isSidechain: false,
+            content: [
+                { type: 'tool-call', id: 'a', name: 'Task', input: { prompt: 'Same' }, description: null, uuid: 'tasks-uuid', parentUUID: null },
+                { type: 'tool-call', id: 'b', name: 'Task', input: { prompt: 'Same' }, description: null, uuid: 'tasks-uuid', parentUUID: null },
+            ],
+        };
+        reducer(state, [tasks]);
+        expect(state.tracerState.uuidToSidechainId.get('root-uuid')).toBe('a');
+        expect(state.tracerState.promptToTaskIds.get('Same')).toEqual(['b']);
+        const child: NormalizedMessage = { id: 'child', localId: null, createdAt: 3000, seq: 3, role: 'agent', isSidechain: true, content: [{ type: 'text', text: 'BELONGS TO A', uuid: 'child-uuid', parentUUID: 'root-uuid' }] };
+        const out = reducer(state, [child]);
+        const emitted = out.messages.filter((m): m is ToolCallMessage => m.kind === 'tool-call');
+        expect(emitted.map((m) => m.tool.model!.identity.callId)).toEqual(['a']);
+        expect(emitted[0].children.map((c) => (c as { text?: string }).text)).toEqual(['BELONGS TO A']);
+    });
+
     it('a completed subagent permission resolves the nested copy too (#395)', () => {
         const pending: AgentState = { requests: { 'nested-bash': { tool: 'Bash', arguments: { command: 'make' }, createdAt: 500 } } };
         const state = createReducer('s');

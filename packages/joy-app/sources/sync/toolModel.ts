@@ -296,14 +296,32 @@ function failureTextOf(blocks: ToolResultBlock[], raw: unknown): string | null {
     return text;
 }
 
+/** How far into a nested `{error: {error: ...}}` shape the unwrap will look. */
+const STRUCTURED_ERROR_MAX_DEPTH = 65536;
+
+/**
+ * The human text inside a structured error. Iterative and bounded: a
+ * 12,000-level `{error: {error: ...}}` result is a valid record that a
+ * recursive unwrap turned into a RangeError, thrown from a function that is
+ * documented never to throw (#413). A cyclic value stops at its first repeat.
+ */
 function structuredErrorText(value: unknown): string | null {
     if (!isRecord(value)) return null;
-    const candidates = [value.error, value.message, value.stderr, value.reason];
-    for (const candidate of candidates) {
+    type Frame = { record: Record<string, unknown>; index: number };
+    const stack: Frame[] = [{ record: value, index: 0 }];
+    const seen = new Set<object>([value]);
+    while (stack.length > 0) {
+        const frame = stack[stack.length - 1];
+        const candidates = [frame.record.error, frame.record.message, frame.record.stderr, frame.record.reason];
+        if (frame.index >= candidates.length) {
+            stack.pop();
+            continue;
+        }
+        const candidate = candidates[frame.index++];
         if (typeof candidate === 'string' && candidate.trim().length > 0) return candidate;
-        if (isRecord(candidate)) {
-            const nested = structuredErrorText(candidate);
-            if (nested !== null) return nested;
+        if (isRecord(candidate) && !seen.has(candidate) && stack.length < STRUCTURED_ERROR_MAX_DEPTH) {
+            seen.add(candidate);
+            stack.push({ record: candidate, index: 0 });
         }
     }
     return safeStringify(value);
@@ -804,7 +822,15 @@ export function buildToolModel(tool: ToolCallLike, identity: Partial<ToolIdentit
     } catch {
         blocks = [{ kind: 'structured', value: tool.result }];
     }
-    const { outcome, errorMessage } = classifyOutcome(tool, blocks);
+    // Classification runs INSIDE the guard: a permitted result must never
+    // throw during projection after its record was marked processed (#413).
+    let outcome: ToolOutcome;
+    let errorMessage: string | null;
+    try {
+        ({ outcome, errorMessage } = classifyOutcome(tool, blocks));
+    } catch {
+        ({ outcome, errorMessage } = fallbackOutcome(tool));
+    }
 
     let command: ToolCommandModel | null = null;
     let fileChanges: ToolFileChangeModel[] | null = null;
@@ -818,6 +844,12 @@ export function buildToolModel(tool: ToolCallLike, identity: Partial<ToolIdentit
     } catch {
         fileChanges = null;
     }
+    let outputText: string | null;
+    try {
+        outputText = joinTextBlocks(blocks);
+    } catch {
+        outputText = null;
+    }
 
     return {
         version: TOOL_MODEL_VERSION,
@@ -828,13 +860,22 @@ export function buildToolModel(tool: ToolCallLike, identity: Partial<ToolIdentit
         outcome,
         isError: outcome === 'failed' || outcome === 'denied' || outcome === 'cancelled',
         blocks,
-        outputText: joinTextBlocks(blocks),
+        outputText,
         errorMessage,
         command,
         fileChanges,
         raw,
         timing,
     };
+}
+
+/** The outcome by record state alone — what is left when classification itself failed. */
+function fallbackOutcome(tool: ToolCallLike): { outcome: ToolOutcome; errorMessage: string | null } {
+    if (tool.permission?.status === 'denied') return { outcome: 'denied', errorMessage: tool.permission.reason ?? null };
+    if (tool.permission?.status === 'canceled') return { outcome: 'cancelled', errorMessage: tool.permission.reason ?? null };
+    if (tool.state === 'running') return { outcome: 'pending', errorMessage: null };
+    if (tool.state === 'error') return { outcome: 'failed', errorMessage: null };
+    return { outcome: 'succeeded', errorMessage: null };
 }
 
 const derivedModels = new WeakMap<object, ToolCallModel>();

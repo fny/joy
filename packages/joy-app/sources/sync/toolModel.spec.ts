@@ -218,6 +218,33 @@ describe('toolModel — arguments and malformed items', () => {
     });
 });
 
+describe('toolModel — never throws (#413)', () => {
+    it('unwraps a 12,000-level nested structured error iteratively and keeps its reason', () => {
+        let error: unknown = 'disk full';
+        for (let i = 0; i < 12000; i++) error = { error };
+        const model = buildToolModel(tool({ name: 'Read', state: 'error', result: error }));
+        expect(model.outcome).toBe('failed');
+        expect(model.errorMessage).toBe('disk full');
+        expect(model.blocks[0].kind).toBe('structured');
+    });
+
+    it('terminates on a cyclic structured error and still classifies it as a failure', () => {
+        const cyclic: { error: { error?: unknown } } = { error: {} };
+        cyclic.error.error = cyclic;
+        const model = buildToolModel(tool({ name: 'Read', state: 'error', result: cyclic }));
+        expect(model.outcome).toBe('failed');
+        expect(typeof model.errorMessage).toBe('string');
+    });
+
+    it('a deeply nested successful structured result projects without throwing', () => {
+        let value: unknown = { ok: true };
+        for (let i = 0; i < 12000; i++) value = { message: value };
+        const model = buildToolModel(tool({ name: 'Read', state: 'completed', result: value }));
+        expect(model.outcome).toBe('succeeded');
+        expect(model.blocks).toHaveLength(1);
+    });
+});
+
 describe('trimCommonIndent', () => {
     it('trims by one shared indent so indentation-only edits stay visible', () => {
         expect(trimCommonIndent(['        x', '    x'])).toEqual(['    x', 'x']);

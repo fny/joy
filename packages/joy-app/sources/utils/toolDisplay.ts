@@ -1,5 +1,6 @@
 import { ToolCall } from '@/sync/typesMessage';
-import { stringifyToolCommand } from './toolCommand';
+import { getToolModel } from '@/sync/toolModel';
+import { t } from '@/text';
 
 const TERMINAL_TOOL_NAMES = new Set([
     'Bash',
@@ -74,18 +75,50 @@ export function getToolSummaryCategory(toolName: string): ToolSummaryCategory {
     return 'other';
 }
 
-export function getToolSummaryDetail(tool: Pick<ToolCall, 'name' | 'input' | 'description'>): string | null {
+/**
+ * Title of a compact transcript row. An edit row names its OUTCOME: only a
+ * succeeded edit reads "Edited file" — a running, failed, denied or cancelled
+ * one says so instead of claiming a change that has not happened (#318).
+ */
+export function getToolSummaryTitle(category: ToolSummaryCategory, tool: ToolCall): string {
+    switch (category) {
+        case 'terminal':
+            return t('tools.names.terminal');
+        case 'edit': {
+            const outcome = getToolModel(tool).outcome;
+            if (outcome === 'succeeded') {
+                return t('toolGroup.editedFile');
+            }
+            return `${t('tools.names.editFile')} · ${t(`tools.outcome.${outcome}`)}`;
+        }
+        case 'read':
+            return t('tools.names.readFile');
+        case 'search':
+            return t('tools.names.search');
+        case 'web':
+            return t('tools.names.fetchUrl');
+        case 'task':
+            return t('tools.names.task');
+        default:
+            return tool.name;
+    }
+}
+
+export function getToolSummaryDetail(tool: ToolCall): string | null {
     const terminalCommand = getTerminalToolCommand(tool);
     if (terminalCommand) {
         return terminalCommand;
     }
 
-    const filePath = tool.input?.file_path;
+    // The validated argument record: a null / array payload reads as {}.
+    const args = getToolModel(tool).arguments.value;
+
+    const filePath = args.file_path;
     if (typeof filePath === 'string' && filePath.trim().length > 0) {
         return filePath.trim();
     }
 
-    const patchFiles = getPatchFiles(tool.input);
+    const patchFiles = getPatchFiles(args);
     if (patchFiles.length > 0) {
         if (patchFiles.length === 1) {
             return patchFiles[0];
@@ -93,17 +126,17 @@ export function getToolSummaryDetail(tool: Pick<ToolCall, 'name' | 'input' | 'de
         return `${patchFiles[0]} +${patchFiles.length - 1}`;
     }
 
-    const path = tool.input?.path;
+    const path = args.path;
     if (typeof path === 'string' && path.trim().length > 0) {
         return path.trim();
     }
 
-    const pattern = tool.input?.pattern;
+    const pattern = args.pattern;
     if (typeof pattern === 'string' && pattern.trim().length > 0) {
         return pattern.trim();
     }
 
-    const url = tool.input?.url;
+    const url = args.url;
     if (typeof url === 'string' && url.trim().length > 0) {
         return url.trim();
     }
@@ -111,35 +144,23 @@ export function getToolSummaryDetail(tool: Pick<ToolCall, 'name' | 'input' | 'de
     return tool.description?.trim() || null;
 }
 
-export function getTerminalToolCommand(tool: Pick<ToolCall, 'name' | 'input'>): string | null {
+/**
+ * The command a terminal card header / summary row shows — the canonical
+ * model's command, the same text the card body renders. The previous
+ * extractor picked the first `parsed_cmd` of a compound Codex command
+ * (`cat a && cat b` showed `cat a`, #286) and sliced a Gemini title at its
+ * first " [" (`if [ -f x ]; ...` showed `if`, #295).
+ */
+export function getTerminalToolCommand(tool: ToolCall): string | null {
     if (!isTerminalToolName(tool.name)) {
         return null;
     }
-
-    const parsedCmd = tool.input?.parsed_cmd;
-    if (Array.isArray(parsedCmd) && parsedCmd.length > 0) {
-        const cmd = parsedCmd.find((item) => typeof item?.cmd === 'string' && item.cmd.trim().length > 0)?.cmd;
-        if (cmd) {
-            return cmd.trim();
-        }
+    const command = getToolModel(tool).command?.command ?? null;
+    if (command === null) {
+        return null;
     }
-
-    const directCommand = stringifyToolCommand(tool.input?.command);
-    if (directCommand) {
-        return directCommand;
-    }
-
-    const title = tool.input?.toolCall?.title;
-    if (typeof title === 'string') {
-        const bracketIdx = title.indexOf(' [');
-        const command = bracketIdx > 0 ? title.substring(0, bracketIdx) : title;
-        const trimmed = command.trim();
-        if (trimmed.length > 0) {
-            return trimmed;
-        }
-    }
-
-    return null;
+    const trimmed = command.trim();
+    return trimmed.length > 0 ? trimmed : null;
 }
 
 function getPatchFiles(input: any): string[] {
