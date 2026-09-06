@@ -47,6 +47,12 @@ export interface AgyInit {
   continueLast?: boolean;
 }
 
+/** The `agySettings` blob as THIS adapter writes it. `continueLast` (#468)
+ *  and `title` (#469) ride beside the fields windowRecord.ts declares: its
+ *  type has neither yet (out of this fix's scope), and saveWindowRecord
+ *  stores the object as given, so both survive a daemon/session restart. */
+interface AgySettingsRecord { model?: string; conversationId?: string; continueLast?: boolean; title?: string }
+
 /** One wire event from `--output-format stream-json`. */
 interface AgyEvent {
   event?: string;
@@ -136,11 +142,21 @@ export class AgySession implements AgentSession {
     this.model = init.model;
     this.currentModel = init.model;
     this.#conversationId = init.conversationId;
-    this.#continueLast = init.continueLast === true;
+    const rec = loadWindowRecord(init.id);
+    const saved = rec?.agySettings as AgySettingsRecord | undefined;
+    // A restart before the first prompt used to forget `--continue` (#468):
+    // only model + conversationId were persisted, so the replacement launched
+    // a FRESH conversation instead of the CLI's most recent one. The pending
+    // flag is restored until a concrete conversation id has been learned.
+    this.#continueLast = init.continueLast === true || (!init.conversationId && saved?.continueLast === true);
     this.status = init.status;
     this.#startedAt = init.startedAt;
     this.#deps = deps;
-    this.#titleLocked = loadWindowRecord(init.id)?.titleLockedByUser === true;
+    this.#titleLocked = rec?.titleLockedByUser === true;
+    // The lock survived restarts but the title it protected did not (#469):
+    // the replacement card came up untitled AND #maybeTitle refused to fill
+    // it. Restore the persisted title together with its lock.
+    if (this.#titleLocked && saved?.title) this.summary = saved.title;
   }
 
   get relayAttached(): boolean { return this.#relay !== null; }
@@ -158,6 +174,9 @@ export class AgySession implements AgentSession {
     rs.start();
     void rs.updateJoyState(this.status === "ended" ? "detached" : "running");
     if (this.currentModel) void rs.updateModelCode(this.currentModel);
+    // createRelaySession builds the card's metadata without a summary: a
+    // /title restored from the record must be pushed onto the new card (#469).
+    if (this.summary) void rs.updateSummary(this.summary);
     return true;
   }
 
@@ -174,10 +193,17 @@ export class AgySession implements AgentSession {
 
   #persistRecord(): void {
     if (this.status === "ended") return; // a retired/killed generation must not recreate a deleted record (#52)
-    saveWindowRecord(this.id, {
-      launchCwd: this.cwd, agent: "agy",
-      agySettings: { model: this.currentModel ?? this.model, conversationId: this.#conversationId },
-    });
+    const agySettings: AgySettingsRecord = {
+      model: this.currentModel ?? this.model,
+      conversationId: this.#conversationId,
+      // Only while no id is known: once `init` names the conversation the
+      // flag is spent and `--conversation` takes over (#468).
+      continueLast: this.#continueLast && !this.#conversationId ? true : undefined,
+      // Only the user's explicit title is worth keeping; a prompt-derived one
+      // is recomputed on the next prompt anyway (#469).
+      title: this.#titleLocked && this.summary ? this.summary : undefined,
+    };
+    saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "agy", agySettings });
   }
 
   // ── queue → one process per turn ──────────────────────────────────────────
@@ -192,8 +218,19 @@ export class AgySession implements AgentSession {
   }
 
   #runTurn(item: QueuedMessage): void {
+    // The prompt goes over stdin, not argv (#56): argv is readable by every
+    // local uid via /proc/<pid>/cmdline for the whole turn (prompts carry
+    // pasted secrets, handoff notes, joy-messages from other sessions), and a
+    // single argument over Linux's MAX_ARG_STRLEN (128 KiB) failed the spawn
+    // with E2BIG — and #drain then failed every queued prompt behind it the
+    // same way. agy 1.0.12 has no `--print -` / `--input-file`; what it has is
+    // `--input-format stream-json`: one NDJSON `{"event":"user","message":
+    // {"role":"user","content":…}}` per stdin line runs one turn, and stdin
+    // EOF ends the process after it (probed live 2026-09-06). `--print` is a
+    // string flag, so it is passed empty. No temp file: nothing hits disk.
     const args = [
-      "--print", item.text,
+      "--print", "",
+      "--input-format", "stream-json",
       "--output-format", "stream-json",
       "--dangerously-skip-permissions",
       "--add-dir", this.cwd,
@@ -215,7 +252,7 @@ export class AgySession implements AgentSession {
       // JOY_SESSION_ID is how the joy CLI knows WHO is talking: without it a
       // `joy send` from inside this session was stamped "cli". Same two
       // variables the claude launch line exports.
-      proc = spawn("agy", args, { cwd: this.cwd, env: { ...process.env, JOY_SESSION_ID: this.id, JOY_DAEMON_FILE: daemonFilePath() }, stdio: ["ignore", "pipe", "pipe"] });
+      proc = spawn("agy", args, { cwd: this.cwd, env: { ...process.env, JOY_SESSION_ID: this.id, JOY_DAEMON_FILE: daemonFilePath() }, stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
       this.#finalize(run, "failed", `spawn failed: ${e}`);
       return;
@@ -248,6 +285,10 @@ export class AgySession implements AgentSession {
       this.#finalize(run, "failed", String(e));
     });
     proc.on("exit", (code) => { run.exit = { code }; this.#maybeFinalize(run); });
+    // EPIPE (agy died before reading its prompt) must not become an uncaught
+    // exception that takes the daemon down; exit/close settle the run.
+    proc.stdin?.on("error", (e) => process.stderr.write(`[agy ${this.id}] stdin error: ${e instanceof Error ? e.message : e}\n`));
+    proc.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: item.text } }) + "\n");
   }
 
   /** Settle a run once its exit status AND its stdout EOF have both arrived. */
@@ -311,13 +352,8 @@ export class AgySession implements AgentSession {
           this.#conversationId = r.conversation_id;
           this.#persistRecord();
         }
-        // The stream may end the last agent_response step only implicitly:
-        // flush any text still buffered before closing the turn.
-        for (const [idx, buf] of run.textByStep) {
-          const text = buf.trim();
-          if (text) this.#relay?.send(encodeTextEvent(text, { turn }), `${turn}:text:${idx}`);
-        }
-        run.textByStep.clear();
+        // The stream may end the last agent_response step only implicitly;
+        // #endTurn flushes whatever is still buffered (#467).
         const u = r?.usage;
         if (u && (u.input_tokens ?? 0) > 0) void this.#relay?.updateContext(u.input_tokens ?? 0);
         this.#endTurn(run, r?.status === "SUCCESS" ? "completed" : "failed");
@@ -327,10 +363,26 @@ export class AgySession implements AgentSession {
     }
   }
 
+  /** Publish any agent_response text still buffered for a run — to the relay
+   *  AND the local chat log — deleting each entry so it goes out exactly once.
+   *  Runs before EVERY turn end (#467): a crash, timeout, cancel or kill used
+   *  to drop text the daemon had already received, and the next run's fresh
+   *  map made it unrecoverable — only the failure notice reached either sink. */
+  #flushText(run: AgyRun): void {
+    for (const [idx, buf] of run.textByStep) {
+      const text = buf.trim();
+      if (!text) continue;
+      this.#relay?.send(encodeTextEvent(text, { turn: run.turn }), `${run.turn}:text:${idx}`);
+      this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: this.id });
+    }
+    run.textByStep.clear();
+  }
+
   /** Emit the turn-end row for a run exactly once. */
   #endTurn(run: AgyRun, status: "completed" | "failed" | "cancelled"): void {
     if (run.turnEnded) return;
     run.turnEnded = true;
+    this.#flushText(run); // received text precedes the end row, whatever the status (#467)
     this.#relay?.send(encodeTurnEnd(status, { turn: run.turn }), `${run.turn}:end`);
   }
 
@@ -342,6 +394,7 @@ export class AgySession implements AgentSession {
     if (run.finalized) return;
     run.finalized = true;
     if (status === "failed" && !run.turnEnded) {
+      this.#flushText(run); // what was generated, then why it stopped (#467)
       process.stderr.write(`[agy ${this.id}] turn failed: ${why}\n`);
       this.#relay?.send(encodeUserMessage(`⚠ agy: ${why}`, Date.now()));
     }
@@ -375,6 +428,7 @@ export class AgySession implements AgentSession {
       this.#titleLocked = !!t;
       saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: !!t });
       if (t) { this.summary = t; void this.#relay?.updateSummary(t); }
+      this.#persistRecord(); // the title is persisted with its lock (#469)
       this.#deps.broadcast("session_update", this.toJSON());
       if (mirror) this.#relay!.send(encodeUserMessage(text, at), `agy:in:${this.id}:${item.id}`);
       return { ...item, handled: "command" };
