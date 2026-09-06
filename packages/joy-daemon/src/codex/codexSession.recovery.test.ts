@@ -585,3 +585,71 @@ test("#625: fresh spawn — a dead in-progress turn whose items came back partia
   expect(queueFor(s2).state()).toMatchObject({ busy: false, pendingCount: 0 });
   s.end("killed"); s2.end("killed");
 });
+
+// #625 follow-up (review wave F18): the dead-turn skip is scoped to prompts the
+// coordinator will resend. A prompt typed in the attached TUI has no ledger
+// command; a prompt of ours the ledger already settled will not be resent.
+// Both are history: on a fresh card their user row replays and the dead turn
+// closes `interrupted`, exactly as before #625 — skipping them lost history.
+
+test("#625: fresh card — a dead in-progress turn holding only a FOREIGN (TUI-typed) prompt replays its user row and closes interrupted; nothing is resent", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-foreign", status: "inProgress", items: [{ id: "foreign-user", type: "userMessage", clientId: "foreign-client", text: "typed directly in TUI" }] },
+  ] } };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-625-foreign", { relay, freshCard: true });
+  await settle(50);
+  expect(H.turnStarts).toHaveLength(0); // nobody's to resend
+  expect(sent.filter((x) => x.t === "user")).toEqual([{ localId: "turn:T-foreign:user:0", t: "user", text: "typed directly in TUI" }]);
+  expect(sent.filter((x) => x.t === "turn-start").map((x) => x.localId)).toEqual(["codex:TH:turn:T-foreign:start"]);
+  expect(sent.filter((x) => x.t === "turn-end").map((x) => x.localId)).toEqual(["codex:TH:turn:T-foreign:complete"]);
+  // user row BEFORE the bracket (#131 / #78 ordering).
+  expect(sent.findIndex((x) => x.t === "user")).toBeLessThan(sent.findIndex((x) => x.t === "turn-start"));
+  expect(ledger().listPending(s.id)).toEqual([]);
+  expect(s.busy()).toBe(false);
+  s.end("killed");
+});
+
+test("#625: fresh card — a dead in-progress turn holding one PENDING prompt of ours and one foreign prompt: the foreign one replays, ours is re-sent once, the turn closes interrupted once", async () => {
+  const id = "rec-625-mixed";
+  const { s, cmdId } = await crashedMidTurn(id, "lost prompt");
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "inProgress", items: [
+      { type: "userMessage", id: "msg_1", clientId: cmdId, content: [{ type: "text", text: "lost prompt" }] },
+      { type: "userMessage", id: "msg_2", clientId: "tui-client", content: [{ type: "text", text: "typed in TUI" }] },
+    ] },
+  ] } };
+  const { relay, sent } = fakeRelay();
+  const { s: s2 } = await started(id, { relay, freshCard: true });
+  await vi.waitFor(() => expect(H.turnStarts).toHaveLength(2));
+  expect(H.turnStarts[1]).toEqual({ text: "lost prompt", clientId: `${cmdId}#a2` });
+  expect(ledger().listObservations(id, "reconcile").map((o) => (o.payload as { outcome: string }).outcome)).toEqual(["absent"]);
+  expect(ledger().getCommand(cmdId)?.state).toBe("accepted"); // waiting on ITS OWN echo, not the dead turn's
+  await settle(50);
+  expect(H.turnStarts).toHaveLength(2); // nothing runs a third time
+  // The foreign prompt is the only user row the dead turn replays; ours will
+  // arrive through its resend, never as a stale copy bound to the dead turn.
+  expect(sent.filter((x) => x.t === "user")).toEqual([{ localId: "turn:T1:user:0", t: "user", text: "typed in TUI" }]);
+  expect(sent.filter((x) => x.t === "turn-start").map((x) => x.localId)).toEqual(["codex:TH:turn:T1:start"]);
+  expect(sent.filter((x) => x.t === "turn-end").map((x) => x.localId)).toEqual(["codex:TH:turn:T1:complete"]);
+  s.end("killed"); s2.end("killed");
+});
+
+test("#625: fresh card — a dead in-progress turn holding only a prompt of ours the ledger already SETTLED replays it and closes interrupted; it is not re-sent", async () => {
+  const id = "rec-625-settled";
+  const { s, cmdId } = await crashedMidTurn(id, "old prompt");
+  expect(ledger().transition(cmdId, ["accepted"], "interrupted", { terminalReason: "cancelled" })).toBe(true); // e.g. the user hit Stop before the crash
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "inProgress", items: [{ type: "userMessage", id: "msg_1", clientId: cmdId, content: [{ type: "text", text: "old prompt" }] }] },
+  ] } };
+  const { relay, sent } = fakeRelay();
+  const { s: s2 } = await started(id, { relay, freshCard: true });
+  await settle(50);
+  expect(H.turnStarts).toHaveLength(1); // settled: nothing to resend
+  expect(ledger().listObservations(id, "reconcile")).toEqual([]);
+  expect(ledger().getCommand(cmdId)?.state).toBe("interrupted");
+  expect(sent.filter((x) => x.t === "user")).toEqual([{ localId: "turn:T1:user:0", t: "user", text: "old prompt" }]);
+  expect(sent.filter((x) => x.t === "turn-end").map((x) => x.localId)).toEqual(["codex:TH:turn:T1:complete"]);
+  expect(s2.busy()).toBe(false);
+  s.end("killed"); s2.end("killed");
+});

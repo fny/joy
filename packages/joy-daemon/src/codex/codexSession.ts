@@ -35,7 +35,7 @@ import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcRespons
 import { CodexNormalizer, itemSignature, isPositionalHistoryId, type CodexNotification } from "./normalize";
 import type { WireRecord } from "../relay/relay";
 import { buildCodexAttachCommand } from "./attach";
-import { ledgerFor, type Ledger } from "../domain/ledger";
+import { ledgerFor, AWAITING_ATTEMPT_STATES, NON_TERMINAL_STATES, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand } from "../domain/coordinator";
 import { CodexDriver, codexTurnStatus, type CodexRuntimePort } from "./codexDriver";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
@@ -852,19 +852,25 @@ export class CodexSession implements AgentSession {
         if (!this.#deferredFloor || tid < this.#deferredFloor) this.#deferredFloor = tid;
         if (status !== "inProgress") continue;
       }
-      const items = deferred ? [] : (Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : []);
+      let items = deferred ? [] : (Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : []);
       // A turn the OLD server left in progress is dead with it on a fresh
-      // spawn (a rejoin keeps it live, below). One showing nothing but the
-      // prompt is not replayed at all (#625): no echo binds its row, so the
-      // row stays `unknown` and the coordinator's reconcile — the driver's
-      // thread/read finds it in a dead turn with no output — re-sends it.
-      // One that visibly ran is replayed and closed below, and its row ends
+      // spawn (a rejoin keeps it live, below). When nothing ran, a prompt of
+      // OURS still pending is not replayed (#625): no echo binds its row, so
+      // the row stays `unknown` and the coordinator's reconcile — the
+      // driver's thread/read finds it in a dead turn with no output —
+      // re-sends it. Only such prompts, though: one typed in the TUI, or one
+      // of ours the ledger already settled, is nobody's to resend, so it
+      // replays like any history (its user row on a fresh card) and the dead
+      // turn closes `interrupted` below — dropping it lost history. One that
+      // visibly ran is replayed whole and closed below, and its row ends
       // `interrupted` so the prompt is never run twice.
       const dead = status === "inProgress" && !this.#rejoined;
       const ran = items.some((item) => String((item as { type?: unknown }).type ?? "") !== "userMessage");
       if (dead && !ran) {
-        process.stderr.write(`[codex ${this.id}] turn ${tid} died with the previous app-server before any output — not replayed; its prompt is reconciled from thread/read\n`);
-        continue;
+        const kept = items.filter((item) => !this.#pendingOwnPrompt(item));
+        if (kept.length < items.length) process.stderr.write(`[codex ${this.id}] turn ${tid} died with the previous app-server before any output — ${items.length - kept.length} pending prompt(s) of ours not replayed; reconciled from thread/read\n`);
+        if (!kept.length) continue;
+        items = kept;
       }
       // What replay is about to emit — id, ordinal, whole content — for the
       // live-buffer flush (#519).
@@ -919,7 +925,13 @@ export class CodexSession implements AgentSession {
         this.#emitReplayedTurnEnd(tid, codexTurnStatus(status), "replayed from thread/read");
       } else if (!this.#rejoined) {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: "interrupted" } } }));
-        this.#emitReplayedTurnEnd(tid, "interrupted", "app-server died mid-turn");
+        // Only a dead turn that visibly RAN is the coordinator's to end here
+        // (its rows settle `interrupted` rather than run twice). One that
+        // never ran holds prompts reconcile is about to re-send — withheld
+        // above, yet bound to this turn id since turn/start named it — or
+        // rows the ledger already settled: a turn_ended naming the turn
+        // would end the pending row `interrupted` and lose the resend.
+        if (ran) this.#emitReplayedTurnEnd(tid, "interrupted", "app-server died mid-turn");
       } else {
         // A LIVE turn we rejoined: it is the active one — busy, thinking,
         // interruptible by id. Its turn/started fired before we connected
@@ -934,6 +946,22 @@ export class CodexSession implements AgentSession {
       }
     }
     // The high-water advances via terminal-row ACKs (setReceiptSink).
+  }
+
+  /** Is this history prompt one the coordinator is about to settle itself: an
+   *  attempt of ours still awaiting evidence, on a command still pending? On
+   *  a fresh spawn the restart left such a command `unknown`; its reconcile
+   *  re-sends it when the dead turn shows no output (#625). Anything else —
+   *  a TUI-typed prompt, a prompt of ours already settled — is history to
+   *  replay. */
+  #pendingOwnPrompt(item: Record<string, unknown>): boolean {
+    if (String(item.type ?? "") !== "userMessage") return false;
+    const ref = String(item.clientId ?? item.clientUserMessageId ?? "");
+    if (!ref) return false;
+    const attempt = this.#ledger.attemptByRef(this.id, ref);
+    if (!attempt || !AWAITING_ATTEMPT_STATES.includes(attempt.state)) return false;
+    const cmd = this.#ledger.getCommand(attempt.commandId);
+    return !!cmd && NON_TERMINAL_STATES.includes(cmd.state);
   }
 
   /** A history turn's end, told to the coordinator when one of our attempts
