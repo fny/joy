@@ -54,7 +54,7 @@ test("a seq delivered and then pruned still dedupes through the retained receipt
   expect(accept("s1", "hello", { seq: 3, source: "relay" })).toMatchObject({ id: c.id, deduped: "receipt" });
   // ...and after retention removes the command row, the receipt answers.
   now += 8 * 24 * 3_600_000;
-  ledger.prune({ terminalOlderThanMs: 7 * 24 * 3_600_000, observationsOlderThanMs: 30 * 24 * 3_600_000 });
+  ledger.prune({ terminalOlderThanMs: 7 * 24 * 3_600_000, observationsOlderThanMs: 30 * 24 * 3_600_000, transcriptReceiptsPerSession: 5_000 });
   expect(ledger.getCommand(c.id)).toBeNull();
   expect(ledger.hasReceipt("s1", "seq", "3")).toBe(false); // receipts follow the same 7-day retention...
   // ...so re-add one to show the receipt path alone dedupes.

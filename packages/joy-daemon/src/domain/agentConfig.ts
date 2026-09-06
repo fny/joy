@@ -75,6 +75,10 @@ export function readAgentConfig(agent: string): { ok: true; agent: string; path:
 // additionally descends only through OWN properties.
 const FORBIDDEN_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
 
+/** The largest real array index (2^32−2). Above it an assignment silently
+ *  becomes a string property, which JSON serialization drops (#525). */
+const MAX_ARRAY_INDEX = 0xfffffffe;
+
 /** `examples[0].title` → ["examples", 0, "title"]. Dots and [n] only — quoted
  *  keys aren't supported (none of the agent configs need them).
  *
@@ -107,7 +111,15 @@ export function parsePathExpr(expr: string): Array<string | number> {
       if (close < 0) bad("unmatched \"[\"");
       const idx = expr.slice(i + 1, close);
       if (!/^\d+$/.test(idx)) bad(`index "[${idx}]" must be a non-negative integer`);
-      out.push(Number(idx));
+      // Range, not just shape (#525 residual, Astra on 4a69e55c): `[4294967295]`
+      // is a well-formed non-negative integer but not an ARRAY index — the
+      // maximum is 2^32−2, and above it `arr[n] = v` writes an ordinary string
+      // property that JSON.stringify drops, so the op reported ok:true /
+      // applied:1 over an unchanged file. Anything past Number.MAX_SAFE_INTEGER
+      // also stops round-tripping through Number() at all.
+      const n = Number(idx);
+      if (!Number.isSafeInteger(n) || n > MAX_ARRAY_INDEX) bad(`index "[${idx}]" is out of range (max ${MAX_ARRAY_INDEX})`);
+      out.push(n);
       i = close + 1;
       continue;
     }
@@ -160,10 +172,19 @@ function setAtPath(doc: Record<string, unknown>, path: Array<string | number>, v
     }
     return undefined;
   };
+  /** An index may address an existing element or APPEND at the end; a gap
+   *  past the end is refused (#525 residual). Writing `examples[9]` into a
+   *  one-element array is not the edit anyone means — it would either grow
+   *  the file by eight `null`s or, past 2^32−2, be dropped entirely and
+   *  reported as applied. */
+  const checkIndex = (arr: unknown[], idx: number, i: number): void => {
+    if (idx > arr.length) throw new Error(`index out of range: ${describe(i)} — the array has ${arr.length} element(s), so [${idx}] would leave a gap (append at [${arr.length}])`);
+  };
   let node: unknown = doc;
   for (let i = 0; i < path.length - 1; i++) {
     const key = path[i];
     const nextKey = path[i + 1];
+    if (Array.isArray(node) && typeof key === "number") checkIndex(node, key, i);
     let child = childOf(node, key, i);
     if (child === undefined || typeof child !== "object" || child === null) {
       if (del) return false; // nothing to delete beneath a missing/scalar parent — leave the doc alone
@@ -179,6 +200,7 @@ function setAtPath(doc: Record<string, unknown>, path: Array<string | number>, v
   if (Array.isArray(node)) {
     if (typeof last !== "number") throw new Error(`path type mismatch: ${describe(parentIdx)} is an array; "${last}" is not an index`);
     if (del) { if (last >= node.length) return false; node.splice(last, 1); return true; }
+    checkIndex(node, last, path.length - 1);
     node[last] = value;
     return true;
   }

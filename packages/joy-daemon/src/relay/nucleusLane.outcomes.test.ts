@@ -34,6 +34,9 @@ const adapterFor = (localId: string) => new RelaySession({ client: { creds: { ma
 function makeFakeRelay(sessions: any[] = []) {
     const calls: Array<{ method: string; path: string; body: any }> = [];
     const answers = new Map<string, { status: number; body: unknown } | ((body: any) => { status: number; body: unknown })>();
+    // "METHOD path" → ms to hold the RESPONSE (the call is recorded on
+    // arrival). Lets a test put the daemon inside an in-flight round trip.
+    const delays = new Map<string, number>();
     let workOffers: any[] = [];
     const server = http.createServer((req, res) => {
         let raw = "";
@@ -42,7 +45,11 @@ function makeFakeRelay(sessions: any[] = []) {
             const body = raw ? JSON.parse(raw) : {};
             const path = req.url!.replace(/^\/joy\/v2/, "");
             const method = req.method!;
-            const send = (obj: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+            const hold = delays.get(`${method} ${path}`) ?? 0;
+            const send = (obj: unknown, status = 200) => {
+                const write = () => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+                if (hold) setTimeout(write, hold); else write();
+            };
             const a = answers.get(`${method} ${path}`);
             if (a) { calls.push({ method, path, body }); const r = typeof a === "function" ? a(body) : a; return send(r.body, r.status); }
             if (path === "/daemon/leases") return send({ leaseId: "L1", leaseToken: "T1", epoch: 1 });
@@ -55,7 +62,7 @@ function makeFakeRelay(sessions: any[] = []) {
         });
     });
     return {
-        server, calls, answers,
+        server, calls, answers, delays,
         listen: () => new Promise<string>(r => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as any).port}`))),
         pushWork: (o: any) => workOffers.push(o),
         facts: (turn: string) => calls.filter(c => c.path === `/daemon/turns/${turn}/facts`).map(c => c.body),
@@ -120,6 +127,34 @@ describe("nucleusLane: adapter turn outcome (#584)", () => {
         await until(() => relay.facts("t2").some(b => b.type === "terminal"), 10_000);
         expect(relay.facts("t2").find(b => b.type === "terminal")).toMatchObject({ terminalState: "completed" });
     }, 25_000);
+
+    // #584 residual (Astra on 4a69e55c): the adapter fails while /start is
+    // still in flight. The verdict used to be counted only from the moment
+    // the relay ANSWERED /start, so a failure that had already executed was
+    // discarded and idle alone terminalized the turn `completed` — the
+    // relay's response time deciding whether a real failure counted.
+    it("a failure emitted while /start is in flight still terminalizes failed", async () => {
+        const relay = makeFakeRelay();
+        const url = await relay.listen(); srv = relay.server;
+        relay.delays.set("POST /daemon/turns/t3/start", 1_500);
+        const session = makeFakeSession("loc3");
+        const registry: any = { get: (i: string) => (i === "loc3" ? session : undefined), create: async () => session, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: () => {} });
+        relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s3", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
+        await until(() => relay.calls.some(c => c.path.endsWith("/bind")));
+        relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s3", kind: "prompt", turnId: "t3", ciphertext: enc("do it") });
+        await until(() => session.enqueued.includes("do it"));
+        session._pending = 0; session._busy = true;
+        // The POST arrives (recorded here) but its response is held 1.5s.
+        await until(() => relay.calls.some(c => c.path === "/daemon/turns/t3/start"));
+        const adapter = adapterFor("loc3");
+        adapter.send(encodeTurnEnd("failed", { turn: "a3" }), "loc3:a3:end"); // inside the round trip
+        await sleep(2_500);                                             // /start answers; the wait moves on
+        session._busy = false;                                          // execution stopped
+        await until(() => relay.facts("t3").some(b => b.type === "terminal"), 15_000);
+        expect(relay.facts("t3").find(b => b.type === "terminal"))
+            .toMatchObject({ terminalState: "failed", meta: { reason: "agent_reported_failed" } });
+    }, 30_000);
 });
 
 describe("nucleusLane: spawn-failed report acknowledged before abandoning (#581)", () => {
@@ -148,6 +183,42 @@ describe("nucleusLane: spawn-failed report acknowledged before abandoning (#581)
         await until(() => relay.calls.some(c => c.path === "/daemon/deliveries/dA3/received"));
         await sleep(800);
         expect(relay.count("POST", "/daemon/sessions/v2s9/spawn-failed")).toBe(2);
+    }, 25_000);
+
+    // #581 residual (Astra on 4a69e55c): the relay answers 200 with
+    // `{ok:true, applied:false, reason:'stale_attempt'}` — it did NOT apply
+    // the failure, the spawn command is still live and still queued. Reading
+    // that as an acknowledgement abandoned the command anyway, so the app
+    // never saw the directory approval it needed: the same dead end the 503
+    // fix closed, one HTTP round trip later.
+    it("a report the relay did not apply to a still-live command is reported again", async () => {
+        const relay = makeFakeRelay();
+        const url = await relay.listen(); srv = relay.server;
+        const registry: any = {
+            get: () => undefined,
+            create: async () => { throw new DirectoryCreationApprovalRequired("/tmp/nope-missing"); },
+            chatHistory: () => [], listRecords: () => [], saveRecord: () => {},
+        };
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: () => {} });
+        const report = "POST /daemon/sessions/v2s8/spawn-failed";
+        relay.answers.set(report, { status: 200, body: { ok: true, applied: false, reason: "stale_attempt" } });
+        const offer = { deliveryId: "dB1", commandId: "sp8", sessionId: "v2s8", kind: "spawn_session", ciphertext: spawnSpec("/tmp/nope-missing") };
+        relay.pushWork(offer);
+        await until(() => relay.count("POST", "/daemon/sessions/v2s8/spawn-failed") === 1);
+        // A current delivery of the SAME command: the stale answer retired the
+        // delivery, never the command.
+        relay.pushWork({ ...offer, deliveryId: "dB2" });
+        await until(() => relay.count("POST", "/daemon/sessions/v2s8/spawn-failed") === 2, 10_000);
+        expect(relay.calls.filter(c => c.path === "/daemon/sessions/v2s8/spawn-failed")[1].body)
+            .toEqual({ reason: "dir_missing:/tmp/nope-missing", deliveryId: "dB2" });
+        // `already_bound` DOES settle the command — a later attempt won it.
+        relay.answers.set(report, { status: 200, body: { ok: true, applied: false, reason: "already_bound" } });
+        relay.pushWork({ ...offer, deliveryId: "dB3" });
+        await until(() => relay.count("POST", "/daemon/sessions/v2s8/spawn-failed") === 3, 10_000);
+        relay.pushWork({ ...offer, deliveryId: "dB4" });
+        await until(() => relay.calls.some(c => c.path === "/daemon/deliveries/dB4/received"));
+        await sleep(800);
+        expect(relay.count("POST", "/daemon/sessions/v2s8/spawn-failed")).toBe(3);
     }, 25_000);
 });
 

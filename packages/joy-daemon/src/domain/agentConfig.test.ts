@@ -18,6 +18,16 @@ describe("parsePathExpr", () => {
       expect(() => parsePathExpr(bad), bad).toThrow(/bad path/);
     }
   });
+  // #525 residual (Astra on 4a69e55c): a well-formed but OUT-OF-RANGE index.
+  // 2^32−1 and up are not array indices at all — the assignment becomes a
+  // string property JSON.stringify drops, so the op used to answer ok:true /
+  // applied:1 over a file that never changed.
+  it("rejects indices past the largest real array index (#525)", () => {
+    for (const bad of ["examples[4294967295].title", "a[4294967296]", "a[99999999999999999999]"]) {
+      expect(() => parsePathExpr(bad), bad).toThrow(/out of range/);
+    }
+    expect(parsePathExpr("a[4294967294]")).toEqual(["a", 4294967294]);
+  });
   // #54: prototype-walking segments never reach the document.
   it("refuses __proto__ / constructor / prototype segments (#54)", () => {
     expect(() => parsePathExpr("__proto__.polluted")).toThrow(/not an allowed key/);
@@ -89,6 +99,27 @@ describe("agent config file round-trip", () => {
     const r = applyAgentConfigAssignments("opencode", ["theme = dark"]);
     expect(r.ok).toBe(false);
     expect((r as any).error).toContain("raw mode");
+  });
+
+  // #525 residual: an in-range index that would leave a GAP is refused, not
+  // written — `examples[9]` into a one-element array either grows the file by
+  // eight nulls or (past 2^32−2) is dropped and reported as applied.
+  it("refuses an index that would leave a gap, and never reports a phantom write (#525)", () => {
+    const dir = join(home, ".pi", "agent");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "settings.json");
+    writeFileSync(file, JSON.stringify({ examples: [] }));
+
+    for (const line of ['examples[4294967295].title = "change"', 'examples[9].title = "gap"', 'examples[1].title = "gap"']) {
+      const r = applyAgentConfigAssignments("pi", [line]);
+      expect(r.ok, line).toBe(false);
+      expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual({ examples: [] }); // untouched
+    }
+    // Appending at the end is the supported growth, and it really lands.
+    const ok = applyAgentConfigAssignments("pi", ['examples[0].title = "first"', 'examples[1].title = "second"']);
+    expect(ok.ok).toBe(true);
+    expect((ok as any).applied).toBe(2);
+    expect(JSON.parse(readFileSync(file, "utf-8")).examples).toEqual([{ title: "first" }, { title: "second" }]);
   });
 
   it("writeAgentConfigRaw validates format", () => {

@@ -30,7 +30,7 @@ import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey } from "../paths";
-import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./relay";
+import { setRecordSink, setOutboundPersistDegraded, relaySessionFor, type WireRecord } from "./relay";
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type JobRow, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
 import { coordinatorFor } from "../domain/coordinator";
@@ -72,6 +72,10 @@ export interface NucleusLaneHandle {
    *  the machine key. The authoritative source for the machine record's
    *  `capabilities.spawnSpecSealed` advertisement (#107). */
   spawnSpecSealed(): boolean;
+  /** Sessions whose relay event budget is exhausted, and how many records
+   *  have been dropped since (#130). The same numbers the card banner shows,
+   *  readable without one. */
+  eventBudgetDrops(): Array<{ v2SessionId: string; localSessionId: string; since: number; dropped: number }>;
 }
 
 interface Lease { leaseId: string; leaseToken: string; epoch: string }
@@ -374,6 +378,34 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 300);
   // Sessions whose relay event budget is exhausted: logged once, outputs dropped.
   const budgetExhausted = new Set<string>();
+  // …and what that costs, per session (#130). The drop used to be a single
+  // daemon log line: the user saw the conversation simply stop growing, with
+  // no way to tell a quiet agent from a truncated one. The count rides the
+  // card as `joy__eventBudget`, which the app renders like the retry and
+  // compacting banners, and it names the only recovery the relay allows — a
+  // fresh session (the budget is per session and retrying never clears it,
+  // see docs/API.md). Publishes are coalesced: a burst of dropped records is
+  // one card PATCH, not one per record.
+  const budgetDropped = new Map<string, { localId: string; since: number; dropped: number }>();
+  const budgetPublish = new Map<string, ReturnType<typeof setTimeout>>();
+  const BUDGET_PUBLISH_MS = 1_000;
+  function publishBudget(v2: string): void {
+    const st = budgetDropped.get(v2);
+    if (!st) return;
+    budgetPublish.delete(v2);
+    void relaySessionFor(st.localId)?.updateEventBudget({ since: st.since, dropped: st.dropped })
+      .catch(() => { /* the card is best effort; the next drop re-asserts it */ });
+  }
+  function noteBudgetDrop(localId: string, v2: string): void {
+    const st = budgetDropped.get(v2) ?? { localId, since: Date.now(), dropped: 0 };
+    st.localId = localId;
+    st.dropped++;
+    budgetDropped.set(v2, st);
+    if (budgetPublish.has(v2)) return;
+    const t = setTimeout(() => publishBudget(v2), BUDGET_PUBLISH_MS);
+    t.unref?.();
+    budgetPublish.set(v2, t);
+  }
   // Rows the ledger refused to commit (disk full, EIO). Kept in memory and
   // re-committed on every sweep tick; while any is held the adapters'
   // checkpoints are held too (RelaySession.outboundPersistDegraded), so a
@@ -432,7 +464,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       else if (!registry.get(row.sessionId) || Date.now() - row.createdAt > 24 * 3_600_000) return { ok: false, fate: "permanent", error: "unbound_abandoned" };
       else return { ok: false, fate: "unbound", error: "session not bound yet" };
     }
-    if (budgetExhausted.has(v2)) return { ok: false, fate: "permanent", error: "session_event_budget_exhausted" };
+    if (budgetExhausted.has(v2)) { noteBudgetDrop(row.sessionId, v2); return { ok: false, fate: "permanent", error: "session_event_budget_exhausted" }; }
     const l = lease;
     if (!l) return { ok: false, fate: "transient", error: "lease_lost" };
     // The key the record was committed under rides the row (#582): a session
@@ -468,7 +500,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (!budgetExhausted.has(v2)) {
           budgetExhausted.add(v2);
           log(`${row.sessionId}: relay event budget exhausted for v2 ${v2.slice(0, 8)} — further output for this session is dropped; the session needs a fresh card`);
+          // Once, on a plane the budget does not gate (#130): the session
+          // events are refused from here on, so the only way to say so is
+          // the card banner below and a push. Silence is what made this a
+          // conversation that simply stopped growing.
+          try { relaySessionFor(row.sessionId)?.notifyCustom("This session is full", "The agent is still running, but its output can no longer be saved. Continue in a new session."); }
+          catch { /* push is best effort */ }
         }
+        noteBudgetDrop(row.sessionId, v2);
         return { ok: false, fate: "permanent", error: "session_event_budget_exhausted" };
       }
       if (fate === "permanent") {
@@ -887,19 +926,37 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  a report delayed past a retry that already bound is answered
    *  `{ok:true, applied:false, reason}` and never overwrites the binding —
    *  logged here, not treated as an error (the relay is right to ignore it). */
-  /** Returns whether the relay ACKNOWLEDGED the report (#581). Callers mark
-   *  the spawn abandoned only on true: a report lost to a transient 503 used
-   *  to leave the command abandoned AND unreported — the relay kept offering
-   *  it, the lane answered every offer with a bare receipt, and the app never
-   *  saw the directory approval it needed. Now the next offer retries the
-   *  spawn, hits the same failure, and reports again. */
+  /** `applied:false` reasons that mean the COMMAND has moved on — a later
+   *  attempt bound it, or the session already left provisioning. There is no
+   *  spawn left to fail, so the command is finished with either way. Every
+   *  other `applied:false` (`stale_attempt`, `ambiguous_attempt`) retires
+   *  only THIS delivery: the command is still live and still needs a report
+   *  (#581 residual, Astra on 4a69e55c). */
+  const SPAWN_COMMAND_SETTLED = new Set(["already_bound", "already_progressed"]);
+
+  /** Returns whether the spawn COMMAND may now be abandoned (#581).
+   *
+   *  Two ways it must not be. A report lost to a transient 503 used to leave
+   *  the command abandoned AND unreported — the relay kept offering it, the
+   *  lane answered every offer with a bare receipt, and the app never saw the
+   *  directory approval it needed. And a report the relay answered
+   *  `applied:false, reason:'stale_attempt'` was read as an acknowledgement,
+   *  which abandoned the whole command even though the relay had explicitly
+   *  NOT applied the failure to the still-live spawn: same silent dead end,
+   *  one HTTP round trip later. Either way the next offer — a fresh delivery,
+   *  so no longer stale — retries the spawn, hits the same failure, and
+   *  reports again. */
   async function reportSpawnFailed(offer: WorkOffer, reason: string, leaseRef: Lease): Promise<boolean> {
     const kind = reason.split(":")[0];
     try {
       const r = await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`,
         { reason, deliveryId: offer.deliveryId }, leaseRef) as { ok?: boolean; applied?: boolean; reason?: string } | null;
       if (r && r.applied === false) {
-        log(`spawn ${offer.sessionId.slice(0, 8)}: ${kind} report not applied (${r.reason ?? "unknown"}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt`);
+        const why = r.reason ?? "unknown";
+        const settled = SPAWN_COMMAND_SETTLED.has(why);
+        log(`spawn ${offer.sessionId.slice(0, 8)}: ${kind} report not applied (${why}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt`
+          + (settled ? "; the command already moved on" : "; the command is still live — reporting again on its next offer"));
+        return settled;
       }
       return true;
     } catch (e2) {
@@ -1336,6 +1393,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         return finish("failed", "dispatch_timeout");
       }
       log(`${tag}: started (delivery confirmed)`);
+      // The adapter's verdicts count from DELIVERY, not from the relay's
+      // acknowledgement of it (#584 residual, Astra on 4a69e55c). This used
+      // to be set after the /start round trip below, so a legacy adapter that
+      // emitted `turn-end failed` while /start was in flight had its verdict
+      // discarded and the lane terminalized `completed` on idle alone — the
+      // relay's response time deciding whether an already-executed failure
+      // counted. The prompt is running the moment the delivery is confirmed;
+      // every turn-end from here belongs to THIS relay turn.
+      { const t = activeTurns.get(turnId); if (t) t.started = true; }
       try {
         await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
       } catch (e) {
@@ -1355,7 +1421,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         throw e;
       }
     }
-    { const t = activeTurns.get(turnId); if (t) t.started = true; } // adapter verdicts count from here (#584)
+    { const t = activeTurns.get(turnId); if (t) t.started = true; } // idempotent: also covers a resumed turn whose /start was already posted (#584)
 
     // Phase C — the command's terminal IS the turn's: completed/failed from
     // the runtime's turn-end, cancelled once the interrupt is confirmed,
@@ -1842,10 +1908,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       lease = null;
       sender.stop();
       setRecordSink(null);
+      for (const t of budgetPublish.values()) clearTimeout(t);
+      budgetPublish.clear();
     },
     // The tunnel executor BORROWS this lease rather than acquiring its own
     // (a second acquirer on the same machineId evicts the first).
     currentLease: () => (lease ? { leaseId: lease.leaseId, leaseToken: lease.leaseToken } : null),
     spawnSpecSealed: () => spawnSpecKey !== null,
+    eventBudgetDrops: () => [...budgetDropped.entries()].map(([v2SessionId, st]) => ({
+      v2SessionId, localSessionId: st.localId, since: st.since, dropped: st.dropped,
+    })),
   };
 }

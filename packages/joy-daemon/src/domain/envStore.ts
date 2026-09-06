@@ -30,7 +30,8 @@
 // environment already carries (service env / shell wins), matching the old
 // ~/.joy/env contract.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readdirSync, linkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, linkSync } from "node:fs";
+import { mkdirSecure } from "./secretFile";
 import { join } from "node:path";
 import { joyHomeDir } from "../paths";
 import { loadCredentials } from "../relay/relay";
@@ -82,7 +83,7 @@ const hooks: { beforePublish?: () => void } = {};
 export function __setEnvStoreHooksForTests(h: typeof hooks): void { Object.assign(hooks, h); }
 
 function withStoreLock<T>(fn: () => T): T | { ok: false; error: string } {
-  mkdirSync(joyHomeDir(), { recursive: true });
+  mkdirSecure(joyHomeDir()); // 0700 — env.sealed + the content key live here (#48)
   const db = new DatabaseSync(lockPath());
   try {
     db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timing.waitMs))}`);
@@ -122,7 +123,7 @@ function readLocalKey(): Uint8Array | null {
 function ensureLocalKey(): Uint8Array {
   const cur = readLocalKey();
   if (cur) return cur;
-  mkdirSync(joyHomeDir(), { recursive: true });
+  mkdirSecure(joyHomeDir()); // 0700 — env.sealed + the content key live here (#48)
   const k = randomBytes(32);
   const tmp = tmpPath(keyPath());
   writeFileSync(tmp, k.toString("base64") + "\n", { mode: 0o600 });
@@ -307,7 +308,7 @@ export function readEnvStore(): EnvStoreRead {
 
 function writeEnvStore(env: Record<string, string>): { ok: true } | { ok: false; error: string } {
   const key = ensureLocalKey();
-  mkdirSync(joyHomeDir(), { recursive: true });
+  mkdirSecure(joyHomeDir()); // 0700 — env.sealed + the content key live here (#48)
   const tmp = tmpPath(storePath());
   try {
     writeFileSync(tmp, seal(env, key) + "\n", { mode: 0o600 });
