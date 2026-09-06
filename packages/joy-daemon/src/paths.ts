@@ -1,6 +1,36 @@
 import { homedir } from "os";
-import { join } from "path";
-import { readFileSync } from "fs";
+import { join, resolve, dirname, basename } from "path";
+import { readFileSync, realpathSync } from "fs";
+
+/** Expand a leading ~ to the daemon user's home. tmux's -c does NOT expand
+ *  tildes (it is not a shell) and the app may send paths with ~ unresolved. */
+export function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+/** The ONE absolute, canonical form of a working directory (#549 #564):
+ *  `~` expanded, `.`/`..` segments folded, symlinks resolved through the
+ *  deepest existing ancestor (so a directory that does not exist yet —
+ *  createDir, a clone target — still lands under its real parent). Claude
+ *  Code keys its project dir (`~/.claude/projects/<encoded cwd>`) on the
+ *  process's physical cwd, so a session launched in `/repo/.` or through a
+ *  symlink was pinned to a transcript under a directory Claude never wrote;
+ *  every launch, record, transcript path and teleport must use this form. */
+export function canonicalCwd(p: string): string {
+  const abs = resolve(expandHome(p.trim()));
+  let head = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try { return join(realpathSync.native(head), ...tail); }
+    catch { /* not there (yet), or unreadable: try the parent */ }
+    const parent = dirname(head);
+    if (parent === head) return abs;
+    tail.unshift(basename(head));
+    head = parent;
+  }
+}
 
 /** The Joy home — $JOY_HOME_DIR or ~/.joy. Daemon state, per-session dirs,
  *  and per-relay credentials all live here.

@@ -28,7 +28,7 @@ import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
-import { joySessionDir } from "../paths";
+import { joySessionDir, canonicalCwd } from "../paths";
 import { ReverseUtf8Assembler } from "./textStream";
 import { shellJoin } from "./quote";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, rmdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
@@ -521,8 +521,11 @@ export const machineOps: MachineOp[] = [
     // createDir isn't set — each transport maps the sentinel to its contract
     // (RPC: requestToApproveDirectoryCreation, HTTP: 422).
     handler: async (registry, params) => {
-      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
-      if (!cwd) return { error: "cwd required" };
+      const rawCwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      if (!rawCwd) return { error: "cwd required" };
+      // One canonical cwd for the clone AND the launch (#549): the clone used
+      // to land under the literal `~/…` while the registry expanded it.
+      const cwd = canonicalCwd(rawCwd);
       // Reject unknown agents LOUDLY instead of falling through to claude.
       // The historical fall-through is how a stale daemon turned "pi" requests
       // into surprise claude sessions (2026-08-15): a newer app sent a flavor
@@ -733,12 +736,17 @@ export const machineOps: MachineOp[] = [
       },
     },
     handler: async (registry, params) => {
-      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      const rawCwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
       const sid = typeof params.claudeSessionId === "string" ? params.claudeSessionId.trim() : "";
       const b64 = typeof params.transcriptBase64 === "string" ? params.transcriptBase64 : "";
-      if (!cwd) return { error: "cwd required" };
+      if (!rawCwd) return { error: "cwd required" };
       if (!/^[0-9a-f-]{8,64}$/.test(sid)) return { error: "invalid claudeSessionId" };
       if (!b64) return { error: "transcript required" };
+      // The transcript dir and the launch must derive from the SAME
+      // canonical cwd (#549): a `~/…` cwd encoded the literal tilde into the
+      // project dir while create() expanded it, so Claude never found the
+      // imported conversation.
+      const cwd = canonicalCwd(rawCwd);
       const dir = cwdToTranscriptDir(cwd);
       mkdirSync(dir, { recursive: true });
       const target = join(dir, `${sid}.jsonl`);

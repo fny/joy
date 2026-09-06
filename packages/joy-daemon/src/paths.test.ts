@@ -82,3 +82,22 @@ describe("isolation: JOY_HOME_DIR override", () => {
         expect(p.joyRelayCredsDir()).toBe(join(homedir(), ".joy-test", "relays", "joy.voltai.party_4997"));
     });
 });
+
+describe("canonicalCwd (#549 #564)", () => {
+    it("expands ~, folds `.`/`..`, resolves symlinks, and keeps a not-yet-existing tail under its real parent", async () => {
+        const { homedir } = await import("os");
+        const { symlinkSync, realpathSync } = await import("fs");
+        const p = await freshPaths();
+        const root = mkdtempSync(join(tmpdir(), "joy-canon-"));
+        const real = join(root, "real"); mkdirSync(real);
+        const link = join(root, "link"); symlinkSync(real, link);
+        const realRoot = realpathSync.native(real);
+        expect(p.canonicalCwd(`${real}/.`)).toBe(realRoot);
+        expect(p.canonicalCwd(`${real}/a/../.`)).toBe(realRoot);
+        expect(p.canonicalCwd(link)).toBe(realRoot);
+        expect(p.canonicalCwd(`${link}/sub/deeper`)).toBe(join(realRoot, "sub", "deeper")); // absent tail, real parent
+        expect(p.canonicalCwd("~")).toBe(realpathSync.native(homedir()));
+        expect(p.canonicalCwd("~/nope-never-there")).toBe(join(realpathSync.native(homedir()), "nope-never-there"));
+        expect(p.canonicalCwd("  /tmp/x/  ")).toBe(join(realpathSync.native("/tmp"), "x"));
+    });
+});
