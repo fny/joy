@@ -1,209 +1,89 @@
 /**
  * Impression-based prefetch for file contents.
  *
- * When the file list is rendered, this hook prefetches file content + diff
- * for all non-deleted, non-binary files that aren't already in the Zustand
- * cache. This way, tapping into a file shows content instantly.
+ * When the file list is rendered, this hook warms the file-contents and
+ * per-path diff RESOURCES (sync/fileContents) for every openable, non-binary
+ * file that is not cached yet, so tapping into a file shows content
+ * instantly. Limited concurrency (3 at a time) keeps the daemon's queue
+ * short. Deleted, binary and unaddressable rows are skipped.
  *
- * Prefetch runs with limited concurrency (3 at a time) to avoid overloading
- * the session with too many RPC calls. Deleted and binary files are skipped.
+ * Ownership is the resource's, not this hook's: `ensure(…, staleTime:
+ * Infinity)` reads a key only when nothing is cached and coalesces with a
+ * read already in flight, and a foreground read (`refresh`) or a save
+ * (`setData`) of the same key supersedes whatever this prefetch started
+ * earlier — an older prefetch can no longer land over what the user just did
+ * (#325). No second gate is needed.
  */
 
 import * as React from 'react';
-import {sessionReadFile, sessionGitDiff } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
-import { currentGen, isLatest, nextGen, retire } from '@/utils/latest';
-import type { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
+import { isBinaryPath } from '@/utils/binaryFile';
+import { resources } from '@/sync/resource';
+import { fileContentsSpec, gitDiffSpec } from '@/sync/fileContents';
+import type { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusModel';
 
-const BINARY_EXTENSIONS = new Set([
-    'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'ico',
-    'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm',
-    'mp3', 'wav', 'flac', 'aac', 'ogg',
-    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-    'zip', 'tar', 'gz', 'rar', '7z',
-    'exe', 'dmg', 'deb', 'rpm',
-    'woff', 'woff2', 'ttf', 'otf',
-    'db', 'sqlite', 'sqlite3',
-]);
-
-function isBinaryPath(path: string): boolean {
-    const ext = path.split('.').pop()?.toLowerCase();
-    return ext ? BINARY_EXTENSIONS.has(ext) : false;
-}
-
-function decodeBase64ToBytes(base64: string): Uint8Array {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
+export interface PrefetchTarget {
+    /** Absolute path the daemon accepts (the file resource's identity). */
+    absolutePath: string;
+    /** Repo-relative path for git/diff, when inside the session root. */
+    diffPath: string | null;
 }
 
 /**
- * Per-path write coordination between prefetch and the foreground (#325).
- *
- * The file cache has two kinds of writer: this prefetch and the file screen's
- * reads and saves. Prefetch is the slow, best-effort one, so its commit is
- * conditional: when a file's prefetch begins it snapshots the path's write
- * generation and its cache entry, and it writes only if neither moved while
- * it waited. A foreground read that lands through applyFileCache is seen via
- * the entry snapshot; a save changes the file on disk without touching the
- * cache, so the save path calls `noteForegroundFileWrite` instead. Either
- * way an older prefetch can no longer land over what the user just did.
+ * Which rows are worth reading: openable (not deleted), text (by extension),
+ * ADDRESSABLE (a non-UTF-8 name has no path the daemon accepts — its
+ * identity key must never reach a file operation) and listed once.
  */
-export function fileCacheWriteKey(sessionId: string, filePath: string): string {
-    return `file-cache:${sessionId}:${filePath}`;
-}
-
-/** A foreground read or save of `filePath` happened: every prefetch of it that began earlier must not commit. */
-export function noteForegroundFileWrite(sessionId: string, filePath: string): void {
-    retire(fileCacheWriteKey(sessionId, filePath));
-}
-
-/**
- * Snapshot the path's write state now; the returned gate answers "may a
- * prefetch that began at the snapshot still write?". `readEntry` defaults to
- * the Zustand cache entry (applyFileCache replaces the entry object on every
- * write, so identity is the change signal).
- */
-export function prefetchCommitGate(
-    sessionId: string,
-    filePath: string,
-    readEntry: () => unknown = () => storage.getState().sessionFileCache[sessionId]?.[filePath],
-): () => boolean {
-    const key = fileCacheWriteKey(sessionId, filePath);
-    // currentGen, not isLatest: a path nobody has written yet has no
-    // generation at all, and that must read as "unchanged", not "stale".
-    const gen = currentGen(key);
-    const entryBefore = readEntry();
-    return () => currentGen(key) === gen && readEntry() === entryBefore;
-}
-
-/**
- * Prefetch a single file's content + diff into the Zustand cache.
- * Silently swallows errors — prefetch is best-effort. `isCurrent` is checked
- * before every cache write: a prefetch cancelled by a newer file list must not
- * land an older version over the replacement's read (#325). So is the per-path
- * commit gate: a foreground read or save of this file since the prefetch began
- * wins over whatever the prefetch read.
- */
-async function prefetchFile(sessionId: string, sessionPath: string, file: GitFileStatus, isCurrent: () => boolean): Promise<void> {
-    const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
-    const filePath = resolved?.absolutePath ?? file.fullPath;
-    const gitDiffPath = resolved?.withinSessionRoot ? resolved.relativePath : null;
-    const mayCommit = prefetchCommitGate(sessionId, filePath);
-    const commit = (content: string, diff: string | null, isBinary: boolean) => {
-        if (!isCurrent() || !mayCommit()) return;
-        storage.getState().applyFileCache(sessionId, filePath, content, diff, isBinary);
-    };
-
-    let diff: string | null = null;
-
-    // Fetch git diff
-    if (gitDiffPath && gitDiffPath !== '.') {
-        try {
-            const diffResponse = await sessionGitDiff(sessionId, { path: gitDiffPath });
-            if (diffResponse.success && diffResponse.diff.trim()) {
-                diff = diffResponse.diff;
-            }
-        } catch {
-            // Best-effort
-        }
+export function prefetchTargets(files: readonly GitFileStatus[], sessionPath: string): PrefetchTarget[] {
+    const out: PrefetchTarget[] = [];
+    const seen = new Set<string>();
+    for (const file of files) {
+        if (file.status === 'deleted' || file.unaddressable || isBinaryPath(file.fullPath)) continue;
+        if (seen.has(file.fullPath)) continue;
+        seen.add(file.fullPath);
+        const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
+        const absolutePath = resolved?.absolutePath ?? file.fullPath;
+        const diffPath = resolved?.withinSessionRoot && resolved.relativePath !== '.' ? resolved.relativePath : null;
+        out.push({ absolutePath, diffPath });
     }
-
-    // Fetch file content
-    try {
-        const response = await sessionReadFile(sessionId, filePath);
-        if (!isCurrent()) return;
-        if (response.success && response.content != null) {
-            let rawBytes: Uint8Array;
-            let decodedContent: string;
-            try {
-                rawBytes = decodeBase64ToBytes(response.content);
-                decodedContent = new TextDecoder().decode(rawBytes);
-            } catch {
-                commit('', diff, true);
-                return;
-            }
-
-            const hasNullBytes = rawBytes.some((byte) => byte === 0);
-            const nonPrintableCount = decodedContent.split('').filter((char) => {
-                const code = char.charCodeAt(0);
-                return code < 32 && code !== 9 && code !== 10 && code !== 13;
-            }).length;
-            const isBinary = hasNullBytes || (nonPrintableCount / decodedContent.length > 0.1);
-
-            commit(isBinary ? '' : decodedContent, diff, isBinary);
-        }
-    } catch {
-        // Best-effort
-    }
+    return out;
 }
 
 const MAX_CONCURRENCY = 3;
 
+/** Warm the resources for `targets`; stops issuing new reads once cancelled. */
+export async function runPrefetch(
+    sessionId: string,
+    targets: readonly PrefetchTarget[],
+    isCancelled: () => boolean = () => false,
+    concurrency: number = MAX_CONCURRENCY,
+): Promise<void> {
+    let i = 0;
+    const worker = async (): Promise<void> => {
+        while (!isCancelled()) {
+            const target = targets[i++];
+            if (!target) return;
+            await Promise.all([
+                resources.ensure(fileContentsSpec(sessionId, target.absolutePath), { staleTime: Infinity }),
+                target.diffPath
+                    ? resources.ensure(gitDiffSpec(sessionId, target.diffPath), { staleTime: Infinity })
+                    : Promise.resolve(),
+            ]);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, worker));
+}
+
 export function usePrefetchFileContents(sessionId: string, gitStatusFiles: GitStatusFiles | null) {
     React.useEffect(() => {
         if (!gitStatusFiles) return;
-
-        const session = storage.getState().sessions[sessionId];
-        const sessionPathMaybe = session?.metadata?.path;
-        if (!sessionPathMaybe) return;
-        const sessionPath: string = sessionPathMaybe;
-
-        const existingCache = storage.getState().sessionFileCache[sessionId] || {};
-
-        // Collect files that need prefetching: non-deleted, non-binary, not cached
-        const filesToPrefetch: GitFileStatus[] = [];
-        const allFiles = [...gitStatusFiles.stagedFiles, ...gitStatusFiles.unstagedFiles];
-        const seen = new Set<string>();
-
-        for (const file of allFiles) {
-            if (file.status === 'deleted') continue;
-            if (isBinaryPath(file.fullPath)) continue;
-            if (seen.has(file.fullPath)) continue;
-            seen.add(file.fullPath);
-
-            // Check if already cached by resolving the path the same way file.tsx does
-            const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
-            const absolutePath = resolved?.absolutePath ?? file.fullPath;
-            if (existingCache[absolutePath]) continue;
-
-            filesToPrefetch.push(file);
-        }
-
-        if (filesToPrefetch.length === 0) return;
-
+        const sessionPath = storage.getState().sessions[sessionId]?.metadata?.path;
+        if (!sessionPath) return;
+        const targets = prefetchTargets([...gitStatusFiles.stagedFiles, ...gitStatusFiles.unstagedFiles], sessionPath);
+        if (targets.length === 0) return;
         let cancelled = false;
-        // One generation per session: a newer file list (this or another
-        // instance for the same session) retires every earlier prefetch's
-        // right to write the shared cache.
-        const key = `prefetch:${sessionId}`;
-        const gen = nextGen(key);
-        const isCurrent = () => !cancelled && isLatest(key, gen);
-
-        // Run prefetch with limited concurrency
-        void (async () => {
-            let i = 0;
-            async function next(): Promise<void> {
-                while (isCurrent()) {
-                    const idx = i++;
-                    if (idx >= filesToPrefetch.length) return;
-                    await prefetchFile(sessionId, sessionPath, filesToPrefetch[idx], isCurrent);
-                }
-            }
-
-            const workers = Array.from(
-                { length: Math.min(MAX_CONCURRENCY, filesToPrefetch.length) },
-                () => next(),
-            );
-            await Promise.all(workers);
-        })();
-
-        return () => {
-            cancelled = true;
-        };
+        void runPrefetch(sessionId, targets, () => cancelled);
+        return () => { cancelled = true; };
     }, [sessionId, gitStatusFiles]);
 }

@@ -6,12 +6,15 @@ import { Typography } from '@/constants/Typography';
 import { FileIcon } from '@/components/FileIcon';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { getPatchDiffStats } from '@/components/diff/calculateDiff';
-import { sessionGitDiff, sessionReadFile } from '@/sync/ops';
 import { isBinaryPath, isImagePath } from '@/utils/binaryFile';
 import { JoyImage } from '@/components/JoyImage';
-import { storage, useSessionGitStatusFiles, useSettingMutable } from '@/sync/storage';
+import { useSession, useSettingMutable } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
-import { GitFileStatus } from '@/sync/gitStatusFiles';
+import { useGitStatusResource } from '@/sync/gitStatusResource';
+import type { GitFileStatus } from '@/sync/gitStatusModel';
+import { resources, type ResourceEntry, type ResourceSpec } from '@/sync/resource';
+import { fileContentsSpec, gitDiffSpec, type FileContents } from '@/sync/fileContents';
+import { useResources } from '@/hooks/useResource';
 import { layout } from '@/components/layout';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
@@ -39,35 +42,58 @@ type FileDiffResult = {
     error: string | null;
 };
 
-/** Same file row (by value — status rows are rebuilt on every refresh) and
- *  same diff content (or same error). */
-function sameDiffResult(a: FileDiffResult, b: FileDiffResult): boolean {
-    const fa = a.file;
-    const fb = b.file;
-    if (fa.fullPath !== fb.fullPath || fa.displayPath !== fb.displayPath || fa.status !== fb.status
-        || fa.isStaged !== fb.isStaged || fa.binary !== fb.binary || fa.oldPath !== fb.oldPath || fa.conflict !== fb.conflict) return false;
-    const la = fa.lines;
-    const lb = fb.lines;
-    if (la === 'unavailable' || lb === 'unavailable') {
-        if (la !== lb) return false;
-    } else if (la.added !== lb.added || la.removed !== lb.removed) return false;
-    if (a.error !== b.error) return false;
-    if (a.content === null || b.content === null) return a.content === b.content;
-    if (a.content.kind !== b.content.kind) return false;
-    switch (a.content.kind) {
-        case 'patch': return a.content.patch === (b.content as { patch: string }).patch;
-        case 'newFile': return a.content.contents === (b.content as { contents: string }).contents;
-        case 'image': return a.content.path === (b.content as { path: string }).path;
-        case 'binary': return true;
+/** What a file's section needs from the daemon — a fetch through ONE of the
+ *  two file resources, or nothing (a static section). */
+type DiffData = string | FileContents;
+type SectionPlan =
+    | { kind: 'static'; result: FileDiffResult }
+    | { kind: 'patch' | 'newFile'; file: GitFileStatus; spec: ResourceSpec<DiffData> };
+
+function planSection(sessionId: string, sessionPath: string | null, file: GitFileStatus, version: string): SectionPlan {
+    const fixed = (content: DiffContent | null, error: string | null): SectionPlan => ({ kind: 'static', result: { file, content, error } });
+    // A name that is not valid UTF-8 has no path the daemon accepts: its
+    // identity key must never reach git/diff or files/read. Display only.
+    if (file.unaddressable) return fixed(null, 'This file name is not valid UTF-8; it cannot be read or diffed.');
+    if (!sessionPath) return fixed(null, 'No session path');
+    const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
+    const gitDiffPath = resolved?.withinSessionRoot ? resolved.relativePath : null;
+    if (!gitDiffPath || !resolved) return fixed(null, 'File is outside the session root.');
+    // Images: show the actual picture (JoyImage fetches the bytes on mount).
+    // Other binaries: placeholder, no read.
+    if (isImagePath(file.fullPath)) return fixed({ kind: 'image', path: resolved.absolutePath }, null);
+    // git's own verdict first (numstat "-"), then the extension list.
+    if (file.binary || isBinaryPath(file.fullPath)) return fixed({ kind: 'binary' }, null);
+    if (file.status === 'untracked') {
+        // The whole file is the diff. Read through the file resource (the same
+        // one the file screen and the prefetcher use) — never `cat`.
+        return { kind: 'newFile', file, spec: { ...fileContentsSpec(sessionId, resolved.absolutePath), version, staleTime: Infinity } as ResourceSpec<DiffData> };
     }
+    // Working tree vs HEAD through the daemon's git route: no shell, so the
+    // path is never interpolated (#5, #92).
+    return { kind: 'patch', file, spec: gitDiffSpec(sessionId, gitDiffPath, { head: true }, version) as ResourceSpec<DiffData> };
+}
+
+function resultFromEntry(plan: Exclude<SectionPlan, { kind: 'static' }>, entry: ResourceEntry<DiffData> | undefined): FileDiffResult | null {
+    if (!entry || !entry.hasData) {
+        const error = entry?.error ?? entry?.unavailable ?? null;
+        return error ? { file: plan.file, content: null, error } : null;
+    }
+    if (plan.kind === 'patch') return { file: plan.file, content: { kind: 'patch', patch: entry.data as string }, error: null };
+    const f = entry.data as FileContents;
+    if (f.isBinary || f.content === null) return { file: plan.file, content: { kind: 'binary' }, error: null };
+    return { file: plan.file, content: { kind: 'newFile', contents: f.content }, error: null };
 }
 
 /**
- * Loads all diffs in parallel, then renders them in a single ScrollView.
- * Shows a global loading spinner until all diffs are fetched to prevent layout jumps.
+ * Renders every changed file's diff in a single ScrollView. Each diff is a
+ * RESOURCE keyed by session + path + options and versioned by the file's
+ * status signature plus the repository check that produced it: a status
+ * change refetches the diff while the previous one stays on screen, an
+ * equal answer keeps its reference (no re-render, no scroll jump), and a
+ * failed read is retried on the next check or on Retry (#91, #199, #200).
+ * Shows a global loading spinner until the first diff arrives to prevent
+ * layout jumps.
  */
-const EMPTY_RESULTS: Map<string, FileDiffResult> = new Map();
-
 export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     sessionId,
     scrollToFile,
@@ -75,7 +101,9 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     onHeaderRightSlotChange,
 }: AllFilesDiffViewProps) {
     const { theme } = useUnistyles();
-    const gitStatusFiles = useSessionGitStatusFiles(sessionId);
+    const status = useGitStatusResource(sessionId);
+    const gitStatusFiles = status.files;
+    const sessionPath = useSession(sessionId)?.metadata?.path ?? null;
     const [diffStyle, setDiffStyle] = useSettingMutable('diffStyle');
     const scrollRef = React.useRef<ScrollView>(null);
     const fileOffsets = React.useRef<Map<string, number>>(new Map());
@@ -86,17 +114,13 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         () => rowsByPath(gitStatusFiles ? [...gitStatusFiles.stagedFiles, ...gitStatusFiles.unstagedFiles] : []),
         [gitStatusFiles],
     );
-    const statusRowsByPathRef = React.useRef(statusRowsByPath);
-    statusRowsByPathRef.current = statusRowsByPath;
-    // Repository-change revision: the store publishes a status list only when
-    // it differs from the last one, so a new reference is a real change to the
-    // working tree. It is part of every diff signature (#199).
-    const listRevision = React.useRef(0);
-    const lastList = React.useRef(gitStatusFiles);
-    if (lastList.current !== gitStatusFiles) {
-        lastList.current = gitStatusFiles;
-        listRevision.current += 1;
-    }
+    // Repository revision: the time the daemon last answered a status read.
+    // git status carries no content hash, so an edit that keeps status and
+    // line counts (an untracked file's text, a +1/-1 rewritten as another
+    // +1/-1) is invisible to the signature alone; every status check
+    // re-validates the diffs instead, and an unchanged diff keeps its
+    // reference (#199 residual).
+    const revision = status.checkedAt;
 
     // Flatten and deduplicate files
     const files = React.useMemo(() => {
@@ -113,214 +137,33 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         return onlyFile ? sorted.filter((f) => f.fullPath === onlyFile) : sorted;
     }, [gitStatusFiles, onlyFile]);
 
-    // Per-file diff cache keyed by fullPath. Reconciled incrementally as the
-    // file set changes so the rendered ScrollView keeps its scroll position and
-    // existing diff sections stay on screen while updated files refresh in the
-    // background.
-    // Results are SCOPED to the session they were fetched for: a mounted view
-    // whose sessionId changes must not show (or reconcile against) the previous
-    // session's diffs under paths that happen to match (Astra on 03b558f0, #91).
-    const [resultsState, setResultsState] = React.useState<{ session: string; map: Map<string, FileDiffResult>; loaded: boolean }>(
-        () => ({ session: sessionId, map: new Map(), loaded: false }),
+    const plans = React.useMemo(
+        () => files.map((f) => planSection(sessionId, sessionPath, f, diffSignature(statusRowsByPath.get(f.fullPath) ?? [f], revision))),
+        [files, sessionId, sessionPath, statusRowsByPath, revision],
     );
-    const resultsMap = resultsState.session === sessionId ? resultsState.map : EMPTY_RESULTS;
-    const hasLoadedOnce = resultsState.session === sessionId && resultsState.loaded;
-    // Signature of the last SUCCESSFULLY fetched version per fullPath (see
-    // allFilesDiffSignature). If it hasn't changed, the diff for that file
-    // doesn't need to be re-fetched. A failed read records nothing, so the
-    // next effect run (a repository change, or Retry) fetches it again — the
-    // signature used to be saved before the request, which cached the failure
-    // as a fetched version until remount (#200).
-    const fetchedSignatures = React.useRef<Map<string, string>>(new Map());
-    // Bumped by the Retry action of a failed section; an effect dependency.
-    const [retryTick, setRetryTick] = React.useState(0);
+    const specs = React.useMemo(
+        () => plans.flatMap((p) => (p.kind === 'static' ? [] : [p.spec])),
+        [plans],
+    );
+    const entries = useResources(specs);
+    const entryByKey = React.useMemo(() => new Map(entries.map((e) => [e.key, e])), [entries]);
+
     const retryPath = React.useCallback((path: string) => {
-        fetchedSignatures.current.delete(path);
-        setRetryTick((n) => n + 1);
-    }, []);
-    const inFlight = React.useRef<Set<string>>(new Set());
-    /** The current file list, read when a fetch completes (#91). */
-    const filesRef = React.useRef(files);
-    filesRef.current = files;
-    // Track whether we've ever populated results — only show the global spinner
-    // on the very first load, not on subsequent file-set changes.
-    // Setters stamp the CURRENT session (sessionRef, not a closure) so a write
-    // can never revive another session's map.
-    const setResultsMap = React.useCallback((upd: Map<string, FileDiffResult> | ((prev: Map<string, FileDiffResult>) => Map<string, FileDiffResult>)) => {
-        setResultsState((s) => {
-            const sess = sessionRef.current;
-            const base = s.session === sess ? s.map : new Map<string, FileDiffResult>();
-            const map = typeof upd === 'function' ? upd(base) : upd;
-            return { session: sess, map, loaded: s.session === sess ? s.loaded : false };
-        });
-    }, []);
-    const setHasLoadedOnce = React.useCallback((loaded: boolean) => {
-        setResultsState((s) => {
-            const sess = sessionRef.current;
-            return { session: sess, map: s.session === sess ? s.map : new Map<string, FileDiffResult>(), loaded };
-        });
-    }, []);
-    // Request generation per path: the empty-list branch clears inFlight while
-    // old requests still run, so a path removed and re-added with the same
-    // signature could have its NEW result overwritten by the OLD completion
-    // (Astra on 81489690, #91). Only the latest request for a path commits.
-    const fetchGen = React.useRef(new Map<string, number>());
-    const genCounter = React.useRef(0);
-    // Session fence: the caches are keyed by path, and a mounted view whose
-    // sessionId changes keeps a pending request from the OLD session whose
-    // result would commit under the new one (Astra on ba243ffb). Retire
-    // everything when the session changes.
-    const sessionRef = React.useRef(sessionId);
-    if (sessionRef.current !== sessionId) {
-        sessionRef.current = sessionId;
-        fetchedSignatures.current.clear();
-        inFlight.current.clear();
-        fetchGen.current.clear();
-    }
+        const plan = plans.find((p) => p.kind !== 'static' && p.file.fullPath === path);
+        if (plan && plan.kind !== 'static') void resources.refresh(plan.spec);
+    }, [plans]);
 
-    const fileSignature = (f: GitFileStatus) =>
-        diffSignature(statusRowsByPathRef.current.get(f.fullPath) ?? [f], listRevision.current);
-
-    React.useEffect(() => {
-        if (files.length === 0) {
-            // Drop everything; nothing to fetch.
-            if (resultsMap.size > 0) setResultsMap(new Map());
-            fetchedSignatures.current.clear();
-            inFlight.current.clear();
-            fetchGen.current.clear(); // outstanding requests lose ownership
-            setHasLoadedOnce(true);
-            return;
-        }
-
-        const session = storage.getState().sessions[sessionId];
-        const sessionPath = session?.metadata?.path ?? null;
-
-        // Reconcile keyed cache: drop files no longer present.
-        const nextKeys = new Set(files.map((f) => f.fullPath));
-        let mapChanged = false;
-        const reconciled = new Map(resultsMap);
-        // Include paths that are only in flight (no result yet): a removed
-        // pending path kept its inFlight entry and generation, so re-adding it
-        // started nothing and the pre-removal result committed (Astra on
-        // bfcec9fd, #91). Retiring the generation makes that completion a no-op.
-        const known = new Set<string>([...reconciled.keys(), ...inFlight.current, ...fetchedSignatures.current.keys(), ...fetchGen.current.keys()]);
-        for (const key of known) {
-            if (!nextKeys.has(key)) {
-                if (reconciled.delete(key)) mapChanged = true;
-                fetchedSignatures.current.delete(key);
-                inFlight.current.delete(key);
-                fetchGen.current.delete(key);
-            }
-        }
-        if (mapChanged) setResultsMap(reconciled);
-
-        // Identify which files need a (re-)fetch.
-        const toFetch = files.filter((f) => {
-            if (inFlight.current.has(f.fullPath)) return false;
-            const prev = fetchedSignatures.current.get(f.fullPath);
-            return prev !== fileSignature(f);
-        });
-
-        if (toFetch.length === 0) {
-            if (!hasLoadedOnce) setHasLoadedOnce(true);
-            return;
-        }
-
-        // Per-path fetches with ownership by signature. No batch-level cancel:
-        // a batch flag either stranded paths (never refetched) or, as a wakeup,
-        // cancelled unrelated in-flight work and looped (Astra on e4ee4754,
-        // #91). Each completion checks the CURRENT signature of its path: same →
-        // commit; changed → fetch the current version; gone → drop.
-        const fetchDiffFor = async (file: GitFileStatus): Promise<void> => {
-            const path = file.fullPath;
-            const sig = fileSignature(file);
-            inFlight.current.add(path);
-            const myGen = ++genCounter.current;
-            fetchGen.current.set(path, myGen);
-            const result: FileDiffResult = await (async (): Promise<FileDiffResult> => {
-            if (!sessionPath) {
-                return { file, content: null, error: 'No session path' };
-            }
-            const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
-            const gitDiffPath = resolved?.withinSessionRoot ? resolved.relativePath : null;
-            if (!gitDiffPath || !resolved) {
-                return { file, content: null, error: 'File is outside the session root.' };
-            }
-
-            try {
-                // Images: show the actual picture (JoyImage fetches the
-                // bytes on mount). Other binaries: placeholder, no read.
-                if (isImagePath(file.fullPath)) {
-                    return { file, content: { kind: 'image' as const, path: resolved.absolutePath }, error: null };
-                }
-                // git's own verdict first (numstat "-"), then the extension list.
-                if (file.binary || isBinaryPath(file.fullPath)) {
-                    return { file, content: { kind: 'binary' as const }, error: null };
-                }
-                if (file.status === 'untracked') {
-                    // Use the native sessionReadFile RPC instead of `cat`
-                    // — `cat` doesn't behave the same on Windows
-                    // (PowerShell aliases it to Get-Content which
-                    // doesn't accept `--`), and shelling out for a
-                    // plain read is slower anyway.
-                    const res = await sessionReadFile(sessionId, resolved.absolutePath);
-                    if (!res.success) {
-                        return { file, content: null, error: res.error || 'Failed to read file' };
-                    }
-                    let contents: string;
-                    try {
-                        const binary = atob(res.content ?? '');
-                        const bytes = new Uint8Array(binary.length);
-                        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                        contents = new TextDecoder().decode(bytes);
-                    } catch {
-                        return { file, content: null, error: 'Failed to decode file' };
-                    }
-                    return { file, content: { kind: 'newFile', contents }, error: null };
-                }
-
-                // Working tree vs HEAD through the daemon's git route: no
-                // shell, so the path is never interpolated (#5, #92).
-                const res = await sessionGitDiff(sessionId, { path: gitDiffPath, head: true });
-                if (!res.success) {
-                    return { file, content: null, error: res.error || 'Failed to fetch diff' };
-                }
-                return { file, content: { kind: 'patch', patch: res.diff }, error: null };
-            } catch (err) {
-                return { file, content: null, error: err instanceof Error ? err.message : 'Failed to fetch diff' };
-            }
-            })();
-            if (sessionRef.current !== sessionId || fetchGen.current.get(path) !== myGen) return; // a newer request or another session owns this path
-            inFlight.current.delete(path);
-            const current = filesRef.current.find((f) => f.fullPath === path);
-            if (!current) return; // removed while fetching
-            if (fileSignature(current) !== sig) { void fetchDiffFor(current); return; } // changed while fetching
-            // Only a successful read is a fetched version (#200).
-            if (result.error === null) fetchedSignatures.current.set(path, sig);
-            setResultsMap((prev) => {
-                // Identical content keeps the previous result object so the
-                // section does not re-render for a no-op refresh.
-                const previous = prev.get(path);
-                if (previous && sameDiffResult(previous, result)) return prev;
-                const next = new Map(prev);
-                next.set(path, result);
-                return next;
-            });
-            setHasLoadedOnce(true);
-        };
-        for (const file of toFetch) void fetchDiffFor(file);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sessionId, files, retryTick]);
-
-    // Render in deterministic file order (same sort as `files`).
+    // Render in deterministic file order (same sort as `files`). A section
+    // without a result yet (first fetch in flight) is left out, like before.
     const results = React.useMemo<FileDiffResult[]>(() => {
         const out: FileDiffResult[] = [];
-        for (const f of files) {
-            const r = resultsMap.get(f.fullPath);
+        for (const plan of plans) {
+            const r = plan.kind === 'static' ? plan.result : resultFromEntry(plan, entryByKey.get(plan.spec.key));
             if (r) out.push(r);
         }
         return out;
-    }, [files, resultsMap]);
+    }, [plans, entryByKey]);
+    const hasLoadedOnce = results.length > 0 || files.length === 0;
 
     // Initial-mount spinner: only show until results have ever been populated.
     const loading = !hasLoadedOnce && results.length === 0 && files.length > 0;
