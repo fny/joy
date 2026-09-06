@@ -9,7 +9,8 @@ import * as http from "node:http";
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
 delete process.env.JOY_SESSION_ID;
-const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, cmdStop, cmdNew, cmdAsk, cmdWaitIdle } = await import("./cli");
+const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn } = await import("./cli");
+const { launcherFromEnv } = await import("./daemonLauncher");
 const { joyStateDir } = await import("./paths");
 
 // ── a fake daemon: the CLI finds it through daemon.json in the (isolated) state dir ──
@@ -65,11 +66,83 @@ describe("joy stop under a supervisor (#502)", () => {
     expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("4242", () => {}) })).toEqual({ kind: "systemd", unit: "joy-daemon.service" });
     expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("0", () => {}) })).toBeNull();     // unit inactive / not installed
     expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("999", () => {}) })).toBeNull();   // some other daemon under the unit
-    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 1, stdout: "" }) })).toBeNull(); // no systemctl
+    // An inspection that FAILS is not "no supervisor" (#502 residual): it is unknown.
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 1, stdout: "" }) })).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/systemctl --user show joy-daemon.service exited 1/) });
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: null, stdout: "" }) })).toMatchObject({ kind: "unknown" }); // no systemctl binary
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "garbage\n" }) })).toMatchObject({ kind: "unknown" });
     const launchd = (out: string, status = 0) => ({ platform: "darwin", run: () => ({ status, stdout: out }) });
     expect(detectSupervisor(4242, launchd('{\n\t"PID" = 4242;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))?.kind).toBe("launchd");
     expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running
-    expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded
+    expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded: launchctl's own definitive answer
+    expect(detectSupervisor(4242, launchd("", 1))).toMatchObject({ kind: "unknown" }); // launchctl itself failed
+  });
+
+  describe("a failed supervisor inspection (#502 residual)", () => {
+    const failing = (cmd: string, args: string[]) => (cmd === "systemctl" && args.includes("stop")) ? { status: 0, stdout: "" } : { status: 1, stdout: "" };
+    const withLauncher = (launcher?: string) => writeFileSync(join(joyStateDir(), "daemon.json"), JSON.stringify({ token: "tok", pid: 4242, port: daemonPort, startedAt: Date.now(), version: "test", ...(launcher ? { launcher } : {}) }));
+
+    test("systemctl show fails, no independent evidence: nothing is signalled, exit 1 with the reason", async () => {
+      route("GET /status", (_q, res) => json(res, 200, { pid: 4242, version: "test" }));
+      const actions: string[] = [];
+      const code = await cmdStop({ platform: "linux", run: (_c, args) => { actions.push(args.join(" ")); return failing(_c, args); }, kill: () => { actions.push("SIGTERM"); }, exists: () => false, cgroupOf: () => null });
+      expect(code).toBe(1);
+      expect(actions).not.toContain("SIGTERM");
+      expect(actions.some((a) => a.includes(" stop "))).toBe(false);
+      expect(log.out.join("\n")).toMatch(/could not determine whether the daemon is supervised \(systemctl --user show joy-daemon.service exited 1\) — nothing signalled/);
+    });
+
+    test("systemctl show fails but the unit file is installed: stopped through systemctl, never signalled", async () => {
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const killed: number[] = [];
+      const run = (cmd: string, args: string[]) => { const r = failing(cmd, args); if (args.includes("stop")) alive = false; return r; };
+      const code = await cmdStop({ platform: "linux", run, kill: (pid) => { killed.push(pid); }, exists: (p) => p.endsWith("/.config/systemd/user/joy-daemon.service"), cgroupOf: () => null });
+      expect(code).toBe(0);
+      expect(killed).toEqual([]);
+      expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+    });
+
+    test("daemon.json records a detached launch: the daemon's own word beats an installed unit file — SIGTERM directly", async () => {
+      withLauncher("detached");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const killed: string[] = [];
+      const code = await cmdStop({ platform: "linux", run: failing, kill: (_p, sig) => { killed.push(sig); alive = false; }, exists: () => true, cgroupOf: () => null });
+      expect(code).toBe(0);
+      expect(killed).toEqual(["SIGTERM"]);
+    });
+
+    test("daemon.json records a systemd launch: stopped through the unit", async () => {
+      withLauncher("systemd");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const killed: string[] = [];
+      const run = (cmd: string, args: string[]) => { const r = failing(cmd, args); if (args.includes("stop")) alive = false; return r; };
+      expect(await cmdStop({ platform: "linux", run, kill: (_p, sig) => { killed.push(sig); }, exists: () => false, cgroupOf: () => null })).toBe(0);
+      expect(killed).toEqual([]);
+      expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+    });
+
+    test("the kernel's cgroup settles it either way", () => {
+      const deps = { platform: "linux", run: failing, kill: () => {}, exists: () => false };
+      const inUnit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/joy-daemon.service\n";
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => inUnit }, null)).toMatchObject({ kind: "supervised", supervisor: { kind: "systemd", unit: "joy-daemon.service" }, evidence: expect.stringContaining("cgroup") });
+      const inScope = "0::/user.slice/user-1000.slice/session-3.scope\n";
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => inScope }, null)).toMatchObject({ kind: "unsupervised", evidence: expect.stringContaining("cgroup") });
+      // a unit file alone (no cgroup, no launcher) still means "stop through the owner"
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => null, exists: () => true }, null)).toMatchObject({ kind: "supervised" });
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => null }, null)).toMatchObject({ kind: "unknown" });
+      // the supervisor's own answer needs no evidence
+      expect(resolveOwnership(4242, { ...deps, run: fakeRun("0", () => {}) }, { launcher: "systemd" })).toMatchObject({ kind: "unsupervised", evidence: expect.stringContaining("does not run this pid") });
+    });
+
+    test("launcherFromEnv: what the daemon records", () => {
+      expect(launcherFromEnv({ INVOCATION_ID: "abc" }, "linux")).toBe("systemd");
+      expect(launcherFromEnv({}, "linux")).toBe("detached");
+      expect(launcherFromEnv({ XPC_SERVICE_NAME: "vip.faraz.joy-daemon" }, "darwin")).toBe("launchd");
+      expect(launcherFromEnv({ XPC_SERVICE_NAME: "0" }, "darwin")).toBe("detached");
+      expect(launcherFromEnv({ INVOCATION_ID: "abc" }, "darwin")).toBe("detached"); // a foreign marker means nothing on the other platform
+    });
   });
 
   test("a systemd-supervised daemon is stopped through systemctl, never signalled directly", async () => {
@@ -128,6 +201,14 @@ const eventsRoute = (initial: unknown[] = [], opts: { onConnect?: (n: number, re
   });
   return { push: (r: { seq: number }) => { log.push(r); for (const res of open) res.write(ndjson([r])); }, connections: () => n };
 };
+/** Push `r`, then end the live follow stream once one is open — the drop is
+ *  ORDERED after the row (a fixed timer raced the push and the connect: the
+ *  stream sometimes ended before the row was written, sometimes never). */
+const pushThenDrop = (ev: { push: (r: { seq: number }) => void }, r: { seq: number }, then?: () => void) => {
+  ev.push(r);
+  const tick = () => { if (hanging.size) { for (const h of hanging) h.end(); hanging.clear(); then?.(); } else setTimeout(tick, 10); };
+  setTimeout(tick, 40);
+};
 const checkRoute = (h: (n: number) => unknown | Handler) => { let n = 0; route(`GET /sessions/${SID}/check`, (q, res, url, body) => { const v = h(++n); return typeof v === "function" ? (v as Handler)(q, res, url, body) : json(res, 200, v); }); };
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -138,7 +219,20 @@ describe("joy new -m: a rejected first message fails the command (#494)", () => 
     route("POST /send", (_q, res) => json(res, 500, { error: "not_durable" }));
     expect(await cmdNew(["/tmp/x", "-m", "do work"])).toBe(1);
     expect(log.out).toEqual([SID]);
-    expect(log.err.join("\n")).toMatch(/first message was not accepted — retry with: joy send abcdef01 "do work"/);
+    expect(log.err.join("\n")).toMatch(/first message was not accepted — retry with: joy send abcdef01 'do work'/);
+  });
+
+  test("the retry line is shell-quoted: a $(…) or backtick in the prompt is inert when pasted (#494 regression)", async () => {
+    route("POST /sessions", (_q, res) => json(res, 201, { id: SID, cwd: "/tmp/x" }));
+    eventsRoute();
+    route("POST /send", (_q, res) => json(res, 500, { error: "not_durable" }));
+    expect(await cmdNew(["/tmp/x", "-m", "explain $(printf substituted)"])).toBe(1);
+    expect(log.err.join("\n")).toContain("joy send abcdef01 'explain $(printf substituted)'");
+    expect(log.err.join("\n")).not.toContain('"explain $(printf substituted)"');
+    log.err.length = 0;
+    expect(await cmdNew(["/tmp/x", "-m", "run `ls` and it's done"])).toBe(1);
+    // one POSIX word: the apostrophe closes, escapes and reopens the quote
+    expect(log.err.join("\n")).toContain("joy send abcdef01 'run `ls` and it'\\''s done'");
   });
 
   test("the send cannot connect: exit 1, not a silent success", async () => {
@@ -210,6 +304,58 @@ describe("a stalled daemon cannot defeat the turn timeout (#501)", () => {
     expect(await cmdWaitIdle([SID, "--turn", "q1", "--timeout", "0.3"])).toBe(4);
     expect(Date.now() - t0).toBeLessThan(2000);
   });
+
+  // #501 residual (Astra): the deadline used to end the polling and then a
+  // FRESH 3 s catch-up ran — a 20 ms wait returned after ~3030 ms.
+  test("a 20 ms wait with the event stream AND /check stalled returns timeout within ~100 ms — no catch-up after the deadline", async () => {
+    route(`GET /sessions/${SID}/events`, stall);
+    route(`GET /sessions/${SID}/check`, stall);
+    const t0 = Date.now();
+    const out = await waitTurn(SID, { afterSeq: 0, timeoutMs: 20 });
+    const elapsed = Date.now() - t0;
+    expect(out.state).toBe("timeout");
+    expect(elapsed).toBeLessThan(150);
+  });
+
+  test("the pre-wait probes run under the same clock: GET /sessions stalls → ask exits 4 at its --timeout", async () => {
+    route("GET /sessions", stall);
+    const t0 = Date.now();
+    expect(await cmdAsk([SID, "hello", "--timeout", "0.1"])).toBe(4);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(log.err.join("\n")).toMatch(/timed out resolving session/);
+  });
+
+  test("POST /send stalls → ask exits 4 at its --timeout and says the send may or may not have landed", async () => {
+    sessionsRoute(); eventsRoute();
+    route("POST /send", stall);
+    const t0 = Date.now();
+    expect(await cmdAsk([SID, "hello", "--timeout", "0.1"])).toBe(4);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(log.err.join("\n")).toMatch(/timed out waiting for the daemon to accept the message/);
+  });
+
+  test("the seq probe (events?last=0) stalls → ask exits 4 at its --timeout", async () => {
+    sessionsRoute();
+    route(`GET /sessions/${SID}/events`, stall);
+    const t0 = Date.now();
+    expect(await cmdAsk([SID, "hello", "--timeout", "0.1"])).toBe(4);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  test("the finish grace and catch-up are clipped to the deadline: a turn that ends 20 ms before it still returns on time", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([agentText(1, "hi")]);
+    let n = 0;
+    route(`GET /sessions/${SID}/check`, (_q, res) => { n++; if (n === 1) json(res, 200, { state: "busy" }); else json(res, 200, { state: "idle" }); });
+    // the follow stream dies right away and every reconnect stalls, so the
+    // catch-up at the end would want its 3 s — it gets what is left instead
+    setTimeout(() => { for (const r of hanging) r.destroy(); hanging.clear(); route(`GET /sessions/${SID}/events`, stall); }, 50);
+    void ev;
+    const t0 = Date.now();
+    const code = await cmdWaitIdle([SID, "--timeout", "0.6"]);
+    expect(Date.now() - t0).toBeLessThan(1200);
+    expect([0, 1, 4]).toContain(code); // what matters here is WHEN it returned
+  });
 });
 
 describe("a broken event stream never yields a successful partial answer (#497)", () => {
@@ -221,9 +367,8 @@ describe("a broken event stream never yields a successful partial answer (#497)"
         json(res, 500, { error: "boom" }); return true; // every reconnect and the catch-up fail
       },
     });
-    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => ev.push(agentText(1, "part one")), 30); });
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => pushThenDrop(ev, agentText(1, "part one")), 30); }); // the follow stream ends after "part one"
     checkRoute((n) => (n < 3 ? { state: "busy" } : { state: "idle" }));
-    setTimeout(() => { for (const r of hanging) r.destroy(); hanging.clear(); }, 100); // the follow socket dies after "part one"
     expect(await cmdAsk([SID, "hello", "--no-queue"])).toBe(1);
     expect(log.err.join("\n")).toMatch(/output stream lost after seq 1 .* the reply is incomplete/);
   });
@@ -231,52 +376,207 @@ describe("a broken event stream never yields a successful partial answer (#497)"
   test("the stream drops and is resumed from the last consumed seq: the whole reply, exit 0", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
-    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => ev.push(agentText(1, "part one")), 30); });
-    setTimeout(() => { for (const r of hanging) r.destroy(); hanging.clear(); }, 100); // kill the first follow stream
-    setTimeout(() => ev.push(agentText(2, "part two")), 160);                        // landed while disconnected
+    // the first follow stream ends after "part one"; "part two" lands while disconnected
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => pushThenDrop(ev, agentText(1, "part one"), () => setTimeout(() => ev.push(agentText(2, "part two")), 60)), 30); });
     checkRoute((n) => (n < 3 ? { state: "busy" } : { state: "idle" }));
     expect(await cmdAsk([SID, "hello", "--no-queue"])).toBe(0);
     expect(log.out).toEqual(["part one\n\npart two"]);
     expect(ev.connections()).toBeGreaterThan(1);
   });
+
+  // #497 residual (Astra): a reconnect that says hello{seq:2} and then stalls
+  // before row 2 used to count as "connected", the catch-up was skipped, and
+  // `ask` exited 0 with part one only.
+  const stalledReopen = (stallFrom: number, stallTo: number) => eventsRoute([], {
+    onConnect: (n, res) => {
+      if (n < stallFrom || n > stallTo) return false; // the seq probe + the first follow, then whatever comes after the stall window
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      res.write(ndjson([{ hello: true, seq: 2 }])); // the reopened stream advertises seq 2 …
+      hanging.add(res); return true;                // … and never sends it
+    },
+  });
+  const reopenScenario = (ev: ReturnType<typeof eventsRoute>) => {
+    // the first follow stream ends after part one; row 2 then exists on the daemon
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => pushThenDrop(ev, agentText(1, "part one"), () => setTimeout(() => ev.push(agentText(2, "part two")), 40)), 20); });
+    checkRoute((n) => (n < 3 ? { state: "busy" } : { state: "idle" }));
+  };
+
+  test("a reopened stream that advertises seq 2 and stalls: the catch-up cannot get it either → exit 1, incomplete", async () => {
+    sessionsRoute();
+    reopenScenario(stalledReopen(3, Infinity)); // every connection after the drop stalls after hello{seq:2}
+    expect(await cmdAsk([SID, "hello", "--no-queue", "--timeout", "8"])).toBe(1);
+    expect(log.out).toEqual(["part one"]);
+    expect(log.err.join("\n")).toMatch(/output stream lost after seq 1 — the daemon holds records through seq 2 .* the reply is incomplete/);
+  }, 15_000);
+
+  test("a reopened stream that advertises seq 2 and stalls: the final catch-up fetches row 2 → exit 0 with both parts", async () => {
+    sessionsRoute();
+    reopenScenario(stalledReopen(3, 3)); // only the reconnect stalls; the head probe and the catch-up are served
+    expect(await cmdAsk([SID, "hello", "--no-queue", "--timeout", "8"])).toBe(0);
+    expect(log.out).toEqual(["part one\n\npart two"]);
+  });
 });
 
-describe("a queued ask's reply is its own turn, not the tail of the previous one (#498)", () => {
-  test("B queued behind A: A's remaining answer is excluded, B's is returned", async () => {
+describe("a queued ask is bound to its durable command and its runtime turn (#498)", () => {
+  const turnEnd = (seq: number, turn: string, usage?: unknown) => rec(seq, { role: "session", content: { type: "session", data: { turn, ev: { t: "turn-end", status: "completed", ...(usage ? { usage } : {}) } } } });
+  /** GET /sessions/:id/queue/:qid over a scripted sequence of states (the last one repeats). */
+  const commandRoute = (qid: string, states: Array<Partial<{ state: string; terminalReason: string | null; runtimeTurnId: string | null }> | Handler>) => {
+    let n = 0;
+    route(`GET /sessions/${SID}/queue/${qid}`, (q, res, url, body) => {
+      const v = states[Math.min(n++, states.length - 1)];
+      if (typeof v === "function") return (v as Handler)(q, res, url, body);
+      json(res, 200, { ok: true, id: qid, text: "…", createdAt: 0, state: "queued", terminalReason: null, runtimeTurnId: null, attempts: 1, ...v });
+    });
+    return { polls: () => n };
+  };
+
+  test("B queued behind A: A's tail after the send is excluded, B's own turn (the first started after the send) is the reply", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
     let dispatched = false;
     route("POST /send", (_q, res) => {
       json(res, 200, { ok: true, queued_id: "q2" });
-      // A is still answering after B was queued; then the daemon dispatches B
-      // (mirrors its prompt as a user row) and B answers.
       void (async () => {
         await delay(50); ev.push(agentText(1, "A's tail", "a"));
         await delay(50); dispatched = true;
         ev.push(userRow(2, '<joy-message from="cli">\nwhat is B\n</joy-message>'));
         ev.push(turnStart(3, "b"));
-        await delay(50); ev.push(agentText(4, "B's answer", "b"));
+        await delay(50); ev.push(agentText(4, "B's answer", "b")); ev.push(turnEnd(5, "b", { output: 7 }));
       })();
     });
-    route(`GET /sessions/${SID}/queue`, (_q, res) => json(res, 200, { items: dispatched ? [] : [{ id: "q2", text: "what is B" }] }));
-    checkRoute(() => ({ state: ev.connections() && dispatched ? "idle" : "busy" }));
-    expect(await cmdAsk([SID, "what", "is", "B"])).toBe(0);
-    expect(log.out).toEqual(["B's answer"]);
+    route(`GET /sessions/${SID}/queue/q2`, (_q, res) => json(res, 200, { ok: true, id: "q2", state: dispatched ? "completed" : "queued", terminalReason: dispatched ? "delivered" : null, runtimeTurnId: null }));
+    checkRoute(() => ({ state: "busy" }));
+    expect(await cmdAsk([SID, "what", "is", "B", "--json"])).toBe(0);
+    const out = JSON.parse(log.out[0]);
+    expect(out).toMatchObject({ state: "answered", text: "B's answer", turn: "q2", usage: { output: 7 } });
   });
 
-  test("no mirrored user row (an adapter that does not echo the prompt): the dispatch moment is the boundary", async () => {
+  // Astra's early-mirror order: the real codex adapter mirrors the prompt at
+  // ACCEPTANCE, while the previous turn still emits, and the next turn can
+  // follow in the same burst. The shipped test used to delay the mirror
+  // until dispatch and returned "A tail / B answer / C answer".
+  const earlyMirrorBurst = (ev: ReturnType<typeof eventsRoute>) => {
+    ev.push(userRow(1, "B"));
+    ev.push(agentText(2, "A tail", "A"));
+    ev.push(turnStart(3, "B")); ev.push(agentText(4, "B answer", "B")); ev.push(turnEnd(5, "B"));
+    ev.push(turnStart(6, "C")); ev.push(agentText(7, "C answer", "C")); ev.push(turnEnd(8, "C"));
+  };
+
+  test("early mirror, the daemon names the runtime turn (codex): exactly that turn's records are the reply", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
-    let polls = 0;
-    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "q2" }); setTimeout(() => ev.push(agentText(1, "A's tail", "a")), 30); });
-    route(`GET /sessions/${SID}/queue`, (_q, res) => {
-      polls++;
-      if (polls >= 2) setTimeout(() => ev.push(agentText(2, "B's answer", "b")), 30);
-      json(res, 200, { items: polls >= 2 ? [] : [{ id: "q2" }] });
-    });
-    checkRoute(() => ({ state: polls >= 2 ? "idle" : "busy" }));
-    expect(await cmdAsk([SID, "what", "is", "B"])).toBe(0);
-    expect(log.out).toEqual(["B's answer"]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => earlyMirrorBurst(ev), 20); });
+    commandRoute("qB", [{ state: "running", runtimeTurnId: "B" }, { state: "completed", terminalReason: "delivered", runtimeTurnId: "B" }]);
+    checkRoute((n) => ({ state: n === 1 ? "busy" : "idle" }));
+    expect(await cmdAsk([SID, "B"])).toBe(0);
+    expect(log.out).toEqual(["B answer"]);
+  });
+
+  test("early mirror, no runtime turn from the daemon (claude): the first turn started after the send is the reply — not A's tail, not C", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => earlyMirrorBurst(ev), 20); });
+    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "delivered" }]);
+    checkRoute((n) => ({ state: n === 1 ? "busy" : "idle" }));
+    expect(await cmdAsk([SID, "B"])).toBe(0);
+    expect(log.out).toEqual(["B answer"]);
+  });
+
+  test("a command that the daemon reports completed before the CLI ever saw it pending: still its own turn", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); earlyMirrorBurst(ev); });
+    commandRoute("qB", [{ state: "completed", terminalReason: "delivered", runtimeTurnId: "B" }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B"])).toBe(0);
+    expect(log.out).toEqual(["B answer"]);
+  });
+
+  // Astra: a 500 from the queue read used to become an empty queue —
+  // "dispatched" — and a busy→idle flip then produced `answered` for a turn
+  // that never ran.
+  test("a failing command read is an error, never an empty queue: 500 then busy→idle is exit 1, not answered", async () => {
+    sessionsRoute(); eventsRoute();
+    route("POST /send", (_q, res) => json(res, 200, { ok: true, queued_id: "never-dispatched" }));
+    route(`GET /sessions/${SID}/queue/never-dispatched`, (_q, res) => json(res, 500, { error: "cannot read queue" }));
+    checkRoute((n) => ({ state: n === 1 ? "busy" : "idle" }));
+    expect(await cmdAsk([SID, "B", "--json", "--timeout", "5"])).toBe(1);
+    const out = JSON.parse(log.out[0]);
+    expect(out.state).toBe("error");
+    expect(out.reason).toMatch(/queue read failed for turn never-dispatched: cannot read queue/);
+  });
+
+  test("a brief run of unreadable reads (a daemon re-exec) is ridden out", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => { ev.push(turnStart(1, "B")); ev.push(agentText(2, "B answer", "B")); ev.push(turnEnd(3, "B")); }, 20); });
+    commandRoute("qB", [(_q, res) => { res.destroy(); }, { state: "completed", terminalReason: "delivered", runtimeTurnId: "B" }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B"])).toBe(0);
+    expect(log.out).toEqual(["B answer"]);
+  });
+
+  test("a global idle never completes a durable turn: the command stays queued → timeout (exit 4), not answered", async () => {
+    sessionsRoute(); eventsRoute([agentText(1, "someone else's text", "z")]);
+    route("POST /send", (_q, res) => json(res, 200, { ok: true, queued_id: "qB" }));
+    commandRoute("qB", [{ state: "queued" }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B", "--timeout", "1"])).toBe(4);
+    expect(log.out).toEqual([]);
+  });
+
+  test("the daemon does not know the id: exit 1 with the reason", async () => {
+    sessionsRoute(); eventsRoute();
+    route("POST /send", (_q, res) => json(res, 200, { ok: true, queued_id: "qB" }));
+    route(`GET /sessions/${SID}/queue/qB`, (_q, res) => json(res, 404, { error: "command_not_found" }));
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B"])).toBe(1);
+    expect(log.err.join("\n")).toMatch(/the daemon has no record of turn qB/);
+  });
+
+  test("the command's own outcome is the verdict: failed → exit 1 with the daemon's reason; cancelled → exit 1", async () => {
+    sessionsRoute(); eventsRoute();
+    route("POST /send", (_q, res) => json(res, 200, { ok: true, queued_id: "qB" }));
+    commandRoute("qB", [{ state: "failed", terminalReason: "rejected: turn refused" }]);
+    checkRoute(() => ({ state: "idle" }));
+    expect(await cmdAsk([SID, "B"])).toBe(1);
+    expect(log.err.join("\n")).toMatch(/turn qB failed: rejected: turn refused/);
+    log.err.length = 0;
+    commandRoute("qB", [{ state: "cancelled", terminalReason: "cancelled" }]);
+    expect(await cmdAsk([SID, "B"])).toBe(1);
+    expect(log.err.join("\n")).toMatch(/turn qB cancelled \(cancelled\) — it did not run to completion/);
+  });
+
+  test("needs_input during the turn still ends the wait with exit 6 and the text so far", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => { ev.push(turnStart(1, "B")); ev.push(agentText(2, "may I?", "B")); }, 20); });
+    commandRoute("qB", [{ state: "running", runtimeTurnId: "B" }]);
+    checkRoute((n) => (n === 1 ? { state: "busy" } : { state: "needs_input", approvals: [{ requestId: "r1", title: "rm -rf" }] }));
+    expect(await cmdAsk([SID, "B"])).toBe(6);
+    expect(log.out).toEqual(["may I?"]);
+  });
+
+  test("completed, but the attributed turn's end record is not in the log: error, not a guessed reply", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([]);
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: "qB" }); setTimeout(() => { ev.push(turnStart(1, "X")); ev.push(agentText(2, "not B", "X")); }, 20); });
+    commandRoute("qB", [{ state: "running", runtimeTurnId: "B" }, { state: "completed", terminalReason: "delivered", runtimeTurnId: "B" }]);
+    checkRoute(() => ({ state: "busy" }));
+    expect(await cmdAsk([SID, "B"])).toBe(1);
+    expect(log.out).toEqual([]);
+    expect(log.err.join("\n")).toMatch(/turn qB completed but the turn-end record of its runtime turn B is not in the log through seq 2/);
+  });
+
+  test("joy wait --turn binds the same way: completed → idle exit 0, failed → exit 1", async () => {
+    sessionsRoute(); eventsRoute();
+    commandRoute("qB", [{ state: "running" }, { state: "completed", terminalReason: "delivered" }]);
+    checkRoute(() => ({ state: "busy" }));
+    expect(await cmdWaitIdle([SID, "--turn", "qB"])).toBe(0);
+    expect(log.out.join("\n")).toContain(`${SID} idle`);
+    commandRoute("qB", [{ state: "interrupted", terminalReason: "idle_without_terminal" }]);
+    expect(await cmdWaitIdle([SID, "--turn", "qB", "--json"])).toBe(1);
+    expect(JSON.parse(log.out[log.out.length - 1])).toMatchObject({ state: "error", reason: expect.stringContaining("turn qB interrupted (idle_without_terminal)") });
   });
 });
 

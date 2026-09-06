@@ -82,6 +82,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-env-list` / `joy-env-set` / `joy-env-unset` | GET /env · POST /env · DELETE /env/:name | The sealed environment store (`~/.joy/env.sealed`, AES-GCM under the machine key): names only out, values in; applied to `process.env` at boot and before EVERY spawn so all four agents inherit it. Also on the tunnel as `/v2/env` |
 | (stream) | GET /sessions/:id/events?after=&last=&follow=1 | NDJSON of the session's adapter records (`{seq, at, record}` — text, tool calls, turn lifecycle+usage, user rows with `meta.from`); first line `{hello, seq}`. Backs `joy events`, `wait`, `ask` |
 | `joy-queue-list/add/edit/cancel/resume/reorder` | /sessions/:id/queue… | Durable dispatch queue CRUD |
+| `joy-queue-get` | GET /sessions/:id/queue/:qid | One command by id (the `queued_id` a send returned): `{ id, text, createdAt, state, terminalReason, runtimeTurnId, attempts }`. `state` is the ledger's (`queued` \| `submitting` \| `accepted` \| `unknown` \| `running` \| `cancelling` \| `completed` \| `failed` \| `cancelled` \| `interrupted`), `terminalReason` why a terminal state was reached (`delivered`, `rejected`, `cancelled`, `idle_without_terminal`, …), `runtimeTurnId` the runtime's own turn id for the accepted attempt — the `turn` its `/events` records carry — once the runtime named one (codex, opencode, pi), null before that or for claude. 404 `command_not_found` for an id this session never accepted or one pruned by the ledger's retention. What `joy ask` / `wait --turn` bind on (#498) |
 | `joy-send-keys` | POST /sessions/:id/keys | Raw key tokens into the pane (escape hatch, not primary interaction) |
 | `joy-set-mode` | POST /sessions/:id/mode | Permission/model/effort switches |
 | `joy-pane` | GET /sessions/:id/pane | ANSI pane capture (terminal view) |
@@ -401,19 +402,50 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   single SSE event `event: history\ndata: [<records>]\n\n` (byte-identical to
   the whole-array form) and `/sessions/:id/events` still opens with the
   `{ hello, seq }` line followed by one NDJSON line per record.
-- CLI turn wait (`joy ask` / `wait` / `run`, `waitTurn` in `cli.ts`): polls
-  `/sessions/:id/queue` until the turn id has left the queue, then `/check`
-  until an explicit `idle` / `needs_input`; every request carries the
-  remaining `--timeout` as its abort signal and the deadline is re-checked
-  after each (#501). `/check` 404 → `gone` (exit 1); any other non-2xx or an
+- CLI turn wait (`joy ask` / `wait` / `run`, `waitTurn` in `cli.ts`): with a
+  turn id (every `ask`/`run`, `wait --turn`) the wait is bound to the DURABLE
+  command (#498): `GET /sessions/:id/queue/:qid` is polled until the command
+  is terminal — `completed` is `answered`; `failed` / `cancelled` /
+  `interrupted` are `error` (exit 1) with the daemon's `terminalReason`; 404
+  `command_not_found` is `error`. Nothing else completes it: `/check` idle
+  while the command is still queued or running is not an answer (the wait
+  runs to its deadline → `timeout`), a queue read that fails is not an empty
+  queue (three consecutive unreadable reads → `error`, a daemon re-exec is
+  ridden out), and an id merely absent from a listing is not "dispatched".
+  `/check` still ends the wait early for `needs_input` (exit 6) and `ended`.
+  The reply's text is the records of the runtime turn attributed to the
+  command — the `runtimeTurnId` the daemon reports (codex, opencode, pi name
+  their turns; `turn` on every `/events` record) or, for an adapter that
+  never does (claude), the first turn that STARTS after the send: turn-start
+  records of the turn in flight at send time predate the send's seq, so its
+  tail and any later turn's output are excluded even when the adapter
+  mirrored the prompt at acceptance (the codex order). The attributed turn's
+  turn-end record must be in the log for `answered`; otherwise `error`.
+  Without a turn id (a bare `wait`) the wait polls `/check` to an explicit
+  `idle` / `needs_input` and the reply is everything after the start seq.
+  ONE deadline covers the whole command (#501): `ask`/`run`/`wait` create a `lifetime(--timeout)` before
+  their first request, and session resolution, the seq probe, the send
+  (`run`: the create too), every poll, the 300/400 ms sleeps, the 150 ms
+  finish grace, the record stream and the final catch-up all run under its
+  signal / remaining time; a timed-out wait starts NO catch-up. A pre-wait
+  probe that hits the deadline exits 4 (a stalled `POST /send` says the
+  message may or may not have been queued). `run`'s teardown runs on its own
+  10 s clock so a spent lifetime still cleans up. `/check` 404 → `gone` (exit 1); any other non-2xx or an
   unknown `state` → `error` (exit 1, `reason`) — never `answered` (#496). The
   `/sessions/:id/events?follow=1` stream is resumed from the last consumed
-  `seq` when it breaks; at the end a tail that cannot be fetched turns an
-  otherwise-answered outcome into `error` ("output stream lost after seq N")
-  instead of a truncated reply (#497). The text of a queued turn starts at the
+  `seq` when it breaks. Before an `answered` / `needs_input` outcome the CLI
+  establishes the log's high-water — the head seq it asks for directly
+  (`?last=0`), never below the seq any `{hello, seq}` frame advertised — and
+  fetches through it once (bounded by the remaining deadline); rows it still
+  lacks turn the outcome into `error` ("output stream lost after seq N — the
+  daemon holds records through seq M"). A connected follow socket is not
+  proof its advertised rows arrived: a reopened stream that says hello{seq:2}
+  and stalls before row 2 is an incomplete reply, not a success (#497). The text of a queued turn starts at the
   mirrored user row whose (wrapper-stripped) text is the sent prompt, else at
   the seq seen when the queue poll noticed the dispatch (#498). `joy new -m`
-  reuses the send path and exits with its code on refusal (#494).
+  reuses the send path and exits with its code on refusal (#494); its retry
+  line shell-quotes the prompt (`shellQuote`, one single-quoted word), so a
+  `$(…)` or backtick in the message is inert when pasted.
 - `joy install` bakes the effective `JOY_RELAY_URL` AND `JOY_HOME_DIR` into
   the systemd unit / launchd plist, so the supervised daemon reads the same
   credentials and state the installing CLI did (an overridden home used to be
@@ -425,7 +457,18 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   stopped through `systemctl --user stop` / `launchctl unload` — a direct
   SIGTERM was undone by `Restart=always` / `KeepAlive` three seconds later
   while `stop` reported success (#502); a failing supervisor stop is exit 1
-  and nothing is signalled. Only a detached daemon gets the signal directly. The single-daemon lock
+  and nothing is signalled. Only a detached daemon gets the signal directly.
+  The supervisor inspection is three-valued: owns the pid / answered and does
+  not (inactive or absent unit or job, `launchctl` 113) / the inspection
+  itself failed. A failed inspection is NOT "no supervisor" (#502 residual):
+  `joy stop` then reads independent evidence, strongest first — the launch
+  mode the daemon recorded in daemon.json (`launcher`: `systemd` | `launchd`
+  | `detached`, from INVOCATION_ID / XPC_SERVICE_NAME; `joy start` strips
+  those markers so a daemon started from a service-hosted shell still records
+  `detached`), the pid's `/proc/<pid>/cgroup` (a unit's process sits in
+  `…/joy-daemon.service`), then whether the unit file / plist is installed.
+  With none of it, `stop` exits 1 with "could not determine whether the
+  daemon is supervised" and signals nothing. The single-daemon lock
   is an SQLite `BEGIN IMMEDIATE` on `daemon.lock.db` — OS-backed, released
   when the process dies, nothing to reclaim; `daemon.lock` is an informational
   pidfile (#589). Node ≥ 22.13.
