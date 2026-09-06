@@ -206,7 +206,7 @@ test("C1/C2: a crash between turn/start and the echo is an explicit unknown; the
   s.end("killed"); s2.end("killed");
 });
 
-test("two non-relay sends in the same millisecond mirror under distinct localIds", async () => {
+test("#517: two non-relay sends in the same millisecond mirror under distinct localIds (the command id, not the timestamp)", async () => {
   const id = "dur-localid";
   const sent: Array<string | undefined> = [];
   // A relay that only records what is sent; every other call is a no-op.

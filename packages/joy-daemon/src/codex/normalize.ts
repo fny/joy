@@ -135,6 +135,21 @@ export class CodexNormalizer {
     return core;
   }
 
+  /** Bind a LIVE transient item id to a canonical ordinal that history replay
+   *  already allocated for the same item (#519). A live item buffered while
+   *  thread/read was pending is also in the returned history under a
+   *  positional id; without the binding its flush allocated a second ordinal
+   *  — a second localId for the same answer, past the relay's dedupe. */
+  bindTransient(turnId: string, type: string, transientId: string, ordinal: number): void {
+    if (!turnId || !type || !transientId) return;
+    const state = this.#turnState(turnId);
+    const key = `${type}|${transientId}`;
+    if (state.byId.has(key)) return;
+    const core = `${type}:${ordinal}`;
+    state.byId.set(key, core);
+    this.#byTransient.set(transientId, { turn: turnId, type, core });
+  }
+
   /** The turn an item/completed belongs to. An item whose start we saw resolves
    *  to the turn that allocated it — even after that turn ended and a new one
    *  began (late tool completion). An explicit turnId that names a DIFFERENT
@@ -351,8 +366,22 @@ export class CodexNormalizer {
   }
 }
 
+/** What identifies an item's CONTENT across its live and history forms
+ *  (the transient ids differ: live msg_…/call_…, history item-N). Empty
+ *  when the type carries nothing comparable — never matched on. */
+export function itemSignature(item: Item): string {
+  switch (itemType(item)) {
+    case "agentMessage": return str(item.text).trim();
+    case "userMessage": return userMessageText(item).trim();
+    case "commandExecution": return str(item.command);
+    case "fileChange": return item.changes !== undefined || item.content !== undefined ? JSON.stringify(item.changes ?? item.content) : "";
+    case "mcpToolCall": return JSON.stringify({ server: item.server ?? null, tool: item.tool ?? item.name ?? null, arguments: item.arguments ?? null });
+    default: return "";
+  }
+}
+
 /** Text of a codex userMessage item — `text`, or the joined text parts of `content`. */
-function userMessageText(item: Item): string {
+export function userMessageText(item: Item): string {
   const direct = str(item.text);
   if (direct) return direct;
   const content = item.content;

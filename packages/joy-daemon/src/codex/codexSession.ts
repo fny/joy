@@ -32,7 +32,8 @@ import type { DeliverySource } from "../domain/agentSession";
 import type { AgentSession } from "../domain/agentSession";
 import { codexJoyInstructions, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
-import { CodexNormalizer, type CodexNotification } from "./normalize";
+import { CodexNormalizer, itemSignature, type CodexNotification } from "./normalize";
+import type { WireRecord } from "../relay/relay";
 import { buildCodexAttachCommand } from "./attach";
 import { ledgerFor, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand } from "../domain/coordinator";
@@ -140,6 +141,21 @@ export class CodexSession implements AgentSession {
   // traffic must not interleave with synthetic history replay.
   #buffering = true;
   #notifBuffer: CodexNotification[] = [];
+  // The items history replay emitted per turn, by content signature, so a
+  // live item buffered while thread/read was pending — the SAME item under
+  // a different transient id — binds to the ordinal replay allocated instead
+  // of a second one (#519). Consumed by the flush.
+  #historyItems = new Map<string, Array<{ type: string; ordinal: number; sig: string; matched: boolean }>>();
+  // The oldest turn whose history could NOT be replayed (itemsView != full):
+  // the delivered high-water must never pass it, or the next recovery skips
+  // its output for good once the full items become available (#518).
+  #deferredFloor: string | null = null;
+  // Codex emits turn/started BEFORE the turn's userMessage item, so a prompt
+  // typed in the attached TUI mirrored on that item landed AFTER the turn-
+  // start record and the app bracketed it inside the turn (#131). The
+  // turn-start is held until the turn's first other effect; a TUI user row
+  // goes out first.
+  #heldTurnStart: { record: WireRecord; localId: string } | null = null;
   // Codex approval requests awaiting the app (non-yolo). Insertion-ordered Map
   // = a FIFO; the app bar always shows the HEAD (finding #6).
   #pendingApprovals = new Map<string, PendingApproval>();
@@ -221,6 +237,9 @@ export class CodexSession implements AgentSession {
   /** The codex thread id, once known — used by registry.restart to resume the
    *  SAME thread even when the persisted record is absent (finding #7). */
   get codexThreadId(): string | undefined { return this.#threadId ?? this.#resumeThreadId; }
+  /** The `-c key=value` overrides this app-server was launched with — a
+   *  restart's replacement launches with the same ones (#561). */
+  get codexConfig(): Record<string, string> | undefined { return this.#config && Object.keys(this.#config).length > 0 ? { ...this.#config } : undefined; }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -475,6 +494,9 @@ export class CodexSession implements AgentSession {
    *  the outbox cannot persist (rows exist only in RAM). */
   #markTurnDelivered(turnId: string): void {
     if (!turnId) return;
+    // Never past a turn whose history replay was deferred (#518): the mark
+    // is a delivered PREFIX, and that turn is a hole in it.
+    if (this.#deferredFloor && turnId >= this.#deferredFloor) return;
     const next = advanceTurnHighWater(this.#deliveredThrough, turnId);
     if (next === this.#deliveredThrough || next === null) return;
     if (this.#relay?.outboundPersistDegraded) return;
@@ -571,7 +593,35 @@ export class CodexSession implements AgentSession {
   #flushNotifBuffer(): void {
     const buffered = this.#notifBuffer;
     this.#notifBuffer = [];
+    this.#bindBufferedToHistory(buffered);
     for (const n of buffered) this.#dispatchNotification(n);
+  }
+
+  /** A live item that completed while thread/read was pending is ALSO in the
+   *  history just replayed, under a positional id. Match each buffered
+   *  completion to the first unmatched replayed item of its turn with the
+   *  same type and content, in order, and bind its live id to that ordinal
+   *  — its flush then re-emits the replayed localIds (relay-deduped) instead
+   *  of minting a second identity for the same answer (#519). */
+  #bindBufferedToHistory(buffered: CodexNotification[]): void {
+    const history = this.#historyItems;
+    this.#historyItems = new Map();
+    if (!history.size) return;
+    for (const n of buffered) {
+      if (n.method !== "item/completed") continue;
+      const p = n.params ?? {};
+      const turnId = typeof p.turnId === "string" ? p.turnId : "";
+      const item = (p.item ?? {}) as Record<string, unknown>;
+      const id = typeof item.id === "string" ? item.id : "";
+      const type = typeof item.type === "string" ? item.type : "";
+      const sig = itemSignature(item);
+      const replayed = history.get(turnId);
+      if (!replayed || !id || !type || !sig) continue;
+      const hit = replayed.find((h) => !h.matched && h.type === type && h.sig === sig);
+      if (!hit) continue;
+      hit.matched = true;
+      this.#norm.bindTransient(turnId, type, id, hit.ordinal);
+    }
   }
 
   #dispatchNotification(n: CodexNotification): void {
@@ -626,17 +676,33 @@ export class CodexSession implements AgentSession {
     this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: this.id });
   }
 
+  /** Send the held turn-start (#131) — before anything else of its turn. */
+  #flushHeldTurnStart(): void {
+    const held = this.#heldTurnStart;
+    if (!held) return;
+    this.#heldTurnStart = null;
+    this.#relay?.send(held.record, held.localId);
+  }
+
   #applyEffects(effects: ReturnType<CodexNormalizer["handle"]>): void {
     for (const eff of effects) {
       switch (eff.kind) {
         case "wire": {
-          this.#relay?.send(eff.record, eff.localId);
           const data = (eff.record as { content?: { data?: { ev?: { t?: string; text?: string } } } }).content?.data;
+          if (data?.ev?.t === "turn-start") {
+            // Held until the turn's first item (#131): a TUI-typed prompt's
+            // user row must precede the bracket, as a joy-sent one does.
+            this.#flushHeldTurnStart();
+            this.#heldTurnStart = { record: eff.record, localId: eff.localId };
+            break;
+          }
+          this.#flushHeldTurnStart();
+          this.#relay?.send(eff.record, eff.localId);
           if (data?.ev?.t === "text" && data.ev.text) this.#mirrorChat(eff.localId ?? String(Math.random()), data.ev.text);
           break;
         }
         case "thinking": this.#thinking = eff.value; this.#relay?.setThinking(eff.value); break;
-        case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
+        case "receipt": this.#flushHeldTurnStart(); this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "model": this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); break;
         case "effort": this.currentEffort = eff.effort; break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
@@ -652,18 +718,21 @@ export class CodexSession implements AgentSession {
           // The userMessage echo carrying a clientId we submitted proves
           // delivery; the coordinator pairs it with its attempt (a late one
           // for a cancelled row is interrupted there — the tombstone rule).
+          this.#flushHeldTurnStart(); // our own prompt's row is already in the card: the bracket opens here
           if (this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client")) this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" });
           break;
         case "userMessage": {
           // Ours if this session ever submitted that clientId (an attempt
           // row or a retained receipt); anything else was typed in the
-          // attached TUI and has no relay row — mirror it once. Not during
-          // history replay: a fresh card already emitted user rows BEFORE
-          // the turn bracket (#78).
+          // attached TUI and has no relay row — mirror it once, BEFORE the
+          // held turn-start so the app brackets it like a joy-sent prompt
+          // (#131). Not during history replay: a fresh card already emitted
+          // user rows before the turn bracket (#78).
           const ours = !!eff.clientId && this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client");
-          if (ours) { this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" }); break; }
-          if (this.#replayingHistory && this.#freshCard) break; // already emitted before the turn bracket
+          if (ours) { this.#flushHeldTurnStart(); this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" }); break; }
+          if (this.#replayingHistory && this.#freshCard) { this.#flushHeldTurnStart(); break; } // already emitted before the turn bracket
           this.#relay?.send(encodeUserMessage(eff.text, Date.now()), eff.localId);
+          this.#flushHeldTurnStart();
           break;
         }
       }
@@ -702,11 +771,23 @@ export class CodexSession implements AgentSession {
       const view = String(turn.itemsView ?? "full");
       // A turn whose items history did NOT fully return can't be faithfully
       // replayed — skip its items and do NOT checkpoint it (finding #2/#5).
+      // Nor anything AFTER it: a later terminal turn's ack used to advance
+      // the high-water past this gap, and the next recovery skipped this
+      // turn's output for good once its full items were available (#518).
       if (view && view !== "full") {
-        process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay\n`);
+        process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay; the delivered mark holds below it\n`);
+        if (!this.#deferredFloor || tid < this.#deferredFloor) this.#deferredFloor = tid;
         continue;
       }
       const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
+      // What replay is about to emit, by content, for the live-buffer flush (#519).
+      const ordinals = new Map<string, number>();
+      this.#historyItems.set(tid, items.map((item) => {
+        const type = String((item as { type?: unknown }).type ?? "");
+        const ordinal = ordinals.get(type) ?? 0;
+        ordinals.set(type, ordinal + 1);
+        return { type, ordinal, sig: itemSignature(item), matched: false };
+      }));
       // FRESH CARD (restart / resume-by-id / continue): the new relay session
       // has no prior rows, so replay the user prompts too — BEFORE the turn
       // bracket, matching live ordering (user row, then turn-start; the app's
@@ -746,6 +827,17 @@ export class CodexSession implements AgentSession {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status } } }));
       } else if (!this.#rejoined) {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: "interrupted" } } }));
+      } else {
+        // A LIVE turn we rejoined: it is the active one — busy, thinking,
+        // interruptible by id. Its turn/started fired before we connected
+        // and will never be replayed, so tell the coordinator now (its own
+        // attempt claims it when the turn id is known; otherwise it is a
+        // foreign turn, R8). Without this the session read idle, abort()
+        // had nothing to interrupt and the next prompt was started against
+        // the running turn (#513).
+        this.#activeTurnId = tid;
+        this.#applyEffects([{ kind: "thinking", value: true }]);
+        this.#driver.emit({ kind: "turn_started", runtimeTurnId: tid });
       }
     }
     // The high-water advances via terminal-row ACKs (setReceiptSink).
@@ -853,9 +945,14 @@ export class CodexSession implements AgentSession {
     // DETERMINISTIC localId matching the normalizer's turn-end (finding #9) so
     // it dedupes against a real turn-end the app may already hold.
     if (this.#activeTurnId) {
+      this.#flushHeldTurnStart();
       try { this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#activeTurnId }), `codex:${this.#threadId}:turn:${this.#activeTurnId}:complete`); } catch { /* ignore */ }
       this.#activeTurnId = null;
     }
+    this.#heldTurnStart = null;
+    // The session's own flag too, not only the relay's: an ended session read
+    // busy forever through busy() and toJSON() (#515).
+    this.#thinking = false;
     if (this.#relay) this.#relay.setThinking(false);
     this.#tmux.untrack(this.tmuxWindow);
     if (reason === "process_exited") {
