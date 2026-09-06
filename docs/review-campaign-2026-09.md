@@ -403,6 +403,11 @@ app.
   voice 235fb05b). Closer running over 136 verified-fixed issues. New lows:
   #622 parseTable quadratic, #623 flaky lane backoff test.
 
+- 2026-09-08 (count) — closer passes over every verified-fixed verdict:
+  139 more issues closed; **109 open** (from 605). Astra's verification of
+  the cc196d26 batch and the C2 phase 5 merge are the last gates before the
+  Wave F sweep.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
