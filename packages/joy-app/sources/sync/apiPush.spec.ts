@@ -1,61 +1,60 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./serverConfig', () => ({ getServerUrl: () => 'https://relay.test' }));
-vi.mock('./clientId', () => ({ getJoyClientId: () => 'test-client' }));
+vi.mock('./clientId', () => ({ getJoyClientId: () => 'client-1' }));
 
-import { PUSH_API_MAX_ATTEMPTS, unregisterPushToken, registerPushToken } from './apiPush';
+import { PUSH_API_MAX_ATTEMPTS, PUSH_API_TIMEOUT_MS, PushApiTimeoutError, unregisterPushToken } from './apiPush';
 
-const creds = { token: 'tok', secret: 'sec' } as any;
+const creds = { token: 'tok', secret: 'sec' };
 
-async function settle<T>(p: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
-    // Drain every retry delay (bounded, so this terminates).
-    const outcome = p.then((value) => ({ ok: true as const, value }), (error) => ({ ok: false as const, error }));
-    await vi.runAllTimersAsync();
+// Drive the bounded retry loop to its end: each attempt lasts one deadline,
+// then a jittered delay (<= 4s) before the next.
+async function runToCompletion(p: Promise<unknown>): Promise<unknown> {
+    let outcome: unknown = 'pending';
+    p.then(() => { outcome = 'resolved'; }, (e) => { outcome = e; });
+    for (let i = 0; i < PUSH_API_MAX_ATTEMPTS; i++) {
+        await vi.advanceTimersByTimeAsync(PUSH_API_TIMEOUT_MS + 5_000);
+    }
     return outcome;
 }
 
-describe('push-token API retries are bounded (#9)', () => {
+describe('push API deadlines (#9 residual)', () => {
+    const signals: AbortSignal[] = [];
     beforeEach(() => {
         vi.useFakeTimers();
+        signals.length = 0;
         vi.spyOn(console, 'warn').mockImplementation(() => {});
     });
-    afterEach(() => {
-        vi.useRealTimers();
-        vi.restoreAllMocks();
-        vi.unstubAllGlobals();
+    afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+    it('a DELETE the relay accepts but never answers settles after the deadline on every attempt', async () => {
+        // Reviewer: attempt count alone is not an I/O bound — the first fetch
+        // stayed pending forever, so removePushToken never returned.
+        const fetchMock = vi.fn((_url: string, init: { signal: AbortSignal }) => {
+            signals.push(init.signal);
+            return new Promise<Response>(() => {}); // never resolves, ignores abort
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const outcome = await runToCompletion(unregisterPushToken(creds, 'T'));
+        expect(outcome).toBeInstanceOf(PushApiTimeoutError);
+        expect(fetchMock).toHaveBeenCalledTimes(PUSH_API_MAX_ATTEMPTS);
+        expect(signals.every((s) => s.aborted)).toBe(true);
     });
 
-    it('unregister settles (rejects) after a bounded number of network failures', async () => {
-        const fetchMock = vi.fn().mockRejectedValue(new TypeError('Network request failed'));
+    it('a response whose BODY never arrives is bounded by the same deadline', async () => {
+        const fetchMock = vi.fn(() => Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => new Promise<never>(() => {}),
+        } as unknown as Response));
         vi.stubGlobal('fetch', fetchMock);
-        const result = await settle(unregisterPushToken(creds, 'ExponentPushToken[abc]'));
-        expect(result.ok).toBe(false);
+        const outcome = await runToCompletion(unregisterPushToken(creds, 'T'));
+        expect(outcome).toBeInstanceOf(PushApiTimeoutError);
         expect(fetchMock).toHaveBeenCalledTimes(PUSH_API_MAX_ATTEMPTS);
     });
 
-    it('does not retry a definitive 401', async () => {
-        const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) });
-        vi.stubGlobal('fetch', fetchMock);
-        const result = await settle(registerPushToken(creds, 'ExponentPushToken[abc]'));
-        expect(result.ok).toBe(false);
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-
-    it('treats a 404 on delete as already unregistered', async () => {
-        const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) });
-        vi.stubGlobal('fetch', fetchMock);
-        const result = await settle(unregisterPushToken(creds, 'ExponentPushToken[abc]'));
-        expect(result.ok).toBe(true);
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-
-    it('retries a 5xx and returns once the relay answers', async () => {
-        const fetchMock = vi.fn()
-            .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) })
-            .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ success: true }) });
-        vi.stubGlobal('fetch', fetchMock);
-        const result = await settle(registerPushToken(creds, 'ExponentPushToken[abc]'));
-        expect(result.ok).toBe(true);
-        expect(fetchMock).toHaveBeenCalledTimes(2);
+    it('a prompt answer still resolves and a 404 counts as already unregistered', async () => {
+        vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 404 } as Response)));
+        await expect(unregisterPushToken(creds, 'T')).resolves.toBeUndefined();
     });
 });

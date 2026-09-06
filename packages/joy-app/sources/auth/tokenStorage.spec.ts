@@ -23,7 +23,17 @@ vi.mock('expo-secure-store', () => ({
 }));
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
 let activeUrl = 'https://joy.voltai.party:4997';
-vi.mock('@/sync/serverConfig', () => ({ getServerUrl: () => activeUrl }));
+// The owner markers serverConfig keeps for per-relay slots (#398), in memory.
+const owners = new Map<string, string>();
+vi.mock('@/sync/serverConfig', async () => {
+    const { relayKeyForUrl, legacyRelayKeyForUrl, resolveLegacySlotOwnership } = await import('@/sync/relayKey');
+    return {
+        getServerUrl: () => activeUrl,
+        claimRelaySlot: (url: string) => { owners.set(relayKeyForUrl(url), relayKeyForUrl(url)); },
+        claimLegacySlot: (url: string) => { owners.set(legacyRelayKeyForUrl(url), relayKeyForUrl(url)); },
+        legacySlotOwnership: (url: string) => resolveLegacySlotOwnership(url, owners.get(legacyRelayKeyForUrl(url)) ?? null, activeUrl),
+    };
+});
 
 import { TokenStorage, authKeyForUrl, legacyAuthKeyForUrl, parseStoredCredentials, areCredentialsUsable } from './tokenStorage';
 
@@ -32,6 +42,7 @@ const creds = { token: 'tok', secret: encodeBase64(new Uint8Array(32).fill(3), '
 describe('TokenStorage', () => {
     beforeEach(() => {
         store.clear();
+        owners.clear();
         failDelete = false;
         activeUrl = 'https://joy.voltai.party:4997';
         vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -62,8 +73,9 @@ describe('TokenStorage', () => {
         expect((await TokenStorage.getCredentials('http://relay.example'))?.token).toBe('http-tok');
     });
 
-    it('migrates credentials stored under the legacy key so nobody is logged out (#398)', async () => {
+    it('migrates credentials stored under the legacy key of the relay the app was using, so nobody is logged out (#398)', async () => {
         const url = 'http://relay.example:4997';
+        activeUrl = url; // the pre-#398 slot was written by the active relay
         const legacyKey = legacyAuthKeyForUrl(url)!;
         expect(legacyKey).toBe('auth_credentials.relay.example_4997');
         store.set(legacyKey, JSON.stringify(creds));
@@ -71,10 +83,40 @@ describe('TokenStorage', () => {
         expect(await TokenStorage.getCredentials(url)).toEqual(creds);
         expect(store.get(authKeyForUrl(url))).toBe(JSON.stringify(creds));
         expect(store.has(legacyKey)).toBe(false);
+        // Ownership is recorded, so the migrated slot stays http's even after
+        // the active relay changes.
+        activeUrl = 'https://joy.voltai.party:4997';
+        expect(await TokenStorage.getCredentials(url)).toEqual(creds);
+    });
+
+    it('a fresh https login is never handed to the http origin on the same host (#398 regression)', async () => {
+        // Reviewer: getCredentials(http://relay.test) after an https login
+        // written by this commit received the https token and logged https out.
+        const httpsCreds = { token: 'HTTPS_TOKEN', secret: creds.secret };
+        await TokenStorage.setCredentials(httpsCreds, 'https://relay.test');
+        expect(await TokenStorage.getCredentials('http://relay.test')).toBeNull();
+        expect(await TokenStorage.getCredentials('https://relay.test')).toEqual(httpsCreds);
+        // ...even when http becomes the active relay afterwards.
+        activeUrl = 'http://relay.test';
+        expect(await TokenStorage.getCredentials('http://relay.test')).toBeNull();
+        expect(await TokenStorage.getCredentials('https://relay.test')).toEqual(httpsCreds);
+    });
+
+    it('an unmarked legacy slot is left alone while another relay is active (ambiguous owner)', async () => {
+        const url = 'http://relay.example:4997';
+        const legacyKey = legacyAuthKeyForUrl(url)!;
+        store.set(legacyKey, JSON.stringify(creds));
+        expect(await TokenStorage.getCredentials(url)).toBeNull();
+        expect(store.get(legacyKey)).toBe(JSON.stringify(creds));
+        // Logging out of http must not delete a slot it does not own either.
+        await TokenStorage.setCredentials(creds, url);
+        expect(await TokenStorage.removeCredentials(url)).toBe(true);
+        expect(store.get(legacyKey)).toBe(JSON.stringify(creds));
     });
 
     it('removes a lingering legacy slot on logout so the fallback cannot restore the account', async () => {
         const url = 'http://relay.example:4997';
+        activeUrl = url;
         store.set(legacyAuthKeyForUrl(url)!, JSON.stringify(creds));
         await TokenStorage.setCredentials(creds, url);
         expect(await TokenStorage.removeCredentials(url)).toBe(true);

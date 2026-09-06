@@ -25,8 +25,21 @@ export class PushApiError extends Error {
     }
 }
 
+/** One attempt exceeded PUSH_API_TIMEOUT_MS (headers or body). Retryable. */
+export class PushApiTimeoutError extends Error {
+    constructor() {
+        super(`Push token request timed out after ${PUSH_API_TIMEOUT_MS}ms`);
+        this.name = 'PushApiTimeoutError';
+    }
+}
+
 /** How many times one push-token call is tried before it gives up. */
 export const PUSH_API_MAX_ATTEMPTS = 4;
+
+/** Deadline for ONE attempt, covering the response headers AND the body
+ *  read. An attempt count alone is not an I/O bound: a DELETE the relay
+ *  accepted but never answered kept removePushToken pending forever (#9). */
+export const PUSH_API_TIMEOUT_MS = 10_000;
 
 /**
  * Every push-token call used to run under the global unbounded `backoff`, so
@@ -45,6 +58,26 @@ const pushBackoff = createBackoff({
     onError: (e) => { console.warn('[push] request failed:', e); },
 });
 
+/**
+ * Run one attempt under a deadline. The signal is handed to fetch so the
+ * request (and, in browsers, the body read) is actually cancelled; the race
+ * guarantees the attempt settles even where the platform ignores the signal.
+ */
+async function withDeadline<T>(attempt: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PUSH_API_TIMEOUT_MS);
+    const timedOut = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener('abort', () => reject(new PushApiTimeoutError()), { once: true });
+    });
+    try {
+        return await Promise.race([attempt(controller.signal), timedOut]);
+    } finally {
+        clearTimeout(timer);
+        // Nothing may keep reading after the attempt is over.
+        controller.abort();
+    }
+}
+
 function headers(credentials: AuthCredentials): Record<string, string> {
     return {
         'Authorization': `Bearer ${credentials.token}`,
@@ -55,11 +88,12 @@ function headers(credentials: AuthCredentials): Record<string, string> {
 
 export async function registerPushToken(credentials: AuthCredentials, token: string): Promise<void> {
     const API_ENDPOINT = getServerUrl();
-    await pushBackoff(async () => {
+    await pushBackoff(() => withDeadline(async (signal) => {
         const response = await fetch(`${API_ENDPOINT}/joy/v2/push-tokens`, {
             method: 'POST',
             headers: headers(credentials),
-            body: JSON.stringify({ token })
+            body: JSON.stringify({ token }),
+            signal,
         });
 
         if (!response.ok) {
@@ -70,15 +104,16 @@ export async function registerPushToken(credentials: AuthCredentials, token: str
         if (!data.success) {
             throw new Error('Failed to register push token');
         }
-    });
+    }));
 }
 
 export async function fetchPushTokens(credentials: AuthCredentials): Promise<PushToken[]> {
     const API_ENDPOINT = getServerUrl();
-    return pushBackoff(async () => {
+    return pushBackoff(() => withDeadline(async (signal) => {
         const response = await fetch(`${API_ENDPOINT}/joy/v2/push-tokens`, {
             method: 'GET',
             headers: headers(credentials),
+            signal,
         });
 
         if (!response.ok) {
@@ -87,15 +122,16 @@ export async function fetchPushTokens(credentials: AuthCredentials): Promise<Pus
 
         const data = await response.json();
         return PushTokenListResponseSchema.parse(data).tokens;
-    });
+    }));
 }
 
 export async function unregisterPushToken(credentials: AuthCredentials, token: string): Promise<void> {
     const API_ENDPOINT = getServerUrl();
-    await pushBackoff(async () => {
+    await pushBackoff(() => withDeadline(async (signal) => {
         const response = await fetch(`${API_ENDPOINT}/joy/v2/push-tokens/${encodeURIComponent(token)}`, {
             method: 'DELETE',
             headers: headers(credentials),
+            signal,
         });
 
         // A token the relay no longer knows is already unregistered — the
@@ -112,5 +148,5 @@ export async function unregisterPushToken(credentials: AuthCredentials, token: s
         if (!data.success) {
             throw new Error('Failed to unregister push token');
         }
-    });
+    }));
 }

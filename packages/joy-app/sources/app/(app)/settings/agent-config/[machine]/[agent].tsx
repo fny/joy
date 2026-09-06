@@ -18,7 +18,7 @@ import { Typography } from '@/constants/Typography';
 import { sync } from '@/sync/sync';
 import { useMachine } from '@/sync/storage';
 import { machineConfigRead, machineConfigSchema, machineConfigSet, machineConfigWrite } from '@/sync/v2/machine';
-import { applyReload, applySaved, discardEdits, isDirty, type RawDraftState } from '@/utils/configRawDraft';
+import { applyReload, applySaved, configTarget, discardEdits, emptyDraft, isDirty, parkDraft, takeParkedDraft, type RawDraftState } from '@/utils/configRawDraft';
 
 interface ReadReply {
     ok: boolean;
@@ -63,11 +63,22 @@ function getAt(doc: any, path: string): unknown {
     return path.split('.').reduce((acc: any, k: string) => acc?.[k], doc);
 }
 
+// The editor instance is KEYED by target (machine + agent): a route change to
+// another machine's file used to feed that file's disk text into the previous
+// file's dirty draft, and Save then wrote machine A's unsaved edits to machine
+// B (#169). A new target is a new instance with its own state and its own
+// in-flight reads; unsaved edits are parked on the way out and come back only
+// for their own file.
 export default React.memo(function AgentConfigEditorScreen() {
-    const { theme } = useUnistyles();
     const params = useLocalSearchParams<{ machine: string; agent: string }>();
     const machineId = String(params.machine ?? '');
     const agent = String(params.agent ?? '');
+    return <AgentConfigEditor key={configTarget(machineId, agent)} machineId={machineId} agent={agent} />;
+});
+
+const AgentConfigEditor = React.memo(function AgentConfigEditor({ machineId, agent }: { machineId: string; agent: string }) {
+    const { theme } = useUnistyles();
+    const target = configTarget(machineId, agent);
 
     const [mode, setMode] = React.useState<'walk' | 'raw'>('walk');
     const [reply, setReply] = React.useState<ReadReply | null>(null);
@@ -75,8 +86,13 @@ export default React.memo(function AgentConfigEditorScreen() {
     const [schemaError, setSchemaError] = React.useState<string | null>(null);
     // Raw editor: the file as last read + what the editor shows. A reload only
     // replaces a CLEAN draft; unsaved edits survive path assignments and a
-    // Save that finishes while the user keeps typing (#169).
-    const [raw, setRaw] = React.useState<RawDraftState>({ disk: null, draft: '' });
+    // Save that finishes while the user keeps typing (#169). Edits parked by
+    // a previous visit to THIS target are restored; the first read then
+    // reports the file as changed on disk if it moved meanwhile.
+    const [raw, setRaw] = React.useState<RawDraftState>(() => takeParkedDraft(target) ?? emptyDraft(target));
+    const rawRef = React.useRef(raw);
+    rawRef.current = raw;
+    React.useEffect(() => () => parkDraft(rawRef.current), []);
     const [staleDisk, setStaleDisk] = React.useState(false);
     const rawDraft = raw.draft;
     const rawDirty = isDirty(raw);
@@ -101,8 +117,8 @@ export default React.memo(function AgentConfigEditorScreen() {
             if (r.ok && typeof r.raw === 'string') {
                 const disk = r.raw;
                 setRaw((prev) => {
-                    if (afterSave) return applySaved(prev, disk);
-                    const out = applyReload(prev, disk);
+                    if (afterSave) return applySaved(prev, disk, target);
+                    const out = applyReload(prev, disk, target);
                     setStaleDisk(out.keptEdits);
                     return out.state;
                 });
@@ -110,7 +126,7 @@ export default React.memo(function AgentConfigEditorScreen() {
         } catch (e) {
             setReply({ ok: false, error: e instanceof Error ? e.message : String(e) });
         }
-    }, [machineId, agent]);
+    }, [machineId, agent, target]);
 
     React.useEffect(() => {
         if (!machineReady) {

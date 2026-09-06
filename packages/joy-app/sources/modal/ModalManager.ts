@@ -48,10 +48,13 @@ class ModalManagerClass implements IModal {
     /**
      * Provider unmount. Only the current owner may unregister (#336). Its
      * dialogs vanished with its React state, so their awaiting callers are
-     * settled as cancelled — but only if no replacement registers in the same
-     * tick: React StrictMode simulates an unmount/remount of the SAME
-     * provider (state kept), and cancelling there would answer dialogs that
-     * are still on screen.
+     * settled as cancelled — unless the SAME owner registers again in the
+     * same tick: React StrictMode simulates an unmount/remount of one
+     * provider instance (state kept), and cancelling there would answer
+     * dialogs that are still on screen. A DIFFERENT provider registering in
+     * that tick is a new instance with empty state: the old owner's dialogs
+     * are gone from the screen and their callers must be settled, not left
+     * with a resolver forever.
      */
     clearFunctions(owner: object) {
         if (this.owner !== owner) return;
@@ -63,7 +66,7 @@ class ModalManagerClass implements IModal {
         // the gap before a replacement mounts is queued and must survive.
         const orphaned = [...this.confirmResolvers.keys(), ...this.promptResolvers.keys()];
         Promise.resolve().then(() => {
-            if (this.owner !== null) return;
+            if (this.owner === owner) return; // same instance replayed its effect
             for (const id of orphaned) this.cancelPending(id);
         });
     }

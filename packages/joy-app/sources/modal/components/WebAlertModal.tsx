@@ -5,7 +5,7 @@ import { AlertModalConfig, ConfirmModalConfig } from '../types';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
-import { runAlertButton } from './alertButtonPress';
+import { createAlertButtonGate } from './alertButtonPress';
 
 interface WebAlertModalProps {
     config: AlertModalConfig | ConfirmModalConfig;
@@ -35,15 +35,17 @@ export function WebAlertModal({ config, onClose, onConfirm, active = true }: Web
         return () => { mounted.current = false; };
     }, []);
 
+    // Claimed SYNCHRONOUSLY before onPress runs: `pending` only disables the
+    // buttons after React commits, so a double activation in the same tick
+    // used to launch the async action twice (#331).
+    const gate = React.useRef(createAlertButtonGate()).current;
+
     const handleButtonPress = (buttonIndex: number) => {
-        if (pending) return;
-        if (isConfirm && onConfirm) {
-            onConfirm(buttonIndex === 1);
-            onClose();
-            return;
-        }
-        const onPress = !isConfirm ? config.buttons?.[buttonIndex]?.onPress : undefined;
-        runAlertButton(onPress, {
+        if (pending || gate.isBusy()) return;
+        const onPress = isConfirm
+            ? (onConfirm ? () => { onConfirm(buttonIndex === 1); } : undefined)
+            : config.buttons?.[buttonIndex]?.onPress;
+        gate.press(onPress, {
             isLive: () => mounted.current,
             pending: () => { setPending(true); setFailure(null); },
             close: () => { if (mounted.current) setPending(false); onClose(); },

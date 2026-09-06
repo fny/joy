@@ -1,6 +1,6 @@
 import * as React from 'react';
 import type { Machine } from '@/sync/storageTypes';
-import { isMachineOnline, MACHINE_ONLINE_WINDOW_MS } from '@/utils/machineUtils';
+import { isMachineOnline, MACHINE_ONLINE_WINDOW_MS, msUntilNextMachineOffline } from '@/utils/machineUtils';
 
 // isMachineOnline() is a pure time-based check ("heard within 60s"). Evaluated
 // once at render it goes stale: a machine that stops heartbeating keeps reading
@@ -22,4 +22,20 @@ export function useMachineOnline(machine: Machine | null | undefined): boolean {
         return () => clearTimeout(t);
     }, [machine, activeAt]);
     return machine ? isMachineOnline(machine) : false;
+}
+
+/**
+ * The list form of useMachineOnline: re-renders the caller when the earliest
+ * currently-online machine in `machines` leaves the heartbeat window, so a
+ * `machines.filter(isMachineOnline)` computed at render cannot keep a stopped
+ * daemon on screen until something else happens to re-render (#180).
+ */
+export function useMachinesOnlineTick(machines: Machine[]): void {
+    const [, force] = React.useReducer((n: number) => n + 1, 0);
+    const nextExpiry = msUntilNextMachineOffline(machines, Date.now());
+    React.useEffect(() => {
+        if (nextExpiry === null) return;
+        const t = setTimeout(force, nextExpiry + 100);
+        return () => clearTimeout(t);
+    }, [machines, nextExpiry]);
 }

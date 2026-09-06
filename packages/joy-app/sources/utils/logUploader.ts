@@ -79,3 +79,57 @@ export function createLogUploader(options: LogUploaderOptions): LogUploader {
         get dropped() { return dropped; },
     };
 }
+
+/**
+ * The shape of a fetch Response this module cares about; structural so a
+ * test (or React Native's polyfill, which has no `body` stream) fits.
+ */
+export interface DrainableResponse {
+    body?: { cancel?: () => Promise<unknown> } | null;
+    text?: () => Promise<unknown>;
+}
+
+/**
+ * Settle a response's BODY before the request counts as finished. `fetch`
+ * resolves at headers, so a send that returned the fetch promise released
+ * its slot (and cleared its abort timer) while the body was still streaming
+ * — 250 header-complete never-ending bodies with inFlight=0 (#426). The
+ * body is cancelled where the platform allows and drained otherwise, and
+ * either way the wait is cut by the same `signal` the request runs under,
+ * because a body read that ignores the signal must not outlive the deadline.
+ */
+export function drainResponse(response: DrainableResponse | null | undefined, signal: AbortSignal): Promise<void> {
+    if (!response) return Promise.resolve();
+    const settle = (async () => {
+        const body = response.body;
+        if (body && typeof body.cancel === 'function') {
+            try {
+                await body.cancel();
+                return;
+            } catch {
+                // locked or already consumed: fall through to a drain
+            }
+        }
+        if (typeof response.text === 'function') {
+            await response.text();
+        }
+    })();
+    if (signal.aborted) return Promise.resolve();
+    const cut = new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    return Promise.race([settle.then(() => undefined, () => undefined), cut]);
+}
+
+/**
+ * One remote log upload: POST the body, then settle the response body under
+ * the same signal. Injected `fetchImpl` keeps it testable.
+ */
+export function sendLogUpload(fetchImpl: typeof fetch, url: string, body: string, signal: AbortSignal): Promise<void> {
+    return fetchImpl(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal,
+    }).then((response) => drainResponse(response as unknown as DrainableResponse, signal));
+}

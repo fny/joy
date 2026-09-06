@@ -331,6 +331,7 @@ export const pl: TranslationStructure = {
         syncStartFailedReload: 'Aplikacja nie mogła uruchomić synchronizacji. Załaduj aplikację ponownie i spróbuj jeszcze raz.',
         answerKeptAsDraft: 'Nie udało się wysłać odpowiedzi. Została zachowana jako szkic poniżej.',
         spawnDidNotStart: 'Sesja została przyjęta, ale nie uruchomiła się na czas. Sprawdź demona na tej maszynie.',
+        historyPageFailed: 'Nie udało się wczytać starszych wiadomości.',
     },
 
     newSession: {

@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useLocalSearchParams, Stack, useRouter } from "expo-router";
-import { Text, View, ActivityIndicator } from "react-native";
+import { Text, View, ActivityIndicator, Pressable } from "react-native";
 import { useMessage, useSession, useSessionMessages } from "@/sync/storage";
 import { sync } from '@/sync/sync';
 import { isDemoSession } from '@/sync/demoSession';
@@ -12,8 +12,9 @@ import { ToolStatusIndicator } from '@/components/tools/ToolStatusIndicator';
 import { Message } from '@/sync/typesMessage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
-import { deepLinkStep } from '@/utils/messageDeepLink';
-import { handle } from '@/utils/guardAsync';
+import { deepLinkStep, deepLinkTarget } from '@/utils/messageDeepLink';
+import { errorMessage } from '@/utils/guardAsync';
+import { t } from '@/text';
 
 const stylesheet = StyleSheet.create((theme) => ({
     loadingContainer: {
@@ -30,6 +31,19 @@ const stylesheet = StyleSheet.create((theme) => ({
         fontSize: 16,
         lineHeight: 24,
         ...Typography.default(),
+    },
+    pagingError: {
+        color: theme.colors.textSecondary,
+        fontSize: 14,
+        textAlign: 'center',
+        paddingHorizontal: 24,
+        ...Typography.default(),
+    },
+    retryText: {
+        color: theme.colors.textLink,
+        fontSize: 16,
+        marginTop: 12,
+        ...Typography.default('semiBold'),
     },
 }));
 
@@ -55,8 +69,19 @@ export default React.memo(() => {
     // The first loaded page is only the most recent window of history; a
     // link to an older message is not "missing" until older pages are
     // exhausted too. Page backward until it appears or nothing is left,
-    // then (and only then) leave (#165).
+    // then (and only then) leave (#165). The page budget belongs to this
+    // link target and starts over for another one; a failed page request
+    // does not count against it — it is shown with a Retry instead.
+    const target = deepLinkTarget(sessionId, messageId);
     const pagesRequested = React.useRef(0);
+    const budgetTarget = React.useRef(target);
+    if (budgetTarget.current !== target) {
+        budgetTarget.current = target;
+        pagesRequested.current = 0;
+    }
+    const [pagingError, setPagingError] = React.useState<string | null>(null);
+    React.useEffect(() => { setPagingError(null); }, [target]);
+    const retryPaging = React.useCallback(() => setPagingError(null), []);
     React.useEffect(() => {
         const step = deepLinkStep({
             messagesLoaded,
@@ -64,14 +89,21 @@ export default React.memo(() => {
             hasMoreOlder,
             isLoadingOlder,
             pagesRequested: pagesRequested.current,
+            pagingFailed: pagingError !== null,
         });
         if (step === 'loadOlder' && sessionId) {
             pagesRequested.current += 1;
-            handle(sync.loadOlderMessages(sessionId));
+            let cancelled = false;
+            sync.loadOlderMessages(sessionId).catch((e) => {
+                if (cancelled) return;
+                pagesRequested.current -= 1; // a failed request is not a consumed page
+                setPagingError(errorMessage(e));
+            });
+            return () => { cancelled = true; };
         } else if (step === 'back') {
             router.back();
         }
-    }, [messagesLoaded, message, hasMoreOlder, isLoadingOlder, sessionId, router]);
+    }, [messagesLoaded, message, hasMoreOlder, isLoadingOlder, pagingError, sessionId, router]);
     
     // Configure header for tool messages
     React.useLayoutEffect(() => {
@@ -90,11 +122,21 @@ export default React.memo(() => {
     }
     
     // Loaded but not yet found: older pages are still being fetched (the
-    // effect above pages until it appears or navigates back).
+    // effect above pages until it appears or navigates back). A page that
+    // failed to load is retryable, not a reason to leave.
     if (!message) {
         return (
             <View style={styles.loadingContainer}>
-                <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                {pagingError !== null ? (
+                    <>
+                        <Text style={styles.pagingError}>{t('errors.historyPageFailed')}</Text>
+                        <Pressable onPress={retryPaging} hitSlop={10}>
+                            <Text style={styles.retryText}>{t('common.retry')}</Text>
+                        </Pressable>
+                    </>
+                ) : (
+                    <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                )}
             </View>
         );
     }

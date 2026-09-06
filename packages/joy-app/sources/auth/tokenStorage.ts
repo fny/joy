@@ -1,6 +1,6 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
-import { getServerUrl } from '@/sync/serverConfig';
+import { claimLegacySlot, claimRelaySlot, getServerUrl, legacySlotOwnership } from '@/sync/serverConfig';
 import { relayKeyForUrl, legacyRelayKeyForUrl, relayKeyNeedsMigration } from '@/sync/relayKey';
 import { decodeBase64 } from '@/encryption/base64';
 import { parseToken } from '@/utils/parseToken';
@@ -113,21 +113,30 @@ export const TokenStorage = {
         if (current) return current;
 
         // #398 migration: a relay whose identifier changed still has its
-        // credentials under the legacy key. Move them across once; the legacy
-        // slot is removed only after the canonical write succeeded.
+        // credentials under the legacy key. Move them across once — but only
+        // with ESTABLISHED ownership: the legacy key of http://relay.example
+        // is the live key of https://relay.example, and moving it blindly
+        // handed a fresh https login to the http origin and logged https out.
+        // An ambiguous slot is neither read nor deleted.
         const legacyKey = legacyAuthKeyForUrl(serverUrl);
-        if (!legacyKey) return null;
+        if (!legacyKey || legacySlotOwnership(serverUrl) !== 'mine') return null;
         const legacyRaw = await readRaw(legacyKey);
         const legacy = parseStoredCredentials(legacyRaw);
         if (!legacy || !legacyRaw) return null;
         if (await writeRaw(key, legacyRaw)) {
+            claimRelaySlot(serverUrl);
+            claimLegacySlot(serverUrl);
             await deleteRaw(legacyKey);
         }
         return legacy;
     },
 
     async setCredentials(credentials: AuthCredentials, serverUrl: string = getServerUrl()): Promise<boolean> {
-        return writeRaw(authKeyForUrl(serverUrl), JSON.stringify(credentials));
+        const saved = await writeRaw(authKeyForUrl(serverUrl), JSON.stringify(credentials));
+        // The canonical slot now belongs to this origin: a later migration for
+        // an origin whose LEGACY key is this slot must not take it (#398).
+        if (saved) claimRelaySlot(serverUrl);
+        return saved;
     },
 
     /** Resolves false when the store could not delete the value — the caller
@@ -135,9 +144,12 @@ export const TokenStorage = {
     async removeCredentials(serverUrl: string = getServerUrl()): Promise<boolean> {
         const removed = await deleteRaw(authKeyForUrl(serverUrl));
         // Clear a not-yet-migrated legacy slot too, or a later boot would
-        // "restore" the account we just logged out of via the fallback read.
+        // "restore" the account we just logged out of via the fallback read —
+        // only when it is OURS: for http://relay.example that slot may be
+        // https://relay.example's live login (#398).
         const legacyKey = legacyAuthKeyForUrl(serverUrl);
-        const legacyRemoved = legacyKey ? await deleteRaw(legacyKey) : true;
+        const ownsLegacy = !!legacyKey && legacySlotOwnership(serverUrl) === 'mine';
+        const legacyRemoved = ownsLegacy ? await deleteRaw(legacyKey!) : true;
         return removed && legacyRemoved;
     },
 };

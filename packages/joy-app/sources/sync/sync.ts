@@ -22,7 +22,8 @@ import { v2MessagesAfter, v2MessagesBefore, type V2Lifecycle } from './v2/reads'
  *  on native (SSE needs a streaming fetch body React Native lacks). */
 const POLL_INTERVAL_MS = 2500;
 
-import { syncCurrentPushToken } from './pushRegistration';
+import { reconcileDisabledPushState, syncCurrentPushToken } from './pushRegistration';
+import { SyncInitGate } from './initGate';
 import { Platform, AppState } from 'react-native';
 import { NormalizedMessage, normalizeRawMessage } from './typesRaw';
 import { Settings, settingsParse } from './settings';
@@ -451,6 +452,24 @@ class Sync {
         if (this.v2ReconnectTimer) { clearTimeout(this.v2ReconnectTimer); this.v2ReconnectTimer = null; }
         this.v2StreamStop?.(); this.v2StreamStop = null;
         if (this.v2PollTimer) { clearInterval(this.v2PollTimer); this.v2PollTimer = null; }
+    }
+
+    /**
+     * Logout: drop the whole account scope — live stream, keys, secret,
+     * per-session cursors and the in-memory account data — so nothing of the
+     * previous account stays reachable in this process (#189). The singleton
+     * cannot be re-created for another account without a reload (its
+     * constructor wiring is not re-entrant); see initGate.
+     */
+    shutdown() {
+        this.stopV2Live();
+        this.masterSecret = null;
+        this.machineDataKeys.clear();
+        this.sessionLastSeq.clear();
+        this.sessionOldestSeq.clear();
+        this.sessionMessageLocks.clear();
+        this.messagesSync.clear();
+        storage.getState().resetAccountData();
     }
 
     private getMessagesSync(sessionId: string): InvalidateSync {
@@ -1477,9 +1496,18 @@ class Sync {
 
     private registerPushToken = async () => {
         // Mobile push toggle (Notifications settings): when off, don't register a
-        // token so the server has nothing to push to.
+        // token so the server has nothing to push to — and remove whatever of
+        // this device is still there. This sync runs at startup, on foreground
+        // and when the setting changes, so an offline removal followed by a
+        // restart is finished here, not only when the notifications screen is
+        // next opened (#181).
         if (!storage.getState().settings.notificationsMobile) {
             log.log('registerPushToken skipped — mobile notifications disabled');
+            try {
+                await reconcileDisabledPushState(this.credentials);
+            } catch (error) {
+                log.log('Failed to remove the push token while disabled: ' + JSON.stringify(error));
+            }
             return;
         }
         log.log('registerPushToken');
@@ -1720,23 +1748,34 @@ if (typeof globalThis !== 'undefined') {
 // Init sequence
 //
 
-let isInitialized = false;
+// Success AND failure of the one-shot init are owned here, for both entry
+// points: a boot that threw used to leave the flag set, so the next login was
+// a silent no-op that "succeeded" with no engine underneath (#88, #190).
+// After a failure — or a logout that could not reload (#189) — every further
+// init throws SyncInitUnavailableError until the process reloads.
+const initGate = new SyncInitGate();
+
+/** True when signing in cannot boot an engine in this process. */
+export function syncReloadRequired(): boolean {
+    return initGate.reloadRequired;
+}
+
 export async function syncCreate(credentials: AuthCredentials) {
-    if (isInitialized) {
+    if (await initGate.run(() => syncInit(credentials, false)) === 'skipped') {
         console.warn('Sync already initialized: ignoring');
-        return;
     }
-    isInitialized = true;
-    await syncInit(credentials, false);
 }
 
 export async function syncRestore(credentials: AuthCredentials) {
-    if (isInitialized) {
+    if (await initGate.run(() => syncInit(credentials, true)) === 'skipped') {
         console.warn('Sync already initialized: ignoring');
-        return;
     }
-    isInitialized = true;
-    await syncInit(credentials, true);
+}
+
+/** Logout: tear the account down and refuse further inits until a reload. */
+export function syncShutdownForLogout() {
+    sync.shutdown();
+    initGate.markStopped();
 }
 
 async function syncInit(credentials: AuthCredentials, restore: boolean) {

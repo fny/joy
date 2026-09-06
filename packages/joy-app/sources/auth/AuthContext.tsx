@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { TokenStorage, AuthCredentials } from '@/auth/tokenStorage';
-import { syncCreate, sync } from '@/sync/sync';
+import { syncCreate, syncShutdownForLogout } from '@/sync/sync';
+import { SyncInitUnavailableError } from '@/sync/initGate';
 import * as Updates from 'expo-updates';
 import { clearPersistence, loadRegisteredPushToken } from '@/sync/persistence';
 import { unregisterPushToken } from '@/sync/apiPush';
@@ -22,12 +23,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
  *  stuck on the account screen with the account still on disk (#9). */
 export const LOGOUT_UNREGISTER_TIMEOUT_MS = 4_000;
 
-/** The sync engine boots once per process. If that boot rejected (no
- *  WebCrypto on an insecure origin, a relay that answered garbage), a later
- *  syncCreate is a silent no-op — it cannot be retried without a reload — so
- *  login must not pretend a retry succeeded (#190). */
-let syncBootFailed = false;
-
 export function AuthProvider({ children, initialCredentials }: { children: ReactNode; initialCredentials: AuthCredentials | null }) {
     const [isAuthenticated, setIsAuthenticated] = useState(!!initialCredentials);
     const [credentials, setCredentials] = useState<AuthCredentials | null>(initialCredentials);
@@ -38,9 +33,6 @@ export function AuthProvider({ children, initialCredentials }: { children: React
     }, [isAuthenticated, credentials]);
 
     const login = async (token: string, secret: string) => {
-        if (syncBootFailed) {
-            throw new Error(t('errors.syncStartFailedReload'));
-        }
         const newCredentials: AuthCredentials = { token, secret };
         const previousAuth = getCurrentAuth();
         const success = await TokenStorage.setCredentials(newCredentials);
@@ -59,9 +51,14 @@ export function AuthProvider({ children, initialCredentials }: { children: React
             // Roll the provisional login back so the app does not boot into a
             // half-initialised account on the next start, and so the failure
             // is visible instead of the React state claiming success (#190).
-            syncBootFailed = true;
+            // The engine owns its one-shot state: after a failed boot (login
+            // OR restore, #88) or a logout that could not reload (#189) it
+            // refuses to start again, and that refusal is shown as "reload".
             setCurrentAuth(previousAuth);
             await TokenStorage.removeCredentials();
+            if (error instanceof SyncInitUnavailableError) {
+                throw new Error(t('errors.syncStartFailedReload'));
+            }
             throw error;
         }
         setCredentials(newCredentials);
@@ -90,14 +87,16 @@ export function AuthProvider({ children, initialCredentials }: { children: React
         }
         clearPersistence();
 
-        // Stop the previous account's live work now rather than relying on
-        // the reload (which rejects in dev builds, #189). The sync singleton
-        // still cannot be re-created for another account in this process —
-        // that needs a reset hook in sync.ts — but it must at least go quiet.
+        // Tear the previous account's engine down now rather than relying on
+        // the reload (which rejects in dev builds, #189): live stream, keys,
+        // secret, cursors and the in-memory account data all go, and the
+        // engine refuses to boot another account until the process reloads —
+        // a login attempted before that gets a visible "reload" error instead
+        // of binding the new credentials to the old account's engine.
         try {
-            sync.stopV2Live();
+            syncShutdownForLogout();
         } catch (error) {
-            console.log('Failed to stop live sync during logout:', error);
+            console.log('Failed to shut sync down during logout:', error);
         }
         setCurrentAuth(null);
 

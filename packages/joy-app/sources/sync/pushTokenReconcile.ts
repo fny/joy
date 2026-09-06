@@ -3,10 +3,15 @@
  * pure so it can be tested without Expo:
  *
  *  - `reconcileRegistration` registers the current Expo token and retires the
- *    previous one. The retirement is PERSISTED as pending before it is
- *    attempted, and resumed on the next sync: replacing A with B and dying
- *    between "B saved" and "A unregistered" used to leave A registered forever,
- *    because the next sync saw B as both previous and current (#385).
+ *    previous one. Intent is PERSISTED before the register request and the
+ *    retirement before it is attempted, then resumed on the next sync:
+ *    replacing A with B and dying between "B saved" and "A unregistered" used
+ *    to leave A registered forever, because the next sync saw B as both
+ *    previous and current; and a register(B) the relay accepted, followed by
+ *    a bookkeeping failure, left B registered with an empty cleanup list once
+ *    the device rotated on to C (#385). Every token the relay MAY hold for
+ *    this device is on the pending list until it is confirmed gone or is the
+ *    current token.
  *  - `unregisterDevice` removes this device's token when Mobile push is turned
  *    off; the relay never sees the (device-local) setting, so the token has to
  *    be deleted explicitly, and a failed deletion stays pending for a retry (#181).
@@ -78,13 +83,20 @@ export async function reconcileRegistration(
     log: (m: string, e?: unknown) => void = () => {},
 ): Promise<ReconcileResult> {
     const previous = store.loadRegistered();
+    // Persist intent BEFORE the request: from here on the relay may hold
+    // `currentToken` for this device, and the previous token is to be
+    // retired. Whatever fails after this line — the request, saving the
+    // new token, the process — the next sync finds both on the list and
+    // cleans up whichever is no longer current (#385).
+    store.savePendingUnregister(unique([...store.loadPendingUnregister(), previous, currentToken]));
     await api.register(currentToken);
 
-    // Persist the retirement of the old token BEFORE saving the new one, so a
-    // crash between the two never loses track of it (#385).
+    // The token is current only once it is SAVED as such; until then it stays
+    // on the pending list (a crash here must not forget it). Once saved, it
+    // is filtered out of every retirement for as long as it is current.
+    store.saveRegistered(currentToken);
     const retire = unique([...store.loadPendingUnregister(), previous]).filter((t) => t !== currentToken);
     store.savePendingUnregister(retire);
-    store.saveRegistered(currentToken);
 
     const pending = await unregisterAll(api, retire, log);
     store.savePendingUnregister(pending);
@@ -125,4 +137,14 @@ export async function unregisterDevice(
 /** True while the relay may still hold a token this device should not have. */
 export function hasPendingCleanup(store: PushTokenStore): boolean {
     return store.loadPendingUnregister().length > 0;
+}
+
+/**
+ * Mobile push is OFF: is there anything of this device left to remove? The
+ * setting is device-local, so the OFF state has to be reconciled by the
+ * sync owner at startup, on foreground and on settings changes — not only
+ * when the notifications screen happens to be opened (#181).
+ */
+export function needsDisabledCleanup(store: PushTokenStore): boolean {
+    return store.loadRegistered() !== null || hasPendingCleanup(store);
 }

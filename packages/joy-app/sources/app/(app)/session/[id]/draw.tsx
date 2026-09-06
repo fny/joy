@@ -14,7 +14,7 @@ import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useDrawingResult } from '@/hooks/useDrawingResult';
 import { DrawingSurface, type DrawingSurfaceHandle } from '@/components/DrawingSurface';
-import { canSaveDrawing } from '@/utils/drawingSave';
+import { canSaveDrawing, chooseBackground, NO_BACKGROUND, reportBackgroundLoad } from '@/utils/drawingSave';
 
 const PEN_COLORS = ['#000000', '#FF3B30', '#007AFF', '#FFCC00', '#FFFFFF'] as const;
 const THICKNESSES = [2, 4, 7, 12] as const; // medium (4) is the default
@@ -31,16 +31,19 @@ export default React.memo(function DrawScreen() {
     const [darkPaper, setDarkPaper] = React.useState(false);
     // Annotation background: pasted or picked image rendered UNDER the ink and
     // captured with it — "paste a screenshot, draw on top" is the core flow.
-    const [bgImage, setBgImage] = React.useState<string | null>(null);
     // The surface loads the background asynchronously; capture paints only
-    // what has loaded. Save is enabled once the surface reports THIS source
-    // loaded, so a fast Save after pasting a large screenshot cannot export a
-    // blank or previous background (#161). A failed load clears the choice.
-    const [loadedBgImage, setLoadedBgImage] = React.useState<string | null>(null);
+    // what has loaded. Save is enabled once the surface reports THIS load
+    // finished, so a fast Save after pasting a large screenshot cannot export
+    // a blank or previous background (#161). Readiness is reset on EVERY
+    // change of source — removing an image and choosing the same one again
+    // is a new load on the surface, and the old readiness must not count. A
+    // failed load clears the choice.
+    const [background, setBackground] = React.useState(NO_BACKGROUND);
+    const { bgImage, loadedBgImage } = background;
+    const setBgImage = React.useCallback((uri: string | null) => setBackground((s) => chooseBackground(s, uri)), []);
     const onBackgroundLoad = React.useCallback((uri: string, ok: boolean) => {
-        if (ok) { setLoadedBgImage(uri); return; }
-        setBgImage((current) => (current === uri ? null : current));
-        Modal.alert(t('common.error'), t('imageUpload.pasteNoImageMessage'), [{ text: t('common.ok') }]);
+        setBackground((s) => reportBackgroundLoad(s, uri, ok));
+        if (!ok) Modal.alert(t('common.error'), t('imageUpload.pasteNoImageMessage'), [{ text: t('common.ok') }]);
     }, []);
     const [saving, setSaving] = React.useState(false);
 

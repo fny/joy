@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createLogUploader } from './logUploader';
+import { createLogUploader, drainResponse, sendLogUpload } from './logUploader';
 
 type Pending = { body: string; signal: AbortSignal; resolve: () => void; reject: (e: unknown) => void };
 
@@ -77,5 +77,54 @@ describe('log uploader (#426)', () => {
         await flush();
         expect(send).toHaveBeenCalledTimes(2);
         expect(up.inFlight).toBe(0);
+    });
+});
+
+describe('response bodies are settled before a slot is released (#426 residual)', () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    // A fetch whose HEADERS arrive at once but whose body never ends, and
+    // that ignores the abort signal (React Native's polyfill does for the
+    // body read).
+    const neverEndingBodyFetch = (() => Promise.resolve({
+        ok: true,
+        text: () => new Promise<string>(() => {}),
+    })) as unknown as typeof fetch;
+
+    it('a header-complete response with a never-ending body keeps its slot until the deadline aborts it', async () => {
+        const send = (body: string, signal: AbortSignal) => sendLogUpload(neverEndingBodyFetch, 'http://logs', body, signal);
+        const up = createLogUploader({ send, maxConcurrent: 1, timeoutMs: 1000 });
+        up.enqueue('a');
+        up.enqueue('b');
+        await flush();
+        // Before: fetch resolved at headers, inFlight dropped to 0 and 'b'
+        // went out while 'a' streamed forever.
+        expect(up.inFlight).toBe(1);
+        expect(up.pending).toBe(1);
+        vi.advanceTimersByTime(1001);
+        await flush();
+        await flush();
+        expect(up.pending).toBe(0);
+        expect(up.inFlight).toBe(1); // 'b' took the slot only after 'a' was cut
+    });
+
+    it('drainResponse cancels a cancellable body, drains an uncancellable one, and is cut by abort', async () => {
+        const cancel = vi.fn(async () => {});
+        await drainResponse({ body: { cancel }, text: vi.fn() }, new AbortController().signal);
+        expect(cancel).toHaveBeenCalledTimes(1);
+
+        const text = vi.fn(async () => 'ok');
+        await drainResponse({ body: null, text }, new AbortController().signal);
+        expect(text).toHaveBeenCalledTimes(1);
+
+        const controller = new AbortController();
+        let settled = false;
+        const p = drainResponse({ text: () => new Promise(() => {}) }, controller.signal).then(() => { settled = true; });
+        await flush();
+        expect(settled).toBe(false);
+        controller.abort();
+        await p;
+        expect(settled).toBe(true);
     });
 });

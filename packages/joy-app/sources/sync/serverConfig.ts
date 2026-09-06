@@ -1,5 +1,5 @@
 import { MMKV } from 'react-native-mmkv';
-import { relayKeyForUrl, legacyRelayKeyForUrl, relayKeyNeedsMigration } from './relayKey';
+import { relayKeyForUrl, legacyRelayKeyForUrl, relayKeyNeedsMigration, resolveLegacySlotOwnership, type LegacySlotOwnership } from './relayKey';
 
 // Separate MMKV instance for server config that persists across logouts
 const serverConfigStorage = new MMKV({ id: 'server-config' });
@@ -22,6 +22,35 @@ export const KNOWN_RELAYS = [
  *  collision-free, SecureStore-safe form (#398, #192). */
 export { relayKeyForUrl } from './relayKey';
 
+// ── per-relay slot ownership ─────────────────────────────────────────────────
+// Every per-relay value (credentials key, relay-scoped MMKV store, manual
+// access key) lives under the relay's canonical identifier. For a non-https
+// relay that identifier changed in #398, and its LEGACY identifier is the
+// canonical identifier of the https relay on the same host — so a migration
+// must know who wrote the legacy slot before taking it over. The owner marker
+// is written on every canonical write; see relayKey.resolveLegacySlotOwnership.
+const RELAY_SLOT_OWNER_PREFIX = 'relay-slot-owner:';
+
+/** `url` wrote to the slots named by its canonical identifier: record it. */
+export function claimRelaySlot(url: string): void {
+    const id = relayKeyForUrl(url);
+    if (serverConfigStorage.getString(RELAY_SLOT_OWNER_PREFIX + id) !== id) {
+        serverConfigStorage.set(RELAY_SLOT_OWNER_PREFIX + id, id);
+    }
+}
+
+/** A completed migration: the legacy slot was `url`'s; say so, so the other
+ *  per-relay values migrate consistently even if the active relay changes. */
+export function claimLegacySlot(url: string): void {
+    serverConfigStorage.set(RELAY_SLOT_OWNER_PREFIX + legacyRelayKeyForUrl(url), relayKeyForUrl(url));
+}
+
+/** May `url` take over the values stored under its legacy identifier? */
+export function legacySlotOwnership(url: string): LegacySlotOwnership {
+    const marker = serverConfigStorage.getString(RELAY_SLOT_OWNER_PREFIX + legacyRelayKeyForUrl(url)) ?? null;
+    return resolveLegacySlotOwnership(url, marker, getServerUrl());
+}
+
 /** MMKV store scoped to the active relay. Every relay (the default one
  *  included) gets its own store, so switching relays never bleeds one
  *  account's caches (sessions, machines, drafts, push registration) into
@@ -30,23 +59,30 @@ export function relayScopedMMKV(): MMKV {
     const url = getServerUrl();
     const store = new MMKV({ id: `relay.${relayKeyForUrl(url)}` });
     migrateLegacyRelayStore(store, url);
+    claimRelaySlot(url);
     return store;
 }
 
 /** #398 changed the store id for non-https relays. Carry a legacy store's
- *  contents over ONCE (only into an empty canonical store, and only when the
- *  legacy id differs) so drafts, settings and the push registration of an
- *  http relay survive the upgrade. Every value in these stores is a string
- *  (JSON or a raw token), so a string copy is exact. */
+ *  contents over ONCE (only into an empty canonical store, only when the
+ *  legacy id differs, and ONLY with established ownership — the legacy store
+ *  of http://relay.example is the live store of https://relay.example, and
+ *  copying it blindly bled one account into another) so drafts, settings and
+ *  the push registration of an http relay survive the upgrade. Every value
+ *  in these stores is a string (JSON or a raw token), so a string copy is
+ *  exact. The legacy store is never deleted here: it may still be another
+ *  origin's live store. */
 function migrateLegacyRelayStore(store: MMKV, url: string): void {
     if (!relayKeyNeedsMigration(url)) return;
     try {
         if (store.getAllKeys().length > 0) return;
+        if (legacySlotOwnership(url) !== 'mine') return;
         const legacy = new MMKV({ id: `relay.${legacyRelayKeyForUrl(url)}` });
         for (const key of legacy.getAllKeys()) {
             const value = legacy.getString(key);
             if (value !== undefined) store.set(key, value);
         }
+        claimLegacySlot(url);
     } catch (error) {
         console.warn('Relay store migration skipped:', error);
     }
@@ -107,7 +143,21 @@ export function getRelayAccessKey(url: string = getServerUrl()): string | null {
  *  logged-in client has a derived key, so getRelayAccessKey() would answer
  *  "yes" for every relay and the answer would be meaningless. */
 export function getStoredRelayAccessKey(url: string = getServerUrl()): string | null {
-    return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || null;
+    return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || migrateLegacyAccessKey(url);
+}
+
+/** A manual key saved before #398 under the legacy identifier moves to the
+ *  canonical one — with established ownership only, like the other slots. */
+function migrateLegacyAccessKey(url: string): string | null {
+    if (!relayKeyNeedsMigration(url)) return null;
+    if (legacySlotOwnership(url) !== 'mine') return null;
+    const legacyKey = RELAY_ACCESS_KEY_PREFIX + legacyRelayKeyForUrl(url);
+    const value = serverConfigStorage.getString(legacyKey);
+    if (!value) return null;
+    serverConfigStorage.set(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url), value);
+    serverConfigStorage.delete(legacyKey);
+    claimLegacySlot(url);
+    return value;
 }
 
 /** The perimeter-key header for a request to `url`, as a headers fragment —
@@ -125,6 +175,7 @@ export function setRelayAccessKey(key: string | null, url: string = getServerUrl
     const storageKey = RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url);
     if (key && key.trim()) {
         serverConfigStorage.set(storageKey, key.trim());
+        claimRelaySlot(url);
     } else {
         serverConfigStorage.delete(storageKey);
     }

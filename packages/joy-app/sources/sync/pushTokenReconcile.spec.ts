@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     flushPendingUnregister,
     hasPendingCleanup,
+    needsDisabledCleanup,
     reconcileRegistration,
     serialized,
     unregisterDevice,
@@ -67,6 +68,43 @@ describe('reconcileRegistration (#385)', () => {
         expect(store.pending).toEqual([]);
     });
 
+    it('a register(B) the relay accepted, then a bookkeeping failure, is still cleaned up after rotating to C (#385 residual)', async () => {
+        // Reviewer: intent used to be persisted only AFTER register(B)
+        // returned; B was then registered with an empty cleanup list and
+        // rotation to C left it on the relay for good.
+        const api = relay();
+        api.tokens.add('A');
+        const store = memoryStore('A');
+        const save = store.saveRegistered;
+        store.saveRegistered = () => { throw new Error('disk full'); };
+        await expect(reconcileRegistration(api, store, 'B')).rejects.toThrow('disk full');
+        expect([...api.tokens].sort()).toEqual(['A', 'B']);
+        expect(store.registered).toBe('A');
+        expect(hasPendingCleanup(store)).toBe(true);
+
+        // "Restart": bookkeeping works again, the device now holds C.
+        store.saveRegistered = save;
+        const r = await reconcileRegistration(api, store, 'C');
+        expect(r.pending).toEqual([]);
+        expect([...api.tokens]).toEqual(['C']);
+        expect(store.registered).toBe('C');
+        expect(store.pending).toEqual([]);
+    });
+
+    it('a register request that never succeeded does not retire the token that is still current', async () => {
+        const api = relay();
+        api.tokens.add('A');
+        api.register = async () => { throw new Error('offline'); };
+        const store = memoryStore('A');
+        await expect(reconcileRegistration(api, store, 'B')).rejects.toThrow('offline');
+        expect(store.registered).toBe('A');
+        // A is current, so a cleanup pass leaves it alone and forgets B (never registered).
+        const api2 = relay();
+        api2.tokens.add('A');
+        expect(await flushPendingUnregister(api2, store)).toEqual([]);
+        expect([...api2.tokens]).toEqual(['A']);
+    });
+
     it('never queues the current token for deletion', async () => {
         const api = relay();
         const store = memoryStore('B', ['B', 'A']);
@@ -114,6 +152,20 @@ describe('unregisterDevice (#181)', () => {
         expect(r2.removed).toBe(true);
         expect(store.registered).toBeNull();
         expect(store.pending).toEqual([]);
+    });
+
+    it('needsDisabledCleanup: the OFF state has work while a token is saved or pending, none otherwise (#181)', async () => {
+        expect(needsDisabledCleanup(memoryStore(null))).toBe(false);
+        expect(needsDisabledCleanup(memoryStore('A'))).toBe(true);
+        expect(needsDisabledCleanup(memoryStore(null, ['A']))).toBe(true);
+        // Reviewer: the disabled startup path used to take no action; the
+        // owner now removes the saved token when the setting is off.
+        const api = relay();
+        api.tokens.add('A');
+        const store = memoryStore('A');
+        if (needsDisabledCleanup(store)) await unregisterDevice(api, store);
+        expect(api.tokens.size).toBe(0);
+        expect(needsDisabledCleanup(store)).toBe(false);
     });
 
     it('is a no-op when nothing was ever registered', async () => {
