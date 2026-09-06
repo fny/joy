@@ -1,4 +1,5 @@
 import { diffLines, diffWordsWithSpace, diffChars } from 'diff';
+import { countUnifiedDiffChanges } from '@/utils/codexUnifiedDiff';
 
 export interface DiffToken {
     value: string;
@@ -303,22 +304,12 @@ export function getDiffStats(oldText: string, newText: string): { additions: num
 }
 
 /**
- * Count additions/deletions in a unified-diff patch string.
- * Ignores file headers (+++ / ---) and hunk headers (@@).
+ * Count additions/deletions in a unified-diff patch string. Delegates to the
+ * unified-diff parser's stateful counter so every patch-stat site agrees: a
+ * prefix filter took a removed "--before" / added "++after" pair for file
+ * headers and reported +0 −0 (#274).
  */
 export function getPatchDiffStats(patch: string): { additions: number; deletions: number } {
-    let additions = 0;
-    let deletions = 0;
-    let inHunk = false;
-    for (const line of patch.split('\n')) {
-        if (line.startsWith('@@')) {
-            inHunk = true;
-            continue;
-        }
-        if (!inHunk) continue;
-        if (line.startsWith('+++') || line.startsWith('---')) continue;
-        if (line.startsWith('+')) additions++;
-        else if (line.startsWith('-')) deletions++;
-    }
-    return { additions, deletions };
+    const { added, removed } = countUnifiedDiffChanges(patch);
+    return { additions: added, deletions: removed };
 }

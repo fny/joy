@@ -1,9 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ToolCall } from '@/sync/typesMessage';
+
+vi.mock('@/text', () => ({
+    t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key),
+}));
+
 import {
     getTerminalToolCommand,
     getToolSummaryCategory,
     getToolSummaryDetail,
+    getToolSummaryTitle,
     isTerminalToolName,
     shouldRenderToolCardHeader,
 } from './toolDisplay';
@@ -78,5 +84,55 @@ describe('terminal tool display helpers', () => {
         expect(getToolSummaryDetail(tool('MultiEdit', {
             file_path: '/repo/src/app.tsx',
         }))).toBe('/repo/src/app.tsx');
+    });
+
+    it('shows a compound Codex command whole — the canonical model\'s command, not the first parsed_cmd (#286)', () => {
+        const compound = tool('CodexBash', {
+            command: 'cat a && cat b',
+            parsed_cmd: [
+                { type: 'read', name: 'a', cmd: 'cat a' },
+                { type: 'read', name: 'b', cmd: 'cat b' },
+            ],
+        });
+        expect(getTerminalToolCommand(compound)).toBe('cat a && cat b');
+        expect(getToolSummaryDetail(compound)).toBe('cat a && cat b');
+    });
+
+    it('keeps the shell brackets of a Gemini execute title (#295)', () => {
+        const gemini = tool('execute', {
+            toolCall: { title: 'if [ -f x ]; then cat x; fi [current working directory /repo] (read x)' },
+        });
+        expect(getTerminalToolCommand(gemini)).toBe('if [ -f x ]; then cat x; fi');
+        expect(getToolSummaryDetail(gemini)).toBe('if [ -f x ]; then cat x; fi');
+    });
+
+    it('survives malformed arguments in the summary detail', () => {
+        expect(getToolSummaryDetail(tool('Read', null))).toBeNull();
+        expect(getToolSummaryDetail(tool('CodexBash', { command: 'ls', parsed_cmd: [null] }))).toBe('ls');
+    });
+});
+
+describe('compact transcript row titles (#318)', () => {
+    function edit(state: ToolCall['state'], result?: unknown): ToolCall {
+        return { ...tool('Edit', { file_path: '/a', old_string: 'x', new_string: 'y' }), state, result, completedAt: state === 'running' ? null : 2 };
+    }
+
+    it('only a succeeded edit is "Edited file"', () => {
+        expect(getToolSummaryTitle('edit', edit('completed'))).toBe('toolGroup.editedFile');
+    });
+
+    it('a running edit says it is pending, not edited', () => {
+        expect(getToolSummaryTitle('edit', edit('running'))).toBe('tools.names.editFile · tools.outcome.pending');
+    });
+
+    it('a failed or denied edit names that outcome', () => {
+        expect(getToolSummaryTitle('edit', edit('error', 'No matching text found'))).toBe('tools.names.editFile · tools.outcome.failed');
+        const denied: ToolCall = { ...edit('error'), permission: { id: 'p', status: 'denied' } };
+        expect(getToolSummaryTitle('edit', denied)).toBe('tools.names.editFile · tools.outcome.denied');
+    });
+
+    it('other categories keep their neutral names', () => {
+        expect(getToolSummaryTitle('read', tool('Read', { file_path: '/a' }))).toBe('tools.names.readFile');
+        expect(getToolSummaryTitle('other', tool('Weird', {}))).toBe('Weird');
     });
 });

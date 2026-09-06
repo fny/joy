@@ -7,8 +7,9 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { getToolModel, ToolOutcome } from '@/sync/toolModel';
 import { describeChildTool } from '../toolPresentation';
-import { ToolOutcomeView } from '../ToolOutcomeView';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
+import { MessageView } from '@/components/MessageView';
+import { ToolResultBlockView } from '../ToolOutcomeView';
 import { toolFullViewStyles } from '../ToolFullView';
 
 interface ChildRow {
@@ -84,14 +85,17 @@ export const TaskView = React.memo<ToolViewProps>(({ metadata, messages }) => {
 });
 
 /**
- * Full Task / Agent details: the prompt, every sub-tool, and the subagent's
- * answer (or failure) — the persisted result that the compact preview omits.
+ * Full Task / Agent details: the prompt, the subagent's actual conversation —
+ * its explanations and every nested tool card with its controls and results,
+ * not only title rows (#298) — and its answer, every result block: a mixed
+ * text / image answer keeps its image next to its markdown.
  */
 export const TaskViewFull = React.memo<ToolViewProps>(({ tool, metadata, messages, sessionId }) => {
     const model = getToolModel(tool);
-    const rows = childRows(messages, metadata);
     const prompt = model.arguments.value.prompt;
-    const answer = model.outcome === 'succeeded' ? model.outputText : null;
+    // Thinking rows render as nothing; they must not open an empty section.
+    const conversation = messages.filter((m) => !(m.kind === 'agent-text' && (m.isThinking || m.text.trim().length === 0)));
+    const answerBlocks = model.outcome === 'succeeded' ? model.blocks : [];
 
     return (
         <View>
@@ -101,29 +105,31 @@ export const TaskViewFull = React.memo<ToolViewProps>(({ tool, metadata, message
                     <MarkdownView markdown={prompt} sessionId={sessionId} />
                 </View>
             ) : null}
-            {rows.length > 0 ? (
+            {conversation.length > 0 ? (
                 <View style={toolFullViewStyles.section}>
                     <Text style={styles.sectionTitle}>{t('tools.detail.subTools')}</Text>
-                    {rows.map((item, index) => (
-                        <View key={`${item.tool.name}-${index}`} style={styles.toolItem}>
-                            <Text style={styles.toolTitle}>{item.title}</Text>
-                            <View style={styles.statusContainer}>
-                                <ChildOutcomeIcon outcome={item.outcome} />
-                            </View>
-                        </View>
-                    ))}
+                    <View style={styles.conversation}>
+                        {conversation.map((message) => (
+                            <MessageView
+                                key={message.id}
+                                message={message}
+                                metadata={metadata}
+                                sessionId={sessionId ?? ''}
+                            />
+                        ))}
+                    </View>
                 </View>
             ) : null}
-            {answer !== null ? (
+            {answerBlocks.length > 0 ? (
                 <View style={toolFullViewStyles.section}>
                     <Text style={styles.sectionTitle}>{t('tools.detail.answer')}</Text>
-                    <MarkdownView markdown={answer} sessionId={sessionId} />
-                </View>
-            ) : null}
-            {model.outcome === 'succeeded' && answer === null && model.blocks.length > 0 ? (
-                <View style={toolFullViewStyles.section}>
-                    <Text style={styles.sectionTitle}>{t('tools.detail.answer')}</Text>
-                    <ToolOutcomeView model={model} mode="full" titled={false} />
+                    <View style={styles.answerBlocks}>
+                        {answerBlocks.map((block, index) => (
+                            block.kind === 'text'
+                                ? <MarkdownView key={index} markdown={block.text} sessionId={sessionId} />
+                                : <ToolResultBlockView key={index} block={block} />
+                        ))}
+                    </View>
                 </View>
             ) : null}
         </View>
@@ -163,6 +169,12 @@ const styles = StyleSheet.create((theme) => ({
     moreToolsItem: {
         paddingVertical: 4,
         paddingHorizontal: 4,
+    },
+    conversation: {
+        gap: 4,
+    },
+    answerBlocks: {
+        gap: 8,
     },
     moreToolsText: {
         fontSize: 14,

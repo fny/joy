@@ -345,10 +345,11 @@ const TOOL_CATEGORIES: Record<string, string> = {
 
 /**
  * Generate a human-readable summary of tools in a group. Totals follow the
- * canonical OUTCOME: only a successful (or still-running) call counts as an
- * edit / read / command; failed calls are reported as failures and pending
- * approvals as awaiting, so a rejected Edit never reads "Edited 1 file". Edit
- * totals count distinct affected files, not tool calls.
+ * canonical OUTCOME: only a SUCCEEDED call counts as an edit / read / command;
+ * a call still executing is reported as pending, failed calls as failures and
+ * pending approvals as awaiting, so neither a rejected nor a still-running
+ * Edit reads "Edited 1 file" (#318). Edit totals count distinct affected
+ * files, not tool calls.
  */
 export function generateGroupSummary(messages: Message[]): string {
     const counts: Record<string, number> = {};
@@ -356,6 +357,7 @@ export function generateGroupSummary(messages: Message[]): string {
     let unnamedEdits = 0;
     let failed = 0;
     let awaiting = 0;
+    let running = 0;
 
     for (const msg of messages) {
         if (msg.kind !== 'tool-call') continue;
@@ -369,6 +371,10 @@ export function generateGroupSummary(messages: Message[]): string {
             continue;
         }
         if (model.outcome === 'denied' || model.outcome === 'cancelled') {
+            continue;
+        }
+        if (model.outcome === 'pending') {
+            running++;
             continue;
         }
         const category = TOOL_CATEGORIES[msg.tool.name] || 'other';
@@ -393,6 +399,7 @@ export function generateGroupSummary(messages: Message[]): string {
     if (counts.other) parts.push(t('toolGroup.usedTools', { count: counts.other }));
     if (failed) parts.push(t('tools.group.failed', { count: failed }));
     if (awaiting) parts.push(t('tools.group.awaiting', { count: awaiting }));
+    if (running) parts.push(t('tools.outcome.pending'));
 
     return parts.join(', ') || t('toolGroup.usedTools', { count: messages.length });
 }

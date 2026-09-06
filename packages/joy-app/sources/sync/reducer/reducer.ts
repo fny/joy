@@ -22,7 +22,9 @@
  *    - Every tool call is indexed by its harness call id, at the root and inside
  *      sidechains. A result whose call has not arrived yet (older history page)
  *      is RETAINED in `pendingResults` and applied when the call lands — never
- *      discarded.
+ *      discarded. EVERY observed result is kept by call identity in
+ *      `toolResults`, so a copy of the call projected later (a subagent's
+ *      nested row after a root permission placeholder) settles too.
  *    - Duplicate observations (live event + replayed history) merge idempotently:
  *      a second result for a settled call is a no-op, a second call for a known
  *      id updates the same row.
@@ -129,6 +131,8 @@ export type ReducerState = {
     sidechainToolIdToMessageId: Map<string, string>; // sidechain call id -> sidechain messageId
     /** Results observed before their call — applied when the call arrives. */
     pendingResults: Map<string, ToolResultObservation>;
+    /** Every result observed, by call id — applied to every later copy of the call. */
+    toolResults: Map<string, ToolResultObservation>;
     permissions: Map<string, StoredPermission>; // Store permission details by ID for quick lookup
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
@@ -160,6 +164,7 @@ export function createReducer(sessionId?: string | null): ReducerState {
         toolIdToMessageId: new Map(),
         sidechainToolIdToMessageId: new Map(),
         pendingResults: new Map(),
+        toolResults: new Map(),
         permissions: new Map(),
         messages: new Map(),
         localIds: new Map(),
@@ -216,22 +221,38 @@ function findToolRows(state: ReducerState, callId: string): Array<{ mid: string;
 }
 
 /**
- * Mark the OUTERMOST displayed ancestor of `mid` as changed. A row inside a
+ * Mark every displayed projection of `mid` as changed. A row inside a
  * sidechain is rendered through its owning Task; emitting the row itself put
- * a subagent child in the root list and left the Task stale.
+ * a subagent child in the root list and left the Task stale. The walk follows
+ * the copy that STRUCTURALLY owns the row — the owner's nested copy — up to
+ * the outermost root; a root permission placeholder for the same call is a
+ * visible projection too and is refreshed, but preferring it ended the walk
+ * there and left the real ancestor stale (#394).
  */
 function markChanged(state: ReducerState, changed: Set<string>, mid: string): void {
     let currentMid = mid;
     let message = state.messages.get(currentMid);
     let hops = 0;
     while (message?.ownerCallId && hops < 64) {
-        const owner = findToolRow(state, message.ownerCallId);
-        if (!owner) break;
-        currentMid = owner.mid;
-        message = owner.message;
+        const rows = findToolRows(state, message.ownerCallId);
+        if (rows.length === 0) break;
+        let next: { mid: string; message: ReducerMessage } | null = null;
+        for (const row of rows) {
+            if (row.message.ownerCallId) next = row; else changed.add(row.mid);
+        }
+        if (!next) next = rows[0];
+        currentMid = next.mid;
+        message = next.message;
         hops++;
     }
     changed.add(currentMid);
+}
+
+/** Refresh every projection of the call `callId` (root placeholder and nested copy), through every nesting level. */
+function markCallChanged(state: ReducerState, changed: Set<string>, callId: string): void {
+    for (const row of findToolRows(state, callId)) {
+        markChanged(state, changed, row.mid);
+    }
 }
 
 function getVisibleSidechainPrompt(owner: ReducerMessage | null): string | null {
@@ -468,11 +489,27 @@ function applyToolResult(state: ReducerState, message: ReducerMessage, result: T
     return true;
 }
 
-/** Apply a result retained before its call arrived, if one is waiting. */
+/**
+ * Remember a result by call identity. Kept even once applied: a root
+ * permission placeholder counted as "the call" and consumed the result, and
+ * the subagent's nested row that arrived afterwards stayed running with no
+ * result at all (#392).
+ */
+function rememberToolResult(state: ReducerState, callId: string, observation: ToolResultObservation): void {
+    if (!state.toolResults.has(callId)) {
+        state.toolResults.set(callId, observation);
+    }
+}
+
+/**
+ * Apply the result already observed for `callId` — retained before any copy
+ * of the call existed, or applied to another copy — to a row that has not
+ * settled yet.
+ */
 function applyPendingResult(state: ReducerState, callId: string, message: ReducerMessage): boolean {
-    const pending = state.pendingResults.get(callId);
-    if (!pending) return false;
-    const applied = applyToolResult(state, message, pending);
+    const known = state.toolResults.get(callId);
+    if (!known) return false;
+    const applied = applyToolResult(state, message, known);
     if (applied) state.pendingResults.delete(callId);
     return applied;
 }
@@ -1114,6 +1151,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         seq: msg.seq ?? null,
                         permissions: c.permissions,
                     };
+                    rememberToolResult(state, c.tool_use_id, observation);
                     const rows = findToolRows(state, c.tool_use_id);
                     if (rows.length === 0) {
                         // The call is on a page not loaded yet — RETAIN the
@@ -1289,6 +1327,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     };
                     // Update BOTH rows holding the call: the sidechain tool row
                     // and a root permission placeholder for it.
+                    rememberToolResult(state, c.tool_use_id, observation);
                     const rows = findToolRows(state, c.tool_use_id);
                     if (rows.length === 0) {
                         if (!state.pendingResults.has(c.tool_use_id)) {
@@ -1308,10 +1347,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         // Update the sidechain in state
         state.sidechains.set(ownerCallId, existingSidechain);
 
-        // Refresh the owning Task — through every nesting level, to the root.
-        if (owner) {
-            markChanged(state, changed, owner.mid);
-        }
+        // Refresh the owning Task — every copy of it, through every nesting
+        // level, to the root.
+        markCallChanged(state, changed, ownerCallId);
     }
 
     //

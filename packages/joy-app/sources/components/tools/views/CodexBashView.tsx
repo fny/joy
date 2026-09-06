@@ -22,7 +22,9 @@ interface CodexBashViewProps {
  * Codex terminal card. The single-file read / write presentation is used only
  * when the harness parsed exactly ONE operation; a compound command
  * (`cat a && cat b`) keeps its complete text. Failures render in every branch,
- * and the full-detail mode shows the stored result.
+ * and the full-detail mode shows the stored streams in every branch without a
+ * truthiness or success-only gate: a successful read whose only output is on
+ * stderr, and a failed read's partial stdout, are results too (#285).
  */
 export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata, full }) => {
     const { theme } = useUnistyles();
@@ -30,6 +32,10 @@ export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata, f
     const command = model.command;
     const failed = model.outcome === 'failed' || model.outcome === 'denied' || model.outcome === 'cancelled';
     const single = command && command.operations.length === 1 ? command.operations[0] : null;
+    const stdout = command?.stdout ?? (failed ? null : model.outputText);
+    const stderr = command?.stderr ?? null;
+    // The failure reason, unless it is exactly the stderr already shown.
+    const error = failed && model.errorMessage !== stderr ? model.errorMessage : null;
 
     let icon: React.ReactNode;
     switch (single?.kind) {
@@ -61,18 +67,17 @@ export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata, f
                         ) : null}
                     </View>
                 </ToolSectionView>
-                {full && !failed && (command?.stdout || model.outputText) ? (
+                {full ? (
                     <ToolSectionView title={t('toolView.output')}>
                         <CommandView
                             command={single.command ?? command?.command ?? ''}
-                            stdout={command?.stdout ?? model.outputText}
-                            stderr={command?.stderr ?? null}
-                            error={null}
+                            stdout={stdout}
+                            stderr={stderr}
+                            error={error}
                             fullWidth
                         />
                     </ToolSectionView>
-                ) : null}
-                {failed ? <ToolOutcomeView model={model} mode="compact" /> : null}
+                ) : failed ? <ToolOutcomeView model={model} mode="compact" /> : null}
             </>
         );
     }
@@ -82,9 +87,9 @@ export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata, f
         <ToolSectionView>
             <CommandView
                 command={commandDisplay}
-                stdout={full ? (command?.stdout ?? (failed ? null : model.outputText)) : null}
-                stderr={full ? (command?.stderr ?? null) : null}
-                error={failed ? model.errorMessage : null}
+                stdout={full ? stdout : null}
+                stderr={full ? stderr : null}
+                error={full ? error : (failed ? model.errorMessage : null)}
                 hideEmptyOutput={!full}
                 fullWidth={full}
             />

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { calculateUnifiedDiff, DiffHunk } from './calculateDiff';
+import { calculateUnifiedDiff, DiffHunk, getPatchDiffStats } from './calculateDiff';
 
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`);
 const withReplaced = (lines: string[], ...at: number[]) =>
@@ -61,5 +61,17 @@ describe('calculateUnifiedDiff hunks (#252)', () => {
         expect(result.stats).toEqual({ additions: 0, deletions: 0 });
         expect(result.hunks).toHaveLength(1);
         expect(result.hunks[0].lines.every(l => l.type === 'normal')).toBe(true);
+    });
+});
+
+describe('getPatchDiffStats (#274)', () => {
+    it('counts a removed "--before" / added "++after" pair by hunk state, not by prefix', () => {
+        const patch = '--- a/x\n+++ b/x\n@@ -1 +1 @@\n---before\n+++after\n';
+        expect(getPatchDiffStats(patch)).toEqual({ additions: 1, deletions: 1 });
+    });
+
+    it('still ignores file and hunk headers', () => {
+        const patch = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+c\n d\n';
+        expect(getPatchDiffStats(patch)).toEqual({ additions: 1, deletions: 1 });
     });
 });

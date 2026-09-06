@@ -319,6 +319,12 @@ describe('group summaries follow the canonical outcome', () => {
         expect(generateGroupSummary([edit('wait', '/a.ts', { state: 'running', pending: true })])).toBe('tools.group.awaiting:1');
     });
 
+    it('reports a still-running edit as pending, never as an edited file (#318)', () => {
+        expect(generateGroupSummary([edit('live', '/a.ts', { state: 'running' })])).toBe('tools.outcome.pending:');
+        expect(generateGroupSummary([edit('done', '/a.ts'), edit('live', '/b.ts', { state: 'running' })]))
+            .toBe('toolGroup.editedFiles:1, tools.outcome.pending:');
+    });
+
     it('counts distinct affected files, not tool calls (#319)', () => {
         const patch: ToolCallMessage = {
             kind: 'tool-call',

@@ -58,6 +58,10 @@ export interface TracerState {
 
     // Track already processed messages to avoid duplicates
     processedIds: Set<string>;
+    // Messages waiting in orphanMessages / pendingRoots — a second delivery of
+    // one of them (a re-fetched page) must not be buffered twice: the copy
+    // claimed ANOTHER Task with the same prompt and re-owned the root (#388).
+    bufferedIds: Set<string>;
 }
 
 // Create a new tracer state with empty collections
@@ -69,7 +73,8 @@ export function createTracer(): TracerState {
         parentIdToCallId: new Map(),
         orphanMessages: new Map(),
         pendingRoots: new Map(),
-        processedIds: new Set()
+        processedIds: new Set(),
+        bufferedIds: new Set()
     };
 }
 
@@ -139,6 +144,7 @@ function emitWithDescendants(state: TracerState, results: TracedMessage[], messa
         const uuid = getMessageUuid(item);
 
         state.processedIds.add(item.id);
+        state.bufferedIds.delete(item.id);
         if (uuid) {
             state.uuidToSidechainId.set(uuid, sidechainId);
         }
@@ -166,6 +172,7 @@ function releaseOrphans(state: TracerState, results: TracedMessage[], parentKey:
 }
 
 function bufferOrphan(state: TracerState, parentKey: string, message: NormalizedMessage): void {
+    state.bufferedIds.add(message.id);
     const orphans = state.orphanMessages.get(parentKey);
     if (orphans) {
         orphans.push(message);
@@ -188,8 +195,9 @@ export function traceMessages(state: TracerState, messages: NormalizedMessage[])
     const results: TracedMessage[] = [];
 
     for (const message of messages) {
-        // Skip if already processed
-        if (state.processedIds.has(message.id)) {
+        // Skip if already processed — or already waiting for its owner: a
+        // buffered message is not emitted yet, but it IS observed.
+        if (state.processedIds.has(message.id) || state.bufferedIds.has(message.id)) {
             continue;
         }
 
@@ -241,6 +249,7 @@ export function traceMessages(state: TracerState, messages: NormalizedMessage[])
                 emitWithDescendants(state, results, message, callId);
             } else {
                 // Task not loaded yet (older page) — wait for it, do not mark processed.
+                state.bufferedIds.add(message.id);
                 const roots = state.pendingRoots.get(rootPrompt);
                 if (roots) roots.push(message); else state.pendingRoots.set(rootPrompt, [message]);
             }

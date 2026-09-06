@@ -61,7 +61,8 @@ function outcomeFallback(outcome: 'failed' | 'denied' | 'cancelled'): string {
     }
 }
 
-const ToolResultBlockView = React.memo<{ block: ToolResultBlock }>(({ block }) => {
+/** One result block — text as code, an image inline, a structured value as JSON. */
+export const ToolResultBlockView = React.memo<{ block: ToolResultBlock }>(({ block }) => {
     if (block.kind === 'text') {
         return <CodeView code={block.text} />;
     }

@@ -541,6 +541,75 @@ describe('reducerTracer', () => {
             expect(state.pendingRoots.size).toBe(0);
         });
 
+        it('buffers a root delivered twice only once, so it claims a single Task (#388)', () => {
+            const state = createTracer();
+            const root: NormalizedMessage = {
+                id: 'root',
+                localId: null,
+                createdAt: 1000,
+                role: 'agent',
+                isSidechain: true,
+                content: [{ type: 'sidechain', uuid: 'root-uuid', prompt: 'Same' }]
+            };
+            expect(traceMessages(state, [root])).toHaveLength(0);
+            expect(traceMessages(state, [root])).toHaveLength(0);
+            expect(state.pendingRoots.get('Same')).toHaveLength(1);
+            expect(state.bufferedIds.has('root')).toBe(true);
+
+            const tasks: NormalizedMessage = {
+                id: 'tasks',
+                localId: null,
+                createdAt: 2000,
+                role: 'agent',
+                isSidechain: false,
+                content: [
+                    { type: 'tool-call', id: 'a', name: 'Task', input: { prompt: 'Same' }, description: null, uuid: 'tasks-uuid', parentUUID: null },
+                    { type: 'tool-call', id: 'b', name: 'Task', input: { prompt: 'Same' }, description: null, uuid: 'tasks-uuid', parentUUID: null },
+                ]
+            };
+            const released = traceMessages(state, [tasks]);
+            expect(released.filter((m) => m.id === 'root')).toHaveLength(1);
+            expect(state.uuidToSidechainId.get('root-uuid')).toBe('a');
+            expect(state.promptToTaskIds.get('Same')).toEqual(['b']);
+            expect(state.bufferedIds.has('root')).toBe(false);
+
+            const child: NormalizedMessage = {
+                id: 'child',
+                localId: null,
+                createdAt: 3000,
+                role: 'agent',
+                isSidechain: true,
+                content: [{ type: 'text', text: 'belongs to a', uuid: 'child-uuid', parentUUID: 'root-uuid' }]
+            };
+            expect(traceMessages(state, [child]).map((m) => m.sidechainId)).toEqual(['a']);
+        });
+
+        it('buffers an orphan delivered twice only once (#388)', () => {
+            const state = createTracer();
+            const orphan: NormalizedMessage = {
+                id: 'orphan',
+                localId: null,
+                createdAt: 1000,
+                role: 'agent',
+                isSidechain: true,
+                content: [{ type: 'text', text: 'early', uuid: 'orphan-uuid', parentUUID: 'missing-parent' }]
+            };
+            traceMessages(state, [orphan]);
+            traceMessages(state, [orphan]);
+            expect(state.orphanMessages.get('missing-parent')).toHaveLength(1);
+
+            const parent: NormalizedMessage = {
+                id: 'parent',
+                localId: null,
+                createdAt: 500,
+                role: 'agent',
+                isSidechain: false,
+                content: [{ type: 'tool-call', id: 'missing-parent', name: 'Task', input: { prompt: 'P' }, description: null, uuid: 'p-uuid', parentUUID: null }]
+            };
+            const released = traceMessages(state, [parent]);
+            expect(released.filter((m) => m.id === 'orphan')).toHaveLength(1);
+        });
+
         it('gives parallel Task calls in one message their own sidechains (#396)', () => {
             const state = createTracer();
             const twoTasks: NormalizedMessage = {

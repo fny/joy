@@ -18,8 +18,8 @@ import { Metadata } from '@/sync/storageTypes';
 import { layout } from './layout';
 import { useElapsedTime } from '@/hooks/useElapsedTime';
 import { t } from '@/text';
-import { Message, ToolCallMessage } from '@/sync/typesMessage';
-import { getToolSummaryCategory, getToolSummaryDetail, ToolSummaryCategory } from '@/utils/toolDisplay';
+import { Message, ToolCall, ToolCallMessage } from '@/sync/typesMessage';
+import { getToolSummaryCategory, getToolSummaryDetail, getToolSummaryTitle, ToolSummaryCategory } from '@/utils/toolDisplay';
 import { useRouter } from 'expo-router';
 import { formatMCPTitle } from './tools/views/MCPToolView';
 import { nestedGroupContaining, RevealLayout, RevealTarget } from './searchReveal';
@@ -502,7 +502,7 @@ function ToolSummaryRow(props: {
     const { tool } = props.message;
     const category = getToolSummaryCategory(tool.name);
     const detail = getToolSummaryDetail(tool);
-    const title = getToolRowTitle(category, tool.name);
+    const title = getToolRowTitle(category, tool);
     const filePath = isFileEditTool(tool.name) && typeof tool.input?.file_path === 'string'
         ? tool.input.file_path
         : null;
@@ -589,27 +589,12 @@ function getGroupSummaryCategory(messages: Message[]): ToolSummaryCategory | nul
     return categories.size > 1 ? 'other' : null;
 }
 
-function getToolRowTitle(category: ToolSummaryCategory, toolName: string): string {
-    if (toolName.startsWith('mcp__')) {
-        return formatMCPTitle(toolName);
+/** Row title — an edit row names its outcome (a running edit is not "Edited file", #318). */
+function getToolRowTitle(category: ToolSummaryCategory, tool: ToolCall): string {
+    if (tool.name.startsWith('mcp__')) {
+        return formatMCPTitle(tool.name);
     }
-
-    switch (category) {
-        case 'terminal':
-            return t('tools.names.terminal');
-        case 'edit':
-            return t('toolGroup.editedFile');
-        case 'read':
-            return t('tools.names.readFile');
-        case 'search':
-            return t('tools.names.search');
-        case 'web':
-            return t('tools.names.fetchUrl');
-        case 'task':
-            return t('tools.names.task');
-        default:
-            return toolName;
-    }
+    return getToolSummaryTitle(category, tool);
 }
 
 function isFileEditTool(toolName: string): boolean {
