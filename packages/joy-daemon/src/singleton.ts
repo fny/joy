@@ -121,7 +121,7 @@ export function acquireSingleton(
     }
     // Stale lock (dead holder, or junk older than the creation grace) — remove
     // exactly that file under the reclaim mutex and retry the atomic create.
-    if (!reclaim(lockPath, holder, now)) continue;
+    if (!reclaim(lockPath, holder, now, isAlive)) continue;
   }
   throw new Error(`could not acquire daemon lock at ${lockPath} after retries`);
 }
@@ -139,20 +139,34 @@ const RECLAIM_MUTEX_STALE_MS = 30_000;
  *  window where a third starter took the pathname while a fresh owner's lock
  *  was aside, and both reported ownership (Astra on 53d22103, #589).
  *  Returns false when the reclaim did not happen (the caller re-evaluates). */
-function reclaim(lockPath: string, stale: LockRecord, now: () => number): boolean {
+function reclaim(lockPath: string, stale: LockRecord, now: () => number, isAlive: (pid: number) => boolean = defaultIsAlive): boolean {
   const mutex = `${lockPath}.reclaiming`;
   let fd: number;
   try {
     fd = openSync(mutex, "wx");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    // The mutex names its holder. It is stolen only from a DEAD holder —
+    // never by age alone: a live reclaimer paused between its re-read and
+    // its unlink would otherwise resume and remove the thief's fresh lock
+    // (Astra on af76c787). A paused-but-alive holder blocks us; we report
+    // occupied and the caller can retry later.
+    let holderPid = NaN;
+    try { holderPid = Number(readFileSync(mutex, "utf8").trim()); } catch { return false; }
+    if (Number.isInteger(holderPid) && holderPid > 0 && isAlive(holderPid)) {
+      throw new SingletonError(holderPid, `another joy-daemon daemon (pid ${holderPid}) is reclaiming the lock at ${lockPath} right now`);
+    }
     let age = 0;
     try { age = now() - statSync(mutex).mtimeMs; } catch { return false; }
-    if (age < RECLAIM_MUTEX_STALE_MS) throw new SingletonError(0, `another joy-daemon daemon is reclaiming the lock at ${lockPath} right now`);
+    // An unreadable/pidless mutex is a creation in progress unless it is old.
+    if (!(Number.isInteger(holderPid) && holderPid > 0) && age < RECLAIM_MUTEX_STALE_MS) {
+      throw new SingletonError(0, `another joy-daemon daemon is reclaiming the lock at ${lockPath} right now`);
+    }
     try { unlinkSync(mutex); } catch { /* a racer removed it */ }
     return false; // retry the whole evaluation
   }
   try {
+    writeSync(fd, `${process.pid}\n`);
     closeSync(fd);
     const current = readLock(lockPath);
     if (!current || current.raw !== stale.raw) return false; // replaced or gone while we decided

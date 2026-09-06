@@ -4,7 +4,7 @@
 // than something we can get wrong. The SQL is plain, so moving to a real
 // postgres server later is a driver swap, not a rewrite.
 import { PGlite } from '@electric-sql/pglite';
-import { closeSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from 'node:fs';
 
 /** Ordered, append-only migrations. Tracked in _migrations by index. */
 const MIGRATIONS = [
@@ -216,10 +216,12 @@ const MIGRATIONS = [
  *  lock (owner pid gone) is reclaimed by RENAMING it away first — rename is
  *  atomic, so of two concurrent reclaimers only one proceeds to create. */
 function acquireDataDirLock(dataDir) {
-  // Beside the directory, not inside it: PGlite refuses a non-empty data dir
-  // that is not yet a database.
-  const path = `${dataDir.replace(/\/+$/, '')}.lock`;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Canonical directory: /x/data and /x/data/. must contend for ONE lock
+  // (Astra on 372f7d54). The directory may not exist yet — create it first.
+  mkdirSync(dataDir, { recursive: true });
+  const canon = realpathSync(dataDir).replace(/\/+$/, '');
+  const path = `${canon}.lock`; // beside the dir: PGlite refuses a non-empty data dir that is not yet a database
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const fd = openSync(path, 'wx');
       writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
@@ -227,21 +229,52 @@ function acquireDataDirLock(dataDir) {
       return () => { try { unlinkSync(path); } catch { /* already gone */ } };
     } catch (e) {
       if (e?.code !== 'EEXIST') throw e;
-      let holder = null;
-      try { holder = JSON.parse(readFileSync(path, 'utf8')); } catch { /* partial write: treat as in-progress */ }
+      let holder = null; let raw = '';
+      try { raw = readFileSync(path, 'utf8'); holder = JSON.parse(raw); } catch { /* partial write: treat as in-progress */ }
       const pid = Number(holder?.pid);
       if (!holder) {
         // No pid yet: the other opener is mid-write, not stale (a half-written
-        // lock is an owner, not a leftover — Astra, singleton #589).
+        // lock is an owner, not a leftover).
         throw new Error(`relay data directory ${dataDir} is being opened by another process`);
       }
       if (pidAlive(pid)) throw new Error(`relay data directory ${dataDir} is owned by pid ${pid}`);
-      try { renameSync(path, `${path}.stale-${process.pid}-${Date.now()}`); }
-      catch (re) { if (re?.code === 'ENOENT') continue; throw re; } // someone else reclaimed it — retry the create
-      try { unlinkSync(`${path}.stale-${process.pid}-${Date.now()}`); } catch { /* best effort */ }
+      // Stale (owner dead). Reclaim under a mutex so two reclaimers cannot
+      // both proceed, re-reading under it and unlinking only the byte-identical
+      // record — never a lock a racer published meanwhile. The mutex is stolen
+      // only from a DEAD holder, never by age (same protocol as the daemon's
+      // singleton; Astra on af76c787/372f7d54).
+      if (!reclaimStale(path, raw)) continue;
     }
   }
   throw new Error(`relay data directory ${dataDir} is locked`);
+}
+
+function reclaimStale(path, staleRaw) {
+  const mutex = `${path}.reclaiming`;
+  let fd;
+  try {
+    fd = openSync(mutex, 'wx');
+  } catch (e) {
+    if (e?.code !== 'EEXIST') throw e;
+    let holderPid = NaN;
+    try { holderPid = Number(readFileSync(mutex, 'utf8').trim()); } catch { return false; }
+    if (Number.isInteger(holderPid) && holderPid > 0 && pidAlive(holderPid)) throw new Error(`relay data directory lock ${path} is being reclaimed by pid ${holderPid}`);
+    let age = Infinity;
+    try { age = Date.now() - statSync(mutex).mtimeMs; } catch { return false; }
+    if (!(Number.isInteger(holderPid) && holderPid > 0) && age < 30_000) throw new Error(`relay data directory lock ${path} is being reclaimed by another process`);
+    try { unlinkSync(mutex); } catch { /* racer */ }
+    return false;
+  }
+  try {
+    writeSync(fd, `${process.pid}\n`); closeSync(fd);
+    let current = null;
+    try { current = readFileSync(path, 'utf8'); } catch { return false; }
+    if (current !== staleRaw) return false;
+    try { unlinkSync(path); } catch { return false; }
+    return true;
+  } finally {
+    try { unlinkSync(mutex); } catch { /* best effort */ }
+  }
 }
 
 function pidAlive(pid) {
