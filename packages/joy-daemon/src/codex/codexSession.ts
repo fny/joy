@@ -746,6 +746,17 @@ export class CodexSession implements AgentSession {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status } } }));
       } else if (!this.#rejoined) {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: "interrupted" } } }));
+      } else {
+        // A LIVE turn we rejoined: it is the active one — busy, thinking,
+        // interruptible by id. Its turn/started fired before we connected
+        // and will never be replayed, so tell the coordinator now (its own
+        // attempt claims it when the turn id is known; otherwise it is a
+        // foreign turn, R8). Without this the session read idle, abort()
+        // had nothing to interrupt and the next prompt was started against
+        // the running turn (#513).
+        this.#activeTurnId = tid;
+        this.#applyEffects([{ kind: "thinking", value: true }]);
+        this.#driver.emit({ kind: "turn_started", runtimeTurnId: tid });
       }
     }
     // The high-water advances via terminal-row ACKs (setReceiptSink).
@@ -856,6 +867,9 @@ export class CodexSession implements AgentSession {
       try { this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#activeTurnId }), `codex:${this.#threadId}:turn:${this.#activeTurnId}:complete`); } catch { /* ignore */ }
       this.#activeTurnId = null;
     }
+    // The session's own flag too, not only the relay's: an ended session read
+    // busy forever through busy() and toJSON() (#515).
+    this.#thinking = false;
     if (this.#relay) this.#relay.setThinking(false);
     this.#tmux.untrack(this.tmuxWindow);
     if (reason === "process_exited") {
