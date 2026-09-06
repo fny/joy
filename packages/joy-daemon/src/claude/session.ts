@@ -2991,18 +2991,22 @@ export class Session {
       // (nothing mirrored, every dispatch timing out) (#37).
       const transcriptPath = this.transcriptPath;
       if (!transcriptPath || !this.#tailer) return;
-      // HOLD the checkpoint while the outbound spool can't persist (5.6-sol
-      // audit #2): advancing past entries whose mirror rows exist only in
-      // memory makes a crash lose the rows AND the replay window that would
-      // have re-mirrored them. Held checkpoints just mean a bigger (receipt-
+      // HOLD the checkpoint while the outbox can't persist (5.6-sol audit
+      // #2): advancing past entries whose mirror rows exist only in memory
+      // makes a crash lose the rows AND the replay window that would have
+      // re-mirrored them. Held checkpoints just mean a bigger (receipt-
       // deduped) replay after restart — safe, merely slower.
       if (this.#relay?.outboundPersistDegraded) {
-        process.stderr.write(`[checkpoint] ${this.id}: outbound spool degraded — holding checkpoint\n`);
+        process.stderr.write(`[checkpoint] ${this.id}: outbound persistence degraded — holding checkpoint\n`);
         return;
       }
       const off = this.#tailer?.offset() ?? 0;
       if (off > 0 && this.status !== "ended") {
-        saveWindowRecord(this.id, { transcriptCheckpoint: { path: transcriptPath, offset: off } });
+        // Committed only once every outbox row of this session so far is
+        // acked (pending until then): a crash before that replays from the
+        // previous checkpoint instead of skipping the rows (#67).
+        try { this.#ledger.setCheckpoint(this.id, "claude_transcript", transcriptPath, off, { throughSeq: "latest" }); }
+        catch (e) { process.stderr.write(`[checkpoint] ${this.id}: ledger write failed: ${e instanceof Error ? e.message : e}\n`); }
       }
     }, 5_000);
   }
@@ -3327,8 +3331,8 @@ export class Session {
             // replay — and when the target file has a persisted checkpoint,
             // resume THERE: a full from-zero replay of a long transcript is
             // no longer receipt-covered once the logs prune (audit #6).
-            const cp = loadWindowRecord(this.id)?.transcriptCheckpoint;
-            this.#transcriptStartOffset = (cp && cp.path === tp) ? cp.offset : 0;
+            const cp = this.#ledger.getCheckpoint(this.id, "claude_transcript");
+            this.#transcriptStartOffset = (cp && cp.ref === tp) ? cp.offset : 0;
             process.stderr.write(`[hook] ${this.id} rebinding transcript ${this.transcriptPath} → ${tp} (offset ${this.#transcriptStartOffset})\n`);
           }
           this.startTailer(tp, true);

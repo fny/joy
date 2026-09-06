@@ -48,8 +48,8 @@ test("a late non-launch patch (checkpoint timer) does not revive a tombstone; a 
   const rm = vi.spyOn(fs, "rmSync").mockImplementation(() => { throw eacces(); });
   deleteWindowRecord(ID, dir);
   rm.mockRestore();
-  // The dying session's checkpoint timer fires after the kill.
-  saveWindowRecord(ID, { transcriptCheckpoint: { path: "/t.jsonl", offset: 10 } }, dir);
+  // The dying session's title patch fires after the kill.
+  saveWindowRecord(ID, { lastAiTitle: "late title" }, dir);
   expect(loadWindowRecord(ID, dir)).toBeNull();
   expect(JSON.parse(readFileSync(file(), "utf-8")).killed).toBe(true);
   // A new launch under the same id (restart) is a live session again.

@@ -15,6 +15,7 @@ import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
 import { CommandRegistry } from "./commands.ts";
 import { Session, type ChatMessage, type SessionDeps, type QueuedItem } from "../claude/session";
+import { ledgerFor } from "./ledger";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
@@ -1160,7 +1161,9 @@ export class SessionRegistry {
       const claimed = new Set(
         [...this.#sessions.values()].filter(s => s.status !== "ended").map(s => s.transcriptPath).filter((p): p is string => !!p),
       );
-      const bound = resolveRecoveredTranscript(rec, cwdToTranscriptDir(cwd), claimed, () => findLatestTranscript(cwdToTranscriptDir(cwd), 0));
+      const ledgerCp = ledgerFor().getCheckpoint(id, "claude_transcript");
+      const checkpoint = ledgerCp ? { path: ledgerCp.ref, offset: ledgerCp.offset } : undefined;
+      const bound = resolveRecoveredTranscript(rec ? { claudeSessionId: rec.claudeSessionId, transcriptCheckpoint: checkpoint } : null, cwdToTranscriptDir(cwd), claimed, () => findLatestTranscript(cwdToTranscriptDir(cwd), 0));
       const transcriptPath = bound.transcriptPath;
       const claudeSessionId = bound.claudeSessionId;
       if (bound.pending) process.stderr.write(`[recover] ${id}: pinned transcript ${transcriptPath} not written yet — waiting for it (not adopting project history)\n`);
@@ -1169,7 +1172,6 @@ export class SessionRegistry {
       // previous daemon left off instead of replaying the whole file from 0 —
       // receipts then only dedupe the small post-checkpoint overlap. Path-
       // scoped: applies only when we bind the SAME transcript file.
-      const checkpoint = rec?.transcriptCheckpoint;
       const startOffset = (checkpoint && transcriptPath && checkpoint.path === transcriptPath
         && existsSync(transcriptPath) && statSync(transcriptPath).size >= checkpoint.offset)
         ? checkpoint.offset : 0;
@@ -1286,7 +1288,6 @@ export class SessionRegistry {
         status: "active", startedAt: Date.now(),
         opencodeSessionId: rec.opencodeSessionId,
         opencodeServerPid: rec.opencodeServerPid,
-        opencodeDeliveredThrough: rec.opencodeDeliveredThrough,
       }, this.#sessionDeps());
       this.#sessions.set(rec.id, session);
       this.#attachRelayAsync(session, () => session.beginWatching());
