@@ -108,10 +108,15 @@ every relay; machines register per account.
 - **A full session says so**: the relay caps a session at 50,000 events. Past
   that its output can no longer be recorded, so the daemon drops it (the turn
   still terminalizes). The loss is not silent (#130): the card carries
-  `joy__eventBudget` {since, dropped} — a banner like the retry/compacting
-  ones, counting what was lost — and the first refusal also fires one push
-  ("This session is full"). Both name the only recovery: continue in a new
-  session; retrying never clears the budget.
+  `joy__eventBudget` {since, dropped}, the daemon persists the count in its
+  ledger and re-asserts it at every boot/rebind (a restart cannot erase it),
+  and the app renders it as a persistent red banner in the session view —
+  counting what was lost since when, with a "Start a new session" action
+  that opens the new-session screen on the same machine and folder — plus a
+  warning marker on the session's sidebar row. The first refusal also fires
+  one push ("This session is full"), but the banner never depends on it.
+  All name the only recovery: continue in a new session; retrying never
+  clears the budget.
 - **Agents talk to agents (CLI)**: `joy ls` (agent, state, title), `joy check`
   (exit code = idle / busy / needs input), `joy send` queues behind a running
   turn and returns the turn id, `joy wait --turn` blocks on it, `joy ask`

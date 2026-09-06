@@ -16,6 +16,7 @@ import { join as joinPath } from "node:path";
 process.env.JOY_HOME_DIR = mkdtempSync(joinPath(tmpdir(), "joy-lane-budget-test-"));
 import { startNucleusLane, type NucleusLaneHandle } from "./nucleusLane";
 import { createRelaySession, encodeTextEvent } from "./relay";
+import { closeAllLedgers } from "../domain/ledger";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const spawnSpec = (cwd: string) => JSON.stringify({ v: 1, t: "spawn", cwd, agent: "claude" });
@@ -28,6 +29,9 @@ function makeFakeRelay() {
   const calls: Array<{ method: string; path: string; body: any }> = [];
   let budgetOut = false;
   let workOffers: any[] = [];
+  // What GET /sessions lists for this daemon — a fresh lane rebuilds its
+  // bindings from it (refreshBindings), the way a restarted daemon does.
+  const bindings: any[] = [];
   const server = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
@@ -40,7 +44,7 @@ function makeFakeRelay() {
       if (/^\/daemon\/leases\/[^/]+$/.test(path) && method === "PUT") return send({ ok: true });
       if (path.endsWith("/claims/work")) { const o = workOffers; workOffers = []; return send({ offers: o }); }
       if (path.endsWith("/claims/control")) return send({ offers: [] });
-      if (path === "/sessions" && method === "GET") return send({ sessions: [] });
+      if (path === "/sessions" && method === "GET") return send({ sessions: bindings });
       calls.push({ method, path, body });
       // Every session fact refused for good, the way a full session answers.
       if (budgetOut && /\/facts$/.test(path)) return send({ error: "session_event_budget_exhausted" }, 429);
@@ -52,6 +56,7 @@ function makeFakeRelay() {
     listen: () => new Promise<string>((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as any).port}`))),
     pushWork: (o: any) => workOffers.push(o),
     exhaust: () => { budgetOut = true; },
+    bind: (row: any) => bindings.push(row),
     cards: () => calls.filter((c) => c.method === "PATCH" && c.path.startsWith("/daemon/sessions/")).map((c) => c.body),
     facts: () => calls.filter((c) => /\/facts$/.test(c.path)),
   };
@@ -97,4 +102,50 @@ describe("nucleusLane: relay event budget exhausted (#130)", () => {
     await until(() => rs.metadataSnapshot?.joy__eventBudget != null, 10_000);
     expect(rs.metadataSnapshot!.joy__eventBudget).toMatchObject({ dropped: drop.dropped });
   }, 40_000);
+
+  // The warning is the ONLY trace of the loss, and a full session is exactly
+  // the one no further output ever reaches the relay from — so nothing after
+  // a restart would re-count it. The lane persists the count in the ledger
+  // and re-asserts the card when a fresh lane (fresh holder, fresh maps)
+  // rebinds the session.
+  it("survives a lane replacement: a fresh lane over the same ledger republishes the card", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const session: any = { id: "bud00002", status: "active", cwd: "/tmp/y", busy: () => false, queueState: () => ({ pendingCount: 0, paused: false }), enqueue: () => ({ id: "q1" }), abort: async () => ({ ok: true }) };
+    const registry: any = { get: (i: string) => (i === "bud00002" ? session : undefined), create: async () => session, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "mb2", log: () => {} });
+    relay.pushWork({ deliveryId: "d0", commandId: "spawnc2", sessionId: "v2b2", kind: "spawn_session", ciphertext: spawnSpec("/tmp/y") });
+    await until(() => relay.calls.some((c) => c.path.endsWith("/bind")));
+    const rs = createRelaySession({ creds: { machineId: "mb2" } } as any, { cwd: "/tmp/y", id: "bud00002" });
+    relay.exhaust();
+    for (let i = 1; i <= 4; i++) rs.send(encodeTextEvent(`dropped ${i}`, { turn: "a1" }), `bud00002:${i}`);
+    await until(() => handle!.eventBudgetDrops()[0]?.dropped >= 4, 15_000);
+    await until(() => rs.metadataSnapshot?.joy__eventBudget != null, 10_000);
+    const [drop] = handle.eventBudgetDrops();
+
+    // Replace everything in-process that knew about the loss: the lane (its
+    // maps and timers), the card holder (a fresh one carries no banner), and
+    // the cached ledger handle (the next lane reopens the file from disk).
+    await handle.stop(); handle = null;
+    closeAllLedgers();
+    const rs2 = createRelaySession({ creds: { machineId: "mb2" } } as any, { cwd: "/tmp/y", id: "bud00002" });
+    expect(rs2.metadataSnapshot?.joy__eventBudget).toBeUndefined();
+    relay.bind({ sessionId: "v2b2", daemonId: "mb2", state: "active", localSessionId: "bud00002" });
+    const cardsBefore = relay.cards().length;
+    const factsBefore = relay.facts().length;
+
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "mb2", log: () => {} });
+    // No new drop happened, yet the fresh holder's card carries the same loss…
+    await until(() => rs2.metadataSnapshot?.joy__eventBudget != null, 15_000);
+    expect(rs2.metadataSnapshot!.joy__eventBudget).toEqual({ since: drop.since, dropped: drop.dropped });
+    expect(relay.cards().length).toBeGreaterThan(cardsBefore);
+    // …the diagnostic sees it too…
+    expect(handle.eventBudgetDrops()).toEqual([{ v2SessionId: "v2b2", localSessionId: "bud00002", since: drop.since, dropped: drop.dropped }]);
+    // …and the refusal is still treated as permanent: a record sent after the
+    // restart is counted, not re-offered to the relay.
+    rs2.send(encodeTextEvent("after restart", { turn: "a2" }), "bud00002:9");
+    await until(() => handle!.eventBudgetDrops()[0]?.dropped === drop.dropped + 1, 15_000);
+    await sleep(500);
+    expect(relay.facts().length).toBe(factsBefore);
+  }, 60_000);
 });
