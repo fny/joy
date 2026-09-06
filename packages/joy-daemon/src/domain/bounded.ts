@@ -101,83 +101,120 @@ export function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-function procState(pid: number): string | null {
+/** Name of the env marker a spawn site can stamp on a process group so the
+ *  kill can prove a pid is ITS OWN before signalling it (#628, part c). */
+export const PGROUP_MARKER_ENV = "JOY_PGROUP";
+
+/** A fresh marker value for one spawned group. Pass `{ [PGROUP_MARKER_ENV]: token }`
+ *  in the child's env and the same token as `marker` to killProcessGroup. */
+export function newProcessGroupMarker(): string {
+  return `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** What identifies one incarnation of a pid: its start time. A reused pid
+ *  has a different one. `start` is /proc/<pid>/stat field 22 (clock ticks
+ *  since boot) on Linux, `ps -o lstart=` elsewhere. */
+export interface ProcessIdentity {
+  start: string;
+  zombie: boolean;
+}
+
+/** Start id reported when the pid is alive but no platform facility can
+ *  read its start time (no /proc AND no usable ps). Two reads of such a pid
+ *  compare equal, which degrades to the old kill(pid, 0) evidence. */
+const UNKNOWN_START = "?";
+
+let procAvailable: boolean | null = null;
+function hasProc(): boolean {
+  if (procAvailable === null) { try { fs.readdirSync("/proc/self"); procAvailable = true; } catch { procAvailable = false; } }
+  return procAvailable;
+}
+
+/** The post-`)` fields of /proc/<pid>/stat: state(0) ppid(1) pgrp(2) …
+ *  starttime(19) — comm can contain spaces and parens, so split after the
+ *  LAST ')'. `null` when the pid is not there. */
+function procStatFields(pid: number): string[] | null {
   try {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] ?? null;
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  } catch { return null; }
+}
+
+/** Parse one `ps -o pid=,pgid=,stat=,lstart=` row. lstart contains spaces,
+ *  so it is whatever follows the three fixed columns. */
+function parsePsRow(line: string): { pid: number; pgid: number; zombie: boolean; start: string } | null {
+  const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line);
+  if (!m) return null;
+  return { pid: Number(m[1]), pgid: Number(m[2]), zombie: m[3].startsWith("Z"), start: m[4] };
+}
+
+function psRows(args: string[]): NonNullable<ReturnType<typeof parsePsRow>>[] | null {
+  try {
+    const r = spawnSync("ps", args, { encoding: "utf8", timeout: 5_000 });
+    if (r.error || !r.stdout) return null;
+    return r.stdout.split("\n").map(parsePsRow).filter((x): x is NonNullable<typeof x> => x !== null);
   } catch { return null; }
 }
 
 /**
- * Live members of the process group led by `pgid`, plus the leader itself
- * when it is alive and not a zombie. Scans /proc so a child that outlived its
- * group leader is still found (#571): kill(-pgid, 0) says nothing once the
- * leader is gone, and probing only the leader hid the surviving server.
- * Per-pid failures are skipped — a process vanishing between readdir and read
- * must not end the scan.
+ * The platform probes behind the group kill, on one object so a test can
+ * substitute a pgid lookup or a start time (simulating a reused pid without
+ * racing the kernel's allocator). Production code never reassigns these.
  */
-/** Enumeration outcome: `members` when the platform could actually list the
- *  group (an empty list then means "only zombies / nobody"), `null` when it
- *  could not (no /proc AND no usable ps) — the two must not be confused: a
- *  parent holding an exited child unreaped is a zombie-only group that is
- *  still addressable by kill(-pgid, 0), and treating "addressable but
- *  unenumerated" as survivors made killProcessGroup refuse a replacement
- *  although nothing executable remained (Astra on 4b47e729). */
-export function enumerateProcessGroup(pgid: number): number[] | null {
-  let entries: string[] = [];
-  try { entries = fs.readdirSync("/proc"); } catch { /* no /proc */ }
-  if (entries.length > 0) return processGroupMembers(pgid);
-  try {
-    const r = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 5_000 });
-    if (r.status !== 0 || !r.stdout) return null;
-    const out: number[] = [];
-    let targetListedZombie = false;
-    for (const line of r.stdout.split("\n")) {
-      const m = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
-      if (!m) continue;
-      const pid = Number(m[1]); const zombie = m[3].startsWith("Z");
-      if (pid === pgid && zombie) targetListedZombie = true;
-      if (Number(m[2]) === pgid && !zombie) out.push(pid);
+export const processProbe = {
+  /** `null` when `pid` is not there. */
+  identityOf(pid: number): ProcessIdentity | null {
+    if (hasProc()) {
+      const f = procStatFields(pid);
+      return f && f[19] !== undefined ? { start: f[19], zombie: f[0] === "Z" } : null;
     }
-    // ps listed the world: a target that ps shows outside the group (a
-    // non-leader pid) still counts when alive and not a zombie — and ps's own
-    // positive zombie verdict wins over kill(pid, 0), which cannot tell a
-    // zombie from a live process without /proc (Astra on b8dc2bf6).
-    if (!out.includes(pgid) && !targetListedZombie && pidAlive(pgid) && procState(pgid) !== "Z") out.push(pgid);
-    return out;
-  } catch { return null; }
-}
-
-export function processGroupMembers(pgid: number): number[] {
-  const out: number[] = [];
-  let entries: string[] = [];
-  try { entries = fs.readdirSync("/proc"); } catch { /* no /proc */ }
-  if (entries.length === 0) {
-    // No /proc (macOS, BSD): ask ps for pid/pgid/state of every process. A
-    // surviving group whose leader exited was invisible here before, so
-    // killProcessGroup declared victory after SIGTERM alone (Astra on da868c80).
-    try {
-      const r = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 5_000 });
-      for (const line of (r.stdout ?? "").split("\n")) {
-        const m = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
-        if (m && Number(m[2]) === pgid && !m[3].startsWith("Z")) out.push(Number(m[1]));
+    const rows = psRows(["-o", "pid=,pgid=,stat=,lstart=", "-p", String(pid)]);
+    if (rows === null) return pidAlive(pid) ? { start: UNKNOWN_START, zombie: false } : null;
+    const row = rows.find((r) => r.pid === pid);
+    return row ? { start: row.start, zombie: row.zombie } : null;
+  },
+  /** Every process whose pgid is `pgid`, with its identity. Per-pid failures
+   *  are skipped — a process vanishing between readdir and read must not end
+   *  the scan. `null` when the platform cannot list processes at all. */
+  membersOf(pgid: number): Array<{ pid: number } & ProcessIdentity> | null {
+    if (hasProc()) {
+      const out: Array<{ pid: number } & ProcessIdentity> = [];
+      let entries: string[] = [];
+      try { entries = fs.readdirSync("/proc"); } catch { return null; }
+      for (const d of entries) {
+        if (!/^\d+$/.test(d)) continue;
+        const f = procStatFields(Number(d));
+        if (f && Number(f[2]) === pgid && f[19] !== undefined) out.push({ pid: Number(d), start: f[19], zombie: f[0] === "Z" });
       }
       return out;
-    } catch { /* fall through to the leader-only evidence below */ }
-  }
-  for (const d of entries) {
-    if (!/^\d+$/.test(d)) continue;
+    }
+    const rows = psRows(["-A", "-o", "pid=,pgid=,stat=,lstart="]);
+    return rows === null ? null : rows.filter((r) => r.pgid === pgid).map(({ pid, start, zombie }) => ({ pid, start, zombie }));
+  },
+  /** Does `pid`'s initial environment carry `JOY_PGROUP=<marker>`? Linux
+   *  only (/proc/<pid>/environ): `null` where it cannot be checked, `false`
+   *  when environ is unreadable for a pid that exists — a process this
+   *  daemon spawned is always readable by it, so "cannot read" means "not
+   *  ours". */
+  hasMarker(pid: number, marker: string): boolean | null {
+    if (!hasProc()) return null;
     try {
-      const stat = fs.readFileSync(`/proc/${d}/stat`, "utf8");
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (fields[0] === "Z") continue; // a zombie is not a live member
-      if (Number(fields[2]) === pgid) out.push(Number(d));
-    } catch { /* gone meanwhile */ }
-  }
-  if (pidAlive(pgid) && !out.includes(pgid)) {
-    // Only a POSITIVELY identified zombie is excluded; an unreadable state
-    // (no /proc, a failed read) keeps the kill(pid, 0) evidence.
-    if (procState(pgid) !== "Z") out.push(pgid);
+      return fs.readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(`${PGROUP_MARKER_ENV}=${marker}`);
+    } catch { return false; }
+  },
+};
+
+/**
+ * Live (non-zombie) members of the process group `pgid`, plus the leader
+ * itself when it is alive and not a zombie. Diagnostic and test helper: the
+ * kill below does NOT identify a group this way once its leader is gone
+ * (#628) — see killProcessGroup.
+ */
+export function processGroupMembers(pgid: number): number[] {
+  const out = (processProbe.membersOf(pgid) ?? []).filter((m) => !m.zombie).map((m) => m.pid);
+  if (!out.includes(pgid)) {
+    const leader = processProbe.identityOf(pgid);
+    if (leader && !leader.zombie) out.push(pgid);
   }
   return out;
 }
@@ -187,6 +224,12 @@ export interface KillProcessGroupOptions {
   graceMs?: number;
   /** Where escalation is reported. Default: stderr. */
   log?: (line: string) => void;
+  /** The `JOY_PGROUP` value the group was spawned with. On Linux a pid is
+   *  then signalled only when /proc/<pid>/environ carries it — including
+   *  the leader — and a group whose leader is already gone can still be
+   *  found through the marker rather than through the reusable pgid. Where
+   *  environ cannot be read (no /proc) the marker is not enforced. */
+  marker?: string;
 }
 
 /**
@@ -195,37 +238,90 @@ export interface KillProcessGroupOptions {
  * report whether the group is gone. Falls back to a single-process kill when
  * `pid` is not a group leader. Resolves false when members survived SIGKILL,
  * so a caller can refuse to start a replacement on top of them.
+ *
+ * Ownership (#628): a pgid equals its leader's pid and is only unambiguous
+ * while that pid still exists (alive, or a zombie not yet reaped). Once the
+ * leader is reaped the number is free, and the next process to be born with
+ * it — the next vitest worker, a `timeout` wrapper, anything — leads an
+ * UNRELATED group; scanning for "pgid == dead leader" then SIGKILLed the
+ * test runner (exit 143). So:
+ *   - the group's members are captured (pid + start time) at the first
+ *     signal, while the leader exists, and re-captured on every poll for as
+ *     long as it does — that is the only window in which the pgid is proof
+ *     of membership (the #571 survivor that outlives its leader is captured
+ *     here);
+ *   - after the leader is gone, only captured pids whose start time still
+ *     matches are signalled, one by one — a reused pid has a different start
+ *     time — and kill(-pgid) is never sent again;
+ *   - with a `marker`, membership is additionally proven through the
+ *     process's environment, which is also the only way a group whose
+ *     leader was already gone when this was called is identified at all.
+ *     Without a marker such a call signals nothing (the leader pid is the
+ *     only evidence, and it is stale) and resolves true.
  */
 export async function killProcessGroup(pid: number, opts: KillProcessGroupOptions = {}): Promise<boolean> {
   const graceMs = opts.graceMs ?? 2000;
   const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
-  const groupKill = (sig: NodeJS.Signals): boolean => {
-    try { process.kill(-pid, sig); return true; } catch { /* not a group leader */ }
-    try { process.kill(pid, sig); return true; } catch { return false; /* gone */ }
-  };
+  const marker = opts.marker;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const tick = 100;
   const rounds = Math.max(1, Math.ceil(graceMs / tick));
 
-  if (!groupKill("SIGTERM")) return true;
-  const groupExists = (): boolean => { try { process.kill(-pid, 0); return true; } catch { return false; } };
-  const stillThere = (): number[] => {
-    const members = enumerateProcessGroup(pid);
-    if (members !== null) return members; // a real listing: zombie-only == nobody left
-    // Enumeration unavailable: keep BOTH kinds of evidence — the group being
-    // addressable, and the target pid itself being alive (the single-process
-    // fallback signals a non-leader pid that kill(-pid) never reaches; Astra
-    // on b8dc2bf6) — so escalation happens instead of a false "gone".
-    return groupExists() || pidAlive(pid) ? [pid] : [];
+  // The leader's own incarnation, fixed at entry: the pid this was called
+  // with must still be that process on every later probe.
+  const leaderAtEntry = processProbe.identityOf(pid);
+  if (leaderAtEntry && marker !== undefined && processProbe.hasMarker(pid, marker) === false) {
+    log(`[kill-group] pid ${pid} does not carry ${PGROUP_MARKER_ENV}=${marker} — not ours, refusing to signal`);
+    return true;
+  }
+  const leaderPresent = (): boolean => leaderAtEntry !== null && processProbe.identityOf(pid)?.start === leaderAtEntry.start;
+  /** A scanned pid may join the owned set when the marker proves it, or —
+   *  while the leader exists, so the pgid itself is proof — when the marker
+   *  is absent or unverifiable on this platform. */
+  const proven = (p: number, leaderHere: boolean): boolean => {
+    if (marker === undefined) return leaderHere;
+    const has = processProbe.hasMarker(p, marker);
+    return has === true || (has === null && leaderHere);
   };
-  for (let i = 0; i < rounds && stillThere().length; i++) await sleep(tick);
-  let left = stillThere();
+
+  /** pid → start time of every member proven to be ours. */
+  const owned = new Map<number, string>();
+  if (leaderAtEntry) owned.set(pid, leaderAtEntry.start);
+  const capture = (): void => {
+    const leaderHere = leaderPresent();
+    // A bare pgid scan is evidence only while the leader exists; with a
+    // marker every hit is proven on its own.
+    if (!leaderHere && marker === undefined) return;
+    for (const m of processProbe.membersOf(pid) ?? []) {
+      if (owned.has(m.pid) || m.zombie) continue;
+      if (proven(m.pid, leaderHere)) owned.set(m.pid, m.start);
+    }
+  };
+  const survivors = (): number[] => {
+    capture();
+    const out: number[] = [];
+    for (const [p, start] of owned) {
+      const now = processProbe.identityOf(p);
+      if (now && !now.zombie && now.start === start) out.push(p);
+    }
+    return out;
+  };
+  const signal = (sig: NodeJS.Signals): void => {
+    // Group-wide delivery only while the leader exists: -pgid is unambiguous
+    // then, and it reaches a member forked between capture and signal.
+    if (leaderPresent()) { try { process.kill(-pid, sig); } catch { /* not a group leader: single-process below */ } }
+    for (const p of survivors()) { try { process.kill(p, sig); } catch { /* gone */ } }
+  };
+
+  if (survivors().length === 0) return true;
+  signal("SIGTERM");
+  for (let i = 0; i < rounds && survivors().length; i++) await sleep(tick);
+  let left = survivors();
   if (left.length) {
     log(`[kill-group] group ${pid} survived SIGTERM (${left.join(",")}) — escalating to SIGKILL`);
-    groupKill("SIGKILL");
-    for (const p of left) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
-    for (let i = 0; i < rounds && stillThere().length; i++) await sleep(tick);
-    left = stillThere();
+    signal("SIGKILL");
+    for (let i = 0; i < rounds && survivors().length; i++) await sleep(tick);
+    left = survivors();
     if (left.length) { log(`[kill-group] group ${pid}: ${left.join(",")} still alive after SIGKILL`); return false; }
   }
   return true;

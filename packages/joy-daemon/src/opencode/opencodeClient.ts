@@ -19,7 +19,7 @@ import { writeFileSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
 import { LineDecoder, TextAccumulator } from "../domain/textStream";
-import { withDeadline, killProcessGroup, BoundedTail } from "../domain/bounded";
+import { withDeadline, killProcessGroup, BoundedTail, PGROUP_MARKER_ENV, newProcessGroupMarker } from "../domain/bounded";
 import * as http from "http";
 
 // Provider API keys (e.g. FIREWORKS_API_KEY for the opencode config's
@@ -54,6 +54,11 @@ export interface OpencodeSpawnResult {
    *  streams are still drained — an unread pipe would block the child — but
    *  nothing older than the window is retained. */
   serverLog: BoundedTail;
+  /** The `JOY_PGROUP` value stamped on the server's environment (#628):
+   *  hand it to killOpencodeServerPid so the kill signals only processes
+   *  that provably belong to THIS server, never a group that merely reused
+   *  the launcher's pid after it exited. */
+  marker: string;
 }
 
 /** Spawn `opencode serve --port 0` in `cwd`. Port is parsed from stdout
@@ -69,6 +74,7 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
   // server (observed live 2026-08-01). Detached makes the launcher a process-
   // group leader so killOpencodeServer can take the whole group down.
   let listenTimedOut: () => void = () => {};
+  const marker = newProcessGroupMarker();
   const proc = spawn(bin, ["serve", "--port", "0"], {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
@@ -77,6 +83,8 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
       ...userShellEnv(), ...process.env, NPM_CONFIG_USERCONFIG: cleanNpmrc,
       // joy-img save-path convention (tools inherit the server env).
       ...(opts?.joySessionId ? { JOY_SESSION_ID: opts.joySessionId } : {}),
+      // Ownership proof for the group kill (#628); the real server inherits it.
+      [PGROUP_MARKER_ENV]: marker,
     },
   });
   // Post-startup output is DRAINED but not retained (#69). A long-running
@@ -115,7 +123,7 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
     listenTimedOut = stopParsing;
   });
   const port = withDeadline(listen, 30_000, () => { listenTimedOut(); throw new Error("opencode serve: no listen line within 30s"); });
-  return { proc, port, serverLog };
+  return { proc, port, serverLog, marker };
 }
 
 /** One opencode SSE/global event. `durable.seq` is a per-session monotonic
@@ -277,9 +285,14 @@ export class OpencodeClient {
  *  scans /proc for surviving members, escalates to SIGKILL, and reports
  *  whether the group is gone (#571; the logic now lives in domain/bounded).
  *  VERIFIED: a stray from a failed TERM was found alive a day later
- *  (2026-08-03). Resolves false when owned members survived SIGKILL. */
-export async function killOpencodeServerPid(pid: number): Promise<boolean> {
-  return killProcessGroup(pid, { graceMs: 2000, log: (line) => process.stderr.write(line.replace(/^\[kill-group\]/, "[opencode] server") + "\n") });
+ *  (2026-08-03). Resolves false when owned members survived SIGKILL.
+ *  `marker` is the spawn's `JOY_PGROUP` value (#628): with it a member is
+ *  signalled only when its environment proves it is ours, and a server whose
+ *  launcher already exited is still found; without it (a pid recorded by an
+ *  earlier daemon run) only the launcher itself and members captured while
+ *  it lived are signalled — never a group that merely reused the pid. */
+export async function killOpencodeServerPid(pid: number, marker?: string): Promise<boolean> {
+  return killProcessGroup(pid, { graceMs: 2000, marker, log: (line) => process.stderr.write(line.replace(/^\[kill-group\]/, "[opencode] server") + "\n") });
 }
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
