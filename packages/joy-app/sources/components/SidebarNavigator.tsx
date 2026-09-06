@@ -14,40 +14,42 @@ import { t } from '@/text';
 import { isTauri } from '@/utils/isTauri';
 import { useOverlayNav } from '@/-session/sessionOverlayNav';
 import { DEFAULT_APP_ZOOM } from '@/hooks/useTauriZoom';
+import { applyNavPathname, canNavBack, canNavForward, createNavHistory, type NavDirection } from './sidebarNavHistory';
 
 const TAURI_HEADER_CONTROL_LEFT = Math.ceil(92 / DEFAULT_APP_ZOOM);
 
 /**
  * Tracks navigation history to determine if back/forward is possible.
  * We maintain our own stack + cursor because the web History API
- * doesn't expose whether forward entries exist.
+ * doesn't expose whether forward entries exist. The model lives in
+ * sidebarNavHistory.ts; this hook feeds it the pathname changes plus how
+ * they happened: our own buttons mark 'back'/'forward', a browser
+ * back/forward/gesture is observed via `popstate` and marked 'pop' so it
+ * moves the cursor instead of appending a new entry (#240).
  */
 function useNavHistory() {
     const pathname = usePathname();
-    const historyRef = React.useRef<string[]>([pathname]);
-    const cursorRef = React.useRef(0);
-    const directionRef = React.useRef<'back' | 'forward' | null>(null);
+    const historyRef = React.useRef(createNavHistory(pathname));
+    const directionRef = React.useRef<NavDirection>(null);
     const [canGoBack, setCanGoBack] = React.useState(false);
     const [canGoForward, setCanGoForward] = React.useState(false);
 
     React.useEffect(() => {
+        if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+        const onPopState = () => {
+            // Only when nothing else already claimed this transition.
+            if (directionRef.current === null) directionRef.current = 'pop';
+        };
+        window.addEventListener('popstate', onPopState);
+        return () => window.removeEventListener('popstate', onPopState);
+    }, []);
+
+    React.useEffect(() => {
         const dir = directionRef.current;
         directionRef.current = null;
-
-        if (dir === 'back') {
-            cursorRef.current = Math.max(0, cursorRef.current - 1);
-        } else if (dir === 'forward') {
-            cursorRef.current = Math.min(historyRef.current.length - 1, cursorRef.current + 1);
-        } else {
-            // Regular navigation — trim forward entries and push
-            const cursor = cursorRef.current;
-            historyRef.current = historyRef.current.slice(0, cursor + 1);
-            historyRef.current.push(pathname);
-            cursorRef.current = historyRef.current.length - 1;
-        }
-
-        setCanGoBack(cursorRef.current > 0);
-        setCanGoForward(cursorRef.current < historyRef.current.length - 1);
+        historyRef.current = applyNavPathname(historyRef.current, pathname, dir);
+        setCanGoBack(canNavBack(historyRef.current));
+        setCanGoForward(canNavForward(historyRef.current));
     }, [pathname]);
 
     const markBack = React.useCallback(() => { directionRef.current = 'back'; }, []);

@@ -86,13 +86,15 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
     const newSessionRoute = useNewSessionRoute();
     const handleAdd = React.useCallback(() => {
         const machineId = session.machineId;
-        const pathToSet = formatPathRelativeToHome(repoPath, session.homeDir ?? undefined);
-        // The create page takes the prefill as route params.
+        // Pass the ABSOLUTE repo path: the create page collapses it to "~/…"
+        // itself once it knows the machine's home dir. Formatting here with a
+        // plain prefix match turned /home/alice2/project on a machine whose
+        // home is /home/alice into ~/2/project (#193).
         router.navigate({
             pathname: newSessionRoute,
-            params: { ...(machineId ? { machineId } : {}), path: pathToSet },
+            params: { ...(machineId ? { machineId } : {}), path: repoPath },
         });
-    }, [session.machineId, session.homeDir, repoPath, router, newSessionRoute]);
+    }, [session.machineId, repoPath, router, newSessionRoute]);
 
     const [isHovered, setIsHovered] = React.useState(false);
     // Identicon size — Appearance → Identicons (clamped on read; default 16).

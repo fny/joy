@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { Header } from './navigation/Header';
 import { useSocketStatus, useAllMachines } from '@/sync/storage';
+import { pickHomeHeaderStatus } from './homeHeaderStatus';
 import { Platform, Pressable, Text, View } from 'react-native';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
@@ -167,11 +168,14 @@ function HeaderTitleWithSubtitle({ subtitle }: { subtitle?: string }) {
     // Condensed machine connectivity ("2/3 connected"). Shown instead of the
     // raw socket status once the user has machines; green when all are online,
     // amber when some, red when none. Falls back to socket status (e.g. the
-    // unauthed screen, which has no machines) when there are none.
+    // unauthed screen, which has no machines) when there are none — and
+    // whenever the relay transport itself is not healthy: the machine records
+    // are cached, so they kept saying "1/1 connected" after the connection
+    // was lost (#222).
+    const statusSource = pickHomeHeaderStatus(socketStatus.status, machines);
     const machineStatus = (() => {
-        const total = machines.length;
-        if (total === 0) return null;
-        const online = machines.filter((m) => m.active).length;
+        if (statusSource.kind !== 'machines') return null;
+        const { online, total } = statusSource;
         const color = online === 0
             ? styles.statusDisconnected.color
             : online === total
