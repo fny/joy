@@ -283,7 +283,9 @@ describe('a replay settles only the rows inside its range (#128 F5)', () => {
 });
 
 describe('older pages that could not be opened record a gap (#128 b)', () => {
-    it('loadOlderMessages advancing past an unopenable page records its span and pulls the card', async () => {
+    it('loadOlderMessages advancing past an unopenable page records one run per failed row and pulls the card', async () => {
+        // Three sparse failures are three one-row gaps — not one (0,100]
+        // envelope that would also stamp the 97 rows between them (#128 F12).
         const older = (_key: Uint8Array | null, beforeSeq: number): Page =>
             ({ messages: [], lifecycle: [], cursor: 1, hasMore: false, unopenable: 3, unopenableSeqs: [1, 50, 100] });
         const { x, olderCalls, gaps, published, invalidated } = build(relayWithRowUnderK2, older);
@@ -291,28 +293,42 @@ describe('older pages that could not be opened record a gap (#128 b)', () => {
         await x.loadOlderMessages('A');
         expect(olderCalls.map((c) => c.beforeSeq)).toEqual([101]);
         expect(x.sessionOldestSeq.get('A')).toBe(1); // still advances: scrolling is never wedged
-        expect(gaps()).toEqual([{ fromSeq: 0, toSeq: 100, keyId: id(K1), count: 3 }]);
-        expect(published.at(-1)).toEqual([{ fromSeq: 0, toSeq: 100, count: 3 }]);
+        expect(gaps()).toEqual([
+            { fromSeq: 0, toSeq: 1, keyId: id(K1), count: 1 },
+            { fromSeq: 49, toSeq: 50, keyId: id(K1), count: 1 },
+            { fromSeq: 99, toSeq: 100, keyId: id(K1), count: 1 },
+        ]);
+        expect(published.at(-1)).toEqual([
+            { fromSeq: 0, toSeq: 1, count: 1 },
+            { fromSeq: 49, toSeq: 50, count: 1 },
+            { fromSeq: 99, toSeq: 100, count: 1 },
+        ]);
         expect(invalidated()).toBe(1);
     });
 
-    it('a page that opened some rows records the span of the rows that failed, and a key change re-reads it', async () => {
+    it('a page that opened some rows records the runs of the rows that failed, and a key change re-reads them', async () => {
+        // Rows 40, 60 and 100 exist; 40 and 100 are sealed under K1 and 60
+        // opens. K2 opens all three.
         const older = (): Page => ({ messages: [{ seq: 60, id: 'm60' }], lifecycle: [], cursor: 40, hasMore: true, unopenable: 2, unopenableSeqs: [40, 100] });
         const relay = (key: Uint8Array | null, afterSeq: number): Page => {
-            if (afterSeq === 39 && key === K2) return { messages: [{ seq: 41, id: 'm41' }, { seq: 60, id: 'm60' }], lifecycle: [], cursor: 100, hasMore: true, unopenable: 0 };
-            return { messages: [], lifecycle: [], cursor: afterSeq, hasMore: false, unopenable: 0 };
+            const rows = [40, 60, 100].filter((seq) => seq > afterSeq);
+            if (key !== K2 || rows.length === 0) return { messages: [], lifecycle: [], cursor: afterSeq, hasMore: false, unopenable: 0 };
+            return { messages: rows.map((seq) => ({ seq, id: `m${seq}` })), lifecycle: [], cursor: 100, hasMore: false, unopenable: 0, unopenableSeqs: [] };
         };
         const { x, applied, calls, gaps, sync, setKey } = build(relay, older);
         x.sessionOldestSeq.set('A', 101);
         await x.loadOlderMessages('A');
         expect(applied.map((m) => m.seq)).toEqual([60]);
         expect(x.sessionOldestSeq.get('A')).toBe(40);
-        expect(gaps()).toEqual([{ fromSeq: 39, toSeq: 100, keyId: id(K1), count: 2 }]);
+        expect(gaps()).toEqual([
+            { fromSeq: 39, toSeq: 40, keyId: id(K1), count: 1 },
+            { fromSeq: 99, toSeq: 100, keyId: id(K1), count: 1 },
+        ]);
 
         setKey(K2);
         await sync(100);
-        expect(calls.map((c) => c.afterSeq)).toEqual([39, 100]);
-        expect(applied.map((m) => m.seq)).toEqual([60, 41, 60]);
+        expect(calls.map((c) => c.afterSeq)).toEqual([39, 99, 100]); // each run replays on its own, then the head
+        expect(applied.map((m) => m.seq)).toEqual([60, 40, 100]); // seq 60 is history already: not re-applied
         expect(gaps()).toEqual([]);
     });
 
@@ -433,5 +449,125 @@ describe('blocked ranges are tracked per key version (#128 c)', () => {
         await sync(30); // 26..30
         expect(gaps()).toEqual([]);
         expect(applied.map((m) => m.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]);
+    });
+});
+
+describe('sparse failures are recorded as runs, never as one envelope over rows that were not seen (#128 F12)', () => {
+    /** Forward pages of up to 100 rows over 1..last, mirroring the real reader:
+     *  `cursor` is the last raw seq examined, and `hasMore` says whether rows
+     *  follow. Under K2 the seqs in `sealedUnderK2` stay sealed; every other
+     *  key fails on every row. */
+    function pagedRelay(last: number, sealedUnderK2: number[]) {
+        return (key: Uint8Array | null, afterSeq: number): Page => {
+            const rows = Array.from({ length: Math.max(0, Math.min(afterSeq + 100, last) - afterSeq) }, (_, i) => afterSeq + 1 + i);
+            if (rows.length === 0) return { messages: [], lifecycle: [], cursor: afterSeq, hasMore: false, unopenable: 0, unopenableSeqs: [] };
+            const failed = rows.filter((seq) => key !== K2 || sealedUnderK2.includes(seq));
+            const opened = rows.filter((seq) => !failed.includes(seq));
+            return { messages: opened.map((seq) => ({ seq, id: `m${seq}` })), lifecycle: [], cursor: rows[rows.length - 1], hasMore: rows[rows.length - 1] < last, unopenable: failed.length, unopenableSeqs: failed };
+        };
+    }
+
+    it('a trimmed older read that fails seqs 1 and 3 leaves the K1 gap at seq 2 eligible, and the next K2 sync recovers seq 2 (8adf6276)', async () => {
+        // 200 rows. Seq 2 is a K1 gap; K2 opens it but fails seqs 1 and 3.
+        // The backward read from 201 scans all 200 rows, trims to the newest
+        // 100 (101..200, cursor 101), and names [1, 3] — seq 2 was scanned
+        // but NOT delivered, so nothing has applied it yet.
+        const older = (): Page => ({
+            messages: Array.from({ length: 100 }, (_, i) => ({ seq: 101 + i, id: `m${101 + i}` })),
+            lifecycle: [], cursor: 101, hasMore: true, unopenable: 2, unopenableSeqs: [1, 3],
+        });
+        const { x, applied, calls, gaps, published, sync, setKey } = build(pagedRelay(200, [1, 3]), older);
+        x.recordUnopenableGap('A', 1, 2, K1, 1);
+        setKey(K2);
+        x.sessionOldestSeq.set('A', 201);
+        await x.loadOlderMessages('A');
+        expect(applied).toHaveLength(100);
+        expect(applied.some((m) => m.seq === 2)).toBe(false);
+        // Two one-row runs under K2; the K1 gap between them is untouched.
+        expect(gaps()).toEqual([
+            { fromSeq: 0, toSeq: 1, keyId: id(K2), count: 1 },
+            { fromSeq: 1, toSeq: 2, keyId: id(K1), count: 1 },
+            { fromSeq: 2, toSeq: 3, keyId: id(K2), count: 1 },
+        ]);
+        expect(published.at(-1)).toEqual([
+            { fromSeq: 0, toSeq: 1, count: 1 },
+            { fromSeq: 1, toSeq: 2, count: 1 },
+            { fromSeq: 2, toSeq: 3, count: 1 },
+        ]);
+
+        calls.length = 0;
+        await sync(200);
+        expect(calls.map((c) => c.afterSeq)).toEqual([1, 200]); // the K1 gap replays under K2, then the head
+        expect(applied.some((m) => m.seq === 2)).toBe(true);
+        expect(gaps()).toEqual([
+            { fromSeq: 0, toSeq: 1, keyId: id(K2), count: 1 },
+            { fromSeq: 2, toSeq: 3, keyId: id(K2), count: 1 },
+        ]);
+
+        calls.length = 0;
+        await sync(200);
+        expect(calls.map((c) => c.afterSeq)).toEqual([200]); // K2 already tried both remaining rows
+    });
+
+    it('failures found on the last budget page around an unvisited K1 gap leave it its stamp, and the next K2 sync applies its row (c66b2da7)', async () => {
+        // 404 rows. K1 gaps (0,401] and (402,403]; head 404. K2 opens every
+        // row except 402 and 404. Page five (after=400) applies 401, the end
+        // of its range, and sees 402 and 404 sealed with readable 403 between
+        // them — a row the replay did NOT apply (past its range) and whose
+        // own range the budget never reached.
+        const { x, applied, calls, gaps, published, sync, setKey } = build(pagedRelay(404, [402, 404]));
+        x.recordUnopenableGap('A', 0, 401, K1, 401);
+        x.recordUnopenableGap('A', 402, 403, K1, 1);
+        setKey(K2);
+        await sync(404);
+        expect(calls.map((c) => c.afterSeq)).toEqual([0, 100, 200, 300, 400, 404]); // five pages, then the head
+        expect(applied).toHaveLength(401);
+        expect(applied.some((m) => m.seq === 403)).toBe(false);
+        expect(gaps()).toEqual([
+            { fromSeq: 401, toSeq: 402, keyId: id(K2), count: 1 },
+            { fromSeq: 402, toSeq: 403, keyId: id(K1), count: 1 }, // unvisited: keeps its stamp and continuation
+            { fromSeq: 403, toSeq: 404, keyId: id(K2), count: 1 },
+        ]);
+        expect(published.at(-1)).toEqual([
+            { fromSeq: 401, toSeq: 402, count: 1 },
+            { fromSeq: 402, toSeq: 403, count: 1 },
+            { fromSeq: 403, toSeq: 404, count: 1 },
+        ]);
+
+        calls.length = 0;
+        await sync(404);
+        expect(calls.map((c) => c.afterSeq)).toEqual([402, 404]); // seq 403's range replays under K2
+        expect(applied.some((m) => m.seq === 403)).toBe(true);
+        expect(applied).toHaveLength(402);
+        expect(gaps()).toEqual([
+            { fromSeq: 401, toSeq: 402, keyId: id(K2), count: 1 },
+            { fromSeq: 403, toSeq: 404, keyId: id(K2), count: 1 },
+        ]);
+
+        calls.length = 0;
+        await sync(404);
+        expect(calls.map((c) => c.afterSeq)).toEqual([404]);
+    });
+
+    it('consecutive failures stay one range while the opened row between two runs never sits under a placeholder', async () => {
+        // Under K1 seqs 102, 103 and 105 are sealed; 101 and 104 open.
+        const relay = (key: Uint8Array | null, afterSeq: number): Page => {
+            if (afterSeq !== 100) return { messages: [], lifecycle: [], cursor: afterSeq, hasMore: false, unopenable: 0, unopenableSeqs: [] };
+            const rows = [101, 102, 103, 104, 105];
+            const failed = key === K2 ? [] : [102, 103, 105];
+            const opened = rows.filter((seq) => !failed.includes(seq));
+            return { messages: opened.map((seq) => ({ seq, id: `m${seq}` })), lifecycle: [], cursor: 105, hasMore: false, unopenable: failed.length, unopenableSeqs: failed };
+        };
+        const { x, applied, gaps } = build(relay);
+        const gen = x.fetchGen.current('A');
+        for (let i = 0; i < 5; i++) {
+            await expect(x.fetchForwardSince('A', {}, 100, gen)).rejects.toThrow(/could not be opened/);
+        }
+        await x.fetchForwardSince('A', {}, 100, gen);
+        expect(applied.map((m) => m.seq)).toEqual([101, 104]);
+        expect(gaps()).toEqual([
+            { fromSeq: 101, toSeq: 103, keyId: id(K1), count: 2 },
+            { fromSeq: 104, toSeq: 105, keyId: id(K1), count: 1 },
+        ]);
     });
 });
