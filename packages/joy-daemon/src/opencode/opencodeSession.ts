@@ -177,7 +177,7 @@ export class OpencodeSession implements AgentSession {
     // closes the previous one (its in-flight prompts become `unknown`).
     this.#ledger = deps.ledger ?? ledgerFor();
     this.#generation = this.#ledger.openGeneration(init.id, "opencode");
-    this.#deliveredThrough = init.opencodeSessionId ? this.#ledger.getCheckpoint(init.id, "opencode_msg")?.ref : undefined;
+    this.#deliveredThrough = init.opencodeSessionId ? (this.#ledger.getCheckpoint(init.id, "opencode_msg")?.ref || undefined) : undefined; // "" = pending, nothing committed
     if (!init.opencodeSessionId) {
       this.#ledger.clearCheckpoint(init.id, "opencode_msg");
       // A fresh opencode session under this id: nothing queued for an earlier

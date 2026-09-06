@@ -170,7 +170,7 @@ export class CodexSession implements AgentSession {
     this.#ledger = deps.ledger ?? ledgerFor();
     this.#generation = this.#ledger.openGeneration(init.id, "codex");
     if (init.codexThreadId) {
-      this.#deliveredThrough = this.#ledger.getCheckpoint(init.id, "codex_turn")?.ref ?? null;
+      this.#deliveredThrough = this.#ledger.getCheckpoint(init.id, "codex_turn")?.ref || null; // "" = a pending mark, nothing committed yet
       // Do NOT seed pendingEffort on resume/recover (finding #8).
     } else {
       // A fresh thread under this id: nothing queued for an earlier thread can

@@ -371,6 +371,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // other (a previous lease's, a previous daemon's) resolves its turn through
   // reconcile with the recorded outcome. Cleared whenever the lease is lost.
   const freshTerminals = new Set<number>();
+  // Nothing is sent until the boot pass (refreshBindings) has loaded the
+  // bindings and the sessions' content keys: a row committed before that,
+  // for a sealed session, must be sealed with the key the pass loads — never
+  // sent in the clear because the key was not in memory yet (#582).
+  let bootReady = false;
   /** The content key a row was committed under, if it carries one (#582). */
   const rowKey = (row: OutboxRow): Uint8Array | undefined => {
     if (!row.keyB64) return undefined;
@@ -480,21 +485,35 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const fate = fateOf(err);
       if (fate === "permanent" && (err as { status?: number }).status !== 409) return { ok: false, fate: "permanent", error: errText(err) };
       // 409 turn_not_orphaned: the relay has not orphaned the old epoch's
-      // turn yet (≤20s) — try again on the sweep cadence.
-      return { ok: false, fate: "transient", error: errText(err), retryAfterMs: RENEW_MS };
+      // turn yet (≤20s) — the sender's backoff (1s, 2s, 4s…) covers it.
+      return { ok: false, fate: "transient", error: errText(err) };
     }
   }
 
   const sender = new OutboxSender({
-    ledger, ready: () => !!lease, log,
+    ledger, ready: () => !!lease && bootReady, log,
     post: (row) => (row.kind === "terminal" ? postTerminalRow(row) : postOutput(row)),
     maxBackoffMs: RETRY_MAX_MS,
   });
 
   /** Commit rows to the outbox. Null = the ledger refused: the rows are
-   *  held in memory (degraded) and re-committed on the sweep. */
+   *  held in memory (degraded) and re-committed on the sweep — or by the
+   *  next commit that succeeds, which lands them FIRST (persisted order). */
   function commitOutbound(rows: NewOutbound[]): number[] | null {
     try {
+      if (unpersisted.length) {
+        const held = unpersisted.splice(0);
+        try {
+          const seqs = ledger.enqueueOutbound([...held, ...rows]);
+          log(`outbox persistence restored — ${held.length} held row(s) committed`);
+          for (const sid of new Set(held.map((r) => r.sessionId))) sender.wake(sid);
+          publishOutboxHealth();
+          return seqs.slice(held.length);
+        } catch (e) {
+          unpersisted.unshift(...held);
+          throw e;
+        }
+      }
       return ledger.enqueueOutbound(rows);
     } catch (e) {
       if (!(e instanceof LedgerWriteError)) throw e;
@@ -578,13 +597,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     freshTerminals.add(seqs[0]);
     sender.wake(localId);
     const settled = await sender.awaitSettled(seqs[0], 60_000);
-    if (!settled) log(`terminal for turn ${turnId.slice(0, 8)} still unacked after 60s — retrying in the background`);
-    freshTerminals.delete(seqs[0]);
-    if (!settled) {
-      // Past the fast path: whatever lease posts it from here resolves the
-      // turn through reconcile with the recorded outcome (the old background
-      // worker's contract), which the relay accepts from any owner.
-    }
+    // Past the minute the sender keeps posting it as a turn fact under this
+    // lease (the old background worker's contract); a lease change moves it
+    // to reconcile with the recorded outcome. Settled rows leave the set.
+    if (settled) freshTerminals.delete(seqs[0]);
+    else log(`terminal for turn ${turnId.slice(0, 8)} still unacked after 60s — retrying in the background`);
   }
 
   /** Raw attachment bytes from the relay store (sealed by the sender). */
@@ -1667,6 +1684,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           if (lane === "control") { await sleep(1_000); continue; } // work loop owns acquire
           await acquire();
           await refreshBindings();
+          bootReady = true; // bindings + content keys loaded: the outbox may send
           sender.start(); // every session with unacked rows resumes from the ledger — in order
           announced = false;
         }

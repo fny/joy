@@ -3,7 +3,7 @@ import {mkdtempSync,writeFileSync,readFileSync,existsSync} from 'node:fs';
 import {join} from 'node:path';
 process.env.JOY_HOME_DIR=mkdtempSync('/tmp/joy-test-tmux/review3/wave1-astra-spool-');
 const {startNucleusLane}=await import('../src/relay/nucleusLane.ts');
-const {OutboundSpool}=await import('../src/relay/outboundSpool.ts');
+const {spool,seedSpool,blockLedgerWrites,unblockLedgerWrites}=await import('./ledger-spool-shim.mts');
 const {RelaySession,encodeTextEvent}=await import('../src/relay/relay.ts');
 const {joyStateDir}=await import('../src/paths.ts');
 const scenario=process.argv[2];
@@ -15,16 +15,17 @@ const row={sessionId:'session-one',localSessionId:'local-one',daemonId:'machine-
 const turnId='be9b8153-7009-43ba-a20b-4a73f2606d6b';
 const out=(id:string,v2:string|null=row.sessionId)=>({kind:'output' as const,id,localId:row.localSessionId,v2SessionId:v2,turnId,wire:encodeTextEvent(id,{turn:'adapter-turn'}),runtimeEventId:'rec:'+id,at:Date.now()});
 const terminal={kind:'terminal' as const,id:'terminal-one',v2SessionId:row.sessionId,turnId,body:{type:'terminal',terminalState:'completed'},at:Date.now()};
-const seed=new OutboundSpool(spoolPath);
+const seed={add:(e:any)=>seedSpool(joyStateDir(),[e])};
 if(scenario==='ordering'){seed.add(out('answer'));seed.add(terminal);}
 if(scenario==='record_order'){seed.add(out('old-first'));seed.add(out('new-second',null));}
 if(scenario==='replay_retry'||scenario==='orphan'){seed.add(terminal);}
 if(scenario==='fence'||scenario==='transient'){seed.add(out('answer'));}
 if(scenario==='disk'){
- const blocker=join(process.env.JOY_HOME_DIR!,'not-a-directory');writeFileSync(blocker,'x');
- const s=new OutboundSpool(join(blocker,'spool.json'));s.add(out('answer'));
- assert.equal(s.size,1);assert.equal(new OutboundSpool(join(blocker,'spool.json')).size,0);
- console.log(JSON.stringify({scenario,returnedNormally:true,inMemory:1,afterReopen:0}));process.exit(0);
+ // The spool is the ledger's outbox: a commit that fails is a throw, never an
+ // entry that exists only in memory.
+ blockLedgerWrites(joyStateDir());let threw=false;try{seed.add(out('answer'));}catch{threw=true;}unblockLedgerWrites(joyStateDir());
+ assert.equal(threw,true);assert.equal(spool(joyStateDir()).size,0);
+ console.log(JSON.stringify({scenario,returnedNormally:false,inMemory:0,afterReopen:0}));process.exit(0);
 }
 if(scenario==='sweep'||scenario==='replay_retry'||scenario==='quota'||scenario==='claimed_sweep'){
  globalThis.setTimeout=((fn:any,ms:any,...args:any[])=>realSetTimeout(fn,ms===8000?20:(scenario==='quota'&&[1000,2000,4000,16000,30000].includes(ms)?10:ms),...args)) as any;
@@ -89,18 +90,18 @@ try{
   await until(()=>events.filter(x=>x==='output-request').length>=3);
   for(let i=0;i<100;i++)adapter.send(encodeTextEvent('later '+i,{turn:'adapter-turn'}),'later-'+i);
   await sleep(100);
-  const pending=new OutboundSpool(spoolPath);
+  const pending=spool(joyStateDir());
   assert.equal(pending.size,101);assert.equal(pending.hasTerminalFor(turnId),false);
   assert.equal(calls.filter(c=>c.body.type==='terminal').length,0);
   console.log(JSON.stringify({scenario,outputAttempts:events.filter(x=>x==='output-request').length,spoolSize:pending.size,terminalSpooled:false,terminalPosts:0,leaseAcquires:acquires}));
  }else if(scenario==='orphan'){
   await until(()=>calls.filter(c=>c.path.endsWith('/reconcile')).length===2);
-  assert.equal(terminalState,'interrupted');assert.equal(new OutboundSpool(spoolPath).size,0);
+  assert.equal(terminalState,'interrupted');assert.equal(spool(joyStateDir()).size,0);
   console.log(JSON.stringify({scenario,events,finalTerminal:terminalState,spoolSize:0}));
  }else if(scenario==='replay_retry'){
   await until(()=>reads>=6); // five healthy sweep ticks, no lease reacquire
   assert.equal(acquires,1);assert.equal(calls.filter(c=>c.path.includes(turnId)&&c.path.endsWith('/reconcile')).length,1);
-  assert.equal(new OutboundSpool(spoolPath).size,1);
+  assert.equal(spool(joyStateDir()).size,1);
   console.log(JSON.stringify({scenario,acquires,sessionListReads:reads,correctTurnReconcileAttempts:1,spoolSize:1,otherReconcilePaths:calls.filter(c=>c.path.endsWith('/reconcile')&&!c.path.includes(turnId)).map(c=>c.path)}));
  }else if(scenario==='sweep'||scenario==='claimed_sweep'){
   await until(()=>calls.filter(c=>c.path.endsWith('/reconcile')).length>=2);
@@ -121,11 +122,11 @@ try{
  }else if(scenario==='transient'){
   await until(()=>events.includes('output-ack'));
   const posts=calls.filter(c=>c.body.type==='output');
-  assert.equal(posts.length,2);assert.equal(posts[0].body.runtimeEventId,posts[1].body.runtimeEventId);assert.equal(new OutboundSpool(spoolPath).size,0);
+  assert.equal(posts.length,2);assert.equal(posts[0].body.runtimeEventId,posts[1].body.runtimeEventId);assert.equal(spool(joyStateDir()).size,0);
   console.log(JSON.stringify({scenario,outputAttempts:2,sameRuntimeEventId:true,spoolSize:0}));
  }else if(scenario==='fence'){
   await until(()=>logs.some(s=>s.includes('dropped')));
-  assert.equal(new OutboundSpool(spoolPath).size,0);
+  assert.equal(spool(joyStateDir()).size,0);
   console.log(JSON.stringify({scenario,outputAttempts:events.filter(x=>x==='output-request').length,outputAcks:events.filter(x=>x==='output-ack').length,spoolSize:0}));
  }else throw new Error('unknown scenario');
 }finally{await lane.stop();}

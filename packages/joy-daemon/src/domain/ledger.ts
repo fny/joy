@@ -802,7 +802,8 @@ export class Ledger {
   /** Record a local replay cursor. With `throughSeq` (or "latest" = the
    *  session's newest outbox row) the checkpoint is committed only once every
    *  outbox row up to that seq is acked or dropped; until then it is held as
-   *  pending and a restart replays from the previous committed cursor. */
+   *  pending and a restart replays from the previous committed cursor — or
+   *  from nothing (`ref` is "" while no cursor has ever been committed). */
   setCheckpoint(sessionId: string, kind: string, ref: string, offset: number, opts: { throughSeq?: number | "latest" } = {}): { committed: boolean } {
     return this.tx(() => {
       const now = this.#now();
@@ -812,7 +813,7 @@ export class Ledger {
       const cur = this.getCheckpoint(sessionId, kind);
       if (blocked) {
         if (cur) this.#run("UPDATE checkpoints SET pending_ref=?, pending_offset=?, pending_through_seq=?, updated_at=? WHERE session_id=? AND kind=?", ref, offset, through, now, sessionId, kind);
-        else this.#run("INSERT INTO checkpoints(session_id,kind,ref,offset,updated_at,pending_ref,pending_offset,pending_through_seq) VALUES(?,?,?,0,?,?,?,?)", sessionId, kind, ref, now, ref, offset, through);
+        else this.#run("INSERT INTO checkpoints(session_id,kind,ref,offset,updated_at,pending_ref,pending_offset,pending_through_seq) VALUES(?,?,'',0,?,?,?,?)", sessionId, kind, now, ref, offset, through);
         return { committed: false };
       }
       this.#run("INSERT OR REPLACE INTO checkpoints(session_id,kind,ref,offset,updated_at,pending_ref,pending_offset,pending_through_seq) VALUES(?,?,?,?,?,NULL,NULL,NULL)", sessionId, kind, ref, offset, now);
