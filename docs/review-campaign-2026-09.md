@@ -509,6 +509,17 @@ app.
   #629 lows, #628 (fixed in the stack). In flight: #130 durable drop
   evidence. **47 open.**
 
+- 2026-09-09 (midday) — the stack pushed (72fa01b3) and #130 durable drop
+  evidence (7711c6cf: the count is committed in the outbox drop's own
+  transaction and merged into every card publication). Closed 27 issues
+  whose later rounds Astra verified as a group (E6 residuals, E4 store,
+  hooks C6, C2 rules R6/R19) plus #82 #119 on the Fable tunnel review.
+  **25 open**: awaiting verdicts (#48 #53 #69 #127 #130 #497 #498 #502
+  #519 #538 #550 #564 #573 #628), in residual rounds (#128 sparse runs,
+  #560 positional receipt coverage, #495 stale-pid stop, #143 #324
+  unmount lows), and lows/follow-ups (#623 #624 #626 #627 flaky tests,
+  #625 fresh-spawn reconcile, #629 foreign OpenCode prompts).
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
