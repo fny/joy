@@ -28,13 +28,20 @@ function folderName(path: string): string {
     return segs.length ? segs[segs.length - 1] : path;
 }
 
-async function deleteSessionRecords(ids: string[]): Promise<number> {
-    let n = 0;
+/** Deletes each record; reports the ids that failed so callers can stop
+ *  (or retry) instead of treating a partial result as done (#175). */
+async function deleteSessionRecords(ids: string[]): Promise<{ deleted: number; failed: string[] }> {
+    let deleted = 0;
+    const failed: string[] = [];
     for (const id of ids) {
-        const r = await sessionDelete(id);
-        if (r.success) n++;
+        try {
+            const r = await sessionDelete(id);
+            if (r.success) deleted++; else failed.push(id);
+        } catch {
+            failed.push(id);
+        }
     }
-    return n;
+    return { deleted, failed };
 }
 
 const joyStateOf = (id: string) => storage.getState().sessions[id]?.metadata?.joy__state;
@@ -162,11 +169,12 @@ export default React.memo(function CleanupScreen() {
                 const r = await sessionKill(id);
                 if (r.success) deletable.push(id); else kept.push(id);
             }
-            const n = await deleteSessionRecords(deletable);
+            const { deleted: n, failed } = await deleteSessionRecords(deletable);
             const parts = [`Removed ${n} of ${ids.length} session record${ids.length === 1 ? '' : 's'}.`];
+            if (failed.length) parts.push(`${failed.length} record${failed.length === 1 ? '' : 's'} could not be deleted; try again later.`);
             if (kept.length) parts.push(`${kept.length} running session${kept.length === 1 ? '' : 's'} could not be stopped; ${kept.length === 1 ? 'its record was' : 'their records were'} kept.`);
             if (changed.length) parts.push(`${changed.length} changed state while you were deciding and ${changed.length === 1 ? 'was' : 'were'} left alone.`);
-            Modal.alert(kept.length || changed.length ? 'Partly deleted' : 'Deleted', parts.join(' '), [{ text: 'OK' }]);
+            Modal.alert(kept.length || changed.length || failed.length ? 'Partly deleted' : 'Deleted', parts.join(' '), [{ text: 'OK' }]);
         });
     }, []);
 
@@ -181,7 +189,11 @@ export default React.memo(function CleanupScreen() {
             const ids = Object.values(storage.getState().sessions)
                 .filter((s) => isJoyDaemonSource(s.metadata?.joy__source) && s.metadata?.machineId === machineId)
                 .map((s) => s.id);
-            const n = await deleteSessionRecords(ids);
+            const { deleted: n, failed } = await deleteSessionRecords(ids);
+            if (failed.length) {
+                Modal.alert('Partly purged', `Removed ${n} session record${n === 1 ? '' : 's'}; ${failed.length} could not be deleted. Try again later.`, [{ text: 'OK' }]);
+                return;
+            }
             Modal.alert('Purged', `Removed ${n} session record${n === 1 ? '' : 's'}.`, [{ text: 'OK' }]);
         });
     }, []);
@@ -193,12 +205,30 @@ export default React.memo(function CleanupScreen() {
             { confirmText: 'Delete', destructive: true },
         ).then(async (ok) => {
             if (!ok) return;
-            const ids = Object.values(storage.getState().sessions)
-                .filter((s) => s.metadata?.machineId === machineId)
-                .map((s) => s.id);
-            await deleteSessionRecords(ids);
-            const r = await machineDelete(machineId);
-            if (!r.success) Modal.alert('Delete failed', r.message || 'Could not delete machine.', [{ text: 'OK' }]);
+            // The machine row goes only once EVERY record deletion succeeded:
+            // machineDelete preserves sessions, so deleting the machine after a
+            // partial failure orphaned the leftover records with no group left
+            // here to retry them from (#175).
+            const run = async (): Promise<void> => {
+                const ids = Object.values(storage.getState().sessions)
+                    .filter((s) => s.metadata?.machineId === machineId)
+                    .map((s) => s.id);
+                const { failed } = await deleteSessionRecords(ids);
+                if (failed.length) {
+                    Modal.alert(
+                        'Machine kept',
+                        `${failed.length} of ${ids.length} session record${ids.length === 1 ? '' : 's'} could not be deleted, so "${name}" was not removed. Retry when the relay is reachable.`,
+                        [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: 'Retry', onPress: () => void run() },
+                        ],
+                    );
+                    return;
+                }
+                const r = await machineDelete(machineId);
+                if (!r.success) Modal.alert('Delete failed', r.message || 'Could not delete machine.', [{ text: 'OK' }]);
+            };
+            await run();
         });
     }, []);
 

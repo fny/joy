@@ -5,7 +5,6 @@ import { ItemList } from '@/components/ItemList';
 import { useSettingMutable, useLocalSettingMutable, storage } from '@/sync/storage';
 import { applyAppearance, applyDarkAppearance } from '@/palettes';
 import { useRouter } from 'expo-router';
-import * as Localization from 'expo-localization';
 import { useUnistyles, UnistylesRuntime, StyleSheet } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
 import { AvatarSquares, AvatarCircles } from '@/components/AvatarIdenticon';
@@ -13,7 +12,7 @@ import { clampSessionAvatarSize, AVATAR_SIZE_MIN, AVATAR_SIZE_MAX, AVATAR_SIZE_S
 import { Appearance, Platform, Pressable, Text, View } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
-import { t, getLanguageNativeName, SUPPORTED_LANGUAGES } from '@/text';
+import { t, getLanguageNativeName, getCurrentLanguage, SUPPORTED_LANGUAGES } from '@/text';
 import { TerminalControls } from '@/components/dev/TerminalControls';
 import { Typography } from '@/constants/Typography';
 import { clampChatFontScale, CHAT_FONT_SCALE_MIN, CHAT_FONT_SCALE_MAX, CHAT_FONT_SCALE_STEP } from '@/hooks/useChatFontScale';
@@ -70,15 +69,14 @@ export default function AppearanceSettingsScreen() {
     // Ensure we have a valid style for display, defaulting to gradient for unknown values
     const displayStyle: KnownAvatarStyle = isKnownAvatarStyle(avatarStyle) ? avatarStyle : 'gradient';
     
-    // Language display
+    // Language display. "Automatic" shows the language the translation module
+    // actually resolved — it walks every device locale and honours the Chinese
+    // script variants; re-deriving it here from the first locale's bare
+    // language code showed "Automatic (English)" on a zh-Hant-TW device that
+    // was running in Traditional Chinese (#172).
     const getLanguageDisplayText = () => {
         if (preferredLanguage === null) {
-            const deviceLocale = Localization.getLocales()?.[0]?.languageTag ?? 'en-US';
-            const deviceLanguage = deviceLocale.split('-')[0].toLowerCase();
-            const detectedLanguageName = deviceLanguage in SUPPORTED_LANGUAGES ? 
-                                        getLanguageNativeName(deviceLanguage as keyof typeof SUPPORTED_LANGUAGES) : 
-                                        getLanguageNativeName('en');
-            return `${t('settingsLanguage.automatic')} (${detectedLanguageName})`;
+            return `${t('settingsLanguage.automatic')} (${getLanguageNativeName(getCurrentLanguage())})`;
         } else if (preferredLanguage && preferredLanguage in SUPPORTED_LANGUAGES) {
             return getLanguageNativeName(preferredLanguage as keyof typeof SUPPORTED_LANGUAGES);
         }
