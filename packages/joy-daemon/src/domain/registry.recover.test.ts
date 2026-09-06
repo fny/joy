@@ -7,9 +7,11 @@
 // module's createRelaySession is a recording stub. Throwaway JOY_HOME_DIR.
 import { test, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
+import os from "node:os";
 import { mkdtempSync, rmSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
 
 const ok = { ok: true, out: "" };
 const seen: { launchCmd: string | null; recordsAtLaunch: unknown[]; runSync: string[][]; windows: string[] } = { launchCmd: null, recordsAtLaunch: [], runSync: [], windows: [] };
@@ -63,7 +65,7 @@ afterEach(async () => {
   const { closeAllLedgers } = await import("./ledger");
   const { resetCoordinators } = await import("./coordinator");
   resetCoordinators(); closeAllLedgers();
-  vi.restoreAllMocks();
+  vi.restoreAllMocks(); syncBuiltinESMExports(); // a homedir spy reaches paths.ts's ESM binding; undo it there too
   if (realHome === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = realHome;
   rmSync(home, { recursive: true, force: true });
 });
@@ -153,4 +155,53 @@ test("#564 residual: a record-only recovery (agy/pi/opencode) canonicalises the 
   expect(loadWindowRecord("af005642")?.launchCwd).toBe(physical);
   expect(relayCards.find((c) => c.id === "af005641")?.cwd ?? agy.toJSON().cwd).toBe(join(physical, "nested"));
   agy.end("killed"); pi.end("killed");
+});
+
+/** shortcut -> physical/nested, so `shortcut/..` IS physical: the three
+ *  spellings the app and a legacy record can carry. `homedir()` is spied on
+ *  the builtin (and synced to its ESM binding) so `~` names this test's
+ *  throwaway home; `process.cwd()` likewise so a relative spelling starts
+ *  there. Both are undone by afterEach's restoreAllMocks + sync. */
+function symlinkSpellings(): { physical: string; spellings: Record<"absolute" | "relative" | "tilde", string> } {
+  const physical = realpathSync.native(cwd);
+  const nested = join(cwd, "nested"); fs.mkdirSync(nested);
+  const link = join(home, "shortcut"); fs.symlinkSync(nested, link);
+  expect(realpathSync.native(`${link}/..`)).toBe(physical);
+  const physHome = realpathSync.native(home);
+  vi.spyOn(os, "homedir").mockReturnValue(physHome); syncBuiltinESMExports();
+  vi.spyOn(process, "cwd").mockReturnValue(physHome);
+  return { physical, spellings: { absolute: `${link}/..`, relative: `${relative(physHome, link)}/..`, tilde: "~/shortcut/.." } };
+}
+
+test("#564 residual: `shortcut/..` spelled absolute, relative and with `~` all launch in the link target's parent", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { physical, spellings } = symlinkSpellings();
+  expect(spellings.relative).toBe("shortcut/..");
+  const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+  for (const [spelling, raw] of Object.entries(spellings)) {
+    seen.recordsAtLaunch = [];
+    await expect(reg.create({ cwd: raw })).rejects.toThrow(/launch-claude/);
+    // old code: relative → `home` (the link's parent); tilde → the home directory
+    expect((seen.recordsAtLaunch[0] as { launchCwd: string }).launchCwd, spelling).toBe(physical);
+  }
+}, 30_000);
+
+test("#564 residual: a record-only recovery canonicalises `shortcut/..` spelled absolute, relative and with `~` to the link target's parent", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { saveWindowRecord, loadWindowRecord } = await import("./windowRecord");
+  const { AgySession } = await import("../agy/agySession");
+  vi.spyOn(AgySession.prototype, "beginWatching").mockImplementation(() => {});
+  const { physical, spellings } = symlinkSpellings();
+  const ids = { absolute: "af005643", relative: "af005644", tilde: "af005645" } as const;
+  for (const [spelling, raw] of Object.entries(spellings)) saveWindowRecord(ids[spelling as keyof typeof ids], { launchCwd: raw, agent: "agy", agySettings: { conversationId: `recovery-${spelling}` } });
+  const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: { creds: { machineId: "m" } } as never });
+  await reg.recover();
+  for (const [spelling, id] of Object.entries(ids)) {
+    const s = reg.get(id)!;
+    expect(s, spelling).toBeTruthy();
+    expect(s.cwd, spelling).toBe(physical);
+    expect(loadWindowRecord(id)?.launchCwd, spelling).toBe(physical);
+    expect(relayCards.find((c) => c.id === id)?.cwd ?? s.toJSON().cwd, spelling).toBe(physical);
+    s.end("killed");
+  }
 });

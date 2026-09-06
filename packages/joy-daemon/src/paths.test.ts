@@ -23,6 +23,8 @@ beforeEach(() => {
 afterEach(() => {
     delete process.env.JOY_HOME_DIR;
     delete process.env.JOY_RELAY_URL;
+    vi.doUnmock("os");
+    vi.restoreAllMocks();
 });
 
 describe("per-relay layout", () => {
@@ -124,5 +126,28 @@ describe("canonicalCwd (#549 #564)", () => {
         // relative spellings resolve against the (physical) process cwd
         expect(p.canonicalCwd("./")).toBe(process.cwd());
         expect(p.canonicalCwd("sub/../")).toBe(process.cwd());
+    });
+
+    it("#564 residual: the same symlink traversal spelled absolute, relative and with `~` all land in the link target's parent", async () => {
+        const { symlinkSync, realpathSync } = await import("fs");
+        const root = realpathSync.native(mkdtempSync(join(tmpdir(), "joy-canon-spell-")));
+        const physical = join(root, "physical"); mkdirSync(join(physical, "nested"), { recursive: true });
+        symlinkSync(join(physical, "nested"), join(root, "shortcut"));
+        expect(realpathSync.native(`${root}/shortcut/..`)).toBe(physical); // what `cd shortcut/..` reaches
+        // absolute
+        let p = await freshPaths();
+        expect(p.canonicalCwd(`${root}/shortcut/..`)).toBe(physical);
+        // relative to the (physical) process cwd — old code: join(cwd, "shortcut/..") folded to `root`
+        vi.spyOn(process, "cwd").mockReturnValue(root);
+        expect(p.canonicalCwd("shortcut/..")).toBe(physical);
+        expect(p.canonicalCwd("./shortcut/../")).toBe(physical);
+        expect(p.canonicalCwd("shortcut/../new-dir/deeper")).toBe(join(physical, "new-dir", "deeper"));
+        // `~` — old code: join(homedir(), "shortcut/..") folded to the home directory
+        vi.doMock("os", async (importOriginal) => ({ ...await importOriginal<typeof import("os")>(), homedir: () => root }));
+        p = await freshPaths();
+        expect(p.expandHome("~/shortcut/..")).toBe(`${root}/shortcut/..`); // raw: nothing folded before the walk
+        expect(p.canonicalCwd("~/shortcut/..")).toBe(physical);
+        expect(p.canonicalCwd("~/shortcut/../..")).toBe(root);
+        expect(p.canonicalCwd("~")).toBe(root);
     });
 });

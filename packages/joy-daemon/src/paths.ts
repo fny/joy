@@ -3,10 +3,13 @@ import { join, dirname, isAbsolute, sep } from "path";
 import { readFileSync, realpathSync } from "fs";
 
 /** Expand a leading ~ to the daemon user's home. tmux's -c does NOT expand
- *  tildes (it is not a shell) and the app may send paths with ~ unresolved. */
+ *  tildes (it is not a shell) and the app may send paths with ~ unresolved.
+ *  A RAW concatenation — never path.join/normalize: that folded `~/link/..`
+ *  to the home directory before canonicalCwd could follow the link (#564
+ *  residual). Callers that want a folded path canonicalise afterwards. */
 export function expandHome(p: string): string {
   if (p === "~") return homedir();
-  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  if (p.startsWith("~/")) return `${homedir().replace(/\/+$/, "")}${sep}${p.slice(2)}`;
   return p;
 }
 
@@ -29,12 +32,14 @@ export function expandHome(p: string): string {
  *  Components past the first missing one are folded lexically onto the
  *  resolved prefix (they exist nowhere yet, so there is nothing to follow). */
 export function canonicalCwd(p: string): string {
-  // Absolute against the process cwd (already physical: getcwd(3) returns
-  // the resolved directory), split into RAW components — no lexical folding,
-  // so each `..` is applied to the directory actually reached.
+  // RAW components — the spelling is never joined or normalised first, so
+  // each `..` is applied to the directory actually reached. A relative
+  // spelling is prefixed with the process cwd's components (already
+  // physical: getcwd(3) returns the resolved directory); `join(cwd, spelled)`
+  // folded `shortcut/..` lexically before the walk (#564 residual).
   const spelled = expandHome(p.trim());
-  const startAbs = isAbsolute(spelled) ? spelled : join(process.cwd(), spelled);
-  const parts = startAbs.split(sep).filter((seg) => seg !== "" && seg !== ".");
+  const prefix = isAbsolute(spelled) ? [] : process.cwd().split(sep);
+  const parts = [...prefix, ...spelled.split(sep)].filter((seg) => seg !== "" && seg !== ".");
   let phys: string = sep;     // the physical directory reached so far
   const tail: string[] = [];  // components below the first missing one
   for (const seg of parts) {
