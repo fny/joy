@@ -628,14 +628,21 @@ export class OpencodeSession implements AgentSession {
     // of the same prompt both arrive as admission evidence, and two interrupts
     // could stop the NEXT turn (the endpoint has no turn identity; Astra on
     // 343e3bb6). Later evidence retries only after a failure settled.
-    if (this.#interrupting.has(id)) return;
+    if (this.#interrupting.has(id)) { this.#interruptAgain.add(id); return; } // evidence during an in-flight interrupt = retry if it fails
     this.#interrupting.add(id);
     void client.interrupt(ocSessionId)
-      .then(() => { this.#cancelledIds.delete(id); })
+      .then(() => { this.#cancelledIds.delete(id); this.#interruptAgain.delete(id); })
       .catch((e) => { process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`); })
-      .finally(() => { this.#interrupting.delete(id); });
+      .finally(() => {
+        this.#interrupting.delete(id);
+        // Admission evidence that arrived while this attempt was pending was
+        // coalesced away; if the attempt failed, that evidence still owes a
+        // retry (Astra on 03b558f0).
+        if (this.#interruptAgain.delete(id) && this.#cancelledIds.has(id) && !this.#isEnded()) this.#interruptCancelled(id, client, ocSessionId);
+      });
   }
   #interrupting = new Set<string>();
+  #interruptAgain = new Set<string>();
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
     // Terminal outcomes are monotonic: a late admission or reply for an item

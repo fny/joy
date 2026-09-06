@@ -42,6 +42,8 @@ type FileDiffResult = {
  * Loads all diffs in parallel, then renders them in a single ScrollView.
  * Shows a global loading spinner until all diffs are fetched to prevent layout jumps.
  */
+const EMPTY_RESULTS: Map<string, FileDiffResult> = new Map();
+
 export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     sessionId,
     scrollToFile,
@@ -73,7 +75,14 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     // file set changes so the rendered ScrollView keeps its scroll position and
     // existing diff sections stay on screen while updated files refresh in the
     // background.
-    const [resultsMap, setResultsMap] = React.useState<Map<string, FileDiffResult>>(() => new Map());
+    // Results are SCOPED to the session they were fetched for: a mounted view
+    // whose sessionId changes must not show (or reconcile against) the previous
+    // session's diffs under paths that happen to match (Astra on 03b558f0, #91).
+    const [resultsState, setResultsState] = React.useState<{ session: string; map: Map<string, FileDiffResult>; loaded: boolean }>(
+        () => ({ session: sessionId, map: new Map(), loaded: false }),
+    );
+    const resultsMap = resultsState.session === sessionId ? resultsState.map : EMPTY_RESULTS;
+    const hasLoadedOnce = resultsState.session === sessionId && resultsState.loaded;
     // Signature of the last fetched version per fullPath. If the signature
     // (status + linesAdded + linesRemoved + isStaged) hasn't changed, the diff
     // for that file doesn't need to be re-fetched.
@@ -84,7 +93,22 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     filesRef.current = files;
     // Track whether we've ever populated results — only show the global spinner
     // on the very first load, not on subsequent file-set changes.
-    const [hasLoadedOnce, setHasLoadedOnce] = React.useState(false);
+    // Setters stamp the CURRENT session (sessionRef, not a closure) so a write
+    // can never revive another session's map.
+    const setResultsMap = React.useCallback((upd: Map<string, FileDiffResult> | ((prev: Map<string, FileDiffResult>) => Map<string, FileDiffResult>)) => {
+        setResultsState((s) => {
+            const sess = sessionRef.current;
+            const base = s.session === sess ? s.map : new Map<string, FileDiffResult>();
+            const map = typeof upd === 'function' ? upd(base) : upd;
+            return { session: sess, map, loaded: s.session === sess ? s.loaded : false };
+        });
+    }, []);
+    const setHasLoadedOnce = React.useCallback((loaded: boolean) => {
+        setResultsState((s) => {
+            const sess = sessionRef.current;
+            return { session: sess, map: s.session === sess ? s.map : new Map<string, FileDiffResult>(), loaded };
+        });
+    }, []);
     // Request generation per path: the empty-list branch clears inFlight while
     // old requests still run, so a path removed and re-added with the same
     // signature could have its NEW result overwritten by the OLD completion
