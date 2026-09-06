@@ -17,7 +17,7 @@
 import { moduleDir } from "./esm";
 import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
-import { mkdirSync, writeFileSync, readFileSync } from "fs";
+import { readFileSync } from "fs";
 import { initRelay, loadCredentials } from "./relay/relay.ts";
 import { migrateLegacyEnvFile, applyEnvStore } from "./domain/envStore";
 import { startNucleusLane } from "./relay/nucleusLane.ts";
@@ -25,6 +25,7 @@ import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
 import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
 import { ledgerFor } from "./domain/ledger";
+import { mkdirSecure, writeSecretFileAtomic } from "./domain/secretFile";
 import { importLegacyState } from "./domain/ledgerImport";
 
 // Provider keys for spawned agents live in the sealed store (~/.joy/env.sealed,
@@ -63,7 +64,11 @@ const PUBLIC_DIR = join(__dirname, "..", "public"); // public/ is at the package
 // H3: per-instance token required on all mutating HTTP routes — prevents
 // drive-by cross-origin session creation / prompt injection via no-cors POST.
 const SERVER_TOKEN = crypto.randomUUID();
-process.stderr.write(`[server] token: ${SERVER_TOKEN}\n`);
+// The token itself is NOT logged (#48): stderr becomes ~/.joy/.../daemon.log,
+// opened with the umask default, so printing it published machine-wide
+// session/bash/file access to every local account. It lives in daemon.json
+// (0600), which is where the CLI reads it from.
+process.stderr.write(`[server] control token written to daemon.json\n`);
 
 // Stable state file the `joy` CLI reads to locate + authenticate to this daemon
 // (the token only otherwise appears on stderr, whose destination depends on how
@@ -87,8 +92,8 @@ try {
 }
 function writeDaemonState(port: number): void {
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(join(STATE_DIR, "daemon.json"), JSON.stringify({
+    mkdirSecure(STATE_DIR);
+    writeSecretFileAtomic(join(STATE_DIR, "daemon.json"), JSON.stringify({
       token: SERVER_TOKEN, pid: process.pid, port,
       relay: joyRelayUrl(), relayKey: joyRelayKey(),
       startedAt: Date.now(), version: "joy-daemon/0.1.0",
