@@ -537,6 +537,18 @@ app.
   291b1f20, specs added). Astra: coordinator collateral verified fixed.
   **23 open.**
 
+- 2026-09-09 (evening) — pushed: #627 ledger hot path (prepared-statement
+  cache + `receipts_file_ord` index; the "flake" was a CPU-starved
+  timeout), #550 continuation reservation (a `--continue` launch claims the
+  transcript it will continue, or the project dir, before launching), #498
+  per-dispatch turn attribution (pending refs are a queue; a transcript
+  turn is claimed by transcript order or by the single dispatch window
+  containing it). Closed on verdicts: #53 #497 #502 #538 #564 #573; closed
+  on own evidence: #623 #624 #626 #627. In flight: #628 dead-leader kill
+  regression + marker propagation (Opus), lane restart round two
+  (adoption unavailability, derived terminals). **13 open**, all awaiting
+  verdicts or inside those two agents.
+
 ## Campaign summary (as of 2026-09-09 afternoon)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
