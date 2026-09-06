@@ -6,11 +6,11 @@ import { isDemoSession } from '@/sync/demoSession';
 import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
-import { sessionReadFile, sessionDeleteFile } from '@/sync/ops';
+import { sessionDeleteFile } from '@/sync/ops';
 import { storage, useSession, useLocalSettingMutable } from '@/sync/storage';
 import { resources } from '@/sync/resource';
 import { fileContentsSpec, gitDiffSpec, type FileContents } from '@/sync/fileContents';
-import { useResourceEntry } from '@/hooks/useResource';
+import { useResource } from '@/hooks/useResource';
 import { pickDownloadPayload } from '@/utils/fileDownloadSource';
 import { isBinaryPath } from '@/utils/binaryFile';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -27,11 +27,11 @@ import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
 import { FileRenderedView, fileRenderKind, isRasterImagePath } from '@/components/FileContentRender';
 import { downloadFile } from '@/utils/downloadFile';
 
-interface FileContent {
-    content: string;
-    encoding: 'utf8' | 'base64';
-    isBinary: boolean;
-}
+type DisplayMode = 'file' | 'diff' | 'rendered';
+
+/** A session with no backend to read from (preview/demo, unknown session)
+ *  shows an empty text file rather than an error. */
+const NO_BACKEND_FILE: FileContents = { base64: '', content: '', isBinary: false };
 
 // Diff display component
 const DiffDisplay: React.FC<{ diffContent: string; fontSize?: number }> = ({ diffContent, fontSize = 14 }) => {
@@ -93,7 +93,7 @@ export default React.memo(function FileScreen() {
     const requestedColumn = columnParam ? Number.parseInt(columnParam, 10) : null;
     // Reactive: a cold-opened deep link renders before sessions hydrate. With
     // a one-shot getState() read the "unknown session → empty file" branch
-    // was final; subscribing lets the load rerun when the session arrives (#162).
+    // was final; subscribing lets the read start once the session arrives (#162).
     const session = useSession(sessionId!);
     const sessionsReady = storage((s) => s.isDataReady);
     const hasSession = !!session;
@@ -110,31 +110,75 @@ export default React.memo(function FileScreen() {
     const resolvedPath = resolveSessionFilePath(rawPath, sessionPath);
     const filePath = resolvedPath?.absolutePath ?? rawPath;
     const gitDiffPath = resolvedPath?.withinSessionRoot ? resolvedPath.relativePath : null;
+    const renderKind = fileRenderKind(filePath);
+    const isRaster = isRasterImagePath(filePath);
+    // A known non-image binary is never read: the screen only shows the
+    // notice, and Download fetches its bytes on demand. Raster images are
+    // binary but renderable, so they are read (as base64) like text.
+    const knownBinary = isBinaryPath(filePath) && !isRaster;
+
+    // Sessions still hydrating: stay in the loading state until the session
+    // record lands (#162). Preview/demo or unknown session (no real session
+    // record, hence no encryption): there is no backend to read from, so no
+    // RPC is made instead of throwing "Session encryption not found".
+    const isDemo = !!sessionId && isDemoSession(sessionId);
+    const hydrating = !!sessionId && !isDemo && !hasSession && !sessionsReady;
+    const canRead = !!sessionId && !isDemo && hasSession;
 
     // The file and its diff are RESOURCES (sync/fileContents) shared with the
-    // prefetcher and the file panel: rendered from cache for instant display
-    // on revisit, revalidated by the load below.
+    // prefetcher, the file panel and the changes view: rendered straight from
+    // the cache (instant on revisit, and a save made elsewhere shows here as
+    // soon as it enters the cache), revalidated on open and on re-focus. Only
+    // user intent — the chosen tab, font, wrap — lives in this component.
     const fileSpec = React.useMemo(() => (sessionId ? fileContentsSpec(sessionId, filePath) : null), [sessionId, filePath]);
     const diffSpec = React.useMemo(
         () => (sessionId && gitDiffPath && gitDiffPath !== '.' ? gitDiffSpec(sessionId, gitDiffPath) : null),
         [sessionId, gitDiffPath],
     );
-    const cachedFile = useResourceEntry<FileContents>(fileSpec?.key ?? null).data ?? null;
-    const cachedDiff = useResourceEntry<string>(diffSpec?.key ?? null).data ?? null;
-    const cached = cachedFile ? { content: cachedFile.content, isBinary: cachedFile.isBinary, diff: cachedDiff } : null;
+    const fileKey = fileSpec?.key ?? '';
+    const file = useResource<FileContents>(fileSpec, { enabled: canRead && !knownBinary });
+    // The diff is best-effort: a failed diff read is no diff.
+    const diff = useResource<string>(diffSpec, { enabled: canRead && !!sessionPath && !isBinaryPath(filePath) });
 
-    const [fileContent, setFileContent] = React.useState<FileContent | null>(() => {
-        if (!cached) return null;
-        return { content: cached.content ?? '', encoding: 'utf8', isBinary: cached.isBinary };
-    });
-    const [diffContent, setDiffContent] = React.useState<string | null>(() => cached?.diff ?? null);
-    const [displayMode, setDisplayMode] = React.useState<'file' | 'diff' | 'rendered'>('diff');
+    const data: FileContents | undefined = canRead ? file.data : (hydrating ? undefined : NO_BACKEND_FILE);
+    const isBinary = knownBinary || (data?.isBinary ?? false);
     // Raster images arrive as base64 (never decoded to text) — rendered-only.
-    const [imageBase64, setImageBase64] = React.useState<string | null>(null);
-    // The daemon's base64 as received — Download writes THESE bytes. The text
-    // shown is a UTF-8 decode that is lossy for Latin-1 / BOM files (#164).
-    const [rawBase64, setRawBase64] = React.useState<string | null>(null);
-    const renderKind = fileRenderKind(filePath);
+    // A zero-byte image has nothing to render: binary notice, not an error (#87).
+    const imageBase64 = isRaster && data?.base64 ? data.base64 : null;
+    const fileText = data && !isBinary ? (data.content ?? '') : null;
+    // An authoritative empty diff (the daemon says the file is unchanged)
+    // is no diff: the Diff tab and its content go away.
+    const diffContent = diff.data && diff.data.trim() ? diff.data : null;
+    const isLoading = hydrating || (canRead && !knownBinary && !file.hasData && !file.error && !file.unavailable);
+    // A read failure with nothing cached is an error state; with a last good
+    // value on screen it is a missed revalidation, surfaced inline below.
+    const fatalError = canRead && !knownBinary && !file.hasData ? (file.error ?? file.unavailable) : null;
+    const refreshFailed = (file.hasData && !!file.error) || (diff.hasData && !!diff.error);
+    const retryRefresh = React.useCallback(() => {
+        if (file.error) void file.refresh();
+        if (diff.error) void diff.refresh();
+    }, [file, diff]);
+
+    // The tab is user intent, kept per file: an explicit choice sticks while
+    // it can still be shown (the Diff tab disappears with the diff, an image
+    // has no source view); until the user picks, the default follows the data.
+    // Renderable text (md/html/csv/tsv) opens in SOURCE (rendering is the
+    // explicit opt-in); images open rendered (no text form); everything else
+    // keeps the diff-first behavior.
+    const [chosenMode, setChosenMode] = React.useState<{ key: string; mode: DisplayMode } | null>(null);
+    const canRender = !!imageBase64 || (!!renderKind && renderKind !== 'image');
+    const modeAvailable = (mode: DisplayMode): boolean =>
+        mode === 'diff' ? !!diffContent : mode === 'rendered' ? canRender : !imageBase64;
+    const defaultMode: DisplayMode = requestedLine !== null && requestedLine > 0 ? 'file'
+        : imageBase64 ? 'rendered'
+        : renderKind ? 'file'
+        : diffContent ? 'diff'
+        : 'file';
+    const displayMode: DisplayMode = chosenMode && chosenMode.key === fileKey && modeAvailable(chosenMode.mode)
+        ? chosenMode.mode
+        : defaultMode;
+    const setDisplayMode = React.useCallback((mode: DisplayMode) => setChosenMode({ key: fileKey, mode }), [fileKey]);
+
     const [fontSize, setFontSize] = useLocalSettingMutable('fileViewerFontSize');
     const [wrap, setWrap] = useLocalSettingMutable('fileViewerWrap');
     const bumpFont = (delta: number) => setFontSize(Math.max(9, Math.min(28, (fontSize ?? 14) + delta)));
@@ -166,8 +210,6 @@ export default React.memo(function FileScreen() {
             Modal.alert(t('common.error'), t('errors.operationFailed'));
         }
     }, [router]);
-    const [isLoading, setIsLoading] = React.useState(!cached);
-    const [error, setError] = React.useState<string | null>(null);
     const [deleting, setDeleting] = React.useState(false);
 
     // Delete the file on the machine. Irreversible (the daemon unlinks it — no
@@ -256,161 +298,39 @@ export default React.memo(function FileScreen() {
         }
     }, []);
 
-    // Check if file is likely binary based on extension
-    const isBinaryFile = React.useCallback((path: string): boolean => isBinaryPath(path), []);
-
-    // Load file content (fetches in background even if cache exists)
     React.useEffect(() => {
-        let isCancelled = false;
-
-        const loadFile = async () => {
-            try {
-                // Sessions still hydrating: stay in the loading state; this effect
-                // reruns once the session record lands (#162).
-                if (sessionId && !isDemoSession(sessionId) && !hasSession && !sessionsReady) {
-                    if (!isCancelled && !cached) setIsLoading(true);
-                    return;
-                }
-                // Preview/demo or unknown session (no real session record, hence
-                // no encryption) — there's no backend to read from, so skip the
-                // RPC instead of throwing "Session encryption not found".
-                if (!sessionId || isDemoSession(sessionId) || !hasSession) {
-                    if (!isCancelled) {
-                        setFileContent({ content: '', encoding: 'utf8', isBinary: false });
-                        setIsLoading(false);
-                    }
-                    return;
-                }
-
-                // Only show loading spinner if no cache
-                if (!cached) {
-                    setIsLoading(true);
-                }
-                setError(null);
-
-                if (isBinaryFile(filePath)) {
-                    // Raster images are binary but renderable: fetch base64
-                    // and show the image instead of the binary notice.
-                    if (isRasterImagePath(filePath)) {
-                        const imgResponse = await sessionReadFile(sessionId, filePath);
-                        if (!isCancelled) {
-                            if (imgResponse.success) {
-                                // A zero-byte image has nothing to render: binary notice, not an error (#87).
-                                if (imgResponse.content) setImageBase64(imgResponse.content);
-                                setFileContent({ content: '', encoding: 'base64', isBinary: true });
-                            } else {
-                                setError(imgResponse.error || 'Failed to read file');
-                            }
-                            setIsLoading(false);
-                        }
-                        return;
-                    }
-                    if (!isCancelled) {
-                        setFileContent({ content: '', encoding: 'base64', isBinary: true });
-                        setIsLoading(false);
-                    }
-                    return;
-                }
-
-                // Fetch git diff for the file (if in git repo) — best-effort:
-                // a failed diff read is no diff.
-                if (sessionPath && diffSpec) {
-                    const diff = await resources.ensure(diffSpec);
-                    if (!isCancelled && diff.data && diff.data.trim()) setDiffContent(diff.data);
-                }
-
-                // A fresh read through the file resource: decoded once there
-                // (an empty file is a file, #87), superseding any prefetch of
-                // this path still in flight.
-                const entry = await resources.refresh(fileSpec!);
-
-                if (!isCancelled) {
-                    if (entry.data) {
-                        setRawBase64(entry.data.base64);
-                        setFileContent({ content: entry.data.content ?? '', encoding: entry.data.isBinary ? 'base64' : 'utf8', isBinary: entry.data.isBinary });
-                    } else {
-                        setError(entry.error || entry.unavailable || 'Failed to read file');
-                    }
-                }
-            } catch (error) {
-                console.error('Failed to load file:', error);
-                if (!isCancelled) {
-                    setError('Failed to load file');
-                }
-            } finally {
-                if (!isCancelled) {
-                    setIsLoading(false);
-                }
-            }
-        };
-
-        setRawBase64(null); // bytes belong to one path; a stale buffer must not download under a new name
-        loadFile();
-
-        return () => {
-            isCancelled = true;
-        };
-    }, [filePath, fileSpec, diffSpec, isBinaryFile, sessionId, sessionPath, hasSession, sessionsReady]);
-
-    // Show error modal if there's an error
-    React.useEffect(() => {
-        if (error) {
-            Modal.alert(t('common.error'), error);
-        }
-    }, [error]);
-
-    // Default display mode. Renderable text (md/html/csv/tsv) opens in SOURCE
-    // (rendering is the explicit opt-in); images open rendered (no text form);
-    // everything else keeps the diff-first behavior.
-    React.useEffect(() => {
-        if (requestedLine !== null && requestedLine > 0) {
-            setDisplayMode('file');
-        } else if (imageBase64) {
-            setDisplayMode('rendered');
-        } else if (renderKind) {
-            setDisplayMode('file');
-        } else if (diffContent) {
-            setDisplayMode('diff');
-        } else if (fileContent) {
-            setDisplayMode('file');
-        }
-    }, [diffContent, fileContent, requestedLine, renderKind, imageBase64]);
-
-    React.useEffect(() => {
-        if (!fileContent?.content || displayMode !== 'file' || requestedLine === null || requestedLine <= 0) {
+        if (!fileText || displayMode !== 'file' || requestedLine === null || requestedLine <= 0) {
             return;
         }
         const offset = Math.max(0, ((requestedLine - 1) * 20) - 40);
         requestAnimationFrame(() => {
             scrollViewRef.current?.scrollTo({ y: offset, animated: false });
         });
-    }, [displayMode, fileContent?.content, requestedLine]);
+    }, [displayMode, fileText, requestedLine]);
 
     const fileName = filePath.split('/').pop() || filePath;
-    // Download what is ON DISK. Text and images are already in memory; a
-    // binary that is not an image (pdf, xlsx, zip…) was never fetched — the
-    // viewer only shows the "binary file" notice — so fetch its bytes now.
-    // Before this, such files had no download at all on this screen, and
-    // the toolbar's download would have written an empty file.
+    // Download what is ON DISK: the resource's bytes as received. Text and
+    // images are already in memory; a binary that is not an image (pdf,
+    // xlsx, zip…) was never fetched — the viewer only shows the "binary file"
+    // notice — so its bytes are read now, through the same resource.
     // Text downloads use the ORIGINAL bytes too: re-encoding the displayed
     // UTF-8 decode rewrote Latin-1 bytes as U+FFFD and dropped BOMs (#164).
-    // Content that only exists as cached text is re-read from the machine.
     const downloadCurrent = React.useCallback(async () => {
         const payload = pickDownloadPayload({
             imageBase64,
-            rawBase64,
-            isBinary: !!fileContent?.isBinary,
-            displayText: fileContent?.content ?? null,
-            canRefetch: !!sessionId && !isDemoSession(sessionId) && hasSession,
+            rawBase64: canRead ? (data?.base64 ?? null) : null,
+            isBinary,
+            displayText: fileText,
+            canRefetch: canRead && !!fileSpec,
         });
         if (payload.kind === 'base64') return downloadFile(fileName, { base64: payload.base64 });
         if (payload.kind === 'refetch') {
-            const res = await sessionReadFile(sessionId!, filePath);
-            if (!res.success) throw new Error(res.error || 'read failed');
-            return downloadFile(fileName, { base64: res.content ?? '' }); // an empty file downloads as an empty file
+            const entry = await resources.ensure(fileSpec!, { staleTime: Infinity });
+            if (!entry.data) throw new Error(entry.error || entry.unavailable || 'read failed');
+            return downloadFile(fileName, { base64: entry.data.base64 }); // an empty file downloads as an empty file
         }
         return downloadFile(fileName, { utf8: payload.text });
-    }, [imageBase64, rawBase64, fileContent, sessionId, hasSession, filePath, fileName]);
+    }, [imageBase64, canRead, data, isBinary, fileText, fileSpec, fileName]);
     const language = getFileLanguage(filePath);
 
     if (isLoading) {
@@ -434,7 +354,7 @@ export default React.memo(function FileScreen() {
         );
     }
 
-    if (error) {
+    if (fatalError) {
         return (
             <View style={{
                 flex: 1,
@@ -458,13 +378,23 @@ export default React.memo(function FileScreen() {
                     textAlign: 'center',
                     ...Typography.default()
                 }}>
-                    {error}
+                    {fatalError}
                 </Text>
+                <Pressable
+                    onPress={() => { void file.refresh(); }}
+                    hitSlop={8}
+                    style={{ marginTop: 20, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10, backgroundColor: theme.colors.button.primary.background }}
+                    accessibilityRole="button"
+                >
+                    <Text style={{ fontSize: 15, color: theme.colors.button.primary.tint, ...Typography.default('semiBold') }}>
+                        {t('common.retry')}
+                    </Text>
+                </Pressable>
             </View>
         );
     }
 
-    if (fileContent?.isBinary && !imageBase64) {
+    if (isBinary && !imageBase64) {
         return (
             <View style={{
                 flex: 1,
@@ -548,8 +478,8 @@ export default React.memo(function FileScreen() {
                     <Ionicons name={wrap ? 'return-down-forward' : 'arrow-forward'} size={18} color={wrap ? theme.colors.textLink : theme.colors.textSecondary} />
                 </Pressable>
                 <Pressable
-                    onPress={() => copyContent(displayMode === 'diff' && diffContent ? diffContent : fileContent?.content)}
-                    onLongPress={() => openTextSelection(displayMode === 'diff' && diffContent ? diffContent : fileContent?.content)}
+                    onPress={() => copyContent(displayMode === 'diff' && diffContent ? diffContent : fileText)}
+                    onLongPress={() => openTextSelection(displayMode === 'diff' && diffContent ? diffContent : fileText)}
                     hitSlop={8}
                     style={styles.ctrlBtn}
                     accessibilityRole="button"
@@ -584,6 +514,30 @@ export default React.memo(function FileScreen() {
                     />
                 </Pressable>
             </View>
+
+            {/* A revalidation that failed keeps the last loaded version on
+                screen and says so, instead of hiding it behind an error. */}
+            {refreshFailed && (
+                <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingHorizontal: 16,
+                    paddingVertical: 8,
+                    borderBottomWidth: Platform.select({ ios: 0.33, default: 1 }),
+                    borderBottomColor: theme.colors.divider,
+                    backgroundColor: theme.colors.surfaceHigh,
+                }}>
+                    <Ionicons name="alert-circle-outline" size={16} color={theme.colors.textSecondary} />
+                    <Text style={{ flex: 1, marginLeft: 8, fontSize: 13, color: theme.colors.textSecondary, ...Typography.default() }}>
+                        {t('files.refreshFailed')}
+                    </Text>
+                    <Pressable onPress={retryRefresh} hitSlop={8} accessibilityRole="button">
+                        <Text style={{ fontSize: 13, color: theme.colors.textLink, ...Typography.default('semiBold') }}>
+                            {t('common.retry')}
+                        </Text>
+                    </Pressable>
+                </View>
+            )}
 
             {/* Mode chips: Diff (when a diff exists) / Source / Rendered (when
                 the type is renderable). Images render-only, so no chips there. */}
@@ -639,7 +593,7 @@ export default React.memo(function FileScreen() {
             {/* Content display */}
             {displayMode === 'rendered' ? (
                 <View style={{ flex: 1 }}>
-                    <FileRenderedView filePath={filePath} content={fileContent?.content} base64={imageBase64} />
+                    <FileRenderedView filePath={filePath} content={fileText ?? undefined} base64={imageBase64} />
                 </View>
             ) : (
             <ScrollView
@@ -656,15 +610,15 @@ export default React.memo(function FileScreen() {
                             <DiffDisplay diffContent={diffContent} fontSize={fontSize ?? 14} />
                         </ScrollView>
                     )
-                ) : displayMode === 'file' && fileContent?.content ? (
+                ) : displayMode === 'file' && fileText ? (
                     wrap ? (
-                        <SimpleSyntaxHighlighter code={fileContent.content} language={language} selectable={true} fontSize={fontSize ?? 14} wrap={true} />
+                        <SimpleSyntaxHighlighter code={fileText} language={language} selectable={true} fontSize={fontSize ?? 14} wrap={true} />
                     ) : (
                         <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-                            <SimpleSyntaxHighlighter code={fileContent.content} language={language} selectable={true} fontSize={fontSize ?? 14} wrap={false} />
+                            <SimpleSyntaxHighlighter code={fileText} language={language} selectable={true} fontSize={fontSize ?? 14} wrap={false} />
                         </ScrollView>
                     )
-                ) : displayMode === 'file' && fileContent && !fileContent.content ? (
+                ) : displayMode === 'file' && fileText === '' ? (
                     <Text style={{
                         fontSize: 16,
                         color: theme.colors.textSecondary,
@@ -673,7 +627,7 @@ export default React.memo(function FileScreen() {
                     }}>
                         {t('files.fileEmpty')}
                     </Text>
-                ) : !diffContent && !fileContent?.content ? (
+                ) : !diffContent && !fileText ? (
                     <Text style={{
                         fontSize: 16,
                         color: theme.colors.textSecondary,

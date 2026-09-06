@@ -781,6 +781,7 @@ export const ja: TranslationStructure = {
         reload: '再読み込み',
         overwrite: '上書き',
         conflicted: '競合',
+        refreshFailed: 'マシンから更新できませんでした。最後に読み込んだバージョンを表示しています。',
     },
 
 

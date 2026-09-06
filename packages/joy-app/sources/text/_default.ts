@@ -827,6 +827,7 @@ export const en = {
         reload: 'Reload',
         overwrite: 'Overwrite',
         conflicted: 'Conflict',
+        refreshFailed: 'Could not refresh from the machine; showing the last loaded version.',
     },
 
 

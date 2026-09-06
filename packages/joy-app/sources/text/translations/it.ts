@@ -778,6 +778,7 @@ export const it: TranslationStructure = {
         reload: 'Ricarica',
         overwrite: 'Sovrascrivi',
         conflicted: 'Conflitto',
+        refreshFailed: "Impossibile aggiornare dalla macchina; viene mostrata l'ultima versione caricata.",
     },
 
 
