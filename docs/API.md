@@ -446,7 +446,8 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   their first request, and session resolution, the seq probe, the send
   (`run`: the create too), every poll, the 300/400 ms sleeps, the 150 ms
   finish grace, the record stream and the final catch-up all run under its
-  signal / remaining time; a timed-out wait starts NO catch-up. A pre-wait
+  signal / remaining time; a wait that hits its deadline before the command
+  completes starts NO catch-up. A pre-wait
   probe that hits the deadline exits 4 (a stalled `POST /send` says the
   message may or may not have been queued). `run`'s teardown runs on its own
   10 s clock so a spent lifetime still cleans up. `/check` 404 → `gone` (exit 1); any other non-2xx or an
@@ -459,7 +460,12 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   lacks turn the outcome into `error` ("output stream lost after seq N — the
   daemon holds records through seq M"). A connected follow socket is not
   proof its advertised rows arrived: a reopened stream that says hello{seq:2}
-  and stalls before row 2 is an incomplete reply, not a success (#497). The text of a queued turn starts at the
+  and stalls before row 2 is an incomplete reply, not a success (#497). That
+  check is never waived for a deadline that trips during the finish grace or
+  the catch-up: it runs on whatever time is left, and a reply it could not
+  verify complete is `timeout` (exit 4, reason "the deadline expired before
+  the reply could be verified complete: …") — never the `answered` selected
+  before it. The text of a queued turn starts at the
   mirrored user row whose (wrapper-stripped) text is the sent prompt, else at
   the seq seen when the queue poll noticed the dispatch (#498). `joy new -m`
   reuses the send path and exits with its code on refusal (#494); its retry

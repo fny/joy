@@ -461,6 +461,30 @@ describe("a broken event stream never yields a successful partial answer (#497)"
     expect(await cmdAsk([SID, "hello", "--no-queue", "--timeout", "8"])).toBe(0);
     expect(log.out).toEqual(["part one\n\npart two"]);
   });
+
+  // Astra F9: the deadline tripped during the finish grace, the completeness
+  // check sat behind !timedOut(), and the `answered` selected before it came
+  // back with "partial" — seq 2 advertised, never fetched, no turn-end.
+  test("the deadline trips during the finish grace: the advertised row is still checked for → timeout (exit 4), never a partial answered", async () => {
+    // every /events request (the head probe and the catch-up too) says hello{seq:2}, sends row 1 and stalls
+    route(`GET /sessions/${SID}/events`, (_q, res) => { res.writeHead(200, { "Content-Type": "application/x-ndjson" }); res.write(ndjson([{ hello: true, seq: 2 }, agentText(1, "partial")])); hanging.add(res); });
+    route(`GET /sessions/${SID}/queue/qDone`, (_q, res) => json(res, 200, { ok: true, id: "qDone", state: "completed", terminalReason: "completed", runtimeTurnId: "t" }));
+    checkRoute(() => ({ state: "idle" }));
+    const started = Date.now();
+    const out = await waitTurn(SID, { afterSeq: 0, queuedId: "qDone", timeoutMs: 80 });
+    expect(Date.now() - started).toBeLessThan(700);
+    expect(out.state).toBe("timeout");
+    expect(out.reason).toMatch(/deadline expired before the reply could be verified complete: output stream lost after seq 1 — the daemon holds records through seq 2/);
+  });
+
+  test("the same log with time left: the catch-up cannot get row 2 either → error, incomplete (exit 1)", async () => {
+    route(`GET /sessions/${SID}/events`, (_q, res) => { res.writeHead(200, { "Content-Type": "application/x-ndjson" }); res.write(ndjson([{ hello: true, seq: 2 }, agentText(1, "partial")])); hanging.add(res); });
+    route(`GET /sessions/${SID}/queue/qDone`, (_q, res) => json(res, 200, { ok: true, id: "qDone", state: "completed", terminalReason: "completed", runtimeTurnId: "t" }));
+    checkRoute(() => ({ state: "idle" }));
+    const out = await waitTurn(SID, { afterSeq: 0, queuedId: "qDone", timeoutMs: 6000 });
+    expect(out.state).toBe("error");
+    expect(out.reason).toMatch(/^output stream lost after seq 1 — the daemon holds records through seq 2 .* the reply is incomplete/);
+  }, 10_000);
 });
 
 describe("a queued ask is bound to its durable command and its runtime turn (#498)", () => {
