@@ -5,7 +5,8 @@ import { useAuth } from '@/auth/AuthContext';
 import { decodeBase64 } from '@/encryption/base64';
 import { encryptBox } from '@/encryption/libsodium';
 import { authApprove } from '@/auth/authApprove';
-import { useCheckScannerPermissions } from '@/hooks/useCheckCameraPermissions';
+import { isScannerCancellation, useCheckScannerPermissions } from '@/hooks/useCheckCameraPermissions';
+import { errorMessage } from '@/utils/guardAsync';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { sync } from '@/sync/sync';
@@ -55,14 +56,23 @@ export function useConnectTerminal(options?: UseConnectTerminalOptions) {
 
     const connectTerminal = React.useCallback(async () => {
         if (await checkScannerPermissions()) {
-            // Use camera scanner
-            CameraView.launchScanner({
-                barcodeTypes: ['qr']
-            });
+            // Use camera scanner. Backing out of Android's code scanner rejects
+            // (BarcodeScanningCancelledException) — that is a normal exit; a
+            // real launch failure is shown.
+            try {
+                await CameraView.launchScanner({
+                    barcodeTypes: ['qr']
+                });
+            } catch (e) {
+                if (isScannerCancellation(e)) return;
+                console.error('Failed to launch scanner', e);
+                Modal.alert(t('common.error'), errorMessage(e), [{ text: t('common.ok') }]);
+                options?.onError?.(e);
+            }
         } else {
             Modal.alert(t('common.error'), t('modals.cameraPermissionsRequiredToConnectTerminal'), [{ text: t('common.ok') }]);
         }
-    }, [checkScannerPermissions]);
+    }, [checkScannerPermissions, options]);
 
     const connectWithUrl = React.useCallback(async (url: string) => {
         return await processAuthUrl(url);

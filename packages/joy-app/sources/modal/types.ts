@@ -4,7 +4,10 @@ export type ModalType = 'alert' | 'confirm' | 'prompt' | 'custom';
 
 export interface AlertButton {
     text: string;
-    onPress?: () => void;
+    /** May be async: the web dialog stays open (button disabled) until it
+     *  settles and shows a rejection inline; native wraps it so a rejection
+     *  is reported instead of escaping. */
+    onPress?: () => void | Promise<void>;
     style?: 'default' | 'cancel' | 'destructive';
 }
 

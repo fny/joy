@@ -54,6 +54,8 @@ export const pl: TranslationStructure = {
         discard: 'Odrzuć',
         version: 'Wersja',
         copied: 'Skopiowano',
+        copyFailed: 'Nie udało się skopiować do schowka',
+        openLinkFailed: 'Nie udało się otworzyć linku',
         share: 'Udostępnij',
         copy: 'Kopiuj',
         scanning: 'Skanowanie...',

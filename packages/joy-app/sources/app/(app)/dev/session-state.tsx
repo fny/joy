@@ -2,7 +2,8 @@ import * as React from 'react';
 import { View, Text, ScrollView, Pressable } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useShallow } from 'zustand/react/shallow';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import { storage } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { useSessionStatus, getSessionName } from '@/utils/sessionUtils';
@@ -77,8 +78,10 @@ export default function SessionStateScreen() {
             permissionRequests: s.agentState?.requests ? Object.keys(s.agentState.requests).length : 0,
             queue: s.metadata?.joy__queue?.queue?.length ?? 0,
         }));
-        void Clipboard.setStringAsync(JSON.stringify(dump, null, 2));
-        Modal.alert('Copied', `${list.length} sessions copied to clipboard`);
+        guarded(async () => {
+            if (!(await copyToClipboard(JSON.stringify(dump, null, 2)))) return;
+            Modal.alert('Copied', `${list.length} sessions copied to clipboard`);
+        })();
     }, [list]);
 
     return (

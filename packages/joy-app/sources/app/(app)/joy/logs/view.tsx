@@ -4,7 +4,8 @@ import { Text } from '@/components/StyledText';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { t } from '@/text';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import { ItemList } from '@/components/ItemList';
 import { Modal } from '@/modal';
 import { machineReadLog, type JoyLogMessage } from '@/sync/ops';
@@ -33,11 +34,11 @@ export default React.memo(function JoyLogViewScreen() {
         return () => { cancelled = true; };
     }, [machine, dir, sessionId]);
 
-    const copyId = React.useCallback(async () => {
+    const copyId = React.useCallback(guarded(async () => {
         if (!sessionId) return;
-        await Clipboard.setStringAsync(sessionId);
-        Modal.alert('Copied', 'Session ID copied to clipboard');
-    }, [sessionId]);
+        if (!(await copyToClipboard(sessionId))) return;
+        Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: 'Session ID' }));
+    }), [sessionId]);
 
     return (
         <ItemList>

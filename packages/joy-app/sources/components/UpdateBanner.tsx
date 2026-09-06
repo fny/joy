@@ -10,6 +10,7 @@ import { useRouter } from 'expo-router';
 import { Platform } from 'react-native';
 import { openExternalUrl } from '@/utils/openExternalUrl';
 import { t } from '@/text';
+import { alertError, guarded } from '@/utils/guardAsync';
 
 export const UpdateBanner = React.memo(() => {
     const { theme } = useUnistyles();
@@ -20,7 +21,7 @@ export const UpdateBanner = React.memo(() => {
 
     // Show native app update banner (highest priority)
     if (updateUrl) {
-        const handleOpenStore = () => openExternalUrl(updateUrl);
+        const handleOpenStore = guarded(() => openExternalUrl(updateUrl), alertError(t('common.openLinkFailed')));
 
         return (
             <ItemGroup>

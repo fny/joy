@@ -10,7 +10,8 @@ import {sessionReadFile, sessionGitDiff, sessionDeleteFile } from '@/sync/ops';
 import { storage, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
 import { isBinaryPath } from '@/utils/binaryFile';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import { storeTempText } from '@/sync/persistence';
 import { useRouter } from 'expo-router';
 import { Modal } from '@/modal';
@@ -135,13 +136,13 @@ export default React.memo(function FileScreen() {
     const [copied, setCopied] = React.useState(false);
     const copiedTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     React.useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
-    const copyContent = React.useCallback((text: string | null | undefined) => {
+    const copyContent = React.useCallback(guarded(async (text: string | null | undefined) => {
         if (!text) return;
-        void Clipboard.setStringAsync(text);
+        if (!(await copyToClipboard(text))) return;
         setCopied(true);
         if (copiedTimer.current) clearTimeout(copiedTimer.current);
         copiedTimer.current = setTimeout(() => setCopied(false), 1500);
-    }, []);
+    }), []);
     // Long-press → the dedicated text-selection screen (native text view with
     // real drag-handle PARTIAL selection). RN's inline `selectable` can't do
     // this reliably on iOS: per-line Texts cap selection at one line and

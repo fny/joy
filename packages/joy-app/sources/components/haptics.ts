@@ -1,9 +1,8 @@
 import * as Haptics from 'expo-haptics';
+import { guarded } from '@/utils/guardAsync';
 
-export function hapticsError() {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-}
+// Best-effort feedback: Expo rejects when the native module is unavailable
+// (simulator, web, a device with haptics off). That is logged, never thrown.
+export const hapticsError: () => void = guarded(() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error));
 
-export function hapticsLight() {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-}
+export const hapticsLight: () => void = guarded(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light));

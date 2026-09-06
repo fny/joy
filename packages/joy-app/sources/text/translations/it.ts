@@ -42,6 +42,8 @@ export const it: TranslationStructure = {
         discard: 'Scarta',
         version: 'Versione',
         copied: 'Copiato',
+        copyFailed: 'Impossibile copiare negli appunti',
+        openLinkFailed: 'Impossibile aprire il link',
         share: 'Condividi',
         copy: 'Copia',
         scanning: 'Scansione...',

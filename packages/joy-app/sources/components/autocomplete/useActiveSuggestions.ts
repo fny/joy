@@ -1,4 +1,5 @@
 import { ValueSync } from '@/utils/sync';
+import { isLatest, nextGen, useLatestKey } from '@/utils/latest';
 import * as React from 'react';
 
 interface SuggestionOptions {
@@ -69,13 +70,20 @@ export function useActiveSuggestions(
         });
     }, [wrapAround]);
 
-    // Sync query to suggestions
+    // Sync query to suggestions. Each request is a generation across every
+    // ValueSync this hook instance has owned: a superseded handler's late
+    // result (an @a request finishing after @b's) is dropped instead of
+    // replacing the current suggestions (#249). The previous ValueSync is
+    // stopped when the handler changes and on unmount.
+    const requestKey = useLatestKey('suggestions');
     const sync = React.useMemo(() => {
         return new ValueSync<string | null>(async (query) => {
             if (!query) {
                 return;
             }
+            const gen = nextGen(requestKey);
             const suggestions = await handler(query);
+            if (!isLatest(requestKey, gen)) return;
             setState((prev) => {
                 if (clampSelection) {
                     // Simply clamp the selection to valid range
@@ -115,10 +123,11 @@ export function useActiveSuggestions(
                 }
             });
         });
-    }, [clampSelection, autoSelectFirst, handler]);
+    }, [clampSelection, autoSelectFirst, handler, requestKey]);
+    React.useEffect(() => () => sync.stop(), [sync]);
     React.useEffect(() => {
         sync.setValue(query);
-    }, [query]);
+    }, [query, sync]);
 
     // If no query return empty suggestions
     if (!query) {

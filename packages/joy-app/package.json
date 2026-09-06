@@ -22,6 +22,7 @@
     "ota:desktop": "APP_ENV=preview NODE_ENV=preview EXPO_PUBLIC_BUILD_SHA=$(git rev-parse --short HEAD) EXPO_PUBLIC_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) expo export --platform web --no-minify --source-maps external --output-dir dist && npx --yes eas-cli@latest deploy --prod",
     "ota:production": "npx eas-cli@latest workflow:run ota.yaml",
     "typecheck": "tsc --noEmit",
+    "lint:promises": "tsx sources/scripts/checkFloatingPromises.ts",
     "postinstall": "patch-package && setup-skia-web public",
     "generate-theme": "tsx sources/theme.gen.ts",
     "// ==== Development/Preview/Production Variants ====": "echo comment",

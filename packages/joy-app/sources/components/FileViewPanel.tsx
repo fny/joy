@@ -18,6 +18,8 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { layout } from '@/components/layout';
 import { useActiveInterval } from '@/hooks/useActiveInterval';
+import { currentGen, isLatest, nextGen, useLatestKey } from '@/utils/latest';
+import { logError } from '@/utils/guardAsync';
 
 interface FileViewPanelProps {
     sessionId: string;
@@ -154,19 +156,28 @@ export const FileViewPanel = React.memo(function FileViewPanel({
 
     const hasChanges = fileState.kind === 'loaded' && editContent !== fileState.content;
 
+    // Every load, save and reload of THIS panel is a generation. A completion
+    // (after the read, after the async hash, after the write) commits only
+    // while it is still the newest — a.txt's late hash or save response can no
+    // longer replace b.txt's contents or saved baseline (#218, #220).
+    const fileKey = useLatestKey('file-view');
+
     // Load file content
     React.useEffect(() => {
         let cancelled = false;
+        const gen = nextGen(fileKey);
+        const stale = () => cancelled || !isLatest(fileKey, gen);
         setFileState({ kind: 'loading' });
         setExternalChange(null);
         setShowConflictDiff(false);
+        setIsSaving(false); // a save still in flight belongs to the previous file
 
         setImageBase64(null);
         if (isBinaryExtension(filePath)) {
             if (isRasterImagePath(filePath)) {
-                (async () => {
+                void (async () => {
                     const res = await sessionReadFile(sessionId, filePath);
-                    if (cancelled) return;
+                    if (stale()) return;
                     if (res.success && res.content) {
                         setImageBase64(res.content);
                         setFileState({ kind: 'binary' }); // not editable — rendered below
@@ -180,11 +191,11 @@ export const FileViewPanel = React.memo(function FileViewPanel({
             return;
         }
 
-        (async () => {
+        void (async () => {
             try {
                 const fileResponse = await sessionReadFile(sessionId, filePath);
 
-                if (cancelled) return;
+                if (stale()) return;
 
                 if (!fileResponse.success || !fileResponse.content) {
                     setFileState({ kind: 'error', message: fileResponse.error || t('files.failedToRead') });
@@ -212,17 +223,18 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                 }
 
                 const hash = await computeSHA256(decodedContent);
+                if (stale()) return; // the hash is async too: re-check before committing
                 setFileState({ kind: 'loaded', content: decodedContent, originalHash: hash });
                 setEditContent(decodedContent);
             } catch {
-                if (!cancelled) {
+                if (!stale()) {
                     setFileState({ kind: 'error', message: t('files.failedToRead') });
                 }
             }
         })();
 
         return () => { cancelled = true; };
-    }, [sessionId, filePath]);
+    }, [sessionId, filePath, fileKey]);
 
     // Poll for external changes every 5s — but ONLY while the screen is focused
     // and the app is foregrounded (useActiveInterval), so a backgrounded/locked
@@ -230,12 +242,21 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     const originalHash = fileState.kind === 'loaded' ? fileState.originalHash : null;
     useActiveInterval(() => {
         if (!originalHash) return;
+        // A poll peeks at the generation without minting one: it must not
+        // supersede a save in flight, but its content is dropped if a load,
+        // save or reload happened while it was out.
+        const gen = currentGen(fileKey);
         void (async () => {
-            const content = await readFileContent(sessionId, filePath);
-            if (!content) return;
-            const currentHash = await computeSHA256(content);
-            if (currentHash !== originalHash) {
-                setExternalChange(content);
+            try {
+                const content = await readFileContent(sessionId, filePath);
+                if (!content || !isLatest(fileKey, gen)) return;
+                const currentHash = await computeSHA256(content);
+                if (!isLatest(fileKey, gen)) return;
+                if (currentHash !== originalHash) {
+                    setExternalChange(content);
+                }
+            } catch (e) {
+                logError(e); // best-effort poll; the next tick retries
             }
         })();
     }, 5000, !!originalHash);
@@ -245,12 +266,14 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         const reloaded = externalChange;
         setExternalChange(null);
         setShowConflictDiff(false);
-        (async () => {
+        const gen = nextGen(fileKey);
+        void (async () => {
             const hash = await computeSHA256(reloaded);
+            if (!isLatest(fileKey, gen)) return;
             setFileState({ kind: 'loaded', content: reloaded, originalHash: hash });
             setEditContent(reloaded);
         })();
-    }, [externalChange]);
+    }, [externalChange, fileKey]);
 
     const handleDismissWarning = React.useCallback(() => {
         setExternalChange(null);
@@ -263,6 +286,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     const handleSave = React.useCallback(async () => {
         if (fileState.kind !== 'loaded' || !hasChanges) return;
         setIsSaving(true);
+        const gen = nextGen(fileKey);
 
         try {
             const base64 = encodeStringToBase64(editContent);
@@ -273,11 +297,13 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                 fileState.originalHash,
                 'base64',
             );
+            if (!isLatest(fileKey, gen)) return; // another file is on screen now
 
             if (!response.success) {
                 if (response.error?.includes('hash') || response.error?.includes('mismatch')) {
                     // Fetch the current server content for diff
                     const serverContent = await readFileContent(sessionId, filePath);
+                    if (!isLatest(fileKey, gen)) return;
                     if (serverContent) {
                         setExternalChange(serverContent);
                         setShowConflictDiff(true);
@@ -299,21 +325,24 @@ export const FileViewPanel = React.memo(function FileViewPanel({
             setExternalChange(null);
             setShowConflictDiff(false);
         } finally {
-            setIsSaving(false);
+            if (isLatest(fileKey, gen)) setIsSaving(false);
         }
-    }, [sessionId, filePath, editContent, fileState, hasChanges]);
+    }, [sessionId, filePath, editContent, fileState, hasChanges, fileKey]);
 
     const handleForceSave = React.useCallback(async () => {
         if (fileState.kind !== 'loaded') return;
         setIsSaving(true);
+        const gen = nextGen(fileKey);
 
         try {
             // Re-read to get current hash, then write
             const serverContent = await readFileContent(sessionId, filePath);
             const currentHash = serverContent ? await computeSHA256(serverContent) : undefined;
+            if (!isLatest(fileKey, gen)) return;
 
             const base64 = encodeStringToBase64(editContent);
             const response = await sessionWriteFile(sessionId, filePath, base64, currentHash, 'base64');
+            if (!isLatest(fileKey, gen)) return;
 
             if (!response.success) {
                 Modal.alert(t('common.error'), response.error || t('files.failedToSave'));
@@ -328,9 +357,9 @@ export const FileViewPanel = React.memo(function FileViewPanel({
             setExternalChange(null);
             setShowConflictDiff(false);
         } finally {
-            setIsSaving(false);
+            if (isLatest(fileKey, gen)) setIsSaving(false);
         }
-    }, [sessionId, filePath, editContent, fileState]);
+    }, [sessionId, filePath, editContent, fileState, fileKey]);
 
     // Publish right-slot controls (edit/preview toggle, save button) into the chat header.
     const isLoaded = fileState.kind === 'loaded';
@@ -616,7 +645,7 @@ const EditorView = React.memo(function EditorView({
         // Dynamic import to keep native bundle clean
         import('@/components/CodeEditor').then((mod) => {
             setEditorComponent(() => mod.CodeEditor);
-        });
+        }, logError);
     }, []);
 
     if (!EditorComponent) {
