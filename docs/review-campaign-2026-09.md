@@ -520,6 +520,23 @@ app.
   unmount lows), and lows/follow-ups (#623 #624 #626 #627 flaky tests,
   #625 fresh-spawn reconcile, #629 foreign OpenCode prompts).
 
+- 2026-09-09 (afternoon) — pushed at d83bb331 (daemon 1198 tests in three
+  shards, app 1825): #495 `joy stop` proves the pid is our daemon (exact
+  kernel start identity + script role + executable) and the racy
+  kernel-read fixture deflaked (a dying `sleep "two words"` fixture, not a
+  /proc race); #560 positional receipt coverage (receipts carry
+  transcript path + byte offset; a checkpoint covers only receipts below
+  its committed offset; unpositioned receipts are never pruned by ordinal);
+  #519 round three (repeated buffered completions coalesce by id, history
+  slots consumed only on a real bind); #625 fresh-spawn Codex reconcile
+  (prompt-only dead turn → absent/resend, visibly-run → interrupted); #629
+  live mirroring of TUI-typed OpenCode prompts under the replay id; import
+  round three (malformed receipt rows fail closed, sources of a failed
+  window record deferred); #623/#624 deflakes (#624 was a 2.8% base64 `/x`
+  false positive, not shared state). Closed #143 #324 (source fixed at
+  291b1f20, specs added). Astra: coordinator collateral verified fixed.
+  **23 open.**
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
