@@ -19,9 +19,16 @@ const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 export const PAIRING_PROOF_LABEL = 'joy-pairing-proof-v1';
 /** Pairing flavours whose pickup REQUIRES the proof. `terminal` is the
  *  daemon (updated in step); `account` is the app's restore flow, which
- *  keeps the legacy one-shot pickup until its requester learns the proof —
- *  a proof it does send is verified and unlocks the same retryable pickup. */
-const PROOF_REQUIRED_KINDS = new Set(['terminal']);
+ *  keeps the legacy one-shot pickup until the app that sends the proof has
+ *  shipped — a proof it does send is verified and unlocks the same retryable
+ *  pickup either way. `JOY_RELAY_PAIRING_PROOF_ACCOUNT=1` flips the account
+ *  flavour to required (docs/API.md); default off, so an app from before the
+ *  proof can still restore. */
+function proofRequiredKinds(pairingProofAccount) {
+  return new Set(pairingProofAccount ? ['terminal', 'account'] : ['terminal']);
+}
+/** The env switch behind `pairingProofAccount` (read at construction). */
+export const PAIRING_PROOF_ACCOUNT_ENV = 'JOY_RELAY_PAIRING_PROOF_ACCOUNT';
 const KEY_LEN = 32;
 const PAIRING_TTL_MS = 24 * 60 * 60 * 1000;
 /** An ANSWERED request lives this long: enough for the requester's next poll
@@ -147,8 +154,12 @@ function machineOut(r, liveness) {
   };
 }
 
-export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIMEOUT_MS, pushConcurrency = PUSH_CONCURRENCY } = {}) {
+export function createAccounts(db, tokens, {
+  fetchImpl, pushTimeoutMs = PUSH_TIMEOUT_MS, pushConcurrency = PUSH_CONCURRENCY,
+  pairingProofAccount = process.env[PAIRING_PROOF_ACCOUNT_ENV] === '1',
+} = {}) {
   const doFetch = fetchImpl ?? fetch;
+  const PROOF_REQUIRED_KINDS = proofRequiredKinds(pairingProofAccount);
 
   // ── login / identity ──────────────────────────────────────────────────────
   async function findOrCreateByPublicKey(publicKeyHex) {
@@ -226,7 +237,22 @@ export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIM
         // authentication failure, never silently "no proof".
         const proven = proof !== undefined && proof !== null;
         if (proven && !pairingProofValid(existing, pk, proof)) return { badProof: true };
-        if (!existing.response || !existing.response_account_id) return existing; // unanswered
+        if (!existing.response || !existing.response_account_id) {
+          // Unanswered. A proof that was PRESENTED here has been seen on the
+          // wire, so it dies with this reply: the challenge rotates and the
+          // next pickup must prove possession over the fresh one (a proof
+          // captured before the answer cannot collect the bearer after it).
+          // Only a VALID proof rotates — a proof-less poll (an observer of
+          // the QR, or the requester before it holds a handshake) and a
+          // wrong proof leave the challenge alone, so nobody who lacks the
+          // private key can invalidate the holder's next proof.
+          if (proven) {
+            ({ rows: [existing] } = await t.query(
+              `UPDATE auth_requests SET challenge = $1 WHERE id = $2 RETURNING *`,
+              [randomBytes(32).toString('base64'), existing.id]));
+          }
+          return existing;
+        }
         if (proven) {
           // Possession proven: the answer is collectable again and again
           // until its window closes — a reply lost in transit is retried,

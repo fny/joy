@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
+import { createHmac, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./pairing";
+import tweetnacl from "tweetnacl";
+import { parseBackupCode, pairWithRelay, pairingProof, deriveRelayPerimeterKey } from "./pairing";
 // machineKeyOpensStore reads ~/.joy/env.sealed — keep the test off the live home.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-pairing-test-"));
 
@@ -156,5 +158,156 @@ describe("pairWithRelay", () => {
         await pairWithRelay(url, secret, join(credsRoot, "relays", "test"));
         expect(relay.rejected()).toBe(0);
         expect(relay.seen.every((s) => s.key === "static-gate-key")).toBe(true);
+    });
+});
+
+// #127: the pickup proves possession of the ephemeral private key. The fake
+// relay below is the relay's REAL construction (accounts.mjs: a per-request
+// X25519 keypair + nonce, Node's x25519 + HMAC-SHA256 to verify), so the
+// daemon's tweetnacl.scalarMult is checked against OpenSSL inside this suite
+// — a drift in the label, the concatenation order or the nonce encoding on
+// either side fails here, not in the field.
+const X25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
+const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
+const PAIRING_PROOF_LABEL = "joy-pairing-proof-v1";
+
+/** The cross-package proof vector — the SAME bytes are asserted by the relay
+ *  (packages/joy-relay/test/wave-f-pairing.test.mjs, Node x25519) and the
+ *  app (packages/joy-app/sources/encryption/pairingProof.spec.ts, tweetnacl +
+ *  expo-crypto), so the three derivations cannot drift apart unnoticed. */
+const VECTOR = {
+    requesterPriv: Buffer.from("01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da", "hex"),
+    requesterPub: Buffer.from("c8feca81be196cdf2cadeabf13c4903d7632dce4955aa68b6e5d9adef54e2616", "hex"),
+    relayPub: Buffer.from("c25e8b84378b21071d603dfce3f947b162b6e715240344db0a18d99259a6de23", "hex"),
+    challenge: Buffer.from("fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a2", "hex").toString("base64"),
+    proofHex: "58d584b4cc82b5cf464318067108a5e0ccfdbbff55df77b0db7c7a513147cc93",
+};
+
+describe("pairingProof (#127)", () => {
+    it("reproduces the cross-package test vector", () => {
+        const kp = tweetnacl.box.keyPair.fromSecretKey(new Uint8Array(VECTOR.requesterPriv));
+        expect(Buffer.from(kp.publicKey).toString("hex")).toBe(VECTOR.requesterPub.toString("hex"));
+        const proof = pairingProof(kp, { challenge: VECTOR.challenge, relayPublicKey: VECTOR.relayPub.toString("base64") });
+        expect(Buffer.from(proof!, "base64").toString("hex")).toBe(VECTOR.proofHex);
+    });
+
+    it("is undefined without a handshake (a relay from before the proof) or with a malformed one", () => {
+        const kp = tweetnacl.box.keyPair();
+        expect(pairingProof(kp, { state: "requested" })).toBeUndefined();
+        expect(pairingProof(kp, { challenge: "abc", relayPublicKey: "AAAA" })).toBeUndefined();
+        expect(pairingProof(kp, { challenge: "", relayPublicKey: Buffer.alloc(32).toString("base64") })).toBeUndefined();
+    });
+});
+
+describe("pairWithRelay: proof of possession (#127)", () => {
+    let server: http.Server | null = null;
+    let credsRoot: string | null = null;
+    afterEach(() => {
+        server?.close(); server = null;
+        if (credsRoot) rmSync(credsRoot, { recursive: true, force: true }); credsRoot = null;
+    });
+
+    interface Row { challenge: string; relayPriv: Buffer; relayPub: Buffer; response: string | null }
+
+    /** A relay that issues the handshake and REQUIRES the proof on pickup.
+     *  `handshake:false` strips the handshake (a MITM, or a relay that wants
+     *  the proof but never said how); `verdict:'reject'` refuses every proof. */
+    function proofRelay({ handshake = true, verdict = "check" as "check" | "reject" } = {}) {
+        const rows = new Map<string, Row>();
+        const polls: Array<{ proof: string | undefined; state: string | number }> = [];
+        let verified = 0;
+        const verify = (row: Row, requesterPub: Buffer, proof: unknown) => {
+            if (typeof proof !== "string" || !proof) return false;
+            const priv = createPrivateKey({ key: Buffer.concat([X25519_PKCS8_PREFIX, row.relayPriv]), format: "der", type: "pkcs8" });
+            const pub = createPublicKey({ key: Buffer.concat([X25519_SPKI_PREFIX, requesterPub]), format: "der", type: "spki" });
+            const shared = diffieHellman({ privateKey: priv, publicKey: pub });
+            const expected = createHmac("sha256", shared)
+                .update(Buffer.concat([Buffer.from(PAIRING_PROOF_LABEL), Buffer.from(row.challenge, "base64"), requesterPub, row.relayPub]))
+                .digest("base64");
+            return expected === proof;
+        };
+        server = http.createServer((req, res) => {
+            let raw = ""; req.on("data", (c) => (raw += c));
+            req.on("end", () => {
+                const send = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+                const body = raw ? JSON.parse(raw) : {};
+                if (req.url === "/joy/v2/auth") return send(200, { token: "acct-token" });
+                if (req.url === "/joy/v2/auth/response") {
+                    const row = rows.get(body.publicKey);
+                    if (!row) return send(404, { error: "no_request" });
+                    row.response = body.response;
+                    return send(200, { success: true });
+                }
+                if (req.url === "/joy/v2/auth/request") {
+                    let row = rows.get(body.publicKey);
+                    if (!row) {
+                        const kp = generateKeyPairSync("x25519");
+                        row = {
+                            challenge: randomBytes(32).toString("base64"),
+                            relayPriv: Buffer.from(kp.privateKey.export({ format: "jwk" }).d!, "base64url"),
+                            relayPub: kp.publicKey.export({ format: "der", type: "spki" }).subarray(-32),
+                            response: null,
+                        };
+                        rows.set(body.publicKey, row);
+                    }
+                    const hs = handshake ? { challenge: row.challenge, relayPublicKey: row.relayPub.toString("base64") } : {};
+                    const proven = body.proof !== undefined;
+                    if (proven) {
+                        const ok = verdict === "check" && verify(row, Buffer.from(body.publicKey, "base64"), body.proof);
+                        if (!ok) { polls.push({ proof: body.proof, state: 401 }); return send(401, { error: "invalid_proof" }); }
+                        verified++;
+                    }
+                    if (!row.response) { polls.push({ proof: body.proof, state: "requested" }); return send(200, { state: "requested", ...hs }); }
+                    if (proven) { polls.push({ proof: body.proof, state: "authorized" }); return send(200, { state: "authorized", response: row.response, token: "term-token" }); }
+                    polls.push({ proof: undefined, state: "proof_required" });
+                    return send(200, {
+                        state: "proof_required", error: "proof_required",
+                        message: "This pairing is approved; present `proof` to collect it.", ...hs,
+                    });
+                }
+                send(404, { error: "nope" });
+            });
+        });
+        return {
+            polls, verified: () => verified,
+            listen: () => new Promise<string>((r) => server!.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server!.address() as any).port}`))),
+        };
+    }
+
+    const secret = new Uint8Array(32).map((_, i) => (i * 3 + 9) & 0xff);
+
+    it("the pickup carries a proof the relay verifies with Node x25519, and the bearer is written", async () => {
+        const relay = proofRelay();
+        const url = await relay.listen();
+        credsRoot = mkdtempSync(join(tmpdir(), "joy-pair-proof-"));
+        const credsDir = join(credsRoot, "relays", "test");
+        await pairWithRelay(url, secret, credsDir);
+        expect(relay.verified()).toBe(1);
+        // Creation (no handshake yet to prove over), then the proven pickup.
+        expect(relay.polls.map((p) => p.state)).toEqual(["requested", "authorized"]);
+        expect(relay.polls[0].proof).toBeUndefined();
+        expect(Buffer.from(relay.polls[1].proof!, "base64").length).toBe(32);
+        expect(JSON.parse(readFileSync(join(credsDir, "access.key"), "utf8")).token).toBe("term-token");
+    });
+
+    it("a proof the relay rejects surfaces as HTTP 401 invalid_proof, and nothing is written", async () => {
+        const relay = proofRelay({ verdict: "reject" });
+        const url = await relay.listen();
+        credsRoot = mkdtempSync(join(tmpdir(), "joy-pair-proof-"));
+        const credsDir = join(credsRoot, "relays", "test");
+        await expect(pairWithRelay(url, secret, credsDir)).rejects.toThrow(/HTTP 401.*invalid_proof/);
+        expect(relay.polls.at(-1)).toMatchObject({ state: 401 });
+        expect(existsSync(join(credsDir, "access.key"))).toBe(false);
+    });
+
+    it("a relay that requires the proof but issued no handshake fails closed with proof_required, never a token", async () => {
+        const relay = proofRelay({ handshake: false });
+        const url = await relay.listen();
+        credsRoot = mkdtempSync(join(tmpdir(), "joy-pair-proof-"));
+        const credsDir = join(credsRoot, "relays", "test");
+        await expect(pairWithRelay(url, secret, credsDir)).rejects.toThrow(/state=proof_required/);
+        expect(relay.verified()).toBe(0);
+        expect(relay.polls.map((p) => p.state)).toEqual(["requested", "proof_required"]);
+        expect(existsSync(join(credsDir, "access.key"))).toBe(false);
     });
 });

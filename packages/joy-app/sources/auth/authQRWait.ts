@@ -3,6 +3,7 @@ import { decodeBase64, encodeBase64 } from '../encryption/base64';
 import { getServerUrl, relayAccessKeyHeaders } from '@/sync/serverConfig';
 import { QRAuthKeyPair } from './authQRStart';
 import { decryptBox } from '@/encryption/libsodium';
+import { pairingHandshakeOf, pairingProof, type PairingHandshake } from '@/encryption/pairingProof';
 import { getJoyClientId } from '@/sync/clientId';
 
 import { t } from '@/text';
@@ -61,6 +62,12 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
     // for a QR the user already approved (#127). Twenty minutes covers any
     // real approval; after that the user re-scans a fresh code.
     const deadline = Date.now() + 20 * 60 * 1000;
+    // Proof of possession (#127): every credential-less reply carries the
+    // handshake (`challenge`, `relayPublicKey`) the NEXT poll proves over,
+    // so the bearer is minted only to the holder of our private key, never
+    // to whoever saw the QR. A relay from before the proof hands out no
+    // handshake and gets the legacy proof-less poll.
+    let handshake: PairingHandshake | null = null;
 
     while (true) {
         if (cancelled()) {
@@ -73,12 +80,24 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
 
         let failed = false;
         try {
-            const response = await pollOnce(serverUrl, keypair, deadline, cancelled);
+            const proof = handshake ? await pairingProof(keypair, handshake) : undefined;
+            const response = await pollOnce(serverUrl, keypair, proof, deadline, cancelled);
 
             // The attempt may have been cancelled while the request was in
             // flight; its answer belongs to nobody now (#191).
             if (cancelled()) {
                 return cancelledResult;
+            }
+
+            // The relay spends a challenge it has seen a valid proof over and
+            // hands out a fresh one, so the proof is always computed over
+            // the handshake of the LATEST reply.
+            handshake = pairingHandshakeOf(response) ?? handshake;
+            if (response.state === 'proof_required') {
+                // Approved, and the relay wants the proof before it hands
+                // out the bearer: the next poll carries it. An observer of
+                // the QR lands here too — and stays here.
+                console.log('Pairing approved; the next poll proves possession of the key.');
             }
 
             // The relay hands the answer out once (#70). 'consumed' means
@@ -116,7 +135,13 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
             }
             // Transient: network blip, 5xx, timeout. The QR stays valid on
             // the relay, so keep polling instead of failing the flow (#89).
+            // A 401 invalid_proof lands here as well — a proof over a
+            // challenge the relay has since spent. Its reply carries no
+            // handshake, so drop ours: the next poll goes proof-less, is
+            // handed the current handshake, and the one after proves over it
+            // instead of repeating the stale proof until the deadline.
             failed = true;
+            handshake = null;
             console.log('Failed to check authentication status; retrying.', error);
         }
 
@@ -137,10 +162,15 @@ interface PollResponse {
     /** Relay-provided explanation for a `consumed` request (#607). */
     message?: string;
     consumedAt?: number;
+    /** The proof-of-possession handshake (#127); absent on `expired`, on
+     *  error bodies and from a relay that predates the proof. */
+    challenge?: string;
+    relayPublicKey?: string;
 }
 
-/** One status request, aborted the moment `cancelled()` turns true. */
-async function pollOnce(serverUrl: string, keypair: QRAuthKeyPair, deadline: number, cancelled: () => boolean): Promise<PollResponse> {
+/** One status request, aborted the moment `cancelled()` turns true.
+ *  `proof` rides along when we hold a handshake to prove over (#127). */
+async function pollOnce(serverUrl: string, keypair: QRAuthKeyPair, proof: string | undefined, deadline: number, cancelled: () => boolean): Promise<PollResponse> {
     const controller = new AbortController();
     const watchdog = setInterval(() => {
         if (cancelled()) controller.abort();
@@ -148,6 +178,7 @@ async function pollOnce(serverUrl: string, keypair: QRAuthKeyPair, deadline: num
     try {
         const response = await axios.post(`${serverUrl}/joy/v2/auth/account/request`, {
             publicKey: encodeBase64(keypair.publicKey),
+            ...(proof ? { proof } : {}),
         }, {
             headers: {
                 'X-Joy-Client': getJoyClientId(),
