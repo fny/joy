@@ -11,13 +11,14 @@ import { Modal } from '@/modal';
 import { useLocalSetting } from '@/sync/storage';
 import { storeTempText } from '@/sync/persistence';
 import { useRouter } from 'expo-router';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
 import { t } from '@/text';
 import { isHttpMarkdownLink } from './linkUtils';
 import { openExternalUrl } from '@/utils/openExternalUrl';
 import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
+import { alertError, guarded } from '@/utils/guardAsync';
 
 // Option type for callback
 export type Option = {
@@ -45,7 +46,7 @@ export const MarkdownView = React.memo((props: {
             return;
         }
 
-        void openExternalUrl(url);
+        guarded(() => openExternalUrl(url), alertError(t('common.openLinkFailed')))();
     }, []);
 
     const handleLongPress = React.useCallback(() => {
@@ -229,15 +230,11 @@ function RenderNumberedListBlock(props: { items: { number: number, depth: number
 function RenderCodeBlock(props: { content: string, language: string | null, first: boolean, last: boolean, selectable: boolean }) {
     const [isHovered, setIsHovered] = React.useState(false);
 
-    const copyCode = React.useCallback(async () => {
-        try {
-            await Clipboard.setStringAsync(props.content);
-            Modal.alert(t('common.success'), t('markdown.codeCopied'), [{ text: t('common.ok'), style: 'cancel' }]);
-        } catch (error) {
-            console.error('Failed to copy code:', error);
-            Modal.alert(t('common.error'), t('markdown.copyFailed'), [{ text: t('common.ok'), style: 'cancel' }]);
-        }
-    }, [props.content]);
+    const copyCode = React.useCallback(guarded(async () => {
+        // A refused write (expo resolves false) shows copyFailed, same as a rejection.
+        if (!(await copyToClipboard(props.content, { failureMessage: t('markdown.copyFailed') }))) return;
+        Modal.alert(t('common.success'), t('markdown.codeCopied'), [{ text: t('common.ok'), style: 'cancel' }]);
+    }), [props.content]);
 
     return (
         <View

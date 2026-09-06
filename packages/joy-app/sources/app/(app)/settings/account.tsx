@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, Pressable, Platform } from 'react-native';
 import { useAuth } from '@/auth/AuthContext';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { alertError, guarded } from '@/utils/guardAsync';
+import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
 import { useFocusEffect } from '@react-navigation/native';
 import { Typography } from '@/constants/Typography';
 import { formatSecretKeyForBackup } from '@/auth/secretKeyBackup';
@@ -196,14 +198,22 @@ export default React.memo(() => {
     // Profile display values
     const displayName = getDisplayName(profile);
 
+    // Every push-settings load is a generation: a slower earlier load (mount
+    // and focus used to start two) can no longer restore a token row that a
+    // later delete-and-reload removed, and the loading flag follows the
+    // newest request only (#167). Token registration/deletion retire whatever
+    // is in flight before they start.
+    const pushKey = useLatestKey('push-settings');
     const loadPushSettings = useCallback(async (showError = false) => {
         if (!auth.credentials) {
+            retire(pushKey);
             setPushTokens([]);
             setPushPermission(null);
             setCurrentPushToken(null);
             return;
         }
 
+        const gen = nextGen(pushKey);
         setLoadingPushSettings(true);
         try {
             const [tokens, permission, liveToken] = await Promise.all([
@@ -211,23 +221,22 @@ export default React.memo(() => {
                 getPushPermissionInfo(),
                 getCurrentExpoPushToken(),
             ]);
+            if (!isLatest(pushKey, gen)) return;
             setPushTokens(tokens);
             setPushPermission(permission);
             setCurrentPushToken(liveToken);
         } catch (error) {
+            if (!isLatest(pushKey, gen)) return;
             console.error('Failed to load push notification settings:', error);
             if (showError) {
                 Modal.alert(t('common.error'), 'Failed to load push notification settings.');
             }
         } finally {
-            setLoadingPushSettings(false);
+            if (isLatest(pushKey, gen)) setLoadingPushSettings(false);
         }
-    }, [auth.credentials]);
+    }, [auth.credentials, pushKey]);
 
-    useEffect(() => {
-        void loadPushSettings();
-    }, [loadPushSettings]);
-
+    // Focus fires on mount as well, so one load per visit (not mount + focus).
     useFocusEffect(
         useCallback(() => {
             void loadPushSettings();
@@ -239,14 +248,10 @@ export default React.memo(() => {
     };
 
     const handleCopySecret = async () => {
-        try {
-            await Clipboard.setStringAsync(formattedSecret);
-            setCopiedRecently(true);
-            setTimeout(() => setCopiedRecently(false), 2000);
-            Modal.alert(t('common.success'), t('settingsAccount.secretKeyCopied'));
-        } catch (error) {
-            Modal.alert(t('common.error'), t('settingsAccount.secretKeyCopyFailed'));
-        }
+        if (!(await copyToClipboard(formattedSecret, { failureMessage: t('settingsAccount.secretKeyCopyFailed') }))) return;
+        setCopiedRecently(true);
+        setTimeout(() => setCopiedRecently(false), 2000);
+        Modal.alert(t('common.success'), t('settingsAccount.secretKeyCopied'));
     };
 
     const handleLogout = async () => {
@@ -256,7 +261,7 @@ export default React.memo(() => {
             { confirmText: t('common.logout'), destructive: true }
         );
         if (confirmed) {
-            auth.logout();
+            guarded(() => auth.logout(), alertError())();
         }
     };
 
@@ -266,6 +271,7 @@ export default React.memo(() => {
         }
 
         setRequestingPushPermission(true);
+        retire(pushKey); // a load already in flight predates the registration
         try {
             const result = await requestPushPermissionOrOpenSettings();
             setPushPermission(result.permission);
@@ -291,7 +297,7 @@ export default React.memo(() => {
         } finally {
             setRequestingPushPermission(false);
         }
-    }, [auth.credentials, loadPushSettings]);
+    }, [auth.credentials, loadPushSettings, pushKey]);
 
     const handleRefreshCurrentPushToken = useCallback(async () => {
         if (!auth.credentials) {
@@ -299,6 +305,7 @@ export default React.memo(() => {
         }
 
         setRefreshingPushToken(true);
+        retire(pushKey);
         try {
             const result = await syncCurrentPushToken(auth.credentials);
             setPushPermission(result.permission);
@@ -316,7 +323,7 @@ export default React.memo(() => {
         } finally {
             setRefreshingPushToken(false);
         }
-    }, [auth.credentials, loadPushSettings]);
+    }, [auth.credentials, loadPushSettings, pushKey]);
 
     const handleDeletePushToken = useCallback(async (pushToken: PushToken) => {
         if (!auth.credentials) {
@@ -334,6 +341,7 @@ export default React.memo(() => {
         }
 
         setDeletingPushToken(pushToken.token);
+        retire(pushKey); // a load already in flight predates the delete
         try {
             await removePushToken(auth.credentials, pushToken.token);
             await loadPushSettings();
@@ -343,7 +351,7 @@ export default React.memo(() => {
         } finally {
             setDeletingPushToken(null);
         }
-    }, [auth.credentials, loadPushSettings]);
+    }, [auth.credentials, loadPushSettings, pushKey]);
 
     return (
         <>

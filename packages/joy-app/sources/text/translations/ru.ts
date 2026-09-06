@@ -54,6 +54,8 @@ export const ru: TranslationStructure = {
         discard: 'Отменить',
         version: 'Версия',
         copied: 'Скопировано',
+        copyFailed: 'Не удалось скопировать в буфер обмена',
+        openLinkFailed: 'Не удалось открыть ссылку',
         share: 'Поделиться',
         copy: 'Копировать',
         scanning: 'Сканирование...',

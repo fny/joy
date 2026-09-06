@@ -324,6 +324,10 @@ class Sync {
     // fetch/reducer pipeline is the same whichever signal fires.
     private v2StreamStop: (() => void) | null = null;
     private v2PollTimer: ReturnType<typeof setInterval> | null = null;
+    // The SSE reconnect delay. Cleared by stopV2Live: a stop/start inside the
+    // 3s window used to let the old timer open a SECOND stream over the new
+    // driver's, orphaning one of them (#408).
+    private v2ReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     private v2SessionIdIndex(): Map<string, string> {
         const idx = new Map<string, string>(); // v2SessionId → local session id
@@ -348,7 +352,8 @@ class Sync {
         // what actually carries data: a recent successful poll is 'connected',
         // whichever transport delivered it.
         const connect = () => {
-            if (this.v2LiveStopped) return;
+            this.v2ReconnectTimer = null;
+            if (this.v2LiveStopped || this.v2StreamStop) return; // stopped, or this driver already has a stream
             try {
                 this.v2StreamStop = connectV2Stream({
                     onHello: () => this.noteRelayReadOk(),
@@ -365,7 +370,8 @@ class Sync {
                         // Deliberately does NOT touch the indicator: on native
                         // this fires on every attempt, and the poll is the real
                         // connection. Retry quietly.
-                        setTimeout(connect, 3000);
+                        if (this.v2ReconnectTimer) clearTimeout(this.v2ReconnectTimer);
+                        this.v2ReconnectTimer = setTimeout(connect, 3000);
                     },
                 });
             } catch { /* SSE unavailable — the poll carries it */ }
@@ -419,6 +425,7 @@ class Sync {
 
     stopV2Live() {
         this.v2LiveStopped = true;
+        if (this.v2ReconnectTimer) { clearTimeout(this.v2ReconnectTimer); this.v2ReconnectTimer = null; }
         this.v2StreamStop?.(); this.v2StreamStop = null;
         if (this.v2PollTimer) { clearInterval(this.v2PollTimer); this.v2PollTimer = null; }
     }

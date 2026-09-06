@@ -4,6 +4,7 @@
 // desktop. Canvas gives smooth pointer-captured ink and a trivially correct
 // export (toDataURL), no extra deps.
 import * as React from 'react';
+import { isLatest, nextGen, useLatestKey } from '@/utils/latest';
 
 export interface DrawingSurfaceHandle {
     undo(): void;
@@ -99,13 +100,23 @@ export const DrawingSurface = React.forwardRef<DrawingSurfaceHandle, DrawingSurf
         return () => obs.disconnect();
     }, [redraw]);
 
-    // Background image element (data: or blob/file uri).
+    // Background image element (data: or blob/file uri). Each source change
+    // is a generation: a slower earlier image whose onload fires after the
+    // current one (or after the background was removed) must not paint (#211).
+    const bgKey = useLatestKey('drawing-bg');
     React.useEffect(() => {
-        if (!props.bgImage) { bgImgRef.current = null; redraw(); return; }
+        const gen = nextGen(bgKey);
+        bgImgRef.current = null; // the previous image never lingers under a new source
+        redraw();
+        if (!props.bgImage) return;
         const img = new Image();
-        img.onload = () => { bgImgRef.current = img; redraw(); };
+        img.onload = () => {
+            if (!isLatest(bgKey, gen)) return;
+            bgImgRef.current = img;
+            redraw();
+        };
         img.src = props.bgImage;
-    }, [props.bgImage, redraw]);
+    }, [props.bgImage, redraw, bgKey]);
 
     // Paper change repaints.
     React.useEffect(() => { redraw(); }, [props.paper, redraw]);

@@ -325,6 +325,44 @@ describe('debounce utilities', () => {
         });
     });
 
+    describe('reentrancy (#429)', () => {
+        it('an update queued synchronously by the trailing callback is delivered by its own timer', () => {
+            const seen: string[] = [];
+            let debouncedFn: (args: string) => void = () => {};
+            debouncedFn = createCustomDebounce((args: string) => {
+                seen.push(args);
+                if (args === 'first') debouncedFn('second'); // reentrant queue
+            }, { delay: 1000, immediateCount: 0 });
+
+            debouncedFn('first');
+            vi.advanceTimersByTime(1000);
+            expect(seen).toEqual(['first']);
+            vi.advanceTimersByTime(1000);
+            expect(seen).toEqual(['first', 'second']);
+        });
+
+        it('advanced: a reentrant queue from the timer and from flush both survive', () => {
+            const seen: string[] = [];
+            const ctl = createAdvancedDebounce((args: string) => {
+                seen.push(args);
+                if (args === 'first') ctl.debounced('second');
+                if (args === 'third') ctl.debounced('fourth');
+            }, { delay: 500, immediateCount: 0 });
+
+            ctl.debounced('first');
+            vi.advanceTimersByTime(500);
+            expect(seen).toEqual(['first']);
+            vi.advanceTimersByTime(500);
+            expect(seen).toEqual(['first', 'second']);
+
+            ctl.debounced('third');
+            ctl.flush();
+            expect(seen).toEqual(['first', 'second', 'third']);
+            vi.advanceTimersByTime(500);
+            expect(seen).toEqual(['first', 'second', 'third', 'fourth']);
+        });
+    });
+
     describe('createAdvancedDebounce', () => {
         describe('basic functionality', () => {
             it('should work like createCustomDebounce for basic usage', () => {

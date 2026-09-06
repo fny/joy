@@ -1,3 +1,13 @@
+# Sep 6 (3) — Reliability sweep
+
+- **"Copied" now means copied.** Every copy button — session ids, commands, code blocks, the machine id, the update id, session metadata, the secret key — checks that the clipboard actually took the text. A refused write shows an error instead of a checkmark over an unchanged clipboard.
+- **Failures are shown, not swallowed.** A palette command, a button action, an environment-key load or delete, a link or store page that would not open, and a failed older-history page used to vanish into the console. They now report what went wrong; a dialog button that runs an async action keeps the dialog open until it finishes and shows the error in place, with the buttons back for a retry.
+- **A late answer never overwrites a newer one.** Switching files while one was still loading or saving, changing machines while an environment or session list was on its way, replacing a drawing background mid-load, deleting a push token during a refresh, backgrounding the app mid-unlock, or typing past an `@` suggestion request — the older result is dropped instead of replacing what you are looking at now.
+- **Voice reconnects to the session you are on**, not the one you were on when the line dropped.
+- **Turning voice off while the browser is still asking for the microphone releases it** instead of listening on afterwards, and restarting the sound detector no longer leaks an audio context.
+- **Nothing keeps running after you leave.** Voice-bar animations, the version tap counter, autocomplete retries and the modal demo's delayed alert all stop with their screen; a live-stream reconnect scheduled just before a stop no longer opens a second stream.
+- **Cancelling the QR scanner on Android** is treated as backing out, not an error.
+
 # Sep 6 (2) — Safety fixes
 
 - **A permission mode change shows only once the machine confirms it.** Picking Plan while the change failed used to display Plan while prompts kept running under the old mode — across refreshes and restarts. A failed change is now reported, and the shown mode follows what the agent is actually in.

@@ -10,7 +10,8 @@ import { View, Text, Pressable, TextInput, ScrollView, Platform } from 'react-na
 import { FlashList } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Octicons from '@expo/vector-icons/Octicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 
@@ -74,12 +75,12 @@ export default React.memo(function IconsScreen() {
     const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     React.useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
 
-    const onCopy = React.useCallback((name: string) => {
-        void Clipboard.setStringAsync(name);
+    const onCopy = React.useCallback(guarded(async (name: string) => {
+        if (!(await copyToClipboard(name))) return;
         setCopied(name);
         if (copyTimer.current) clearTimeout(copyTimer.current);
         copyTimer.current = setTimeout(() => setCopied(null), 1200);
-    }, []);
+    }), []);
 
     return (
         <View style={styles.container}>

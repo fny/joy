@@ -6,7 +6,8 @@ import { useRouter } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
@@ -355,14 +356,14 @@ export const SettingsView = React.memo(function SettingsView() {
                     detail={otaDetail()}
                     icon={<Ionicons name="cloud-download-outline" size={29} color={theme.colors.textSecondary} />}
                     showChevron={false}
-                    onPress={() => {
+                    onPress={guarded(async () => {
                         // Copy the FULL update id (detail shows a truncated one) —
                         // it's the thing you paste when reporting which bundle
                         // you're on.
                         const full = Updates.updateId ?? otaDetail();
-                        void Clipboard.setStringAsync(full);
+                        if (!(await copyToClipboard(full))) return;
                         Modal.alert(t('common.copied'), full);
-                    }}
+                    })}
                 />
                 <Item
                     title={t('settingsUpdates.checkForUpdate')}

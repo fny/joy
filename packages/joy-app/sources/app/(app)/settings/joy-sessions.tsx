@@ -43,7 +43,7 @@ export default React.memo(function JoySessionsScreen() {
         if (probedRef.current || onlineMachines.length === 0) return;
         probedRef.current = true;
         let cancelled = false;
-        (async () => {
+        void (async () => {
             const probeOne = (id: string) => Promise.race([
                 (async () => { const c = sync.machineOnlyCtx(id); if (!c) throw new Error('no ctx'); await machineStatusOnly(c); return id; })(),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
@@ -65,73 +65,6 @@ export default React.memo(function JoySessionsScreen() {
         setSelectedMachineId(id);
     }, []);
 
-    const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyRpcSessions(selectedMachineId);
-
-    // Daemon card: one-shot joy-status fetch per machine selection.
-    type JoyStatus = { ok: boolean; version?: string; uptimeMs?: number; claude?: { available: boolean; version: string | null } };
-    const [daemonStatus, setDaemonStatus] = React.useState<JoyStatus | null>(null);
-    React.useEffect(() => {
-        setDaemonStatus(null);
-        if (!selectedMachineId) return;
-        let cancelled = false;
-        Promise.race([
-            (function(){ const c0 = sync.machineOnlyCtx(selectedMachineId); if (!c0) return Promise.reject(new Error('no machine context')); return machineStatusOnly(c0).then(r => r.data as never); })(),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
-        ]).then(s => { if (!cancelled) setDaemonStatus(s); }).catch(() => { /* card stays hidden */ });
-        return () => { cancelled = true; };
-    }, [selectedMachineId]);
-
-    const killingIdRef = React.useRef<string | null>(null);
-    const screenshotIdRef = React.useRef<string | null>(null);
-
-    const [createLoading, doCreate] = useJoyAction(React.useCallback(async () => {
-        const cwd = await Modal.prompt(
-            t('settingsSessions.newSession'),
-            t('settingsSessions.workingDirectory'),
-            { placeholder: t('settingsSessions.workingDirectoryPlaceholder') },
-        );
-        if (!cwd?.trim()) return;
-        await createSession(cwd.trim());
-    }, [createSession]));
-
-    const [, doKill] = useJoyAction(React.useCallback(async () => {
-        const id = killingIdRef.current;
-        if (!id) return;
-        await killSession(id);
-    }, [killSession]));
-
-    const [screenshotLoading, doScreenshot] = useJoyAction(React.useCallback(async () => {
-        const id = screenshotIdRef.current;
-        if (!id) return;
-        const text = await fetchPane(id);
-        Modal.show({ component: PaneViewModal, props: { text } });
-    }, [fetchPane]));
-
-    const handleScreenshot = React.useCallback((session: JoySession) => {
-        screenshotIdRef.current = session.id;
-        doScreenshot();
-    }, [doScreenshot]);
-
-    const handleOpenTerminal = React.useCallback((session: JoySession) => {
-        if (!selectedMachineId) return;
-        router.push(`/joy/pane/${encodeURIComponent(selectedMachineId)}/${encodeURIComponent(session.id)}`);
-    }, [selectedMachineId]);
-
-    const handleKill = React.useCallback((session: JoySession) => {
-        Modal.alert(
-            t('settingsSessions.confirmKill'),
-            session.cwd,
-            [
-                { text: t('common.cancel'), style: 'cancel' },
-                {
-                    text: t('settingsSessions.killSession'),
-                    style: 'destructive',
-                    onPress: () => { killingIdRef.current = session.id; doKill(); },
-                },
-            ],
-        );
-    }, [doKill]);
-
     // Only machines that actually run joy-tmux are listed — an online
     // machine without the daemon can't serve any of the RPCs this page uses.
     const visibleMachines = joyMachineIds === null
@@ -141,10 +74,6 @@ export default React.memo(function JoySessionsScreen() {
     const withoutJoyCount = joyMachineIds === null
         ? 0
         : (onlineMachines.length - visibleMachines.length) + offlineMachines.length;
-    const activeSessions = sessions.filter(s => s.status !== 'ended');
-    // Ended sessions the daemon still remembers (in-memory — clears when the
-    // daemon restarts). Chat history survives on the relay regardless.
-    const endedSessions = sessions.filter(s => s.status === 'ended');
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
@@ -193,66 +122,147 @@ export default React.memo(function JoySessionsScreen() {
                 )}
             </ItemGroup>
 
-            {selectedMachineId && (
-                <ItemGroup
-                    title={t('settingsSessions.sessions')}
-                    footer={error ?? undefined}
-                >
-                    {loading && activeSessions.length === 0 ? (
-                        <Item
-                            title={t('settingsSessions.loading')}
-                            showChevron={false}
-                            rightElement={<ActivityIndicator />}
-                        />
-                    ) : activeSessions.length === 0 ? (
-                        <Item
-                            title={t('settingsSessions.noSessions')}
-                            showChevron={false}
-                        />
-                    ) : (
-                        [...activeSessions].sort((a, b) => ((a as any).agent ?? 'claude').localeCompare((b as any).agent ?? 'claude')).map(session => (
-                            <Item
-                                key={session.id}
-                                title={session.cwd.split('/').pop() ?? session.cwd}
-                                subtitle={`${(session as any).agent ?? 'claude'} · ${statusLabel(session.status)} · ${session.cwd}`}
-                                onPress={session.relay_session_id ? () => router.push(`/session/${encodeURIComponent(session.relay_session_id!)}`) : undefined}
-                                showChevron={!!session.relay_session_id}
-                                rightElement={
-                                    <View style={styles.sessionActions}>
-                                        <Pressable
-                                            onPress={() => handleOpenTerminal(session)}
-                                            onLongPress={() => handleScreenshot(session)}
-                                            style={styles.actionButton}
-                                            hitSlop={8}
-                                        >
-                                            {screenshotLoading && screenshotIdRef.current === session.id
-                                                ? <ActivityIndicator size="small" />
-                                                : <Ionicons name="terminal-outline" size={20} color="#8E8E93" />
-                                            }
-                                        </Pressable>
-                                        <Pressable
-                                            onPress={() => handleKill(session)}
-                                            style={styles.actionButton}
-                                            hitSlop={8}
-                                        >
-                                            <Ionicons name="trash-outline" size={20} color="#FF3B30" />
-                                        </Pressable>
-                                    </View>
-                                }
-                            />
-                        ))
-                    )}
-                    <Item
-                        title={t('settingsSessions.newSession')}
-                        icon={<Ionicons name="add-circle-outline" size={29} color="#34C759" />}
-                        onPress={doCreate}
-                        showChevron={false}
-                        rightElement={createLoading ? <ActivityIndicator /> : undefined}
-                    />
-                </ItemGroup>
-            )}
+            {/* Keyed by machine: selecting another machine REMOUNTS the session
+                list, so its RPC hook, poll and pending responses belong to one
+                machine for their whole life. A late list from machine A can no
+                longer land in B's rows, and every row action (terminal, kill,
+                screenshot) is bound to the machine that produced the row (#179). */}
+            {selectedMachineId && <MachineSessions key={selectedMachineId} machineId={selectedMachineId} />}
+        </ItemList>
+    );
+});
 
-            {selectedMachineId && daemonStatus?.ok && (
+const MachineSessions = React.memo(function MachineSessions({ machineId }: { machineId: string }) {
+    const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyRpcSessions(machineId);
+
+    // Daemon card: one-shot joy-status fetch per machine selection.
+    type JoyStatus = { ok: boolean; version?: string; uptimeMs?: number; claude?: { available: boolean; version: string | null } };
+    const [daemonStatus, setDaemonStatus] = React.useState<JoyStatus | null>(null);
+    React.useEffect(() => {
+        setDaemonStatus(null);
+        let cancelled = false;
+        Promise.race([
+            (function(){ const c0 = sync.machineOnlyCtx(machineId); if (!c0) return Promise.reject(new Error('no machine context')); return machineStatusOnly(c0).then(r => r.data as never); })(),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
+        ]).then(s => { if (!cancelled) setDaemonStatus(s); }).catch(() => { /* card stays hidden */ });
+        return () => { cancelled = true; };
+    }, [machineId]);
+
+    const killingIdRef = React.useRef<string | null>(null);
+    const screenshotIdRef = React.useRef<string | null>(null);
+
+    const [createLoading, doCreate] = useJoyAction(React.useCallback(async () => {
+        const cwd = await Modal.prompt(
+            t('settingsSessions.newSession'),
+            t('settingsSessions.workingDirectory'),
+            { placeholder: t('settingsSessions.workingDirectoryPlaceholder') },
+        );
+        if (!cwd?.trim()) return;
+        await createSession(cwd.trim());
+    }, [createSession]));
+
+    const [, doKill] = useJoyAction(React.useCallback(async () => {
+        const id = killingIdRef.current;
+        if (!id) return;
+        await killSession(id);
+    }, [killSession]));
+
+    const [screenshotLoading, doScreenshot] = useJoyAction(React.useCallback(async () => {
+        const id = screenshotIdRef.current;
+        if (!id) return;
+        const text = await fetchPane(id);
+        Modal.show({ component: PaneViewModal, props: { text } });
+    }, [fetchPane]));
+
+    const handleScreenshot = React.useCallback((session: JoySession) => {
+        screenshotIdRef.current = session.id;
+        doScreenshot();
+    }, [doScreenshot]);
+
+    const handleOpenTerminal = React.useCallback((session: JoySession) => {
+        router.push(`/joy/pane/${encodeURIComponent(machineId)}/${encodeURIComponent(session.id)}`);
+    }, [machineId]);
+
+    const handleKill = React.useCallback((session: JoySession) => {
+        Modal.alert(
+            t('settingsSessions.confirmKill'),
+            session.cwd,
+            [
+                { text: t('common.cancel'), style: 'cancel' },
+                {
+                    text: t('settingsSessions.killSession'),
+                    style: 'destructive',
+                    onPress: () => { killingIdRef.current = session.id; doKill(); },
+                },
+            ],
+        );
+    }, [doKill]);
+
+    const activeSessions = sessions.filter(s => s.status !== 'ended');
+    // Ended sessions the daemon still remembers (in-memory — clears when the
+    // daemon restarts). Chat history survives on the relay regardless.
+    const endedSessions = sessions.filter(s => s.status === 'ended');
+
+    return (
+        <>
+            <ItemGroup
+                title={t('settingsSessions.sessions')}
+                footer={error ?? undefined}
+            >
+                {loading && activeSessions.length === 0 ? (
+                    <Item
+                        title={t('settingsSessions.loading')}
+                        showChevron={false}
+                        rightElement={<ActivityIndicator />}
+                    />
+                ) : activeSessions.length === 0 ? (
+                    <Item
+                        title={t('settingsSessions.noSessions')}
+                        showChevron={false}
+                    />
+                ) : (
+                    [...activeSessions].sort((a, b) => ((a as any).agent ?? 'claude').localeCompare((b as any).agent ?? 'claude')).map(session => (
+                        <Item
+                            key={session.id}
+                            title={session.cwd.split('/').pop() ?? session.cwd}
+                            subtitle={`${(session as any).agent ?? 'claude'} · ${statusLabel(session.status)} · ${session.cwd}`}
+                            onPress={session.relay_session_id ? () => router.push(`/session/${encodeURIComponent(session.relay_session_id!)}`) : undefined}
+                            showChevron={!!session.relay_session_id}
+                            rightElement={
+                                <View style={styles.sessionActions}>
+                                    <Pressable
+                                        onPress={() => handleOpenTerminal(session)}
+                                        onLongPress={() => handleScreenshot(session)}
+                                        style={styles.actionButton}
+                                        hitSlop={8}
+                                    >
+                                        {screenshotLoading && screenshotIdRef.current === session.id
+                                            ? <ActivityIndicator size="small" />
+                                            : <Ionicons name="terminal-outline" size={20} color="#8E8E93" />
+                                        }
+                                    </Pressable>
+                                    <Pressable
+                                        onPress={() => handleKill(session)}
+                                        style={styles.actionButton}
+                                        hitSlop={8}
+                                    >
+                                        <Ionicons name="trash-outline" size={20} color="#FF3B30" />
+                                    </Pressable>
+                                </View>
+                            }
+                        />
+                    ))
+                )}
+                <Item
+                    title={t('settingsSessions.newSession')}
+                    icon={<Ionicons name="add-circle-outline" size={29} color="#34C759" />}
+                    onPress={doCreate}
+                    showChevron={false}
+                    rightElement={createLoading ? <ActivityIndicator /> : undefined}
+                />
+            </ItemGroup>
+
+            {daemonStatus?.ok && (
                 <ItemGroup title="Daemon">
                     <Item
                         title="joy-tmux"
@@ -273,7 +283,7 @@ export default React.memo(function JoySessionsScreen() {
                 </ItemGroup>
             )}
 
-            {selectedMachineId && endedSessions.length > 0 && (
+            {endedSessions.length > 0 && (
                 <ItemGroup title="Previous sessions" footer="Held in daemon memory — clears on joy-tmux restart. Chat history stays on the relay.">
                     {endedSessions.map(session => (
                         <Item
@@ -286,7 +296,7 @@ export default React.memo(function JoySessionsScreen() {
                     ))}
                 </ItemGroup>
             )}
-        </ItemList>
+        </>
     );
 });
 

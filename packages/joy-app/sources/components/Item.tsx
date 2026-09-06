@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Typography } from '@/constants/Typography';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -160,19 +160,15 @@ export const Item = React.memo<ItemProps>((props) => {
             textToCopy = detail || subtitle || title;
         }
         
-        try {
-            await Clipboard.setStringAsync(textToCopy);
-            Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: title }));
-        } catch (error) {
-            console.error('Failed to copy:', error);
-        }
+        if (!(await copyToClipboard(textToCopy))) return;
+        Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: title }));
     }, [copy, isWeb, title, subtitle, detail]);
     
     // Handle long press for copy functionality
     const handlePressIn = React.useCallback(() => {
         if (copy && !isWeb && !onPress) {
             longPressTimer.current = setTimeout(() => {
-                handleCopy();
+                void handleCopy();
             }, 500); // 500ms delay for long press
         }
     }, [copy, isWeb, onPress, handleCopy]);

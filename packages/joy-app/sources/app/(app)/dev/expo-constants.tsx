@@ -8,7 +8,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Typography } from '@/constants/Typography';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { Modal } from '@/modal';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import { config } from '@/config';
@@ -23,12 +23,8 @@ function JsonViewer({ title, data, defaultExpanded = false }: JsonViewerProps) {
     const [isExpanded, setIsExpanded] = useState(defaultExpanded);
     
     const handleCopy = async () => {
-        try {
-            await Clipboard.setStringAsync(JSON.stringify(data, null, 2));
-            Modal.alert('Copied', 'JSON data copied to clipboard');
-        } catch (error) {
-            Modal.alert('Error', 'Failed to copy to clipboard');
-        }
+        if (!(await copyToClipboard(JSON.stringify(data, null, 2)))) return;
+        Modal.alert('Copied', 'JSON data copied to clipboard');
     };
     
     if (!data) {

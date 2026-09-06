@@ -21,8 +21,10 @@ import { useUnistyles } from 'react-native-unistyles';
 import { useJoyAction } from '@/hooks/useJoyAction';
 import { machineEnvList, machineEnvSet, machineEnvUnset } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
+import { alertError, errorMessage, guarded } from '@/utils/guardAsync';
+import { isLatest, nextGen, useLatestKey } from '@/utils/latest';
 import { t } from '@/text';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { machineStatusOnly, machineSlashCommandsAll } from '@/sync/v2/machine';
@@ -62,10 +64,10 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         return all.filter((c) => !plugins.has(c)).length;
     }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands]);
 
-    const copyMachineId = React.useCallback(async () => {
-        await Clipboard.setStringAsync(machineId);
+    const copyMachineId = React.useCallback(guarded(async () => {
+        if (!(await copyToClipboard(machineId))) return;
         Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: t('machine.machineId') }));
-    }, [machineId]);
+    }), [machineId]);
 
     // Tap the command count to see the full list the daemon reported — plugins
     // marked "(plugin — hidden)". Diagnoses the two failure modes directly: if a
@@ -396,14 +398,30 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
 const EnvironmentSection = React.memo(({ machineId, online }: { machineId: string; online: boolean }) => {
     const [names, setNames] = React.useState<string[] | null>(null);
     const [error, setError] = React.useState<string | null>(null);
+    // Names are cleared on a machine change and every response is fenced to
+    // the request that asked: machine A's late list can no longer be shown
+    // (and its delete rows aimed) at machine B (#226).
+    const envKey = useLatestKey('machine-env');
     const reload = React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) { setError('no_ctx'); return; }
-        const r = await machineEnvList(ctx);
-        if (r.data?.ok) { setNames(r.data.names ?? []); setError(null); }
-        else setError(r.data?.error ?? `http_${r.status}`);
-    }, [machineId]);
-    React.useEffect(() => { if (online) void reload(); }, [online, reload]);
+        const gen = nextGen(envKey);
+        try {
+            const r = await machineEnvList(ctx);
+            if (!isLatest(envKey, gen)) return;
+            if (r.data?.ok) { setNames(r.data.names ?? []); setError(null); }
+            else setError(r.data?.error ?? `http_${r.status}`);
+        } catch (e) {
+            // A timed-out or failed tunnel request is an error state, not an
+            // unhandled rejection; the Add row doubles as the retry.
+            if (isLatest(envKey, gen)) setError(errorMessage(e));
+        }
+    }, [machineId, envKey]);
+    React.useEffect(() => {
+        setNames(null);
+        setError(null);
+        if (online) guarded(reload)();
+    }, [online, reload]);
     const [adding, doAdd] = useJoyAction(React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) return;
@@ -418,14 +436,13 @@ const EnvironmentSection = React.memo(({ machineId, online }: { machineId: strin
     const remove = React.useCallback((name: string) => {
         Modal.alert(t('machine.environmentRemoveTitle'), t('machine.environmentRemoveMessage', { name }), [
             { text: t('common.cancel'), style: 'cancel' },
-            { text: t('common.delete'), style: 'destructive', onPress: () => {
-                void (async () => {
-                    const ctx = sync.machineOnlyCtx(machineId);
-                    if (!ctx) return;
-                    await machineEnvUnset(ctx, name);
-                    await reload();
-                })();
-            } },
+            { text: t('common.delete'), style: 'destructive', onPress: guarded(async () => {
+                const ctx = sync.machineOnlyCtx(machineId);
+                if (!ctx) return;
+                const r = await machineEnvUnset(ctx, name);
+                if (!r.data?.ok) throw new Error(r.data?.error ?? `http_${r.status}`);
+                await reload();
+            }, alertError()) },
         ]);
     }, [machineId, reload]);
     if (!online) return null;

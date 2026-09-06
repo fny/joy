@@ -3,6 +3,7 @@ import { ActivityIndicator, Platform, Pressable, StyleProp, Text, TextStyle, Vie
 import { iOSUIKit } from 'react-native-typography';
 import { Typography } from '@/constants/Typography';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { alertError, guarded } from '@/utils/guardAsync';
 
 export type RoundButtonSize = 'large' | 'normal' | 'small';
 const sizes: { [key in RoundButtonSize]: { height: number, fontSize: number, hitSlop: number, pad: number } } = {
@@ -49,13 +50,15 @@ export const RoundButton = React.memo((props: { size?: RoundButtonSize, display?
         }
         if (props.action) {
             setLoading(true);
-            (async () => {
+            // A rejected action clears the spinner AND is shown; before, it
+            // escaped as an unhandled rejection with nothing on screen.
+            guarded(async () => {
                 try {
                     await props.action!();
                 } finally {
                     setLoading(false);
                 }
-            })();
+            }, alertError())();
         }
     }, [props.onPress, props.action]);
     const displays: { [key in RoundButtonDisplay]: {
