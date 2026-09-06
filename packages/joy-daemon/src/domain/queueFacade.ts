@@ -28,6 +28,18 @@ export interface QueueFacade {
    *  when it has one), with the current state after `timeoutMs`, or null
    *  when the command is unknown. */
   waitFor(id: string, states: readonly CommandState[], opts: WaitOpts): Promise<WaitResult>;
+  /** One command by id — its durable state, terminal reason and the runtime
+   *  turn attributed to it (#498): what `joy ask` / `wait --turn` bound their
+   *  reply and completion on. null for an id this session does not own. */
+  command(id: string): CommandInfo | null;
+}
+export interface CommandInfo {
+  id: string; text: string; createdAt: number; state: CommandState; terminalReason: string | null;
+  /** The runtime's own turn id for this command's accepted attempt — the
+   *  `turn` its records carry — once the runtime named it (codex, opencode,
+   *  pi); null before that, or for an adapter that never does (claude). */
+  runtimeTurnId: string | null;
+  attempts: number;
 }
 export interface WaitResult { state: CommandState | null; reason?: string }
 export interface WaitOpts { timeoutMs: number; signal?: AbortSignal }
@@ -68,6 +80,13 @@ export function queueFor(session: Pick<AgentSession, "id">, coordinator: Session
       reorder: (cid, to) => owned(cid) && coordinator.reorder(cid, to),
       resume: () => coordinator.resume(id),
       busy: () => { const s = coordinator.snapshot(id); return s.busy || s.pendingCount > 0; },
+      command: (cid) => {
+        const row = coordinator.command(cid);
+        if (!row || row.sessionId !== id) return null;
+        const attempts = coordinator.ledger.attemptsForCommand(cid);
+        const turn = [...attempts].reverse().find((a) => a.runtimeTurnId)?.runtimeTurnId ?? null;
+        return { id: row.id, text: row.text, createdAt: row.createdAt, state: row.state, terminalReason: row.terminalReason, runtimeTurnId: turn, attempts: attempts.length };
+      },
       waitFor: async (cid, states, opts) => {
         if (!owned(cid)) return { state: null };
         const state = await coordinator.waitFor(cid, states, { timeoutMs: opts.timeoutMs, signal: opts.signal });

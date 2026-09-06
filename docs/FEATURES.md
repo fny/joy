@@ -120,15 +120,24 @@ every relay; machines register per account.
   `about`. Outcomes of `ask`/`wait`/`run`: `answered` 0 · `needs_input` 6 ·
   `timeout` 4 · `gone` 1 (the session ended or no longer exists — a 404 from
   `/check` is never "answered", #496) · `error` 1 with a `reason` (`/check`
-  failed or returned an unknown state; or the record stream broke and its
-  tail could not be recovered, so the reply would be incomplete, #497). Every
-  request inside the wait is bounded by the remaining `--timeout`, so a
-  daemon that accepts `/check` and never answers still yields `timeout` (#501).
-  A queued `ask` returns only ITS turn's text: the boundary is the daemon's
-  mirrored user row carrying the prompt (the dispatch moment as fallback), so
-  the tail of the turn it queued behind is not part of the reply (#498).
+  failed or returned an unknown state; or the log holds records past what the
+  stream delivered and the final fetch could not get them — a reopened
+  stream that advertises a seq and stalls is not a complete reply, #497). One
+  deadline covers the whole command — session resolution, the send, every
+  poll and sleep, the record stream and the final catch-up — so a daemon
+  that accepts any of those requests and never answers still yields
+  `timeout` at `--timeout`, not later (#501).
+  `ask`/`run`/`wait --turn` are bound to the durable command the send
+  returned (`GET /sessions/:id/queue/:qid`): the command's own terminal state
+  is the verdict (`completed` → answered; `failed`/`cancelled`/`interrupted`
+  → error with the daemon's reason), never a global idle, a failed queue read
+  or an id missing from a listing; the reply is the records of the runtime
+  turn attributed to the command (the daemon's `runtimeTurnId`, or for claude
+  the first turn started after the send), so the tail of the turn it queued
+  behind — even one still emitting when the prompt was mirrored early — and
+  the next turn's output are not part of the reply (#498).
   `joy new -m` fails with the send's exit code when the first message is not
-  accepted (the id is still printed, retry guidance on stderr, #494). A message sent from inside a joy session is wrapped by the daemon in
+  accepted (the id is still printed, shell-quoted retry guidance on stderr, #494). A message sent from inside a joy session is wrapped by the daemon in
   `<joy-message from="joy:<id>" reply-to="joy:<id>">` and shown in the chat as
   coming from that session (peer bubble); no `reply-to` means no answer expected
   — `joy send --no-reply` and `joy run` send `replyTo: null`, which the daemon
@@ -365,7 +374,9 @@ sync can no longer overwrite its replacement's status. An older daemon (no
 - Account: backup-key reveal/restore, QR device-link approval, terminal-auth
   deep links (`joy://`), push-token administration.
 - joy CLI: `joy` daemon control (`update`, `auth <relay...>`, `new --agent`,
-  install/uninstall services), release-branch installs.
+  install/uninstall services; `joy stop` stops a service-owned daemon through
+  systemctl/launchctl and refuses to guess when the supervisor cannot be
+  asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
 - Dev tools: always-on developer pages, OTA identity + manual update check,
