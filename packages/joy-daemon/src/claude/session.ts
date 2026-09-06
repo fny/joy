@@ -1143,7 +1143,7 @@ export class Session {
       }
       // An intentional kill takes the window record with it (the other
       // adapters already do); a restart keeps it for the replacement (#43).
-      if (reason !== "restart") deleteWindowRecord(this.id);
+      if (reason !== "restart") this.#recordTerminated = deleteWindowRecord(this.id);
       void (this.#tmuxSocket
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())          // own server: OS reclaims everything
         : this.#tmux.command(["kill-window", "-t", this.tmuxWindow])); // legacy shared server
@@ -1156,6 +1156,14 @@ export class Session {
   /** Resolve once the kill-path archived-card publish settles (true if archived
    *  or there was nothing to archive). Lets killSession report a real failure so the app
    *  runs its own fallback archive instead of trusting an unconditional success. */
+  /** #567 residual: false once an intentional kill could NOT durably commit a
+   *  termination marker (the record's unlink AND its tombstone both refused).
+   *  The kill op reports that instead of ok — a restart would otherwise
+   *  recover the "killed" session — and the delete is retried on every record
+   *  scan and on the next kill of this id. */
+  #recordTerminated = true;
+  recordTerminated(): boolean { return this.#recordTerminated; }
+
   async awaitArchive(): Promise<boolean> {
     return this.#archivePromise ? await this.#archivePromise : true;
   }
@@ -1176,7 +1184,7 @@ export class Session {
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())          // own server: OS reclaims everything
         : this.#tmux.command(["kill-window", "-t", this.tmuxWindow])); // legacy shared server
     this.endReason = "killed";
-    deleteWindowRecord(this.id); // a detached session killed on purpose leaves nothing to resurrect (#43)
+    this.#recordTerminated = deleteWindowRecord(this.id); // a detached session killed on purpose leaves nothing to resurrect (#43)
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
   }

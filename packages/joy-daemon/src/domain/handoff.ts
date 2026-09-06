@@ -216,6 +216,28 @@ async function enqueueDurably(s: AgentSession, text: string, retryMs: readonly n
   throw new HandoffNotDurableError(s.id, lastError);
 }
 
+/** The job record itself could not be written (#542 residual). Nothing is
+ *  dispatched past this point: a job that is not on disk cannot be resumed
+ *  after a crash, so "will retry on daemon restart" would be a false promise
+ *  and a delivered prompt with no record could be delivered AGAIN (a second
+ *  target launched on the same note) when a stale earlier phase is replayed. */
+export class HandoffNotPersistedError extends Error {
+  constructor(sessionId: string, phase: string) {
+    super(`could not persist the handoff job for ${sessionId} (${phase}); the state directory refused the write — nothing was dispatched, hand off again once it is writable`);
+    this.name = "HandoffNotPersistedError";
+  }
+}
+
+/** The failure text the card shows. The retry promise is made ONLY when the
+ *  job is confirmed on disk — that is the only case resumeHandoffJobs can act
+ *  on (#542 residual). */
+function failureText(msg: string, keepJob: boolean, jobOnDisk: boolean): string {
+  if (!keepJob) return msg;
+  return jobOnDisk
+    ? `${msg} (will retry on daemon restart)`
+    : `${msg} — and the job record could not be saved, so it will NOT retry on restart; hand off again`;
+}
+
 export interface HandoffJobOptions {
   /** Retry schedule for the durable enqueue; defaults to HANDOFF_ENQUEUE_RETRY_MS. */
   enqueueRetryMs?: readonly number[];
@@ -229,12 +251,21 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
   // reached instead of launching a second target on the same note and cwd
   // (codex review, 2026-09-04).
   let job: HandoffJob = resumed ?? { role: "source", path, target, at: Date.now() };
-  const advance = (patch: Partial<HandoffJob>) => { job = { ...job, ...patch }; saveWindowRecord(src.id, { handoffJob: job }); };
-  advance({});
+  // Whether the CURRENT phase is confirmed on disk. saveWindowRecord used to
+  // be called and ignored here, so a refused write still let the job publish
+  // "will retry on daemon restart" (#542 residual). Every phase that must
+  // survive a crash is persisted and CONFIRMED before the step it protects.
+  let jobOnDisk = false;
+  const advance = (patch: Partial<HandoffJob>): boolean => {
+    job = { ...job, ...patch };
+    jobOnDisk = saveWindowRecord(src.id, { handoffJob: job });
+    return jobOnDisk;
+  };
   // Set when the job must OUTLIVE this run: the prompt is not durably
   // queued yet, and clearing the record would make the loss permanent (#542).
   let keepJob = false;
   try {
+    if (!advance({})) throw new HandoffNotPersistedError(src.id, "before waiting for the note");
     let dst: AgentSession;
     if (job.dst) {
       const found = registry.get(job.dst);
@@ -244,7 +275,9 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
       const body = await awaitNote(src, path);
       finalizeNote(path, body, src);
       dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false, forceNew: true });
-      advance({ dst: dst.id });
+      // The target exists; if THAT is not on record, a replay would create a
+      // second one — so the prompt is not dispatched until it is.
+      if (!advance({ dst: dst.id })) throw new HandoffNotPersistedError(src.id, `target ${dst.id} created`);
     }
     if (!job.delivered) {
       // Bind the card BEFORE the prompt goes in: records produced before a
@@ -256,25 +289,35 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
         if (e instanceof HandoffNotDurableError) keepJob = true;
         throw e;
       }
-      advance({ delivered: true });
+      // The prompt IS in the target's durable queue. A failure to record that
+      // is logged, not thrown: the work moved; the cost of a replay is a
+      // duplicate pickup prompt, not a lost one.
+      if (!advance({ delivered: true })) process.stderr.write(`[handoff] ${src.id}: prompt delivered to ${dst.id} but the job record could not be updated — a daemon restart may deliver the pickup prompt again\n`);
     }
     dst.setHandoff?.({ state: "picked_up", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
     src.setHandoff?.({ state: "handed_off", peer: dst.id, peerLabel: sessionLabel(dst), note: path, at: Date.now() });
     process.stderr.write(`[handoff] ${src.id} → ${dst.id} (${targetLabel}) note=${path}\n`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    process.stderr.write(`[handoff] ${src.id} failed: ${msg}${keepJob ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
-    src.setHandoff?.({ state: "failed", error: keepJob ? `${msg} (will retry on daemon restart)` : msg, note: path, at: Date.now() });
+    // keepJob only means something when the job it would keep is on disk.
+    const retryable = keepJob && jobOnDisk;
+    process.stderr.write(`[handoff] ${src.id} failed: ${msg}${retryable ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
+    src.setHandoff?.({ state: "failed", error: failureText(msg, keepJob, jobOnDisk), note: path, at: Date.now() });
   } finally {
-    if (!keepJob) saveWindowRecord(src.id, { handoffJob: null });
+    if (!keepJob && !saveWindowRecord(src.id, { handoffJob: null }) && jobOnDisk) {
+      process.stderr.write(`[handoff] ${src.id}: settled, but the job record could not be cleared — the next daemon start will replay it\n`);
+    }
   }
 }
 
 /** Target side: wait for the note, deliver it into the source as a prompt. */
 export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSession, srcId: string, path: string, options: HandoffJobOptions = {}): Promise<void> {
-  saveWindowRecord(tgt.id, { handoffJob: { role: "target", path, peer: srcId, at: Date.now() } });
+  // Confirmed on disk before anything is asked of either session (#542
+  // residual): without the record a crash mid-note has nothing to resume.
+  const jobOnDisk = saveWindowRecord(tgt.id, { handoffJob: { role: "target", path, peer: srcId, at: Date.now() } });
   let keepJob = false;
   try {
+    if (!jobOnDisk) throw new HandoffNotPersistedError(tgt.id, "before waiting for the note");
     const gone = (s: AgentSession | undefined): s is undefined => !s || s.status === "ended";
     if (gone(registry.get(srcId))) throw new Error(`the original session ${srcId} is gone; restart it and hand back again`);
     const body = await awaitNote(tgt, path);
@@ -297,10 +340,13 @@ export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSessio
     process.stderr.write(`[handoff] ${tgt.id} → back to ${src.id} note=${path}\n`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}${keepJob ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
-    tgt.setHandoff?.({ state: "failed", peer: srcId, error: keepJob ? `${msg} (will retry on daemon restart)` : msg, note: path, at: Date.now() });
+    const retryable = keepJob && jobOnDisk;
+    process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}${retryable ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
+    tgt.setHandoff?.({ state: "failed", peer: srcId, error: failureText(msg, keepJob, jobOnDisk), note: path, at: Date.now() });
   } finally {
-    if (!keepJob) saveWindowRecord(tgt.id, { handoffJob: null });
+    if (!keepJob && !saveWindowRecord(tgt.id, { handoffJob: null }) && jobOnDisk) {
+      process.stderr.write(`[handoff] handback ${tgt.id}: settled, but the job record could not be cleared — the next daemon start will replay it\n`);
+    }
   }
 }
 

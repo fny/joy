@@ -26,11 +26,11 @@ import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
 import { joySessionDir } from "../paths";
-import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, mkdirSync, writeFileSync, renameSync } from "fs";
+import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, rmdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, dirname, join, resolve as resolvePath } from "path";
 import { hostname, platform, release, arch } from "os";
-import { spawn, execFile } from "child_process";
+import { spawn, execFile, spawnSync } from "child_process";
 import { randomBytes } from "crypto";
 
 /** Accepted git URL shapes for a git-URL session spawn. */
@@ -62,6 +62,32 @@ export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<void> 
   if ("error" in r) throw new Error(r.error);
 }
 
+/** The repository a git URL names, for "is this the same repo" comparisons
+ *  (#151 residual): host lower-cased, trailing `/` and `.git` dropped,
+ *  transport/user ignored — `git@github.com:acme/app.git`,
+ *  `https://GitHub.com/acme/app/` and `ssh://git@github.com/acme/app` are one
+ *  repository. Anything unparseable compares as its trimmed lower-case text. */
+export function gitRepoIdentity(url: string): string {
+  const u = url.trim().replace(/\/+$/, "").replace(/\.git$/i, "").replace(/\/+$/, "");
+  let m = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.*)$/i.exec(u); // scheme://[user@]host[:port]/path
+  if (m) return `${m[1].toLowerCase()}/${m[2].replace(/^\/+/, "")}`;
+  m = /^(?:[^@/]+@)?([^/:]+):(.*)$/.exec(u); // scp-like user@host:path
+  if (m && !/^[a-z]:[\\/]/i.test(u)) return `${m[1].toLowerCase()}/${m[2].replace(/^\/+/, "")}`;
+  return u.toLowerCase();
+}
+
+/** Is the checkout at `target` the repository `gitUrl` names? Reads the
+ *  STORED origin URL (`git config`, not `remote get-url`, which would expand
+ *  the user's insteadOf rewrites and never match what they typed). A repo
+ *  with no origin at all is somebody's own work, never "ours to reuse". */
+function checkoutMatches(target: string, gitUrl: string): { ok: true } | { error: string } {
+  const r = spawnSync("git", ["-C", target, "config", "--get", "remote.origin.url"], { encoding: "utf8", timeout: 10_000 });
+  const origin = r.status === 0 ? r.stdout.trim() : "";
+  if (!origin) return { error: `directory ${target} holds a different repository (no origin remote)` };
+  if (gitRepoIdentity(origin) !== gitRepoIdentity(gitUrl)) return { error: `directory ${target} holds a different repository (${origin})` };
+  return { ok: true };
+}
+
 function cloneAttempt(gitUrl: string, target: string): Promise<{ ok: true } | { error: string }> {
   return new Promise((resolve) => {
     // The attempt-owned staging dir. Never `target` itself.
@@ -69,7 +95,10 @@ function cloneAttempt(gitUrl: string, target: string): Promise<{ ok: true } | { 
     const cleanupStaging = () => { try { rmSync(staging, { recursive: true, force: true }); } catch { /* our own dir; best effort */ } };
     try {
       if (existsSync(target)) {
-        if (existsSync(join(target, ".git"))) return resolve({ ok: true }); // existing clone — reuse
+        // An existing clone is reused ONLY when it is the requested repository:
+        // `.git` alone let a create for repo B silently land in repo A's
+        // checkout (#151 residual).
+        if (existsSync(join(target, ".git"))) return resolve(checkoutMatches(target, gitUrl));
         if (readdirSync(target).length > 0) return resolve({ error: `directory ${target} exists and is not a git repo` });
       }
       mkdirSync(dirname(target), { recursive: true });
@@ -84,9 +113,22 @@ function cloneAttempt(gitUrl: string, target: string): Promise<{ ok: true } | { 
           // destination while we cloned. A finished repo there is reusable;
           // anything else is theirs to keep — never delete it.
           if (existsSync(target)) {
-            if (existsSync(join(target, ".git"))) { cleanupStaging(); return resolve({ ok: true }); }
-            if (readdirSync(target).length > 0) { cleanupStaging(); return resolve({ error: `directory ${target} exists and is not a git repo` }); }
-            rmSync(target, { recursive: false, force: true }); // an EMPTY dir only — rename needs the name free
+            if (existsSync(join(target, ".git"))) { cleanupStaging(); return resolve(checkoutMatches(target, gitUrl)); }
+            // An EMPTY dir (the app pre-creates the cwd; a user's `mkdir`) must
+            // make way for the rename. rmdir(2) removes ONLY an empty directory
+            // — anything populated meanwhile fails with ENOTEMPTY and is left
+            // alone. The previous `rmSync(target, {recursive: false})` raised
+            // EISDIR on EVERY directory, so cloning into a pre-created empty
+            // cwd always failed here and the finished checkout was discarded
+            // (#547 residual).
+            try { rmdirSync(target); }
+            catch (e) {
+              cleanupStaging();
+              const code = (e as { code?: string }).code;
+              return resolve(code === "ENOTEMPTY" || code === "EEXIST"
+                ? { error: `directory ${target} was populated while the clone ran and is not a git repo — it was left untouched` }
+                : { error: `git clone failed: could not make way for the clone at ${target}: ${e instanceof Error ? e.message : e}` });
+            }
           }
           renameSync(staging, target);
           resolve({ ok: true });
@@ -735,11 +777,19 @@ export const machineOps: MachineOp[] = [
       if (session.status === "ended") session.forceKill(); else session.end("killed");
       // The REAL archive result: a failed archive must read as failure so the
       // app runs its fallback archive (Astra on 2f803b14).
-      return { ok: await session.awaitArchive() };
+      if (!(await session.awaitArchive())) return { ok: false };
+      // A kill is done only once a termination marker is durably committed
+      // (#567 residual): when the record's unlink AND its tombstone were both
+      // refused, only this process's memory hid the record, the op still said
+      // ok:true, and the next daemon boot recovered the session. The delete is
+      // retried on every record scan and by a repeat kill of this id.
+      if (session.recordTerminated?.() === false) return { ok: false, error: "record_not_terminated" };
+      return { ok: true };
     },
     httpShape: (result) => {
       const r = result as { ok: boolean; error?: string };
       if (r.error === "status_mismatch") return { status: 409, body: result };
+      if (r.error === "record_not_terminated") return { status: 503, body: result };
       return { status: r.ok ? 200 : 404, body: result };
     },
   },

@@ -1060,11 +1060,19 @@ export class CodexSession implements AgentSession {
       clearCheckpoint(this.id);
       // Intentional kill → drop the record so record-based codex recovery
       // can't resurrect this session on the next daemon boot.
-      if (reason !== "restart") deleteWindowRecord(this.id);
+      if (reason !== "restart") this.#recordTerminated = deleteWindowRecord(this.id);
     }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
   }
+
+  /** #567 residual: false once an intentional kill could NOT durably commit a
+   *  termination marker (the record's unlink AND its tombstone both refused).
+   *  The kill op reports that instead of ok — a restart would otherwise
+   *  recover the "killed" session — and the delete is retried on every record
+   *  scan and on the next kill of this id. */
+  #recordTerminated = true;
+  recordTerminated(): boolean { return this.#recordTerminated; }
 
   forceKill(): boolean {
     if (this.status === "ended") {
@@ -1073,7 +1081,7 @@ export class CodexSession implements AgentSession {
       // (Astra on 2f803b14, #43).
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
-      deleteWindowRecord(this.id);
+      this.#recordTerminated = deleteWindowRecord(this.id);
       clearCodexInbound(this.id); clearCheckpoint(this.id); this.#inbound = []; // nothing left to deliver or resume (#43)
       void (this.#tmuxSocket
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())

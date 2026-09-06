@@ -105,3 +105,59 @@ describe("runHandbackJob delivery (#542)", () => {
     expect(tgt.handoff.at(-1)).toMatchObject({ state: "failed" });
   }, 15_000); // awaitNote polls every 2s
 });
+
+// #542 residual (Astra): the job record's own write used to be fire-and-forget.
+// A refused write must be reported as such — and never as a retry promise.
+describe("handoff job persistence is confirmed before dispatch (#542 residual)", () => {
+  const eacces = () => Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+
+  it("source: the job record cannot be written → nothing dispatched, state says so, NO 'will retry on daemon restart'", async () => {
+    const { runHandoffJob, loadWindowRecord, saveWindowRecord } = await mods();
+    const src = fake("aaaa1121"), dst = fake("bbbb2231");
+    saveWindowRecord(src.id, { launchCwd: src.cwd });
+    const note = join(home, "note.md"); writeFileSync(note, "## Goal\nfinish\n");
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    // The state dir refuses every record write from here on (rename is the
+    // step the atomic writer lands with).
+    const fs = await import("node:fs");
+    vi.spyOn(fs.default, "renameSync").mockImplementation(() => { throw eacces(); });
+    await runHandoffJob(registryOf(src, dst), src as never, { agent: "claude" }, note, { role: "source", path: note, target: { agent: "claude" }, dst: dst.id, at: 1 }, { enqueueRetryMs: [1] });
+    expect(dst.enqueued).toHaveLength(0); // the pickup prompt was never dispatched
+    const last = src.handoff.at(-1) as { state: string; error: string };
+    expect(last.state).toBe("failed");
+    expect(last.error).toMatch(/could not persist the handoff job/);
+    expect(last.error).not.toMatch(/will retry on daemon restart/);
+    vi.restoreAllMocks();
+    expect(loadWindowRecord(src.id)?.handoffJob).toBeUndefined(); // nothing left behind to replay
+  });
+
+  it("source: durable enqueue exhausted AND the record is on disk → the retry promise is genuine", async () => {
+    const { runHandoffJob, loadWindowRecord, saveWindowRecord } = await mods();
+    const src = fake("aaaa1122"), dst = fake("bbbb2232", 99);
+    saveWindowRecord(src.id, { launchCwd: src.cwd });
+    const note = join(home, "note.md"); writeFileSync(note, "## Goal\nfinish\n");
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await runHandoffJob(registryOf(src, dst), src as never, { agent: "claude" }, note, { role: "source", path: note, target: { agent: "claude" }, dst: dst.id, at: 1 }, { enqueueRetryMs: [1] });
+    expect((src.handoff.at(-1) as { error: string }).error).toMatch(/will retry on daemon restart/);
+    expect(loadWindowRecord(src.id)?.handoffJob).toMatchObject({ dst: dst.id }); // and the job it promises IS there
+  });
+
+  it("handback: the job record cannot be written → fails before waiting for the note, no retry promise", async () => {
+    const { runHandbackJob, loadWindowRecord, saveWindowRecord } = await mods();
+    const src = fake("aaaa1123"), tgt = fake("bbbb2233");
+    saveWindowRecord(tgt.id, { launchCwd: tgt.cwd });
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const fs = await import("node:fs");
+    vi.spyOn(fs.default, "renameSync").mockImplementation(() => { throw eacces(); });
+    const started = Date.now();
+    await runHandbackJob(registryOf(src, tgt), tgt as never, src.id, join(home, "never-written.md"), { enqueueRetryMs: [1] });
+    expect(Date.now() - started).toBeLessThan(1500); // did not sit in awaitNote's 2s poll
+    expect(src.enqueued).toHaveLength(0);
+    const last = tgt.handoff.at(-1) as { state: string; error: string };
+    expect(last.state).toBe("failed");
+    expect(last.error).toMatch(/could not persist the handoff job/);
+    expect(last.error).not.toMatch(/will retry on daemon restart/);
+    vi.restoreAllMocks();
+    expect(loadWindowRecord(tgt.id)?.handoffJob).toBeUndefined();
+  });
+});
