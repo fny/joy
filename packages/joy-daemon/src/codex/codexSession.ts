@@ -32,7 +32,7 @@ import type { DeliverySource } from "../domain/agentSession";
 import type { AgentSession } from "../domain/agentSession";
 import { codexJoyInstructions, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
-import { CodexNormalizer, type CodexNotification } from "./normalize";
+import { CodexNormalizer, itemSignature, type CodexNotification } from "./normalize";
 import { buildCodexAttachCommand } from "./attach";
 import { ledgerFor, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand } from "../domain/coordinator";
@@ -140,6 +140,15 @@ export class CodexSession implements AgentSession {
   // traffic must not interleave with synthetic history replay.
   #buffering = true;
   #notifBuffer: CodexNotification[] = [];
+  // The items history replay emitted per turn, by content signature, so a
+  // live item buffered while thread/read was pending — the SAME item under
+  // a different transient id — binds to the ordinal replay allocated instead
+  // of a second one (#519). Consumed by the flush.
+  #historyItems = new Map<string, Array<{ type: string; ordinal: number; sig: string; matched: boolean }>>();
+  // The oldest turn whose history could NOT be replayed (itemsView != full):
+  // the delivered high-water must never pass it, or the next recovery skips
+  // its output for good once the full items become available (#518).
+  #deferredFloor: string | null = null;
   // Codex approval requests awaiting the app (non-yolo). Insertion-ordered Map
   // = a FIFO; the app bar always shows the HEAD (finding #6).
   #pendingApprovals = new Map<string, PendingApproval>();
@@ -475,6 +484,9 @@ export class CodexSession implements AgentSession {
    *  the outbox cannot persist (rows exist only in RAM). */
   #markTurnDelivered(turnId: string): void {
     if (!turnId) return;
+    // Never past a turn whose history replay was deferred (#518): the mark
+    // is a delivered PREFIX, and that turn is a hole in it.
+    if (this.#deferredFloor && turnId >= this.#deferredFloor) return;
     const next = advanceTurnHighWater(this.#deliveredThrough, turnId);
     if (next === this.#deliveredThrough || next === null) return;
     if (this.#relay?.outboundPersistDegraded) return;
@@ -571,7 +583,35 @@ export class CodexSession implements AgentSession {
   #flushNotifBuffer(): void {
     const buffered = this.#notifBuffer;
     this.#notifBuffer = [];
+    this.#bindBufferedToHistory(buffered);
     for (const n of buffered) this.#dispatchNotification(n);
+  }
+
+  /** A live item that completed while thread/read was pending is ALSO in the
+   *  history just replayed, under a positional id. Match each buffered
+   *  completion to the first unmatched replayed item of its turn with the
+   *  same type and content, in order, and bind its live id to that ordinal
+   *  — its flush then re-emits the replayed localIds (relay-deduped) instead
+   *  of minting a second identity for the same answer (#519). */
+  #bindBufferedToHistory(buffered: CodexNotification[]): void {
+    const history = this.#historyItems;
+    this.#historyItems = new Map();
+    if (!history.size) return;
+    for (const n of buffered) {
+      if (n.method !== "item/completed") continue;
+      const p = n.params ?? {};
+      const turnId = typeof p.turnId === "string" ? p.turnId : "";
+      const item = (p.item ?? {}) as Record<string, unknown>;
+      const id = typeof item.id === "string" ? item.id : "";
+      const type = typeof item.type === "string" ? item.type : "";
+      const sig = itemSignature(item);
+      const replayed = history.get(turnId);
+      if (!replayed || !id || !type || !sig) continue;
+      const hit = replayed.find((h) => !h.matched && h.type === type && h.sig === sig);
+      if (!hit) continue;
+      hit.matched = true;
+      this.#norm.bindTransient(turnId, type, id, hit.ordinal);
+    }
   }
 
   #dispatchNotification(n: CodexNotification): void {
@@ -702,11 +742,23 @@ export class CodexSession implements AgentSession {
       const view = String(turn.itemsView ?? "full");
       // A turn whose items history did NOT fully return can't be faithfully
       // replayed — skip its items and do NOT checkpoint it (finding #2/#5).
+      // Nor anything AFTER it: a later terminal turn's ack used to advance
+      // the high-water past this gap, and the next recovery skipped this
+      // turn's output for good once its full items were available (#518).
       if (view && view !== "full") {
-        process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay\n`);
+        process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay; the delivered mark holds below it\n`);
+        if (!this.#deferredFloor || tid < this.#deferredFloor) this.#deferredFloor = tid;
         continue;
       }
       const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
+      // What replay is about to emit, by content, for the live-buffer flush (#519).
+      const ordinals = new Map<string, number>();
+      this.#historyItems.set(tid, items.map((item) => {
+        const type = String((item as { type?: unknown }).type ?? "");
+        const ordinal = ordinals.get(type) ?? 0;
+        ordinals.set(type, ordinal + 1);
+        return { type, ordinal, sig: itemSignature(item), matched: false };
+      }));
       // FRESH CARD (restart / resume-by-id / continue): the new relay session
       // has no prior rows, so replay the user prompts too — BEFORE the turn
       // bracket, matching live ordering (user row, then turn-start; the app's
