@@ -63,14 +63,18 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   // the daemon (which holds live sessions) with one giant POST body.
   const MAX_BODY = 10 * 1024 * 1024;
   return new Promise(resolve => {
-    let data = "";
+    // Collect BYTES and decode once: `data += chunk` stringified each Buffer
+    // on its own, so a multi-byte character split across arrivals became
+    // U+FFFD (#62 family; Astra on da868c80).
+    const parts: Buffer[] = [];
+    let size = 0;
     let overflow = false;
-    req.on("data", chunk => {
+    req.on("data", (chunk: Buffer) => {
       if (overflow) return;
-      data += chunk;
-      if (data.length > MAX_BODY) { overflow = true; data = ""; req.destroy(); resolve(undefined); }
+      parts.push(chunk); size += chunk.length;
+      if (size > MAX_BODY) { overflow = true; parts.length = 0; req.destroy(); resolve(undefined); }
     });
-    req.on("end", () => { if (!overflow) { try { resolve(JSON.parse(data)); } catch { resolve(undefined); } } });
+    req.on("end", () => { if (!overflow) { try { resolve(JSON.parse(Buffer.concat(parts).toString("utf8"))); } catch { resolve(undefined); } } });
     req.on("error", () => resolve(undefined));
   });
 }
@@ -210,16 +214,17 @@ export function startHttpServer(opts: {
       res.writeHead(200, { ...corsHeaders, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
       const history = sessionRecords(sid, { after, last });
       const upTo = latestRecordSeq(sid);
-      res.write(JSON.stringify({ hello: true, seq: upTo }) + "\n");
-      for (const r of history) res.write(JSON.stringify(r) + "\n");
-      if (!follow) return res.end();
-      // Bounded: a follower that stops reading is unsubscribed and dropped
-      // instead of buffering forever (#597).
+      // Bounded from the FIRST byte: the opening history is the largest write
+      // of all, and a non-reading client could park >10 MiB of it without ever
+      // reaching the live bound (#597; Astra on da868c80).
       let unsubscribe: () => void = () => {};
       const write = boundedWriter(res, EVENT_CLIENT_MAX_BUFFERED_BYTES, () => {
         unsubscribe();
-        process.stderr.write(`[http] /sessions/${sid}/events follower exceeded ${EVENT_CLIENT_MAX_BUFFERED_BYTES} pending bytes — dropped\n`);
+        process.stderr.write(`[http] /sessions/${sid}/events client exceeded ${EVENT_CLIENT_MAX_BUFFERED_BYTES} pending bytes — dropped\n`);
       });
+      write(JSON.stringify({ hello: true, seq: upTo }) + "\n");
+      for (const r of history) { if (res.destroyed) break; write(JSON.stringify(r) + "\n"); }
+      if (!follow) return res.end();
       unsubscribe = subscribeRecords(sid, (r) => { write(JSON.stringify(r) + "\n"); });
       res.on("close", unsubscribe);
       return;
@@ -232,16 +237,16 @@ export function startHttpServer(opts: {
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
       });
-      // The opening history goes out unconditionally (the client has had no
-      // chance to read yet); LIVE events are bounded — a client that stops
-      // reading is unsubscribed and dropped instead of buffering forever (#597).
-      res.write(`event: history\ndata: ${JSON.stringify(registry.chatHistory())}\n\n`);
-      res.write(`event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`);
+      // Everything goes through the bound, the opening history included — it
+      // is the largest write and a non-reading client could park all of it
+      // (#597; Astra on da868c80).
       let unsubscribe: () => void = () => {};
       const enqueue = boundedWriter(res, EVENT_CLIENT_MAX_BUFFERED_BYTES, () => {
         unsubscribe();
         process.stderr.write(`[http] /events client exceeded ${EVENT_CLIENT_MAX_BUFFERED_BYTES} pending bytes — dropped\n`);
       });
+      enqueue(`event: history\ndata: ${JSON.stringify(registry.chatHistory())}\n\n`);
+      enqueue(`event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`);
       unsubscribe = registry.subscribeSse((s) => { enqueue(s); });
       res.on("close", unsubscribe);
       return;

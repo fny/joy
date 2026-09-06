@@ -120,6 +120,19 @@ export function processGroupMembers(pgid: number): number[] {
   const out: number[] = [];
   let entries: string[] = [];
   try { entries = fs.readdirSync("/proc"); } catch { /* no /proc */ }
+  if (entries.length === 0) {
+    // No /proc (macOS, BSD): ask ps for pid/pgid/state of every process. A
+    // surviving group whose leader exited was invisible here before, so
+    // killProcessGroup declared victory after SIGTERM alone (Astra on da868c80).
+    try {
+      const r = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 5_000 });
+      for (const line of (r.stdout ?? "").split("\n")) {
+        const m = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
+        if (m && Number(m[2]) === pgid && !m[3].startsWith("Z")) out.push(Number(m[1]));
+      }
+      return out;
+    } catch { /* fall through to the leader-only evidence below */ }
+  }
   for (const d of entries) {
     if (!/^\d+$/.test(d)) continue;
     try {
@@ -163,14 +176,22 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   const rounds = Math.max(1, Math.ceil(graceMs / tick));
 
   if (!groupKill("SIGTERM")) return true;
-  for (let i = 0; i < rounds && processGroupMembers(pid).length; i++) await sleep(tick);
-  let left = processGroupMembers(pid);
+  const groupExists = (): boolean => { try { process.kill(-pid, 0); return true; } catch { return false; } };
+  const stillThere = (): number[] => {
+    const members = processGroupMembers(pid);
+    // Enumeration can miss members (no /proc, ps failed) while the group
+    // itself is still addressable: treat an addressable group as survivors
+    // so escalation happens instead of a false "gone".
+    return members.length || !groupExists() ? members : [pid];
+  };
+  for (let i = 0; i < rounds && stillThere().length; i++) await sleep(tick);
+  let left = stillThere();
   if (left.length) {
     log(`[kill-group] group ${pid} survived SIGTERM (${left.join(",")}) — escalating to SIGKILL`);
     groupKill("SIGKILL");
     for (const p of left) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
-    for (let i = 0; i < rounds && processGroupMembers(pid).length; i++) await sleep(tick);
-    left = processGroupMembers(pid);
+    for (let i = 0; i < rounds && stillThere().length; i++) await sleep(tick);
+    left = stillThere();
     if (left.length) { log(`[kill-group] group ${pid}: ${left.join(",")} still alive after SIGKILL`); return false; }
   }
   return true;
