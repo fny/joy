@@ -41,16 +41,27 @@ vi.mock("./appServerClient", async (importOriginal) => {
   const orig = await importOriginal<typeof import("./appServerClient")>();
   const { EventEmitter } = await import("node:events");
   class FakeClient {
-    notify: (n: { method: string; params?: Record<string, unknown> }) => void = () => {};
+    // Mirrors the real client's contract: every notification carries its
+    // dispatch seq, and a thread/read response carries the barrier — the seq
+    // count at the moment the RESPONSE FRAME was handled. `onThreadRead`
+    // traffic runs before that moment (inside the barrier);
+    // `onWindowRecordSaved` traffic runs after it (#519).
+    #seq = 0;
+    #cb: (n: any, seq: number) => void = () => {};
+    notify = (n: { method: string; params?: Record<string, unknown> }) => { this.#cb(n, ++this.#seq); };
     constructor() { H.clients.push(this); }
-    onNotification(cb: (n: any) => void) { this.notify = cb; }
+    onNotification(cb: (n: any, seq: number) => void) { this.#cb = cb; }
     onServerRequest() {}
     onClose() {}
     resolveServerRequestExternally() {}
     async connect() { return {}; }
     async threadStart() { return { threadId: "TH", rolloutPath: null, model: null }; }
     async threadResume(threadId: string) { return { threadId, model: null, reasoningEffort: null }; }
-    async threadRead() { H.onThreadRead?.(this); return H.history; }
+    async threadRead() {
+      H.onThreadRead?.(this);
+      const raw = H.history as { thread?: Record<string, unknown> };
+      return { thread: (raw.thread ?? raw) as Record<string, unknown>, notifBarrier: this.#seq };
+    }
     async turnStart(_t: string, text: string, opts: { clientUserMessageId?: string }) {
       H.turnStarts.push({ text, clientId: opts.clientUserMessageId });
       if (H.busyTurn) throw new orig.JsonRpcResponseError(-32600, `turn ${H.busyTurn} already active`);
@@ -402,5 +413,63 @@ test.each([
   expect(sent[1].localId).toBe("codex:TH:turn:T-tui:start");
   // Nothing of ours was confirmed by it.
   expect(queueFor(s).state()).toMatchObject({ inFlight: null, running: null });
+  s.end("killed");
+});
+
+test("#519: two executions under DISTINCT runtime ids never alias, however equal their whole content — call_old is the history's, call_new is its own", async () => {
+  const exec = { type: "commandExecution", command: "echo hi", cwd: "/same", aggregatedOutput: "hi", exitCode: 0, status: "completed" };
+  H.history = { thread: { id: "TH", turns: [{ id: "T-live", status: "inProgress", items: [{ ...exec, id: "call_old" }] }] } };
+  // Inside the boundary: the same command, same cwd, same output — a second run.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-live", item: { ...exec, id: "call_new" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { ...exec, id: "call_new" } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-runtime-ids", { relay, rejoin: true });
+  expect(sent.filter((x) => x.t === "tool-call-start").map((x) => x.localId)).toEqual([
+    "codex:TH:turn:T-live:item:commandExecution:0:tool-start",
+    "codex:TH:turn:T-live:item:commandExecution:1:tool-start",
+  ]);
+  expect(sent.filter((x) => x.t === "tool-call-end").map((x) => x.localId)).toEqual([
+    "codex:TH:turn:T-live:item:commandExecution:0:tool-end",
+    "codex:TH:turn:T-live:item:commandExecution:1:tool-end",
+  ]);
+  s.end("killed");
+});
+
+test("#519: exact-id binds are reserved FIRST — an earlier equal-content live item never takes the slot a later notification names by id", async () => {
+  H.history = { thread: { id: "TH", turns: [{ id: "T-live", status: "inProgress", items: [
+    { type: "agentMessage", id: "msg_x", text: "same answer" },  // the runtime's own id
+    { type: "agentMessage", id: "item-1", text: "same answer" }, // positional
+  ] }] } };
+  // Buffer order: the content-only candidate BEFORE the id-named one.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg_new", text: "same answer" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg_x", text: "same answer" } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-reserve", { relay, rejoin: true });
+  expect(sent.filter((x) => x.t === "text").map((x) => x.localId)).toEqual([
+    "codex:TH:turn:T-live:item:agentMessage:0:text", // replay msg_x
+    "codex:TH:turn:T-live:item:agentMessage:1:text", // replay item-1
+    "codex:TH:turn:T-live:item:agentMessage:1:text", // msg_new → the positional twin (a single pass gave it :0, msg_x's)
+    "codex:TH:turn:T-live:item:agentMessage:0:text", // msg_x → its own, by id
+  ]);
+  s.end("killed");
+});
+
+test("#519: a history item under a RUNTIME id is never content-matched — an equal answer under another id is a new occurrence, and the id-named one still binds", async () => {
+  H.history = { thread: { id: "TH", turns: [{ id: "T-live", status: "inProgress", items: [{ type: "agentMessage", id: "msg_original", text: "same answer" }] }] } };
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg_another", text: "same answer" } } });
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg_original", text: "same answer" } } });
+  };
+  const { relay, sent } = fakeRelay();
+  const { s } = await started("rec-519-runtime-history", { relay, rejoin: true });
+  expect(sent.filter((x) => x.t === "text").map((x) => x.localId)).toEqual([
+    "codex:TH:turn:T-live:item:agentMessage:0:text", // replay
+    "codex:TH:turn:T-live:item:agentMessage:1:text", // msg_another: new (a content match aliased it to :0)
+    "codex:TH:turn:T-live:item:agentMessage:0:text", // msg_original: the replayed identity, re-sent
+  ]);
   s.end("killed");
 });

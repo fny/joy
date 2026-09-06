@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { CodexNormalizer, type CodexEffect, type CodexNotification } from "./normalize";
+import { CodexNormalizer, itemSignature, isPositionalHistoryId, type CodexEffect, type CodexNotification } from "./normalize";
 
 // Deterministic turn-id minting so the wire `turn` field is assertable.
 function normalizer() {
@@ -276,4 +276,39 @@ test("#523: a late tool completion WITHOUT a turnId still resolves to the turn t
   n.handle({ method: "turn/started", params: { turn: { id: T2 } } });
   const late = n.handle({ method: "item/completed", params: { item: { type: "commandExecution", id: "call_slow", status: "completed" } } }).filter((e) => e.kind === "wire") as any[];
   expect(late[0].localId).toBe(`codex:TH:turn:${T1}:item:commandExecution:0:tool-end`);
+});
+
+test("#519: the whole-content signature comes from the RAW item — cwd, the exit code itself and every byte of the output tell executions apart; the display clamp does not", () => {
+  const a = { type: "commandExecution", command: "echo hi", cwd: "/a", aggregatedOutput: "same", status: "completed", exitCode: 1 };
+  expect(itemSignature(a)).toBe(itemSignature({ ...a }));
+  expect(itemSignature(a)).not.toBe(itemSignature({ ...a, cwd: "/b" }));
+  expect(itemSignature(a)).not.toBe(itemSignature({ ...a, exitCode: 2 }));
+  // A difference buried in the middle toolOutcome() truncates away.
+  const prefix = "a".repeat(24_000), suffix = "z".repeat(24_000);
+  expect(itemSignature({ ...a, aggregatedOutput: `${prefix}first${suffix}` })).not.toBe(itemSignature({ ...a, aggregatedOutput: `${prefix}different${suffix}` }));
+  expect(itemSignature({ ...a, aggregatedOutput: `${prefix}first${suffix}` })).toBe(itemSignature({ ...a, aggregatedOutput: `${prefix}first${suffix}` }));
+  expect(itemSignature(a)).not.toBe(itemSignature({ ...a, stderr: "warning" }));
+  // The signature never carries the output itself — a digest of it.
+  expect(itemSignature({ ...a, aggregatedOutput: prefix }).length).toBeLessThan(400);
+});
+
+test("#519: fileChange signs the FULL patch, mcpToolCall the full input and output (key order is irrelevant)", () => {
+  const patch = { type: "fileChange", status: "completed", changes: [{ path: "a.ts", kind: "update", diff: "x".repeat(60_000) + "1" }] };
+  expect(itemSignature(patch)).toBe(itemSignature({ ...patch }));
+  expect(itemSignature(patch)).not.toBe(itemSignature({ ...patch, changes: [{ path: "a.ts", kind: "update", diff: "x".repeat(60_000) + "2" }] }));
+  expect(itemSignature({ type: "fileChange" })).toBe("");
+  const mcp = { type: "mcpToolCall", server: "s", tool: "t", status: "completed", arguments: { q: "x", n: 1 }, result: { rows: [1, 2] } };
+  expect(itemSignature(mcp)).toBe(itemSignature({ ...mcp, arguments: { n: 1, q: "x" } }));
+  expect(itemSignature(mcp)).not.toBe(itemSignature({ ...mcp, arguments: { q: "y", n: 1 } }));
+  expect(itemSignature(mcp)).not.toBe(itemSignature({ ...mcp, result: { rows: [1, 3] } }));
+  expect(itemSignature(mcp)).not.toBe(itemSignature({ ...mcp, error: "boom" }));
+});
+
+test("#519: only thread/read's positional item ids are content-matchable; a runtime id names one occurrence", () => {
+  expect(isPositionalHistoryId("item-0")).toBe(true);
+  expect(isPositionalHistoryId("item-17")).toBe(true);
+  expect(isPositionalHistoryId("")).toBe(true);
+  expect(isPositionalHistoryId("call_MqHM7YV0OX6mYq55wPL0AGwd")).toBe(false);
+  expect(isPositionalHistoryId("msg_09f0d88b03349d5f016a62e9ff4e9081959f49c57a341d7e47")).toBe(false);
+  expect(isPositionalHistoryId("019f9261-ff1e-7fa2-8c66-2a618db4c053")).toBe(false);
 });

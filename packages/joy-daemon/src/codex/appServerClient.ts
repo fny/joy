@@ -158,8 +158,15 @@ export class JsonRpcResponseError extends Error {
 export class CodexAppServerClient {
   #ws: WebSocket | null = null;
   #nextId = 1;
-  #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  #onNotification: (n: Notification) => void = () => {};
+  #pending = new Map<number, { resolve: (v: unknown, notifBarrier: number) => void; reject: (e: Error) => void }>();
+  #onNotification: (n: Notification, seq: number) => void = () => {};
+  // Notifications dispatched so far on this client, in socket order. Each
+  // response frame is tagged with the count at the moment it is handled —
+  // the caller's continuation runs LATER (a promise job), by which time the
+  // frames coalesced behind the response in the same socket read have already
+  // been dispatched. A consumer that samples "what arrived before the
+  // response" at continuation time sees those later frames too (#519).
+  #notifSeq = 0;
   #onServerRequest: (r: ServerRequest) => Promise<unknown> | unknown = () => ({});
   #onClose: () => void = () => {};
   // Server-request ids resolved EXTERNALLY (the attached TUI answered, or an
@@ -168,7 +175,12 @@ export class CodexAppServerClient {
   #externallyResolved = new Set<string>();
   #closed = false;
 
-  onNotification(cb: (n: Notification) => void): void { this.#onNotification = cb; }
+  /** `seq` is the notification's position in this client's dispatch order
+   *  (1-based, monotonic); compare it with a response's `notifBarrier`. */
+  onNotification(cb: (n: Notification, seq: number) => void): void { this.#onNotification = cb; }
+  /** Notifications dispatched so far — the barrier a response handled right
+   *  now would carry. */
+  get notificationSeq(): number { return this.#notifSeq; }
   /** Handler for server→client requests (approvals/elicitations). Must return
    *  the JSON-RPC result; unhandled methods should return {} so the server
    *  doesn't hang. */
@@ -250,7 +262,7 @@ export class CodexAppServerClient {
         // landed (finding #3d).
         const err = msg.error as { code?: number; message?: string };
         p.reject(new JsonRpcResponseError(typeof err.code === "number" ? err.code : -32603, err.message ?? JSON.stringify(msg.error)));
-      } else p.resolve(msg.result);
+      } else p.resolve(msg.result, this.#notifSeq); // the barrier: sampled HERE in the frame handler, never in the continuation
       return;
     }
     // Server→client request (has id AND method).
@@ -260,7 +272,7 @@ export class CodexAppServerClient {
     }
     // Notification (method, no id).
     if (typeof msg.method === "string") {
-      this.#onNotification({ method: msg.method, params: msg.params as Record<string, unknown> });
+      this.#onNotification({ method: msg.method, params: msg.params as Record<string, unknown> }, ++this.#notifSeq);
     }
   }
 
@@ -290,6 +302,15 @@ export class CodexAppServerClient {
   }
 
   request(method: string, params: Record<string, unknown>): Promise<unknown> {
+    return this.requestWithBarrier(method, params).then((r) => r.result);
+  }
+
+  /** Like request(), also returning the NOTIFICATION BARRIER: how many
+   *  notifications this client had dispatched when the response frame was
+   *  handled. A notification with `seq <= notifBarrier` was on the wire before
+   *  the response; one with `seq > notifBarrier` came after it — however soon,
+   *  even in the same socket read (#519). */
+  requestWithBarrier(method: string, params: Record<string, unknown>): Promise<{ result: unknown; notifBarrier: number }> {
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
       if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) { reject(new Error("app-server not connected")); return; }
@@ -304,7 +325,7 @@ export class CodexAppServerClient {
         if (this.#pending.delete(id)) reject(new Error(`app-server request '${method}' timed out`));
       }, timeoutMs);
       this.#pending.set(id, {
-        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        resolve: (v, notifBarrier) => { clearTimeout(timer); resolve({ result: v, notifBarrier }); },
         reject: (e) => { clearTimeout(timer); reject(e); },
       });
       this.#send({ jsonrpc: "2.0", id, method, params });
@@ -362,9 +383,14 @@ export class CodexAppServerClient {
     return { threadId: id, model: res.model ?? null, reasoningEffort: res.reasoningEffort ?? null };
   }
 
-  /** thread/read → full history for reconciliation. */
-  async threadRead(threadId: string): Promise<Record<string, unknown>> {
-    return await this.request("thread/read", { threadId, includeTurns: true }) as Record<string, unknown>;
+  /** thread/read → full history for reconciliation, with the notification
+   *  barrier of its response: a notification whose `seq` is within the
+   *  barrier may be described by this snapshot; one past it cannot be — it is
+   *  new by construction, whatever its content (#519). */
+  async threadRead(threadId: string): Promise<{ thread: Record<string, unknown>; notifBarrier: number }> {
+    const { result, notifBarrier } = await this.requestWithBarrier("thread/read", { threadId, includeTurns: true });
+    const res = (result ?? {}) as Record<string, unknown>;
+    return { thread: (res.thread ?? res) as Record<string, unknown>, notifBarrier };
   }
 
   /** turn/start → deliver a user message. Uses `sandboxPolicy` (tagged object).

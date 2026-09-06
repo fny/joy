@@ -14,7 +14,7 @@
 // #turn / #openTools state): it maps codex turn ids → joy turn ids and tracks
 // open tool calls, so CodexSession stays a thin applier of the effects.
 
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { parseJoyTags } from "../domain/agentTagsPrompt";
 import {
   encodeTurnStart,
@@ -366,33 +366,67 @@ export class CodexNormalizer {
   }
 }
 
+/** Is `id` one of thread/read's POSITIONAL item ids (`item-N`, reissued per
+ *  turn) rather than the runtime's own identity for an item (`msg_…`,
+ *  `call_…`, a UUID)? Only a positional twin may be recognised by content;
+ *  a history item under a runtime id IS that occurrence, and a live item
+ *  under a different runtime id is another one (#519). */
+export function isPositionalHistoryId(id: string): boolean {
+  return !id || /^item-\d+$/.test(id);
+}
+
 /** The WHOLE observable content of a completed item — input AND outcome —
  *  as it reads in both its live and history forms (the transient ids differ:
  *  live msg_…/call_…, history item-N). Used to recognise a buffered live
  *  completion in the history just replayed (#519). The outcome is part of
  *  it on purpose: equality of the command alone is not proof of the same
  *  occurrence — a NEW `date` after the snapshot aliased the old one and the
- *  relay deduped its result away. Empty when the type carries nothing
- *  comparable — never matched on. */
+ *  relay deduped its result away. Built from the RAW item fields — cwd,
+ *  the exit code itself, a digest of the full output/patch/payload — never
+ *  from the display form toolOutcome() renders: that one clamps the middle
+ *  of a long output and folds every non-zero exit into "isError", so two
+ *  executions that differed only there read as one. Empty when the type
+ *  carries nothing comparable — never matched on. */
 export function itemSignature(item: Item): string {
   switch (itemType(item)) {
     case "agentMessage": return str(item.text).trim();
     case "userMessage": return userMessageText(item).trim();
     case "commandExecution": {
-      const { result, isError } = toolOutcome(item);
-      return JSON.stringify({ command: str(item.command), status: str(item.status), result: result ?? null, isError: isError ?? false });
+      const stdout = str(item.aggregatedOutput) || str(item.output) || str(item.stdout);
+      const code = typeof item.exitCode === "number" ? item.exitCode : (typeof item.exit_code === "number" ? item.exit_code : null);
+      return JSON.stringify({
+        command: item.command ?? null, cwd: str(item.cwd) || null, status: str(item.status), exitCode: code,
+        output: digest(stdout), stderr: digest(str(item.stderr)),
+      });
     }
     case "fileChange": {
       if (item.changes === undefined && item.content === undefined) return "";
-      const { result, isError } = toolOutcome(item);
-      return JSON.stringify({ changes: item.changes ?? item.content, status: str(item.status), result: result ?? null, isError: isError ?? false });
+      return JSON.stringify({ changes: digest(canonicalJson(item.changes ?? item.content)), status: str(item.status), error: digest(canonicalJson(item.error ?? null)) });
     }
     case "mcpToolCall": {
-      const { result, isError } = toolOutcome(item);
-      return JSON.stringify({ server: item.server ?? null, tool: item.tool ?? item.name ?? null, arguments: item.arguments ?? null, status: str(item.status), result: result ?? null, isError: isError ?? false });
+      return JSON.stringify({
+        server: item.server ?? null, tool: item.tool ?? item.name ?? null,
+        input: digest(canonicalJson(item.arguments ?? item.input ?? null)), status: str(item.status),
+        output: digest(canonicalJson(item.result ?? null)), error: digest(canonicalJson(item.error ?? null)),
+      });
     }
     default: return "";
   }
+}
+
+/** sha256 of the FULL text — an equality key that keeps every byte in
+ *  play without carrying a 48k output around in the signature. */
+function digest(text: string): string {
+  return text ? createHash("sha256").update(text).digest("hex") : "";
+}
+
+/** JSON with object keys sorted, so the same payload in either form
+ *  (live or history) digests identically regardless of key order. */
+function canonicalJson(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  return JSON.stringify(v, (_k, val) => (val && typeof val === "object" && !Array.isArray(val))
+    ? Object.fromEntries(Object.keys(val as Record<string, unknown>).sort().map((k) => [k, (val as Record<string, unknown>)[k]]))
+    : val);
 }
 
 /** Text of a codex userMessage item — `text`, or the joined text parts of `content`. */
