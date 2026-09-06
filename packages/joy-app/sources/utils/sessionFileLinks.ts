@@ -412,49 +412,87 @@ function looksLikePathStart(text: string): boolean {
 const MAX_PATH_SPAN_TOKENS = 8;
 
 const QUOTE_CHARS = '"\'`';
+// ":12" / ":12:3" right after a closing quote: line/column of the quoted file.
+const LINE_SUFFIX_AFTER_QUOTE = /^:\d+(?::\d+)?\b/;
 
-// True when the token `raw` ends with `quote`, allowing the wrapping
-// punctuation stripToken removes after it (so the two agree on the span).
-function closesQuote(raw: string, quote: string): boolean {
-    const trailing = raw.match(TRAILING_WRAP)?.[0] ?? '';
-    if (trailing.includes(quote)) {
-        return true; // " and ` are wrapping punctuation themselves
-    }
-    return raw.slice(0, raw.length - trailing.length).endsWith(quote); // ' is not
+// Position of the `quote` that closes a span inside `raw`, at or after `from`,
+// or -1. An apostrophe can be part of a name ("it's.ts"), so a single quote
+// closes at its LAST occurrence; " and ` never are, and close at the first.
+function closingQuoteAt(raw: string, quote: string, from: number): number {
+    const at = quote === "'" ? raw.lastIndexOf(quote) : raw.indexOf(quote, from);
+    return at >= from ? at : -1;
 }
 
+type QuotedSpan = {
+    /** Index of the token holding the closing quote. */
+    end: number;
+    leading: string;
+    core: string;
+    trailing: string;
+    /** A ":line[:col]" written right after the closing quote, else "". */
+    lineSuffix: string;
+};
+
 /**
- * Index of the token that closes the quote the token at `from` opens, or -1.
- * An explicitly quoted reference is ONE path however many words it holds:
- * "/repo/my.txt file.ts" is the file "my.txt file.ts", not two references —
- * the separate-reference rule (#445) stopped it at its first word. The span
- * is bounded like any other candidate (token count, same line) and a token
- * that opens the same quote again means the first one was stray.
+ * The quoted span the token at `from` opens, or null. An explicitly quoted
+ * reference is ONE path however many words it holds: "/repo/my.txt file.ts"
+ * is the file "my.txt file.ts", not two references — the separate-reference
+ * rule (#445) stopped it at its first word. The closing quote is located as
+ * a character, wherever it sits in its token: only the quoted interior is
+ * the path, and whatever follows the quote — a sentence's ".", a ":12" line
+ * suffix — stays outside it. (Recognising only a quote followed by wrapping
+ * punctuation left `See "/repo/my.txt file.ts".` linking /repo/my.txt.)
+ * The span is bounded like any other candidate (token count, same line) and
+ * a token that opens the same quote again means the first one was stray.
  */
-function quotedSpanEnd(text: string, tokens: TokenMatch[], from: number): number {
+function quotedSpan(text: string, tokens: TokenMatch[], from: number): QuotedSpan | null {
     const first = text.slice(tokens[from].start, tokens[from].end);
     const leading = first.match(LEADING_WRAP)?.[0] ?? '';
     let quote = '';
     for (const ch of leading) {
         if (QUOTE_CHARS.includes(ch)) quote = ch;
     }
-    if (!quote || closesQuote(first.slice(leading.length), quote)) {
-        return -1;
+    if (!quote) {
+        return null;
     }
-    for (let i = from + 1; i < tokens.length && i - from < MAX_PATH_SPAN_TOKENS; i++) {
-        if (text.slice(tokens[i - 1].end, tokens[i].start).includes('\n')) {
-            return -1;
+    const interiorStart = tokens[from].start + leading.lastIndexOf(quote) + 1;
+    let end = from;
+    let closeAt = closingQuoteAt(first, quote, interiorStart - tokens[from].start);
+    if (closeAt !== -1) {
+        closeAt += tokens[from].start;
+    } else {
+        for (let i = from + 1; i < tokens.length && i - from < MAX_PATH_SPAN_TOKENS; i++) {
+            if (text.slice(tokens[i - 1].end, tokens[i].start).includes('\n')) {
+                return null;
+            }
+            const raw = text.slice(tokens[i].start, tokens[i].end);
+            const lead = raw.match(LEADING_WRAP)?.[0] ?? '';
+            if (lead.includes(quote)) {
+                return null;
+            }
+            const at = closingQuoteAt(raw, quote, 0);
+            if (at !== -1) {
+                closeAt = tokens[i].start + at;
+                end = i;
+                break;
+            }
         }
-        const raw = text.slice(tokens[i].start, tokens[i].end);
-        const lead = raw.match(LEADING_WRAP)?.[0] ?? '';
-        if (lead.includes(quote)) {
-            return -1;
-        }
-        if (closesQuote(raw, quote)) {
-            return i;
+        if (closeAt === -1) {
+            return null;
         }
     }
-    return -1;
+    const inner = stripToken(text.slice(interiorStart, closeAt));
+    if (!inner.core) {
+        return null;
+    }
+    const suffix = text.slice(closeAt + 1, tokens[end].end);
+    return {
+        end,
+        leading: text.slice(tokens[from].start, interiorStart) + inner.leading,
+        core: inner.core,
+        trailing: inner.trailing + quote + suffix,
+        lineSuffix: suffix.match(LINE_SUFFIX_AFTER_QUOTE)?.[0] ?? '',
+    };
 }
 
 export function splitSessionFileText(text: string, sessionRoot?: string | null): SessionFileTextSegment[] {
@@ -493,16 +531,15 @@ export function splitSessionFileText(text: string, sessionRoot?: string | null):
 
         // An explicitly quoted span is tried whole first: quote boundaries
         // outrank the separate-reference heuristics below.
-        const quotedEnd = quotedSpanEnd(text, tokens, tokenIndex);
-        if (quotedEnd !== -1 && budget.spend()) {
-            const stripped = stripToken(text.slice(token.start, tokens[quotedEnd].end));
-            const link = stripped.core ? parseSessionFileLink(stripped.core, { sessionRoot, bareText: true }) : null;
+        const quoted = quotedSpan(text, tokens, tokenIndex);
+        if (quoted && budget.spend()) {
+            const link = parseSessionFileLink(`${quoted.core}${quoted.lineSuffix}`, { sessionRoot, bareText: true });
             if (link) {
-                bestEnd = quotedEnd;
+                bestEnd = quoted.end;
                 bestLink = link;
-                bestLeading = stripped.leading;
-                bestCore = stripped.core;
-                bestTrailing = stripped.trailing;
+                bestLeading = quoted.leading;
+                bestCore = quoted.core;
+                bestTrailing = quoted.trailing;
             }
         }
 
