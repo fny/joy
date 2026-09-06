@@ -386,8 +386,8 @@ test("#37 a checkpoint armed before a /clear rebind persists the NEW binding, no
   await vi.advanceTimersByTimeAsync(10);
   s.startTailer(f2, true);                       // /clear → rebind inside the window
   await vi.advanceTimersByTimeAsync(6_000);
-  const cp = loadWindowRecord(id)?.transcriptCheckpoint;
-  expect(cp?.path).toBe(f2);                     // old code: f1 with f2's offset
+  const cp = ledgerFor().getCheckpoint(id, "claude_transcript");
+  expect(cp?.ref).toBe(f2);                      // old code: f1 with f2's offset
   expect(cp?.offset).toBe(Buffer.byteLength(line("b") + line("c")));
   s.end("killed");
 });

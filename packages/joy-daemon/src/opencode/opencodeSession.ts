@@ -44,8 +44,6 @@ export interface OpencodeInit {
   opencodeSessionId?: string;
   /** Reap this recorded server pid on takeover (recovery). */
   opencodeServerPid?: number;
-  /** Reconcile checkpoint: last fully-delivered message id (recovery). */
-  opencodeDeliveredThrough?: string;
   /** Continue: resume the newest existing opencode session in this cwd
    *  (ignored when opencodeSessionId is set). Falls back to a fresh session
    *  when the cwd has none. */
@@ -144,8 +142,10 @@ export class OpencodeSession implements AgentSession {
   // prompt POST is a ledger attempt committed before the request goes out.
   #ledger: Ledger;
   #generation: number;
-  // Reconcile checkpoint (persisted): last message id fully delivered to the
-  // relay. Advanced on live turn completion and after reconcile replay.
+  // Reconcile checkpoint — `checkpoints(kind='opencode_msg')` in the ledger:
+  // last message id fully delivered to the relay, committed only once its
+  // outbox rows are acked. Advanced on live turn completion and after
+  // reconcile replay.
   #deliveredThrough?: string;
   #continueLast = false;
   // First-prompt auto-title fires once, and only for sessions whose card is
@@ -170,7 +170,6 @@ export class OpencodeSession implements AgentSession {
     this.#deps = deps;
     this.#resumeOcSessionId = init.opencodeSessionId;
     this.#reapPid = init.opencodeServerPid;
-    this.#deliveredThrough = init.opencodeDeliveredThrough;
     this.#continueLast = init.continueLast === true;
     this.#titled = init.opencodeSessionId != null;
     this.#titleLocked = loadWindowRecord(init.id)?.titleLockedByUser === true;
@@ -178,7 +177,9 @@ export class OpencodeSession implements AgentSession {
     // closes the previous one (its in-flight prompts become `unknown`).
     this.#ledger = deps.ledger ?? ledgerFor();
     this.#generation = this.#ledger.openGeneration(init.id, "opencode");
+    this.#deliveredThrough = init.opencodeSessionId ? this.#ledger.getCheckpoint(init.id, "opencode_msg")?.ref : undefined;
     if (!init.opencodeSessionId) {
+      this.#ledger.clearCheckpoint(init.id, "opencode_msg");
       // A fresh opencode session under this id: nothing queued for an earlier
       // one can run here.
       for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session" });
@@ -278,13 +279,25 @@ export class OpencodeSession implements AgentSession {
     }
   }
 
+  /** Commit the delivered-through mark, pending until every outbox row of
+   *  this session so far is acked (#67); a restart before that replays from
+   *  the previous mark, deduped by the relay's runtime event ids. */
+  #advanceDeliveredThrough(messageId: string): void {
+    if (this.status === "ended") return;
+    try {
+      this.#ledger.setCheckpoint(this.id, "opencode_msg", messageId, 0, { throughSeq: "latest" });
+      this.#deliveredThrough = messageId;
+    } catch (e) {
+      process.stderr.write(`[opencode ${this.id}] checkpoint ${messageId} failed: ${e instanceof Error ? e.message : e}\n`);
+    }
+  }
+
   #persistRecord(): void {
     if (this.status === "ended") return; // a retired/killed generation must not recreate a deleted record (#52)
     saveWindowRecord(this.id, {
       launchCwd: this.cwd, agent: "opencode",
       opencodeSessionId: this.#ocSessionId ?? undefined,
       opencodeServerPid: this.#proc?.pid,
-      opencodeDeliveredThrough: this.#deliveredThrough,
       opencodeSettings: { model: this.currentModel ?? this.model, providerID: this.#providerID },
     });
   }
@@ -426,10 +439,7 @@ export class OpencodeSession implements AgentSession {
       if (status === "cancelled") return;
       if (this.#relay?.outboundPersistDegraded) return; // records only in RAM: hold the checkpoint
       const last = this.#norm?.lastMessageId;
-      if (last && last !== this.#deliveredThrough) {
-        this.#deliveredThrough = last;
-        this.#persistRecord();
-      }
+      if (last && last !== this.#deliveredThrough) this.#advanceDeliveredThrough(last);
     };
     if (!this.#norm) { advance(); return; }
     const turn = this.#norm.currentTurn ?? turnID;
@@ -548,10 +558,7 @@ export class OpencodeSession implements AgentSession {
           completedThrough = mid;
         }
       }
-      if (completedThrough && !this.#relay?.outboundPersistDegraded) {
-        this.#deliveredThrough = completedThrough;
-        this.#persistRecord();
-      }
+      if (completedThrough && !this.#relay?.outboundPersistDegraded) this.#advanceDeliveredThrough(completedThrough);
     } catch (e) {
       process.stderr.write(`[opencode ${this.id}] reconcile failed: ${e}\n`);
     }

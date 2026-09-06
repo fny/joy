@@ -22,13 +22,12 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import tweetnacl from "tweetnacl";
-import { readFileSync, existsSync, unlinkSync } from "node:fs";
-import { writeFileAtomic } from "../domain/atomicWrite";
+import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
-import { joyRelayAccessKey, joyStateDir } from "../paths";
+import { joyRelayAccessKey } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./relay";
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, type NewOutbound, type OutboxRow } from "../domain/ledger";
@@ -220,22 +219,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // chat:<id> runtimeEventId from THIS boot could replay-collide with one
   // from the last boot and get silently dropped by the relay. Scope them.
   const bootNonce = randomUUID().slice(0, 8);
+  // The durable acceptance ledger: the outbox (below), and the spawn intents —
   // spawnCommandId → localSessionId, persisted across the create→bind gap so
   // a crash between the two never spawns a SECOND real agent for the same
-  // command (the re-offer finds the intent record and only re-binds).
-  const spawnIntentPath = join(joyStateDir(), "v2-spawns.json");
-  const readSpawnIntents = (): Record<string, string> => {
-    try { return JSON.parse(readFileSync(spawnIntentPath, "utf8")); } catch { return {}; }
-  };
-  const writeSpawnIntent = (commandId: string, localId: string): void => {
-    const m = readSpawnIntents();
-    m[commandId] = localId;
-    // Atomic replace via the shared primitive (fsync'd temp + rename): a crash
-    // mid-write used to truncate the whole map and lose every other command's
-    // mapping (Astra on 2f803b14, #75); Wave B routes the remaining hand-rolled
-    // tmp+rename through domain/atomicWrite.
-    writeFileAtomic(spawnIntentPath, JSON.stringify(m, null, 2));
-  };
+  // command (the re-offer finds the intent row and only re-binds). One row
+  // per command, committed on its own (#75): no whole-map rewrite to truncate.
+  const ledger = ledgerFor();
+  const readSpawnIntent = (commandId: string): string | undefined => ledger.lookupSpawnIntent(commandId) ?? undefined;
+  const writeSpawnIntent = (commandId: string, localId: string): void => { ledger.spawnIntent(commandId, localId); };
   // v2 sessionId → local session id, rebuilt from the relay on start and
   // extended by every bind we perform.
   const bound = new Map<string, string>();
@@ -332,7 +323,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // stable runtimeEventId the relay dedupes. A relay outage or a daemon
   // restart loses no output (#60, #67) and leaves no turn unterminated
   // (#74): the rows are still there and the sender resumes from them.
-  const ledger = ledgerFor();
   const recordFailures = new Set<string>();
   const RETRY_MAX_MS = 30_000;
   // How a failed POST is handled. Lease fencing (401 unknown/expired lease,
@@ -878,7 +868,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // Idempotency across the create→bind gap: a prior attempt that crashed
       // after create left an intent record — re-bind that session instead of
       // spawning a second real agent for the same command.
-      const prior = readSpawnIntents()[offer.commandId];
+      const prior = readSpawnIntent(offer.commandId);
       let session = prior ? registry.get(prior) : undefined;
       if (session && session.status === "ended") session = undefined;
       if (session) spawning.add(localId = session.id);
@@ -988,6 +978,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         throw e;
       }
       bound.set(offer.sessionId, session.id); boundByLocal.set(session.id, offer.sessionId);
+      try { ledger.bindSpawnIntent(offer.commandId); } catch { /* informational */ }
       // Stamp the session card with its v2 link so the app can address this
       // session — envelope included so the app needs no extra fetch to obtain
       // the content key.
@@ -1545,7 +1536,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   async function announceUnboundSessions(): Promise<void> {
     // A session a spawn command created belongs to that command's relay
     // row — even across a daemon restart (the intent file remembers it).
-    const spawned = new Set(Object.values(readSpawnIntents()));
+    const spawned = new Set(ledger.listSpawnIntents().map((i) => i.localSessionId));
     const records = registry.listRecords();
     for (const s of registry.list()) {
       if (s.status !== "active" && s.status !== "starting") continue;

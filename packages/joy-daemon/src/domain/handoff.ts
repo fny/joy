@@ -20,8 +20,41 @@ import { hostname, homedir } from "node:os";
 import { join } from "node:path";
 
 import type { AgentSession } from "./agentSession";
-import { saveWindowRecord, listWindowRecords, type HandoffJob } from "./windowRecord";
-import { LedgerWriteError, SessionEndedError } from "./ledger";
+import { ledgerFor, LedgerWriteError, SessionEndedError } from "./ledger";
+
+/** An in-flight handoff/handback: the note path being awaited and who it is
+ *  for — persisted as a ledger job (`jobs(kind='handoff')`, one per source
+ *  session) so a daemon restart mid-note resumes the poll instead of
+ *  abandoning the workflow. Deleted when it settles. */
+export interface HandoffJob {
+  role: "source" | "target";
+  path: string;
+  /** source: the harness/model to create; target: absent. */
+  target?: { agent: "claude" | "codex" | "opencode" | "pi" | "agy"; model?: string; effort?: string; permissionMode?: string };
+  /** target: the session to hand back to. */
+  peer?: string;
+  /** source: the target session once created — a replay after a daemon
+   *  death past this point must reuse it, not launch a second agent. */
+  dst?: string;
+  /** source: the pickup prompt reached the target's queue. */
+  delivered?: boolean;
+  at: number;
+}
+
+/** Persist a session's handoff job; false when the ledger refused the commit. */
+export function saveHandoffJob(sessionId: string, job: HandoffJob): boolean {
+  try { ledgerFor().putJob({ id: sessionId, sessionId, kind: "handoff", payload: job }); return true; }
+  catch (e) { process.stderr.write(`[handoff] ${sessionId}: job write failed: ${e instanceof Error ? e.message : e}\n`); return false; }
+}
+/** Clear a settled job; false when the ledger refused. */
+export function clearHandoffJob(sessionId: string): boolean {
+  try { ledgerFor().deleteJob(sessionId); return true; }
+  catch (e) { process.stderr.write(`[handoff] ${sessionId}: job clear failed: ${e instanceof Error ? e.message : e}\n`); return false; }
+}
+export function loadHandoffJob(sessionId: string): HandoffJob | null {
+  const j = ledgerFor().getJob(sessionId);
+  return j && j.kind === "handoff" && j.payload && typeof j.payload === "object" ? (j.payload as HandoffJob) : null;
+}
 import { joySessionDir } from "../paths";
 import { findCodexRollout, findPiSessionFile } from "./forkHarness";
 
@@ -261,7 +294,7 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
   let jobOnDisk = false;
   const advance = (patch: Partial<HandoffJob>): boolean => {
     job = { ...job, ...patch };
-    jobOnDisk = saveWindowRecord(src.id, { handoffJob: job });
+    jobOnDisk = saveHandoffJob(src.id, job);
     return jobOnDisk;
   };
   // Set when the job must OUTLIVE this run: the prompt is not durably
@@ -307,7 +340,7 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
     process.stderr.write(`[handoff] ${src.id} failed: ${msg}${retryable ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
     src.setHandoff?.({ state: "failed", error: failureText(msg, keepJob, jobOnDisk), note: path, at: Date.now() });
   } finally {
-    if (!keepJob && !saveWindowRecord(src.id, { handoffJob: null }) && jobOnDisk) {
+    if (!keepJob && !clearHandoffJob(src.id) && jobOnDisk) {
       process.stderr.write(`[handoff] ${src.id}: settled, but the job record could not be cleared — the next daemon start will replay it\n`);
     }
   }
@@ -317,7 +350,7 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
 export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSession, srcId: string, path: string, options: HandoffJobOptions = {}): Promise<void> {
   // Confirmed on disk before anything is asked of either session (#542
   // residual): without the record a crash mid-note has nothing to resume.
-  const jobOnDisk = saveWindowRecord(tgt.id, { handoffJob: { role: "target", path, peer: srcId, at: Date.now() } });
+  const jobOnDisk = saveHandoffJob(tgt.id, { role: "target", path, peer: srcId, at: Date.now() });
   let keepJob = false;
   try {
     if (!jobOnDisk) throw new HandoffNotPersistedError(tgt.id, "before waiting for the note");
@@ -347,7 +380,7 @@ export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSessio
     process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}${retryable ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
     tgt.setHandoff?.({ state: "failed", peer: srcId, error: failureText(msg, keepJob, jobOnDisk), note: path, at: Date.now() });
   } finally {
-    if (!keepJob && !saveWindowRecord(tgt.id, { handoffJob: null }) && jobOnDisk) {
+    if (!keepJob && !clearHandoffJob(tgt.id) && jobOnDisk) {
       process.stderr.write(`[handoff] handback ${tgt.id}: settled, but the job record could not be cleared — the next daemon start will replay it\n`);
     }
   }
@@ -356,14 +389,14 @@ export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSessio
 /** After recovery: pick up every job a previous daemon left mid-note. The
  *  note may already be on disk (awaitNote returns at once) or still coming. */
 export function resumeHandoffJobs(registry: HandoffRegistry): void {
-  for (const rec of listWindowRecords()) {
-    const job = rec.handoffJob as HandoffJob | undefined;
-    if (!job) continue;
-    const s = registry.get(rec.id);
-    if (!s || s.status === "ended") { saveWindowRecord(rec.id, { handoffJob: null }); continue; }
-    process.stderr.write(`[handoff] resuming ${job.role} job for ${rec.id} (note ${job.path})\n`);
+  for (const row of ledgerFor().listJobs("handoff")) {
+    const job = row.payload as HandoffJob | null;
+    if (!job || typeof job !== "object") { clearHandoffJob(row.id); continue; }
+    const s = registry.get(row.sessionId);
+    if (!s || s.status === "ended") { clearHandoffJob(row.id); continue; }
+    process.stderr.write(`[handoff] resuming ${job.role} job for ${row.sessionId} (note ${job.path})\n`);
     if (job.role === "source" && job.target) void runHandoffJob(registry, s, job.target, job.path, job);
     else if (job.role === "target" && job.peer) void runHandbackJob(registry, s, job.peer, job.path);
-    else saveWindowRecord(rec.id, { handoffJob: null });
+    else clearHandoffJob(row.id);
   }
 }
