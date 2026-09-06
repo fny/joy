@@ -1,3 +1,4 @@
+import { safeGet } from '@/utils/safeGet';
 import * as React from 'react';
 import { EditView } from './EditView';
 import { BashView } from './BashView';
@@ -59,14 +60,15 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Agent: TaskView,
 };
 
-// Helper function to get the appropriate view component for a tool
+// Registry lookups are OWN-property only: a tool named "__proto__" or
+// "constructor" used to resolve to Object.prototype / the Object function,
+// which React then tried to render as a component and crashed (#293).
 export function getToolViewComponent(toolName: string): ToolViewComponent | null {
-    return toolViewRegistry[toolName] || null;
+    return safeGet(toolViewRegistry, toolName) ?? null;
 }
 
-// Helper function to get the full view component for a tool
 export function getToolFullViewComponent(toolName: string): ToolViewComponent | null {
-    return toolFullViewRegistry[toolName] || null;
+    return safeGet(toolFullViewRegistry, toolName) ?? null;
 }
 
 // Export individual components
