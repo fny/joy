@@ -17,6 +17,9 @@ export const MAX_QUEUED_TURNS = 100;
 export const MAX_SESSIONS_PER_ACCOUNT = 200;
 export const MAX_DAEMONS_PER_ACCOUNT = 50;
 export const MAX_EVENTS_PER_SESSION = 50_000;
+/** Events a turn writes besides its outputs (queued, started, terminal);
+ *  prompt admission keeps this many free per open turn (#613). */
+export const EVENT_BUDGET_LIFECYCLE_RESERVE = 3;
 
 export class ApiError extends Error {
   constructor(status, code, message) {
@@ -62,6 +65,18 @@ export async function appendEvent(t, sessionId, seq, fields) {
      fields.runtimeEventId ?? null, fields.ciphertext ?? null],
   );
   return eventId;
+}
+
+/** Client-facing message status for a (command state, turn) pair — the
+ *  same mapping v2.mjs projects, used here for the 409 body of a refused
+ *  queued-only cancel (#621). */
+export function messageStatusOf(cmdState, turn) {
+  if (cmdState === 'cancelled' || turn.terminal_state === 'cancelled') return 'cancelled';
+  if (cmdState === 'rejected' || cmdState === 'indeterminate' || turn.state === 'orphaned') return 'failed';
+  if (turn.state === 'terminal') return turn.terminal_state === 'completed' ? 'delivered' : 'failed';
+  if (turn.state === 'running' || turn.state === 'cancelling') return 'delivered';
+  if (turn.state === 'dispatching' || cmdState === 'delivered') return 'delivering';
+  return 'queued';
 }
 
 function acceptedIntentFrom(cmd) {
@@ -261,27 +276,70 @@ export function createCore(db, notify) {
            revision = revision + 1, updated_at = now()
          WHERE id = $1`,
         [sessionId, body.encryptedMetadata ?? null, body.state ?? null, body.sessionKeyEnvelope ?? null]);
+      if (body.state === 'archived' && s.state !== 'archived') await resolveOutstandingWork(t, s);
       return s.account_id;
     });
     notify.pokeAccount(accountId, sessionId, ['state']);
   }
 
+  /** Archiving resolves the queue in the SAME transaction (#614): queued
+   *  turns are cancelled (their prompts can never run — the session is
+   *  closed) and every outstanding delivery is superseded, so a claim the
+   *  daemon already holds is refused at /received and a late submit/start
+   *  finds nothing to advance. Executing turns are left to their owner: the
+   *  daemon's terminal fact (or the orphan sweep) closes them. */
+  async function resolveOutstandingWork(t, s) {
+    const { rows: queued } = await t.query(
+      `SELECT * FROM turns WHERE session_id = $1 AND state = 'queued' ORDER BY request_seq`, [s.id]);
+    for (const q of queued) {
+      await terminalizeTurn(t, s, q, 'cancelled', { mode: 'session_archived' });
+      await t.query(`UPDATE commands SET state = 'cancelled', disposition = 'cancelled_session_archived' WHERE id = $1`,
+        [q.prompt_command_id]);
+    }
+    await t.query(
+      `UPDATE deliveries SET disposition = 'superseded'
+       WHERE disposition IS NULL AND command_id IN (SELECT id FROM commands WHERE session_id = $1 AND kind <> 'cancel')`,
+      [s.id]);
+  }
+
   /** Daemon reports a spawn could not run (e.g. cwd missing, createDir off).
    *  Marks the session failed with a machine-readable reason so the client can
-   *  offer to create the directory and retry. Fenced to the owning daemon. */
-  async function spawnFailed(sessionId, leaseRef, reason) {
+   *  offer to create the directory and retry. Fenced to the owning daemon AND
+   *  to the spawn ATTEMPT (#612): a failure report that was delayed past a
+   *  retry which already bound must not overwrite the successful binding —
+   *  the session would read failed with local_session_id set, claims and
+   *  prompts would stop, and retrySpawn would refuse with already_bound.
+   *  A stale report is answered ok/applied:false, never applied. */
+  async function spawnFailed(sessionId, leaseRef, reason, { deliveryId } = {}) {
     let poke = null;
-    await db.tx(async (t) => {
+    const out = await db.tx(async (t) => {
       const lease = await fencedLease(t, leaseRef.id, leaseRef.token_hash, leaseRef.epoch);
       const s = await loadSession(t, sessionId, null);
       if (s.owner_daemon_id !== lease.daemon_id || s.account_id !== lease.account_id) throw new ApiError(403, 'not_owner_daemon');
-      if (s.state !== 'provisioning' && s.state !== 'starting') return; // already progressed
+      // Bound = a later attempt succeeded (or the session was announced):
+      // there is no spawn left to fail.
+      if (s.local_session_id) return { ok: true, applied: false, reason: 'already_bound' };
+      if (s.state !== 'provisioning' && s.state !== 'starting') return { ok: true, applied: false, reason: 'already_progressed' };
+      const spawn = await one(t, `SELECT * FROM commands WHERE session_id = $1 AND kind = 'spawn_session'`, [sessionId]);
+      // The spawn command is 'applied' once a bind landed; only a live
+      // (queued/delivered) spawn can still fail.
+      if (spawn && !['queued', 'delivered'].includes(spawn.state)) return { ok: true, applied: false, reason: 'already_bound' };
+      if (deliveryId && spawn) {
+        // Attempt fence: the report names the delivery it executed. A retry
+        // supersedes the earlier delivery (retrySpawn), so a report for a
+        // superseded or foreign-epoch delivery belongs to a dead attempt.
+        const d = await one(t, `SELECT * FROM deliveries WHERE id = $1 AND command_id = $2`, [deliveryId, spawn.id]);
+        if (!d || d.disposition !== null || String(d.lease_epoch) !== String(lease.epoch)) {
+          return { ok: true, applied: false, reason: 'stale_attempt' };
+        }
+      }
       await t.query(`UPDATE native_sessions SET state = 'failed', spawn_failure = $2, updated_at = now() WHERE id = $1`,
         [sessionId, String(reason).slice(0, 300)]);
       poke = [s.account_id, s.id];
+      return { ok: true, applied: true };
     });
     if (poke) notify.pokeAccount(poke[0], poke[1], ['state']);
-    return { ok: true };
+    return out;
   }
 
   /** Client retries a FAILED spawn, opting into directory creation. Resets the
@@ -337,6 +395,21 @@ export function createCore(db, notify) {
       const { rows: [{ count }] } = await t.query(
         `SELECT count(*)::int AS count FROM turns WHERE session_id = $1 AND state IN ('queued','dispatching')`, [sessionId]);
       if (count >= MAX_QUEUED_TURNS) throw new ApiError(429, 'queue_full');
+      // Event-budget admission (#613): a session at MAX_EVENTS_PER_SESSION
+      // still accepted, offered and started prompts whose every output fact
+      // was then refused with session_event_budget_exhausted — the relay
+      // authorized work it could not record. Refuse at admission instead
+      // (never accept-then-drop, design §12), keeping room for the lifecycle
+      // events (queued/started/terminal) every already-accepted turn still
+      // has to write. The 429 is the client's cue to continue in a NEW
+      // session; nothing here clears by retrying.
+      const { rows: [{ n: eventCount }] } = await t.query(
+        `SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [sessionId]);
+      const { rows: [{ n: openTurns }] } = await t.query(
+        `SELECT count(*)::int AS n FROM turns WHERE session_id = $1 AND state <> 'terminal'`, [sessionId]);
+      if (eventCount + EVENT_BUDGET_LIFECYCLE_RESERVE * (openTurns + 1) >= MAX_EVENTS_PER_SESSION) {
+        throw new ApiError(429, 'session_event_budget_exhausted');
+      }
 
       const { seq } = await nextSeq(t, sessionId);
       const commandId = randomUUID();
@@ -371,7 +444,12 @@ export function createCore(db, notify) {
 
   // ── Cancellation (§4) ─────────────────────────────────────────────────────
 
-  async function acceptCancellation(accountId, actorId, sessionId, targetTurnId, body) {
+  /** `requireQueued` (message DELETE): the cancel is only valid while the
+   *  prompt is still editable — turn queued AND command not yet acknowledged
+   *  by the daemon. Checked INSIDE this transaction (#621): a read-then-cancel
+   *  across two transactions let the daemon ack, submit and start the turn in
+   *  between, and the "queued-only" delete interrupted a running agent. */
+  async function acceptCancellation(accountId, actorId, sessionId, targetTurnId, body, { requireQueued = false } = {}) {
     const scope = body.scope ?? 'turn_and_pending_before_barrier';
     const hash = requestHash({ kind: 'cancel', clientIntentId: body.clientIntentId, targetTurnId, scope });
     let wakeControl = null;
@@ -381,6 +459,12 @@ export function createCore(db, notify) {
       if (replay) return replay;
       const target = await one(t, `SELECT * FROM turns WHERE id = $1 AND session_id = $2`, [targetTurnId, sessionId]);
       if (!target) throw new ApiError(404, 'turn_not_found');
+      if (requireQueued) {
+        const cmd = await one(t, `SELECT state FROM commands WHERE id = $1`, [target.prompt_command_id]);
+        if (target.state !== 'queued' || cmd?.state !== 'queued') {
+          throw new ApiError(409, { error: 'not_deletable', status: messageStatusOf(cmd?.state, target) });
+        }
+      }
 
       const { seq } = await nextSeq(t, sessionId);
       const commandId = randomUUID();
@@ -558,8 +642,11 @@ export function createCore(db, notify) {
         const deliveryId = await offerCommand(t, lease, head);
         // Carry the cited attachment ids so the daemon can fetch device-born
         // content — without this the reference is invisible past the relay.
+        // Read through the reference table: a blob cited by two prompts has
+        // a row per prompt, so the SECOND offer is authorized too (#58).
         const { rows: atts } = await t.query(
-          `SELECT id, size FROM attachments WHERE referenced_by = $1 ORDER BY created_at`, [head.id]);
+          `SELECT a.id, a.size FROM attachment_refs r JOIN attachments a ON a.id = r.attachment_id
+           WHERE r.ref = $1 ORDER BY a.created_at`, [head.id]);
         offers.push({
           deliveryId, commandId: head.id, sessionId: s.id, kind: 'prompt',
           seq: String(head.seq), turnId: head.head_turn_id, ciphertext: head.ciphertext,
@@ -618,9 +705,18 @@ export function createCore(db, notify) {
     if (!d) throw new ApiError(409, 'no_current_delivery');
   }
 
+  /** A session that is archived or failed accepts no lifecycle advance: a
+   *  submit/start that was already in flight when the daemon archived the
+   *  session must not reopen it (#614). */
+  function requireLiveSession(s) {
+    if (s.state === 'archived') throw new ApiError(409, 'session_archived');
+    if (s.state === 'failed') throw new ApiError(409, 'session_failed');
+  }
+
   async function turnSubmitted(turnId, leaseRef) {
     await withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
       if (turn.state === 'terminal') throw new ApiError(409, 'turn_terminal');
+      requireLiveSession(s);
       await requireCurrentDelivery(t, turn, lease);
       if (turn.state === 'queued') {
         await t.query(`UPDATE turns SET state = 'dispatching', lease_epoch = $2 WHERE id = $1`, [turnId, lease.epoch]);
@@ -640,6 +736,9 @@ export function createCore(db, notify) {
       if (turn.cancel_requested) throw new ApiError(409, 'turn_cancelled');
       if (turn.state === 'running') return { turnId, state: 'running', replay: true };
       if (turn.state === 'orphaned') throw new ApiError(409, 'turn_orphaned_reconcile_first');
+      // Checked INSIDE the start transaction: turn.start used to flip an
+      // archived session straight back to active (#614).
+      requireLiveSession(s);
       if (s.active_turn_id && s.active_turn_id !== turnId) throw new ApiError(409, 'another_turn_active');
       await requireCurrentDelivery(t, turn, lease);
       const earlier = await one(

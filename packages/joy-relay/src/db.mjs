@@ -207,6 +207,27 @@ const MIGRATIONS = [
   // poll consumes the request; later polls with the same public key get no
   // token. Answered requests also age out fast (see accounts.sweepPairings).
   `ALTER TABLE auth_requests ADD COLUMN consumed_at TIMESTAMPTZ;`,
+  // 007 — attachment references become a JOIN TABLE (#58): one blob may be
+  // cited by several prompts (a re-upload dedupes to the same id, a second
+  // message reuses it), and the single `referenced_by` column kept only the
+  // first — every later offer lost its authorization. Existing references
+  // migrate as rows. `uploaded_at` is the orphan clock (#611): a retried
+  // upload of an aged, unreferenced blob renews it, so the sweep cannot eat
+  // an upload the client was just told succeeded.
+  `
+  CREATE TABLE attachment_refs (
+    attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+    ref TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (attachment_id, ref)
+  );
+  CREATE INDEX attachment_refs_by_ref ON attachment_refs (ref);
+  INSERT INTO attachment_refs (attachment_id, ref)
+    SELECT id, referenced_by FROM attachments WHERE referenced_by IS NOT NULL;
+  ALTER TABLE attachments DROP COLUMN referenced_by;
+  ALTER TABLE attachments ADD COLUMN uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now();
+  UPDATE attachments SET uploaded_at = created_at;
+  `,
 ];
 
 /** Exclusive ownership of a data directory. Two relay processes opening the
