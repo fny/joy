@@ -30,7 +30,7 @@ import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey } from "../paths";
-import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./relay";
+import { setRecordSink, setOutboundPersistDegraded, relaySessionFor, type WireRecord } from "./relay";
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type JobRow, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
 import { coordinatorFor } from "../domain/coordinator";
@@ -72,6 +72,10 @@ export interface NucleusLaneHandle {
    *  the machine key. The authoritative source for the machine record's
    *  `capabilities.spawnSpecSealed` advertisement (#107). */
   spawnSpecSealed(): boolean;
+  /** Sessions whose relay event budget is exhausted, and how many records
+   *  have been dropped since (#130). The same numbers the card banner shows,
+   *  readable without one. */
+  eventBudgetDrops(): Array<{ v2SessionId: string; localSessionId: string; since: number; dropped: number }>;
 }
 
 interface Lease { leaseId: string; leaseToken: string; epoch: string }
@@ -383,6 +387,34 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 300);
   // Sessions whose relay event budget is exhausted: logged once, outputs dropped.
   const budgetExhausted = new Set<string>();
+  // …and what that costs, per session (#130). The drop used to be a single
+  // daemon log line: the user saw the conversation simply stop growing, with
+  // no way to tell a quiet agent from a truncated one. The count rides the
+  // card as `joy__eventBudget`, which the app renders like the retry and
+  // compacting banners, and it names the only recovery the relay allows — a
+  // fresh session (the budget is per session and retrying never clears it,
+  // see docs/API.md). Publishes are coalesced: a burst of dropped records is
+  // one card PATCH, not one per record.
+  const budgetDropped = new Map<string, { localId: string; since: number; dropped: number }>();
+  const budgetPublish = new Map<string, ReturnType<typeof setTimeout>>();
+  const BUDGET_PUBLISH_MS = 1_000;
+  function publishBudget(v2: string): void {
+    const st = budgetDropped.get(v2);
+    if (!st) return;
+    budgetPublish.delete(v2);
+    void relaySessionFor(st.localId)?.updateEventBudget({ since: st.since, dropped: st.dropped })
+      .catch(() => { /* the card is best effort; the next drop re-asserts it */ });
+  }
+  function noteBudgetDrop(localId: string, v2: string): void {
+    const st = budgetDropped.get(v2) ?? { localId, since: Date.now(), dropped: 0 };
+    st.localId = localId;
+    st.dropped++;
+    budgetDropped.set(v2, st);
+    if (budgetPublish.has(v2)) return;
+    const t = setTimeout(() => publishBudget(v2), BUDGET_PUBLISH_MS);
+    t.unref?.();
+    budgetPublish.set(v2, t);
+  }
   // Rows the ledger refused to commit (disk full, EIO). Kept in memory and
   // re-committed on every sweep tick; while any is held the adapters'
   // checkpoints are held too (RelaySession.outboundPersistDegraded), so a
@@ -441,7 +473,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       else if (!registry.get(row.sessionId) || Date.now() - row.createdAt > 24 * 3_600_000) return { ok: false, fate: "permanent", error: "unbound_abandoned" };
       else return { ok: false, fate: "unbound", error: "session not bound yet" };
     }
-    if (budgetExhausted.has(v2)) return { ok: false, fate: "permanent", error: "session_event_budget_exhausted" };
+    if (budgetExhausted.has(v2)) { noteBudgetDrop(row.sessionId, v2); return { ok: false, fate: "permanent", error: "session_event_budget_exhausted" }; }
     const l = lease;
     if (!l) return { ok: false, fate: "transient", error: "lease_lost" };
     // The key the record was committed under rides the row (#582): a session
@@ -477,7 +509,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (!budgetExhausted.has(v2)) {
           budgetExhausted.add(v2);
           log(`${row.sessionId}: relay event budget exhausted for v2 ${v2.slice(0, 8)} — further output for this session is dropped; the session needs a fresh card`);
+          // Once, on a plane the budget does not gate (#130): the session
+          // events are refused from here on, so the only way to say so is
+          // the card banner below and a push. Silence is what made this a
+          // conversation that simply stopped growing.
+          try { relaySessionFor(row.sessionId)?.notifyCustom("This session is full", "The agent is still running, but its output can no longer be saved. Continue in a new session."); }
+          catch { /* push is best effort */ }
         }
+        noteBudgetDrop(row.sessionId, v2);
         return { ok: false, fate: "permanent", error: "session_event_budget_exhausted" };
       }
       if (fate === "permanent") {
@@ -1916,10 +1955,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       lease = null;
       sender.stop();
       setRecordSink(null);
+      for (const t of budgetPublish.values()) clearTimeout(t);
+      budgetPublish.clear();
     },
     // The tunnel executor BORROWS this lease rather than acquiring its own
     // (a second acquirer on the same machineId evicts the first).
     currentLease: () => (lease ? { leaseId: lease.leaseId, leaseToken: lease.leaseToken } : null),
     spawnSpecSealed: () => spawnSpecKey !== null,
+    eventBudgetDrops: () => [...budgetDropped.entries()].map(([v2SessionId, st]) => ({
+      v2SessionId, localSessionId: st.localId, since: st.since, dropped: st.dropped,
+    })),
   };
 }
