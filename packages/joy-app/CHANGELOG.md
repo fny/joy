@@ -1,3 +1,15 @@
+# Sep 7 — Git status, structured
+
+- **File names are shown exactly as they are.** A file with a space at the end, a quote, a pipe, an accent or an emoji in its name used to appear under a mangled name — or as a file that did not exist. The machine now reports every name byte-for-byte and the app opens the file it shows. A newline or other control character in a name is drawn as a symbol instead of breaking the row.
+- **Line counts are exact or absent.** The +N/−N badges on sessions, the Files header and each changed file come straight from git's per-file counts. A binary file, an untracked file, or a count the machine could not read shows no number instead of a made-up 0 — and a failed read no longer replaces the numbers you had.
+- **Renames show the new name**, with the old one kept alongside, and their line counts land on the right file.
+- **Conflicts are conflicts.** Add/add and delete/delete merge conflicts are listed as conflicted instead of hiding among staged changes; a tree with only conflicts is not reported clean.
+- **Detached and rebasing checkouts say so**: a rebase in progress no longer shows up as a branch called "no branch, rebasing main", and a checkout in a linked worktree reports its own branch.
+- **A file deleted in the index and recreated on disk can be opened again** from Changes instead of sitting struck through.
+- **The Changes tree keeps its top folder**: `src/a.ts` and `src/b.ts` stay under `src` rather than spilling to the root.
+- **Git status refreshes retry after a dropped connection**, and a refresh started for a session you already closed can no longer overwrite the status of the one that replaced it.
+- *Needs the updated daemon for exact names and counts; an older daemon still lists the files, without line counts.*
+
 # Sep 6 (3) — Reliability sweep
 
 - **"Copied" now means copied.** Every copy button — session ids, commands, code blocks, the machine id, the update id, session metadata, the secret key — checks that the clipboard actually took the text. A refused write shows an error instead of a checkmark over an unchanged clipboard.
