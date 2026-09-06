@@ -230,4 +230,56 @@ describe("nucleusLane: a deleted relay row behind a live session (#120)", () => 
         expect(saved.some(p => p.id === "loc8" && p.v2SessionId === "v2new")).toBe(true);
         expect(relay.count("PATCH", "/daemon/sessions/v2dead")).toBe(0);        // never bound to the dead row
     }, 25_000);
+
+    it("a kill that lands during the recovered-row GET ends the announce: no replacement row, no record resurrected", async () => {
+        const relay = makeFakeRelay([]);
+        const url = await relay.listen(); srv = relay.server;
+        const session = makeFakeSession("loc9", { cardMetadata: () => (session.status === "ended" ? null : { joy__state: "running" }) });
+        let records: any[] = [{ id: "loc9", launchCwd: "/tmp/x", v2SessionId: "v2del", socket: null }];
+        const saved: Array<Record<string, unknown>> = [];
+        const registry: any = {
+            get: (i: string) => (i === "loc9" ? session : undefined), create: async () => session, chatHistory: () => [],
+            list: () => [session], listRecords: () => records,
+            saveRecord: (id: string, patch: Record<string, unknown>) => { saved.push({ id, ...patch }); records = [{ id, ...(records[0] ?? {}), ...patch }]; },
+        };
+        // The user kills the session while the row check is outstanding: the
+        // registry ends it and deletes its record before the 404 comes back.
+        relay.answers.set("GET /sessions/v2del", (() => { session.status = "ended"; records = []; return { status: 404, body: { error: "session_not_found" } }; }) as any);
+        let announces = 0;
+        relay.answers.set("POST /sessions", () => { announces++; return { status: 200, body: { sessionId: "ghost" } }; });
+        const logs: string[] = [];
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: (l) => logs.push(l) });
+        await until(() => relay.count("GET", "/sessions/v2del") >= 1, 15_000);
+        await sleep(1_500);
+        expect(announces).toBe(0);                                              // used to POST a replacement for the killed session
+        expect(saved).toEqual([]);                                              // the deleted record stays deleted
+        expect(records).toEqual([]);
+        expect(relay.count("PATCH", "/daemon/sessions/ghost")).toBe(0);
+        expect(logs.some(l => /loc9: ended while its relay row was being checked/.test(l))).toBe(true);
+    }, 25_000);
+
+    it("a kill that lands during the announce POST archives the replacement row instead of binding it", async () => {
+        const relay = makeFakeRelay([]);
+        const url = await relay.listen(); srv = relay.server;
+        const session = makeFakeSession("loc10", { cardMetadata: () => (session.status === "ended" ? null : { joy__state: "running" }) });
+        let records: any[] = [{ id: "loc10", launchCwd: "/tmp/x", v2SessionId: "v2del2", socket: null }];
+        const saved: Array<Record<string, unknown>> = [];
+        const registry: any = {
+            get: (i: string) => (i === "loc10" ? session : undefined), create: async () => session, chatHistory: () => [],
+            list: () => [session], listRecords: () => records,
+            saveRecord: (id: string, patch: Record<string, unknown>) => { saved.push({ id, ...patch }); records = [{ id, ...(records[0] ?? {}), ...patch }]; },
+        };
+        relay.answers.set("GET /sessions/v2del2", { status: 404, body: { error: "session_not_found" } });
+        // The relay creates the replacement — and the kill lands before the reply is processed.
+        relay.answers.set("POST /sessions", (() => { session.status = "ended"; records = []; return { status: 200, body: { sessionId: "ghost2" } }; }) as any);
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: () => {} });
+        await until(() => relay.count("PATCH", "/daemon/sessions/ghost2") >= 1, 15_000);
+        await sleep(1_000);
+        const patches = relay.calls.filter(c => c.method === "PATCH" && c.path === "/daemon/sessions/ghost2");
+        expect(patches).toHaveLength(1);                                        // the archive — never the card publisher
+        expect(patches[0].body.state).toBe("archived");
+        expect(JSON.parse(patches[0].body.encryptedMetadata).metadata).toMatchObject({ joy__state: "archived", joy__sessionId: "loc10" });
+        expect(saved.some(p => p.v2SessionId === "ghost2")).toBe(false);       // the killed identity is not rebound
+        expect(records).toEqual([]);
+    }, 25_000);
 });
