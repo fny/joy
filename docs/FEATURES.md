@@ -122,9 +122,15 @@ every relay; machines register per account.
   poll and sleep, the record stream and the final catch-up — so a daemon
   that accepts any of those requests and never answers still yields
   `timeout` at `--timeout`, not later (#501).
-  A queued `ask` returns only ITS turn's text: the boundary is the daemon's
-  mirrored user row carrying the prompt (the dispatch moment as fallback), so
-  the tail of the turn it queued behind is not part of the reply (#498).
+  `ask`/`run`/`wait --turn` are bound to the durable command the send
+  returned (`GET /sessions/:id/queue/:qid`): the command's own terminal state
+  is the verdict (`completed` → answered; `failed`/`cancelled`/`interrupted`
+  → error with the daemon's reason), never a global idle, a failed queue read
+  or an id missing from a listing; the reply is the records of the runtime
+  turn attributed to the command (the daemon's `runtimeTurnId`, or for claude
+  the first turn started after the send), so the tail of the turn it queued
+  behind — even one still emitting when the prompt was mirrored early — and
+  the next turn's output are not part of the reply (#498).
   `joy new -m` fails with the send's exit code when the first message is not
   accepted (the id is still printed, shell-quoted retry guidance on stderr, #494). A message sent from inside a joy session is wrapped by the daemon in
   `<joy-message from="joy:<id>" reply-to="joy:<id>">` and shown in the chat as
