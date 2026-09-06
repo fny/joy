@@ -355,6 +355,16 @@ export interface SessionOp {
 
 export type Op = MachineOp | SessionOp;
 
+/** The HTTP answer for a machine op's result: its `httpShape` when it has
+ *  one, else 200 with the result as-is. BOTH HTTP surfaces go through this —
+ *  the v1 catalog router and the /v2 tunnel routes — so a status an op
+ *  promises (handoff's `not_durable` 503, kill's 409/503, queueAdd's 400/503)
+ *  is the same on either path; the /v2 routes used to wrap the raw result in
+ *  a 200 and the app, which calls /v2, never saw the code (#53 residual). */
+export function httpAnswer(op: Pick<MachineOp, "httpShape">, result: unknown): { status: number; body: unknown } {
+  return op.httpShape ? op.httpShape(result) : { status: 200, body: result };
+}
+
 // ── Machine-scoped operations ───────────────────────────────────────────────
 
 

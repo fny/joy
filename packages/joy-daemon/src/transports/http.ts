@@ -9,7 +9,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
+import { machineOps, sessionOps, httpAnswer, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import { sessionRecords, latestRecordSeq, subscribeRecords, type LoggedRecord } from "../relay/relay";
 import { buildOpenApiSpec } from "./openapi";
@@ -532,12 +532,8 @@ export function startHttpServer(opts: {
 
       try {
         if (route.op.scope === "machine") {
-          const result = await route.op.handler(registry, params, { via: "http" });
-          if (route.op.httpShape) {
-            const shaped = route.op.httpShape(result);
-            return json(shaped.body, shaped.status);
-          }
-          return json(result);
+          const shaped = httpAnswer(route.op, await route.op.handler(registry, params, { via: "http" }));
+          return json(shaped.body, shaped.status);
         }
         // Session-scoped: resolve the session from :id.
         const session = registry.get(String(params.id ?? ""));
