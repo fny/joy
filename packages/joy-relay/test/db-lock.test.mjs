@@ -18,6 +18,14 @@ describe('data directory lock (#615)', () => {
     rmSync(dir, { recursive: true, force: true }); rmSync(`${dir}.lock`, { force: true });
   }, 60_000);
 
+  it('one lock per canonical directory: dir and dir/. contend for the same lock', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'joy-relay-lock-'));
+    const a = await openDb(dir);
+    await expect(openDb(`${dir}/.`)).rejects.toThrow(/owned by pid/);
+    await a.close();
+    rmSync(dir, { recursive: true, force: true }); rmSync(`${dir}.lock`, { force: true });
+  }, 60_000);
+
   it('reclaims a lock whose owner is gone, but not a half-written one', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'joy-relay-lock-'));
     writeFileSync(`${dir}.lock`, JSON.stringify({ pid: 2 ** 22 - 1, at: 'x' })); // no such pid
