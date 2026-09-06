@@ -35,10 +35,12 @@ export default React.memo(function FilesScreen() {
     const router = useRouter();
     const { id: sessionId } = useLocalSearchParams<{ id: string }>();
 
-    const { data: gitStatusFiles, isLoading } = useGitStatusFiles(sessionId!);
+    const { data: gitStatusFiles, isLoading, revision, state: gitState, refresh: refreshGitStatus } = useGitStatusFiles(sessionId!);
 
-    // Prefetch file contents for instant navigation into file view
-    usePrefetchFileContents(sessionId!, gitStatusFiles);
+    // Prefetch file contents for instant navigation into file view — at the
+    // changed list's revision, so a list that changed mid-prefetch is not
+    // warmed with the previous list's contents (#325).
+    usePrefetchFileContents(sessionId!, gitStatusFiles, revision);
     // Changes (git status, the default) vs All files (the same browsable tree
     // the desktop sidebar shows — AllFilesTab brings its own search + cache).
     const [mode, setMode] = React.useState<'changes' | 'allFiles'>('changes');
@@ -334,9 +336,23 @@ export default React.memo(function FilesScreen() {
                 </View>
             )}
 
+            {/* The last good list is on screen but the newest check failed: say so, retryably. */}
+            {gitState.kind === 'ready' && gitState.stale && (
+                <Pressable
+                    onPress={() => { void refreshGitStatus(); }}
+                    accessibilityRole="button"
+                    style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 8, gap: 12 }}
+                >
+                    <Text numberOfLines={2} style={{ flex: 1, fontSize: 12, color: theme.colors.textSecondary, ...Typography.default() }}>
+                        {t('files.statusStale')} · {gitState.stale}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: theme.colors.textLink, ...Typography.default('semiBold') }}>{t('common.retry')}</Text>
+                </Pressable>
+            )}
+
             {/* Git Status List */}
             <ItemList style={{ flex: 1 }}>
-                {isLoading ? (
+                {isLoading || gitState.kind === 'loading' ? (
                     <View style={{
                         flex: 1,
                         justifyContent: 'center',
@@ -344,6 +360,38 @@ export default React.memo(function FilesScreen() {
                         paddingTop: 40
                     }}>
                         <ActivityIndicator size="small" color={theme.colors.textSecondary} />
+                    </View>
+                ) : gitState.kind === 'failed' ? (
+                    // No answer and nothing cached: an error with Retry — never "not a repository".
+                    <View style={{
+                        flex: 1,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        paddingTop: 40,
+                        paddingHorizontal: 20
+                    }}>
+                        <Octicons name="alert" size={48} color={theme.colors.textSecondary} />
+                        <Text style={{
+                            fontSize: 16,
+                            color: theme.colors.textSecondary,
+                            textAlign: 'center',
+                            marginTop: 16,
+                            ...Typography.default()
+                        }}>
+                            {t('files.statusFailed')}
+                        </Text>
+                        <Text style={{
+                            fontSize: 14,
+                            color: theme.colors.textSecondary,
+                            textAlign: 'center',
+                            marginTop: 8,
+                            ...Typography.default()
+                        }}>
+                            {gitState.reason}
+                        </Text>
+                        <Pressable onPress={() => { void refreshGitStatus(); }} accessibilityRole="button" style={{ marginTop: 16 }}>
+                            <Text style={{ fontSize: 14, color: theme.colors.textLink, ...Typography.default('semiBold') }}>{t('common.retry')}</Text>
+                        </Pressable>
                     </View>
                 ) : !gitStatusFiles ? (
                     <View style={{

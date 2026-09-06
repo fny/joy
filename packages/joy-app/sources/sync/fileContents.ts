@@ -8,8 +8,8 @@
  * wins. The store's `sessionFileCache` and the prefetch commit gate that
  * coordinated two writers for the same file are gone.
  */
-import { sessionGitDiff, sessionReadFile } from './ops';
-import { resources, type ResourceSpec } from './resource';
+import { sessionGitDiff, sessionReadFile, type OpsFailure } from './ops';
+import { resources, type ResourceOutcome, type ResourceSpec } from './resource';
 import { isBinaryPath } from '@/utils/binaryFile';
 
 export interface FileContents {
@@ -22,14 +22,37 @@ export interface FileContents {
 
 const FILE_FAMILY = 'file';
 const DIFF_FAMILY = 'git-diff';
+// Bytes bound the payloads, entries bound the metadata (a failed, empty or
+// binary read costs a slot too), age reclaims what nobody revisits. An entry
+// on screen is exempt only while it is mounted (sync/resource.ts header).
 resources.defineFamily(FILE_FAMILY, {
     maxBytes: 24 * 1024 * 1024,
+    maxEntries: 512,
+    maxAgeMs: 30 * 60_000,
     size: (d) => { const f = d as FileContents; return f.base64.length + (f.content?.length ?? 0); },
 });
-resources.defineFamily(DIFF_FAMILY, { maxBytes: 8 * 1024 * 1024, size: (d) => (d as string).length });
+resources.defineFamily(DIFF_FAMILY, {
+    maxBytes: 8 * 1024 * 1024,
+    maxEntries: 1024,
+    maxAgeMs: 30 * 60_000,
+    size: (d) => (d as string).length,
+});
 
 export function fileContentsKey(sessionId: string, absolutePath: string): string {
     return `file:${sessionId}:${absolutePath}`;
+}
+
+/**
+ * One rule for every file/diff read: no machine context → `unavailable`
+ * (the next policy trigger retries, no error shown); a transport failure
+ * (the tunnel threw or timed out) → THROWN, so the spec's bounded retry
+ * fires; the daemon's own refusal → terminal `error`.
+ */
+function failed(res: { error?: string; failure?: OpsFailure }, fallback: string): ResourceOutcome<never> {
+    const reason = res.error || fallback;
+    if (res.failure === 'no-context') return { kind: 'unavailable', reason };
+    if (res.failure === 'transport') throw new Error(reason);
+    return { kind: 'error', reason };
 }
 
 function decodeBase64ToBytes(base64: string): Uint8Array {
@@ -65,18 +88,26 @@ export function decodeFileContents(path: string, base64: string): FileContents {
     return { base64, content: decoded, isBinary: false };
 }
 
-/** The file at `absolutePath` on the session's machine. */
-export function fileContentsSpec(sessionId: string, absolutePath: string): ResourceSpec<FileContents> {
+/**
+ * The file at `absolutePath` on the session's machine. `version` is the
+ * caller's revision of the repository (the prefetcher passes the changed
+ * list's revision): contents fetched under an older revision are stale for
+ * it — refetched, or served by one trailing read when a read is already
+ * active — while the last good contents stay visible. A caller without a
+ * revision (the file panel) takes whatever is cached and revalidates by time.
+ */
+export function fileContentsSpec(sessionId: string, absolutePath: string, version?: string): ResourceSpec<FileContents> {
     return {
         key: fileContentsKey(sessionId, absolutePath),
         family: FILE_FAMILY,
+        version,
         // Shown from cache on revisit, revalidated in the background.
         staleTime: 0,
         // A dropped tunnel request is worth one more try; a daemon error is not.
         retry: { attempts: 1, delayMs: 500 },
         fetch: async () => {
             const res = await sessionReadFile(sessionId, absolutePath);
-            if (!res.success) return { kind: 'error', reason: res.error || 'Failed to read file' };
+            if (!res.success) return failed(res, 'Failed to read file');
             return { kind: 'ok', data: decodeFileContents(absolutePath, res.content ?? '') };
         },
     };
@@ -107,13 +138,15 @@ export function gitDiffSpec(sessionId: string, relativePath: string, opts: GitDi
         retry: { attempts: 1, delayMs: 500 },
         fetch: async () => {
             const res = await sessionGitDiff(sessionId, { path: relativePath, head: opts.head, staged: opts.staged });
-            if (!res.success) return { kind: 'error', reason: res.error || 'Failed to fetch diff' };
+            if (!res.success) return failed(res, 'Failed to fetch diff');
             return { kind: 'ok', data: res.diff };
         },
     };
 }
 
-/** Forget every file and diff cached for a session (the session was deleted). */
+/** Forget every file and diff cached for a session (the session was deleted;
+ *  called from sync.forgetSession). A reader still mounted for one of them
+ *  sees an idle entry and keeps its subscription (sync/resource.ts `remove`). */
 export function forgetSessionFiles(sessionId: string): void {
     resources.remove(`file:${sessionId}:`, { prefix: true });
     resources.remove(`git-diff:${sessionId}:`, { prefix: true });

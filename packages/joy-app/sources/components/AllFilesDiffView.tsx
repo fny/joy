@@ -40,6 +40,8 @@ type FileDiffResult = {
     file: GitFileStatus;
     content: DiffContent | null;
     error: string | null;
+    /** The content is the last good value and the newest revalidation failed (retryable). */
+    stale: string | null;
 };
 
 /** What a file's section needs from the daemon — a fetch through ONE of the
@@ -50,7 +52,7 @@ type SectionPlan =
     | { kind: 'patch' | 'newFile'; file: GitFileStatus; spec: ResourceSpec<DiffData> };
 
 function planSection(sessionId: string, sessionPath: string | null, file: GitFileStatus, version: string): SectionPlan {
-    const fixed = (content: DiffContent | null, error: string | null): SectionPlan => ({ kind: 'static', result: { file, content, error } });
+    const fixed = (content: DiffContent | null, error: string | null): SectionPlan => ({ kind: 'static', result: { file, content, error, stale: null } });
     // A name that is not valid UTF-8 has no path the daemon accepts: its
     // identity key must never reach git/diff or files/read. Display only.
     if (file.unaddressable) return fixed(null, 'This file name is not valid UTF-8; it cannot be read or diffed.');
@@ -76,12 +78,14 @@ function planSection(sessionId: string, sessionPath: string | null, file: GitFil
 function resultFromEntry(plan: Exclude<SectionPlan, { kind: 'static' }>, entry: ResourceEntry<DiffData> | undefined): FileDiffResult | null {
     if (!entry || !entry.hasData) {
         const error = entry?.error ?? entry?.unavailable ?? null;
-        return error ? { file: plan.file, content: null, error } : null;
+        return error ? { file: plan.file, content: null, error, stale: null } : null;
     }
-    if (plan.kind === 'patch') return { file: plan.file, content: { kind: 'patch', patch: entry.data as string }, error: null };
+    // Last good value on screen; a failed revalidation is shown beside it, retryably.
+    const stale = entry.error ?? entry.unavailable;
+    if (plan.kind === 'patch') return { file: plan.file, content: { kind: 'patch', patch: entry.data as string }, error: null, stale };
     const f = entry.data as FileContents;
-    if (f.isBinary || f.content === null) return { file: plan.file, content: { kind: 'binary' }, error: null };
-    return { file: plan.file, content: { kind: 'newFile', contents: f.content }, error: null };
+    if (f.isBinary || f.content === null) return { file: plan.file, content: { kind: 'binary' }, error: null, stale };
+    return { file: plan.file, content: { kind: 'newFile', contents: f.content }, error: null, stale };
 }
 
 /**
@@ -103,6 +107,16 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     const { theme } = useUnistyles();
     const status = useGitStatusResource(sessionId);
     const gitStatusFiles = status.files;
+    // The status resource's four states, kept apart: no answer and nothing
+    // cached is a failure with Retry (or a spinner while the first read
+    // runs), the daemon's explicit "not a repository" is its own message,
+    // and a last good list whose newest check failed is shown WITH a
+    // retryable stale notice — never "no changes".
+    const statusFailure = status.error ?? status.unavailable;
+    const statusFailed = !status.entry.hasData ? statusFailure : null;
+    const statusStale = status.entry.hasData ? statusFailure : null;
+    const statusPending = !status.entry.hasData && !statusFailure;
+    const notRepo = status.entry.hasData && status.entry.data === null;
     const sessionPath = useSession(sessionId)?.metadata?.path ?? null;
     const [diffStyle, setDiffStyle] = useSettingMutable('diffStyle');
     const scrollRef = React.useRef<ScrollView>(null);
@@ -114,13 +128,23 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         () => rowsByPath(gitStatusFiles ? [...gitStatusFiles.stagedFiles, ...gitStatusFiles.unstagedFiles] : []),
         [gitStatusFiles],
     );
-    // Repository revision: the time the daemon last answered a status read.
-    // git status carries no content hash, so an edit that keeps status and
-    // line counts (an untracked file's text, a +1/-1 rewritten as another
-    // +1/-1) is invisible to the signature alone; every status check
-    // re-validates the diffs instead, and an unchanged diff keeps its
-    // reference (#199 residual).
-    const revision = status.checkedAt;
+    // Repository revision: the git status resource's MONOTONIC count of
+    // daemon answers (not checkedAt — wall-clock milliseconds can collide or
+    // step backwards). git status carries no content hash, so an edit that
+    // keeps status and line counts (an untracked file's text, a +1/-1
+    // rewritten as another +1/-1) is invisible to the signature alone; every
+    // status check re-validates the diffs instead, and an unchanged diff
+    // keeps its reference (#199 residual). A revision that advances while a
+    // diff's read is still active is served by ONE trailing read once it
+    // settles (sync/resource: a newer version never joins an older read), and
+    // a path removed and re-added under a new revision is read again rather
+    // than inheriting the pre-removal read (#91).
+    //
+    // The observed repository's poll source IS the git status resource's
+    // refresh (screen focus, app focus, reconnect, session activity, the
+    // sidebar's checks): an external edit made while this view sits idle
+    // shows up on the next status check — there is no separate diff poller.
+    const revision = status.revision;
 
     // Flatten and deduplicate files
     const files = React.useMemo(() => {
@@ -165,8 +189,9 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     }, [plans, entryByKey]);
     const hasLoadedOnce = results.length > 0 || files.length === 0;
 
-    // Initial-mount spinner: only show until results have ever been populated.
-    const loading = !hasLoadedOnce && results.length === 0 && files.length > 0;
+    // Initial-mount spinner: only show until results have ever been populated
+    // — and while the status itself has no answer yet.
+    const loading = (!hasLoadedOnce && results.length === 0 && files.length > 0) || statusPending;
 
     // Whenever the file list changes (new file silently appears, an existing
     // file disappears, a sort order shifts), all cached Y offsets are
@@ -223,12 +248,30 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         return () => onHeaderRightSlotChange(null);
     }, [files.length, diffStyle, setDiffStyle, onHeaderRightSlotChange]);
 
+    if (statusFailed) {
+        return (
+            <View style={[styles.outer, { backgroundColor: theme.colors.surface }]}>
+                <View style={styles.centered}>
+                    <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{t('files.statusFailed')}</Text>
+                    <Text style={{ color: theme.colors.textSecondary, marginTop: 8, ...Typography.default() }}>{statusFailed}</Text>
+                    <Pressable
+                        onPress={() => { void status.refresh(); }}
+                        accessibilityRole="button"
+                        style={({ pressed }) => [styles.retryButton, { borderColor: theme.colors.divider, opacity: pressed ? 0.7 : 1 }]}
+                    >
+                        <Text style={{ color: theme.colors.textLink, fontSize: 13, ...Typography.default('semiBold') }}>{t('common.retry')}</Text>
+                    </Pressable>
+                </View>
+            </View>
+        );
+    }
+
     if (files.length === 0 && !loading) {
         return (
             <View style={[styles.outer, { backgroundColor: theme.colors.surface }]}>
                 <View style={styles.centered}>
                     <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>
-                        {t('files.noChanges')}
+                        {notRepo ? t('files.notRepo') : t('files.noChanges')}
                     </Text>
                 </View>
             </View>
@@ -247,6 +290,18 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                     style={{ flex: 1 }}
                     contentContainerStyle={{ maxWidth: layout.maxWidth, alignSelf: 'center', width: '100%' }}
                 >
+                    {statusStale && (
+                        <Pressable
+                            onPress={() => { void status.refresh(); }}
+                            accessibilityRole="button"
+                            style={[styles.staleNotice, { borderBottomColor: theme.colors.divider }]}
+                        >
+                            <Text numberOfLines={2} style={{ flex: 1, fontSize: 12, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                {t('files.statusStale')} · {statusStale}
+                            </Text>
+                            <Text style={{ fontSize: 12, color: theme.colors.textLink, ...Typography.default('semiBold') }}>{t('common.retry')}</Text>
+                        </Pressable>
+                    )}
                     {results.map((result) => (
                         <FileDiffSection
                             key={result.file.fullPath}
@@ -305,7 +360,7 @@ const FileDiffSection = React.memo(function FileDiffSection({
     onRetry: (path: string) => void;
 }) {
     const { theme } = useUnistyles();
-    const { file, content, error } = result;
+    const { file, content, error, stale } = result;
     const [collapsed, setCollapsed] = React.useState(false);
 
     const fileName = file.fileName; // display text; file.fullPath stays the identity
@@ -366,6 +421,20 @@ const FileDiffSection = React.memo(function FileDiffSection({
                     </View>
                 )}
             </Pressable>
+
+            {/* Last good diff below; the failed revalidation above it, retryably. */}
+            {!collapsed && stale && !error && (
+                <Pressable
+                    onPress={() => onRetry(file.fullPath)}
+                    accessibilityRole="button"
+                    style={[styles.staleNotice, { borderBottomColor: theme.colors.divider }]}
+                >
+                    <Text numberOfLines={2} style={{ flex: 1, fontSize: 12, color: theme.colors.textSecondary, ...Typography.default() }}>
+                        {t('files.diffStale')} · {stale}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: theme.colors.textLink, ...Typography.default('semiBold') }}>{t('common.retry')}</Text>
+                </Pressable>
+            )}
 
             {/* Diff content */}
             {!collapsed && (
@@ -508,5 +577,13 @@ const styles = StyleSheet.create({
         paddingVertical: 6,
         borderRadius: 6,
         borderWidth: 1,
+    },
+    staleNotice: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderBottomWidth: StyleSheet.hairlineWidth,
     },
 });
