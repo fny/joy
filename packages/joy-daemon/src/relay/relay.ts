@@ -589,6 +589,19 @@ export interface JoyRetryInfo {
   status: number;    // the HTTP status that triggered the retry (e.g. 500)
 }
 
+/**
+ * Event-budget banner (#130). The relay caps a session at 50,000 events; past
+ * that it answers `429 session_event_budget_exhausted` and the lane drops the
+ * session's further output so the turn can still terminalize. That used to be
+ * a silent gap in the conversation — logged once on the daemon, invisible in
+ * the app. The card carries it instead, with the count of what was lost and
+ * the only recovery there is: continue in a fresh session.
+ */
+export interface JoyEventBudgetInfo {
+  since: number;   // epoch ms of the first refusal
+  dropped: number; // records the daemon could not deliver since then
+}
+
 /** Compaction banner the app renders while Claude summarizes the conversation. */
 export interface JoyCompactingInfo {
   trigger: 'auto' | 'manual'; // what kicked off the compaction
@@ -843,6 +856,13 @@ export class RelaySession {
 
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
     await this.mergeKey('joy__compacting', info);
+  }
+
+  /** The relay refused this session's events for good (#130): show the gap
+   *  and its recovery path on the card. Re-asserted with a growing `dropped`,
+   *  so the banner counts up rather than being written once. */
+  async updateEventBudget(info: JoyEventBudgetInfo | null): Promise<void> {
+    await this.mergeKey('joy__eventBudget', info);
   }
 
   async updateHandoff(info: JoyHandoffInfo | null): Promise<void> {
@@ -1199,7 +1219,19 @@ export function subscribeRecords(localSessionId: string, fn: (r: LoggedRecord) =
   subs.add(fn);
   return () => { subs!.delete(fn); };
 }
-export function forgetRecords(localSessionId: string): void { recordLogs.delete(localSessionId); recordSeqs.delete(localSessionId); recordSubs.delete(localSessionId); }
+export function forgetRecords(localSessionId: string): void { recordLogs.delete(localSessionId); recordSeqs.delete(localSessionId); recordSubs.delete(localSessionId); holders.delete(localSessionId); }
+
+// local session id -> its card holder. The nucleus lane knows things about a
+// session that only the card can show (the relay refusing its events, #130)
+// but must not reach into RelaySession internals — and a metadata patch has
+// to go through THIS object or the next merge would overwrite it. Registered
+// by createRelaySession, the one constructor every adapter uses; dropped with
+// the session's records.
+const holders = new Map<string, RelaySession>();
+/** The card holder for a local session, or null when it has none. */
+export function relaySessionFor(localSessionId: string): RelaySession | null {
+  return holders.get(localSessionId) ?? null;
+}
 
 /** Where RelaySession.send delivers records. One sink per process (the
  *  nucleus lane); null while no lane is running — records are then dropped,
@@ -1234,7 +1266,9 @@ export function createRelaySession(
   // as "not picked up" (codex review, 2026-09-04).
   const handoff = loadWindowRecord(opts.id)?.handoff;
   if (handoff) metadata.joy__handoff = handoff;
-  return new RelaySession({ client, relaySessionId: opts.id, metadata });
+  const rs = new RelaySession({ client, relaySessionId: opts.id, metadata });
+  holders.set(opts.id, rs);
+  return rs;
 }
 
 // ── Util ──────────────────────────────────────────────────────────────────────

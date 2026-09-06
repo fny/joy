@@ -387,6 +387,9 @@ export async function handleGetDirectoryTree(workingDirectory: string, data: Get
  *  (#537 residual). difftastic reads DFT_* the same way. Inherited config is
  *  therefore dropped for the child (the forced `--no-config` on rg is the
  *  second belt — see handleRipgrep). */
+/** Wall-clock cap on one jailed tool run (#538). */
+export const TOOL_TIMEOUT_MS = 120_000;
+
 export function jailedToolEnv(extraEnv?: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -400,7 +403,7 @@ export function jailedToolEnv(extraEnv?: Record<string, string>): NodeJS.Process
 // ripgrep and difftastic. ANY exit code counts
 // as success — the app inspects exitCode itself. Only spawn errors (ENOENT,
 // permission denied) cause success=false. Exported for its test only.
-export function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+export function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>, timeoutMs = TOOL_TIMEOUT_MS): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolveResult, rejectResult) => {
     const child = nodeSpawn(binary, args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -409,17 +412,42 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       env: jailedToolEnv(extraEnv),
     });
     // Nothing is ever fed to the tool: close stdin so a tool that would read
-    // it (rg with no path operand) exits instead of waiting forever.
+    // it (rg with no path operand) exits instead of waiting forever. The
+    // handlers ALSO give rg a path so it searches the tree rather than this
+    // empty pipe — see handleRipgrep (#538).
     child.stdin.end();
     // One decoder per stream: a multibyte character split between two pipe
     // chunks must not become replacement characters in matched text or
     // filenames (#540).
     const stdout = new TextAccumulator();
     const stderr = new TextAccumulator();
+    // Deadline (#538): a child that never exits — a tool wedged on a fifo, a
+    // pathological regex over a huge tree — used to hold the request and this
+    // promise forever. SIGTERM, then SIGKILL, then settle whether or not
+    // `close` ever fires: `close` waits for every holder of the pipes, and a
+    // signalled shell can leave a grandchild holding them open indefinitely.
+    let settled = false;
+    let timedOut = false;
+    const settle = (exitCode: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      resolveResult({ exitCode, stdout: stdout.end(), stderr: stderr.end(), timedOut });
+    };
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* already gone */ }
+      const hard = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        settle(-1);
+      }, 2_000);
+      hard.unref?.();
+    }, timeoutMs);
+    deadline.unref?.();
     child.stdout.on("data", (d: Buffer) => { stdout.push(d); });
     child.stderr.on("data", (d: Buffer) => { stderr.push(d); });
-    child.on("close", (code) => { resolveResult({ exitCode: code ?? 0, stdout: stdout.end(), stderr: stderr.end() }); });
-    child.on("error", (err) => { rejectResult(err); });
+    child.on("close", (code) => { settle(code ?? 0); });
+    child.on("error", (err) => { if (settled) return; settled = true; clearTimeout(deadline); rejectResult(err); });
   });
 }
 
@@ -487,7 +515,7 @@ export function jailToolArgs(
   args: unknown,
   workingDirectory: string,
   extraRoots: string[] = [],
-): { ok: true; args: string[] } | { ok: false; error: string } {
+): { ok: true; args: string[]; pathOperands: string[] } | { ok: false; error: string } {
   if (!Array.isArray(args) || !args.every((a) => typeof a === "string")) return { ok: false, error: "args must be an array of strings" };
   const spec = tool === "rg" ? RG_SPEC : DIFFT_SPEC;
   const argv = args as string[];
@@ -533,7 +561,7 @@ export function jailToolArgs(
     const v = validatePath(p, workingDirectory, extraRoots);
     if (!v.valid) return { ok: false, error: v.error ?? `Access denied: Path '${p}' is outside the working directory` };
   }
-  return { ok: true, args: argv };
+  return { ok: true, args: argv, pathOperands };
 }
 
 export async function handleRipgrep(workingDirectory: string, data: RipgrepRequest, extraRoots: string[] = []): Promise<RipgrepResponse> {
@@ -553,7 +581,20 @@ export async function handleRipgrep(workingDirectory: string, data: RipgrepReque
     // RIPGREP_CONFIG_PATH file can add options the jail refused, `--no-follow`
     // so no config, alias or default can make the walk cross a symlink out of
     // the jail (#537 residual). Nothing in RG_SPEC can turn either back on.
-    const result = await runTool(RG_BIN, [...RG_FORCED_ARGS, ...jailed.args], cwd ?? workingDirectory);
+    // Default search path (#538). rg searches STDIN, not the tree, when it is
+    // given no path operand and stdin is not a tty — and runTool always hands
+    // it a pipe. `rg review-needle` in a project full of matches therefore
+    // hung on that pipe (and, once it was closed, answered "no matches" while
+    // never opening a single project file). An explicit `.` makes the cwd the
+    // operand, which is what every caller meant. `--files` lists the tree and
+    // never reads stdin, so it is left alone. Filenames then print `./`-
+    // prefixed, the way rg always renders them relative to the given operand.
+    // Appended bare, never after a `--` of our own: a caller that already
+    // ended option parsing would see a second `--` as a literal path.
+    const needsDefaultPath = jailed.pathOperands.length === 0 && !jailed.args.includes("--files");
+    const argv = [...RG_FORCED_ARGS, ...jailed.args, ...(needsDefaultPath ? ["."] : [])];
+    const result = await runTool(RG_BIN, argv, cwd ?? workingDirectory);
+    if (result.timedOut) return { success: false, error: `ripgrep exceeded ${TOOL_TIMEOUT_MS / 1000}s and was terminated` };
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run ripgrep" };
@@ -571,6 +612,7 @@ export async function handleDifftastic(workingDirectory: string, data: Difftasti
   if (!jailed.ok) return { success: false, error: jailed.error };
   try {
     const result = await runTool(DIFFT_BIN, jailed.args, cwd ?? workingDirectory, { FORCE_COLOR: "1" });
+    if (result.timedOut) return { success: false, error: `difftastic exceeded ${TOOL_TIMEOUT_MS / 1000}s and was terminated` };
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run difftastic" };

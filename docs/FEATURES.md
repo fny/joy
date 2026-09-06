@@ -100,6 +100,13 @@ every relay; machines register per account.
   running → completed), thinking/turn lifecycle and per-turn usage arrive as
   sealed adapter records from the daemon for claude, codex, opencode and pi;
   a prompt typed straight into the terminal pane shows up as a user bubble too.
+- **A full session says so**: the relay caps a session at 50,000 events. Past
+  that its output can no longer be recorded, so the daemon drops it (the turn
+  still terminalizes). The loss is not silent (#130): the card carries
+  `joy__eventBudget` {since, dropped} — a banner like the retry/compacting
+  ones, counting what was lost — and the first refusal also fires one push
+  ("This session is full"). Both name the only recovery: continue in a new
+  session; retrying never clears the budget.
 - **Agents talk to agents (CLI)**: `joy ls` (agent, state, title), `joy check`
   (exit code = idle / busy / needs input), `joy send` queues behind a running
   turn and returns the turn id, `joy wait --turn` blocks on it, `joy ask`

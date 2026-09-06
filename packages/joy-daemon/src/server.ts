@@ -17,7 +17,7 @@
 import { moduleDir } from "./esm";
 import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
-import { mkdirSync, writeFileSync, readFileSync } from "fs";
+import { readFileSync } from "fs";
 import { initRelay, loadCredentials } from "./relay/relay.ts";
 import { migrateLegacyEnvFile, applyEnvStore } from "./domain/envStore";
 import { startNucleusLane } from "./relay/nucleusLane.ts";
@@ -25,6 +25,7 @@ import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
 import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
 import { ledgerFor } from "./domain/ledger";
+import { mkdirSecure, writeSecretFileAtomic } from "./domain/secretFile";
 import { importLegacyState } from "./domain/ledgerImport";
 
 // Provider keys for spawned agents live in the sealed store (~/.joy/env.sealed,
@@ -63,7 +64,11 @@ const PUBLIC_DIR = join(__dirname, "..", "public"); // public/ is at the package
 // H3: per-instance token required on all mutating HTTP routes — prevents
 // drive-by cross-origin session creation / prompt injection via no-cors POST.
 const SERVER_TOKEN = crypto.randomUUID();
-process.stderr.write(`[server] token: ${SERVER_TOKEN}\n`);
+// The token itself is NOT logged (#48): stderr becomes ~/.joy/.../daemon.log,
+// opened with the umask default, so printing it published machine-wide
+// session/bash/file access to every local account. It lives in daemon.json
+// (0600), which is where the CLI reads it from.
+process.stderr.write(`[server] control token written to daemon.json\n`);
 
 // Stable state file the `joy` CLI reads to locate + authenticate to this daemon
 // (the token only otherwise appears on stderr, whose destination depends on how
@@ -87,8 +92,8 @@ try {
 }
 function writeDaemonState(port: number): void {
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(join(STATE_DIR, "daemon.json"), JSON.stringify({
+    mkdirSecure(STATE_DIR);
+    writeSecretFileAtomic(join(STATE_DIR, "daemon.json"), JSON.stringify({
       token: SERVER_TOKEN, pid: process.pid, port,
       relay: joyRelayUrl(), relayKey: joyRelayKey(),
       startedAt: Date.now(), version: "joy-daemon/0.1.0",
@@ -158,9 +163,14 @@ const registry = new SessionRegistry({
 // once) and create({ id }) refuses it.
 if (importReport.quarantine.length) registry.quarantine(importReport.quarantine, "legacy import failed");
 
+// The port the local surface ACTUALLY bound. With PORT=0 the kernel picks
+// one and only onListening knows it — everything that dials the local
+// surface must read it from here rather than capture PORT (#588).
+let boundPort = PORT;
 startHttpServer({
   registry, port: PORT, publicDir: PUBLIC_DIR, token: SERVER_TOKEN,
   onListening: (port) => {
+    boundPort = port;
     if (port !== PORT) writeDaemonState(port);
     process.stderr.write(`webchat server running on http://127.0.0.1:${port} (relay ${joyRelayUrl()})\n`);
   },
@@ -217,7 +227,11 @@ if (process.env.JOY_V2_LANE !== "0") {
       // Borrow the lane's lease: acquiring a second one for the same machine
       // would release the lane's and the two would evict each other forever.
       borrowLease: () => nucleusLane?.currentLease() ?? null,
-      targetBase: `http://127.0.0.1:${PORT}`,
+      // Resolved per request from the BOUND port (#588): with PORT=0 the
+      // executor used to hold http://127.0.0.1:0 forever, so every tunneled
+      // files / git / terminal / usage request failed with a sealed 502
+      // while the local HTTP server was healthy.
+      targetBase: () => `http://127.0.0.1:${boundPort}`,
       targetHeaders: { "X-Joy-Token": SERVER_TOKEN },
       log: (line) => process.stderr.write(line + "\n"),
     });

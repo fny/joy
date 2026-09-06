@@ -246,6 +246,50 @@ export function withFd<T>(path: string, flags: fs.OpenMode, fn: (fd: number) => 
 
 // ── bounded response writer ──────────────────────────────────────────────────
 
+// ── bounded stream tails ─────────────────────────────────────────────────────
+
+/**
+ * A fixed-size tail of a stream that must still be DRAINED (#69).
+ *
+ * The failure it replaces: a long-running child's stderr listener that kept
+ * appending to a startup buffer for the life of the session, so the daemon
+ * retained the server's entire log. Dropping the listener instead is worse —
+ * an unread pipe fills at ~64 KiB and the child blocks on write forever. So:
+ * read every chunk, keep only the last `maxBytes`, and hand the tail back for
+ * a diagnostic ("what did it say before it died?").
+ *
+ * Bytes, not characters: chunks are concatenated and trimmed at the byte
+ * level, then decoded once at read time, so a multibyte character split
+ * across chunks survives. The trim can cut a character in half at the FRONT
+ * of the window; `text()` drops the leading partial rather than emitting a
+ * replacement character.
+ */
+export class BoundedTail {
+  readonly maxBytes: number;
+  #buf: Buffer = Buffer.alloc(0);
+  #dropped = 0;
+  constructor(maxBytes = 16 * 1024) { this.maxBytes = Math.max(1, maxBytes); }
+  push(chunk: Buffer | string): void {
+    const b = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    const joined = this.#buf.length ? Buffer.concat([this.#buf, b]) : Buffer.from(b);
+    if (joined.length <= this.maxBytes) { this.#buf = joined; return; }
+    this.#dropped += joined.length - this.maxBytes;
+    this.#buf = joined.subarray(joined.length - this.maxBytes);
+  }
+  /** Bytes discarded because they fell out of the window. */
+  get droppedBytes(): number { return this.#dropped; }
+  get byteLength(): number { return this.#buf.length; }
+  /** The retained tail, decoded. A leading partial character is dropped. */
+  text(): string {
+    let start = 0;
+    // A UTF-8 continuation byte (10xxxxxx) at the front is the tail of a
+    // character whose lead byte was trimmed away.
+    while (start < this.#buf.length && (this.#buf[start] & 0xc0) === 0x80) start++;
+    return this.#buf.subarray(start).toString("utf8");
+  }
+  clear(): void { this.#buf = Buffer.alloc(0); }
+}
+
 export interface BoundedSink {
   readonly writableLength: number;
   write(chunk: string): boolean;

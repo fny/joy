@@ -23,7 +23,14 @@ export interface ExecutorOpts {
    *  provided the executor never calls acquire. */
   borrowLease?: () => { leaseId: string; leaseToken: string } | null;
   machineId: string;           // daemon identity (lease daemon_id)
-  targetBase: string;          // local surface, e.g. http://127.0.0.1:4997
+  /** Local surface, e.g. http://127.0.0.1:4997. A FUNCTION when the port is
+   *  not known at construction time (#588): with PORT=0 the HTTP server binds
+   *  an arbitrary port and only `onListening` learns it, so a base captured
+   *  as a string held `http://127.0.0.1:0` for the life of the process and
+   *  every tunneled files / git / terminal / usage request came back a sealed
+   *  502 while the local server was perfectly healthy. Resolved per request,
+   *  so a rebind is picked up too. */
+  targetBase: string | (() => string);
   targetHeaders?: Record<string, string>; // e.g. X-Joy-Token for the local API
   log?: (line: string) => void;
   /** Replay guard to share/inspect (tests); defaults to a fresh 10k / 15 min one. */
@@ -83,6 +90,8 @@ export function resolveLocalPath(targetBase: string, p: unknown): string | null 
 
 export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   const log = opts.log ?? (() => {});
+  /** The local surface as it stands NOW (#588) — never captured once. */
+  const targetBase = typeof opts.targetBase === "function" ? opts.targetBase : () => opts.targetBase as string;
   const key = deriveTunnelKey(opts.machineKey, opts.machineId);
   const seen = opts.replayGuard ?? new SeenStreamIds();
   let stopped = false;
@@ -184,7 +193,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
 
     // The path must land on the LOCAL surface (#119) — a sealed 400 otherwise,
     // and the daemon token never leaves the loopback.
-    const target = resolveLocalPath(opts.targetBase, head.p);
+    const target = resolveLocalPath(targetBase(), head.p);
     if (target === null) {
       log(`tunnel request ${requestId}: refused path ${JSON.stringify(String(head.p).slice(0, 120))} — not a local surface path (#119)`);
       const body = new TextEncoder().encode(JSON.stringify({ error: "bad_path" }));
