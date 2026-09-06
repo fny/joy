@@ -257,8 +257,13 @@ describe("nucleusLane on the coordinator", () => {
     expect(ledger.getCommand(done.id)?.state).toBe("cancelled");
     const registry: any = { get: (i: string) => (i === "cs000004" ? s : undefined), list: () => [s], create: async () => s, chatHistory: () => [], listRecords: () => [{ id: "cs000004", v2SessionId: "v2s4" }], saveRecord: () => {} };
     handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m4", log: () => {} });
-    await until(() => !!relay.terminal("t5"), 10_000);
-    expect(relay.terminal("t5")).toMatchObject({ terminalState: "cancelled" });
+    // The ended turn's terminal is DERIVED from the ledger row before any
+    // orphan cleanup and published as the recorded outcome of a previous
+    // generation's turn (reconcile{terminal}, #74) — once, never invented.
+    await until(() => relay.terminals("t5").length > 0, 10_000);
+    expect(relay.terminals("t5")[0]).toMatchObject({ terminalState: "cancelled" });
+    await sleep(300);
+    expect(relay.terminals("t5")).toHaveLength(1);
     // The row is running but NO /start was ever acknowledged (this fixture is
     // exactly "died between the driver's echo and the POST", Astra on
     // edd69fd1): the resumed loop posts it — once, under the stable event id.

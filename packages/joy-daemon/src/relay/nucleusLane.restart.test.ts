@@ -31,7 +31,10 @@ type Prior =
   | "running"         // /start applied on the relay, the ack receipt lost
   | "acknowledged"    // /start applied AND acknowledged (durable ack)
   | "cancelling"      // acknowledged, then the app requested a cancel before the crash
-  | "closed_remotely"; // before /start; an intermediate generation already closed the turn `interrupted`
+  | "closed_remotely" // before /start; an intermediate generation already closed the turn `interrupted`
+  | "adoption_unavailable_twice" // before /start; the relay answers reconcile{running} 503 twice, then normally
+  | "adoption_unavailable"       // before /start; the relay answers reconcile{running} 503 for good
+  | "terminal_before_outbox";    // /start applied; the command COMPLETED in the ledger, the process died before its terminal row was committed
 
 let dir = "";
 let prevHome: string | undefined;
@@ -58,17 +61,30 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** Count POST …/start requests the lane sends (the lane uses global fetch). */
-function countStarts(): { starts: () => number } {
+/** Wrap global fetch (the lane uses it): count POST …/start requests and
+ *  successful adoptions (reconcile{running} answered 2xx), and — when
+ *  `unavailable` says so for the n-th such request — answer reconcile{running}
+ *  with a 503 instead of forwarding it (the relay is unreachable for THAT
+ *  question only; everything else reaches the real relay). */
+function interceptFetch(unavailable: (n: number) => boolean = () => false): { starts: () => number; adoptions: () => number; reconcileRunning: () => number } {
   const real = globalThis.fetch;
-  let n = 0;
-  globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  let starts = 0, adoptions = 0, reconciles = 0;
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if ((init?.method ?? "GET") === "POST" && /\/daemon\/turns\/[^/]+\/start$/.test(url)) n++;
-    return real(input, init);
+    const method = init?.method ?? "GET";
+    if (method === "POST" && /\/daemon\/turns\/[^/]+\/start$/.test(url)) starts++;
+    const isReconcileRunning = method === "POST" && /\/daemon\/turns\/[^/]+\/reconcile$/.test(url)
+      && (JSON.parse(String(init?.body ?? "{}")) as { resolution?: string }).resolution === "running";
+    if (isReconcileRunning) {
+      reconciles++;
+      if (unavailable(reconciles)) return new Response(JSON.stringify({ error: "temporarily_unavailable" }), { status: 503, headers: { "content-type": "application/json" } });
+    }
+    const res = await real(input, init);
+    if (isReconcileRunning && res.ok) adoptions++;
+    return res;
   }) as typeof fetch;
   restoreFetch = () => { globalThis.fetch = real; };
-  return { starts: () => n };
+  return { starts: () => starts, adoptions: () => adoptions, reconcileRunning: () => reconciles };
 }
 
 async function scenario(prior: Prior) {
@@ -92,7 +108,8 @@ async function scenario(prior: Prior) {
   expect((await d1.received(offer.deliveryId)).status).toBe(200);
   expect((await d1.submitted(offer.turnId)).status).toBe(200);
   const turnId = offer.turnId as string;
-  if (prior !== "dispatching" && prior !== "closed_remotely") {
+  const beforeStart: readonly Prior[] = ["dispatching", "closed_remotely", "adoption_unavailable_twice", "adoption_unavailable"];
+  if (!beforeStart.includes(prior)) {
     expect((await d1.start(turnId, { runtimeEventId: `start:${turnId}` })).status).toBe(200);
   }
   const first = new FakeDriver(id, ledger.openGeneration(id, "codex"));
@@ -105,6 +122,13 @@ async function scenario(prior: Prior) {
   await settle();
   first.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "RuntimeTurn" });
   expect(c.state(row.id)).toBe("running");
+  if (prior === "terminal_before_outbox") {
+    // The runtime finished and the ledger committed `completed`; the process
+    // died before the lane committed the terminal outbox row.
+    first.emit({ kind: "turn_ended", runtimeTurnId: "RuntimeTurn", status: "completed" });
+    expect(c.state(row.id)).toBe("completed");
+    expect(ledger.hasOutboundEvent(`term:${turnId}`)).toBe(false);
+  }
   // The receipts the previous lane left: the /start intent always (it was
   // about to post, or did); the ack only when the answer was recorded.
   ledger.addReceipt(id, { kind: "relay_start_intent", ref: turnId, commandId: row.id });
@@ -136,17 +160,19 @@ async function scenario(prior: Prior) {
   c = coordinatorFor(ledger);
   c.adopt(id, next);
   next.ready();
-  await until(() => c.state(row.id) === "running");
+  await until(() => c.state(row.id) === (prior === "terminal_before_outbox" ? "completed" : "running"));
   const s: any = { id, status: "active", cwd: dir, agentFlavor: "codex", busy: () => c.busy(id), abort: () => c.abortRunning(id), toJSON: () => ({ id, cwd: dir, status: "active", agent: "codex" }) };
   const registry: any = { get: (x: string) => (x === id ? s : undefined), list: () => [s], create: async () => s, chatHistory: () => [], listRecords: () => [{ id, v2SessionId: sid }], saveRecord: () => {} };
   retire = async () => { c.retire(id, "restart"); await settle(); };
   const logs: string[] = [];
-  const { starts } = countStarts();
+  const unavailable = prior === "adoption_unavailable" ? () => true : prior === "adoption_unavailable_twice" ? (n: number) => n <= 2 : undefined;
+  const { starts, adoptions, reconcileRunning } = interceptFetch(unavailable);
   const execution = async () => (await r.call("GET", `/joy/v2/sessions/${sid}`)).json.execution as { state: string; turnId: string | null; cancelRequested: boolean };
   const events = async (kind: string) => (await r.db.query("SELECT count(*)::int AS n FROM session_events WHERE session_id = $1 AND kind = $2", [sid, kind])).rows[0].n as number;
   const turnRow = async () => (await r.db.query("SELECT state, terminal_state, lease_epoch FROM turns WHERE id = $1", [turnId])).rows[0] as { state: string; terminal_state: string | null; lease_epoch: string | number };
-  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x) });
-  return { id, sid, turnId, row, ledger, next, logs, starts, execution, events, turnRow, coordinator: () => c };
+  // The in-loop adoption backoff is shortened (a test seam); production waits 1s, 2s, 4s, 8s.
+  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x), adoptionRetryMs: [200, 400] });
+  return { id, sid, turnId, row, ledger, next, logs, starts, adoptions, reconcileRunning, execution, events, turnRow, lane: () => lane!, coordinator: () => c };
 }
 
 test.each(["dispatching", "running", "acknowledged"] as const)(
@@ -214,4 +240,79 @@ test("real relay: /start answers 409 turn_terminal for a turn the relay already 
   expect(await t.events("turn.terminal")).toBe(1);
   expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "interrupted" });
   expect(t.starts()).toBeLessThanOrEqual(1);
+}, 30_000);
+
+test("real relay: reconcile{running} answers 503 twice, then normally — the local command stays running, ONE adoption lands, no /start-refusal cancel (F14)", async () => {
+  const t = await scenario("adoption_unavailable_twice");
+  // The bounded backoff rides out the outage; the third answer adopts.
+  await until(() => t.logs.some((l) => /adopted on the relay under this lease/.test(l)), 15_000);
+  expect(t.reconcileRunning()).toBe(3);
+  expect(t.adoptions()).toBe(1);
+  expect(t.logs.filter((l) => /adoption unavailable .* retrying/.test(l))).toHaveLength(2);
+  await until(async () => (await t.execution()).state === "running");
+  expect(await t.execution()).toMatchObject({ state: "running", turnId: t.turnId, cancelRequested: false });
+  expect(String((await t.turnRow()).lease_epoch)).toBe("2");
+  // The owed /start is posted once the adoption is in (a replay: one start event, the ack recorded).
+  await until(() => t.ledger.hasReceipt(t.id, "relay_start", t.turnId));
+  expect(t.starts()).toBe(1);
+  expect(await t.events("turn.started")).toBe(1);
+  await sleep(400);
+  expect(t.coordinator().state(t.row.id)).toBe("running");
+  expect(t.next.interrupts).toHaveLength(0);
+  expect(t.logs.some((l) => /→ cancelled locally/.test(l))).toBe(false);
+  expect(t.logs.some((l) => /was orphaned → interrupted/.test(l))).toBe(false);
+  expect(t.lane().relayTurns()).toEqual([expect.objectContaining({ turnId: t.turnId, commandId: t.row.id, state: "running" })]);
+  // The runtime ends → one terminal, the runtime's own.
+  t.next.emit({ kind: "turn_ended", runtimeTurnId: "RuntimeTurn", status: "completed" });
+  await until(() => t.coordinator().state(t.row.id) === "completed");
+  await until(async () => (await t.execution()).state === "idle");
+  await sleep(300);
+  expect(await t.events("turn.terminal")).toBe(1);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+}, 30_000);
+
+test("real relay: reconcile{running} answers 503 for good — the turn is adoption_pending in the lane state, the command keeps running, nothing is cancelled and no /start is posted; the runtime's outcome still lands as the ONE terminal (F14)", async () => {
+  const t = await scenario("adoption_unavailable");
+  await until(() => t.logs.some((l) => /adoption_pending, the command keeps running/.test(l)), 15_000);
+  expect(t.reconcileRunning()).toBe(3); // the bounded backoff: 1 + 2 retries
+  expect(t.adoptions()).toBe(0);
+  expect(t.lane().relayTurns()).toEqual([expect.objectContaining({
+    turnId: t.turnId, localSessionId: t.id, commandId: t.row.id, state: "adoption_pending", attempts: 1, lastError: expect.stringMatching(/503/),
+  })]);
+  await sleep(600);
+  // Unresolved is not permission to cancel — or to guess a /start.
+  expect(t.coordinator().state(t.row.id)).toBe("running");
+  expect(t.next.interrupts).toHaveLength(0);
+  expect(t.starts()).toBe(0);
+  expect(t.logs.some((l) => /→ cancelled locally/.test(l))).toBe(false);
+  expect(t.logs.some((l) => /was orphaned → interrupted/.test(l))).toBe(false);
+  expect(await t.execution()).toMatchObject({ state: "orphaned", turnId: t.turnId }); // still the relay's picture; nothing invented
+  expect(await t.events("turn.terminal")).toBe(0);
+  // The runtime ends while the adoption is still pending: the recorded
+  // outcome is the turn's terminal — published once, never `interrupted`.
+  t.next.emit({ kind: "turn_ended", runtimeTurnId: "RuntimeTurn", status: "completed" });
+  await until(() => t.coordinator().state(t.row.id) === "completed");
+  await until(async () => (await t.turnRow()).state === "terminal");
+  await sleep(300);
+  expect(await t.events("turn.terminal")).toBe(1);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+  expect(t.lane().relayTurns()).toEqual([]);
+}, 30_000);
+
+test("real relay: the command COMPLETED in the ledger but the process died before its terminal row — boot derives the terminal from the command BEFORE orphan cleanup: ONE `completed`, never `interrupted` (F14)", async () => {
+  const t = await scenario("terminal_before_outbox");
+  await until(() => t.logs.some((l) => /completed in the ledger with no terminal row/.test(l)));
+  await until(async () => (await t.turnRow()).state === "terminal");
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+  expect(t.logs.some((l) => /was orphaned → interrupted/.test(l))).toBe(false);
+  await sleep(500);
+  expect(await t.events("turn.terminal")).toBe(1);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+  expect((await t.execution()).state).toBe("idle");
+  // The derived row is the stable `term:<turn>`: acked once, never doubled.
+  expect(t.ledger.hasOutboundEvent(`term:${t.turnId}`)).toBe(true);
+  await until(() => !t.ledger.hasTerminalFor(t.turnId)); // acked
+  expect(t.starts()).toBe(0);
+  expect(t.adoptions()).toBe(0);
+  expect(t.coordinator().state(t.row.id)).toBe("completed");
 }, 30_000);

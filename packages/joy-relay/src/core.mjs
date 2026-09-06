@@ -928,8 +928,23 @@ export function createCore(db, notify) {
    *  gets the start bookkeeping here (started_at, run token, prompt command
    *  applied, `turn.started` event) so it reads like any running turn.
    *  `terminal` goes through the shared terminalization (cancel commands
-   *  resolve, slot clears). */
+   *  resolve, slot clears).
+   *
+   *  A never-started turn's adoption IS its first start, so it takes the
+   *  first-start budget decision turnStarted takes (#613): a session whose
+   *  event log is full commits the turn `failed` (session_event_budget_
+   *  exhausted, delivery superseded) and answers the same 409 /start would —
+   *  adoption used to hand out `running` here, /start then replayed and the
+   *  first output was refused with 429 (Astra, F14). Re-fencing a turn that
+   *  already started is NOT gated: its start was authorized under the
+   *  predecessor's budget and its output is refused per fact, as always. */
   async function reconcileTurn(turnId, leaseRef, body) {
+    const r = await reconcileTurnTx(turnId, leaseRef, body);
+    if (r.budgetExhausted) throw new ApiError(409, 'session_event_budget_exhausted');
+    return r;
+  }
+
+  function reconcileTurnTx(turnId, leaseRef, body) {
     return withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
       if (turn.state === 'terminal') return { turnId, state: 'terminal', terminalState: turn.terminal_state, replay: true };
       const live = ['dispatching', 'running', 'cancelling'].includes(turn.state);
@@ -953,7 +968,13 @@ export function createCore(db, notify) {
         } else {
           // Adopted before /start ever landed (the predecessor died between
           // the runtime's echo and the POST): the same bookkeeping /start
-          // does, so the app's projection and a later /start (replay) agree.
+          // does, so the app's projection and a later /start (replay) agree —
+          // including its budget decision, COMMITTED here and signalled to
+          // the caller (a throw would roll the terminalization back).
+          if (await eventBudgetExhausted(t, s.id)) {
+            await failTurnBudgetExhausted(t, s, turn);
+            return { turnId, state: 'terminal', terminalState: 'failed', budgetExhausted: true };
+          }
           const runToken = body.runToken ?? randomUUID();
           await t.query(
             `UPDATE turns SET state = $2, lease_epoch = $3, run_token = $4, started_at = now(), last_progress_at = now() WHERE id = $1`,
