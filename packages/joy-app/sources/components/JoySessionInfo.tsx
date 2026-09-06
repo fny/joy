@@ -10,7 +10,8 @@ import * as React from 'react';
 import { View, Text, Animated, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import { Typography } from '@/constants/Typography';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
@@ -75,12 +76,12 @@ function CopyRow({ title, value, icon, short }: { title: string; value: string; 
             icon={icon}
             showChevron={false}
             rightElement={<Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={18} color={copied ? '#30D158' : '#8E8E93'} />}
-            onPress={async () => {
-                await Clipboard.setStringAsync(value);
+            onPress={guarded(async () => {
+                if (!(await copyToClipboard(value))) return;
                 setCopied(true);
                 if (timerRef.current) clearTimeout(timerRef.current);
                 timerRef.current = setTimeout(() => setCopied(false), 2000);
-            }}
+            })}
         />
     );
 }
@@ -113,7 +114,7 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
             return;
         }
         let cancelled = false;
-        (async () => {
+        void (async () => {
             try {
                 const ictx = sync.machineOnlyCtx(machineId);
                 if (!ictx) { setLiveFailed(true); return; }

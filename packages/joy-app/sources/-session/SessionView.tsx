@@ -46,7 +46,8 @@ import { useOverlayNav } from '@/-session/sessionOverlayNav';
 import { formatPathRelativeToHome, getResumeCommandBlock, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -1354,11 +1355,11 @@ function ResumeCommandCopyBlock({ resumeCommandBlock }: {
 
     return (
         <Pressable
-            onPress={async () => {
-                await Clipboard.setStringAsync(resumeCommandBlock.copyText);
+            onPress={guarded(async () => {
+                if (!(await copyToClipboard(resumeCommandBlock.copyText))) return;
                 setCopied(true);
                 setTimeout(() => setCopied(false), 2000);
-            }}
+            })}
             style={{
                 minHeight: 48,
                 borderRadius: 14,

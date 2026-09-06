@@ -1,7 +1,8 @@
 import * as React from 'react';
 import { Text, View, StyleSheet, Platform, Pressable } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { guarded } from '@/utils/guardAsync';
 import { useUnistyles } from 'react-native-unistyles';
 
 interface CommandViewProps {
@@ -94,12 +95,12 @@ export const CommandView = React.memo<CommandViewProps>(({
     const [copied, setCopied] = React.useState(false);
     const copyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     React.useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
-    const copyCommand = React.useCallback(() => {
-        void Clipboard.setStringAsync(command);
+    const copyCommand = React.useCallback(guarded(async () => {
+        if (!(await copyToClipboard(command))) return; // the checkmark only after a real write
         setCopied(true);
         if (copyTimer.current) clearTimeout(copyTimer.current);
         copyTimer.current = setTimeout(() => setCopied(false), 1500);
-    }, [command]);
+    }), [command]);
 
     return (
         <View style={[

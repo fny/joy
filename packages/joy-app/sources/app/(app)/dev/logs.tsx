@@ -5,7 +5,7 @@ import { log, MAX_APP_LOG_ENTRIES } from '@/log';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Item } from '@/components/Item';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { Modal } from '@/modal';
 
 export default function LogsScreen() {
@@ -59,7 +59,7 @@ export default function LogsScreen() {
         }
 
         const allLogs = logs.join('\n');
-        await Clipboard.setStringAsync(allLogs);
+        if (!(await copyToClipboard(allLogs))) return;
         Modal.alert('Copied', `${logs.length} log entries copied to clipboard`);
     };
 
