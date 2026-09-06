@@ -238,41 +238,51 @@ async function cmdStart(): Promise<number> {
  *  the kernel gives them — Linux /proc/<pid>/cmdline is NUL-delimited; macOS
  *  `ps` prints one joined string, split on whitespace as a best effort), its
  *  executable (Linux /proc/<pid>/exe), its kernel start identity
- *  (processStartId), when it started, and its working directory (to resolve
- *  a relative script operand). null = no such process. */
-export interface ProcessIdentity { argv: string[]; command: string; exe?: string; startId?: string; startedAt?: number; cwd?: string }
-export function processIdentity(pid: number): ProcessIdentity | null {
+ *  (processStartId) and its working directory (to resolve a relative script
+ *  operand).
+ *
+ *  Three outcomes, not two (Astra on f677e68a): `null` = NO SUCH PROCESS —
+ *  the kernel's ESRCH, the one answer that means the daemon is gone;
+ *  `unreadable` = the process EXISTS but the OS would not describe it
+ *  (EACCES on /proc/<pid>/cmdline, a hidepid mount, a `ps` that prints
+ *  nothing for a live pid). An unreadable live process is not a dead one:
+ *  it can be matched to daemon.json neither way, and `joy stop` must keep
+ *  the record rather than declare the daemon gone. */
+export interface ProcessIdentity { argv: string[]; command: string; exe?: string; startId?: string; cwd?: string }
+export interface ProcessUnreadable { unreadable: true; reason: string }
+export function processIdentity(pid: number): ProcessIdentity | ProcessUnreadable | null {
   if (osPlatform() === "linux") {
     let argv: string[];
     try {
       argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
       if (argv[argv.length - 1] === "") argv.pop(); // the trailing NUL terminator
-    } catch { return null; }
+    } catch (e) {
+      if (!processExists(pid)) return null;
+      return { unreadable: true, reason: `/proc/${pid}/cmdline could not be read (${(e as NodeJS.ErrnoException).code ?? "unknown error"})` };
+    }
     let cwd: string | undefined;
     try { cwd = readlinkSync(`/proc/${pid}/cwd`); } catch { /* a foreign uid's process; the command alone decides */ }
     let exe: string | undefined;
     // "/path/to/node (deleted)" when the binary was replaced (a node upgrade
     // under a running daemon): still the binary it started from.
     try { exe = readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, ""); } catch { /* foreign uid, or a kernel thread */ }
-    let startedAt: number | undefined;
-    try {
-      // starttime (field 22 of /proc/<pid>/stat) in clock ticks since boot
-      // (CLK_TCK = 100 on every Linux Node ships for); btime is the boot time
-      // in epoch seconds. For the legacy skew check only — the exact identity
-      // is startId.
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-      const ticks = Number(fields[19]);
-      const btimeLine = readFileSync("/proc/stat", "utf8").split("\n").find((l) => l.startsWith("btime "));
-      const btime = btimeLine ? Number(btimeLine.slice(6).trim()) : NaN;
-      if (Number.isFinite(ticks) && Number.isFinite(btime)) startedAt = (btime + ticks / 100) * 1000;
-    } catch { /* command alone still identifies it */ }
-    return { argv, command: argv.join(" "), exe, startId: processStartId(pid) ?? undefined, startedAt, cwd };
+    return { argv, command: argv.join(" "), exe, startId: processStartId(pid) ?? undefined, cwd };
   }
   const r = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
   const command = r.status === 0 ? r.stdout.trim() : "";
-  if (!command) return null;
+  if (!command) {
+    if (!processExists(pid)) return null;
+    return { unreadable: true, reason: `ps -o command= -p ${pid} printed nothing for a live process` };
+  }
   return { argv: command.split(/\s+/), command, startId: processStartId(pid) ?? undefined };
+}
+
+/** Is there a process with this pid at all, whoever owns it? `kill(pid, 0)`
+ *  delivers nothing: ESRCH is the kernel's "no such process"; success or
+ *  EPERM (another user's) is a live one. Anything else counts as live — the
+ *  caller then refuses to act rather than declare a daemon dead. */
+export function processExists(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== "ESRCH"; }
 }
 
 /** Node options that consume the next argument. `-e`/`-p` are deliberately
@@ -336,76 +346,64 @@ export function execMatches(identity: Pick<ProcessIdentity, "argv" | "exe">, rec
   return got === want;
 }
 
-/** LEGACY identity, for a daemon.json written before `entry` was recorded
- *  (#495): the server.ts must sit under a `joy-daemon/` path segment — a
- *  checkout (packages/joy-daemon/src/server.ts) or an install
- *  (@fny/joy-daemon/src/server.ts). The old rule, "contains server.ts and
- *  tsx", accepted `node --import tsx /home/u/unrelated/server.ts`. */
-export function looksLikeJoyDaemon(argv: string[] | string): boolean {
-  const entry = serverEntryOf(argv);
-  return !!entry && /(^|\/)joy-daemon\//.test(entry);
-}
-
-/** LEGACY daemon.json (no startId) wrote startedAt a moment after the
- *  process started (module load, then listen). Anything further apart than
- *  this is a different process that inherited the pid. */
-const START_SKEW_MS = 120_000;
-
 /** Is `pid` the daemon `state` (daemon.json) describes — not merely a live
  *  process that inherited its number? A pid in a file outlives the process
  *  that wrote it; `joy stop` used to SIGTERM whatever now held it (#495).
  *
  *  `stale: true` = proven to be some OTHER process (or none): the record can
- *  go. `stale: false` = the OS gave too little evidence to prove it either
- *  way: the record stays and nothing is signalled.
+ *  go. `stale: false` = UNVERIFIABLE — the evidence proves it neither way:
+ *  the record stays and nothing is signalled directly.
  *
- *  A record with `startId` is verified exactly: the live pid's kernel start
- *  identity must equal the recorded one (pid + start time is the OS's own
- *  notion of process identity — a reused pid cannot reproduce it), its
- *  script operand must be exactly the recorded entry, and its executable
- *  must match the recorded one wherever the OS gives executable evidence.
- *  A legacy record falls back to the joy-daemon/ path rule and the
- *  startedAt skew. */
+ *  Verification is exact or nothing. The record must carry the daemon's own
+ *  kernel start identity (`startId`, written at launch since #495) and the
+ *  live pid's must equal it — pid + start time is the OS's own notion of
+ *  process identity; a reused pid cannot reproduce it — then the script
+ *  operand must be exactly the recorded entry, and the executable must match
+ *  wherever the OS gives executable evidence. A record WITHOUT a start
+ *  identity — written by a daemon from before it was recorded, or on an OS
+ *  that would not report one — is unverifiable, never stale (Astra on
+ *  f677e68a): the command-line shape and the 120-second startedAt skew it
+ *  used to fall back on accepted a reused pid inside the window and cannot
+ *  tell OUR server.ts from another install's. Such a daemon must be
+ *  restarted once (it records its identity at launch) before `joy stop` can
+ *  verify it; until then only its supervisor, which owns the pid on its own
+ *  evidence, may stop it (#502). */
 export function verifyDaemonPid(
   pid: number,
-  state: { startedAt?: number; startId?: string | null; entry?: string; exec?: string } | null,
-  identity: ProcessIdentity | null,
+  state: { startId?: string | null; entry?: string; exec?: string } | null,
+  identity: ProcessIdentity | ProcessUnreadable | null,
 ): { ok: true } | { ok: false; stale: boolean; reason: string } {
   if (!identity) return { ok: false, stale: true, reason: `pid ${pid} is not running` };
+  // A live process the OS would not describe is not proven to be anything:
+  // neither the daemon nor a stranger. Only ESRCH means the daemon is gone.
+  if ("unreadable" in identity) return { ok: false, stale: false, reason: `pid ${pid} is running but ${identity.reason}` };
   const shown = identity.command.slice(0, 80) || "unknown command";
-  if (state?.startId) {
-    if (!identity.startId) return { ok: false, stale: false, reason: `the OS did not report when pid ${pid} started, so it cannot be matched to daemon.json` };
-    if (identity.startId !== state.startId) {
-      return { ok: false, stale: true, reason: `stale pid: pid ${pid} started at a different time than daemon.json records — the number was reused (running: ${shown})` };
-    }
+  const unverifiable = (why: string) => ({ ok: false as const, stale: false, reason: `${why}, so pid ${pid} cannot be matched to it` });
+  if (!state?.startId) {
+    return unverifiable(state?.startId === null
+      ? "the daemon could not read its own start identity from the OS when it launched"
+      : "daemon.json records no start identity for its daemon (written before identities were recorded)");
   }
-  if (state?.entry) {
-    // The daemon recorded the script it runs (process.argv[1], absolute): the
-    // live argv must launch EXACTLY that file — a same-looking joy-daemon
-    // from another install, or any other server.ts, is not the process
-    // daemon.json describes. A relative operand (`tsx src/server.ts` from the
-    // package dir) is resolved against the process's cwd where the kernel
-    // reports it.
-    const operand = serverEntryOf(identity.argv);
-    const entry = operand && !isAbsolute(operand) && identity.cwd ? resolve(identity.cwd, operand) : operand;
-    if (entry !== state.entry) {
-      return { ok: false, stale: true, reason: `stale pid: pid ${pid} is not the daemon daemon.json records (expected ${state.entry}; running: ${shown})` };
-    }
-    const exec = execMatches(identity, state.exec);
-    if (exec === false) {
-      return { ok: false, stale: true, reason: `stale pid: pid ${pid} runs a different executable than daemon.json records (${shown})` };
-    }
-    // No executable evidence at all: the exact start identity carries a new
-    // record on its own; a legacy record has only the skew below, which is
-    // not proof.
-    if (exec === null && !state.startId) {
-      return { ok: false, stale: false, reason: `pid ${pid}'s executable could not be resolved to compare with daemon.json (${shown})` };
-    }
-  } else if (!looksLikeJoyDaemon(identity.argv)) {
-    return { ok: false, stale: true, reason: `stale pid: pid ${pid} is not a joy-daemon (${shown})` };
+  if (!state.entry) return unverifiable("daemon.json records no entry script for its daemon");
+  if (!identity.startId) return { ok: false, stale: false, reason: `the OS did not report when pid ${pid} started, so it cannot be matched to daemon.json` };
+  if (identity.startId !== state.startId) {
+    return { ok: false, stale: true, reason: `stale pid: pid ${pid} started at a different time than daemon.json records — the number was reused (running: ${shown})` };
   }
-  if (!state?.startId && identity.startedAt && state?.startedAt && Math.abs(identity.startedAt - state.startedAt) > START_SKEW_MS) {
-    return { ok: false, stale: true, reason: `stale pid: pid ${pid} started at a different time than daemon.json records — the number was reused` };
+  // The daemon recorded the script it runs (process.argv[1], absolute): the
+  // live argv must launch EXACTLY that file — a same-looking joy-daemon
+  // from another install, or any other server.ts, is not the process
+  // daemon.json describes. A relative operand (`tsx src/server.ts` from the
+  // package dir) is resolved against the process's cwd where the kernel
+  // reports it.
+  const operand = serverEntryOf(identity.argv);
+  const entry = operand && !isAbsolute(operand) && identity.cwd ? resolve(identity.cwd, operand) : operand;
+  if (entry !== state.entry) {
+    return { ok: false, stale: true, reason: `stale pid: pid ${pid} is not the daemon daemon.json records (expected ${state.entry}; running: ${shown})` };
+  }
+  // No executable evidence at all (null) is carried by the exact start
+  // identity; a DIFFERENT executable is a different process.
+  if (execMatches(identity, state.exec) === false) {
+    return { ok: false, stale: true, reason: `stale pid: pid ${pid} runs a different executable than daemon.json records (${shown})` };
   }
   return { ok: true };
 }
@@ -527,9 +525,12 @@ export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number>
   // answer the only evidence is daemon.json, which outlives its writer — the
   // pid must be proven to still be OUR daemon before anything is signalled
   // (#495): exact kernel start identity, exact entry script, matching
-  // executable. A reused pid is refused as stale; too little OS evidence is
-  // refused as unverifiable. Neither gets a signal.
+  // executable. A reused pid is refused as stale (record removed); a record
+  // without a start identity, or a live pid the OS would not describe, is
+  // UNVERIFIABLE (record kept). Neither gets a direct signal. Only a pid the
+  // kernel says does not exist (ESRCH) is a dead daemon.
   let pid: number | undefined = Number.isInteger(s?.pid) && s.pid > 0 ? s.pid : undefined;
+  let unverified: string | null = null; // why daemon.json's pid could not be proven to be its daemon
   if (!pid) {
     if (!st?.pid) { console.log("daemon not running"); return 0; }
     const identity = processIdentity(st.pid);
@@ -546,9 +547,7 @@ export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number>
         console.log(`  ${c.dim("stale daemon.json removed — nothing signalled")}`);
         return 1;
       }
-      console.log(`${bad} cannot prove pid ${st.pid} is the daemon daemon.json records (${v.reason}) — nothing signalled`);
-      console.log(`  ${c.dim(`if it is your daemon, signal pid ${st.pid} yourself; if not, remove ${STATE_FILE}`)}`);
-      return 1;
+      unverified = v.reason;
     }
     pid = st.pid;
   }
@@ -559,6 +558,15 @@ export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number>
   // launchctl unload leave the service installed: it returns at the next
   // login/boot, and `joy install` re-arms it now.
   const own = resolveOwnership(pid, deps, st);
+  if (unverified && own.kind !== "supervised") {
+    // An unverifiable pid is never signalled directly. The supervisor path
+    // stays open: stopping the unit / job that owns the pid touches only our
+    // own service, whatever the pid turns out to be.
+    console.log(`${bad} cannot prove pid ${pid} is the daemon daemon.json records (${unverified}) — nothing signalled`);
+    if (st?.startId === undefined) console.log(`  ${c.dim("this daemon predates start-identity records: it must be restarted once (it records its identity at launch) before `joy stop` can verify it")}`);
+    console.log(`  ${c.dim(`if it is your daemon, signal pid ${pid} yourself; if not, remove ${STATE_FILE}`)}`);
+    return 1;
+  }
   if (own.kind === "unknown") {
     // No supervisor answer and no independent evidence either way: a direct
     // SIGTERM would be undone by a supervisor we cannot see, and a supervisor
@@ -571,6 +579,7 @@ export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number>
   const sup = own.kind === "supervised" ? own.supervisor : null;
   const via = sup ? (sup.kind === "systemd" ? `systemctl --user stop ${sup.unit}` : `launchctl unload ${sup.plist}`) : null;
   if (sup) {
+    if (unverified) console.log(`  ${c.dim(`pid ${pid} could not be verified against daemon.json (${unverified}); stopping it through ${sup.kind === "systemd" ? sup.unit : sup.label}, which owns it (${own.kind === "supervised" ? own.evidence : ""})`)}`);
     const r = sup.kind === "systemd" ? deps.run("systemctl", ["--user", "stop", sup.unit]) : deps.run("launchctl", ["unload", sup.plist]);
     if (r.status !== 0) {
       console.log(`${bad} ${via} failed (exit ${r.status ?? "?"}) — not signalling pid ${pid} directly, the service would restart it`);
