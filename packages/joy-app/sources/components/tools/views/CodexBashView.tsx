@@ -7,37 +7,32 @@ import { ToolSectionView } from '../ToolSectionView';
 import { CommandView } from '@/components/CommandView';
 import { Metadata } from '@/sync/storageTypes';
 import { resolvePath } from '@/utils/pathUtils';
-import { stringifyToolCommand } from '@/utils/toolCommand';
 import { t } from '@/text';
+import { getToolModel } from '@/sync/toolModel';
+import { ToolOutcomeView } from '../ToolOutcomeView';
 
 interface CodexBashViewProps {
     tool: ToolCall;
     metadata: Metadata | null;
+    /** Full-detail mode: the stored result is rendered too. */
+    full?: boolean;
 }
 
-export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata }) => {
+/**
+ * Codex terminal card. The single-file read / write presentation is used only
+ * when the harness parsed exactly ONE operation; a compound command
+ * (`cat a && cat b`) keeps its complete text. Failures render in every branch,
+ * and the full-detail mode shows the stored result.
+ */
+export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata, full }) => {
     const { theme } = useUnistyles();
-    const { input, result, state } = tool;
+    const model = getToolModel(tool);
+    const command = model.command;
+    const failed = model.outcome === 'failed' || model.outcome === 'denied' || model.outcome === 'cancelled';
+    const single = command && command.operations.length === 1 ? command.operations[0] : null;
 
-    // Parse the input structure
-    const command = input?.command;
-    const parsedCmd = input?.parsed_cmd;
-
-    // Determine the type of operation from parsed_cmd
-    let operationType: 'read' | 'write' | 'bash' | 'unknown' = 'unknown';
-    let fileName: string | null = null;
-    let commandStr: string | null = null;
-
-    if (parsedCmd && Array.isArray(parsedCmd) && parsedCmd.length > 0) {
-        const firstCmd = parsedCmd[0];
-        operationType = firstCmd.type || 'unknown';
-        fileName = firstCmd.name || null;
-        commandStr = firstCmd.cmd || null;
-    }
-
-    // Get the appropriate icon based on operation type
     let icon: React.ReactNode;
-    switch (operationType) {
+    switch (single?.kind) {
         case 'read':
             icon = <Octicons name="eye" size={18} color={theme.colors.textSecondary} />;
             break;
@@ -48,58 +43,59 @@ export const CodexBashView = React.memo<CodexBashViewProps>(({ tool, metadata })
             icon = <Octicons name="terminal" size={18} color={theme.colors.textSecondary} />;
     }
 
-    // Format the display based on operation type
-    if (operationType === 'read' && fileName) {
-        // Display as a read operation
-        const resolvedPath = resolvePath(fileName, metadata);
-        
+    if (single && single.path && (single.kind === 'read' || single.kind === 'write')) {
+        const resolvedPath = resolvePath(single.path, metadata);
+        const label = single.kind === 'read'
+            ? t('tools.desc.readingFile', { file: resolvedPath })
+            : t('tools.desc.writingFile', { file: resolvedPath });
         return (
-            <ToolSectionView>
-                <View style={styles.readContainer}>
-                    <View style={styles.iconRow}>
-                        {icon}
-                        <Text style={styles.operationText}>{t('tools.desc.readingFile', { file: resolvedPath })}</Text>
+            <>
+                <ToolSectionView>
+                    <View style={styles.readContainer}>
+                        <View style={styles.iconRow}>
+                            {icon}
+                            <Text style={styles.operationText}>{label}</Text>
+                        </View>
+                        {single.command ? (
+                            <Text style={styles.commandText}>{single.command}</Text>
+                        ) : null}
                     </View>
-                    {commandStr && (
-                        <Text style={styles.commandText}>{commandStr}</Text>
-                    )}
-                </View>
-            </ToolSectionView>
-        );
-    } else if (operationType === 'write' && fileName) {
-        // Display as a write operation
-        const resolvedPath = resolvePath(fileName, metadata);
-        
-        return (
-            <ToolSectionView>
-                <View style={styles.readContainer}>
-                    <View style={styles.iconRow}>
-                        {icon}
-                        <Text style={styles.operationText}>{t('tools.desc.writingFile', { file: resolvedPath })}</Text>
-                    </View>
-                    {commandStr && (
-                        <Text style={styles.commandText}>{commandStr}</Text>
-                    )}
-                </View>
-            </ToolSectionView>
-        );
-    } else {
-        // Display as a regular command
-        const commandDisplay = commandStr || stringifyToolCommand(command) || '';
-        
-        return (
-            <ToolSectionView>
-                <CommandView 
-                    command={commandDisplay}
-                    stdout={null}
-                    stderr={null}
-                    error={state === 'error' && typeof result === 'string' ? result : null}
-                    hideEmptyOutput
-                />
-            </ToolSectionView>
+                </ToolSectionView>
+                {full && !failed && (command?.stdout || model.outputText) ? (
+                    <ToolSectionView title={t('toolView.output')}>
+                        <CommandView
+                            command={single.command ?? command?.command ?? ''}
+                            stdout={command?.stdout ?? model.outputText}
+                            stderr={command?.stderr ?? null}
+                            error={null}
+                            fullWidth
+                        />
+                    </ToolSectionView>
+                ) : null}
+                {failed ? <ToolOutcomeView model={model} mode="compact" /> : null}
+            </>
         );
     }
+
+    const commandDisplay = command?.command ?? '';
+    return (
+        <ToolSectionView>
+            <CommandView
+                command={commandDisplay}
+                stdout={full ? (command?.stdout ?? (failed ? null : model.outputText)) : null}
+                stderr={full ? (command?.stderr ?? null) : null}
+                error={failed ? model.errorMessage : null}
+                hideEmptyOutput={!full}
+                fullWidth={full}
+            />
+        </ToolSectionView>
+    );
 });
+
+/** Registry entry for the full-detail screen. */
+export const CodexBashViewFull = React.memo<{ tool: ToolCall; metadata: Metadata | null }>(({ tool, metadata }) => (
+    <CodexBashView tool={tool} metadata={metadata} full />
+));
 
 const styles = StyleSheet.create((theme) => ({
     readContainer: {

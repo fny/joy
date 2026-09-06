@@ -1,6 +1,5 @@
 import * as React from 'react';
 import { Modal } from '@/modal';
-import { sync } from '@/sync/sync';
 import { View, Text, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ToolViewProps } from './_all';
@@ -9,6 +8,7 @@ import { sessionAllow } from '@/sync/ops';
 import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { t } from '@/text';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { getToolModel, ToolCallModel } from '@/sync/toolModel';
 
 interface QuestionOption {
     label: string;
@@ -20,10 +20,6 @@ interface Question {
     header: string;
     options: QuestionOption[];
     multiSelect: boolean;
-}
-
-interface AskUserQuestionInput {
-    questions: Question[];
 }
 
 // Styles MUST be defined outside the component to prevent infinite re-renders
@@ -174,26 +170,75 @@ const styles = StyleSheet.create((theme) => ({
     },
 }));
 
+/** The validated question list, or an empty list for any other shape. */
+function questionsOf(model: ToolCallModel): Question[] {
+    const raw = model.arguments.value.questions;
+    if (!Array.isArray(raw)) return [];
+    const questions: Question[] = [];
+    for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const record = item as Record<string, unknown>;
+        const options: QuestionOption[] = [];
+        if (Array.isArray(record.options)) {
+            for (const option of record.options) {
+                if (!option || typeof option !== 'object') continue;
+                const optionRecord = option as Record<string, unknown>;
+                if (typeof optionRecord.label !== 'string') continue;
+                options.push({ label: optionRecord.label, description: typeof optionRecord.description === 'string' ? optionRecord.description : '' });
+            }
+        }
+        questions.push({
+            question: typeof record.question === 'string' ? record.question : '',
+            header: typeof record.header === 'string' ? record.header : '',
+            options,
+            multiSelect: record.multiSelect === true,
+        });
+    }
+    return questions;
+}
+
+/**
+ * Answers persisted with the call — `input.answers` (the approval echoes the
+ * answers into the tool input) or a structured `{answers}` result — keyed by
+ * question text. Local selections only matter while this card submits.
+ */
+function persistedAnswers(model: ToolCallModel): Record<string, string> {
+    const answers: Record<string, string> = {};
+    const collect = (value: unknown) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+        for (const [question, answer] of Object.entries(value as Record<string, unknown>)) {
+            if (typeof answer === 'string') answers[question] = answer;
+            else if (Array.isArray(answer)) answers[question] = answer.filter((a): a is string => typeof a === 'string').join(', ');
+        }
+    };
+    collect(model.arguments.value.answers);
+    for (const block of model.blocks) {
+        if (block.kind === 'structured' && block.value && typeof block.value === 'object') {
+            collect((block.value as Record<string, unknown>).answers);
+        }
+    }
+    return answers;
+}
+
 export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
     const { theme } = useUnistyles();
+    // Every hook runs before any input-dependent return: a card that first
+    // rendered with `input: {}` and then received its questions used to throw
+    // "Rendered more hooks than during the previous render".
     const [selections, setSelections] = React.useState<Map<number, Set<number>>>(new Map());
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
     const { armedKey, requireDoubleTap } = useDoubleTap();
 
-    // Parse input
-    const input = tool.input as AskUserQuestionInput | undefined;
-    const questions = input?.questions;
+    const model = getToolModel(tool);
+    const questions = React.useMemo(() => questionsOf(model), [model]);
+    const persisted = React.useMemo(() => persistedAnswers(model), [model]);
 
-    if (!questions || !Array.isArray(questions) || questions.length === 0) {
-        return null;
-    }
-
-    const isRunning = tool.state === 'running';
+    const isRunning = model.outcome === 'pending';
     const canInteract = isRunning && !isSubmitted;
 
     // Check if all questions have at least one selection
-    const allQuestionsAnswered = questions.every((_, qIndex) => {
+    const allQuestionsAnswered = questions.length > 0 && questions.every((_, qIndex) => {
         const selected = selections.get(qIndex);
         return selected && selected.size > 0;
     });
@@ -267,23 +312,31 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         }
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
-    // Show submitted state
-    if (isSubmitted || tool.state === 'completed') {
+    if (questions.length === 0) {
+        return null;
+    }
+
+    // Show submitted state — from the persisted answers first, so a completed
+    // question reopened later still shows what was chosen.
+    if (isSubmitted || model.outcome !== 'pending') {
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>
                     {questions.map((q, qIndex) => {
                         const selected = selections.get(qIndex);
-                        const selectedLabels = selected
+                        const localLabels = selected && selected.size > 0
                             ? Array.from(selected)
                                 .map(optIndex => q.options[optIndex]?.label)
                                 .filter(Boolean)
                                 .join(', ')
-                            : '-';
+                            : null;
+                        const persistedLabel = persisted[q.question] ?? persisted[q.header] ?? null;
+                        const answer = persistedLabel ?? localLabels
+                            ?? (questions.length === 1 && model.outcome === 'succeeded' && model.outputText ? model.outputText : '-');
                         return (
                             <View key={qIndex} style={styles.submittedItem}>
                                 <Text style={styles.submittedHeader}>{q.header}:</Text>
-                                <Text style={styles.submittedValue}>{selectedLabels}</Text>
+                                <Text style={styles.submittedValue}>{answer}</Text>
                             </View>
                         );
                     })}
@@ -331,23 +384,23 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                                                     styles.checkboxOuter,
                                                     isSelected && styles.checkboxOuterSelected,
                                                 ]}>
-                                                    {isSelected && (
+                                                    {isSelected ? (
                                                         <Ionicons name="checkmark" size={14} color="#fff" />
-                                                    )}
+                                                    ) : null}
                                                 </View>
                                             ) : (
                                                 <View style={[
                                                     styles.radioOuter,
                                                     isSelected && styles.radioOuterSelected,
                                                 ]}>
-                                                    {isSelected && <View style={styles.radioInner} />}
+                                                    {isSelected ? <View style={styles.radioInner} /> : null}
                                                 </View>
                                             )}
                                             <View style={styles.optionContent}>
                                                 <Text style={styles.optionLabel}>{option.label}</Text>
-                                                {option.description && (
+                                                {option.description ? (
                                                     <Text style={styles.optionDescription}>{option.description}</Text>
-                                                )}
+                                                ) : null}
                                             </View>
                                         </TouchableOpacity>
                                     );
@@ -357,7 +410,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                     );
                 })}
 
-                {canInteract && (
+                {canInteract ? (
                     <View style={styles.actionsContainer}>
                         <TouchableOpacity
                             style={[
@@ -378,7 +431,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                             )}
                         </TouchableOpacity>
                     </View>
-                )}
+                ) : null}
             </View>
         </ToolSectionView>
     );

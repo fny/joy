@@ -11,6 +11,7 @@ import {
     formatWorkDuration,
     generateGroupSummary,
     groupToolCallsForDisplay,
+    hasPendingPermission,
 } from '@/hooks/useGroupedMessages';
 import { MessageView } from './MessageView';
 import { Metadata } from '@/sync/storageTypes';
@@ -70,10 +71,16 @@ export const ToolGroupView = React.memo<ToolGroupViewProps>((props) => {
     const router = useRouter();
     const summary = React.useMemo(() => generateGroupSummary(group.messages), [group.messages]);
     const summaryCategory = React.useMemo(() => getGroupSummaryCategory(group.messages), [group.messages]);
-    const suppressChildren = hideSingleToolChildren && group.messages.length === 1 && group.messages[0]?.kind === 'tool-call';
-    const singleToolMessage = suppressChildren && group.messages[0]?.kind === 'tool-call'
+    // A lone tool folds into its header row — unless it still needs the user:
+    // a pending approval (its own or a nested subagent's) or an open question
+    // keeps the full card and its controls visible.
+    const singleCandidate = hideSingleToolChildren && group.messages.length === 1 && group.messages[0]?.kind === 'tool-call'
         ? group.messages[0]
         : null;
+    const singleNeedsInteraction = singleCandidate !== null
+        && (hasPendingPermission([singleCandidate]) || singleCandidate.tool.name === 'AskUserQuestion');
+    const suppressChildren = singleCandidate !== null && !singleNeedsInteraction;
+    const singleToolMessage = suppressChildren ? singleCandidate : null;
     const handleToggle = React.useCallback(() => {
         onToggle(group.id);
     }, [onToggle, group.id]);
@@ -175,16 +182,22 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
         [nestedItemsNewestFirst],
     );
 
+    // Nested groups start collapsed (unless awaiting approval) the FIRST time
+    // they appear; after that the user's toggles win. Re-seeding on every
+    // message update snapped manually expanded groups shut on each late tool
+    // result, so only never-seen group ids are touched here.
+    const seenToolGroupsRef = React.useRef<Set<string>>(new Set());
+    const manuallyToggledToolGroupsRef = React.useRef<Set<string>>(new Set());
     const [collapsedToolGroups, setCollapsedToolGroups] = React.useState<Set<string>>(() => {
         const initial = new Set<string>();
         for (const item of nestedItemsNewestFirst) {
-            if (item.type === 'tool-group' && !item.hasPendingPermission) {
-                initial.add(item.id);
+            if (item.type === 'tool-group') {
+                seenToolGroupsRef.current.add(item.id);
+                if (!item.hasPendingPermission) initial.add(item.id);
             }
         }
         return initial;
     });
-    const manuallyCollapsedToolGroupsRef = React.useRef<Set<string>>(new Set());
 
     React.useEffect(() => {
         setCollapsedToolGroups((prev) => {
@@ -194,13 +207,19 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
                 if (item.type !== 'tool-group') {
                     continue;
                 }
-                if (item.hasPendingPermission && next.has(item.id) && !manuallyCollapsedToolGroupsRef.current.has(item.id)) {
-                    next.delete(item.id);
-                    changed = true;
+                const manual = manuallyToggledToolGroupsRef.current.has(item.id);
+                if (!seenToolGroupsRef.current.has(item.id)) {
+                    seenToolGroupsRef.current.add(item.id);
+                    if (!item.hasPendingPermission && !next.has(item.id)) {
+                        next.add(item.id);
+                        changed = true;
+                    }
                     continue;
                 }
-                if (!item.hasPendingPermission && !next.has(item.id)) {
-                    next.add(item.id);
+                // A group that newly needs the user opens even if it was seen
+                // — but never overrides a deliberate collapse.
+                if (item.hasPendingPermission && next.has(item.id) && !manual) {
+                    next.delete(item.id);
                     changed = true;
                 }
             }
@@ -209,14 +228,13 @@ export const AgentWorkGroupView = React.memo<AgentWorkGroupViewProps>((props) =>
     }, [nestedItemsNewestFirst]);
 
     const handleToggleNestedGroup = React.useCallback((groupId: string) => {
+        manuallyToggledToolGroupsRef.current.add(groupId);
         setCollapsedToolGroups((prev) => {
             const next = new Set(prev);
             if (next.has(groupId)) {
                 next.delete(groupId);
-                manuallyCollapsedToolGroupsRef.current.delete(groupId);
             } else {
                 next.add(groupId);
-                manuallyCollapsedToolGroupsRef.current.add(groupId);
             }
             return next;
         });

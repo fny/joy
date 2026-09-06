@@ -2,54 +2,42 @@ import * as React from 'react';
 import { View, ScrollView, StyleSheet } from 'react-native';
 import { ToolCall } from '@/sync/typesMessage';
 import { Metadata } from '@/sync/storageTypes';
-import { knownTools } from '@/components/tools/knownTools';
-import { toolFullViewStyles } from '../ToolFullView';
 import { CommandView } from '@/components/CommandView';
+import { getToolModel } from '@/sync/toolModel';
 
 interface BashViewFullProps {
     tool: ToolCall;
     metadata: Metadata | null;
 }
 
-export const BashViewFull = React.memo<BashViewFullProps>(({ tool, metadata }) => {
-    const { input, result, state } = tool;
-
-    // Parse the result
-    let parsedResult: { stdout?: string; stderr?: string } | null = null;
-    let unparsedOutput: string | null = null;
-    let error: string | null = null;
-
-    if (state === 'completed' && result) {
-        if (typeof result === 'string') {
-            // Handle unparsed string result
-            unparsedOutput = result;
-        } else {
-            // Try to parse as structured result
-            const parsed = knownTools.Bash.result.safeParse(result);
-            if (parsed.success) {
-                parsedResult = parsed.data;
-            } else {
-                // If parsing fails but it's not a string, stringify it
-                unparsedOutput = JSON.stringify(result);
-            }
-        }
-    } else if (state === 'error' && typeof result === 'string') {
-        error = result;
-    }
+/**
+ * Full terminal details. Reads the command model, so a FAILED command with a
+ * structured `{stdout, stderr}` result shows both streams plus the failure
+ * instead of "[Command completed with no output]".
+ */
+export const BashViewFull = React.memo<BashViewFullProps>(({ tool }) => {
+    const model = getToolModel(tool);
+    const command = model.command;
+    const failed = model.outcome === 'failed' || model.outcome === 'denied' || model.outcome === 'cancelled';
+    const stdout = command?.stdout ?? (failed ? null : model.outputText);
+    const stderr = command?.stderr ?? null;
+    // The failure reason is shown once: when it is already the stderr text,
+    // CommandView's error line would only repeat it.
+    const error = failed && model.errorMessage !== stderr ? model.errorMessage : (failed && !stderr ? model.errorMessage : null);
 
     return (
         <View style={styles.container}>
             <View style={styles.terminalContainer}>
-                <ScrollView 
+                <ScrollView
                     horizontal
                     showsHorizontalScrollIndicator={true}
                     contentContainerStyle={styles.scrollContent}
                 >
                     <View style={styles.commandWrapper}>
                         <CommandView
-                            command={input.command}
-                            stdout={parsedResult?.stdout || unparsedOutput}
-                            stderr={parsedResult?.stderr}
+                            command={command?.command ?? ''}
+                            stdout={stdout}
+                            stderr={stderr}
                             error={error}
                             fullWidth
                         />

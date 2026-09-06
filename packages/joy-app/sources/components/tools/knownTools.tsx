@@ -32,8 +32,8 @@ function getPatchFiles(input: any): string[] {
 
 const taskLikeTool = {
     title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-        if (opts.tool.input && opts.tool.input.description && typeof opts.tool.input.description === 'string') {
-            return opts.tool.input.description;
+        if (opts.tool.input && opts.tool.input?.description && typeof opts.tool.input?.description === 'string') {
+            return opts.tool.input?.description;
         }
         return t('tools.names.task');
     },
@@ -78,8 +78,8 @@ export const knownTools = {
             stdout: z.string(),
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.command === 'string') {
-                const cmd = opts.tool.input.command;
+            if (typeof opts.tool.input?.command === 'string') {
+                const cmd = opts.tool.input?.command;
                 // Extract just the command name for common commands
                 const firstWord = cmd.split(' ')[0];
                 if (['cd', 'ls', 'pwd', 'mkdir', 'rm', 'cp', 'mv', 'npm', 'yarn', 'git'].includes(firstWord)) {
@@ -92,16 +92,16 @@ export const knownTools = {
             return t('tools.names.terminal');
         },
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.command === 'string') {
-                return opts.tool.input.command;
+            if (typeof opts.tool.input?.command === 'string') {
+                return opts.tool.input?.command;
             }
             return null;
         }
     },
     'Glob': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.pattern === 'string') {
-                return opts.tool.input.pattern;
+            if (typeof opts.tool.input?.pattern === 'string') {
+                return opts.tool.input?.pattern;
             }
             return t('tools.names.searchFiles');
         },
@@ -112,16 +112,16 @@ export const knownTools = {
             path: z.string().optional().describe('The directory to search in')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.pattern === 'string') {
-                return t('tools.desc.searchPattern', { pattern: opts.tool.input.pattern });
+            if (typeof opts.tool.input?.pattern === 'string') {
+                return t('tools.desc.searchPattern', { pattern: opts.tool.input?.pattern });
             }
             return t('tools.names.search');
         }
     },
     'Grep': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.pattern === 'string') {
-                return `grep(pattern: ${opts.tool.input.pattern})`;
+            if (typeof opts.tool.input?.pattern === 'string') {
+                return `grep(pattern: ${opts.tool.input?.pattern})`;
             }
             return 'Search Content';
         },
@@ -142,10 +142,10 @@ export const knownTools = {
             multiline: z.boolean().optional().describe('Enable multiline mode')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.pattern === 'string') {
-                const pattern = opts.tool.input.pattern.length > 20
-                    ? opts.tool.input.pattern.substring(0, 20) + '...'
-                    : opts.tool.input.pattern;
+            if (typeof opts.tool.input?.pattern === 'string') {
+                const pattern = opts.tool.input?.pattern.length > 20
+                    ? opts.tool.input?.pattern.substring(0, 20) + '...'
+                    : opts.tool.input?.pattern;
                 return `Search(pattern: ${pattern})`;
             }
             return 'Search';
@@ -153,8 +153,8 @@ export const knownTools = {
     },
     'LS': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.path === 'string') {
-                return resolvePath(opts.tool.input.path, opts.metadata);
+            if (typeof opts.tool.input?.path === 'string') {
+                return resolvePath(opts.tool.input?.path, opts.metadata);
             }
             return t('tools.names.listFiles');
         },
@@ -165,8 +165,8 @@ export const knownTools = {
             ignore: z.array(z.string()).optional().describe('List of glob patterns to ignore')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.path === 'string') {
-                const path = resolvePath(opts.tool.input.path, opts.metadata);
+            if (typeof opts.tool.input?.path === 'string') {
+                const path = resolvePath(opts.tool.input?.path, opts.metadata);
                 const basename = path.split('/').pop() || path;
                 return t('tools.desc.searchPath', { basename });
             }
@@ -189,13 +189,13 @@ export const knownTools = {
     },
     'Read': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.file_path === 'string') {
-                const path = resolvePath(opts.tool.input.file_path, opts.metadata);
+            if (typeof opts.tool.input?.file_path === 'string') {
+                const path = resolvePath(opts.tool.input?.file_path, opts.metadata);
                 return path;
             }
             // Gemini uses 'locations' array with 'path' field
-            if (opts.tool.input.locations && Array.isArray(opts.tool.input.locations) && opts.tool.input.locations[0]?.path) {
-                const path = resolvePath(opts.tool.input.locations[0].path, opts.metadata);
+            if (opts.tool.input?.locations && Array.isArray(opts.tool.input?.locations) && opts.tool.input?.locations[0]?.path) {
+                const path = resolvePath(opts.tool.input?.locations[0].path, opts.metadata);
                 return path;
             }
             return t('tools.names.readFile');
@@ -224,12 +224,12 @@ export const knownTools = {
     'read': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Gemini uses 'locations' array with 'path' field
-            if (opts.tool.input.locations && Array.isArray(opts.tool.input.locations) && opts.tool.input.locations[0]?.path) {
-                const path = resolvePath(opts.tool.input.locations[0].path, opts.metadata);
+            if (opts.tool.input?.locations && Array.isArray(opts.tool.input?.locations) && opts.tool.input?.locations[0]?.path) {
+                const path = resolvePath(opts.tool.input?.locations[0].path, opts.metadata);
                 return path;
             }
-            if (typeof opts.tool.input.file_path === 'string') {
-                const path = resolvePath(opts.tool.input.file_path, opts.metadata);
+            if (typeof opts.tool.input?.file_path === 'string') {
+                const path = resolvePath(opts.tool.input?.file_path, opts.metadata);
                 return path;
             }
             return t('tools.names.readFile');
@@ -244,8 +244,8 @@ export const knownTools = {
     },
     'Edit': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.file_path === 'string') {
-                const path = resolvePath(opts.tool.input.file_path, opts.metadata);
+            if (typeof opts.tool.input?.file_path === 'string') {
+                const path = resolvePath(opts.tool.input?.file_path, opts.metadata);
                 return path;
             }
             return t('tools.names.editFile');
@@ -261,9 +261,9 @@ export const knownTools = {
     },
     'MultiEdit': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.file_path === 'string') {
-                const path = resolvePath(opts.tool.input.file_path, opts.metadata);
-                const editCount = Array.isArray(opts.tool.input.edits) ? opts.tool.input.edits.length : 0;
+            if (typeof opts.tool.input?.file_path === 'string') {
+                const path = resolvePath(opts.tool.input?.file_path, opts.metadata);
+                const editCount = Array.isArray(opts.tool.input?.edits) ? opts.tool.input?.edits.length : 0;
                 if (editCount > 1) {
                     return t('tools.desc.multiEditEdits', { path, count: editCount });
                 }
@@ -282,9 +282,9 @@ export const knownTools = {
             })).describe('Array of edit operations')
         }).partial().passthrough(),
         extractStatus: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.file_path === 'string') {
-                const path = resolvePath(opts.tool.input.file_path, opts.metadata);
-                const editCount = Array.isArray(opts.tool.input.edits) ? opts.tool.input.edits.length : 0;
+            if (typeof opts.tool.input?.file_path === 'string') {
+                const path = resolvePath(opts.tool.input?.file_path, opts.metadata);
+                const editCount = Array.isArray(opts.tool.input?.edits) ? opts.tool.input?.edits.length : 0;
                 if (editCount > 0) {
                     return t('tools.desc.multiEditEdits', { path, count: editCount });
                 }
@@ -295,8 +295,8 @@ export const knownTools = {
     },
     'Write': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.file_path === 'string') {
-                const path = resolvePath(opts.tool.input.file_path, opts.metadata);
+            if (typeof opts.tool.input?.file_path === 'string') {
+                const path = resolvePath(opts.tool.input?.file_path, opts.metadata);
                 return path;
             }
             return t('tools.names.writeFile');
@@ -310,9 +310,9 @@ export const knownTools = {
     },
     'WebFetch': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.url === 'string') {
+            if (typeof opts.tool.input?.url === 'string') {
                 try {
-                    const url = new URL(opts.tool.input.url);
+                    const url = new URL(opts.tool.input?.url);
                     return url.hostname;
                 } catch {
                     return t('tools.names.fetchUrl');
@@ -327,9 +327,9 @@ export const knownTools = {
             prompt: z.string().describe('The prompt to run on the fetched content')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.url === 'string') {
+            if (typeof opts.tool.input?.url === 'string') {
                 try {
-                    const url = new URL(opts.tool.input.url);
+                    const url = new URL(opts.tool.input?.url);
                     return t('tools.desc.fetchUrlHost', { host: url.hostname });
                 } catch {
                     return t('tools.names.fetchUrl');
@@ -340,8 +340,8 @@ export const knownTools = {
     },
     'NotebookRead': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.notebook_path === 'string') {
-                const path = resolvePath(opts.tool.input.notebook_path, opts.metadata);
+            if (typeof opts.tool.input?.notebook_path === 'string') {
+                const path = resolvePath(opts.tool.input?.notebook_path, opts.metadata);
                 return path;
             }
             return t('tools.names.readNotebook');
@@ -355,8 +355,8 @@ export const knownTools = {
     },
     'NotebookEdit': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.notebook_path === 'string') {
-                const path = resolvePath(opts.tool.input.notebook_path, opts.metadata);
+            if (typeof opts.tool.input?.notebook_path === 'string') {
+                const path = resolvePath(opts.tool.input?.notebook_path, opts.metadata);
                 return path;
             }
             return t('tools.names.editNotebook');
@@ -371,9 +371,9 @@ export const knownTools = {
             edit_mode: z.enum(['replace', 'insert', 'delete']).optional().describe('The type of edit to make')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.notebook_path === 'string') {
-                const path = resolvePath(opts.tool.input.notebook_path, opts.metadata);
-                const mode = opts.tool.input.edit_mode || 'replace';
+            if (typeof opts.tool.input?.notebook_path === 'string') {
+                const path = resolvePath(opts.tool.input?.notebook_path, opts.metadata);
+                const mode = opts.tool.input?.edit_mode || 'replace';
                 return t('tools.desc.editNotebookMode', { path, mode });
             }
             return t('tools.names.editNotebook');
@@ -385,7 +385,7 @@ export const knownTools = {
         noStatus: true,
         minimal: (opts: { metadata: Metadata | null, tool: ToolCall, messages?: Message[] }) => {
             // Check if there are todos in the input
-            if (opts.tool.input?.todos && Array.isArray(opts.tool.input.todos) && opts.tool.input.todos.length > 0) {
+            if (opts.tool.input?.todos && Array.isArray(opts.tool.input?.todos) && opts.tool.input?.todos.length > 0) {
                 return false; // Has todos, show expanded
             }
             
@@ -404,8 +404,8 @@ export const knownTools = {
             newTodos: TodoItemsSchema.describe('The new todo list')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (Array.isArray(opts.tool.input.todos)) {
-                const count = opts.tool.input.todos.length;
+            if (Array.isArray(opts.tool.input?.todos)) {
+                const count = opts.tool.input?.todos.length;
                 return t('tools.desc.todoListCount', { count });
             }
             return t('tools.names.todoList');
@@ -413,8 +413,8 @@ export const knownTools = {
     },
     'WebSearch': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.query === 'string') {
-                return opts.tool.input.query;
+            if (typeof opts.tool.input?.query === 'string') {
+                return opts.tool.input?.query;
             }
             return t('tools.names.webSearch');
         },
@@ -426,10 +426,10 @@ export const knownTools = {
             blocked_domains: z.array(z.string()).optional().describe('Never include results from these domains')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input.query === 'string') {
-                const query = opts.tool.input.query.length > 30
-                    ? opts.tool.input.query.substring(0, 30) + '...'
-                    : opts.tool.input.query;
+            if (typeof opts.tool.input?.query === 'string') {
+                const query = opts.tool.input?.query.length > 30
+                    ? opts.tool.input?.query.substring(0, 30) + '...'
+                    : opts.tool.input?.query;
                 return t('tools.desc.webSearchQuery', { query });
             }
             return t('tools.names.webSearch');
@@ -439,12 +439,12 @@ export const knownTools = {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Check if this is a single read command
             if (opts.tool.input?.parsed_cmd && 
-                Array.isArray(opts.tool.input.parsed_cmd) && 
-                opts.tool.input.parsed_cmd.length === 1 && 
-                opts.tool.input.parsed_cmd[0].type === 'read' &&
-                opts.tool.input.parsed_cmd[0].name) {
+                Array.isArray(opts.tool.input?.parsed_cmd) && 
+                opts.tool.input?.parsed_cmd.length === 1 && 
+                opts.tool.input?.parsed_cmd[0].type === 'read' &&
+                opts.tool.input?.parsed_cmd[0].name) {
                 // Display the file name being read
-                const path = resolvePath(opts.tool.input.parsed_cmd[0].name, opts.metadata);
+                const path = resolvePath(opts.tool.input?.parsed_cmd[0].name, opts.metadata);
                 return path;
             }
             return t('tools.names.terminal');
@@ -465,10 +465,10 @@ export const knownTools = {
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // For single read commands, show the actual command
             if (opts.tool.input?.parsed_cmd && 
-                Array.isArray(opts.tool.input.parsed_cmd) && 
-                opts.tool.input.parsed_cmd.length === 1 &&
-                opts.tool.input.parsed_cmd[0].type === 'read') {
-                const parsedCmd = opts.tool.input.parsed_cmd[0];
+                Array.isArray(opts.tool.input?.parsed_cmd) && 
+                opts.tool.input?.parsed_cmd.length === 1 &&
+                opts.tool.input?.parsed_cmd[0].type === 'read') {
+                const parsedCmd = opts.tool.input?.parsed_cmd[0];
                 if (parsedCmd.cmd) {
                     // Show the command but truncate if too long
                     const cmd = parsedCmd.cmd;
@@ -476,8 +476,8 @@ export const knownTools = {
                 }
             }
             // Show the actual command being executed for other cases
-            if (opts.tool.input?.parsed_cmd && Array.isArray(opts.tool.input.parsed_cmd) && opts.tool.input.parsed_cmd.length > 0) {
-                const parsedCmd = opts.tool.input.parsed_cmd[0];
+            if (opts.tool.input?.parsed_cmd && Array.isArray(opts.tool.input?.parsed_cmd) && opts.tool.input?.parsed_cmd.length > 0) {
+                const parsedCmd = opts.tool.input?.parsed_cmd[0];
                 if (parsedCmd.cmd) {
                     return parsedCmd.cmd;
                 }
@@ -487,9 +487,9 @@ export const knownTools = {
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Provide a description based on the parsed command type
             if (opts.tool.input?.parsed_cmd && 
-                Array.isArray(opts.tool.input.parsed_cmd) && 
-                opts.tool.input.parsed_cmd.length === 1) {
-                const parsedCmd = opts.tool.input.parsed_cmd[0];
+                Array.isArray(opts.tool.input?.parsed_cmd) && 
+                opts.tool.input?.parsed_cmd.length === 1) {
+                const parsedCmd = opts.tool.input?.parsed_cmd[0];
                 if (parsedCmd.type === 'read' && parsedCmd.name) {
                     // For single read commands, show "Reading" as simple description
                     // The file path is already in the title
@@ -507,8 +507,8 @@ export const knownTools = {
     },
     'CodexReasoning': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input?.title && typeof opts.tool.input.title === 'string') {
-                return opts.tool.input.title;
+            if (opts.tool.input?.title && typeof opts.tool.input?.title === 'string') {
+                return opts.tool.input?.title;
             }
             return t('tools.names.reasoning');
         },
@@ -523,16 +523,16 @@ export const knownTools = {
             status: z.enum(['completed', 'in_progress', 'error']).optional().describe('The status of the reasoning')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input?.title && typeof opts.tool.input.title === 'string') {
-                return opts.tool.input.title;
+            if (opts.tool.input?.title && typeof opts.tool.input?.title === 'string') {
+                return opts.tool.input?.title;
             }
             return t('tools.names.reasoning');
         }
     },
     'GeminiReasoning': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input?.title && typeof opts.tool.input.title === 'string') {
-                return opts.tool.input.title;
+            if (opts.tool.input?.title && typeof opts.tool.input?.title === 'string') {
+                return opts.tool.input?.title;
             }
             return t('tools.names.reasoning');
         },
@@ -547,16 +547,16 @@ export const knownTools = {
             status: z.enum(['completed', 'in_progress', 'canceled']).optional().describe('The status of the reasoning')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input?.title && typeof opts.tool.input.title === 'string') {
-                return opts.tool.input.title;
+            if (opts.tool.input?.title && typeof opts.tool.input?.title === 'string') {
+                return opts.tool.input?.title;
             }
             return t('tools.names.reasoning');
         }
     },
     'think': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input?.title && typeof opts.tool.input.title === 'string') {
-                return opts.tool.input.title;
+            if (opts.tool.input?.title && typeof opts.tool.input?.title === 'string') {
+                return opts.tool.input?.title;
             }
             return t('tools.names.reasoning');
         },
@@ -574,8 +574,8 @@ export const knownTools = {
             status: z.enum(['completed', 'in_progress', 'canceled']).optional().describe('The status')
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input?.title && typeof opts.tool.input.title === 'string') {
-                return opts.tool.input.title;
+            if (opts.tool.input?.title && typeof opts.tool.input?.title === 'string') {
+                return opts.tool.input?.title;
             }
             return t('tools.names.reasoning');
         }
@@ -608,19 +608,19 @@ export const knownTools = {
             
             // 1. Check toolCall.content[0].path
             if (opts.tool.input?.toolCall?.content?.[0]?.path) {
-                filePath = opts.tool.input.toolCall.content[0].path;
+                filePath = opts.tool.input?.toolCall.content[0].path;
             }
             // 2. Check toolCall.title (has nice "Writing to ..." format)
             else if (opts.tool.input?.toolCall?.title) {
-                return opts.tool.input.toolCall.title;
+                return opts.tool.input?.toolCall.title;
             }
             // 3. Check input[0].path (array format)
-            else if (Array.isArray(opts.tool.input?.input) && opts.tool.input.input[0]?.path) {
-                filePath = opts.tool.input.input[0].path;
+            else if (Array.isArray(opts.tool.input?.input) && opts.tool.input?.input[0]?.path) {
+                filePath = opts.tool.input?.input[0].path;
             }
             // 4. Check direct path field
             else if (typeof opts.tool.input?.path === 'string') {
-                filePath = opts.tool.input.path;
+                filePath = opts.tool.input?.path;
             }
             
             if (filePath) {
@@ -650,7 +650,7 @@ export const knownTools = {
             if (opts.tool.input?.toolCall?.title) {
                 // Title is like "rm file.txt [cwd /path] (description)"
                 // Extract just the command part before [
-                const fullTitle = opts.tool.input.toolCall.title;
+                const fullTitle = opts.tool.input?.toolCall.title;
                 const bracketIdx = fullTitle.indexOf(' [');
                 if (bracketIdx > 0) {
                     return fullTitle.substring(0, bracketIdx);
@@ -683,7 +683,7 @@ export const knownTools = {
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Extract description from parentheses at the end
             if (opts.tool.input?.toolCall?.title) {
-                const title = opts.tool.input.toolCall.title;
+                const title = opts.tool.input?.toolCall.title;
                 const parenMatch = title.match(/\(([^)]+)\)$/);
                 if (parenMatch) {
                     return parenMatch[1];
@@ -697,6 +697,8 @@ export const knownTools = {
         icon: ICON_EDIT,
         minimal: false,
         hideDefaultError: true,
+        // A patch writes files — it is never a read-only tool.
+        isMutable: true,
         input: z.object({
             auto_approved: z.boolean().optional().describe('Whether changes were auto-approved'),
             changes: z.record(z.string(), z.object({
@@ -784,8 +786,8 @@ export const knownTools = {
         }).partial().passthrough(),
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Show the first file being modified
-            if (opts.tool.input?.changes && typeof opts.tool.input.changes === 'object') {
-                const files = Object.keys(opts.tool.input.changes);
+            if (opts.tool.input?.changes && typeof opts.tool.input?.changes === 'object') {
+                const files = Object.keys(opts.tool.input?.changes);
                 if (files.length > 0) {
                     const path = resolvePath(files[0], opts.metadata);
                     const fileName = path.split('/').pop() || path;
@@ -802,8 +804,8 @@ export const knownTools = {
         },
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Show the number of files being modified
-            if (opts.tool.input?.changes && typeof opts.tool.input.changes === 'object') {
-                const files = Object.keys(opts.tool.input.changes);
+            if (opts.tool.input?.changes && typeof opts.tool.input?.changes === 'object') {
+                const files = Object.keys(opts.tool.input?.changes);
                 const fileCount = files.length;
                 if (fileCount === 1) {
                     const path = resolvePath(files[0], opts.metadata);
@@ -830,8 +832,8 @@ export const knownTools = {
         }).partial().passthrough(),
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Try to extract filename from unified diff
-            if (opts.tool.input?.unified_diff && typeof opts.tool.input.unified_diff === 'string') {
-                const diffLines = opts.tool.input.unified_diff.split('\n');
+            if (opts.tool.input?.unified_diff && typeof opts.tool.input?.unified_diff === 'string') {
+                const diffLines = opts.tool.input?.unified_diff.split('\n');
                 for (const line of diffLines) {
                     if (line.startsWith('+++ b/') || line.startsWith('+++ ')) {
                         const fileName = line.replace(/^\+\+\+ (b\/)?/, '');
@@ -862,13 +864,13 @@ export const knownTools = {
         }).partial().passthrough(),
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Try to extract filename from filePath first
-            if (opts.tool.input?.filePath && typeof opts.tool.input.filePath === 'string') {
-                const basename = opts.tool.input.filePath.split('/').pop() || opts.tool.input.filePath;
+            if (opts.tool.input?.filePath && typeof opts.tool.input?.filePath === 'string') {
+                const basename = opts.tool.input?.filePath.split('/').pop() || opts.tool.input?.filePath;
                 return basename;
             }
             // Fall back to extracting from unified diff
-            if (opts.tool.input?.unified_diff && typeof opts.tool.input.unified_diff === 'string') {
-                const diffLines = opts.tool.input.unified_diff.split('\n');
+            if (opts.tool.input?.unified_diff && typeof opts.tool.input?.unified_diff === 'string') {
+                const diffLines = opts.tool.input?.unified_diff.split('\n');
                 for (const line of diffLines) {
                     if (line.startsWith('+++ b/') || line.startsWith('+++ ')) {
                         const fileName = line.replace(/^\+\+\+ (b\/)?/, '');
@@ -886,8 +888,8 @@ export const knownTools = {
     'AskUserQuestion': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Use first question header as title if available
-            if (opts.tool.input?.questions && Array.isArray(opts.tool.input.questions) && opts.tool.input.questions.length > 0) {
-                const firstQuestion = opts.tool.input.questions[0];
+            if (opts.tool.input?.questions && Array.isArray(opts.tool.input?.questions) && opts.tool.input?.questions.length > 0) {
+                const firstQuestion = opts.tool.input?.questions[0];
                 if (firstQuestion.header) {
                     return firstQuestion.header;
                 }
@@ -909,10 +911,10 @@ export const knownTools = {
             })).describe('Questions to ask the user')
         }).partial().passthrough(),
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (opts.tool.input?.questions && Array.isArray(opts.tool.input.questions)) {
-                const count = opts.tool.input.questions.length;
+            if (opts.tool.input?.questions && Array.isArray(opts.tool.input?.questions)) {
+                const count = opts.tool.input?.questions.length;
                 if (count === 1) {
-                    return opts.tool.input.questions[0].question;
+                    return opts.tool.input?.questions[0].question;
                 }
                 return t('tools.askUserQuestion.multipleQuestions', { count });
             }
