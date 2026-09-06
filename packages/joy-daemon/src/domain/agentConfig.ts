@@ -13,11 +13,12 @@
 // schema-walked editor. codex/pi have no published schema — raw + path modes
 // still work.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { joyStateDir } from "../paths";
+import { writeFileAtomic } from "./atomicWrite";
 
 export type ConfigAgent = "claude" | "codex" | "opencode" | "pi" | "agy";
 
@@ -119,10 +120,15 @@ function setAtPath(doc: Record<string, unknown>, path: Array<string | number>, v
   }
 }
 
+/** Replace the config atomically and rotate <name>.joy-bak as part of the
+ *  SAME successful replacement. The previous shape — copy live → backup, then
+ *  writeFileSync — meant an ENOSPC after the truncating write left a partial
+ *  live file, and the user's RETRY copied that partial file over the only
+ *  intact backup: two failed saves = both copies gone (#527). writeFileAtomic
+ *  stages the new contents beside the file, never truncates the live one, and
+ *  rotates the backup only once the rename has landed. */
 function backupThenWrite(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  if (existsSync(path)) copyFileSync(path, path + ".joy-bak");
-  writeFileSync(path, content);
+  writeFileAtomic(path, content, { backup: path + ".joy-bak" });
 }
 
 export function applyAgentConfigAssignments(agent: string, lines: string[]): { ok: true; raw: string; applied: number } | { ok: false; error: string } {
