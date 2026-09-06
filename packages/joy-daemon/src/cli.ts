@@ -10,7 +10,7 @@ import { join, dirname, resolve, basename, sep, isAbsolute } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
-import { joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
+import { joyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
 import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay/pairing";
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
@@ -113,13 +113,14 @@ function authHeaders(): Record<string, string> {
   return h;
 }
 
-async function api(method: string, path: string, body?: unknown): Promise<Response> {
+async function api(method: string, path: string, body?: unknown, init: { signal?: AbortSignal } = {}): Promise<Response> {
   const b = base();
   if (!b) throw new Error("daemon not running (no daemon.json for this relay)");
   return fetch(b + path, {
     method,
     headers: authHeaders(),
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: init.signal,
   });
 }
 
@@ -172,7 +173,7 @@ async function cmdList(): Promise<number> {
   const ago = (t?: number) => (t ? fmtUptime(Date.now() - t) + " ago" : "");
   for (const [i, s] of sessions.entries()) {
     const ck = checks[i];
-    const state = s.status === "ended" ? c.dim("ended") : ck?.state === "needs_input" ? c.y("needs input") : ck?.state === "busy" ? c.y("busy") : c.g("idle");
+    const state = s.status === "ended" ? c.dim("ended") : ck?.state === "needs_input" ? c.y("needs input") : ck?.state === "busy" ? c.y("busy") : ck?.state === "error" ? c.r("error") : c.g("idle");
     const title = s.summary?.text ?? (typeof s.summary === "string" ? s.summary : "");
     console.log(`  ${c.b(s.id)}  ${String(s.agent ?? "claude").padEnd(8)} ${state.padEnd(20)} ${String(title).slice(0, 40).padEnd(40)}  ${s.cwd}${s.last_active_at ? c.dim("  " + ago(s.last_active_at)) : ""}`);
   }
@@ -330,7 +331,39 @@ export function verifyDaemonPid(
   return { ok: true };
 }
 
-async function cmdStop(): Promise<number> {
+/** The installed service that OWNS the daemon process `pid`, if any: the
+ *  systemd user unit whose MainPID it is, or the launchd agent whose job
+ *  runs it. A daemon `joy start` spawned detached has no supervisor even
+ *  when a unit file exists on disk (inactive), and is signalled directly. */
+export type Supervisor = { kind: "systemd"; unit: string } | { kind: "launchd"; label: string; plist: string };
+export interface StopDeps {
+  platform: string;
+  run: (cmd: string, args: string[]) => { status: number | null; stdout: string };
+  kill: (pid: number, signal: NodeJS.Signals) => void;
+}
+const defaultStopDeps: StopDeps = {
+  platform: osPlatform(),
+  run: (cmd, args) => { const r = spawnSync(cmd, args, { encoding: "utf8" }); return { status: r.status, stdout: r.stdout ?? "" }; },
+  kill: (pid, signal) => process.kill(pid, signal),
+};
+export function detectSupervisor(pid: number, deps: Pick<StopDeps, "platform" | "run">): Supervisor | null {
+  if (deps.platform === "linux") {
+    const unit = `${serviceName()}.service`;
+    // MainPID is "0" for an inactive unit and for a unit that is not installed.
+    const r = deps.run("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit]);
+    return r.status === 0 && Number(r.stdout.trim()) === pid ? { kind: "systemd", unit } : null;
+  }
+  if (deps.platform === "darwin") {
+    const label = launchdLabel();
+    // `launchctl list <label>` prints the job's dictionary, `"PID" = <n>;` while it runs.
+    const r = deps.run("launchctl", ["list", label]);
+    const m = r.status === 0 ? /"PID"\s*=\s*(\d+)/.exec(r.stdout) : null;
+    return m && Number(m[1]) === pid ? { kind: "launchd", label, plist: launchdPlistPath() } : null;
+  }
+  return null;
+}
+
+export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number> {
   const s = await probe();
   const st = readState();
   // A daemon that answered the token-authenticated /status IS the daemon:
@@ -347,12 +380,33 @@ async function cmdStop(): Promise<number> {
     }
     pid = st.pid;
   }
-  try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+  // A supervised daemon is stopped THROUGH its supervisor. The unit is
+  // Restart=always (the plist KeepAlive=true) by design, so a direct SIGTERM
+  // "stopped" it for three seconds and then it was back — `joy stop` reported
+  // success while the service restarted the daemon (#502). systemctl stop /
+  // launchctl unload leave the service installed: it returns at the next
+  // login/boot, and `joy install` re-arms it now.
+  const sup = detectSupervisor(pid, deps);
+  const via = sup ? (sup.kind === "systemd" ? `systemctl --user stop ${sup.unit}` : `launchctl unload ${sup.plist}`) : null;
+  if (sup) {
+    const r = sup.kind === "systemd" ? deps.run("systemctl", ["--user", "stop", sup.unit]) : deps.run("launchctl", ["unload", sup.plist]);
+    if (r.status !== 0) {
+      console.log(`${bad} ${via} failed (exit ${r.status ?? "?"}) — not signalling pid ${pid} directly, the service would restart it`);
+      return 1;
+    }
+  } else {
+    try { deps.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+  }
   for (let i = 0; i < 25; i++) {
     await new Promise(r => setTimeout(r, 200));
-    if (!(await probe())) { try { rmSync(STATE_FILE); } catch {} console.log(`${ok} stopped (pid ${pid})`); return 0; }
+    if (!(await probe())) {
+      try { rmSync(STATE_FILE); } catch {}
+      console.log(`${ok} stopped (pid ${pid}${via ? `, via ${via}` : ""})`);
+      if (sup) console.log(`  ${c.dim("the service stays installed: it returns at the next login/boot; `joy install` re-arms it now, `joy start` runs the daemon unsupervised")}`);
+      return 0;
+    }
   }
-  console.log(`${warn} sent SIGTERM to ${pid} but it's still answering`);
+  console.log(`${warn} ${via ?? `sent SIGTERM to ${pid}`} but it's still answering`);
   return 1;
 }
 
@@ -540,30 +594,29 @@ function removeService(): void {
   }
 }
 
-function cmdInstall(): number {
-  const plat = osPlatform();
-  if (!existsSync(SERVER_TS)) {
-    // A unit pointing at a missing server.ts crash-loops forever (#503).
-    console.log(`${bad} daemon source not found at ${SERVER_TS} — not installing a service that cannot start`);
-    return 1;
-  }
-  removeService(); // idempotent: start from a clean slate so the new config takes effect
-  // Bake the relay into the unit so the service supervises the daemon for
-  // exactly the relay it was installed for.
-  // Always explicit: the unit should say which relay it serves rather than
-  // inheriting a default that may move under it.
-  const relayEnvSystemd = `Environment=JOY_RELAY_URL=${joyRelayUrl()}\n`;
-  if (plat === "linux") {
-    const unit = `[Unit]
-Description=joy-daemon daemon (relay ${joyRelayUrl()})
+/** The systemd user unit `joy install` writes on Linux — pure so its
+ *  environment is testable. The relay AND the Joy home are baked in
+ *  explicitly: the unit must say which relay it serves and which ~/.joy it
+ *  reads, rather than inheriting defaults that may move under it. Installing
+ *  with JOY_HOME_DIR=/isolated/joy used to produce a service that started
+ *  against ~/.joy — missing the credentials and state the installing CLI was
+ *  using (#499). Values are quoted: systemd splits Environment= on
+ *  whitespace. */
+export interface SystemdUnitValues { node: string; serverTs: string; pkgDir: string; path: string; relayUrl: string; homeDir: string }
+export function systemdUnit(v: SystemdUnitValues): string {
+  const q = (s: string) => `"${s.replace(/(["\\])/g, "\\$1")}"`;
+  return `[Unit]
+Description=joy-daemon daemon (relay ${v.relayUrl})
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${NODE} --import tsx ${SERVER_TS}
-WorkingDirectory=${PKG_DIR}
-Environment=PATH=${process.env.PATH ?? ""}
-${relayEnvSystemd}
+ExecStart=${v.node} --import tsx ${v.serverTs}
+WorkingDirectory=${v.pkgDir}
+Environment=${q(`PATH=${v.path}`)}
+Environment=${q(`JOY_RELAY_URL=${v.relayUrl}`)}
+Environment=${q(`JOY_HOME_DIR=${v.homeDir}`)}
+
 # Restart=always, NOT on-failure: the daemon self-restarts (joy-restart-daemon
 # RPC + the update flow) by exiting 0 after spawning a detached replacement.
 # Under systemd the default KillMode=control-group reaps that replacement when
@@ -582,6 +635,18 @@ KillMode=process
 [Install]
 WantedBy=default.target
 `;
+}
+
+function cmdInstall(): number {
+  const plat = osPlatform();
+  if (!existsSync(SERVER_TS)) {
+    // A unit pointing at a missing server.ts crash-loops forever (#503).
+    console.log(`${bad} daemon source not found at ${SERVER_TS} — not installing a service that cannot start`);
+    return 1;
+  }
+  removeService(); // idempotent: start from a clean slate so the new config takes effect
+  if (plat === "linux") {
+    const unit = systemdUnit({ node: NODE, serverTs: SERVER_TS, pkgDir: PKG_DIR, path: process.env.PATH ?? "", relayUrl: joyRelayUrl(), homeDir: joyHomeDir() });
     const path = systemdUnitPath();
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
@@ -602,6 +667,7 @@ WantedBy=default.target
       pkgDir: PKG_DIR,
       path: process.env.PATH ?? "",
       relayUrl: joyRelayUrl(),
+      homeDir: joyHomeDir(),
       logFile: LOG_FILE,
     });
     const path = launchdPlistPath();
@@ -727,7 +793,14 @@ async function cmdJump(rest: string[]): Promise<number> {
 //     dialog mid-turn, and a blocked `ask` would hang until timeout.
 // Exit codes: 0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 bad mode.
 
-const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Sleep `ms`, or until `signal` aborts — a wait must never outlive the
+ *  loop that owns it. */
+const wait = (ms: number, signal?: AbortSignal) => new Promise<void>((r) => {
+  if (signal?.aborted) return r();
+  const done = () => { clearTimeout(t); r(); };
+  const t = setTimeout(() => { signal?.removeEventListener("abort", done); r(); }, ms);
+  signal?.addEventListener("abort", done, { once: true });
+});
 
 /**
  * Delete a session's transcript log ROBUSTLY. Killing the session tears down
@@ -847,11 +920,25 @@ function renderRecord(r: LoggedRecord): string | null {
   }
 }
 
-async function checkState(id: string): Promise<any | null> {
-  const r = await api("GET", `/sessions/${id}/check`).catch(() => null);
+const CHECK_STATES = new Set(["idle", "busy", "needs_input", "ended"]);
+/** The session's /check verdict. null = the daemon did not answer at all
+ *  (down, or `signal` fired). A missing session (404 session_not_found)
+ *  reads as `ended`; any other failure, or a state the daemon never
+ *  advertises, is `{ state: "error", reason }`. Both used to flow through as
+ *  `state: undefined`, which waitTurn read as idle and reported answered —
+ *  a successful exit for a session that no longer existed (#496). */
+async function checkState(id: string, opts: { signal?: AbortSignal } = {}): Promise<any | null> {
+  const r = await api("GET", `/sessions/${id}/check`, undefined, opts).catch(() => null);
   if (!r) return null;
-  return await r.json().catch(() => null);
+  const body = await r.json().catch(() => null) as any;
+  if (r.status === 404 || body?.error === "session_not_found") return { state: "ended", reason: "session_not_found" };
+  if (!r.ok || !body) return { state: "error", reason: body?.error ?? `HTTP ${r.status}` };
+  if (!CHECK_STATES.has(body.state)) return { state: "error", reason: `unexpected check state ${JSON.stringify(body.state)}` };
+  return body;
 }
+
+/** The daemon-stamped <joy-message …> wrapper off a mirrored user row. */
+const stripJoyMessage = (s: string): string => s.replace(/^\s*<joy-message\b[^>]*>\s*/, "").replace(/\s*<\/joy-message>\s*$/, "").trim();
 
 /** Record seq the session's log is at right now (0 when it has none). */
 async function currentSeq(id: string): Promise<number> {
@@ -861,8 +948,11 @@ async function currentSeq(id: string): Promise<number> {
   try { return Number(JSON.parse(first).seq) || 0; } catch { return 0; }
 }
 
-type TurnOutcome = { state: "answered" | "needs_input" | "timeout" | "gone"; text: string; check: any; records: LoggedRecord[] };
-const OUTCOME_EXIT: Record<TurnOutcome["state"], number> = { answered: 0, needs_input: 6, timeout: 4, gone: 1 };
+/** `error` (exit 1): the turn could not be observed to its end — /check
+ *  failed, or the reply's records were lost with the event stream — and
+ *  `reason` says which. Never reported as `answered`. */
+type TurnOutcome = { state: "answered" | "needs_input" | "timeout" | "gone" | "error"; text: string; check: any; records: LoggedRecord[]; reason?: string };
+const OUTCOME_EXIT: Record<TurnOutcome["state"], number> = { answered: 0, needs_input: 6, timeout: 4, gone: 1, error: 1 };
 
 /**
  * Block until the turn behind `queuedId` (or, without one, whatever is
@@ -870,44 +960,104 @@ const OUTCOME_EXIT: Record<TurnOutcome["state"], number> = { answered: 0, needs_
  * the queue no longer holds the item AND the session reports idle /
  * needs_input — polled, so it holds for every adapter regardless of how it
  * signals turn-end. The assistant text of the turn is the joined text
- * records after `afterSeq`.
+ * records of THAT turn:
+ *   - an exclusive send / a bare `wait`: everything after `afterSeq`;
+ *   - a queued item runs behind whatever is in flight, so the rest of the
+ *     PREVIOUS answer lands after `afterSeq` too and used to be returned as
+ *     this turn's reply (#498). The boundary is the daemon-mirrored user
+ *     record carrying `text` (every adapter mirrors the dispatched prompt);
+ *     the seq seen when the queue poll noticed the dispatch is the fallback.
+ * Every request in here is bounded by the remaining deadline: a daemon that
+ * accepts /check and never answers used to hold the wait forever, timeout or
+ * not (#501). The record stream resumes from the last consumed seq when it
+ * breaks; a tail that cannot be recovered is an `error`, not a short answer
+ * (#497).
  */
-async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: string | null; timeoutMs: number }): Promise<TurnOutcome> {
+export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: string | null; text?: string; timeoutMs: number }): Promise<TurnOutcome> {
   const deadline = Date.now() + opts.timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  const timedOut = () => Date.now() > deadline;
   const controller = new AbortController();
   const records: LoggedRecord[] = [];
+  let boundarySeq: number | null = opts.queuedId ? null : opts.afterSeq;
+  let fallbackBoundary: number | null = null;
+  let lastSeq = opts.afterSeq;
   let sawActivity = false;
+  let connected = false;
+  let lastStreamError: string | null = null;
+  const sentText = opts.text?.trim() ?? "";
+  const consume = (line: any): void => {
+    if (typeof line?.seq !== "number") return;
+    lastSeq = line.seq;
+    records.push(line);
+    if (boundarySeq === null && sentText && line.record?.role === "user" && stripJoyMessage(String(line.record.content?.text ?? "")) === sentText) boundarySeq = line.seq;
+    const ev = evOf(line);
+    const from = boundarySeq ?? fallbackBoundary;
+    if (from !== null && line.seq > from && ev && (ev.t === "turn-start" || ev.t === "text" || ev.t === "tool-call-start")) sawActivity = true;
+  };
   const pump = (async () => {
-    try {
-      for await (const line of streamEvents(id, { after: opts.afterSeq, follow: true, signal: controller.signal })) {
-        if (line?.hello) continue;
-        records.push(line);
-        const ev = evOf(line);
-        if (ev && (ev.t === "turn-start" || ev.t === "text" || ev.t === "tool-call-start")) sawActivity = true;
+    let backoff = 200;
+    while (!controller.signal.aborted) {
+      try {
+        for await (const line of streamEvents(id, { after: lastSeq, follow: true, signal: controller.signal })) {
+          if (line?.hello) { connected = true; continue; }
+          consume(line);
+        }
+        lastStreamError = "stream closed"; // a follow stream never ends on its own
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        lastStreamError = e instanceof Error ? e.message : String(e);
       }
-    } catch { /* aborted */ }
+      connected = false;
+      // Resume from the last consumed seq: nothing in between is lost (#497).
+      await wait(backoff, controller.signal);
+      backoff = Math.min(backoff * 2, 2000);
+    }
   })();
-  const finish = async (state: TurnOutcome["state"], check: any): Promise<TurnOutcome> => {
-    await wait(150); // let a trailing text record land before we stop reading
+  const finish = async (state: TurnOutcome["state"], check: any, reason?: string): Promise<TurnOutcome> => {
+    if (state !== "timeout") await wait(150); // let a trailing text record land before we stop reading
     controller.abort();
     await pump.catch(() => {});
-    const text = records.map((r) => (r.record.role !== "user" ? textOf(r) : null)).filter((t): t is string => !!t && t.trim().length > 0).join("\n\n").trim();
-    return { state, text, check, records };
+    if (!connected) {
+      // The stream was down when the turn ended: whatever landed after the
+      // last consumed record is not here. Fetch that tail once, bounded; if
+      // even that fails the reply is INCOMPLETE and the outcome says so
+      // rather than passing a truncated answer off as the answer (#497).
+      try {
+        for await (const line of streamEvents(id, { after: lastSeq, follow: false, signal: AbortSignal.timeout(3000) })) { if (!line?.hello) consume(line); }
+      } catch (e) {
+        if (state === "answered" || state === "needs_input") {
+          state = "error";
+          reason = `output stream lost after seq ${lastSeq} (${lastStreamError ?? (e instanceof Error ? e.message : String(e))}) — the reply is incomplete; \`joy events ${id} --json\` has the records`;
+        }
+      }
+    }
+    const from = boundarySeq ?? fallbackBoundary ?? opts.afterSeq;
+    const mine = records.filter((r) => r.seq > from);
+    const text = mine.map((r) => (r.record.role !== "user" ? textOf(r) : null)).filter((t): t is string => !!t && t.trim().length > 0).join("\n\n").trim();
+    return { state, text, check, records: mine, ...(reason ? { reason } : {}) };
   };
-  const startedAt = Date.now();
+  let startedAt = Date.now();
   let dispatched = !opts.queuedId;
+  let lastCheck: any = null;
   for (;;) {
-    if (Date.now() > deadline) return finish("timeout", await checkState(id));
+    if (timedOut()) return finish("timeout", lastCheck);
     if (!dispatched) {
-      const q = await api("GET", `/sessions/${id}/queue`).catch(() => null);
+      const q = await api("GET", `/sessions/${id}/queue`, undefined, { signal: AbortSignal.timeout(remaining()) }).catch(() => null);
+      if (timedOut()) return finish("timeout", lastCheck);
       const qs = q && q.ok ? await q.json().catch(() => null) as any : null;
       const items: any[] = qs?.items ?? qs?.queue ?? [];
       dispatched = !items.some((it) => String(it.id) === String(opts.queuedId));
       if (!dispatched) { await wait(400); continue; }
+      fallbackBoundary = lastSeq;
+      startedAt = Date.now();
     }
-    const ck = await checkState(id);
-    if (!ck) return finish("gone", null);
-    if (ck.state === "ended") return finish("gone", ck);
+    const ck = await checkState(id, { signal: AbortSignal.timeout(remaining()) });
+    if (timedOut()) return finish("timeout", lastCheck);
+    if (!ck) return finish("gone", null, "daemon not answering");
+    lastCheck = ck;
+    if (ck.state === "error") return finish("error", ck, `check failed: ${ck.reason}`);
+    if (ck.state === "ended") return finish("gone", ck, ck.reason);
     if (ck.state === "needs_input") return finish("needs_input", ck);
     if (ck.state === "busy") { sawActivity = true; await wait(400); continue; }
     // idle — but a harness that flips busy asynchronously may not have started
@@ -921,7 +1071,9 @@ async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: string 
  *  daemon, or a typed failure (exit code). */
 async function sendTo(rec: any, text: string, opts: { exclusive?: boolean; from?: string; replyTo?: string | null }): Promise<{ ok: true; queuedId: string | null; seq: number } | { ok: false; code: number }> {
   const seq = await currentSeq(rec.id);
-  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: opts.exclusive === true, from: opts.from, replyTo: opts.replyTo ?? undefined }).catch(() => null);
+  // replyTo travels as-is: `null` is the explicit "no reply expected" the
+  // daemon honours (#112); `?? undefined` used to erase it from the body.
+  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: opts.exclusive === true, from: opts.from, replyTo: opts.replyTo }).catch(() => null);
   if (!r) { console.error(`${bad} daemon not running`); return { ok: false, code: 1 }; }
   const body = await r.json().catch(() => ({})) as any;
   if (body.error === "busy") { console.error(`${bad} session ${rec.id} is busy (--no-queue)`); return { ok: false, code: 3 }; }
@@ -995,7 +1147,7 @@ async function cmdAbout(rest: string[]): Promise<number> {
   return 0;
 }
 
-async function cmdNew(rest: string[]): Promise<number> {
+export async function cmdNew(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   const readOnly = takeBool(rest, "--read-only");
   const cont = takeBool(rest, "--continue");
@@ -1021,11 +1173,20 @@ async function cmdNew(rest: string[]): Promise<number> {
   const body = await r.json().catch(() => ({}));
   if (r.status !== 201) { console.error(`${bad} create failed: ${JSON.stringify(body)}`); return 1; }
   const rec = body as any;
-  if (msg && msg.trim()) {
-    await api("POST", "/send", { session_id: rec.id, text: msg, from: senderIdentity() }).catch(() => null);
-  }
   if (json) console.log(JSON.stringify(rec));
   else console.log(rec.id);
+  if (msg && msg.trim()) {
+    // The first message is the point of -m: a send the daemon did not accept
+    // (5xx, not_durable, connection refused) used to be ignored and the
+    // command exited 0 with a session that would never start the work (#494).
+    // The id is printed either way — the session exists — and the exit code
+    // is the send's.
+    const sent = await sendTo(rec, msg, { from: senderIdentity() });
+    if (!sent.ok) {
+      console.error(`${bad} session ${rec.id} was created but its first message was not accepted — retry with: joy send ${rec.id} ${JSON.stringify(msg)}`);
+      return sent.code;
+    }
+  }
   return 0;
 }
 
@@ -1041,7 +1202,7 @@ function permissionModeFor(agent: string, readOnly: boolean): { ok: true; mode: 
 
 // joy ask <session> <text...> [--timeout secs] [--json]
 // Exclusive send + wait for the turn to finish + print the response text.
-async function cmdAsk(rest: string[]): Promise<number> {
+export async function cmdAsk(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   const noQueue = takeBool(rest, "--no-queue");
   const timeoutS = Number(takeFlag(rest, "--timeout") ?? 600);
@@ -1052,16 +1213,17 @@ async function cmdAsk(rest: string[]): Promise<number> {
   if (!rec) return 1;
   const sent = await sendTo(rec, text, { exclusive: noQueue, from: senderIdentity() });
   if (!sent.ok) return sent.code;
-  const out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, timeoutMs: timeoutS * 1000 });
+  const out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, text, timeoutMs: timeoutS * 1000 });
   if (json) {
     console.log(JSON.stringify({ session: rec.id, state: out.state, text: out.text, turn: sent.queuedId,
       question: out.check?.question ?? null, options: out.check?.options ?? null, approval: out.check?.approvals?.[0] ?? null,
-      usage: [...out.records].reverse().map((r) => evOf(r)?.usage).find(Boolean) ?? null }));
+      usage: [...out.records].reverse().map((r) => evOf(r)?.usage).find(Boolean) ?? null, ...(out.reason ? { reason: out.reason } : {}) }));
   } else {
     if (out.text) console.log(out.text);
     if (out.state === "needs_input") console.error(`${c.y("?")} ${rec.id} is waiting for input${out.check?.approvals?.length ? ` (approval: ${out.check.approvals[0].title})` : ""}`);
     else if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`);
-    else if (out.state === "gone") console.error(`${bad} session ${rec.id} gone`);
+    else if (out.state === "gone") console.error(`${bad} session ${rec.id} gone${out.reason ? ` (${out.reason})` : ""}`);
+    else if (out.state === "error") console.error(`${bad} ${out.reason ?? "turn could not be observed"} (session ${rec.id})`);
   }
   return OUTCOME_EXIT[out.state];
 }
@@ -1101,9 +1263,10 @@ async function cmdRun(rest: string[]): Promise<number> {
     const sent = await sendTo(rec, prompt, { from: senderIdentity(), replyTo: null });
     if (!sent.ok) code = sent.code;
     else {
-      out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, timeoutMs: timeoutS * 1000 });
+      out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, text: prompt, timeoutMs: timeoutS * 1000 });
       code = OUTCOME_EXIT[out.state];
       if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id})`);
+      else if (out.state === "error" || out.state === "gone") console.error(`${bad} ${out.reason ?? out.state} (session ${rec.id})`);
     }
   } finally {
     let pid = rec.pid as number | undefined;
@@ -1146,7 +1309,7 @@ async function cmdSend(rest: string[]): Promise<number> {
 }
 
 // joy wait <session> [--timeout secs] — block until the session is idle.
-async function cmdWaitIdle(rest: string[]): Promise<number> {
+export async function cmdWaitIdle(rest: string[]): Promise<number> {
   const timeoutS = Number(takeFlag(rest, "--timeout") ?? 600);
   const turn = takeFlag(rest, "--turn");
   const json = takeBool(rest, "--json");
@@ -1155,11 +1318,12 @@ async function cmdWaitIdle(rest: string[]): Promise<number> {
   const rec = await resolveSession(target);
   if (!rec) return 1;
   const out = await waitTurn(rec.id, { afterSeq: 0, queuedId: turn ?? null, timeoutMs: timeoutS * 1000 });
-  if (json) console.log(JSON.stringify({ session: rec.id, state: out.state, check: out.check }));
+  if (json) console.log(JSON.stringify({ session: rec.id, state: out.state, check: out.check, ...(out.reason ? { reason: out.reason } : {}) }));
   else if (out.state === "answered") console.log(`${ok} ${rec.id} idle`);
   else if (out.state === "needs_input") console.log(`${c.y("?")} ${rec.id} needs input`);
   else if (out.state === "timeout") console.error(`${bad} timed out after ${timeoutS}s (session ${rec.id} still busy)`);
-  else console.error(`${bad} session ${rec.id} gone`);
+  else if (out.state === "error") console.error(`${bad} ${out.reason ?? "turn could not be observed"} (session ${rec.id})`);
+  else console.error(`${bad} session ${rec.id} gone${out.reason ? ` (${out.reason})` : ""}`);
   return OUTCOME_EXIT[out.state];
 }
 
@@ -1340,7 +1504,7 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.dim("side by side — own state, own tmux server, own service unit.")}
 
   ${c.b("start")}        Start the daemon (detached)
-  ${c.b("stop")}         Stop the daemon (tmux sessions stay alive)
+  ${c.b("stop")}         Stop the daemon (tmux sessions stay alive; an installed service is stopped via systemctl/launchctl)
   ${c.b("restart")}      Restart the daemon (re-exec; running sessions survive)
   ${c.b("status")}       Show daemon status
   ${c.b("ls")}           List sessions: id, agent, state (idle / busy / needs input), title, cwd
@@ -1349,10 +1513,12 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
   ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m]
                  [--effort e] [--read-only] [--continue|--resume <id>] [--json]  → prints session id
+                 (a -m message the daemon did not accept fails the command with the send's exit code; the id is still printed)
   ${c.b("run")}          One-shot (ephemeral, like claude -p): create → prompt → print response → kill session.
                  joy run <prompt...> [--dir d] [--agent a] [--model m] [--read-only] [--timeout s] [--json]
   ${c.b("ask")}          Send + wait + print:  joy ask <session> <text...> [--timeout s] [--json]
-                 --json → { state: answered | needs_input | timeout, text, question?, approval?, usage }
+                 --json → { state: answered | needs_input | timeout | gone | error, text, question?, approval?, usage, reason? }
+                 (error, exit 1: the turn could not be observed — /check failed or the reply's records were lost)
   ${c.b("send")}         Send without waiting (queued behind a running turn):  joy send <session> <text...>
                  [--no-queue: fail with exit 3 if busy] [--no-reply] [--json → turn id]
   ${c.b("wait")}         Block until a turn ends:  joy wait <session> [--turn <id>] [--timeout s]

@@ -861,7 +861,7 @@ export const machineOps: MachineOp[] = [
         id: { type: "string", description: "joy session id" },
         text: { type: "string", description: "Message text; /steer, /title, /joy-prompt etc. are intercepted daemon-side" },
         from: { type: "string", description: "Sender identity: joy:<session id> (must exist here), cli, app, or cron:<name>. The daemon wraps the text in <joy-message from=… reply-to=…> — never trust a caller-written wrapper." },
-        replyTo: { type: "string", description: "Where the callee should answer (joy:<id>); omit for no-reply-expected. Defaults to `from` when that is a joy session." },
+        replyTo: { type: ["string", "null"], description: "Where the callee should answer (joy:<id>). Defaults to `from` when that is a joy session; an explicit null or \"\" means no reply expected (joy send --no-reply, joy run) and stamps no reply-to." },
         exclusive: { type: "boolean", description: "Scripting contract: refuse (busy) instead of queueing when work is in flight, and only drive yolo/read-only sessions" },
       },
     },
@@ -897,7 +897,13 @@ export const machineOps: MachineOp[] = [
       if (from) {
         const okFrom = /^joy:[0-9a-f]{8}$/.test(from) ? !!registry.get(from.slice(4)) : /^(cli|app|cron:[A-Za-z0-9_.-]{1,64})$/.test(from);
         if (!okFrom) return { error: "bad_from", from };
-        const replyTo = typeof params.replyTo === "string" ? params.replyTo.trim() : (from.startsWith("joy:") ? from : "");
+        // An EXPLICIT null (or "") is "no reply expected" — `joy send --no-reply`
+        // and `joy run` send it. `typeof null` is "object", so it used to fall
+        // into the default branch and stamp reply-to=<sender> anyway: every
+        // FYI from inside a session solicited an answer back (#112).
+        const replyTo = params.replyTo === null || params.replyTo === "" ? ""
+          : typeof params.replyTo === "string" ? params.replyTo.trim()
+          : (from.startsWith("joy:") ? from : "");
         if (replyTo && !/^joy:[0-9a-f]{8}$/.test(replyTo)) return { error: "bad_reply_to", replyTo };
         // Who, not just which id: harness (+ model) and the sender's title, so
         // the app can say "from Claude Code · Greet CLI (774a97e6)" even for a
