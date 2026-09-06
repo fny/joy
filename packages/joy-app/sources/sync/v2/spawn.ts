@@ -11,6 +11,7 @@ import { Modal } from '@/modal';
 import { t } from '@/text';
 import { sync } from '@/sync/sync';
 import { storage } from '@/sync/storage';
+import { loadUncertainCreations, saveUncertainCreations } from '@/sync/persistence';
 import { v2, V2ApiError } from '@/sync/v2/api';
 import { deriveSpawnSpecKey, encodeSpawnSpec } from '@/sync/v2/spawnSpec';
 
@@ -40,11 +41,13 @@ const STEP_CAP_MS = 10_000;
  *  the moment the relay is most likely unreachable — unbounded, it stranded
  *  the waiter forever AFTER its deadline had already fired (#416). */
 const CLEANUP_CAP_MS = STEP_CAP_MS;
-/** How long an UNCERTAIN creation (see SpawnCreationUncertainError) keeps
- *  being replayed for a repeat of the identical action. The relay dedupes by
- *  (account, actor, creationIntentId) plus the full request hash, so a
- *  replay can only ever return the session this exact action asked for. */
-const UNCERTAIN_CREATION_TTL_MS = 10 * 60_000;
+/** How many UNCERTAIN creations (see SpawnCreationUncertainError) are
+ *  retained at once — a bound on count only, never on age: acceptance does
+ *  not become known by waiting, so an unresolved identity lives until the
+ *  relay answers under it (#417). The relay dedupes by (account, actor,
+ *  creationIntentId) plus the full request hash, so a replay can only ever
+ *  return the session this exact action asked for. */
+const UNCERTAIN_CREATIONS_CAP = 32;
 
 type SessionLink = { sessionId?: string; localSessionId?: string; keyEnvelope?: string };
 type SessionLike = { metadata?: { joy__sessionId?: string; v2?: SessionLink } | null };
@@ -63,9 +66,10 @@ export interface SpawnDeps {
      *  the plain-JSON form (#107) — spawnSealKeyFor in production. */
     sealKeyFor: (machineId: string) => Promise<Uint8Array | null>;
     /** Pins the creation intent (see #417). A caller re-driving ONE user
-     *  action — the "Retry" of a SpawnCreationUncertainError it just showed —
-     *  passes that error's `creationIntentId` here so the relay replays
-     *  instead of spawning a second session; a new user action must not. */
+     *  action — the "Retry" of a SpawnCreationUncertainError it just showed
+     *  (v2SpawnInteractive) — passes that error's `creationIntentId` here so
+     *  the relay replays instead of spawning a second session; a new user
+     *  action must not. */
     creationIntentId?: string;
 }
 
@@ -177,11 +181,13 @@ export class SpawnAbandonedError extends Error {
     }
 }
 
-/** The retained identity of a creation whose acceptance is unresolved. */
+/** The retained identity of a creation whose acceptance is unresolved.
+ *  Persisted as-is (sync/persistence loadUncertainCreations). */
 export interface UncertainCreation {
     creationIntentId: string;
     machineId: string;
-    /** When the create budget ran out (deps.now()). */
+    /** When the create budget FIRST ran out for this intent (deps.now()) —
+     *  informational; nothing expires on it. */
     since: number;
     /** The spec exactly as it went on the wire. A replay of this intent must
      *  re-send these bytes: the relay's idempotency hash covers them, and a
@@ -191,9 +197,40 @@ export interface UncertainCreation {
 
 // Keyed by the action's fingerprint (machine + spec): the relay's own
 // idempotency hash covers the whole request, so only the IDENTICAL action
-// may replay an intent. Module state, not persisted: the failure the user
-// can retry lives in this app run too.
-const uncertainCreations = new Map<string, UncertainCreation>();
+// may replay an intent. PERSISTED (relay-scoped MMKV, sync/persistence) and
+// loaded on first use: a module-only map was discarded by an app restart,
+// and a ten-minute age limit let the very same unresolved action accept a
+// second intent afterwards — both left two sessions where the user asked
+// for one (#417). An entry is removed only when its acceptance is resolved
+// (an answer under the intent, accepted or refused) or the caller discards
+// it (discardUncertainCreation); UNCERTAIN_CREATIONS_CAP bounds the count.
+let uncertainCreations: Map<string, UncertainCreation> | null = null;
+
+function registry(): Map<string, UncertainCreation> {
+    if (!uncertainCreations) uncertainCreations = new Map(Object.entries(loadUncertainCreations()));
+    return uncertainCreations;
+}
+
+function persistRegistry(): void {
+    saveUncertainCreations(Object.fromEntries(registry()));
+}
+
+function retainUncertainCreation(fingerprint: string, entry: UncertainCreation): void {
+    const r = registry();
+    r.delete(fingerprint);
+    r.set(fingerprint, entry);
+    // Insertion order is age: drop the oldest beyond the cap.
+    while (r.size > UNCERTAIN_CREATIONS_CAP) {
+        const oldest = r.keys().next().value;
+        if (oldest === undefined) break;
+        r.delete(oldest);
+    }
+    persistRegistry();
+}
+
+function resolveUncertainCreation(fingerprint: string): void {
+    if (registry().delete(fingerprint)) persistRegistry();
+}
 
 function stableJson(v: unknown): string {
     if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']';
@@ -212,31 +249,26 @@ export function creationFingerprint(machineId: string, spec: V2SpawnSpec): strin
 /**
  * The unresolved creation of exactly this action, if any (#417). The UI
  * passes its `creationIntentId` as SpawnDeps.creationIntentId when the user
- * retries the failure it was shown; v2SpawnAndWait also reuses it on its own
- * for an identical spawn within UNCERTAIN_CREATION_TTL_MS. It resolves when
- * a create under it is answered (accepted or refused); choosing a DISTINCT
- * creation is discardUncertainCreation.
+ * retries the failure it was shown (v2SpawnInteractive); v2SpawnAndWait
+ * also reuses it on its own for an identical spawn, however long ago and
+ * across app restarts. It resolves when a create under it is answered
+ * (accepted or refused); choosing a DISTINCT creation of the same action is
+ * discardUncertainCreation.
  */
-export function uncertainCreationFor(machineId: string, spec: V2SpawnSpec, now = Date.now()): UncertainCreation | null {
-    const key = creationFingerprint(machineId, spec);
-    const found = uncertainCreations.get(key);
-    if (!found) return null;
-    if (now - found.since > UNCERTAIN_CREATION_TTL_MS) {
-        uncertainCreations.delete(key);
-        return null;
-    }
-    return found;
+export function uncertainCreationFor(machineId: string, spec: V2SpawnSpec): UncertainCreation | null {
+    return registry().get(creationFingerprint(machineId, spec)) ?? null;
 }
 
 /** Forget the unresolved creation of this action: the next spawn of it is a
  *  new creation with a new identity. */
 export function discardUncertainCreation(machineId: string, spec: V2SpawnSpec): void {
-    uncertainCreations.delete(creationFingerprint(machineId, spec));
+    resolveUncertainCreation(creationFingerprint(machineId, spec));
 }
 
-/** Test seam: a fresh registry between cases. */
+/** Test seam: a fresh registry between cases (memory and persisted). */
 export function resetUncertainCreationsForTests(): void {
-    uncertainCreations.clear();
+    uncertainCreations = new Map();
+    persistRegistry();
 }
 
 /** Cancel an accepted spawn nobody is waiting for — without letting the
@@ -272,7 +304,7 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
     // after the retry budget the id used to live only in the abandoned
     // invocation, so the user's own retry accepted a second intent.
     const fingerprint = creationFingerprint(machineId, spec);
-    const uncertain = uncertainCreationFor(machineId, spec, deps.now());
+    const uncertain = uncertainCreationFor(machineId, spec);
     const creationIntentId = deps.creationIntentId ?? uncertain?.creationIntentId ?? randomUUID();
     // The spec goes on the wire ONCE per creation intent (#107): sealed under
     // the machine's spawn-spec key when the daemon opens sealed specs (a
@@ -292,17 +324,17 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
         const r = await settleWithin(deps, deps.api.createSession(machineId, spec, { creationIntentId, spawnSpecWire }), Math.min(STEP_CAP_MS, remaining));
         if (r?.ok) {
             v2id = r.value.sessionId;
-            uncertainCreations.delete(fingerprint); // acceptance resolved
+            resolveUncertainCreation(fingerprint); // acceptance resolved
             break;
         }
         const error = r ? r.error : new Error('createSession did not answer in time');
         if (!isRetryableCreateError(error)) {
-            uncertainCreations.delete(fingerprint); // the relay refused it: nothing to replay
+            resolveUncertainCreation(fingerprint); // the relay refused it: nothing to replay
             throw error;
         }
         const elapsed = deps.now() - createStarted;
         if (elapsed >= CREATE_RETRY_BUDGET_MS) {
-            uncertainCreations.set(fingerprint, { creationIntentId, machineId, since: deps.now(), spawnSpecWire });
+            retainUncertainCreation(fingerprint, { creationIntentId, machineId, since: uncertain?.since ?? deps.now(), spawnSpecWire });
             throw new SpawnCreationUncertainError(creationIntentId, machineId, error);
         }
         await deps.sleep(Math.min(CREATE_RETRY_BASE_MS * 2 ** attempt, CREATE_RETRY_BUDGET_MS - elapsed));
@@ -383,6 +415,35 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
     // outcome reported on the error rather than assumed (#416).
     const cleanup = await cancelSpawn(deps, v2id);
     throw new SpawnAbandonedError(t('errors.spawnDidNotStart'), v2id, cleanup);
+}
+
+/**
+ * v2SpawnAndWait for a USER action (#417) — what every UI "start a session"
+ * button calls. When the relay never answered the creation, the user is
+ * asked whether to retry: a retry re-drives the SAME action under the
+ * error's `creationIntentId`, so the relay replays the session it may
+ * already hold instead of accepting a second one. Declining returns null
+ * (nothing to navigate to, like a declined directory prompt); the unresolved
+ * identity stays retained, so a later press of the same button, or the same
+ * action after a restart, still replays it. Every other failure propagates.
+ */
+export async function v2SpawnInteractive(machineId: string, spec: V2SpawnSpec, overrides: Partial<SpawnDeps> = {}): Promise<string | null> {
+    const deps: SpawnDeps = { ...defaultDeps(), ...overrides };
+    let creationIntentId = deps.creationIntentId;
+    for (;;) {
+        try {
+            return await v2SpawnAndWait(machineId, spec, { ...deps, creationIntentId });
+        } catch (e) {
+            if (!(e instanceof SpawnCreationUncertainError)) throw e;
+            const retry = await deps.confirm(
+                t('newSession.creationUncertainTitle'),
+                t('newSession.creationUncertainMessage'),
+                { cancelText: t('common.cancel'), confirmText: t('common.retry') },
+            );
+            if (!retry) return null;
+            creationIntentId = e.creationIntentId;
+        }
+    }
 }
 
 /**

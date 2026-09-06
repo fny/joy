@@ -24,12 +24,15 @@ import { useRootGutter } from '@/hooks/useRootGutter';
 import { sync } from '@/sync/sync';
 import { machinePane, machineResize, machineSendKeys } from '@/sync/v2/machine';
 import { paneSizeFor, paneSizeChanged, type PaneSize } from '@/utils/paneSize';
-import { clearPendingScript, planTextSubmit, resizePending, restoreFailedInput, sendKeysOutcome, type SendOutcome, type TypedPending } from './paneInputRecovery';
+import { pendingAfterScript, performSendKeys, resizePending, restoreFailedInput, submitTextOperation, type SendOutcome, type TypedPending } from './paneInputRecovery';
 import { t } from '@/text';
 import { describePaneError } from '@/utils/paneError';
 import { sharedInFlightGuard } from '@/utils/inFlightGuard';
 
 const POLL_MS = 1500;
+/** How long one send-keys call may stay unanswered before its outcome is
+ *  reported as unknown (#155); the request itself keeps running. */
+const SEND_TIMEOUT_MS = 10000;
 
 // Simple mode: strip the claude TUI's status chrome from the capture — the
 // permission/shortcut hint line, git-branch/subagent/artifact widgets — i.e.
@@ -177,39 +180,23 @@ export default React.memo(function JoyPaneScreen() {
     // callers that chain a follow-up (text mode's submit Enter) must gate on
     // it: an unconditional Enter after a FAILED text send would submit
     // whatever already sits in Claude's input box, or answer a TUI prompt.
-    // 'failed' is definite (the text is safe to retype); 'unknown' is a
-    // timeout — the keys may have landed, so the box state is ambiguous
-    // (#155). UNGUARDED: only call from inside runExclusive.
+    // 'failed' is definite (the daemon or relay refused BEFORE executing —
+    // the text is safe to retype); 'unknown' covers a timeout, a rejected
+    // transport promise and an unacknowledged answer — the keys may have
+    // landed, so the box state is ambiguous (#155, performSendKeys).
+    // UNGUARDED: only call from inside runExclusive.
     const sendKeysRaw = React.useCallback(async (script: string, literal = false): Promise<SendOutcome> => {
         if (!script) return 'failed';
         const kctx = sync.machineCtxFor(machineId, sessionId);
         if (!kctx) { Modal.alert(t('common.error'), `Machine encryption not found for ${machineId}`); return 'failed'; }
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-            const result = await Promise.race([
-                machineSendKeys(kctx, script, literal),
-                new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), 10000); }),
-            ]);
-            if (result === 'timeout') {
-                Modal.alert(t('common.error'), 'joy-tmux did not respond');
-                return 'unknown';
-            }
-            // A 5xx or an {ok:false} without error text used to count as
-            // landed because only an `error` field was checked (#155).
-            const verdict = sendKeysOutcome(result);
-            if (verdict.outcome === 'failed') {
-                Modal.alert(t('common.error'), verdict.message);
-                return 'failed';
-            }
+        const verdict = await performSendKeys(() => machineSendKeys(kctx, script, literal), SEND_TIMEOUT_MS);
+        if (verdict.outcome === 'ok') {
             // Tight feedback loop: re-poll right after the keys land.
             setTimeout(() => void refresh(), 250);
             return 'ok';
-        } catch (e) {
-            Modal.alert(t('common.error'), e instanceof Error ? e.message : String(e));
-            return 'failed';
-        } finally {
-            if (timer !== undefined) clearTimeout(timer);
         }
+        Modal.alert(t('common.error'), verdict.timedOut ? 'joy-tmux did not respond' : verdict.message);
+        return verdict.outcome;
     }, [machineId, sessionId, refresh]);
 
     // Run one whole terminal operation under the guard. Resolves false when
@@ -225,12 +212,10 @@ export default React.memo(function JoyPaneScreen() {
     // Text that was typed into the pane's input box but whose Enter FAILED:
     // it is sitting there unsubmitted, so a retry of the same text sends only
     // the Enter instead of typing it a second time, and a retry of EDITED
-    // text clears the box first instead of appending (#155). After a timeout
-    // the entry is kept but marked uncertain: the next submit clears first.
+    // text clears the box first instead of appending (#155). After an
+    // UNKNOWN outcome (timeout, lost response) the entry is kept but marked
+    // uncertain: the next submit clears first.
     const typedPendingRef = React.useRef<TypedPending>(null);
-    const markPendingUncertain = React.useCallback((fallbackText: string) => {
-        typedPendingRef.current = { text: typedPendingRef.current?.text ?? fallbackText, certain: false };
-    }, []);
 
     /** One script (quick key, raw tokens) as a complete operation. */
     const sendScript = React.useCallback((script: string, literal = false): Promise<boolean> =>
@@ -238,10 +223,9 @@ export default React.memo(function JoyPaneScreen() {
             const outcome = await sendKeysRaw(script, literal);
             // Any other keys reaching the pane (C-c, Esc, an Enter from the
             // key bar) change what its input box holds — stop assuming.
-            if (outcome === 'ok') typedPendingRef.current = null;
-            else if (outcome === 'unknown' && typedPendingRef.current) markPendingUncertain(typedPendingRef.current.text);
+            typedPendingRef.current = pendingAfterScript(outcome, typedPendingRef.current);
             return outcome === 'ok';
-        }), [runExclusive, sendKeysRaw, markPendingUncertain]);
+        }), [runExclusive, sendKeysRaw]);
 
     // A definite failure puts the submitted text back — into an empty box
     // only, never over something typed since (#155). The alert from
@@ -262,11 +246,8 @@ export default React.memo(function JoyPaneScreen() {
             void runExclusive(async () => {
                 setInput('');
                 const outcome = await sendKeysRaw(script, false);
-                if (outcome === 'ok') typedPendingRef.current = null;
-                else {
-                    if (outcome === 'unknown' && typedPendingRef.current) markPendingUncertain(typedPendingRef.current.text);
-                    restoreInput(script);
-                }
+                typedPendingRef.current = pendingAfterScript(outcome, typedPendingRef.current);
+                if (outcome !== 'ok') restoreInput(script);
                 return outcome === 'ok';
             });
         } else {
@@ -275,40 +256,17 @@ export default React.memo(function JoyPaneScreen() {
             // All steps run under ONE hold of the guard. Text delivery and
             // Enter delivery are tracked separately (#155): a retry after the
             // text landed sends only the Enter; a retry with DIFFERENT text
-            // (or after a timeout left the box unknown) clears the box first.
+            // (or after an unknown outcome left the box ambiguous) clears the
+            // box first — submitTextOperation.
             void runExclusive(async () => {
                 setInput('');
-                const pending = typedPendingRef.current;
-                const { clearFirst, typeText } = planTextSubmit(script, pending);
-                if (clearFirst) {
-                    const cleared = await sendKeysRaw(clearPendingScript(pending?.text ?? script), false);
-                    if (cleared !== 'ok') {
-                        if (cleared === 'unknown') markPendingUncertain(script);
-                        restoreInput(script);
-                        return false;
-                    }
-                    typedPendingRef.current = null;
-                }
-                if (typeText) {
-                    const typed = await sendKeysRaw(script, true);
-                    if (typed !== 'ok') {
-                        if (typed === 'unknown') typedPendingRef.current = { text: script, certain: false };
-                        restoreInput(script);
-                        return false;
-                    }
-                    typedPendingRef.current = { text: script, certain: true };
-                }
-                const submitted = await sendKeysRaw('<Enter>', false);
-                if (submitted !== 'ok') {
-                    if (submitted === 'unknown') typedPendingRef.current = { text: script, certain: false };
-                    restoreInput(script);
-                    return false;
-                }
-                typedPendingRef.current = null;
-                return true;
+                const r = await submitTextOperation(script, typedPendingRef.current, sendKeysRaw);
+                typedPendingRef.current = r.pending;
+                if (!r.submitted) restoreInput(script);
+                return r.submitted;
             });
         }
-    }, [input, rawMode, runExclusive, sendKeysRaw, restoreInput, markPendingUncertain]);
+    }, [input, rawMode, runExclusive, sendKeysRaw, restoreInput]);
 
     // The header is hidden (full-height terminal), so on iOS the keyboard would
     // overlay the quick-keys + input row. Lift the whole column above it with the

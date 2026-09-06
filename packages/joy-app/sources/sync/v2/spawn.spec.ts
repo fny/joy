@@ -12,6 +12,17 @@ import _sodium from 'libsodium-wrappers';
 import { createHmac } from 'node:crypto';
 
 vi.mock('expo-crypto', () => ({ randomUUID: () => 'uuid-' + Math.random().toString(36).slice(2) }));
+// The persisted registry of unresolved creations (#417): an in-memory
+// stand-in for the relay-scoped MMKV store, kept OUTSIDE the module so a
+// vi.resetModules() "restart" re-imports spawn.ts against the same bytes.
+const { persisted } = vi.hoisted(() => ({ persisted: new Map<string, string>() }));
+vi.mock('@/sync/persistence', () => ({
+    loadUncertainCreations: () => JSON.parse(persisted.get('uncertain-creations-v1') ?? '{}'),
+    saveUncertainCreations: (entries: Record<string, unknown>) => {
+        if (Object.keys(entries).length === 0) persisted.delete('uncertain-creations-v1');
+        else persisted.set('uncertain-creations-v1', JSON.stringify(entries));
+    },
+}));
 // spawn.ts seals the spec (#107): the native libsodium module and the
 // hmac primitive get their node stand-ins, as in spawnSpec.spec.ts.
 vi.mock('@/encryption/libsodium.lib', async () => { await _sodium.ready; return { default: _sodium }; });
@@ -33,7 +44,7 @@ vi.mock('@/sync/v2/api', () => {
 import { V2ApiError } from '@/sync/v2/api';
 import {
     SpawnAbandonedError, SpawnCreationUncertainError, discardUncertainCreation, isRetryableCreateError,
-    resetUncertainCreationsForTests, spawnSealKeyFor, uncertainCreationFor, v2SpawnAndWait, waitForLocalSession, type SpawnDeps,
+    resetUncertainCreationsForTests, spawnSealKeyFor, uncertainCreationFor, v2SpawnAndWait, v2SpawnInteractive, waitForLocalSession, type SpawnDeps,
 } from './spawn';
 import { deriveSpawnSpecKey, openSpawnSpec } from './spawnSpec';
 
@@ -70,7 +81,7 @@ const bound = (v2id: string): Sessions => ({
 });
 
 describe('v2SpawnAndWait', () => {
-    beforeEach(() => resetUncertainCreationsForTests());
+    beforeEach(() => { resetUncertainCreationsForTests(); persisted.clear(); });
 
     it('returns the bound card id once the refresh shows it', async () => {
         let refreshed = 0;
@@ -140,12 +151,12 @@ describe('v2SpawnAndWait', () => {
         expect(failure).toBeInstanceOf(SpawnCreationUncertainError);
         expect(accepted.has(failure.creationIntentId)).toBe(true);
         // The identity outlives the failed invocation, addressed by the action.
-        expect(uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())?.creationIntentId).toBe(failure.creationIntentId);
+        expect(uncertainCreationFor('m', { cwd: '/x' })?.creationIntentId).toBe(failure.creationIntentId);
         recovered = true;
         await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).resolves.toBe('app1');
         expect(accepted.size).toBe(1);
         // Resolved by the accepted answer: nothing left to replay.
-        expect(uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())).toBeNull();
+        expect(uncertainCreationFor('m', { cwd: '/x' })).toBeNull();
     });
 
     it('#417: the UI can pin the id from the error, and a distinct action gets its own', async () => {
@@ -165,6 +176,124 @@ describe('v2SpawnAndWait', () => {
         // A different spec is a different action: a new id.
         await v2SpawnAndWait('m', { cwd: '/y' }, h.deps);
         expect(new Set(seen).size).toBe(2);
+    });
+
+    it('#417 residual: a distinct creation gets its own intent and leaves the unresolved one retained', async () => {
+        const seen: string[] = [];
+        const h = harness({ sessions: () => bound('v2-1') });
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (_m: string, s: { cwd: string }, opts?: { creationIntentId?: string }) => {
+            seen.push(opts!.creationIntentId!);
+            if (s.cwd === '/x') { h.clock.add(31_000); throw new TypeError('Network request failed'); }
+            return { sessionId: 'v2-1' };
+        });
+        const failure = (await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e)) as SpawnCreationUncertainError;
+        await expect(v2SpawnAndWait('m', { cwd: '/y' }, h.deps)).resolves.toBe('app1');
+        expect(seen[seen.length - 1]).not.toBe(failure.creationIntentId);
+        expect(uncertainCreationFor('m', { cwd: '/x' })?.creationIntentId).toBe(failure.creationIntentId);
+        expect(uncertainCreationFor('m', { cwd: '/y' })).toBeNull();
+    });
+
+    it('#417 residual: the same unresolved action retried after the former ten-minute limit still replays ONE intent', async () => {
+        const accepted = new Set<string>();
+        let recovered = false;
+        const h = harness({ sessions: () => bound('v2-1') });
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (_m: string, _s: unknown, opts?: { creationIntentId?: string }) => {
+            accepted.add(opts!.creationIntentId!);
+            if (!recovered) { h.clock.add(31_000); throw new Error('accepted; lost response'); }
+            return { sessionId: 'v2-1' };
+        });
+        await expect(v2SpawnAndWait('m', { cwd: '/ttl' }, h.deps)).rejects.toBeInstanceOf(SpawnCreationUncertainError);
+        h.clock.add(600_001);
+        recovered = true;
+        await expect(v2SpawnAndWait('m', { cwd: '/ttl' }, h.deps)).resolves.toBe('app1');
+        expect(accepted.size).toBe(1);
+        expect(uncertainCreationFor('m', { cwd: '/ttl' })).toBeNull();
+    });
+
+    it('#417 residual: an app restart (fresh module state fed from persisted storage) replays the same intent', async () => {
+        const accepted = new Set<string>();
+        let recovered = false;
+        const h = harness({ sessions: () => bound('v2-1') });
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (_m: string, _s: unknown, opts?: { creationIntentId?: string }) => {
+            accepted.add(opts!.creationIntentId!);
+            if (!recovered) { h.clock.add(31_000); throw new TypeError('Network request failed'); }
+            return { sessionId: 'v2-1' };
+        });
+        const failure = (await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e)) as SpawnCreationUncertainError;
+        expect(persisted.get('uncertain-creations-v1')).toContain(failure.creationIntentId);
+
+        // "Restart": a fresh spawn.ts whose only memory is the persisted store.
+        vi.resetModules();
+        const fresh = await import('./spawn');
+        expect(fresh.uncertainCreationFor('m', { cwd: '/x' })?.creationIntentId).toBe(failure.creationIntentId);
+        recovered = true;
+        await expect(fresh.v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).resolves.toBe('app1');
+        expect(accepted.size).toBe(1);
+        // Resolved by the accepted answer: the store is empty again.
+        expect(fresh.uncertainCreationFor('m', { cwd: '/x' })).toBeNull();
+        expect(persisted.has('uncertain-creations-v1')).toBe(false);
+    });
+
+    it('#417 residual: a restart followed by a DEFINITIVE refusal resolves the persisted identity', async () => {
+        const h = harness();
+        let n = 0;
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+            if (n++ === 0) { h.clock.add(31_000); throw new TypeError('Network request failed'); }
+            throw new V2ApiError(429, 'too_many_sessions', null);
+        });
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toBeInstanceOf(SpawnCreationUncertainError);
+        vi.resetModules();
+        const fresh = await import('./spawn');
+        expect(fresh.uncertainCreationFor('m', { cwd: '/x' })).not.toBeNull();
+        // The fresh module's V2ApiError is a different class; the refusal is
+        // classified by its status, so the old instance still counts.
+        await expect(fresh.v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toMatchObject({ code: 'too_many_sessions' });
+        expect(fresh.uncertainCreationFor('m', { cwd: '/x' })).toBeNull();
+        expect(persisted.has('uncertain-creations-v1')).toBe(false);
+    });
+
+    describe('v2SpawnInteractive (#417: the UI retry path)', () => {
+        function lossyThenRecovering(h: ReturnType<typeof harness>) {
+            const accepted = new Set<string>();
+            const state = { recovered: false };
+            (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (_m: string, _s: unknown, opts?: { creationIntentId?: string }) => {
+                accepted.add(opts!.creationIntentId!);
+                if (!state.recovered) { h.clock.add(31_000); throw new TypeError('Network request failed'); }
+                return { sessionId: 'v2-1' };
+            });
+            return { accepted, state };
+        }
+
+        it('a confirmed Retry re-drives the same action under the error\'s creationIntentId', async () => {
+            const prompts: string[] = [];
+            const h = harness({ sessions: () => bound('v2-1') });
+            const { accepted, state } = lossyThenRecovering(h);
+            h.deps.confirm = async (title) => { prompts.push(title); state.recovered = true; return true; };
+            await expect(v2SpawnInteractive('m', { cwd: '/x' }, h.deps)).resolves.toBe('app1');
+            expect(prompts).toEqual(['newSession.creationUncertainTitle']);
+            expect(accepted.size).toBe(1);
+            expect(uncertainCreationFor('m', { cwd: '/x' })).toBeNull();
+        });
+
+        it('a declined Retry returns null and keeps the identity for the next press of the same button', async () => {
+            const h = harness({ sessions: () => bound('v2-1') });
+            const { accepted, state } = lossyThenRecovering(h);
+            h.deps.confirm = async () => false;
+            await expect(v2SpawnInteractive('m', { cwd: '/x' }, h.deps)).resolves.toBeNull();
+            const retained = uncertainCreationFor('m', { cwd: '/x' });
+            expect(retained).not.toBeNull();
+            expect(accepted.has(retained!.creationIntentId)).toBe(true);
+            // The user presses the same button again later, relay recovered.
+            state.recovered = true;
+            await expect(v2SpawnInteractive('m', { cwd: '/x' }, h.deps)).resolves.toBe('app1');
+            expect(accepted.size).toBe(1);
+        });
+
+        it('every other failure propagates unchanged', async () => {
+            const h = harness();
+            (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async () => { throw new V2ApiError(429, 'too_many_sessions', null); });
+            await expect(v2SpawnInteractive('m', { cwd: '/x' }, h.deps)).rejects.toMatchObject({ code: 'too_many_sessions' });
+        });
     });
 
     it('#417: discarding the uncertain creation makes the next spawn a new one', async () => {
@@ -187,7 +316,7 @@ describe('v2SpawnAndWait', () => {
         const h = harness({ sessions: () => bound('v2-1') });
         (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async () => { throw new V2ApiError(429, 'too_many_sessions', null); });
         await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toMatchObject({ code: 'too_many_sessions' });
-        expect(uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())).toBeNull();
+        expect(uncertainCreationFor('m', { cwd: '/x' })).toBeNull();
     });
 
     it('#416: a createSession POST that never answers is bounded and ends as an uncertain creation', async () => {
@@ -342,7 +471,7 @@ describe('isRetryableCreateError', () => {
 });
 
 describe('#107 spawn-spec sealing', () => {
-    beforeEach(() => resetUncertainCreationsForTests());
+    beforeEach(() => { resetUncertainCreationsForTests(); persisted.clear(); });
     const machineKey = new Uint8Array(32).fill(7);
 
     it('spawnSealKeyFor: the spawn-spec key only when the daemon advertises spawnSpecSealed AND the machine key is known', async () => {
@@ -389,7 +518,7 @@ describe('#107 spawn-spec sealing', () => {
         h.api.createSession = vi.fn(async () => { throw new V2ApiError(503, 'down', null); }) as never;
         const failure = await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e);
         expect(failure).toBeInstanceOf(SpawnCreationUncertainError);
-        const retained = uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())!;
+        const retained = uncertainCreationFor('m', { cwd: '/x' })!;
         expect(retained.spawnSpecWire?.startsWith('v2e1:')).toBe(true);
         // the user retries the same action: same intent, same bytes
         h.api.createSession = vi.fn(async (_m: string, _s: unknown, opts?: { creationIntentId?: string; spawnSpecWire?: string }) => {

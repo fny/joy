@@ -302,6 +302,8 @@ export const ru: TranslationStructure = {
         switchMachinesHint: '• Переключите машину, нажав на неё выше',
         createDirectoryTitle: 'Создать папку?',
         createDirectoryMessage: ({ path }: { path: string }) => `Папка '${path}' не существует на машине. Создать её?`,
+        creationUncertainTitle: 'Сессия не подтверждена',
+        creationUncertainMessage: 'Релей не подтвердил новую сессию. Повтор отправит тот же запрос ещё раз, так что запустится не больше одной сессии.',
     },
 
     sessionHistory: {

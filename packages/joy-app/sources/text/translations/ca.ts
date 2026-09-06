@@ -323,6 +323,8 @@ export const ca: TranslationStructure = {
         switchMachinesHint: '• Canvia de màquina fent clic a la màquina de dalt',
         createDirectoryTitle: 'Crear el directori?',
         createDirectoryMessage: ({ path }: { path: string }) => `El directori '${path}' no existeix a la màquina. Vols crear-lo?`,
+        creationUncertainTitle: 'Sessió no confirmada',
+        creationUncertainMessage: 'El relay no ha confirmat la nova sessió. Reintentar envia la mateixa sol·licitud de nou, així que s\'iniciarà com a màxim una sessió.',
     },
 
     sessionHistory: {

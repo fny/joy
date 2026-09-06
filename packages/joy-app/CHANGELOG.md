@@ -1,3 +1,8 @@
+# Sep 8 (3) — Review follow-ups
+
+- **Starting sessions**: a session whose creation the relay never confirmed is remembered until it is confirmed or refused, across app restarts and however long later; retrying offers to re-send the same request so at most one session starts. The new-session machine picker re-probes when the machine list changes during discovery instead of leaving nothing selected.
+- **Terminal**: a send whose reply was lost is treated as possibly landed, so a retry clears the input line first instead of typing the text twice.
+
 # Sep 8 (2) — Review follow-ups
 
 - **Voice**: the idle listener rotates its recording every five minutes instead of growing one file; a session that finishes while voice is still connecting is reported once connected; ending a call while it is connecting always wins.

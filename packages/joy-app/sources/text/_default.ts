@@ -368,6 +368,8 @@ export const en = {
         switchMachinesHint: '• Switch machines by clicking on the machine above',
         createDirectoryTitle: 'Create directory?',
         createDirectoryMessage: ({ path }: { path: string }) => `The directory '${path}' does not exist on the machine. Create it?`,
+        creationUncertainTitle: 'Session not confirmed',
+        creationUncertainMessage: 'The relay did not confirm the new session. Retry sends the same request again, so at most one session is started.',
     },
 
     sessionHistory: {
