@@ -1073,6 +1073,10 @@ export const pl: TranslationStructure = {
         codeCopied: 'Kod skopiowany',
         copyFailed: 'Błąd kopiowania',
         mermaidRenderFailed: 'Nie udało się wyświetlić diagramu mermaid',
+        // Remote markdown images load on tap only (#94)
+        loadImage: ({ host }: { host: string }) => `Wczytaj obraz z ${host}`,
+        // A task notification sharing a message with a real prompt renders as a line (#269)
+        taskNotificationLine: ({ status, summary }: { status: string; summary: string }) => `Zadanie w tle ${status}: ${summary}`,
     },
 
 

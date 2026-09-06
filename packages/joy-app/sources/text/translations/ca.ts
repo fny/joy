@@ -1057,6 +1057,10 @@ export const ca: TranslationStructure = {
         codeCopied: 'Codi copiat',
         copyFailed: 'Error al copiar',
         mermaidRenderFailed: 'Error al renderitzar el diagrama mermaid',
+        // Remote markdown images load on tap only (#94)
+        loadImage: ({ host }: { host: string }) => `Carrega la imatge de ${host}`,
+        // A task notification sharing a message with a real prompt renders as a line (#269)
+        taskNotificationLine: ({ status, summary }: { status: string; summary: string }) => `Tasca en segon pla ${status}: ${summary}`,
     },
 
 

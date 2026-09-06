@@ -1104,6 +1104,10 @@ export const en = {
         codeCopied: 'Code copied',
         copyFailed: 'Copy failed',
         mermaidRenderFailed: 'Failed to render mermaid diagram',
+        // Remote markdown images load on tap only (#94)
+        loadImage: ({ host }: { host: string }) => `Load image from ${host}`,
+        // A task notification sharing a message with a real prompt renders as a line (#269)
+        taskNotificationLine: ({ status, summary }: { status: string; summary: string }) => `Background task ${status}: ${summary}`,
     },
 
 

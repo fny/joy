@@ -13,12 +13,36 @@ const webStyle: any = {
     overflow: 'auto',
 };
 
+// Every render attempt gets its own SVG id. Mermaid removes any existing
+// element with the id it is given before drawing, so two diagrams whose
+// imports resolved in the same millisecond (one `Date.now()` id) deleted each
+// other and the survivors shared an id (#260). A module counter cannot collide.
+let mermaidRenderSeq = 0;
+function nextMermaidId(): string {
+    mermaidRenderSeq += 1;
+    return `mermaid-${mermaidRenderSeq}-${Date.now().toString(36)}`;
+}
+
+// Mermaid renders into a temporary element under document.body (and, when
+// the diagram is invalid, an error SVG) that it does not always remove before
+// throwing — invalid mid-stream content left one per attempt behind (#261).
+function removeMermaidScratch(id: string) {
+    if (typeof document === 'undefined') return;
+    for (const scratchId of [id, `d${id}`]) {
+        document.getElementById(scratchId)?.remove();
+    }
+}
+
+// Native: the WebView measures its own document and posts the height.
+const NATIVE_INITIAL_HEIGHT = 200;
+
 // Mermaid render component that works on all platforms
 export const MermaidRenderer = React.memo((props: {
     content: string;
 }) => {
     const { theme } = useUnistyles();
-    const [dimensions, setDimensions] = React.useState({ width: 0, height: 200 });
+    const [dimensions, setDimensions] = React.useState({ width: 0, height: NATIVE_INITIAL_HEIGHT });
+    const [measured, setMeasured] = React.useState(false);
     const [svgContent, setSvgContent] = React.useState<string | null>(null);
 
     const onLayout = React.useCallback((event: any) => {
@@ -34,6 +58,7 @@ export const MermaidRenderer = React.memo((props: {
             let isMounted = true;
             setHasError(false);
 
+            const renderId = nextMermaidId();
             const renderMermaid = async () => {
                 try {
                     const mermaidModule: any = await import('mermaid');
@@ -42,15 +67,16 @@ export const MermaidRenderer = React.memo((props: {
                     if (mermaid.initialize) {
                         mermaid.initialize({
                             startOnLoad: false,
-                            theme: 'dark'
+                            theme: 'dark',
+                            // Failures surface through our own error view; without
+                            // this Mermaid also drew an error SVG into document.body
+                            // and threw before removing it (#261).
+                            suppressErrorRendering: true,
                         });
                     }
 
                     if (mermaid.render) {
-                        const { svg } = await mermaid.render(
-                            `mermaid-${Date.now()}`,
-                            props.content
-                        );
+                        const { svg } = await mermaid.render(renderId, props.content);
 
                         if (isMounted) {
                             setSvgContent(svg);
@@ -61,6 +87,8 @@ export const MermaidRenderer = React.memo((props: {
                         console.warn(`[Mermaid] ${t('markdown.mermaidRenderFailed')}: ${error instanceof Error ? error.message : String(error)}`);
                         setHasError(true);
                     }
+                } finally {
+                    removeMermaidScratch(renderId);
                 }
             };
 
@@ -68,6 +96,7 @@ export const MermaidRenderer = React.memo((props: {
 
             return () => {
                 isMounted = false;
+                removeMermaidScratch(renderId);
             };
         }, [props.content]);
 
@@ -144,20 +173,36 @@ export const MermaidRenderer = React.memo((props: {
                 (async function() {
                     const content = ${mermaidContent};
                     const container = document.getElementById('mermaid-container');
-                    
+                    // The native side sizes the WebView from these messages: a
+                    // tall diagram stayed clipped to the initial 200px because
+                    // nothing was ever posted (#259). Measure after insertion
+                    // and again whenever the document's size changes.
+                    const postHeight = function() {
+                        if (!window.ReactNativeWebView) return;
+                        const height = Math.ceil(document.documentElement.scrollHeight || document.body.scrollHeight || 0);
+                        if (height > 0) {
+                            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'dimensions', height: height }));
+                        }
+                    };
+                    if (typeof ResizeObserver === 'function') {
+                        new ResizeObserver(postHeight).observe(document.body);
+                    }
+
                     try {
                         mermaid.initialize({
                             startOnLoad: false,
                             theme: 'dark'
                         });
-                        
+
                         const { svg } = await mermaid.render('mermaid-diagram', content);
                         container.innerHTML = svg;
                     } catch (error) {
-                        container.innerHTML = '<div class="error">Diagram error: ' + 
-                            (error.message || String(error)).replace(/</g, '&lt;').replace(/>/g, '&gt;') + 
+                        container.innerHTML = '<div class="error">Diagram error: ' +
+                            (error.message || String(error)).replace(/</g, '&lt;').replace(/>/g, '&gt;') +
                             '</div>';
                     }
+                    postHeight();
+                    setTimeout(postHeight, 250);
                 })();
             </script>
         </body>
@@ -170,7 +215,10 @@ export const MermaidRenderer = React.memo((props: {
                 <WebView
                     source={{ html }}
                     style={{ flex: 1 }}
-                    scrollEnabled={false}
+                    // Until the document reports its height the viewport may be
+                    // too short, so scrolling stays available as the fallback;
+                    // once sized to the diagram there is nothing to scroll (#259).
+                    scrollEnabled={!measured}
                     onMessage={(event) => {
                         // Anything in the WebView can postMessage: never let a
                         // non-JSON payload throw in the native callback (#17).
@@ -178,11 +226,11 @@ export const MermaidRenderer = React.memo((props: {
                         try { data = JSON.parse(event.nativeEvent.data); } catch { return; }
                         if (!data || typeof data !== 'object') return;
                         const height = data.height;
-                        if (data.type === 'dimensions' && typeof height === 'number') {
-                            setDimensions(prev => ({
-                                ...prev,
-                                height: Math.max(prev.height, height)
-                            }));
+                        if (data.type === 'dimensions' && typeof height === 'number' && Number.isFinite(height) && height > 0) {
+                            // Clamp: a runaway document must not grow the chat unboundedly.
+                            const clamped = Math.min(Math.max(Math.round(height), NATIVE_INITIAL_HEIGHT), 4000);
+                            setMeasured(true);
+                            setDimensions(prev => (prev.height === clamped ? prev : { ...prev, height: clamped }));
                         }
                     }}
                 />
