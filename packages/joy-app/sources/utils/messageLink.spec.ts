@@ -101,6 +101,24 @@ describe('message deep links carry durable identity (#165)', () => {
         expect(resolveMessageLink({ messagesMap: {} }, 'call-bash')).toBeNull();
     });
 
+    it('a link id spelled like a prototype member is absent, not an inherited function (#165 residual)', () => {
+        const prototypeNames = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf'];
+        // The store's map is an ordinary {} — exactly what storage.ts keeps.
+        for (const id of prototypeNames) {
+            expect(resolveMessageLink({ messagesMap: {} }, id)).toBeNull();
+            expect(resolveMessageLink(storeFrom([history()]), id)).toBeNull();
+            expect(resolveMessageLink({ messagesMap: {} }, encodeURIComponent(id))).toBeNull();
+        }
+        // A tool call whose harness id happens to be one of those names still
+        // resolves once it IS in the store — by the reducer's lookup tables,
+        // never by the inherited property.
+        const store = storeFrom([[norm(fixtures.claudeAssistantToolUse('constructor', 'Bash', { command: 'true' }), 1, 'srv-ctor')]]);
+        const resolved = resolveMessageLink(store, 'constructor');
+        expect(resolved?.kind).toBe('tool-call');
+        expect(resolved?.kind === 'tool-call' && resolved.tool.model?.identity.callId).toBe('constructor');
+        expect(resolveMessageLink(store, 'toString')).toBeNull();
+    });
+
     it('a text message keeps its row id as the link (no durable call identity to carry)', () => {
         const text: Message = { kind: 'agent-text', id: 'row-1', localId: null, createdAt: 1, text: 'hi' };
         expect(messageLinkId(text)).toBe('row-1');
