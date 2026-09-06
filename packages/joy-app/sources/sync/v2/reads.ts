@@ -46,6 +46,11 @@ export interface V2Page {
     /** Sealed rows on this page that could not be opened with the given key.
      *  A forward sync must not advance past them (issue #3). */
     unopenable?: number;
+    /** The seqs of those rows, ascending — WHICH rows failed, so a caller
+     *  records a gap for them alone: a backward read scans (and trims) rows
+     *  well below the ones it returns, and a replay reads past the range it
+     *  is re-trying; a bare count would stamp rows that opened fine (#128). */
+    unopenableSeqs?: number[];
     /** turn.receipted / turn.started seen on this page, in seq order. */
     lifecycle: V2Lifecycle[];
 }
@@ -72,7 +77,7 @@ function toLifecycle(e: RawV2Event): V2Lifecycle | null {
 }
 
 /** Translate one v2 event into an app row, or null when it is not renderable. */
-function toRow(e: RawV2Event, key: Uint8Array | null, stats?: { unopenable: number }): V2Row | null {
+function toRow(e: RawV2Event, key: Uint8Array | null, stats?: { unopenable: number; unopenableSeqs: number[] }): V2Row | null {
     const seq = Number(e.seq);
     const payload = e.content ? openV2Payload(e.content.ciphertext, key) : null;
     const text = payload?.t === 'plain' ? payload.message.text : (e.content && !payload ? openV2Content(e.content.ciphertext, key) : null);
@@ -83,7 +88,7 @@ function toRow(e: RawV2Event, key: Uint8Array | null, stats?: { unopenable: numb
         // rendered (issue #3: the bind's envelope and first sealed events
         // land together; the events page raced the card and was skipped).
         console.warn(`[v2 reads] could not open ${e.kind} seq=${e.seq} (key=${key ? 'present' : 'MISSING'})`);
-        if (stats) stats.unopenable += 1;
+        if (stats) { stats.unopenable += 1; stats.unopenableSeqs.push(seq); }
     }
 
     // A forwarded adapter record (tool call, text, turn lifecycle + usage,
@@ -165,11 +170,11 @@ export async function v2MessagesAfter(
 ): Promise<V2Page> {
     const base = opts.base ?? getV2BaseUrl();
     const { events, hasMore } = await fetchEvents(base, opts.token, opts.v2SessionId, opts.afterSeq, opts.limit ?? 100);
-    const stats = { unopenable: 0 };
+    const stats = { unopenable: 0, unopenableSeqs: [] as number[] };
     const messages = events.map(e => toRow(e, opts.key, stats)).filter((r): r is V2Row => r !== null);
     const lifecycle = events.map(toLifecycle).filter((l): l is V2Lifecycle => l !== null);
     const cursor = events.length ? Number(events[events.length - 1].seq) : opts.afterSeq;
-    return { messages, hasMore, cursor, lifecycle, unopenable: stats.unopenable };
+    return { messages, hasMore, cursor, lifecycle, unopenable: stats.unopenable, unopenableSeqs: stats.unopenableSeqs };
 }
 
 /**
@@ -186,7 +191,7 @@ export async function v2MessagesBefore(
     const limit = opts.limit ?? 100;
     const rows: V2Row[] = [];
     const lifecycle: V2Lifecycle[] = [];
-    const stats = { unopenable: 0 };
+    const stats = { unopenable: 0, unopenableSeqs: [] as number[] };
     let bound = Number.isFinite(opts.beforeSeq) ? opts.beforeSeq : Number.MAX_SAFE_INTEGER;
     let olderExists = false;
     for (let pages = 0; pages < 20; pages++) {
@@ -215,5 +220,9 @@ export async function v2MessagesBefore(
     // returned ones: the bound must be the oldest returned row, not the oldest
     // scanned, or those rows are skipped for good (Astra on bfcec9fd).
     const cursor = rows.length > tail.length ? tail[0].seq : bound;
-    return { messages: tail, hasMore: olderExists || rows.length > tail.length, lifecycle, unopenable: stats.unopenable, cursor };
+    // Failures are reported by seq (pages were walked newest-first, so sort):
+    // the ones below `cursor` are NOT covered by the returned span, and the
+    // caller must not blame the rows it did get for them (#128).
+    const unopenableSeqs = stats.unopenableSeqs.sort((a, b) => a - b);
+    return { messages: tail, hasMore: olderExists || rows.length > tail.length, lifecycle, unopenable: stats.unopenable, unopenableSeqs, cursor };
 }

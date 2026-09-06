@@ -1185,7 +1185,7 @@ class Sync {
         const v2ctx = this.v2ReadCtx(sessionId);
         if (!v2ctx) throw new Error(`Failed to fetch initial page for ${sessionId}: no v2 link`);
         for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
-            let data: { messages: ApiMessage[]; hasMore: boolean; unopenable?: number; lifecycle: V2Lifecycle[]; cursor?: number };
+            let data: { messages: ApiMessage[]; hasMore: boolean; unopenable?: number; unopenableSeqs?: number[]; lifecycle: V2Lifecycle[]; cursor?: number };
             try {
                 data = await v2MessagesBefore({ ...v2ctx, beforeSeq });
                 this.assertFresh(sessionId, gen); // reset while this page was in flight (#407)
@@ -1199,11 +1199,11 @@ class Sync {
                         this.unopenableStrikes.set(sessionId, strikes);
                         throw new Error(`Initial page of ${sessionId}: ${data.unopenable} sealed row(s) could not be opened (${v2ctx.key ? `key present, attempt ${strikes}` : 'no content key yet'}) — retrying`);
                     }
-                    // The scanned range stays a recoverable gap: `cursor` is
-                    // the oldest seq this backward page covered (#128).
-                    const gapFrom = typeof data.cursor === 'number' ? data.cursor - 1 : 0;
-                    const gapTo = Number.isFinite(beforeSeq) ? beforeSeq - 1 : Number.MAX_SAFE_INTEGER;
-                    this.recordUnopenableGap(sessionId, gapFrom, gapTo, v2ctx.key, data.unopenable ?? 0);
+                    // The rows that failed stay a recoverable gap — their own
+                    // span, not the page's: the reader scanned (and trimmed)
+                    // rows below the ones it returned (#128).
+                    const gap = Sync.sealedSpan(data, typeof data.cursor === 'number' ? data.cursor - 1 : 0, Number.isFinite(beforeSeq) ? beforeSeq - 1 : Number.MAX_SAFE_INTEGER);
+                    this.recordUnopenableGap(sessionId, gap.fromSeq, gap.toSeq, v2ctx.key, gap.count);
                     log.log(`💬 fetchInitialLatestPage: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries — anchoring past them, kept as a recoverable gap (#128)`);
                     this.unopenableStrikes.delete(sessionId);
                 }
@@ -1347,10 +1347,11 @@ class Sync {
                     throw new Error(`Forward sync of ${sessionId}: ${data.unopenable} sealed row(s) could not be opened (${v2ctx.key ? `key present, attempt ${strikes}` : 'no content key yet'}) — retrying`);
                 }
                 // Still unreadable with the freshest key after every retry:
-                // advance rather than wedge the session, but KEEP the page's
-                // range as a gap that a later key change re-reads (#128).
-                this.recordUnopenableGap(sessionId, afterSeq, maxSeq, v2ctx.key, data.unopenable ?? 0);
-                log.log(`💬 fetchForwardSince: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries with the current key — advancing past them, ${afterSeq + 1}..${maxSeq} kept as a recoverable gap (#128)`);
+                // advance rather than wedge the session, but KEEP the rows
+                // that failed as a gap that a later key change re-reads (#128).
+                const gap = Sync.sealedSpan(data, afterSeq, maxSeq);
+                this.recordUnopenableGap(sessionId, gap.fromSeq, gap.toSeq, v2ctx.key, gap.count);
+                log.log(`💬 fetchForwardSince: ${gap.count} row(s) in ${sessionId} unopenable after ${strikes - 1} retries with the current key — advancing past them, ${gap.fromSeq + 1}..${gap.toSeq} kept as a recoverable gap (#128)`);
             }
             this.unopenableStrikes.delete(sessionId);
 
@@ -1519,14 +1520,18 @@ class Sync {
                 }
                 // Sealed rows this older page could not open: the scroll-up
                 // path advances past them (a retry loop here would stall the
-                // scroll), but the page's span is a recoverable gap like any
-                // other, re-read once the key changes — it used to advance to
-                // seq 1 with no accounting at all (#128). Pull the card so a
-                // re-stamped envelope reaches the next sync.
+                // scroll), but they are a recoverable gap like any other,
+                // re-read once the key changes — it used to advance to seq 1
+                // with no accounting at all (#128). The gap is the failed
+                // rows' OWN span: the reader may have scanned, then trimmed,
+                // rows far below the ones it returned, and a gap over the
+                // returned span blamed rows that opened fine. Pull the card
+                // so a re-stamped envelope reaches the next sync.
                 if ((data.unopenable ?? 0) > 0) {
                     this.sessionsSync.invalidate(); // fire only: awaiting queue idleness can starve under the 2.5s poll (Astra, c2f47079)
-                    this.recordUnopenableGap(sessionId, minSeq - 1, beforeSeq - 1, v2ctxOlder.key, data.unopenable ?? 0);
-                    log.log(`💬 loadOlderMessages: ${data.unopenable} row(s) in ${sessionId} unopenable — ${minSeq}..${beforeSeq - 1} kept as a recoverable gap (#128)`);
+                    const gap = Sync.sealedSpan(data, minSeq - 1, beforeSeq - 1);
+                    this.recordUnopenableGap(sessionId, gap.fromSeq, gap.toSeq, v2ctxOlder.key, gap.count);
+                    log.log(`💬 loadOlderMessages: ${gap.count} row(s) in ${sessionId} unopenable — ${gap.fromSeq + 1}..${gap.toSeq} kept as a recoverable gap (#128)`);
                 }
                 storage.getState().applyOlderMessagesPagination(sessionId, {
                     hasMore: !!data.hasMore && advanced
@@ -1619,6 +1624,24 @@ class Sync {
         let s = '';
         for (let i = 0; i < key.length; i++) s += key[i].toString(16).padStart(2, '0');
         return s;
+    }
+
+    /**
+     * The span to record for a page's sealed rows: `(min-1, max]` of the
+     * seqs the reader named, so rows that opened are never under a
+     * placeholder — or, from a reader that only counted them, the page's
+     * own `(pageFrom, pageTo]`.
+     */
+    private static sealedSpan(
+        data: { unopenable?: number; unopenableSeqs?: number[] },
+        pageFrom: number,
+        pageTo: number,
+    ): { fromSeq: number; toSeq: number; count: number } {
+        const seqs = data.unopenableSeqs;
+        if (seqs && seqs.length > 0) {
+            return { fromSeq: Math.min(...seqs) - 1, toSeq: Math.max(...seqs), count: seqs.length };
+        }
+        return { fromSeq: pageFrom, toSeq: pageTo, count: data.unopenable ?? 0 };
     }
 
     /** Remember `(fromSeq, toSeq]` — `count` sealed rows — as unreadable under `key`. */
