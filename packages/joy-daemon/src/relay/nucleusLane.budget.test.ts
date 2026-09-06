@@ -16,7 +16,7 @@ import { join as joinPath } from "node:path";
 process.env.JOY_HOME_DIR = mkdtempSync(joinPath(tmpdir(), "joy-lane-budget-test-"));
 import { startNucleusLane, type NucleusLaneHandle } from "./nucleusLane";
 import { createRelaySession, encodeTextEvent } from "./relay";
-import { closeAllLedgers } from "../domain/ledger";
+import { closeAllLedgers, ledgerFor } from "../domain/ledger";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const spawnSpec = (cwd: string) => JSON.stringify({ v: 1, t: "spawn", cwd, agent: "claude" });
@@ -148,4 +148,83 @@ describe("nucleusLane: relay event budget exhausted (#130)", () => {
     await sleep(500);
     expect(relay.facts().length).toBe(factsBefore);
   }, 60_000);
+
+  // The refusal is committed the instant the outbox settles the row — and
+  // that settlement lets the session's checkpoint advance, so nothing is
+  // left to replay or recount. A count that reached the ledger only from the
+  // one-second publish timer left a window in which an unclean exit erased
+  // the only evidence of the loss (Astra on 73be2b84): a fresh lane over the
+  // reopened database saw no pending output, no job row, a clean card. The
+  // count now commits in the drop's OWN transaction; the timer coalesces the
+  // card PATCH only.
+  it("an unclean exit right after the refusal commits keeps the count: it is written in the drop's own transaction", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const local = "bud00003", v2 = "v2b3", machine = "mb3";
+    const session: any = { id: local, status: "active", cwd: "/tmp/z", busy: () => false, queueState: () => ({ pendingCount: 0, paused: false }), enqueue: () => ({ id: "q1" }), abort: async () => ({ ok: true }) };
+    const registry: any = { get: (i: string) => (i === local ? session : undefined), create: async () => session, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
+    // Already bound and already full — the way a restarted daemon finds it.
+    relay.exhaust();
+    relay.bind({ sessionId: v2, daemonId: machine, state: "active", localSessionId: local });
+    const doomed = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: machine, log: () => {} });
+    try {
+      const rs = createRelaySession({ creds: { machineId: machine } } as any, { cwd: "/tmp/z", id: local });
+      rs.send(encodeTextEvent("lost just before a crash", { turn: "a1" }), `${local}:1`);
+      const ledger = ledgerFor();
+      const settled = () => {
+        const seq = ledger.lastOutboundSeq(local);
+        const row = seq ? ledger.getOutbound(seq) : null;
+        return row?.ackedAt != null && !!row.lastError?.includes("session_event_budget_exhausted") ? row : null;
+      };
+      await until(() => settled() !== null, 15_000);
+      const row = settled()!;
+      // The evidence is on disk the moment the row is — same transaction,
+      // not a second later from the publish timer (which has not fired).
+      const job = ledger.getJob(`event_budget:${v2}`);
+      expect(job?.payload).toMatchObject({ v2SessionId: v2, localId: local, dropped: 1 });
+      expect(Math.abs(job!.updatedAt - row.ackedAt!)).toBeLessThan(100);
+      expect(rs.metadataSnapshot?.joy__eventBudget).toBeUndefined();
+      // The settlement let the line move on: nothing is left to replay or recount.
+      expect(ledger.pendingOutbound(local)).toEqual([]);
+      const [drop] = doomed.eventBudgetDrops();
+      expect(drop).toMatchObject({ v2SessionId: v2, localSessionId: local, dropped: 1 });
+      // Let the doomed lane's own coalesced PATCH land on ITS holder, so the
+      // fresh holder below can only learn the loss from the ledger.
+      await until(() => rs.metadataSnapshot?.joy__eventBudget != null, 10_000);
+
+      // Unclean exit: no stop(), no flush — the ledger file is all that survives.
+      closeAllLedgers();
+      const rs2 = createRelaySession({ creds: { machineId: machine } } as any, { cwd: "/tmp/z", id: local });
+      expect(rs2.metadataSnapshot?.joy__eventBudget).toBeUndefined();
+      const cardsBefore = relay.cards().length;
+      handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: machine, log: () => {} });
+      await until(() => rs2.metadataSnapshot?.joy__eventBudget != null, 15_000);
+      expect(rs2.metadataSnapshot!.joy__eventBudget).toEqual({ since: drop.since, dropped: 1 });
+      expect(handle.eventBudgetDrops()).toEqual([{ v2SessionId: v2, localSessionId: local, since: drop.since, dropped: 1 }]);
+      // …and the card PATCH the fresh lane sent carries it.
+      const carried = relay.cards().slice(cardsBefore).map((c) => JSON.parse(c.encryptedMetadata).metadata.joy__eventBudget).filter(Boolean);
+      expect(carried.at(-1)).toEqual({ since: drop.since, dropped: 1 });
+    } finally {
+      await doomed.stop();
+    }
+  }, 60_000);
+
+  // The warning must not depend on a live adapter either. A session whose
+  // runtime died with the daemon still has its window record and its relay
+  // row; the boot pass archives that row with a replacement card built from
+  // the record — and that card used to be clean, while the count sat in the
+  // ledger with nothing left to read it.
+  it("a session with a record but no runtime: the boot-time archive carries the loss on record", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const local = "bud00004", v2 = "v2b4", machine = "mb4";
+    ledgerFor().putJob({ id: `event_budget:${v2}`, sessionId: local, kind: "event_budget", payload: { v2SessionId: v2, localId: local, since: 1234, dropped: 7 } });
+    relay.bind({ sessionId: v2, daemonId: machine, state: "active", localSessionId: local });
+    const registry: any = { get: () => undefined, chatHistory: () => [], listRecords: () => [{ id: local, launchCwd: "/tmp/gone" }], saveRecord: () => {} };
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: machine, log: () => {} });
+    await until(() => relay.cards().some((c) => c.state === "archived"), 15_000);
+    const card = JSON.parse(relay.cards().find((c) => c.state === "archived")!.encryptedMetadata).metadata;
+    expect(card).toMatchObject({ joy__state: "archived", joy__sessionId: local, joy__eventBudget: { since: 1234, dropped: 7 } });
+    expect(handle.eventBudgetDrops()).toEqual([{ v2SessionId: v2, localSessionId: local, since: 1234, dropped: 7 }]);
+  }, 30_000);
 });
