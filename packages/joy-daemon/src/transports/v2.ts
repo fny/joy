@@ -21,6 +21,7 @@ import { validatePath, withPathLock } from "../domain/fileOps";
 import { writeFileAtomicAsync } from "../domain/atomicWrite";
 import { readAgentConfig, writeAgentConfigRaw, applyAgentConfigAssignments, fetchAgentSchema, agentConfigSpec } from "../domain/agentConfig";
 import { fetchClaudeLimits, readCodexLimits, claudeLimitRows } from "../domain/limits";
+import { readGitStatus } from "../domain/gitStatus";
 
 const HARNESSES = ["claude", "codex", "opencode", "pi", "agy"] as const;
 type Harness = (typeof HARNESSES)[number];
@@ -523,7 +524,13 @@ route("GET", "/v2/sessions/:id/files/diff", withSession(async (ctx, session) => 
 }));
 
 // ── session git (NEW: porcelain parsed daemon-side) ─────────────────────────
-route("GET", "/v2/sessions/:id/git/status", withSession(async (_ctx, session) => {
+route("GET", "/v2/sessions/:id/git/status", withSession(async (ctx, session) => {
+  // ?v=2: the structured, versioned read (domain/gitStatus.ts) — root and
+  // cwd relation, branch/detached/unborn head, path identity separate from
+  // display text, conflicts incl. AA/DD, rename source, binary flag and
+  // explicit available/unavailable line counts, all from git's NUL formats.
+  // `v` absent keeps the original shape below so older apps keep working.
+  if (ctx.url.searchParams.get("v") === "2") return ok(await readGitStatus(session.cwd));
   // "--" "." scopes to the session cwd even when it is a subdirectory of a
   // larger repository (git otherwise reports the whole worktree).
   const r = await git(session.cwd, ["status", "--porcelain=v2", "--branch", "-z", "--", "."]);
