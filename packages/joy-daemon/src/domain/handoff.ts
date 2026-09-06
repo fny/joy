@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import type { AgentSession } from "./agentSession";
 import { ledgerFor, LedgerWriteError, SessionEndedError } from "./ledger";
+import { queueFor } from "./queueFacade";
 
 /** An in-flight handoff/handback: the note path being awaited and who it is
  *  for — persisted as a ledger job (`jobs(kind='handoff')`, one per source
@@ -238,7 +239,7 @@ async function enqueueDurably(s: AgentSession, text: string, retryMs: readonly n
   for (let attempt = 0; ; attempt++) {
     if (s.status === "ended") throw new Error(`session ${s.id} ended before the note could be queued`);
     try {
-      s.enqueue(text, { source: "rpc", mirrorToRelay: true });
+      queueFor(s).accept(text, { source: "rpc", mirrorToRelay: true });
       return;
     } catch (e) {
       lastError = e;

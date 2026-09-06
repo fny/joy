@@ -51,12 +51,16 @@ export interface AgentSession {
   beginWatching(): void;
 
   // ── app-facing intake / queue ──
+  // A session the SessionCoordinator (domain/coordinator.ts) has adopted has
+  // NO queue surface of its own: its commands are ledger rows the coordinator
+  // owns, and callers go through domain/queueFacade.ts (`queueFor`). The
+  // methods below exist only on adapters not yet ported to a RuntimeDriver.
   busy(): boolean;
   /** Accept a text for this session. Returns only after the acceptance is
    *  COMMITTED to the ledger (domain/ledger.ts) — or throws: LedgerWriteError
    *  when it could not be committed (nothing staged, no ack), SessionEndedError
    *  when the session has ended (#553). Durability is not the caller's choice. */
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; id?: string }): QueuedMessage;
+  enqueue?(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; id?: string }): QueuedMessage;
   /** Restart support: pluck every prompt that has NOT been dispatched yet so
    *  the replacement can take them (same ids — the relay lane tracks them).
    *  Adapters without a pluckable queue leave this undefined. */
@@ -65,16 +69,18 @@ export interface AgentSession {
    *  gone (kill -9 after `ms`). Adapters whose replacement reopens the same
    *  on-disk conversation implement this so two writers never overlap. */
   awaitExit?(ms?: number): Promise<void>;
-  queueState(): QueueState;
+  queueState?(): QueueState;
   /** Delivery state of ONE queued item, when the adapter can track it (claude).
    *  Callers that need proof a SPECIFIC prompt landed must prefer this over the
    *  session-wide busy() flag; adapters without it return nothing and the caller
    *  falls back. */
   queueItemState?(id: string): QueueItemState;
-  resumeQueue(): void;
-  editQueued(id: string, text: string): boolean;
-  cancelQueued(id: string): boolean;
-  reorderQueued(id: string, toIndex: number): boolean;
+  resumeQueue?(): void;
+  editQueued?(id: string, text: string): boolean;
+  cancelQueued?(id: string): boolean;
+  reorderQueued?(id: string, toIndex: number): boolean;
+  /** Stop whatever is executing (a coordinator session: every command in
+   *  flight is cancelled durably; a foreign turn is interrupted). */
   abort(): Promise<{ ok: boolean; error?: string }>;
 
   // ── pane / control surface (tmux window shared by both agents) ──
