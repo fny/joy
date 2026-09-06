@@ -1090,8 +1090,13 @@ class Sync {
         // Anchor both ends so future incremental forward sync resumes from
         // maxSeq, and loadOlderMessages can page backward from minSeq.
         this.sessionLastSeq.set(sessionId, maxSeq);
-        if (anyMessages) {
-            this.sessionOldestSeq.set(sessionId, minSeq);
+        // The backward anchor is the last bound the loop scanned to, even when
+        // every page was non-renderable: with no anchor, loadOlderMessages
+        // never asked again although the relay said more existed (#4).
+        const scanned = beforeSeq !== SEQ_BACKWARD_INITIAL_SENTINEL ? beforeSeq : Number.POSITIVE_INFINITY;
+        const oldest = Math.min(scanned, anyMessages ? minSeq : Number.POSITIVE_INFINITY);
+        if (Number.isFinite(oldest)) {
+            this.sessionOldestSeq.set(sessionId, oldest);
         }
         storage.getState().applyOlderMessagesPagination(sessionId, {
             hasMore
