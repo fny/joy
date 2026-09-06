@@ -501,12 +501,20 @@ describe('#107 spawn-spec sealing', () => {
             if (first) { first = false; throw new V2ApiError(503, 'relay_restarting', null); }
             return { sessionId: 'v2-1' };
         }) as never;
-        await expect(v2SpawnAndWait('m', { cwd: '/x', extraArgs: '--flag' }, h.deps)).resolves.toBe('app1');
+        const spec = { cwd: '/x', extraArgs: '--flag' };
+        await expect(v2SpawnAndWait('m', spec, h.deps)).resolves.toBe('app1');
         expect(h.calls.create).toHaveLength(2);
         const wire = h.calls.create[0].wire!;
         expect(wire.startsWith('v2e1:')).toBe(true);
-        expect(wire).not.toContain('/x');
-        expect(wire).not.toContain('--flag');
+        // Confidentiality: neither the wire nor the bytes it carries hold the
+        // spec. Checked on the quoted JSON fields — base64 never contains a
+        // quote, whereas a bare `/x` DOES turn up in ~3% of random ciphertexts
+        // (both are base64 alphabet), which made this test flake (#624).
+        const plain = JSON.stringify({ v: 1, t: 'spawn', ...spec });
+        expect(wire).not.toBe(plain);
+        const sealed = Buffer.from(wire.slice('v2e1:'.length), 'base64').toString('latin1');
+        expect(sealed).not.toContain('"cwd":"/x"');
+        expect(sealed).not.toContain('"extraArgs":"--flag"');
         expect(h.calls.create[1].wire).toBe(wire);
         expect(h.calls.create[1].intent).toBe(h.calls.create[0].intent);
         expect(openSpawnSpec(wire, key)).toEqual({ v: 1, t: 'spawn', cwd: '/x', extraArgs: '--flag' });
