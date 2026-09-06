@@ -255,6 +255,21 @@ app.
   merged (relay 79 tests) with daemon/app contract follow-ups in flight.
   Wave E1, E2, E5, E6, E7 in flight as isolated worktree agents.
 
+- 2026-09-07 — Wave D relay merged (79 → 89 tests with the Fable tunnel
+  hardening: bounded response buffering, admission before body, relay-wide
+  budget) and its daemon/app contracts (request_gone, spawn-failed
+  deliveryId, session_archived, retry-after handling, connection_slow). Wave
+  E2 structured git, E5 markdown/links, E7 voice merged with What's New
+  entries; E1 tool model and E6 settings/auth/modal finished on branches.
+  Wave C3 daemon modules finished on a branch. Wave B verified-fixed issues
+  closed (65) and the won't-fix bucket closed (22); 446 open. Four merges
+  await conflict approval (Wave A residuals, C3, E1, E6). Architecture item
+  8 spike done (`review-campaign-2026-09-claude-runtime-spike.md`): STOP on
+  a headless runtime — a Claude session id is single-process and the only
+  attach path takes keyboard input only; GO on hooks + transcript as the
+  authority inside the TUI (SessionEnd, PermissionRequest, StopFailure,
+  permission_mode…), pane demoted to a tie-breaker.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
