@@ -33,7 +33,7 @@ import { ReverseUtf8Assembler } from "./textStream";
 import { shellJoin } from "./quote";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, rmdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { readFile } from "fs/promises";
-import { basename, dirname, join, resolve as resolvePath } from "path";
+import { basename, dirname, join } from "path";
 import { hostname, platform, release, arch } from "os";
 import { spawn, execFile, spawnSync } from "child_process";
 import { randomBytes } from "crypto";
@@ -74,11 +74,18 @@ export function sourcePermissionMode(src: Pick<AgentSession, "id" | "detectPermi
  *  failure was "destination already exists" because a concurrent attempt
  *  had just finished, that deleted the SUCCESSFUL working copy and any work
  *  the launched agent had already done in it. */
-export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<void> {
+/** Resolves to the CANONICAL destination (paths.canonicalCwd — `~` expanded,
+ *  symlinks and `..` resolved the way the kernel enters them, #549 residual):
+ *  the clone used to `path.resolve` the spelling it was given, so a relay
+ *  spawn spec's `~/repo` cloned into `<daemon cwd>/~/repo` while create()
+ *  expanded the same spelling to the home directory and launched the agent
+ *  in an empty folder. Callers MUST launch in the returned path. */
+export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<string> {
   if (!GIT_URL_RE.test(gitUrl)) throw new Error("invalid git url");
-  const canonical = resolvePath(cwd);
+  const canonical = canonicalCwd(cwd);
   const r = await withPathLock(`git-clone:${canonical}`, () => cloneAttempt(gitUrl, canonical));
   if ("error" in r) throw new Error(r.error);
+  return canonical;
 }
 
 /** Is a handoff / handback already running for this session (#53)? The
@@ -525,7 +532,7 @@ export const machineOps: MachineOp[] = [
       if (!rawCwd) return { error: "cwd required" };
       // One canonical cwd for the clone AND the launch (#549): the clone used
       // to land under the literal `~/…` while the registry expanded it.
-      const cwd = canonicalCwd(rawCwd);
+      let cwd = canonicalCwd(rawCwd);
       // Reject unknown agents LOUDLY instead of falling through to claude.
       // The historical fall-through is how a stale daemon turned "pi" requests
       // into surprise claude sessions (2026-08-15): a newer app sent a flavor
@@ -541,7 +548,7 @@ export const machineOps: MachineOp[] = [
       // git-URL spawn: clone (or reuse) into cwd first, then launch inside it.
       const gitUrl = typeof params.gitUrl === "string" ? params.gitUrl.trim() : "";
       if (gitUrl) {
-        try { await cloneForSpawn(gitUrl, cwd); }
+        try { cwd = await cloneForSpawn(gitUrl, cwd); }
         catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
       }
       const session = await registry.create({
