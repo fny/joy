@@ -272,6 +272,122 @@ test("#498 no hooks: the turn-start confirm names the turn it confirmed on; a sl
   s.end("killed");
 });
 
+// Astra F14 residual: ONE pending ref named the next transcript turn for the
+// newest dispatch. Submit A, Stop A, submit B — then the tailer reaches A's
+// assistant entries (earlier timestamps) and B was named A's turn, A left
+// unnamed. Ownership is now a queue correlated against the hook-observed turn
+// windows (or the transcript's own user-entry order); an entry no window claims
+// names nobody.
+const isoAt = (ms: number) => new Date(ms).toISOString();
+const assistantAt = (uuid: string, ms: number, text: string, stop?: string) =>
+  ({ type: "assistant", uuid, timestamp: isoAt(ms), message: { role: "assistant", model: "claude-x", ...(stop ? { stop_reason: stop } : {}), content: [{ type: "text", text }] } }) as any;
+
+test("#498 hooks live: A confirmed and Stopped, B confirmed, THEN A's lagging entries are tailed — A is named A's turn and B its own", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("f14-lag"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-f14-lag");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const a = queueFor(s).accept("A old prompt", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "A old prompt" });
+  const timeA = Date.now(); // inside A's hook window
+  await vi.advanceTimersByTimeAsync(2_000);
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: null });
+  await vi.advanceTimersByTimeAsync(5_000);
+  const b = queueFor(s).accept("B requested prompt", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "B requested prompt" });
+  expect(queueFor(s).command(b.id)?.state).toBe("running");
+  // The tailer now reaches A's turn — stamped inside A's window, before B was even submitted.
+  s.onTranscriptEntry(assistantAt("f14-answer-a", timeA, "OLD A ANSWER"));
+  const [turnA] = turnStartsSent(sent);
+  expect(turnA).toBeTruthy();
+  expect(queueFor(s).command(a.id)?.runtimeTurnId).toBe(turnA);
+  expect(queueFor(s).command(b.id)?.runtimeTurnId).toBeNull();
+  s.onTranscriptEntry(assistantAt("f14-end-a", timeA + 500, "OLD A FINAL", "end_turn"));
+  expect(queueFor(s).command(b.id)?.state).toBe("running"); // A's lagging terminal never touches B's run
+  // B's real answer opens the next transcript turn, inside B's (still open) window.
+  s.onTranscriptEntry(assistantAt("f14-answer-b", Date.now(), "ACTUAL B ANSWER"));
+  const turns = turnStartsSent(sent);
+  expect(turns).toHaveLength(2);
+  expect(turns[1]).not.toBe(turnA);
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "running", runtimeTurnId: turns[1] });
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "completed", runtimeTurnId: turns[1] });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: turnA });
+  s.end("killed");
+});
+
+test("#498 hooks live: the transcript's own order names the turn — A's user echo then A's entries, while B is the running hook turn", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("f14-order"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-f14-order");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const a = queueFor(s).accept("A echoed prompt", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "A echoed prompt" });
+  const timeA = Date.now();
+  await vi.advanceTimersByTimeAsync(1_000);
+  s.onHookEvent({ event: "Stop" });
+  await vi.advanceTimersByTimeAsync(3_000);
+  const b = queueFor(s).accept("B echoed prompt", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "B echoed prompt" });
+  // The tailer reads A's user entry, then A's assistant entries. The first one
+  // is stamped past A's Stop (beyond clock slack) and before B's submit — no
+  // hook window places it, so the transcript's order alone names it.
+  s.onTranscriptEntry({ type: "user", uuid: "f14-user-a", timestamp: isoAt(timeA), message: { role: "user", content: "A echoed prompt" } } as any);
+  s.onTranscriptEntry(assistantAt("f14-order-answer-a", timeA + 2_600, "A's answer"));
+  const [turnA] = turnStartsSent(sent);
+  expect(turnA).toBeTruthy();
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: turnA });
+  expect(queueFor(s).command(b.id)?.runtimeTurnId).toBeNull();
+  s.onTranscriptEntry(assistantAt("f14-order-end-a", timeA + 2_700, "A done", "end_turn"));
+  s.onTranscriptEntry({ type: "user", uuid: "f14-user-b", timestamp: isoAt(Date.now() - 300), message: { role: "user", content: "B echoed prompt" } } as any);
+  s.onTranscriptEntry(assistantAt("f14-order-answer-b", Date.now(), "B's answer"));
+  const turns = turnStartsSent(sent);
+  expect(turns).toHaveLength(2);
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "running", runtimeTurnId: turns[1] });
+  expect(queueFor(s).command(a.id)?.runtimeTurnId).toBe(turnA);
+  s.end("killed");
+});
+
+test("#498 hooks live: a transcript turn no pending dispatch's window contains leaves the attribution missing", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("f14-none"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-f14-none");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const a = queueFor(s).accept("A prompt whose turn never tails", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "A prompt whose turn never tails" });
+  await vi.advanceTimersByTimeAsync(1_000);
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: null });
+  // A turn stamped well after A's Stop, with nothing of ours submitted since: a
+  // terminal prompt's, a task notification's — never A's merely because A is pending.
+  await vi.advanceTimersByTimeAsync(10_000);
+  s.onTranscriptEntry(assistantAt("f14-foreign", Date.now(), "someone else's turn"));
+  const [turn] = turnStartsSent(sent);
+  expect(turn).toBeTruthy();
+  expect(queueFor(s).command(a.id)?.runtimeTurnId).toBeNull();
+  // …and one stamped BEFORE A was submitted is not A's either.
+  s.onTranscriptEntry(assistantAt("f14-foreign-end", Date.now(), "done", "end_turn"));
+  s.onTranscriptEntry(assistantAt("f14-ancient", Date.now() - 40_000, "from before A"));
+  expect(turnStartsSent(sent)).toHaveLength(2);
+  expect(queueFor(s).command(a.id)?.runtimeTurnId).toBeNull();
+  s.end("killed");
+});
+
 // ── no hook ever: behaviour identical to today ──────────────────────────────
 
 test("no hook seen: the pane rules stay in force — turn start confirms on an empty box, the pane sets and clears thinking, exit waits for the pid probe", async () => {
