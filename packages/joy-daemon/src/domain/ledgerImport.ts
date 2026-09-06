@@ -28,7 +28,20 @@
 //     offsets and sequence numbers must be non-negative safe integers; a
 //     handoff job must be one `domain/handoff.ts` can resume (a known
 //     role, and the target / peer that role needs) — accepted execution
-//     state is never imported in a shape that resume would clear.
+//     state is never imported in a shape that resume would clear. Receipt
+//     rows are held to the same rule (review d5f35f45): a receipts-file or
+//     codex-checkpoint row whose seq is not a safe integer, whose uuid /
+//     clientId is not a non-empty string, or that is not an object fails
+//     its file — a receipt is ownership and dedupe evidence, and dropping
+//     one row silently while importing the rest loses exactly that.
+//   - Window records import FIRST, and a source that depends on a record
+//     which failed is DEFERRED (review d5f35f45): not imported, no marker,
+//     not moved, reported in `failed` and retried next boot, so a repaired
+//     record's next import still finds it. The dependents of a record are
+//     the per-session files of its session and every v2-outbound entry it
+//     owns — including one without a localId whose v2SessionId no readable
+//     record maps while some record could not be read at all (it may be
+//     the owner). Only sources whose owner record imported are consumed.
 //   - A failed file changes nothing, the report's counters included: they
 //     are restored with the rows when its transaction rolls back.
 //   - A legacy checkpoint never moves the ledger's cursor backwards: it is
@@ -92,6 +105,11 @@ const RECEIVED_WINDOW_MS = 15 * 60 * 1000;
 /** The source parsed, but is not the shape its file class promises. */
 class MalformedSource extends Error {
   constructor(what: string) { super(`malformed: ${what}`); this.name = "MalformedSource"; }
+}
+/** The source is fine, but a window record it depends on failed to import:
+ *  it waits, unconsumed, for that record's repair. */
+class DeferredSource extends Error {
+  constructor(what: string) { super(`deferred: ${what}`); this.name = "DeferredSource"; }
 }
 
 /** Read + parse a source, hashing the bytes actually read. Throws: an
@@ -174,6 +192,44 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
     log(`[ledger-import] ${file}: ${what} (${error}) — left in place, nothing imported, retried next boot${sessionId ? `; session ${sessionId} accepts no work until then` : ""}`);
   };
 
+  // Window records FIRST: the three execution fields move; the record stays.
+  // The per-session files and the outbound entries a record owns depend on
+  // it importing — a record that fails holds them back (review d5f35f45).
+  const owners: RecordOwners = { failed: new Map(), unreadable: [], localByV2 };
+  for (const rec of records) {
+    const file = `window-${rec.id}.json`;
+    // A record that could not be read or parsed may hold execution fields
+    // nobody can see: a failed import of this record, its session
+    // quarantined, retried once the record is repaired (review a7edccec).
+    const raw = rec.raw;
+    if (!raw) {
+      const what = rec.error instanceof MalformedSource ? "malformed" : "unreadable";
+      fail(file, rec.id, what, errMsg(rec.error));
+      owners.failed.set(rec.id, `${what}: ${errMsg(rec.error)}`);
+      owners.unreadable.push(file);
+      continue;
+    }
+    if (!EXEC_FIELDS.some((f) => raw[f] != null)) continue;
+    // Every field is validated BEFORE anything is written or stripped: a
+    // malformed one (a string offset) is a failed import of this record —
+    // it keeps its fields and its session is quarantined until repaired.
+    let fields: RecordFields;
+    try { fields = parseRecordFields(raw); }
+    catch (e) { fail(file, rec.id, "malformed", errMsg(e)); owners.failed.set(rec.id, errMsg(e)); continue; }
+    const before = counters();
+    try { ledger.tx(() => importRecordFields(ledger, rec.id, fields, report), `import ${file}`); }
+    catch (e) { restore(before); fail(file, rec.id, "import failed", errMsg(e)); owners.failed.set(rec.id, errMsg(e)); continue; }
+    const stripped: Record<string, unknown> = { ...raw };
+    for (const f of EXEC_FIELDS) delete stripped[f];
+    // The record is the session's identity (launch cwd, conversation id): it
+    // is replaced atomically or not at all. A failed rewrite leaves the old
+    // fields in place; importRecordFields ignores them once the ledger has
+    // its checkpoint, and the strip is retried next boot.
+    try { writeFileAtomic(rec.path, JSON.stringify(stripped)); }
+    catch (e) { report.unmoved.push(file); log(`[ledger-import] ${file}: fields imported but the record could not be rewritten (${errMsg(e)}) — record left complete, stripped next boot`); }
+    report.files.push(file);
+  }
+
   for (const name of files) {
     const path = join(stateDir, name);
     const sessionId = sessionOf(name);
@@ -188,13 +244,17 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
       move(name);
       continue;
     }
+    // A per-session file whose owner record failed waits for the repair:
+    // nothing of it is consumed until its session can be recovered.
+    const owner = sessionId ? owners.failed.get(sessionId) : undefined;
+    if (owner !== undefined) { fail(name, sessionId, "deferred", new DeferredSource(`window-${sessionId}.json failed to import (${owner}) — this file waits for its repair`).message); continue; }
     const before = counters();
     try {
       ledger.tx(() => {
         let m: RegExpExecArray | null;
         if ((m = LEGACY.queue.exec(name))) importQueue(ledger, m[1], src.doc, report);
         else if ((m = LEGACY.receipts.exec(name))) importReceipts(ledger, m[1], src.doc, src.hash, report, now());
-        else if (LEGACY.outbound.test(name)) importOutbound(ledger, src.doc, report, opts.sealsContent, localByV2, log);
+        else if (LEGACY.outbound.test(name)) importOutbound(ledger, src.doc, report, opts.sealsContent, owners, log);
         else if ((m = LEGACY.codexInbound.exec(name))) importCodexInbound(ledger, m[1], src.doc, report);
         else if ((m = LEGACY.codexCheckpoint.exec(name))) importCodexCheckpoint(ledger, m[1], src.doc, report);
         else if (LEGACY.spawns.test(name)) importSpawns(ledger, src.doc, report);
@@ -208,37 +268,9 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
       // tx() wraps it — report the shape complaint, not the wrapper.
       const cause = e instanceof LedgerWriteError ? e.cause : e;
       if (cause instanceof MalformedSource) fail(name, sessionId, "malformed", cause.message);
+      else if (cause instanceof DeferredSource) fail(name, sessionId, "deferred", cause.message);
       else fail(name, sessionId, "import failed", errMsg(e));
     }
-  }
-
-  // Window records: the three execution fields move; the record stays.
-  for (const rec of records) {
-    const file = `window-${rec.id}.json`;
-    // A record that could not be read or parsed may hold execution fields
-    // nobody can see: a failed import of this record, its session
-    // quarantined, retried once the record is repaired (review a7edccec).
-    const raw = rec.raw;
-    if (!raw) { fail(file, rec.id, rec.error instanceof MalformedSource ? "malformed" : "unreadable", errMsg(rec.error)); continue; }
-    if (!EXEC_FIELDS.some((f) => raw[f] != null)) continue;
-    // Every field is validated BEFORE anything is written or stripped: a
-    // malformed one (a string offset) is a failed import of this record —
-    // it keeps its fields and its session is quarantined until repaired.
-    let fields: RecordFields;
-    try { fields = parseRecordFields(raw); }
-    catch (e) { fail(file, rec.id, "malformed", errMsg(e)); continue; }
-    const before = counters();
-    try { ledger.tx(() => importRecordFields(ledger, rec.id, fields, report), `import ${file}`); }
-    catch (e) { restore(before); fail(file, rec.id, "import failed", errMsg(e)); continue; }
-    const stripped: Record<string, unknown> = { ...raw };
-    for (const f of EXEC_FIELDS) delete stripped[f];
-    // The record is the session's identity (launch cwd, conversation id): it
-    // is replaced atomically or not at all. A failed rewrite leaves the old
-    // fields in place; importRecordFields ignores them once the ledger has
-    // its checkpoint, and the strip is retried next boot.
-    try { writeFileAtomic(rec.path, JSON.stringify(stripped)); }
-    catch (e) { report.unmoved.push(file); log(`[ledger-import] ${file}: fields imported but the record could not be rewritten (${errMsg(e)}) — record left complete, stripped next boot`); }
-    report.files.push(file);
   }
 
   if (report.failed.length === 0 && report.unmoved.length === 0 && listLegacyFiles(stateDir).length === 0) {
@@ -252,6 +284,11 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
 
 /** A window record: parsed (`raw`), or the read/parse failure it hit. */
 interface RecordFile { id: string; path: string; raw: Record<string, unknown> | null; error?: unknown; v2SessionId?: string }
+/** What the window-record pass learned about the sources' owners: the
+ *  records that failed (id → why), the ones nobody could read (their
+ *  v2SessionId is unknown, so they may own any unmapped outbound entry),
+ *  and the v2 → local mapping the readable ones supplied. */
+interface RecordOwners { failed: Map<string, string>; unreadable: string[]; localByV2: Map<string, string> }
 function listRecordFiles(stateDir: string): RecordFile[] {
   let names: string[] = [];
   try { names = fs.readdirSync(stateDir); } catch { return []; }
@@ -313,21 +350,39 @@ function importQueue(ledger: Ledger, sessionId: string, doc: unknown, report: Im
   });
 }
 
+/** An optional array field (absent / null = empty), or a MalformedSource. */
+function optionalList(doc: Record<string, unknown>, field: string, where: string): unknown[] {
+  const v = doc[field];
+  if (v == null) return [];
+  if (!Array.isArray(v)) throw new MalformedSource(`${where}: ${field} must be an array`);
+  return v;
+}
+
 function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, sourceHash: string, report: ImportReport, now: number): void {
   if (!isRecord(doc)) throw new MalformedSource("a receipts file is an object");
-  const inbound = Array.isArray(doc.inbound) ? doc.inbound : [];
-  const outbound = Array.isArray(doc.outbound) ? doc.outbound : [];
-  const received = Array.isArray(doc.received) ? doc.received : [];
-  for (const r of inbound) {
-    if (!isRecord(r) || typeof r.uuid !== "string" || !r.uuid) continue;
-    ledger.addReceipt(sessionId, { kind: "transcript_uuid", ref: r.uuid, at: num(r.at) }); report.receipts++;
-    const seq = index(r.seq);
-    if (seq != null) { ledger.addReceipt(sessionId, { kind: "seq", ref: String(seq), at: num(r.at) }); report.receipts++; }
-  }
-  for (const r of outbound) {
-    if (!isRecord(r) || typeof r.uuid !== "string" || !r.uuid) continue;
-    ledger.addReceipt(sessionId, { kind: "transcript_uuid", ref: r.uuid, at: num(r.at) }); report.receipts++;
-  }
+  const where = "receipts file";
+  const inbound = optionalList(doc, "inbound", where);
+  const outbound = optionalList(doc, "outbound", where);
+  const received = optionalList(doc, "received", where);
+  // Every row is evidence the daemon recorded (an echo it matched, a seq it
+  // owns): one that cannot be imported fails the file — dropping it while
+  // importing the rest would silently lose that ownership (review d5f35f45).
+  inbound.forEach((r, i) => {
+    const where = `inbound receipt ${i}`;
+    if (!isRecord(r)) throw new MalformedSource(`${where}: not an object`);
+    const uuid = requireText(r, "uuid", where);
+    const seq = optionalIndex(r, "seq", where);
+    const at = optionalNum(r, "at", where);
+    ledger.addReceipt(sessionId, { kind: "transcript_uuid", ref: uuid, at }); report.receipts++;
+    if (seq != null) { ledger.addReceipt(sessionId, { kind: "seq", ref: String(seq), at }); report.receipts++; }
+  });
+  outbound.forEach((r, i) => {
+    const where = `outbound receipt ${i}`;
+    if (!isRecord(r)) throw new MalformedSource(`${where}: not an object`);
+    const uuid = requireText(r, "uuid", where);
+    const at = optionalNum(r, "at", where);
+    ledger.addReceipt(sessionId, { kind: "transcript_uuid", ref: uuid, at }); report.receipts++;
+  });
   // The echo backstop: a text the app sent in the last 15 minutes whose
   // transcript echo has not been matched yet. It becomes a synthetic
   // delivered command with an attempt awaiting that echo (runtime_ref = the
@@ -336,24 +391,33 @@ function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, sourceH
   // a function of the source (hash) and the entry's index: a re-import of
   // the same file finds the same row and adds nothing.
   received.forEach((r, i) => {
-    if (!isRecord(r) || typeof r.text !== "string" || !r.text) return;
-    const at = num(r.at) ?? 0;
+    const where = `received entry ${i}`;
+    if (!isRecord(r)) throw new MalformedSource(`${where}: not an object`);
+    const text = requireText(r, "text", where);
+    const at = optionalNum(r, "at", where) ?? 0;
     if (at < now - RECEIVED_WINDOW_MS) return;
     const id = `import:${sessionId}:received:${sourceHash.slice(0, 12)}:${i}`;
-    const c = ledger.acceptCommand({ sessionId, id, text: r.text, origin: "import", source: "relay", visible: false, mirrorToRelay: false, createdAt: at, state: "completed" });
+    const c = ledger.acceptCommand({ sessionId, id, text, origin: "import", source: "relay", visible: false, mirrorToRelay: false, createdAt: at, state: "completed" });
     if (c.deduped !== "none") return;
-    ledger.importAttempt(c.id, r.text, "unknown", at); report.commands++; report.attempts++;
+    ledger.importAttempt(c.id, text, "unknown", at); report.commands++; report.attempts++;
   });
 }
 
-function importOutbound(ledger: Ledger, doc: unknown, report: ImportReport, sealsContent: boolean, localByV2: Map<string, string>, log: (l: string) => void): void {
+function importOutbound(ledger: Ledger, doc: unknown, report: ImportReport, sealsContent: boolean, owners: RecordOwners, log: (l: string) => void): void {
   if (!Array.isArray(doc)) throw new MalformedSource("v2-outbound.json is an array of entries");
   const rows: NewOutbound[] = [];
   for (const e of doc) {
     if (!isRecord(e) || typeof e.id !== "string") continue;
     const v2 = str(e.v2SessionId) || null;
-    const localId = str(e.localId) ?? (v2 ? localByV2.get(v2) : undefined);
+    const localId = str(e.localId) ?? (v2 ? owners.localByV2.get(v2) : undefined);
+    // An entry only its window record can attribute (no localId) is not
+    // orphaned while a record nobody could read may be that owner: the file
+    // waits for the repair instead of dropping the entry (review d5f35f45).
+    if (!localId && owners.unreadable.length) throw new DeferredSource(`v2-outbound entry ${e.id} has no local session (v2 ${v2 ?? "none"}) and ${owners.unreadable.join(", ")} could not be read — it may own the entry; waits for the repair`);
     if (!localId) { log(`[ledger-import] v2-outbound entry ${e.id} has no local session (v2 ${v2 ?? "none"}) — dropped`); continue; }
+    // An entry whose owner record failed is imported only once that record is.
+    const owner = owners.failed.get(localId);
+    if (owner !== undefined) throw new DeferredSource(`v2-outbound entry ${e.id} belongs to session ${localId}, whose window-${localId}.json failed to import (${owner}) — waits for its repair`);
     if (e.kind === "terminal") {
       const turnId = str(e.turnId);
       if (!turnId || !isRecord(e.body)) continue;
@@ -407,15 +471,22 @@ function importCodexCheckpoint(ledger: Ledger, sessionId: string, doc: unknown, 
   // Never backwards: a cursor the ledger already holds is by construction
   // newer than anything the legacy file remembers.
   if (high && !ledger.getCheckpoint(sessionId, "codex_turn")) { ledger.setCheckpoint(sessionId, "codex_turn", high, 0); report.checkpoints++; }
-  for (const id of Array.isArray(doc.knownClientIds) ? doc.knownClientIds : []) {
-    if (typeof id !== "string" || !id) continue;
+  // Ownership evidence, held to the queue rule: a malformed row fails the
+  // file rather than silently forfeiting the dedupe it carries (review d5f35f45).
+  const where = "codex checkpoint";
+  optionalList(doc, "knownClientIds", where).forEach((id, i) => {
+    if (typeof id !== "string" || !id) throw new MalformedSource(`${where}: knownClientIds[${i}] must be a non-empty string`);
     ledger.addReceipt(sessionId, { kind: "codex_client", ref: id, commandId: id }); report.receipts++;
-  }
-  for (const r of Array.isArray(doc.seqReceipts) ? doc.seqReceipts : []) {
-    if (!isRecord(r) || index(r.seq) === undefined || typeof r.clientId !== "string") continue;
-    ledger.addReceipt(sessionId, { kind: "seq", ref: String(r.seq), commandId: r.clientId }); report.receipts++;
-    ledger.addReceipt(sessionId, { kind: "codex_client", ref: r.clientId, commandId: r.clientId }); report.receipts++;
-  }
+  });
+  optionalList(doc, "seqReceipts", where).forEach((r, i) => {
+    const where = `codex seq receipt ${i}`;
+    if (!isRecord(r)) throw new MalformedSource(`${where}: not an object`);
+    const seq = index(r.seq);
+    if (seq === undefined) throw new MalformedSource(`${where}: seq must be a non-negative integer`);
+    const clientId = requireText(r, "clientId", where);
+    ledger.addReceipt(sessionId, { kind: "seq", ref: String(seq), commandId: clientId }); report.receipts++;
+    ledger.addReceipt(sessionId, { kind: "codex_client", ref: clientId, commandId: clientId }); report.receipts++;
+  });
 }
 
 function importSpawns(ledger: Ledger, doc: unknown, report: ImportReport): void {

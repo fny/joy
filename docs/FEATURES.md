@@ -556,6 +556,20 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   target harness — and its `dst` once delivered — or a target's peer;
   unknown fields dropped) and the report's counters are restored with
   the rows when a file's transaction rolls back (review a7edccec).
+  Receipt rows fail closed the same way (review d5f35f45): a
+  `<id>.receipts.json` or codex-checkpoint row whose seq is not a safe
+  integer (`1.5`, `2^53`), whose uuid/clientId is not a non-empty string,
+  or that is not an object fails its whole file — receipts are ownership
+  and dedupe evidence, never silently dropped while the rest imports.
+  Window records import FIRST, and a source that depends on a record
+  which failed is DEFERRED, not consumed: no rows, no marker, not moved,
+  reported in `failed`, retried next boot — so repairing the record makes
+  the next import find it. A record's dependents are its session's
+  per-session files and every `v2-outbound.json` entry it owns, including
+  an entry without a `localId` whose `v2SessionId` no readable record
+  maps while some record could not be read at all (it may be the owner);
+  only when every record is readable is such an entry an orphan and
+  dropped. Only sources whose owner record imported are consumed.
   Settlements obey the current-owner rule:
   `settleAttempt`/`confirmDelivery` change the command only when the claimed
   generation is the session's current one AND the attempt is the command's

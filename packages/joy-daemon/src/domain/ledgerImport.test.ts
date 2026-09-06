@@ -23,8 +23,8 @@ function seedLegacyState() {
     { id: "q2", text: "second", createdAt: 11, source: "rpc", mirrorToRelay: true, visible: true },
   ]);
   write("aaaa0001.receipts.json", {
-    inbound: [{ seq: 4, uuid: "u-in", text: "hello", source: "relay", at: 1 }, null, { text: "no uuid" }],
-    outbound: [{ uuid: "u-out", turn: "t1", at: 2 }, "junk"],
+    inbound: [{ seq: 4, uuid: "u-in", text: "hello", source: "relay", at: 1 }],
+    outbound: [{ uuid: "u-out", turn: "t1", at: 2 }],
     received: [{ text: "recent send", at: NOW - 60_000 }, { text: "stale", at: NOW - 3_600_000 }],
   });
   write("v2-outbound.json", [
@@ -458,13 +458,164 @@ test("byte offsets and sequence numbers must be non-negative safe integers: a fl
   write("window-aaaa0004.json", { launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: 2 ** 53 } });
   const l = Ledger.open(dir);
   const r = importLegacyState(l, dir, { sealsContent: false });
+  // Window records import first (the other sources depend on them), so they lead the report.
   expect(r.failed).toEqual([
-    { file: "codex-inbound-aaaa0002.json", error: "malformed: codex inbound item 0: seq must be a non-negative integer", sessionId: "aaaa0002" },
-    { file: "queue-aaaa0001.json", error: "malformed: queue item 0: seq must be a non-negative integer", sessionId: "aaaa0001" },
     { file: "window-aaaa0003.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "aaaa0003" },
     { file: "window-aaaa0004.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "aaaa0004" },
+    { file: "codex-inbound-aaaa0002.json", error: "malformed: codex inbound item 0: seq must be a non-negative integer", sessionId: "aaaa0002" },
+    { file: "queue-aaaa0001.json", error: "malformed: queue item 0: seq must be a non-negative integer", sessionId: "aaaa0001" },
   ]);
-  expect(r.quarantine).toEqual(["aaaa0002", "aaaa0001", "aaaa0003", "aaaa0004"]);
+  expect(r.quarantine).toEqual(["aaaa0003", "aaaa0004", "aaaa0002", "aaaa0001"]);
   expect(r).toMatchObject({ commands: 0, checkpoints: 0 });
+  l.close();
+});
+
+// ── review d5f35f45: receipt rows fail closed; a failed window record holds its dependent sources ──
+
+test("a receipt row with a malformed seq (a fractional codex seq-receipt, an unsafe-integer inbound seq) is a FAILED import of its file: quarantined, nothing committed, files kept, not done — ownership is never silently dropped; a repair imports it", () => {
+  write("codex-checkpoint-eeee0001.json", { deliveredThroughTurnId: "turn-7", seqReceipts: [{ seq: 1.5, clientId: "owned-prompt" }] });
+  write("eeee0002.receipts.json", { inbound: [{ uuid: "owned-echo", seq: Number.MAX_SAFE_INTEGER + 1, at: 100 }] });
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([
+    { file: "codex-checkpoint-eeee0001.json", error: "malformed: codex seq receipt 0: seq must be a non-negative integer", sessionId: "eeee0001" },
+    { file: "eeee0002.receipts.json", error: "malformed: inbound receipt 0: seq must be a non-negative integer", sessionId: "eeee0002" },
+  ]);
+  expect(r.quarantine).toEqual(["eeee0001", "eeee0002"]);
+  expect(r.files).toEqual([]);
+  expect(r.receipts).toBe(0);
+  expect(l.getCheckpoint("eeee0001", "codex_turn")).toBeNull(); // the valid cursor rolled back with its file
+  expect(l.listReceipts("eeee0001")).toEqual([]);
+  expect(l.listReceipts("eeee0002")).toEqual([]);
+  expect(l.getImportSource("codex-checkpoint-eeee0001.json")).toBeNull();
+  expect(l.getImportSource("eeee0002.receipts.json")).toBeNull();
+  expect(listLegacyFiles(dir)).toEqual(["codex-checkpoint-eeee0001.json", "eeee0002.receipts.json"]);
+  expect(existsSync(join(dir, "imported-v1"))).toBe(false);
+  expect(l.getMeta("import_v1")).toBeNull();
+  // Repaired by hand: the ownership lands with the rows, the files move, the import completes.
+  write("codex-checkpoint-eeee0001.json", { deliveredThroughTurnId: "turn-7", seqReceipts: [{ seq: 1, clientId: "owned-prompt" }] });
+  write("eeee0002.receipts.json", { inbound: [{ uuid: "owned-echo", seq: Number.MAX_SAFE_INTEGER, at: 100 }] });
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed).toEqual([]);
+  expect(r2.quarantine).toEqual([]);
+  expect(l.getCheckpoint("eeee0001", "codex_turn")?.ref).toBe("turn-7");
+  expect(l.getReceipt("eeee0001", "seq", "1")?.commandId).toBe("owned-prompt");
+  expect(l.hasReceipt("eeee0001", "codex_client", "owned-prompt")).toBe(true);
+  expect(l.listReceipts("eeee0002").map((x) => [x.kind, x.ref]).sort()).toEqual([["seq", String(Number.MAX_SAFE_INTEGER)], ["transcript_uuid", "owned-echo"]]);
+  expect(readdirSync(join(dir, "imported-v1")).sort()).toEqual(["codex-checkpoint-eeee0001.json", "eeee0002.receipts.json"]);
+  expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
+test("every receipt row is checked like a queue row: a null entry, a uuid-less receipt, a non-object outbound row, a non-array section, a textless received entry, a non-numeric at, a non-string known client id, a clientId-less or negative seq receipt", () => {
+  const cases: Array<[string, string, unknown, string]> = [
+    ["aaaa0001.receipts.json", "aaaa0001", { inbound: [{ uuid: "ok", seq: 1 }, null] }, "malformed: inbound receipt 1: not an object"],
+    ["aaaa0002.receipts.json", "aaaa0002", { inbound: [{ text: "no uuid" }] }, "malformed: inbound receipt 0: uuid must be a non-empty string"],
+    ["aaaa0003.receipts.json", "aaaa0003", { outbound: [{ uuid: "ok" }, "junk"] }, "malformed: outbound receipt 1: not an object"],
+    ["aaaa0004.receipts.json", "aaaa0004", { inbound: { uuid: "not a list" } }, "malformed: receipts file: inbound must be an array"],
+    ["aaaa0005.receipts.json", "aaaa0005", { received: [{ text: 7, at: NOW }] }, "malformed: received entry 0: text must be a non-empty string"],
+    ["aaaa0006.receipts.json", "aaaa0006", { outbound: [{ uuid: "ok", at: "yesterday" }] }, "malformed: outbound receipt 0: at must be a number"],
+    ["codex-checkpoint-aaaa0007.json", "aaaa0007", { knownClientIds: ["ok", 5] }, "malformed: codex checkpoint: knownClientIds[1] must be a non-empty string"],
+    ["codex-checkpoint-aaaa0008.json", "aaaa0008", { seqReceipts: [{ seq: 2 }] }, "malformed: codex seq receipt 0: clientId must be a non-empty string"],
+    ["codex-checkpoint-aaaa0009.json", "aaaa0009", { seqReceipts: [{ seq: -1, clientId: "c" }] }, "malformed: codex seq receipt 0: seq must be a non-negative integer"],
+  ];
+  for (const [name, , doc] of cases) write(name, doc);
+  const l = Ledger.open(dir, { now: () => NOW });
+  const r = importLegacyState(l, dir, { sealsContent: false, now: () => NOW });
+  expect(r.failed).toEqual(cases.map(([file, sessionId, , error]) => ({ file, error, sessionId })));
+  expect(r.quarantine).toEqual(cases.map(([, sessionId]) => sessionId));
+  expect(l.db.prepare("SELECT COUNT(*) AS n FROM receipts").get()).toEqual({ n: 0 }); // the valid siblings rolled back with their files
+  expect(listLegacyFiles(dir)).toEqual(cases.map(([name]) => name));
+  expect(l.getMeta("import_v1")).toBeNull();
+  l.close();
+});
+
+test("a truncated window record keeps its dependent outbound source unconsumed (not imported, no marker, not moved); repairing the record imports the output row on the next boot", () => {
+  const file = join(dir, "window-ffff0001.json");
+  const truncated = '{"v2SessionId":"v2-owner","transcriptCheckpoint":';
+  writeFileSync(file, truncated);
+  // The entry predates localId: only its window record can say whose it is.
+  write("v2-outbound.json", [{ id: "pending", kind: "output", v2SessionId: "v2-owner", wire: wire("accepted output"), runtimeEventId: "accepted-output", sealed: false }]);
+  const l = Ledger.open(dir);
+  const first = importLegacyState(l, dir, { sealsContent: false });
+  expect(first.failed).toEqual([
+    { file: "window-ffff0001.json", error: expect.stringMatching(/^malformed: not JSON/), sessionId: "ffff0001" },
+    { file: "v2-outbound.json", error: expect.stringMatching(/^deferred: v2-outbound entry pending has no local session \(v2 v2-owner\) and window-ffff0001\.json could not be read/) },
+  ]);
+  expect(first.quarantine).toEqual(["ffff0001"]);
+  expect(first.files).toEqual([]);
+  expect(first.outbox).toBe(0);
+  expect(l.getImportSource("v2-outbound.json")).toBeNull();
+  expect(existsSync(join(dir, "v2-outbound.json"))).toBe(true);
+  expect(existsSync(join(dir, "imported-v1"))).toBe(false);
+  expect(readFileSync(file, "utf8")).toBe(truncated);
+  expect(l.getMeta("import_v1")).toBeNull();
+  // Repaired by hand; the next daemon opens the same SQLite file and imports again.
+  writeFileSync(file, JSON.stringify({ v2SessionId: "v2-owner", launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: 200 } }));
+  l.close();
+  const l2 = Ledger.open(dir);
+  const repaired = importLegacyState(l2, dir, { sealsContent: false });
+  expect(repaired.failed).toEqual([]);
+  expect(repaired.quarantine).toEqual([]);
+  expect(repaired.files).toEqual(["window-ffff0001.json", "v2-outbound.json"]);
+  expect(repaired.outbox).toBe(1);
+  expect(l2.getCheckpoint("ffff0001", "claude_transcript")?.offset).toBe(200);
+  expect(l2.pendingOutbound("ffff0001").map((o) => [o.runtimeEventId, o.v2SessionId, o.sealed])).toEqual([["accepted-output", "v2-owner", false]]);
+  expect(existsSync(join(dir, "imported-v1", "v2-outbound.json"))).toBe(true);
+  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ v2SessionId: "v2-owner", launchCwd: "/repo" });
+  expect(l2.getMeta("import_v1")).toBe("done");
+  l2.close();
+});
+
+test("a readable record that fails (a string offset) holds every source its session owns — the outbound file naming it by localId, its queue and receipts — while another session's sources import; the repair imports them together", () => {
+  write("window-aaaa0001.json", { launchCwd: "/repo", v2SessionId: "v2a", transcriptCheckpoint: { path: "/t", offset: "100" } });
+  write("window-bbbb0002.json", { launchCwd: "/other", v2SessionId: "v2b" });
+  write("v2-outbound.json", [
+    { id: "held", kind: "output", localId: "aaaa0001", v2SessionId: "v2a", wire: wire("held"), runtimeEventId: "rec:held", sealed: false },
+    { id: "fine", kind: "output", v2SessionId: "v2b", wire: wire("fine"), runtimeEventId: "rec:fine", sealed: false },
+  ]);
+  write("queue-aaaa0001.json", [{ id: "q-held", text: "held with its record" }]);
+  write("aaaa0001.receipts.json", { inbound: [{ uuid: "u-held", seq: 3 }] });
+  write("queue-bbbb0002.json", [{ id: "q-fine", text: "imports" }]);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([
+    { file: "window-aaaa0001.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "aaaa0001" },
+    { file: "aaaa0001.receipts.json", error: expect.stringMatching(/^deferred: window-aaaa0001\.json failed to import/), sessionId: "aaaa0001" },
+    { file: "queue-aaaa0001.json", error: expect.stringMatching(/^deferred: window-aaaa0001\.json failed to import/), sessionId: "aaaa0001" },
+    { file: "v2-outbound.json", error: expect.stringMatching(/^deferred: v2-outbound entry held belongs to session aaaa0001, whose window-aaaa0001\.json failed to import/) },
+  ]);
+  expect(r.quarantine).toEqual(["aaaa0001"]);
+  expect(r.files).toEqual(["queue-bbbb0002.json"]);
+  expect(l.listPending("bbbb0002").map((c) => c.id)).toEqual(["q-fine"]);
+  expect(l.listCommands("aaaa0001")).toEqual([]);
+  expect(l.listReceipts("aaaa0001")).toEqual([]);
+  expect(l.pendingOutbound("aaaa0001")).toEqual([]);
+  expect(l.pendingOutbound("bbbb0002")).toEqual([]); // the whole file waits: one transaction, one marker
+  expect(listLegacyFiles(dir)).toEqual(["aaaa0001.receipts.json", "queue-aaaa0001.json", "v2-outbound.json"]);
+  expect(l.getMeta("import_v1")).toBeNull();
+  // Repaired: the held sources import together with the record.
+  write("window-aaaa0001.json", { launchCwd: "/repo", v2SessionId: "v2a", transcriptCheckpoint: { path: "/t", offset: 100 } });
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed).toEqual([]);
+  expect(l.listPending("aaaa0001").map((c) => c.id)).toEqual(["q-held"]);
+  expect(l.getReceipt("aaaa0001", "seq", "3")).not.toBeNull();
+  expect(l.pendingOutbound("aaaa0001").map((o) => o.runtimeEventId)).toEqual(["rec:held"]);
+  expect(l.pendingOutbound("bbbb0002").map((o) => o.runtimeEventId)).toEqual(["rec:fine"]);
+  expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
+test("with every record readable, an outbound entry whose v2 session no record maps has no possible owner: dropped and logged, the import completes", () => {
+  write("window-cccc0003.json", { launchCwd: "/x", v2SessionId: "v2c" });
+  write("v2-outbound.json", [{ id: "orphan", kind: "output", v2SessionId: "v2-gone", wire: wire("orphan"), runtimeEventId: "rec:orphan", sealed: false }]);
+  const l = Ledger.open(dir);
+  const logs: string[] = [];
+  const r = importLegacyState(l, dir, { sealsContent: false, log: (s) => logs.push(s) });
+  expect(r.failed).toEqual([]);
+  expect(r.outbox).toBe(0);
+  expect(logs.some((s) => s.includes("v2-outbound entry orphan has no local session (v2 v2-gone) — dropped"))).toBe(true);
+  expect(existsSync(join(dir, "imported-v1", "v2-outbound.json"))).toBe(true);
+  expect(l.getMeta("import_v1")).toBe("done");
   l.close();
 });
