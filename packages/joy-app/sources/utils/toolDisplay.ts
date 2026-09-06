@@ -1,5 +1,5 @@
 import { ToolCall } from '@/sync/typesMessage';
-import { getToolModel } from '@/sync/toolModel';
+import { commandPreviewOf, getToolModel } from '@/sync/toolModel';
 import { t } from '@/text';
 
 const TERMINAL_TOOL_NAMES = new Set([
@@ -8,6 +8,7 @@ const TERMINAL_TOOL_NAMES = new Set([
     'GeminiBash',
     'shell',
     'execute',
+    'run_shell_command',
 ]);
 
 const EDIT_TOOL_NAMES = new Set([
@@ -146,7 +147,8 @@ export function getToolSummaryDetail(tool: ToolCall): string | null {
 
 /**
  * The command a terminal card header / summary row shows — the canonical
- * model's command, the same text the card body renders. The previous
+ * model's bounded one-line preview of the same command the card body
+ * renders, whether the call is still running or settled. The previous
  * extractor picked the first `parsed_cmd` of a compound Codex command
  * (`cat a && cat b` showed `cat a`, #286) and sliced a Gemini title at its
  * first " [" (`if [ -f x ]; ...` showed `if`, #295).
@@ -155,12 +157,7 @@ export function getTerminalToolCommand(tool: ToolCall): string | null {
     if (!isTerminalToolName(tool.name)) {
         return null;
     }
-    const command = getToolModel(tool).command?.command ?? null;
-    if (command === null) {
-        return null;
-    }
-    const trimmed = command.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    return commandPreviewOf(getToolModel(tool));
 }
 
 function getPatchFiles(input: any): string[] {
