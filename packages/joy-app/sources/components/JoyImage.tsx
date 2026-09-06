@@ -2,7 +2,8 @@ import * as React from 'react';
 import { View, Pressable, Text, ActivityIndicator, Modal, ScrollView, Platform, useWindowDimensions } from 'react-native';
 import { Image } from 'expo-image';
 import { StyleSheet } from 'react-native-unistyles';
-import { sessionReadFile } from '@/sync/ops';
+import { fileContentsSpec, type FileContents } from '@/sync/fileContents';
+import { useResource } from '@/hooks/useResource';
 import { joyImgMime } from '@/utils/joyImg';
 import { writeAsStringAsync, deleteAsync, cacheDirectory, EncodingType } from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
@@ -22,27 +23,19 @@ import { logError } from '@/utils/guardAsync';
  * Files live under ~/.joy/sessions/<id>/media/ on the machine (the readFile
  * jail admits exactly that session's folder). A deleted file renders as a
  * quiet placeholder with the alt text.
+ *
+ * The bytes are the shared file RESOURCE (sync/fileContents, keyed session +
+ * path) — the same entry the file viewer shows for that path, so one read
+ * serves both and a write lands in one place. Messages re-render constantly
+ * while streaming and scrolling re-mounts rows, so the image is read once and
+ * kept (staleTime Infinity, no focus refetch): a chat image is immutable
+ * output, and refetching a few-hundred-KB payload per mount would hammer
+ * the RPC channel. Two mounts of one src share the read in flight, and the
+ * resource family's byte budget evicts unobserved images, oldest first.
  */
 
-// Fetched data-URI cache — messages re-render constantly while streaming, and
-// scrolling back re-mounts; refetching a few-hundred-KB image each time would
-// hammer the RPC channel. Keyed per session+path; modest cap, oldest evicted.
-const cache = new Map<string, string>();
-const CACHE_MAX = 40;
-// In-flight fetches, deduped per key: two mounts of the same src (or a fast
-// unmount/remount during scroll) share one RPC instead of issuing duplicates.
-const inFlight = new Map<string, Promise<string | null>>();
-
-function cacheGet(key: string): string | undefined {
-    return cache.get(key);
-}
-
-function cachePut(key: string, value: string): void {
-    if (cache.size >= CACHE_MAX) {
-        const oldest = cache.keys().next().value;
-        if (oldest !== undefined) cache.delete(oldest);
-    }
-    cache.set(key, value);
+function imageSpec(sessionId: string, src: string) {
+    return { ...fileContentsSpec(sessionId, src), staleTime: Infinity };
 }
 
 export const JoyImage = React.memo((props: {
@@ -53,51 +46,23 @@ export const JoyImage = React.memo((props: {
     alt: string | null;
 }) => {
     const { sessionId, src } = props;
-    const key = `${sessionId}:${src}`;
-    const [uri, setUri] = React.useState<string | null>(() => cacheGet(key) ?? null);
-    const [failed, setFailed] = React.useState(false);
+    const spec = React.useMemo(() => imageSpec(sessionId, src), [sessionId, src]);
+    const file = useResource<FileContents>(spec, { refetchOnScreenFocus: false });
     const [viewer, setViewer] = React.useState(false);
     const { width: screenWidth, height: screenHeight } = useWindowDimensions();
 
-    React.useEffect(() => {
-        let alive = true;
-        // Every image key starts clean — cache hits included. A failed read
-        // followed by a src/session change whose image was already cached set
-        // the new uri but kept failed=true, so the placeholder hid a valid
-        // image (#224).
-        setFailed(false);
-        const cached = cacheGet(key);
-        if (cached) { setUri(cached); return; }
-        setUri(null);
-        // The fetch (and cachePut) completes even if this row unmounts mid-RPC —
-        // discarding a few-hundred-KB payload because FlashList recycled the row
-        // meant scrolling back refetched the whole image. Only the setState is
-        // gated on being mounted.
-        let p = inFlight.get(key);
-        if (!p) {
-            p = (async () => {
-                const res = await sessionReadFile(sessionId, src);
-                if (res.success && res.content) {
-                    const dataUri = `data:${joyImgMime(src)};base64,${res.content}`;
-                    cachePut(key, dataUri);
-                    return dataUri;
-                }
-                return null;
-            })().finally(() => { inFlight.delete(key); });
-            inFlight.set(key, p);
-        }
-        void p.then((dataUri) => {
-            if (!alive) return;
-            if (dataUri) setUri(dataUri); else setFailed(true);
-        });
-        return () => { alive = false; };
-    }, [key, sessionId, src]);
+    // The data URI hands the daemon's base64 over AS IS — no re-encoding
+    // anywhere in the pipeline. A zero-byte file has nothing to show and is a
+    // placeholder like a failed read; a read the resource could not make yet
+    // (no live session) keeps the spinner until a policy retries it.
+    const base64 = file.data?.base64;
+    const uri = React.useMemo(() => (base64 ? `data:${joyImgMime(src)};base64,${base64}` : null), [base64, src]);
+    const failed = !uri && (file.hasData || !!file.error);
 
     // Copy / share (share sheet includes "Save Image" on iOS — no photo-library
-    // permission needed). Bytes are already local as a data URI and are handed
-    // over AS IS — no re-encoding anywhere in the pipeline. Native pasteboards
-    // only accept png/jpeg, so copy on other formats surfaces the failure
-    // alert; Share always works with the original bytes.
+    // permission needed). Bytes are already local as a data URI. Native
+    // pasteboards only accept png/jpeg, so copy on other formats surfaces the
+    // failure alert; Share always works with the original bytes.
     const copyImage = React.useCallback(async () => {
         if (!uri) return;
         try {

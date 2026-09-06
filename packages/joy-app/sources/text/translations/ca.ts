@@ -782,6 +782,7 @@ export const ca: TranslationStructure = {
         reload: 'Recarregar',
         overwrite: 'Sobreescriure',
         conflicted: 'Conflicte',
+        refreshFailed: "No s'ha pogut actualitzar des de la màquina; es mostra l'última versió carregada.",
     },
 
 

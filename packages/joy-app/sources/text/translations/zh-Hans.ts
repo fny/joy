@@ -783,6 +783,7 @@ export const zhHans: TranslationStructure = {
         reload: '重新加载',
         overwrite: '覆盖',
         conflicted: '冲突',
+        refreshFailed: '无法从机器刷新；显示的是上次加载的版本。',
     },
 
 
