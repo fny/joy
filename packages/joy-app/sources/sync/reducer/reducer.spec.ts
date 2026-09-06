@@ -1337,10 +1337,13 @@ describe('reducer', () => {
             const result2 = reducer(state, toolMessages);
             expect(result2.messages).toHaveLength(1);
             if (result2.messages[0].kind === 'tool-call') {
-                expect(result2.messages[0].tool.state).toBe('running'); // Result was ignored
-                expect(result2.messages[0].tool.result).toBeUndefined();
+                // The early result was RETAINED and settles the call as it lands.
+                expect(result2.messages[0].tool.state).toBe('completed');
+                expect(result2.messages[0].tool.result).toBe('Success');
+                expect(result2.messages[0].tool.model?.outcome).toBe('succeeded');
             }
-            
+            expect(state.pendingResults.size).toBe(0);
+
             // Result arrives again (with different message ID since it's a new message)
             const resultMessages2: NormalizedMessage[] = [
                 {
@@ -1361,17 +1364,14 @@ describe('reducer', () => {
             ];
             
             const result3 = reducer(state, resultMessages2, null);
-            
-            // Debug: Check if tool was properly registered
-            const toolId = 'tool-1';
-            const msgId = state.toolIdToMessageId.get(toolId);
+
+            // A duplicate observation of a settled call merges idempotently:
+            // nothing changes, nothing is re-emitted.
+            expect(result3.messages).toHaveLength(0);
+            const msgId = state.toolIdToMessageId.get('tool-1');
             const message = msgId ? state.messages.get(msgId) : null;
-            
-            expect(result3.messages).toHaveLength(1);
-            if (result3.messages[0].kind === 'tool-call') {
-                expect(result3.messages[0].tool.state).toBe('completed');
-                expect(result3.messages[0].tool.result).toBe('Success');
-            }
+            expect(message?.tool?.state).toBe('completed');
+            expect(message?.tool?.result).toBe('Success');
         });
 
         it('should handle interleaved messages from multiple sources correctly', () => {

@@ -704,7 +704,26 @@ export const it: TranslationStructure = {
             modifyingFiles: ({ count }: { count: number }) => `Modificando ${count} file`,
             modifyingMultipleFiles: ({ file, count }: { file: string; count: number }) => `${file} e altri ${count}`,
             showingDiff: 'Mostrando modifiche',
-        }
+        },
+        outcome: {
+            succeeded: 'Completato',
+            failed: 'Fallito',
+            cancelled: 'Annullato',
+            denied: 'Negato',
+            pending: 'In attesa',
+            proposed: 'Modifica proposta — non applicata',
+            image: 'Immagine',
+        },
+        detail: {
+            prompt: 'Richiesta',
+            answer: 'Risposta',
+            subTools: 'Sotto-strumenti',
+            command: 'Comando',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} falliti`,
+            awaiting: ({ count }: { count: number }) => `${count} in attesa di approvazione`,
+        },
     },
 
     files: {

@@ -1,5 +1,6 @@
 import { AgentEvent, MessageAttachment } from "./typesRaw";
 import { MessageMeta } from "./typesMessageMeta";
+import type { ToolCallModel } from "./toolModel";
 
 export type ToolCall = {
     name: string;
@@ -19,6 +20,12 @@ export type ToolCall = {
         decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
         date?: number;
     };
+    /**
+     * Canonical normalized record (see sync/toolModel.ts). Attached by the
+     * reducer at projection time; views read it through `getToolModel`, which
+     * derives it for any legacy record that reaches them without one.
+     */
+    model?: ToolCallModel;
 }
 
 // Flattened message types - each message represents a single block

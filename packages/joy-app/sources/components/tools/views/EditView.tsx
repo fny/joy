@@ -2,28 +2,31 @@ import * as React from 'react';
 import { ToolSectionView } from '../../tools/ToolSectionView';
 import { ToolViewProps } from './_all';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
-import { knownTools } from '../../tools/knownTools';
-import { trimIdent } from '@/utils/trimIdent';
 import { useSetting } from '@/sync/storage';
+import { getToolModel, trimCommonIndent } from '@/sync/toolModel';
 
+/** The single edit of an Edit-family change, indentation trimmed JOINTLY. */
+export function editPair(tool: ToolViewProps['tool']): { oldText: string; newText: string } | null {
+    const change = getToolModel(tool).fileChanges?.[0];
+    if (!change) return null;
+    const edit = change.edits?.[0] ?? (change.oldText !== null || change.newText !== null
+        ? { oldText: change.oldText ?? '', newText: change.newText ?? '' }
+        : null);
+    if (!edit) return null;
+    const [oldText, newText] = trimCommonIndent([edit.oldText, edit.newText]);
+    return { oldText, newText };
+}
 
 export const EditView = React.memo<ToolViewProps>(({ tool }) => {
     const showLineNumbersInToolViews = useSetting('showLineNumbersInToolViews');
-    
-    let oldString = '';
-    let newString = '';
-    const parsed = knownTools.Edit.input.safeParse(tool.input);
-    if (parsed.success) {
-        oldString = trimIdent(parsed.data.old_string || '');
-        newString = trimIdent(parsed.data.new_string || '');
-    }
+    const pair = editPair(tool);
 
     return (
         <>
             <ToolSectionView fullWidth>
-                <ToolDiffView 
-                    oldText={oldString} 
-                    newText={newString} 
+                <ToolDiffView
+                    oldText={pair?.oldText ?? ''}
+                    newText={pair?.newText ?? ''}
                     showLineNumbers={showLineNumbersInToolViews}
                     showPlusMinusSymbols={showLineNumbersInToolViews}
                 />

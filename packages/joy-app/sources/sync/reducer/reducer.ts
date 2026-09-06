@@ -1,113 +1,65 @@
 /**
  * Message Reducer for Real-time Sync System
- * 
+ *
  * This reducer is the core message processing engine that transforms raw messages from
  * the sync system into a structured, deduplicated message history. It handles complex
  * scenarios including tool permissions, sidechains, and message deduplication.
- * 
+ *
  * ## Core Responsibilities:
- * 
+ *
  * 1. **Message Deduplication**: Prevents duplicate messages using multiple tracking mechanisms:
  *    - localId tracking for user messages
  *    - messageId tracking for all messages
  *    - Permission ID tracking for tool permissions
- * 
+ *
  * 2. **Tool Permission Management**: Integrates with AgentState to handle tool permissions:
  *    - Creates placeholder messages for pending permission requests
- *    - Updates permission status (pending → approved/denied/canceled)
+ *    - Updates permission status (pending → approved/denied/canceled) on EVERY copy
+ *      of the call (the root placeholder and a subagent's nested copy)
  *    - Matches incoming tool calls to approved permissions
- *    - Prioritizes tool calls over permissions when both exist
- * 
- * 3. **Tool Call Lifecycle**: Manages the complete lifecycle of tool calls:
- *    - Creation from permission requests or direct tool calls
- *    - Matching tool calls to existing permission messages
- *    - Processing tool results and updating states
- *    - Handling errors and completion states
- * 
+ *
+ * 3. **Tool Call Lifecycle** — an IDENTITY-BASED projection:
+ *    - Every tool call is indexed by its harness call id, at the root and inside
+ *      sidechains. A result whose call has not arrived yet (older history page)
+ *      is RETAINED in `pendingResults` and applied when the call lands — never
+ *      discarded.
+ *    - Duplicate observations (live event + replayed history) merge idempotently:
+ *      a second result for a settled call is a no-op, a second call for a known
+ *      id updates the same row.
+ *    - A permission placeholder acquires the real call's server `seq` when the
+ *      call arrives, so it settles into log order instead of floating as newest.
+ *    - The canonical tool model (sync/toolModel.ts) is attached at projection
+ *      time with the call's identity (session / turn / message / call / parent).
+ *
  * 4. **Sidechain Processing**: Handles nested conversation branches (sidechains):
- *    - Identifies sidechain messages using the tracer
- *    - Stores sidechain messages separately
- *    - Links sidechains to their parent tool calls
- * 
+ *    - Children are keyed by the OWNING CALL id (parallel Task calls in one
+ *      message keep their own output)
+ *    - Nested sidechains propagate changes to the outermost root; only roots are
+ *      ever emitted in the result delta
+ *
+ * 5. **Historical lifecycle events** update historical state only: a snapshot
+ *    (usage, todos, plan-mode transitions) is taken from a message only when it
+ *    is newer (server seq, then timestamp) than what the state already holds, so
+ *    paging history backward never overwrites the current snapshot.
+ *
  * ## Processing Phases:
- * 
- * The reducer processes messages in a specific order to ensure correct behavior:
- * 
+ *
  * **Phase 0: AgentState Permissions**
- *   - Processes pending and completed permission requests
- *   - Creates tool messages for permissions
- *   - Skips completed permissions if matching tool call (same name AND arguments) exists in incoming messages
- *   - Phase 2 will handle matching tool calls to existing permission messages
- * 
- * **Phase 0.5: Message-to-Event Conversion**
- *   - Parses messages to check if they should be converted to events
- *   - Converts matching messages to events immediately
- *   - Converted messages skip all subsequent processing phases
- *   - Supports user commands, tool results, and metadata-driven conversions
- * 
- * **Phase 1: User and Text Messages**
- *   - Processes user messages with deduplication
- *   - Processes agent text messages
- *   - Skips tool calls for later phases
- * 
- * **Phase 2: Tool Calls**
- *   - Processes incoming tool calls from agents
- *   - Matches to existing permission messages when possible
- *   - Creates new tool messages when no match exists
- *   - Prioritizes newest permission when multiple matches
- * 
- * **Phase 3: Tool Results**
- *   - Updates tool messages with results
- *   - Sets completion or error states
- *   - Updates completion timestamps
- * 
+ * **Phase 0.5: Message-to-Event Conversion** (per content block — sibling
+ *   blocks of an event keep flowing through normal processing)
+ * **Phase 1: User & text messages**
+ * **Phase 2: Tool calls** (root)
+ * **Phase 3: Tool results** (root; unmatched retained)
  * **Phase 4: Sidechains**
- *   - Processes sidechain messages separately
- *   - Stores in sidechain map linked to parent tool
- *   - Handles nested tool calls within sidechains
- * 
  * **Phase 5: Mode Switch Events**
- *   - Processes agent event messages
- *   - Handles mode changes and other events
- * 
+ *
  * ## Key Behaviors:
- * 
+ *
  * - **Idempotency**: Calling the reducer multiple times with the same data produces no duplicates
  * - **Priority Rules**: When both tool calls and permissions exist, tool calls take priority
- * - **Argument Matching**: Tool calls match to permissions based on both name AND arguments
- * - **Timestamp Preservation**: Original timestamps are preserved when matching tools to permissions
- * - **State Persistence**: The ReducerState maintains all mappings across calls
- * - **Message Immutability**: NEVER modify message timestamps or core properties after creation
- *   Messages can only have their tool state/result updated, never their creation metadata
- * - **Timestamp Preservation**: NEVER change a message's createdAt timestamp. The timestamp
- *   represents when the message was originally created and must be preserved throughout all
- *   processing phases. This is critical for maintaining correct message ordering.
- * 
- * ## Permission Matching Algorithm:
- * 
- * When a tool call arrives, the matching algorithm:
- * 1. Checks if the tool has already been processed (via toolIdToMessageId)
- * 2. Searches for approved permission messages with:
- *    - Same tool name
- *    - Matching arguments (deep equality)
- *    - Not already linked to another tool
- * 3. Prioritizes the newest matching permission
- * 4. Updates the permission message with tool execution details
- * 5. Falls back to creating a new tool message if no match
- * 
- * ## Data Flow:
- * 
- * Raw Messages → Normalizer → Reducer → Structured Messages
- *                              ↑
- *                         AgentState
- * 
- * The reducer receives:
- * - Normalized messages from the sync system
- * - Current AgentState with permission information
- * 
- * And produces:
- * - Structured Message objects for UI rendering
- * - Updated internal state for future processing
+ * - **Timestamp Preservation**: NEVER change a message's createdAt timestamp.
+ * - **Indexed entities**: every lookup is a Map lookup; no phase scans the whole
+ *   message log, so a batch costs what the batch contains, not what the log holds.
  */
 
 import { Message, ToolCall, DeliveryStage } from "../typesMessage";
@@ -115,7 +67,8 @@ import { AgentEvent, MessageAttachment, NormalizedMessage, UsageData } from "../
 import { createTracer, traceMessages, TracerState } from "./reducerTracer";
 import { AgentState, TodoItem, TodoItemsSchema } from "../storageTypes";
 import { MessageMeta } from "../typesMessageMeta";
-import { parseMessageAsEvent } from "./messageToEvent";
+import { splitMessageEvents } from "./messageToEvent";
+import { buildToolModel } from "../toolModel";
 
 type ReducerMessage = {
     id: string;
@@ -135,6 +88,10 @@ type ReducerMessage = {
     deliveryStage?: DeliveryStage;
     /** Relay turn the prompt opened — how lifecycle events find this row. */
     turnId?: string;
+    /** Harness call id of a tool row (permission id for a placeholder). */
+    callId?: string;
+    /** Owning Task / Agent call id for a row inside a sidechain. */
+    ownerCallId?: string;
 }
 
 type StoredPermission = {
@@ -149,16 +106,38 @@ type StoredPermission = {
     decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
 };
 
+type ToolResultObservation = {
+    content: unknown;
+    isError: boolean;
+    createdAt: number;
+    seq: number | null;
+    permissions?: {
+        date: number;
+        result: 'approved' | 'denied';
+        mode?: string;
+        allowedTools?: string[];
+        decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
+    };
+};
+
+export type PlanModeTransition = 'enter' | 'exit';
+
 export type ReducerState = {
-    toolIdToMessageId: Map<string, string>; // toolId/permissionId -> messageId (since they're the same now)
-    sidechainToolIdToMessageId: Map<string, string>; // toolId -> sidechain messageId (for dual tracking)
+    /** Session the projection belongs to (identity on every tool model). */
+    sessionId: string | null;
+    toolIdToMessageId: Map<string, string>; // root call id / permission id -> messageId
+    sidechainToolIdToMessageId: Map<string, string>; // sidechain call id -> sidechain messageId
+    /** Results observed before their call — applied when the call arrives. */
+    pendingResults: Map<string, ToolResultObservation>;
     permissions: Map<string, StoredPermission>; // Store permission details by ID for quick lookup
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
     turnIds: Map<string, string>; // relay turnId -> internalId (user prompts only)
     messages: Map<string, ReducerMessage>;
-    sidechains: Map<string, ReducerMessage[]>;
+    sidechains: Map<string, ReducerMessage[]>; // owning call id -> children
     tracerState: TracerState; // Tracer state for sidechain processing
+    /** Highest server seq projected so far — the line between history and live. */
+    maxSeq: number | null;
     latestTodos?: {
         todos: TodoItem[];
         timestamp: number;
@@ -175,17 +154,20 @@ export type ReducerState = {
     };
 };
 
-export function createReducer(): ReducerState {
+export function createReducer(sessionId?: string | null): ReducerState {
     return {
+        sessionId: sessionId ?? null,
         toolIdToMessageId: new Map(),
         sidechainToolIdToMessageId: new Map(),
+        pendingResults: new Map(),
         permissions: new Map(),
         messages: new Map(),
         localIds: new Map(),
         messageIds: new Map(),
         turnIds: new Map(),
         sidechains: new Map(),
-        tracerState: createTracer()
+        tracerState: createTracer(),
+        maxSeq: null,
     }
 };
 
@@ -202,22 +184,54 @@ function mergeToolInputs(existingInput: unknown, nextInput: unknown): unknown {
     return nextInput ?? existingInput;
 }
 
-function getSidechainOwner(state: ReducerState, sidechainId: string): ReducerMessage | null {
-    const ownerMessageId = state.messageIds.get(sidechainId);
-    if (ownerMessageId) {
-        const owner = state.messages.get(ownerMessageId);
-        if (owner?.tool) {
-            return owner;
-        }
+/** The row holding call `callId` — the root row first, then a sidechain copy. */
+function findToolRow(state: ReducerState, callId: string): { mid: string; message: ReducerMessage } | null {
+    const rootMid = state.toolIdToMessageId.get(callId);
+    if (rootMid) {
+        const message = state.messages.get(rootMid);
+        if (message?.tool) return { mid: rootMid, message };
     }
-
-    for (const message of state.messages.values()) {
-        if (message.realID === sidechainId && message.tool) {
-            return message;
-        }
+    const sidechainMid = state.sidechainToolIdToMessageId.get(callId);
+    if (sidechainMid) {
+        const message = state.messages.get(sidechainMid);
+        if (message?.tool) return { mid: sidechainMid, message };
     }
-
     return null;
+}
+
+/** Every row holding call `callId` (root placeholder and nested copy). */
+function findToolRows(state: ReducerState, callId: string): Array<{ mid: string; message: ReducerMessage }> {
+    const rows: Array<{ mid: string; message: ReducerMessage }> = [];
+    const rootMid = state.toolIdToMessageId.get(callId);
+    if (rootMid) {
+        const message = state.messages.get(rootMid);
+        if (message?.tool) rows.push({ mid: rootMid, message });
+    }
+    const sidechainMid = state.sidechainToolIdToMessageId.get(callId);
+    if (sidechainMid && sidechainMid !== rootMid) {
+        const message = state.messages.get(sidechainMid);
+        if (message?.tool) rows.push({ mid: sidechainMid, message });
+    }
+    return rows;
+}
+
+/**
+ * Mark the OUTERMOST displayed ancestor of `mid` as changed. A row inside a
+ * sidechain is rendered through its owning Task; emitting the row itself put
+ * a subagent child in the root list and left the Task stale.
+ */
+function markChanged(state: ReducerState, changed: Set<string>, mid: string): void {
+    let currentMid = mid;
+    let message = state.messages.get(currentMid);
+    let hops = 0;
+    while (message?.ownerCallId && hops < 64) {
+        const owner = findToolRow(state, message.ownerCallId);
+        if (!owner) break;
+        currentMid = owner.mid;
+        message = owner.message;
+        hops++;
+    }
+    changed.add(currentMid);
 }
 
 function getVisibleSidechainPrompt(owner: ReducerMessage | null): string | null {
@@ -252,6 +266,12 @@ export type ReducerResult = {
         contextSize: number;
     };
     hasReadyEvent?: boolean;
+    /**
+     * Plan-mode transition carried by FRESH messages in this batch (newer than
+     * anything projected before). Older pages and replays never report one, so
+     * loading history cannot flip the current permission mode.
+     */
+    planModeTransition?: PlanModeTransition;
 };
 
 /**
@@ -414,20 +434,168 @@ export function forgetLocalMessage(state: ReducerState, localId: string): string
     return internalId;
 }
 
+/**
+ * Apply a result observation to a tool row. Idempotent: a call that has
+ * already settled (a duplicate live/history observation, or a placeholder
+ * settled by a denial) is left as it is.
+ */
+function applyToolResult(state: ReducerState, message: ReducerMessage, result: ToolResultObservation): boolean {
+    if (!message.tool || message.tool.state !== 'running') {
+        return false;
+    }
+    message.tool.state = result.isError ? 'error' : 'completed';
+    message.tool.result = result.content;
+    message.tool.completedAt = result.createdAt;
+
+    // Update permission data if provided by backend
+    if (result.permissions) {
+        const existingDecision = message.tool.permission?.decision;
+        message.tool.permission = {
+            ...(message.tool.permission ?? {}),
+            id: message.callId ?? message.tool.permission?.id ?? '',
+            status: result.permissions.result === 'approved' ? 'approved' : 'denied',
+            date: result.permissions.date,
+            mode: result.permissions.mode,
+            allowedTools: result.permissions.allowedTools,
+            decision: result.permissions.decision || existingDecision
+        };
+    }
+
+    if (message.tool.name === 'TodoWrite' && !result.isError) {
+        const newTodos = isRecord(result.content) ? result.content.newTodos : undefined;
+        updateLatestTodos(state, newTodos, result.createdAt, result.seq);
+    }
+    return true;
+}
+
+/** Apply a result retained before its call arrived, if one is waiting. */
+function applyPendingResult(state: ReducerState, callId: string, message: ReducerMessage): boolean {
+    const pending = state.pendingResults.get(callId);
+    if (!pending) return false;
+    const applied = applyToolResult(state, message, pending);
+    if (applied) state.pendingResults.delete(callId);
+    return applied;
+}
+
+/**
+ * Apply a completed permission (from agentState) to one row holding the call.
+ * Returns whether the row changed.
+ */
+function applyCompletedPermission(
+    message: ReducerMessage,
+    permId: string,
+    completed: NonNullable<AgentState['completedRequests']>[string],
+): boolean {
+    if (!message.tool) return false;
+    // Skip if tool has already started actual execution with approval
+    if (message.tool.startedAt && message.tool.permission?.status === 'approved') {
+        return false;
+    }
+    // Skip if permission already has date (came from tool result - preferred over agentState)
+    if (message.tool.permission?.date) {
+        return false;
+    }
+    const needsUpdate =
+        message.tool.permission?.status !== completed.status ||
+        message.tool.permission?.reason !== completed.reason ||
+        message.tool.permission?.mode !== completed.mode ||
+        message.tool.permission?.allowedTools !== completed.allowedTools ||
+        message.tool.permission?.decision !== completed.decision;
+    if (!needsUpdate) {
+        return false;
+    }
+
+    if (!message.tool.permission) {
+        message.tool.permission = {
+            id: permId,
+            status: completed.status,
+            mode: completed.mode || undefined,
+            allowedTools: completed.allowedTools || undefined,
+            decision: completed.decision || undefined,
+            reason: completed.reason || undefined
+        };
+    } else {
+        message.tool.permission.status = completed.status;
+        message.tool.permission.mode = completed.mode || undefined;
+        message.tool.permission.allowedTools = completed.allowedTools || undefined;
+        message.tool.permission.decision = completed.decision || undefined;
+        if (completed.reason) {
+            message.tool.permission.reason = completed.reason;
+        }
+    }
+
+    if (completed.status === 'approved') {
+        if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
+            message.tool.state = 'running';
+        }
+    } else {
+        // denied or canceled
+        if (message.tool.state !== 'error' && message.tool.state !== 'completed') {
+            message.tool.state = 'error';
+            message.tool.completedAt = completed.completedAt || Date.now();
+            if (!message.tool.result && completed.reason) {
+                message.tool.result = { error: completed.reason };
+            }
+        }
+    }
+    return true;
+}
+
+function storedPermissionFrom(completed: NonNullable<AgentState['completedRequests']>[string]): StoredPermission {
+    return {
+        tool: completed.tool,
+        arguments: completed.arguments,
+        createdAt: completed.createdAt || Date.now(),
+        completedAt: completed.completedAt || undefined,
+        status: completed.status,
+        reason: completed.reason || undefined,
+        mode: completed.mode || undefined,
+        allowedTools: completed.allowedTools || undefined,
+        decision: completed.decision || undefined
+    };
+}
+
+function planModeTransitionOf(msg: NormalizedMessage): PlanModeTransition | null {
+    if (msg.role !== 'agent' || msg.isSidechain) return null;
+    let transition: PlanModeTransition | null = null;
+    for (const c of msg.content) {
+        if (c.type !== 'tool-call') continue;
+        if (c.name === 'EnterPlanMode' || c.name === 'enter_plan_mode') transition = 'enter';
+        else if (c.name === 'ExitPlanMode' || c.name === 'exit_plan_mode') transition = 'exit';
+    }
+    return transition;
+}
+
 export function reducer(state: ReducerState, messages: NormalizedMessage[], agentState?: AgentState | null): ReducerResult {
     if (ENABLE_LOGGING) {
         console.log(`[REDUCER] Called with ${messages.length} messages, agentState: ${agentState ? 'YES' : 'NO'}`);
-        if (agentState?.requests) {
-            console.log(`[REDUCER] AgentState has ${Object.keys(agentState.requests).length} pending requests`);
-        }
-        if (agentState?.completedRequests) {
-            console.log(`[REDUCER] AgentState has ${Object.keys(agentState.completedRequests).length} completed requests`);
-        }
     }
 
     let newMessages: Message[] = [];
     let changed: Set<string> = new Set();
     let hasReadyEvent = false;
+
+    // A message is FRESH when it is newer than everything projected before
+    // this batch (or has no server seq yet — a live event). Only fresh
+    // messages may report lifecycle transitions that change the current mode.
+    const maxSeqBefore = state.maxSeq;
+    const isFresh = (msg: NormalizedMessage) => msg.seq == null || maxSeqBefore == null || msg.seq > maxSeqBefore;
+    const planMode: { current: { transition: PlanModeTransition; seq: number | null } | null } = { current: null };
+    const notePlanMode = (msg: NormalizedMessage) => {
+        if (!isFresh(msg)) return;
+        const transition = planModeTransitionOf(msg);
+        if (!transition) return;
+        // Highest seq wins; a live (seq-less) transition is newest of all.
+        const current = planMode.current;
+        if (!current || msg.seq == null || (current.seq != null && msg.seq >= current.seq)) {
+            planMode.current = { transition, seq: msg.seq ?? null };
+        }
+    };
+    for (const msg of messages) {
+        if (msg.seq != null && (state.maxSeq == null || msg.seq > state.maxSeq)) {
+            state.maxSeq = msg.seq;
+        }
+    }
 
     // First, trace all messages to identify sidechains
     const tracedMessages = traceMessages(state.tracerState, messages);
@@ -438,12 +606,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
     //
     // Phase 0.5: Message-to-Event Conversion
-    // Convert certain messages to events before normal processing
+    // Convert event BLOCKS to events before normal processing; the remaining
+    // blocks of the same message continue as an ordinary message.
     //
-
-    if (ENABLE_LOGGING) {
-        console.log(`[REDUCER] Phase 0.5: Message-to-Event Conversion`);
-    }
 
     const messagesToProcess: NormalizedMessage[] = [];
     const convertedEvents: { message: NormalizedMessage, event: AgentEvent }[] = [];
@@ -457,6 +622,12 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         if (state.messageIds.has(msg.id)) {
             reconcileSeq(state, changed, msg);
             continue;
+        }
+
+        // Turn usage rides on lifecycle events too (session-protocol turn-end
+        // becomes `ready`); take it BEFORE the lifecycle filter below.
+        if (msg.usage && msg.role !== 'agent') {
+            processUsageData(state, msg.usage, msg.createdAt, msg.seq ?? null);
         }
 
         // Filter out ready events completely - they should not create any message
@@ -518,20 +689,27 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             // Don't continue - let the event be processed normally to create a message
         }
 
-        // Try to parse message as event
-        const event = parseMessageAsEvent(msg);
-        if (event) {
-            if (ENABLE_LOGGING) {
-                console.log(`[REDUCER] Converting message ${msg.id} to event:`, event);
-            }
+        // Plan-mode transitions are read from every fresh agent message,
+        // whether or not its blocks convert to events.
+        notePlanMode(msg);
+
+        // Convert event blocks; keep the rest of the message.
+        const { events, remainder } = splitMessageEvents(msg);
+        for (const event of events) {
             convertedEvents.push({ message: msg, event });
-            // Mark as processed to prevent duplication
+        }
+        if (events.length > 0 && remainder === null) {
+            // Nothing but events: mark processed here (Phase 1 will not see it)
+            // and take its usage.
             state.messageIds.set(msg.id, msg.id);
             if (msg.role === 'user' && msg.localId) {
                 state.localIds.set(msg.localId, msg.id);
             }
-        } else {
-            messagesToProcess.push(msg);
+            if (msg.role === 'agent' && msg.usage) {
+                processUsageData(state, msg.usage, msg.createdAt, msg.seq ?? null);
+            }
+        } else if (remainder) {
+            messagesToProcess.push(remainder);
         }
     }
 
@@ -571,9 +749,6 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     // Phase 0: Process AgentState permissions
     //
 
-    if (ENABLE_LOGGING) {
-        console.log(`[REDUCER] Phase 0: Processing AgentState`);
-    }
     if (agentState) {
         // Process pending permission requests
         if (agentState.requests) {
@@ -583,26 +758,19 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     continue;
                 }
 
-                // Check if we already have a message for this permission ID
-                const existingMessageId = state.toolIdToMessageId.get(permId);
-                if (existingMessageId) {
-                    // Update existing tool message with permission info
-                    const message = state.messages.get(existingMessageId);
-                    if (message?.tool && !message.tool.permission) {
-                        if (ENABLE_LOGGING) {
-                            console.log(`[REDUCER] Updating existing tool ${permId} with permission`);
+                const rows = findToolRows(state, permId);
+                if (rows.length > 0) {
+                    // Update every row holding this call with the pending permission
+                    for (const { mid, message } of rows) {
+                        if (message.tool && !message.tool.permission) {
+                            message.tool.permission = {
+                                id: permId,
+                                status: 'pending'
+                            };
+                            markChanged(state, changed, mid);
                         }
-                        message.tool.permission = {
-                            id: permId,
-                            status: 'pending'
-                        };
-                        changed.add(existingMessageId);
                     }
                 } else {
-                    if (ENABLE_LOGGING) {
-                        console.log(`[REDUCER] Creating new message for permission ${permId}`);
-                    }
-
                     // Create a new tool message for the permission request
                     let mid = allocateId();
                     let toolCall: ToolCall = {
@@ -632,6 +800,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         text: null,
                         tool: toolCall,
                         event: null,
+                        callId: permId,
                     });
 
                     // Store by permission ID (which will match tool ID)
@@ -653,108 +822,25 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         // Process completed permission requests
         if (agentState.completedRequests) {
             for (const [permId, completed] of Object.entries(agentState.completedRequests)) {
-                // Check if we have a message for this permission ID
-                const messageId = state.toolIdToMessageId.get(permId);
-                if (messageId) {
-                    const message = state.messages.get(messageId);
-                    if (message?.tool) {
-                        // Skip if tool has already started actual execution with approval
-                        if (message.tool.startedAt && message.tool.permission?.status === 'approved') {
-                            continue;
+                const rows = findToolRows(state, permId);
+                if (rows.length > 0) {
+                    // Resolve EVERY copy — the root placeholder and a subagent's
+                    // nested copy — and refresh the root that displays them.
+                    let anyChanged = false;
+                    for (const { mid, message } of rows) {
+                        if (applyCompletedPermission(message, permId, completed)) {
+                            anyChanged = true;
+                            markChanged(state, changed, mid);
                         }
-
-                        // Skip if permission already has date (came from tool result - preferred over agentState)
-                        if (message.tool.permission?.date) {
-                            continue;
-                        }
-
-                        // Check if we need to update ANY field
-                        const needsUpdate = 
-                            message.tool.permission?.status !== completed.status ||
-                            message.tool.permission?.reason !== completed.reason ||
-                            message.tool.permission?.mode !== completed.mode ||
-                            message.tool.permission?.allowedTools !== completed.allowedTools ||
-                            message.tool.permission?.decision !== completed.decision;
-
-                        if (!needsUpdate) {
-                            continue;
-                        }
-
-                        let hasChanged = false;
-
-                        // Update permission status
-                        if (!message.tool.permission) {
-                            message.tool.permission = {
-                                id: permId,
-                                status: completed.status,
-                                mode: completed.mode || undefined,
-                                allowedTools: completed.allowedTools || undefined,
-                                decision: completed.decision || undefined,
-                                reason: completed.reason || undefined
-                            };
-                            hasChanged = true;
-                        } else {
-                            // Update all fields
-                            message.tool.permission.status = completed.status;
-                            message.tool.permission.mode = completed.mode || undefined;
-                            message.tool.permission.allowedTools = completed.allowedTools || undefined;
-                            message.tool.permission.decision = completed.decision || undefined;
-                            if (completed.reason) {
-                                message.tool.permission.reason = completed.reason;
-                            }
-                            hasChanged = true;
-                        }
-
-                        // Update tool state based on permission status
-                        if (completed.status === 'approved') {
-                            if (message.tool.state !== 'completed' && message.tool.state !== 'error' && message.tool.state !== 'running') {
-                                message.tool.state = 'running';
-                                hasChanged = true;
-                            }
-                        } else {
-                            // denied or canceled
-                            if (message.tool.state !== 'error' && message.tool.state !== 'completed') {
-                                message.tool.state = 'error';
-                                message.tool.completedAt = completed.completedAt || Date.now();
-                                if (!message.tool.result && completed.reason) {
-                                    message.tool.result = { error: completed.reason };
-                                }
-                                hasChanged = true;
-                            }
-                        }
-
-                        // Update stored permission
-                        state.permissions.set(permId, {
-                            tool: completed.tool,
-                            arguments: completed.arguments,
-                            createdAt: completed.createdAt || Date.now(),
-                            completedAt: completed.completedAt || undefined,
-                            status: completed.status,
-                            reason: completed.reason || undefined,
-                            mode: completed.mode || undefined,
-                            allowedTools: completed.allowedTools || undefined,
-                            decision: completed.decision || undefined
-                        });
-
-                        if (hasChanged) {
-                            changed.add(messageId);
-                        }
+                    }
+                    if (anyChanged) {
+                        state.permissions.set(permId, storedPermissionFrom(completed));
                     }
                 } else {
                     // No existing message - check if tool ID is in incoming messages
                     if (incomingToolIds.has(permId)) {
-                        if (ENABLE_LOGGING) {
-                            console.log(`[REDUCER] Storing permission ${permId} for incoming tool`);
-                        }
                         // Store permission for when tool arrives in Phase 2
-                        state.permissions.set(permId, {
-                            tool: completed.tool,
-                            arguments: completed.arguments,
-                            createdAt: completed.createdAt || Date.now(),
-                            completedAt: completed.completedAt || undefined,
-                            status: completed.status,
-                            reason: completed.reason || undefined
-                        });
+                        state.permissions.set(permId, storedPermissionFrom(completed));
                         continue;
                     }
 
@@ -795,23 +881,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         text: null,
                         tool: toolCall,
                         event: null,
+                        callId: permId,
                     });
 
                     state.toolIdToMessageId.set(permId, mid);
-
-                    // Store permission details
-                    state.permissions.set(permId, {
-                        tool: completed.tool,
-                        arguments: completed.arguments,
-                        createdAt: completed.createdAt || Date.now(),
-                        completedAt: completed.completedAt || undefined,
-                        status: completed.status,
-                        reason: completed.reason || undefined,
-                        mode: completed.mode || undefined,
-                        allowedTools: completed.allowedTools || undefined,
-                        decision: completed.decision || undefined
-                    });
-
+                    state.permissions.set(permId, storedPermissionFrom(completed));
                     changed.add(mid);
                 }
             }
@@ -820,7 +894,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
     //
     // Phase 1: Process non-sidechain user messages and text messages
-    // 
+    //
 
     for (let msg of nonSidechainMessages) {
         if (msg.role === 'user') {
@@ -894,6 +968,23 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         meta: msg.meta,
                     });
                     changed.add(mid);
+                } else if (c.type === 'user-text') {
+                    // The user's own words riding in an array-form user record
+                    // next to tool results — a user bubble, not agent text.
+                    let mid = allocateId();
+                    state.messages.set(mid, {
+                        id: mid,
+                        realID: msg.id,
+                        seq: msg.seq ?? null,
+                        role: 'user',
+                        createdAt: msg.createdAt,
+                        text: c.text,
+                        tool: null,
+                        event: null,
+                        meta: msg.meta,
+                        claudeUuid: msg.claudeUuid,
+                    });
+                    changed.add(mid);
                 }
             }
         }
@@ -903,9 +994,6 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     // Phase 2: Process non-sidechain tool calls
     //
 
-    if (ENABLE_LOGGING) {
-        console.log(`[REDUCER] Phase 2: Processing tool calls`);
-    }
     for (let msg of nonSidechainMessages) {
         if (msg.role === 'agent') {
             for (let c of msg.content) {
@@ -914,29 +1002,35 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     const existingMessageId = state.toolIdToMessageId.get(c.id);
 
                     if (existingMessageId) {
-                        if (ENABLE_LOGGING) {
-                            console.log(`[REDUCER] Found existing message for tool ${c.id}`);
-                        }
-                        // Update existing message with tool execution details
+                        // Update existing row (a permission placeholder, or a
+                        // duplicate observation of a known call) with the call's
+                        // execution details AND its server identity.
                         const message = state.messages.get(existingMessageId);
                         if (message?.tool) {
-                            message.realID = msg.id;
-                            message.tool.input = mergeToolInputs(message.tool.input, c.input);
-                            message.tool.description = c.description;
-                            message.tool.startedAt = msg.createdAt;
+                            // Merge idempotently: only a field that actually
+                            // changes re-emits the row, so a replayed
+                            // observation of a known call is a no-op.
+                            let dirty = false;
+                            if (message.realID === null) { message.realID = msg.id; dirty = true; }
+                            if (msg.seq != null && message.seq !== msg.seq) { message.seq = msg.seq; dirty = true; }
+                            if (!message.meta && msg.meta) { message.meta = msg.meta; dirty = true; }
+                            if (message.callId !== c.id) { message.callId = c.id; dirty = true; }
+                            state.messageIds.set(msg.id, existingMessageId);
+                            const mergedInput = mergeToolInputs(message.tool.input, c.input);
+                            if (JSON.stringify(mergedInput) !== JSON.stringify(message.tool.input)) { message.tool.input = mergedInput; dirty = true; }
+                            if (message.tool.description !== c.description && c.description !== null) { message.tool.description = c.description; dirty = true; }
+                            if (message.tool.startedAt === null) { message.tool.startedAt = msg.createdAt; dirty = true; }
                             // If permission was approved and shown as completed (no tool), now it's running
-                            if (message.tool.permission?.status === 'approved' && message.tool.state === 'completed') {
+                            if (message.tool.permission?.status === 'approved' && message.tool.state === 'completed' && message.tool.result === 'Approved') {
                                 message.tool.state = 'running';
                                 message.tool.completedAt = null;
                                 message.tool.result = undefined;
+                                dirty = true;
                             }
-                            changed.add(existingMessageId);
-
+                            if (applyPendingResult(state, c.id, message)) dirty = true;
+                            if (dirty) changed.add(existingMessageId);
                         }
                     } else {
-                        if (ENABLE_LOGGING) {
-                            console.log(`[REDUCER] Creating new message for tool ${c.id}`);
-                        }
                         // Check if there's a stored permission for this tool
                         const permission = state.permissions.get(c.id);
 
@@ -953,9 +1047,6 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
 
                         // Add permission info if found
                         if (permission) {
-                            if (ENABLE_LOGGING) {
-                                console.log(`[REDUCER] Found stored permission for tool ${c.id}`);
-                            }
                             toolCall.permission = {
                                 id: c.id,
                                 status: permission.status,
@@ -976,7 +1067,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         }
 
                         let mid = allocateId();
-                        state.messages.set(mid, {
+                        const row: ReducerMessage = {
                             id: mid,
                             realID: msg.id,
                             seq: msg.seq ?? null,
@@ -986,7 +1077,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                             tool: toolCall,
                             event: null,
                             meta: msg.meta,
-                        });
+                            callId: c.id,
+                        };
+                        state.messages.set(mid, row);
 
                         state.toolIdToMessageId.set(c.id, mid);
                         // Optimistic sends that normalize as agent TOOL-CALLS
@@ -997,8 +1090,9 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         if (msg.localId) {
                             state.localIds.set(msg.localId, mid);
                         }
+                        // A result that arrived before this call settles it now.
+                        applyPendingResult(state, c.id, row);
                         changed.add(mid);
-
                     }
                 }
             }
@@ -1013,58 +1107,27 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         if (msg.role === 'agent') {
             for (let c of msg.content) {
                 if (c.type === 'tool-result') {
-                    // Find the message containing this tool
-                    let messageId = state.toolIdToMessageId.get(c.tool_use_id);
-                    if (!messageId) {
+                    const observation: ToolResultObservation = {
+                        content: c.content,
+                        isError: c.is_error,
+                        createdAt: msg.createdAt,
+                        seq: msg.seq ?? null,
+                        permissions: c.permissions,
+                    };
+                    const rows = findToolRows(state, c.tool_use_id);
+                    if (rows.length === 0) {
+                        // The call is on a page not loaded yet — RETAIN the
+                        // result; Phase 2 / Phase 4 apply it when the call lands.
+                        if (!state.pendingResults.has(c.tool_use_id)) {
+                            state.pendingResults.set(c.tool_use_id, observation);
+                        }
                         continue;
                     }
-
-                    let message = state.messages.get(messageId);
-                    if (!message || !message.tool) {
-                        continue;
-                    }
-
-                    if (message.tool.state !== 'running') {
-                        continue;
-                    }
-
-                    // Update tool state and result
-                    message.tool.state = c.is_error ? 'error' : 'completed';
-                    message.tool.result = c.content;
-                    message.tool.completedAt = msg.createdAt;
-
-                    // Update permission data if provided by backend
-                    if (c.permissions) {
-                        // Merge with existing permission to preserve decision field from agentState
-                        if (message.tool.permission) {
-                            // Preserve existing decision if not provided in tool result
-                            const existingDecision = message.tool.permission.decision;
-                            message.tool.permission = {
-                                ...message.tool.permission,
-                                id: c.tool_use_id,
-                                status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                date: c.permissions.date,
-                                mode: c.permissions.mode,
-                                allowedTools: c.permissions.allowedTools,
-                                decision: c.permissions.decision || existingDecision
-                            };
-                        } else {
-                            message.tool.permission = {
-                                id: c.tool_use_id,
-                                status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                date: c.permissions.date,
-                                mode: c.permissions.mode,
-                                allowedTools: c.permissions.allowedTools,
-                                decision: c.permissions.decision
-                            };
+                    for (const { mid, message } of rows) {
+                        if (applyToolResult(state, message, observation)) {
+                            markChanged(state, changed, mid);
                         }
                     }
-
-                    if (message.tool.name === 'TodoWrite' && !c.is_error) {
-                        updateLatestTodos(state, message.tool.result?.newTodos, msg.createdAt, msg.seq ?? null);
-                    }
-
-                    changed.add(messageId);
                 }
             }
         }
@@ -1074,7 +1137,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     // Phase 4: Process sidechains and store them in state
     //
 
-    // For each sidechain message, store it in the state and mark the Task as changed
+    // For each sidechain message, store it in the state and mark the owning Task as changed
     for (const msg of sidechainMessages) {
         if (!msg.sidechainId) continue;
 
@@ -1084,16 +1147,17 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         // Mark as processed
         state.messageIds.set(msg.id, msg.id);
 
-        // Get or create the sidechain array for this Task
-        const existingSidechain = state.sidechains.get(msg.sidechainId) || [];
-        const owner = getSidechainOwner(state, msg.sidechainId);
-        const ownerPrompt = getVisibleSidechainPrompt(owner);
+        const ownerCallId = msg.sidechainId;
+        // Get or create the sidechain array for this Task call
+        const existingSidechain = state.sidechains.get(ownerCallId) || [];
+        const owner = findToolRow(state, ownerCallId);
+        const ownerPrompt = getVisibleSidechainPrompt(owner?.message ?? null);
 
         // Process and add new sidechain messages
         if (msg.role === 'agent' && msg.content[0]?.type === 'sidechain') {
             // This is the sidechain root - create a user message
             if (isDuplicateSidechainPrompt(existingSidechain, ownerPrompt, msg.content[0].prompt)) {
-                state.sidechains.set(msg.sidechainId, existingSidechain);
+                state.sidechains.set(ownerCallId, existingSidechain);
                 continue;
             }
             let mid = allocateId();
@@ -1107,6 +1171,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                 tool: null,
                 event: null,
                 meta: msg.meta,
+                ownerCallId,
             };
             state.messages.set(mid, userMsg);
             existingSidechain.push(userMsg);
@@ -1131,10 +1196,40 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         tool: null,
                         event: null,
                         meta: msg.meta,
+                        ownerCallId,
                     };
                     state.messages.set(mid, textMsg);
                     existingSidechain.push(textMsg);
+                } else if (c.type === 'user-text') {
+                    let mid = allocateId();
+                    let userMsg: ReducerMessage = {
+                        id: mid,
+                        realID: msg.id,
+                        seq: msg.seq ?? null,
+                        role: 'user',
+                        createdAt: msg.createdAt,
+                        text: c.text,
+                        tool: null,
+                        event: null,
+                        meta: msg.meta,
+                        ownerCallId,
+                    };
+                    state.messages.set(mid, userMsg);
+                    existingSidechain.push(userMsg);
                 } else if (c.type === 'tool-call') {
+                    const existingSidechainMid = state.sidechainToolIdToMessageId.get(c.id);
+                    if (existingSidechainMid) {
+                        // Duplicate observation of a nested call — merge into the row.
+                        const existing = state.messages.get(existingSidechainMid);
+                        if (existing?.tool) {
+                            existing.tool.input = mergeToolInputs(existing.tool.input, c.input);
+                            existing.tool.description = existing.tool.description ?? c.description;
+                            if (msg.seq != null) existing.seq = msg.seq;
+                            applyPendingResult(state, c.id, existing);
+                        }
+                        continue;
+                    }
+
                     // Check if there's already a permission message for this tool
                     const existingPermissionMessageId = state.toolIdToMessageId.get(c.id);
 
@@ -1175,88 +1270,35 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         tool: toolCall,
                         event: null,
                         meta: msg.meta,
+                        callId: c.id,
+                        ownerCallId,
                     };
                     state.messages.set(mid, toolMsg);
                     existingSidechain.push(toolMsg);
 
                     // Map sidechain tool separately to avoid overwriting permission mapping
                     state.sidechainToolIdToMessageId.set(c.id, mid);
+                    applyPendingResult(state, c.id, toolMsg);
                 } else if (c.type === 'tool-result') {
-                    // Process tool result in sidechain - update BOTH messages
-
-                    // Update the sidechain tool message
-                    let sidechainMessageId = state.sidechainToolIdToMessageId.get(c.tool_use_id);
-                    if (sidechainMessageId) {
-                        let sidechainMessage = state.messages.get(sidechainMessageId);
-                        if (sidechainMessage && sidechainMessage.tool && sidechainMessage.tool.state === 'running') {
-                            sidechainMessage.tool.state = c.is_error ? 'error' : 'completed';
-                            sidechainMessage.tool.result = c.content;
-                            sidechainMessage.tool.completedAt = msg.createdAt;
-                            
-                            // Update permission data if provided by backend
-                            if (c.permissions) {
-                                // Merge with existing permission to preserve decision field from agentState
-                                if (sidechainMessage.tool.permission) {
-                                    const existingDecision = sidechainMessage.tool.permission.decision;
-                                    sidechainMessage.tool.permission = {
-                                        ...sidechainMessage.tool.permission,
-                                        id: c.tool_use_id,
-                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                        date: c.permissions.date,
-                                        mode: c.permissions.mode,
-                                        allowedTools: c.permissions.allowedTools,
-                                        decision: c.permissions.decision || existingDecision
-                                    };
-                                } else {
-                                    sidechainMessage.tool.permission = {
-                                        id: c.tool_use_id,
-                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                        date: c.permissions.date,
-                                        mode: c.permissions.mode,
-                                        allowedTools: c.permissions.allowedTools,
-                                        decision: c.permissions.decision
-                                    };
-                                }
-                            }
+                    const observation: ToolResultObservation = {
+                        content: c.content,
+                        isError: c.is_error,
+                        createdAt: msg.createdAt,
+                        seq: msg.seq ?? null,
+                        permissions: c.permissions,
+                    };
+                    // Update BOTH rows holding the call: the sidechain tool row
+                    // and a root permission placeholder for it.
+                    const rows = findToolRows(state, c.tool_use_id);
+                    if (rows.length === 0) {
+                        if (!state.pendingResults.has(c.tool_use_id)) {
+                            state.pendingResults.set(c.tool_use_id, observation);
                         }
+                        continue;
                     }
-
-                    // Also update the main permission message if it exists
-                    let permissionMessageId = state.toolIdToMessageId.get(c.tool_use_id);
-                    if (permissionMessageId) {
-                        let permissionMessage = state.messages.get(permissionMessageId);
-                        if (permissionMessage && permissionMessage.tool && permissionMessage.tool.state === 'running') {
-                            permissionMessage.tool.state = c.is_error ? 'error' : 'completed';
-                            permissionMessage.tool.result = c.content;
-                            permissionMessage.tool.completedAt = msg.createdAt;
-                            
-                            // Update permission data if provided by backend
-                            if (c.permissions) {
-                                // Merge with existing permission to preserve decision field from agentState
-                                if (permissionMessage.tool.permission) {
-                                    const existingDecision = permissionMessage.tool.permission.decision;
-                                    permissionMessage.tool.permission = {
-                                        ...permissionMessage.tool.permission,
-                                        id: c.tool_use_id,
-                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                        date: c.permissions.date,
-                                        mode: c.permissions.mode,
-                                        allowedTools: c.permissions.allowedTools,
-                                        decision: c.permissions.decision || existingDecision
-                                    };
-                                } else {
-                                    permissionMessage.tool.permission = {
-                                        id: c.tool_use_id,
-                                        status: c.permissions.result === 'approved' ? 'approved' : 'denied',
-                                        date: c.permissions.date,
-                                        mode: c.permissions.mode,
-                                        allowedTools: c.permissions.allowedTools,
-                                        decision: c.permissions.decision
-                                    };
-                                }
-                            }
-                            
-                            changed.add(permissionMessageId);
+                    for (const { mid, message } of rows) {
+                        if (applyToolResult(state, message, observation)) {
+                            markChanged(state, changed, mid);
                         }
                     }
                 }
@@ -1264,15 +1306,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         }
 
         // Update the sidechain in state
-        state.sidechains.set(msg.sidechainId, existingSidechain);
+        state.sidechains.set(ownerCallId, existingSidechain);
 
-        // Find the Task tool message that owns this sidechain and mark it as changed
-        // msg.sidechainId is the realID of the Task message
-        for (const [internalId, message] of state.messages) {
-            if (message.realID === msg.sidechainId && message.tool) {
-                changed.add(internalId);
-                break;
-            }
+        // Refresh the owning Task — through every nesting level, to the root.
+        if (owner) {
+            markChanged(state, changed, owner.mid);
         }
     }
 
@@ -1305,6 +1343,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     for (let id of changed) {
         let existing = state.messages.get(id);
         if (!existing) continue;
+        // Only roots are emitted; a nested row is carried by its owner.
+        if (existing.ownerCallId) continue;
 
         let message = convertReducerMessageToMessage(existing, state);
         if (message) {
@@ -1312,15 +1352,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         }
     }
 
-    //
-    // Debug changes
-    //
-
     if (ENABLE_LOGGING) {
-        console.log(JSON.stringify(messages, null, 2));
         console.log(`[REDUCER] Changed messages: ${changed.size}`);
     }
 
+    const planModeResult = planMode.current;
     return {
         messages: newMessages,
         todos: state.latestTodos?.todos,
@@ -1331,7 +1367,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             cacheRead: state.latestUsage.cacheRead,
             contextSize: state.latestUsage.contextSize
         } : undefined,
-        hasReadyEvent: hasReadyEvent || undefined
+        hasReadyEvent: hasReadyEvent || undefined,
+        planModeTransition: planModeResult?.transition,
     };
 }
 
@@ -1391,9 +1428,9 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             meta: reducerMsg.meta
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.tool !== null) {
-        // Convert children recursively
+        // Convert children recursively — keyed by THIS call's id
         let childMessages: Message[] = [];
-        let children = reducerMsg.realID ? state.sidechains.get(reducerMsg.realID) || [] : [];
+        let children = reducerMsg.callId ? state.sidechains.get(reducerMsg.callId) || [] : [];
         for (let child of children) {
             let childMessage = convertReducerMessageToMessage(child, state);
             if (childMessage) {
@@ -1401,13 +1438,22 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             }
         }
 
+        const tool: ToolCall = { ...reducerMsg.tool };
+        tool.model = buildToolModel(tool, {
+            callId: reducerMsg.callId ?? null,
+            messageId: reducerMsg.realID,
+            sessionId: state.sessionId,
+            turnId: reducerMsg.meta?.turnId ?? null,
+            parentCallId: reducerMsg.ownerCallId ?? null,
+        });
+
         return {
             id: reducerMsg.id,
             seq: reducerMsg.seq,
             localId: null,
             createdAt: reducerMsg.createdAt,
             kind: 'tool-call',
-            tool: { ...reducerMsg.tool },
+            tool,
             children: childMessages,
             meta: reducerMsg.meta
         };

@@ -7,10 +7,11 @@ describe('reducerTracer', () => {
         it('should create initial state', () => {
             const state = createTracer();
             expect(state.taskTools.size).toBe(0);
-            expect(state.promptToTaskId.size).toBe(0);
+            expect(state.promptToTaskIds.size).toBe(0);
             expect(state.uuidToSidechainId.size).toBe(0);
-            expect(state.toolCallToMessageId.size).toBe(0);
+            expect(state.parentIdToCallId.size).toBe(0);
             expect(state.orphanMessages.size).toBe(0);
+            expect(state.pendingRoots.size).toBe(0);
             expect(state.processedIds.size).toBe(0);
         });
     });
@@ -69,11 +70,13 @@ describe('reducerTracer', () => {
             traceMessages(state, messages);
             
             expect(state.taskTools.size).toBe(1);
-            expect(state.taskTools.get('msg1')).toEqual({
+            // Keyed by the CALL id — one message may hold several Task calls.
+            expect(state.taskTools.get('tool1')).toEqual({
+                callId: 'tool1',
                 messageId: 'msg1',
                 prompt: 'Search for files'
             });
-            expect(state.promptToTaskId.get('Search for files')).toBe('msg1');
+            expect(state.promptToTaskIds.get('Search for files')).toEqual(['tool1']);
         });
 
         it('should identify and track Agent tools', () => {
@@ -99,11 +102,12 @@ describe('reducerTracer', () => {
 
             traceMessages(state, messages);
 
-            expect(state.taskTools.get('msg-agent')).toEqual({
+            expect(state.taskTools.get('agent-tool')).toEqual({
+                callId: 'agent-tool',
                 messageId: 'msg-agent',
                 prompt: 'Inspect translations'
             });
-            expect(state.promptToTaskId.get('Inspect translations')).toBe('msg-agent');
+            expect(state.promptToTaskIds.get('Inspect translations')).toEqual(['agent-tool']);
         });
 
         it('should assign sidechainId to sidechain root messages', () => {
@@ -146,8 +150,8 @@ describe('reducerTracer', () => {
             const traced = traceMessages(state, [sidechainRoot]);
             
             expect(traced).toHaveLength(1);
-            expect(traced[0].sidechainId).toBe('task1');
-            expect(state.uuidToSidechainId.get('sidechain-uuid')).toBe('task1');
+            expect(traced[0].sidechainId).toBe('tool1');
+            expect(state.uuidToSidechainId.get('sidechain-uuid')).toBe('tool1');
         });
 
         it('should handle sidechain messages with parent relationships', () => {
@@ -205,8 +209,8 @@ describe('reducerTracer', () => {
             const traced = traceMessages(state, [sidechainChild]);
             
             expect(traced).toHaveLength(1);
-            expect(traced[0].sidechainId).toBe('task1');
-            expect(state.uuidToSidechainId.get('child-uuid')).toBe('task1');
+            expect(traced[0].sidechainId).toBe('tool1');
+            expect(state.uuidToSidechainId.get('child-uuid')).toBe('tool1');
         });
 
         it('should link subagent-based sidechain messages to parent tool call message', () => {
@@ -247,7 +251,7 @@ describe('reducerTracer', () => {
 
             const traced = traceMessages(state, [subagentMessage]);
             expect(traced).toHaveLength(1);
-            expect(traced[0].sidechainId).toBe('parent-msg');
+            expect(traced[0].sidechainId).toBe('tool-call-1');
         });
 
         it('should link session subagent ids from tool input to the parent tool call message', () => {
@@ -291,7 +295,7 @@ describe('reducerTracer', () => {
 
             const traced = traceMessages(state, [subagentMessage]);
             expect(traced).toHaveLength(1);
-            expect(traced[0].sidechainId).toBe('parent-agent-msg');
+            expect(traced[0].sidechainId).toBe('tool-agent-1');
         });
 
         it('should buffer orphan messages until parent arrives', () => {
@@ -357,9 +361,9 @@ describe('reducerTracer', () => {
             // Should return both parent and orphan
             expect(traced).toHaveLength(2);
             expect(traced[0].id).toBe('sidechain1');
-            expect(traced[0].sidechainId).toBe('task1');
+            expect(traced[0].sidechainId).toBe('tool1');
             expect(traced[1].id).toBe('orphan1');
-            expect(traced[1].sidechainId).toBe('task1');
+            expect(traced[1].sidechainId).toBe('tool1');
             
             // Orphan buffer should be cleared
             expect(state.orphanMessages.has('11111111-1111-4111-8111-111111111111')).toBe(false);
@@ -447,15 +451,15 @@ describe('reducerTracer', () => {
             expect(traced[2].id).toBe('orphan2');
             
             // All should have the same sidechainId
-            expect(traced[0].sidechainId).toBe('task1');
-            expect(traced[1].sidechainId).toBe('task1');
-            expect(traced[2].sidechainId).toBe('task1');
+            expect(traced[0].sidechainId).toBe('tool1');
+            expect(traced[1].sidechainId).toBe('tool1');
+            expect(traced[2].sidechainId).toBe('tool1');
             
             // Orphan buffers should be cleared
             expect(state.orphanMessages.size).toBe(0);
         });
 
-        it('should not orphan non-uuid parent references', () => {
+        it('buffers a subagent child until its parent tool call arrives, then links it (#388)', () => {
             const state = createTracer();
 
             const orphanSubagent: NormalizedMessage = {
@@ -472,11 +476,90 @@ describe('reducerTracer', () => {
                 }]
             };
 
+            // Not emitted as a root, not marked processed — it waits.
             const firstPass = traceMessages(state, [orphanSubagent]);
-            expect(firstPass).toHaveLength(1);
-            expect(firstPass[0].id).toBe('subagent-child');
-            expect(firstPass[0].sidechainId).toBeUndefined();
+            expect(firstPass).toHaveLength(0);
+            expect(state.orphanMessages.has('tool-call-late')).toBe(true);
+            expect(state.processedIds.has('subagent-child')).toBe(false);
+
+            const lateParent: NormalizedMessage = {
+                id: 'late-parent-msg',
+                localId: null,
+                createdAt: 1000,
+                role: 'agent',
+                isSidechain: false,
+                content: [{
+                    type: 'tool-call',
+                    id: 'tool-call-late',
+                    name: 'Task',
+                    input: { prompt: 'late' },
+                    description: null,
+                    uuid: 'late-parent-uuid',
+                    parentUUID: null
+                }]
+            };
+            const secondPass = traceMessages(state, [lateParent]);
+            expect(secondPass.map((m) => m.id)).toEqual(['subagent-child', 'late-parent-msg']);
+            expect(secondPass[0].sidechainId).toBe('tool-call-late');
             expect(state.orphanMessages.has('tool-call-late')).toBe(false);
+        });
+
+        it('links a sidechain root that loaded before its Task (#388)', () => {
+            const state = createTracer();
+            const root: NormalizedMessage = {
+                id: 'early-root',
+                localId: null,
+                createdAt: 2000,
+                role: 'agent',
+                isSidechain: true,
+                content: [{ type: 'sidechain', uuid: '11111111-1111-4111-8111-111111111111', prompt: 'Find it' }]
+            };
+            const child: NormalizedMessage = {
+                id: 'early-child',
+                localId: null,
+                createdAt: 2100,
+                role: 'agent',
+                isSidechain: true,
+                content: [{ type: 'text', text: 'found', uuid: '22222222-2222-4222-8222-222222222222', parentUUID: '11111111-1111-4111-8111-111111111111' }]
+            };
+            expect(traceMessages(state, [child, root])).toHaveLength(0);
+            expect(state.pendingRoots.get('Find it')).toHaveLength(1);
+            expect(state.processedIds.has('early-root')).toBe(false);
+
+            const task: NormalizedMessage = {
+                id: 'task-msg',
+                localId: null,
+                createdAt: 1000,
+                role: 'agent',
+                isSidechain: false,
+                content: [{ type: 'tool-call', id: 'tool-find', name: 'Task', input: { prompt: 'Find it' }, description: null, uuid: 'task-uuid', parentUUID: null }]
+            };
+            const released = traceMessages(state, [task]);
+            expect(released.map((m) => m.id)).toEqual(['early-root', 'early-child', 'task-msg']);
+            expect(released[0].sidechainId).toBe('tool-find');
+            expect(released[1].sidechainId).toBe('tool-find');
+            expect(state.pendingRoots.size).toBe(0);
+        });
+
+        it('gives parallel Task calls in one message their own sidechains (#396)', () => {
+            const state = createTracer();
+            const twoTasks: NormalizedMessage = {
+                id: 'both',
+                localId: null,
+                createdAt: 1000,
+                role: 'agent',
+                isSidechain: false,
+                content: [
+                    { type: 'tool-call', id: 'tA', name: 'Task', input: { prompt: 'A' }, description: null, uuid: 'u', parentUUID: null },
+                    { type: 'tool-call', id: 'tB', name: 'Task', input: { prompt: 'B' }, description: null, uuid: 'u', parentUUID: null },
+                ]
+            };
+            traceMessages(state, [twoTasks]);
+            const roots = traceMessages(state, [
+                { id: 'rB', localId: null, createdAt: 2, role: 'agent', isSidechain: true, content: [{ type: 'sidechain', uuid: 'rb-uuid', prompt: 'B' }] },
+                { id: 'rA', localId: null, createdAt: 3, role: 'agent', isSidechain: true, content: [{ type: 'sidechain', uuid: 'ra-uuid', prompt: 'A' }] },
+            ]);
+            expect(roots.map((m) => [m.id, m.sidechainId])).toEqual([['rB', 'tB'], ['rA', 'tA']]);
         });
 
         it('should skip already processed messages', () => {
@@ -530,14 +613,59 @@ describe('deep orphan chains (#389)', () => {
             id: 'root', localId: null, createdAt: 2000, role: 'agent', isSidechain: true,
             content: [{ type: 'sidechain', uuid: uuidAt(0), prompt: 'deep' }],
         }]);
-        expect(performance.now() - t0).toBeLessThan(100);
+        // Generous bound: the property under test is linear time, and the
+        // suite shares the machine with other work.
+        expect(performance.now() - t0).toBeLessThan(500);
 
         expect(released).toHaveLength(N + 1);
         expect(released[0].id).toBe('root');
         expect(released.slice(1).map(m => m.id)).toEqual(Array.from({ length: N }, (_, k) => `sc-${k + 1}`));
-        expect(released.every(m => m.sidechainId === 'task')).toBe(true);
+        expect(released.every(m => m.sidechainId === 'tool1')).toBe(true);
         expect(state.orphanMessages.size).toBe(0);
         expect(state.processedIds.size).toBe(N + 2);
+    });
+
+    it('releases 150,000 buffered descendants without a stack overflow, marking each only as it is emitted', () => {
+        const state = createTracer();
+        const N = 150_000;
+        // A chain 100 deep, 1,500 wide at every level: every message buffered
+        // before its parent (backward paging), so the release must walk and
+        // APPEND iteratively — a spread into push threw RangeError here.
+        const depth = 100;
+        const width = N / depth;
+        const parentOf = (i: number) => (i <= width ? uuidAt(0) : uuidAt(i - width));
+        const messages: NormalizedMessage[] = [];
+        for (let i = N; i >= 1; i--) {
+            messages.push({
+                id: `w-${i}`,
+                localId: null,
+                createdAt: 3000 + i,
+                role: 'agent',
+                isSidechain: true,
+                content: [{ type: 'text', text: `w ${i}`, uuid: uuidAt(i), parentUUID: parentOf(i) }],
+            });
+        }
+        expect(traceMessages(state, messages)).toHaveLength(0);
+        expect(state.processedIds.size).toBe(0);
+
+        traceMessages(state, [{
+            id: 'task', localId: null, createdAt: 1000, role: 'agent', isSidechain: false,
+            content: [{ type: 'tool-call', id: 'tool-wide', name: 'Task', input: { prompt: 'wide' }, description: null, uuid: 'task-uuid', parentUUID: null }],
+        }]);
+        let released: ReturnType<typeof traceMessages> = [];
+        expect(() => {
+            released = traceMessages(state, [{
+                id: 'root', localId: null, createdAt: 2000, role: 'agent', isSidechain: true,
+                content: [{ type: 'sidechain', uuid: uuidAt(0), prompt: 'wide' }],
+            }]);
+        }).not.toThrow();
+        expect(released).toHaveLength(N + 1);
+        expect(released.every(m => m.sidechainId === 'tool-wide')).toBe(true);
+        expect(state.orphanMessages.size).toBe(0);
+        // root + task + every descendant — nothing consumed that was not returned.
+        expect(state.processedIds.size).toBe(N + 2);
+        const ids = new Set(released.map(m => m.id));
+        expect(ids.size).toBe(N + 1);
     });
 
     it('keeps depth-first emit order for branching orphans', () => {

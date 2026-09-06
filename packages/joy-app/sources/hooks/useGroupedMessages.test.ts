@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { groupMessagesForDisplay, groupToolCallsForDisplay } from './useGroupedMessages';
+import { generateGroupSummary, groupMessagesForDisplay, groupToolCallsForDisplay, hasPendingPermission } from './useGroupedMessages';
 import { Message, ToolCallMessage } from '@/sync/typesMessage';
 
 vi.mock('@/components/tools/knownTools', () => ({
@@ -285,5 +285,71 @@ describe('useGroupedMessages', () => {
             throw new Error('Expected a tool group');
         }
         expect(items[0].messages.map((message) => message.id)).toEqual(['tool-only']);
+    });
+});
+
+describe('group summaries follow the canonical outcome', () => {
+    function edit(id: string, filePath: string, options: { state?: 'completed' | 'error' | 'running'; result?: unknown; pending?: boolean } = {}): ToolCallMessage {
+        return {
+            kind: 'tool-call',
+            id,
+            localId: null,
+            createdAt: 1,
+            tool: {
+                name: 'Edit',
+                state: options.state ?? 'completed',
+                input: { file_path: filePath, old_string: 'a', new_string: 'b' },
+                createdAt: 1,
+                startedAt: 1,
+                completedAt: 2,
+                description: null,
+                result: options.result,
+                ...(options.pending ? { permission: { id: `p-${id}`, status: 'pending' as const } } : {}),
+            },
+            children: [],
+        };
+    }
+
+    it('reports a failed edit as a failure, not as an edited file (#318)', () => {
+        const summary = generateGroupSummary([edit('ok', '/a.ts'), edit('bad', '/b.ts', { state: 'error', result: 'No matching text found' })]);
+        expect(summary).toBe('toolGroup.editedFiles:1, tools.group.failed:1');
+    });
+
+    it('reports a pending approval as awaiting, not as done', () => {
+        expect(generateGroupSummary([edit('wait', '/a.ts', { state: 'running', pending: true })])).toBe('tools.group.awaiting:1');
+    });
+
+    it('counts distinct affected files, not tool calls (#319)', () => {
+        const patch: ToolCallMessage = {
+            kind: 'tool-call',
+            id: 'patch',
+            localId: null,
+            createdAt: 1,
+            tool: {
+                name: 'CodexPatch',
+                state: 'completed',
+                input: { changes: { 'a.ts': { diff: '@@ -1 +1 @@\n-x\n+y' }, 'b.ts': { add: { content: 'new' } } } },
+                createdAt: 1,
+                startedAt: 1,
+                completedAt: 2,
+                description: null,
+            },
+            children: [],
+        };
+        expect(generateGroupSummary([patch])).toBe('toolGroup.editedFiles:2');
+        expect(generateGroupSummary([edit('e1', '/a.ts'), edit('e2', '/a.ts')])).toBe('toolGroup.editedFiles:1');
+    });
+
+    it('sees a pending permission nested under a Task (#317)', () => {
+        const task: ToolCallMessage = {
+            kind: 'tool-call',
+            id: 'task',
+            localId: null,
+            createdAt: 1,
+            tool: { name: 'Task', state: 'running', input: { prompt: 'p' }, createdAt: 1, startedAt: 1, completedAt: null, description: null },
+            children: [edit('nested', '/a.ts', { state: 'running', pending: true })],
+        };
+        expect(hasPendingPermission([task])).toBe(true);
+        expect(groupToolCallsForDisplay([task, edit('other', '/b.ts')], true)[0]).toMatchObject({ type: 'tool-group', hasPendingPermission: true });
     });
 });

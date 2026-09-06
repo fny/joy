@@ -11,6 +11,9 @@ import { useLocalSetting } from '@/sync/storage';
 import { useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { getToolModel, safeStringify } from '@/sync/toolModel';
+import { primaryFilePath } from './toolPresentation';
+import { ToolOutcomeView } from './ToolOutcomeView';
 
 interface ToolFullViewProps {
     tool: ToolCall;
@@ -19,6 +22,13 @@ interface ToolFullViewProps {
     sessionId?: string;
 }
 
+/**
+ * Full-screen tool details. The specialized view (diff, terminal, task) shows
+ * the tool's own material; the outcome — failure reason, denial, interruption,
+ * or every result block — is ALWAYS rendered here from the canonical model, so
+ * a failed Edit or MultiEdit no longer hides why it failed behind its proposed
+ * diff, and a structured error never collapses to "[object Object]".
+ */
 export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolFullViewProps) {
     // Check if there's a specialized content view for this tool
     const SpecializedFullView = getToolFullViewComponent(tool.name);
@@ -26,26 +36,43 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolF
     const devModeEnabled = (useLocalSetting('devModeEnabled') || __DEV__);
     const { theme } = useUnistyles();
     const router = useRouter();
+    const model = getToolModel(tool);
     // Mod 08 (Read → Open file) is permanent — the button always shows for Read calls.
-    const readFilePath = tool.name === 'Read' && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
-    const showOpenFileButton = readFilePath && sessionId;
+    const readFilePath = tool.name === 'Read' ? primaryFilePath(tool) : null;
+    const showOpenFileButton = Boolean(readFilePath && sessionId);
     const handleOpenReadFile = React.useCallback(() => {
         if (!sessionId || !readFilePath) return;
         router.push(`/session/${sessionId}/file?path=${encodePathParam(readFilePath)}`);
     }, [sessionId, readFilePath, router]);
-    console.log('ToolFullView', devModeEnabled);
+
+    const hasInput = model.arguments.ok
+        ? Object.keys(model.arguments.value).length > 0
+        : (model.raw.input !== undefined && model.raw.input !== null);
+    const hasFailure = model.outcome === 'failed' || model.outcome === 'denied' || model.outcome === 'cancelled';
+    const hasOutput = model.outcome === 'succeeded' && model.blocks.length > 0;
+    const isEmptyCompletion = model.outcome === 'succeeded' && model.blocks.length === 0;
 
     return (
         <ScrollView style={[styles.container, { paddingHorizontal: screenWidth > 700 ? 16 : 0 }]}>
             <View style={styles.contentWrapper}>
-                {/* Tool-specific content or generic fallback */}
                 {SpecializedFullView ? (
-                    <SpecializedFullView tool={tool} metadata={metadata || null} messages={messages} />
+                    <>
+                        <SpecializedFullView tool={tool} metadata={metadata || null} messages={messages} sessionId={sessionId} />
+                        {hasFailure ? (
+                            <View style={styles.section}>
+                                <View style={styles.sectionHeader}>
+                                    <Ionicons name="close-circle" size={20} color="#FF3B30" />
+                                    <Text style={styles.sectionTitle}>{t('tools.fullView.error')}</Text>
+                                </View>
+                                <ToolOutcomeView model={model} mode="compact" />
+                            </View>
+                        ) : null}
+                    </>
                 ) : (
                     <>
                     {/* Generic fallback for tools without specialized views */}
                     {/* Tool Description */}
-                    {tool.description && (
+                    {tool.description ? (
                         <View style={styles.section}>
                             <View style={styles.sectionHeader}>
                                 <Ionicons name="information-circle" size={20} color="#5856D6" />
@@ -53,19 +80,19 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolF
                             </View>
                             <Text style={styles.description}>{tool.description}</Text>
                         </View>
-                    )}
+                    ) : null}
                     {/* Input Parameters */}
-                    {tool.input && (
+                    {hasInput ? (
                         <View style={styles.section}>
                             <View style={styles.sectionHeader}>
                                 <Ionicons name="log-in" size={20} color="#5856D6" />
                                 <Text style={styles.sectionTitle}>{t('tools.fullView.inputParams')}</Text>
                             </View>
-                            <CodeView code={JSON.stringify(tool.input, null, 2)} />
+                            <CodeView code={model.arguments.ok ? safeStringify(model.arguments.value) : safeStringify(model.raw.input)} />
                         </View>
-                    )}
+                    ) : null}
 
-                    {showOpenFileButton && (
+                    {showOpenFileButton ? (
                         <View style={styles.section}>
                             <TouchableOpacity
                                 style={[styles.openFileButton, { backgroundColor: theme.colors.button.primary.background }]}
@@ -76,36 +103,32 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolF
                                 <Text style={[styles.openFileButtonText, { color: theme.colors.button.primary.tint }]}>{t('toolView.openFile')}</Text>
                             </TouchableOpacity>
                         </View>
-                    )}
+                    ) : null}
 
-                    {/* Result/Output */}
-                    {tool.state === 'completed' && tool.result && (
+                    {/* Result / Output — every block, including 0 / false / "" */}
+                    {hasOutput ? (
                         <View style={styles.section}>
                             <View style={styles.sectionHeader}>
                                 <Ionicons name="log-out" size={20} color="#34C759" />
                                 <Text style={styles.sectionTitle}>{t('tools.fullView.output')}</Text>
                             </View>
-                            <CodeView
-                                code={typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
-                            />
+                            <ToolOutcomeView model={model} mode="full" titled={false} />
                         </View>
-                    )}
+                    ) : null}
 
-                    {/* Error Details */}
-                    {tool.state === 'error' && tool.result && (
+                    {/* Error / denial / interruption details */}
+                    {hasFailure ? (
                         <View style={styles.section}>
                             <View style={styles.sectionHeader}>
                                 <Ionicons name="close-circle" size={20} color="#FF3B30" />
                                 <Text style={styles.sectionTitle}>{t('tools.fullView.error')}</Text>
                             </View>
-                            <View style={styles.errorContainer}>
-                                <Text style={styles.errorText}>{String(tool.result)}</Text>
-                            </View>
+                            <ToolOutcomeView model={model} mode="compact" />
                         </View>
-                    )}
+                    ) : null}
 
                     {/* No Output Message */}
-                    {tool.state === 'completed' && !tool.result && (
+                    {isEmptyCompletion ? (
                         <View style={styles.section}>
                             <View style={styles.emptyOutputContainer}>
                                 <Ionicons name="checkmark-circle-outline" size={48} color="#34C759" />
@@ -113,22 +136,24 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolF
                                 <Text style={styles.emptyOutputSubtext}>{t('tools.fullView.noOutput')}</Text>
                             </View>
                         </View>
-                    )}
+                    ) : null}
 
                 </>
                 )}
 
                 {/* Raw JSON View (Dev Mode Only) */}
-                {devModeEnabled && (
+                {devModeEnabled ? (
                     <View style={styles.section}>
                         <View style={styles.sectionHeader}>
                             <Ionicons name="code-slash" size={20} color="#FF9500" />
                             <Text style={styles.sectionTitle}>{t('tools.fullView.rawJsonDevMode')}</Text>
                         </View>
-                        <CodeView 
-                            code={JSON.stringify({
+                        <CodeView
+                            code={safeStringify({
                                 name: tool.name,
                                 state: tool.state,
+                                outcome: model.outcome,
+                                identity: model.identity,
                                 description: tool.description,
                                 input: tool.input,
                                 result: tool.result,
@@ -137,10 +162,10 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId }: ToolF
                                 completedAt: tool.completedAt,
                                 permission: tool.permission,
                                 messages
-                            }, null, 2)} 
+                            })}
                         />
                     </View>
-                )}
+                ) : null}
             </View>
         </ScrollView>
     );

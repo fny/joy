@@ -2,26 +2,25 @@ import * as React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { ToolCall } from '@/sync/typesMessage';
 import { Metadata } from '@/sync/storageTypes';
-import { knownTools } from '@/components/tools/knownTools';
 import { toolFullViewStyles } from '../ToolFullView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
-import { trimIdent } from '@/utils/trimIdent';
 import { t } from '@/text';
+import { multiEditPairs } from './MultiEditView';
+import { getToolModel } from '@/sync/toolModel';
 
 interface MultiEditViewFullProps {
     tool: ToolCall;
     metadata: Metadata | null;
 }
 
-export const MultiEditViewFull = React.memo<MultiEditViewFullProps>(({ tool, metadata }) => {
-    const { input } = tool;
-
-    let edits: Array<{ old_string: string; new_string: string; replace_all?: boolean }> = [];
-
-    const parsed = knownTools.MultiEdit.input.safeParse(input);
-    if (parsed.success && parsed.data.edits) {
-        edits = parsed.data.edits;
-    }
+/**
+ * Full MultiEdit details. Failed or pending edits are labelled as proposals;
+ * the failure reason is rendered by ToolFullView from the model, so it is
+ * never lost behind the proposed diffs.
+ */
+export const MultiEditViewFull = React.memo<MultiEditViewFullProps>(({ tool }) => {
+    const edits = multiEditPairs(tool);
+    const proposed = getToolModel(tool).outcome !== 'succeeded';
 
     if (edits.length === 0) {
         return null;
@@ -29,31 +28,36 @@ export const MultiEditViewFull = React.memo<MultiEditViewFullProps>(({ tool, met
 
     return (
         <View style={toolFullViewStyles.sectionFullWidth}>
-            {edits.map((edit, index) => {
-                const oldString = trimIdent(edit.old_string || '');
-                const newString = trimIdent(edit.new_string || '');
-                return (
-                    <View key={index}>
-                        <View style={styles.editHeader}>
-                            <Text style={styles.editNumber}>
-                                {t('tools.multiEdit.editNumber', { index: index + 1, total: edits.length })}
-                            </Text>
-                            {edit.replace_all && (
-                                <View style={styles.replaceAllBadge}>
-                                    <Text style={styles.replaceAllText}>{t('tools.multiEdit.replaceAll')}</Text>
-                                </View>
-                            )}
-                        </View>
-                        <ToolDiffView oldText={oldString} newText={newString} showLineNumbers />
-                        {index < edits.length - 1 && <View style={styles.separator} />}
+            {proposed ? <Text style={styles.proposedLabel}>{t('tools.outcome.proposed')}</Text> : null}
+            {edits.map((edit, index) => (
+                <View key={index}>
+                    <View style={styles.editHeader}>
+                        <Text style={styles.editNumber}>
+                            {t('tools.multiEdit.editNumber', { index: index + 1, total: edits.length })}
+                        </Text>
+                        {edit.replaceAll ? (
+                            <View style={styles.replaceAllBadge}>
+                                <Text style={styles.replaceAllText}>{t('tools.multiEdit.replaceAll')}</Text>
+                            </View>
+                        ) : null}
                     </View>
-                );
-            })}
+                    <ToolDiffView oldText={edit.oldText} newText={edit.newText} showLineNumbers />
+                    {index < edits.length - 1 ? <View style={styles.separator} /> : null}
+                </View>
+            ))}
         </View>
     );
 });
 
 const styles = StyleSheet.create({
+    proposedLabel: {
+        fontSize: 12,
+        color: '#8E8E93',
+        paddingHorizontal: 12,
+        paddingBottom: 4,
+        textTransform: 'uppercase',
+        letterSpacing: 0.6,
+    },
     editHeader: {
         flexDirection: 'row',
         alignItems: 'center',
