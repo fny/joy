@@ -247,7 +247,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const cancelRequested = new Set<string>();
   // Executing turns: what cancel/cleanup needs to stop LOCAL work too —
   // terminalizing the relay alone leaves a queued prompt to fire later.
-  const activeTurns = new Map<string, { localId: string; queuedId: string | null; lease: Lease }>();
+  const activeTurns = new Map<string, { localId: string; queuedId: string | null; lease: Lease; started?: boolean; outcome?: string }>();
   // local session id → v2 session id (the inverse of `bound`), for the
   // record sink, which only knows the local id.
   const boundByLocal = new Map<string, string>();
@@ -276,6 +276,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // caller did not opt into creation) — never re-attempted, so the lane does
   // not hot-loop a permanently-failing spawn.
   const abandonedSpawns = new Set<string>();
+  // local id → relay row the record still names but the relay no longer has
+  // (#120). The app's delete flow is kill-then-DELETE; when the kill never
+  // reached the daemon (offline, tunnel 503) the agent kept running and its
+  // window record kept the deleted v2SessionId. On reconnect the lane
+  // re-bound to that dead row and every card PATCH / facts POST 404'd — an
+  // invisible, unkillable agent, across restarts. A row proven gone is
+  // remembered here so the recovered-record path does not re-bind to it,
+  // and the session is announced again under a fresh row.
+  const deadRows = new Map<string, string>();
 
   const baseHeaders = (): Record<string, string> => {
     const h: Record<string, string> = {};
@@ -428,6 +437,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           if (fate === "permanent") {
             log(`record ${entry.runtimeEventId} for ${entry.localId} rejected for good: ${(e as Error).message} — dropped`);
             spool.remove(entry.id);
+            if (isRowGone(e)) relayRowGone(entry.localId, v2, "facts POST 404");
             return;
           }
           if (!recordFailures.has(entry.localId)) {
@@ -458,6 +468,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // typed at the terminal, which the app has no other way to see.
     const v2SessionId = boundByLocal.get(localId) ?? null;
     const turnEntry = [...activeTurns.entries()].find(([, v]) => v.localId === localId);
+    // The adapter's own verdict on the turn (#584): a turn-end record with
+    // status failed/cancelled, seen while the relay turn is running. The
+    // idle loop that terminalizes the relay turn used to pick `completed`
+    // solely because no cancel was requested — a provider error the adapter
+    // had already reported as failed was relayed as a success.
+    const ev = (wire.content as { data?: { ev?: { t?: string; status?: string } } } | undefined)?.data?.ev;
+    if (turnEntry && turnEntry[1].started && ev?.t === "turn-end" && typeof ev.status === "string") turnEntry[1].outcome = ev.status;
     const entry: SpooledOutput = {
       kind: "output", id: randomUUID(), localId, v2SessionId, turnId: turnEntry?.[0] ?? null, wire,
       runtimeEventId: recLocalId ? `rec:${recLocalId}` : `rec:${bootNonce}:${randomUUID()}`, at: Date.now(),
@@ -767,6 +784,27 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
 
+  /** A 404 that says the SESSION ROW is gone (deleted card), as opposed to a
+   *  turn or delivery that is not receivable. */
+  const isRowGone = (e: unknown): boolean => {
+    const x = e as { status?: number; relayError?: string } | null;
+    return x?.status === 404 && (x.relayError === undefined || x.relayError === "session_not_found");
+  };
+  /** The relay row a local session was bound to no longer exists (#120):
+   *  drop the binding so nothing else is written into the void, remember the
+   *  dead row, and — while the agent is still running — announce it again so
+   *  the app gets a card it can see, message and kill. */
+  function relayRowGone(localId: string, v2SessionId: string, why: string): void {
+    if (boundByLocal.get(localId) !== v2SessionId) return; // already moved on
+    bound.delete(v2SessionId); boundByLocal.delete(localId);
+    unregisterV2CardPublisher(localId);
+    deadRows.set(localId, v2SessionId);
+    const s = registry.get(localId);
+    const live = !!s && (s.status === "active" || s.status === "starting");
+    log(`${localId}: relay row ${v2SessionId.slice(0, 8)} is gone (${why}) — unbound${live ? "; re-announcing the live session" : ""}`);
+    if (live) void announceLocalSession(s!);
+  }
+
   // Register the v2 card publisher for a bound session: every metadata merge
   // (title, joy__state, model, queue…) re-seals the full card with the session
   // content key and PATCHes the relay. Also fires ONCE immediately so a fresh
@@ -786,6 +824,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }, l);
       } catch (e) {
         log(`card publish ${v2SessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
+        if (isRowGone(e)) relayRowGone(localId, v2SessionId, "card PATCH 404");
         throw e;
       }
     });
@@ -820,7 +859,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  a report delayed past a retry that already bound is answered
    *  `{ok:true, applied:false, reason}` and never overwrites the binding —
    *  logged here, not treated as an error (the relay is right to ignore it). */
-  async function reportSpawnFailed(offer: WorkOffer, reason: string, leaseRef: Lease): Promise<void> {
+  /** Returns whether the relay ACKNOWLEDGED the report (#581). Callers mark
+   *  the spawn abandoned only on true: a report lost to a transient 503 used
+   *  to leave the command abandoned AND unreported — the relay kept offering
+   *  it, the lane answered every offer with a bare receipt, and the app never
+   *  saw the directory approval it needed. Now the next offer retries the
+   *  spawn, hits the same failure, and reports again. */
+  async function reportSpawnFailed(offer: WorkOffer, reason: string, leaseRef: Lease): Promise<boolean> {
     const kind = reason.split(":")[0];
     try {
       const r = await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`,
@@ -828,7 +873,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       if (r && r.applied === false) {
         log(`spawn ${offer.sessionId.slice(0, 8)}: ${kind} report not applied (${r.reason ?? "unknown"}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt`);
       }
-    } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report ${kind}: ${String(e2)}`); }
+      return true;
+    } catch (e2) {
+      log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report ${kind}: ${String(e2)} — will retry on the next offer`);
+      return false;
+    }
   }
 
   async function handleSpawn(offer: WorkOffer, leaseRef: Lease): Promise<void> {
@@ -866,8 +915,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         let cloneError: string | null = null;
         try { await cloneForSpawn(gitUrl, spec.cwd); } catch (e) { cloneError = e instanceof Error ? e.message : String(e); }
         if (cloneError !== null) {
-          abandonedSpawns.add(offer.commandId);
-          await reportSpawnFailed(offer, `clone_failed:${cloneError}`, leaseRef);
+          if (await reportSpawnFailed(offer, `clone_failed:${cloneError}`, leaseRef)) abandonedSpawns.add(offer.commandId);
           log(`spawn ${offer.sessionId.slice(0, 8)}: clone of ${gitUrl} failed — ${cloneError}`);
           return;
         }
@@ -911,8 +959,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // this command; the session is reachable through its existing card.
       const elsewhere = boundByLocal.get(session.id);
       if (elsewhere && elsewhere !== offer.sessionId) {
-        abandonedSpawns.add(offer.commandId);
-        await reportSpawnFailed(offer, `already_bound:${elsewhere}`, leaseRef);
+        if (await reportSpawnFailed(offer, `already_bound:${elsewhere}`, leaseRef)) abandonedSpawns.add(offer.commandId);
         log(`spawn ${offer.sessionId.slice(0, 8)}: local ${session.id} is already bound to v2 ${elsewhere.slice(0, 8)} — reported, abandoned`);
         return;
       }
@@ -973,8 +1020,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // Report the missing directory to the relay so the client can offer to
         // create it and retry (v1-parity). The relay marks the session failed,
         // which drops it from the work claim — no hot-retry, no app spinner.
-        abandonedSpawns.add(offer.commandId);
-        await reportSpawnFailed(offer, `dir_missing:${spec.cwd}`, leaseRef);
+        // Abandoned only once the report is acknowledged (#581).
+        if (await reportSpawnFailed(offer, `dir_missing:${spec.cwd}`, leaseRef)) abandonedSpawns.add(offer.commandId);
         log(`spawn ${offer.sessionId.slice(0, 8)}: directory does not exist — reported for client retry (${spec.cwd})`);
         return;
       }
@@ -1331,6 +1378,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }
         throw e;
       }
+      { const t = activeTurns.get(turnId); if (t) t.started = true; } // adapter verdicts count from here (#584)
 
       // Observe until the session has been idle for IDLE_DEBOUNCE_POLLS
       // consecutive polls. The turn's CONTENT no longer comes from here: the
@@ -1363,11 +1411,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         await sleep(POLL_MS);
       }
 
-      const terminalState = cancelRequested.has(turnId) ? "cancelled" : "completed";
-            await postTerminal(turnId, sess.id, {
-        type: "terminal", terminalState, runtimeEventId: randomUUID(),
+      // Idle says execution STOPPED; the adapter's turn-end says how (#584).
+      const outcome = activeTurns.get(turnId)?.outcome;
+      const terminalState = cancelRequested.has(turnId) ? "cancelled"
+        : outcome === "failed" ? "failed"
+        : outcome === "cancelled" ? "cancelled"
+        : "completed";
+      const meta = terminalState !== "completed" && !cancelRequested.has(turnId) ? { reason: `agent_reported_${outcome}` } : undefined;
+      await postTerminal(turnId, sess.id, {
+        type: "terminal", terminalState, runtimeEventId: randomUUID(), ...(meta ? { meta } : {}),
       }, leaseRef);
-      log(`${tag} ${terminalState}`);
+      log(`${tag} ${terminalState}${meta ? ` (${meta.reason})` : ""}`);
     } catch (e) {
       log(`turn ${turnId.slice(0, 8)} error: ${String(e)}`);
       // Best-effort: leave the relay a terminal instead of a forever-running
@@ -1456,13 +1510,28 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     announcing.add(session.id);
     try {
       const rec = registry.listRecords().find((r) => r.id === session.id);
-      if (rec?.v2SessionId) {
-        // Bound before (a recovered record): just re-establish the maps.
-        bound.set(rec.v2SessionId, session.id); boundByLocal.set(session.id, rec.v2SessionId);
-        if (rec.v2SessionKey) sessionKeys.set(rec.v2SessionId, new Uint8Array(Buffer.from(rec.v2SessionKey, "base64")));
-        wireCardPublisher(session.id, rec.v2SessionId);
-        return;
+      if (rec?.v2SessionId && deadRows.get(session.id) !== rec.v2SessionId) {
+        // Bound before (a recovered record). The relay did not list this row
+        // (refreshBindings would have bound it) — confirm it still exists
+        // before trusting the record (#120): a 404 means the card was deleted
+        // while we were unreachable, and re-binding would park the live
+        // agent behind a dead row for good.
+        let gone = false;
+        try { await withTimeout(api("GET", `/sessions/${rec.v2SessionId}`), 15_000); }
+        catch (e) { gone = isRowGone(e); /* other failures: transient — trust the record for now */ }
+        if (!gone) {
+          bound.set(rec.v2SessionId, session.id); boundByLocal.set(session.id, rec.v2SessionId);
+          if (rec.v2SessionKey) sessionKeys.set(rec.v2SessionId, new Uint8Array(Buffer.from(rec.v2SessionKey, "base64")));
+          wireCardPublisher(session.id, rec.v2SessionId);
+          return;
+        }
+        deadRows.set(session.id, rec.v2SessionId);
+        log(`${session.id}: relay row ${rec.v2SessionId.slice(0, 8)} from the window record no longer exists — announcing a fresh one`);
       }
+      // A replacement for a deleted row needs a NEW creation intent: the old
+      // one is idempotent by design and would replay the dead row's answer.
+      const dead = deadRows.get(session.id);
+      const creationIntentId = dead ? `announce:${session.id}:after:${dead.slice(0, 8)}` : `announce:${session.id}`;
       // Reuse an in-flight announce's key + envelope. The relay dedupes by
       // intent AND request hash, so a retry after a lost reply must repeat
       // the same envelope: a fresh key made every retry a 409
@@ -1476,13 +1545,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         registry.saveRecord(session.id, { v2SessionKey: Buffer.from(key).toString("base64"), v2AnnounceEnvelope: envelope });
       }
       const r = await withTimeout(api("POST", "/sessions", {
-        mode: "announce_existing", creationIntentId: `announce:${session.id}`, daemonId: machineId,
+        mode: "announce_existing", creationIntentId, daemonId: machineId,
         localSessionId: session.id, sessionKeyEnvelope: envelope,
       }), 15_000) as { sessionId?: string };
       const v2 = r?.sessionId;
       if (!v2) throw new Error("announce returned no sessionId");
       if (key) sessionKeys.set(v2, key);
       registry.saveRecord(session.id, { v2SessionId: v2, ...(key ? { v2SessionKey: Buffer.from(key).toString("base64") } : {}) });
+      if (dead) deadRows.delete(session.id);
       bound.set(v2, session.id); boundByLocal.set(session.id, v2);
       session.setV2Link?.({ sessionId: v2, relay: relayUrl, keyEnvelope: envelope });
       wireCardPublisher(session.id, v2);
@@ -1497,9 +1567,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // A session a spawn command created belongs to that command's relay
     // row — even across a daemon restart (the intent file remembers it).
     const spawned = new Set(Object.values(readSpawnIntents()));
+    const records = registry.listRecords();
     for (const s of registry.list()) {
       if (s.status !== "active" && s.status !== "starting") continue;
-      if (boundByLocal.has(s.id) || spawning.has(s.id) || spawned.has(s.id)) continue;
+      if (boundByLocal.has(s.id) || spawning.has(s.id)) continue;
+      // A spawn whose bind is still pending is its command's to bind. One
+      // whose record already names a row completed that bind — if the relay
+      // does not list it now, the row is gone (#120) and it needs a new one.
+      if (spawned.has(s.id) && !records.find((r) => r.id === s.id)?.v2SessionId) continue;
       await announceLocalSession(s);
     }
   }

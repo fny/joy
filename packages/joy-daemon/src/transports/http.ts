@@ -6,7 +6,7 @@
 // Every catalog op is reachable here — same handlers the relay RPCs use, so
 // the two surfaces cannot drift.
 
-import { createServer, type IncomingMessage } from "http";
+import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { machineOps, sessionOps, type HttpMethod, type MachineOp, type SessionOp } from "../domain/operations";
@@ -21,6 +21,85 @@ import { boundedWriter } from "../domain/bounded";
  *  grew the daemon's memory with every broadcast. Sessions can emit MBs in a
  *  burst, so the bound is generous; a client this far behind is not reading. */
 const EVENT_CLIENT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+/** How long the opening-history flush waits for a stalled socket to drain
+ *  before the client is dropped (Astra on #597, Wave B). */
+const EVENT_HISTORY_DRAIN_DEADLINE_MS = 10_000;
+
+/**
+ * Stream a long-lived event response: the opening history first, with REAL
+ * backpressure, then live records through the bounded writer.
+ *
+ * The first #597 fix routed the history through boundedWriter synchronously.
+ * That bound is a pending-bytes cap, and a legitimate 12 MiB history (192
+ * records of 64 KiB — within the record-count limits) exceeds it in one
+ * synchronous loop before the socket has flushed a single byte: a FAST reader
+ * was destroyed before receiving any body (Astra, Wave B). The history is now
+ * written one item at a time; whenever res.write() reports a full buffer the
+ * loop awaits 'drain' — a reading client receives everything, a non-reading
+ * one is dropped when the drain deadline passes. Live records that arrive
+ * during the flush are buffered (bounded by the same cap) so none are lost,
+ * then handed over to the bounded writer once the history is on the wire.
+ */
+async function streamHistoryThenFollow(opts: {
+  res: ServerResponse;
+  history: Iterable<string>;
+  /** Live-record source; null for a one-shot (non-follow) response. */
+  subscribe: ((fn: (chunk: string) => void) => () => void) | null;
+  label: string;
+  drainDeadlineMs?: number;
+  maxBufferedBytes?: number;
+}): Promise<void> {
+  const { res, label } = opts;
+  const maxBytes = opts.maxBufferedBytes ?? EVENT_CLIENT_MAX_BUFFERED_BYTES;
+  const drainMs = opts.drainDeadlineMs ?? EVENT_HISTORY_DRAIN_DEADLINE_MS;
+  let unsubscribe: () => void = () => {};
+  const drop = (why: string) => {
+    unsubscribe();
+    process.stderr.write(`[http] ${label} client ${why} — dropped\n`);
+    try { res.destroy(); } catch { /* already closed */ }
+  };
+  // Subscribe FIRST (buffering) so nothing published while the history is on
+  // the wire is lost; the caller computed `history` synchronously before this
+  // call, so every buffered record is newer than it.
+  const buffered: string[] = [];
+  let bufferedBytes = 0;
+  let live: (chunk: string) => void = (chunk) => {
+    bufferedBytes += Buffer.byteLength(chunk);
+    if (bufferedBytes > maxBytes) { drop(`fell behind by more than ${maxBytes} bytes during the history flush`); return; }
+    buffered.push(chunk);
+  };
+  if (opts.subscribe) {
+    unsubscribe = opts.subscribe((chunk) => live(chunk));
+    res.on("close", () => unsubscribe());
+  }
+  const drained = (): Promise<boolean> => new Promise((resolve) => {
+    const timer = setTimeout(() => { cleanup(); resolve(false); }, drainMs);
+    const ok = () => { cleanup(); resolve(true); };
+    const gone = () => { cleanup(); resolve(false); };
+    const cleanup = () => { clearTimeout(timer); res.off("drain", ok); res.off("close", gone); res.off("error", gone); };
+    res.on("drain", ok); res.on("close", gone); res.on("error", gone);
+  });
+  for (const chunk of opts.history) {
+    if (res.destroyed) { unsubscribe(); return; }
+    if (!res.write(chunk)) {
+      if (!(await drained())) {
+        if (!res.destroyed) drop(`did not drain the opening history within ${drainMs}ms`);
+        else unsubscribe();
+        return;
+      }
+    }
+  }
+  if (res.destroyed) { unsubscribe(); return; }
+  if (!opts.subscribe) { res.end(); return; }
+  // Hand over: what arrived meanwhile, then live records, all bounded.
+  const write = boundedWriter(res, maxBytes, () => {
+    unsubscribe();
+    process.stderr.write(`[http] ${label} client exceeded ${maxBytes} pending bytes — dropped\n`);
+  });
+  for (const chunk of buffered) write(chunk);
+  buffered.length = 0;
+  live = write;
+}
 
 interface CompiledRoute {
   method: HttpMethod;
@@ -87,8 +166,11 @@ export function startHttpServer(opts: {
   /** Fires with the BOUND port once listening — the daemon uses this to write
    *  the real port into daemon.json when it asked for a dynamic one (port 0). */
   onListening?: (port: number) => void;
-}): void {
+  /** Tests: shorten the history drain deadline / buffered-bytes cap. */
+  eventStream?: { drainDeadlineMs?: number; maxBufferedBytes?: number };
+}): ReturnType<typeof createServer> {
   const { registry, port, publicDir, token, onListening } = opts;
+  const eventStream = opts.eventStream ?? {};
 
   const routes: CompiledRoute[] = [];
   for (const op of machineOps) {
@@ -180,16 +262,27 @@ export function startHttpServer(opts: {
       const boundPort = addr && typeof addr === "object" ? addr.port : port;
       return json(buildOpenApiSpec({ port: boundPort, version: daemonVersion() }));
     }
-    // Browsable API docs: /docs?token=… renders the spec with Redoc (CDN
-    // script — the page runs in the user's browser, which can reach the CDN).
+    // Browsable API docs: /docs renders the spec with Redoc (CDN script — the
+    // page runs in the user's browser, which can reach the CDN). The spec is
+    // EMBEDDED in the page (#596): it used to be fetched from
+    // `/openapi.json?token=<query token>`, so a request authenticated by the
+    // X-Joy-Token header or a bearer got a 200 page whose spec request
+    // carried an empty token and 401'd — the docs never rendered. Embedding
+    // means whichever credential opened the page is the one that counts.
     if (method === "GET" && url.pathname === "/docs") {
       if (!openApiAuthed()) return json({ error: "unauthorized" }, 401);
-      const specUrl = `/openapi.json?token=${encodeURIComponent(url.searchParams.get("token") ?? "")}`;
+      const addr = server.address();
+      const boundPort = addr && typeof addr === "object" ? addr.port : port;
+      // `<` is escaped so a `</script>` inside a description cannot end the
+      // inline script; U+2028/2029 are JSON-legal but not JS-legal in strings.
+      const specJs = JSON.stringify(buildOpenApiSpec({ port: boundPort, version: daemonVersion() }))
+        .replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
       const page = `<!doctype html><html><head><title>joy-daemon API</title>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>body{margin:0}</style></head><body>
-<redoc spec-url="${specUrl}"></redoc>
+<div id="redoc"></div>
 <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+<script>Redoc.init(${specJs}, {}, document.getElementById("redoc"));</script>
 </body></html>`;
       return send(200, { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" }, page);
     }
@@ -214,19 +307,16 @@ export function startHttpServer(opts: {
       res.writeHead(200, { ...corsHeaders, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
       const history = sessionRecords(sid, { after, last });
       const upTo = latestRecordSeq(sid);
-      // Bounded from the FIRST byte: the opening history is the largest write
-      // of all, and a non-reading client could park >10 MiB of it without ever
-      // reaching the live bound (#597; Astra on da868c80).
-      let unsubscribe: () => void = () => {};
-      const write = boundedWriter(res, EVENT_CLIENT_MAX_BUFFERED_BYTES, () => {
-        unsubscribe();
-        process.stderr.write(`[http] /sessions/${sid}/events client exceeded ${EVENT_CLIENT_MAX_BUFFERED_BYTES} pending bytes — dropped\n`);
+      // History with backpressure, then live records through the bound
+      // (#597; Astra on da868c80 and Wave B) — see streamHistoryThenFollow.
+      const lines = (function* () {
+        yield JSON.stringify({ hello: true, seq: upTo }) + "\n";
+        for (const r of history) yield JSON.stringify(r) + "\n";
+      })();
+      await streamHistoryThenFollow({
+        res, history: lines, label: `/sessions/${sid}/events`, ...eventStream,
+        subscribe: follow ? (fn) => subscribeRecords(sid, (r) => fn(JSON.stringify(r) + "\n")) : null,
       });
-      write(JSON.stringify({ hello: true, seq: upTo }) + "\n");
-      for (const r of history) { if (res.destroyed) break; write(JSON.stringify(r) + "\n"); }
-      if (!follow) return res.end();
-      unsubscribe = subscribeRecords(sid, (r) => { write(JSON.stringify(r) + "\n"); });
-      res.on("close", unsubscribe);
       return;
     }
     if (method === "GET" && url.pathname === "/events") {
@@ -237,18 +327,16 @@ export function startHttpServer(opts: {
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
       });
-      // Everything goes through the bound, the opening history included — it
-      // is the largest write and a non-reading client could park all of it
-      // (#597; Astra on da868c80).
-      let unsubscribe: () => void = () => {};
-      const enqueue = boundedWriter(res, EVENT_CLIENT_MAX_BUFFERED_BYTES, () => {
-        unsubscribe();
-        process.stderr.write(`[http] /events client exceeded ${EVENT_CLIENT_MAX_BUFFERED_BYTES} pending bytes — dropped\n`);
+      // The opening history is the largest write of all: streamed with
+      // backpressure, then live events through the bound (#597, Wave B).
+      const opening = [
+        `event: history\ndata: ${JSON.stringify(registry.chatHistory())}\n\n`,
+        `event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`,
+      ];
+      await streamHistoryThenFollow({
+        res, history: opening, label: "/events", ...eventStream,
+        subscribe: (fn) => registry.subscribeSse((s) => fn(s)),
       });
-      enqueue(`event: history\ndata: ${JSON.stringify(registry.chatHistory())}\n\n`);
-      enqueue(`event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`);
-      unsubscribe = registry.subscribeSse((s) => { enqueue(s); });
-      res.on("close", unsubscribe);
       return;
     }
 
@@ -320,4 +408,5 @@ export function startHttpServer(opts: {
     const addr = server.address();
     if (onListening && addr && typeof addr === "object") onListening(addr.port);
   });
+  return server;
 }

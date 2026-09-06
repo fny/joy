@@ -10,6 +10,7 @@
 import { deriveTunnelKey, SealedWriter, CHUNK_MAX, TamperError } from "./sealedStream";
 import { openHeadAndBody, requestBinding, sealResponse, type RequestHead, type ResponseHead } from "./wire";
 import { SeenStreamIds, staleReason } from "./replayGuard";
+import { joyRelayAccessKey } from "../paths";
 
 export interface ExecutorOpts {
   relayUrl: string;            // nucleus base, e.g. http://127.0.0.1:PORT
@@ -35,6 +36,34 @@ export interface ExecutorHandle { stop(): Promise<void>; leaseId: () => string |
  *  client re-add their own. Everything else passes through sealed. */
 const STRIP = new Set(["host", "connection", "content-length", "transfer-encoding", "keep-alive", "upgrade"]);
 
+/** The relay perimeter key, when configured (#82). Every other relay client
+ *  (nucleus lane, RelayClient, pairing, the app) sends it; the executor's
+ *  three fetches did not, so flipping the gate 401'd every tunnel claim —
+ *  which the loop read as "lease rotated" and retried forever, silently,
+ *  while the message plane kept working. Read per request (like the lane):
+ *  the env loader may run after module import. */
+function relayKeyHeaders(): Record<string, string> {
+  const k = joyRelayAccessKey();
+  return k ? { "x-joy-relay-key": k } : {};
+}
+
+/** Resolve the sealed request path against the local surface, or null when it
+ *  cannot be dispatched there (#119). `targetBase + head.p` trusted the
+ *  client's `p` verbatim: `@evil.example/x` became
+ *  `http://127.0.0.1:4997@evil.example/x` — host evil.example, our loopback
+ *  as userinfo — and `//evil.example/x` rehomed the same way, both sending
+ *  the daemon's X-Joy-Token to an arbitrary host. Only a `/`-rooted path
+ *  that resolves to the target's own origin is dispatched. */
+export function resolveLocalPath(targetBase: string, p: unknown): string | null {
+  if (typeof p !== "string" || !/^\/(?![/\\@])\S*$/.test(p)) return null;
+  try {
+    const base = new URL(targetBase);
+    const u = new URL(p, base);
+    if (u.origin !== base.origin || u.username || u.password) return null;
+    return u.href;
+  } catch { return null; }
+}
+
 export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   const log = opts.log ?? (() => {});
   const key = deriveTunnelKey(opts.machineKey, opts.machineId);
@@ -42,11 +71,12 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   let stopped = false;
   let lease: { id: string; token: string } | null = null;
   let renewTimer: ReturnType<typeof setInterval> | null = null;
+  let gateRefusalLogged = false;
 
   async function acquire(): Promise<void> {
     const r = await fetch(`${opts.relayUrl}/joy/v2/daemon/leases`, {
       method: "POST",
-      headers: { authorization: `Bearer ${opts.accountToken}`, "content-type": "application/json" },
+      headers: { ...relayKeyHeaders(), authorization: `Bearer ${opts.accountToken}`, "content-type": "application/json" },
       body: JSON.stringify({ machineId: opts.machineId, capabilities: { tunnel: 1 } }),
     });
     if (!r.ok) throw new Error(`lease acquire failed: ${r.status} ${await r.text()}`);
@@ -58,7 +88,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
     renewTimer = setInterval(() => {
       if (opts.borrowLease) return; // the nucleus lane renews the lease it owns
       void fetch(`${opts.relayUrl}/joy/v2/daemon/leases/${lease!.id}`, {
-        method: "PUT", headers: { "x-joy-lease-token": lease!.token },
+        method: "PUT", headers: { ...relayKeyHeaders(), "x-joy-lease-token": lease!.token },
       }).catch(() => {});
     }, Math.max(2, j.ttlSeconds / 2) * 1000);
   }
@@ -70,7 +100,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
         headers: (() => {
           const l = activeLease();
           if (!l) throw new Error("no lease for frame post");
-          return { "x-joy-lease-id": l.id, "x-joy-lease-token": l.token, "content-type": "application/octet-stream" };
+          return { ...relayKeyHeaders(), "x-joy-lease-id": l.id, "x-joy-lease-token": l.token, "content-type": "application/octet-stream" };
         })(),
         body: bytes as any,
       });
@@ -112,13 +142,23 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
       return;
     }
 
+    // The path must land on the LOCAL surface (#119) — a sealed 400 otherwise,
+    // and the daemon token never leaves the loopback.
+    const target = resolveLocalPath(opts.targetBase, head.p);
+    if (target === null) {
+      log(`tunnel request ${requestId}: refused path ${JSON.stringify(String(head.p).slice(0, 120))} — not a local surface path (#119)`);
+      const body = new TextEncoder().encode(JSON.stringify({ error: "bad_path" }));
+      await postFrames(sealResponse(key, { s: 400, h: { "content-type": "application/json", "x-tunnel-error": "bad_path" }, r }, body), true);
+      return;
+    }
+
     // Dispatch to the local surface; network errors become a sealed 502.
     let status = 502; let respHeaders: Record<string, string> = { "x-tunnel-error": "daemon_fetch_failed" };
     let respBody: ReadableStream<Uint8Array> | null = null;
     try {
       const h: Record<string, string> = { ...opts.targetHeaders };
       for (const [k, v] of Object.entries(head.h ?? {})) if (!STRIP.has(k.toLowerCase())) h[k] = v;
-      const resp = await fetch(opts.targetBase + head.p, {
+      const resp = await fetch(target, {
         method: head.m, headers: h,
         body: body.length > 0 ? (body as any) : undefined,
       });
@@ -184,9 +224,18 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
         const leaseToken = borrowed ? borrowed.leaseToken : lease!.token;
         const r = await fetch(`${opts.relayUrl}/joy/v2/daemon/leases/${leaseId}/claims/tunnel`, {
           method: "POST",
-          headers: { "x-joy-lease-token": leaseToken, "content-type": "application/json" },
+          headers: { ...relayKeyHeaders(), "x-joy-lease-token": leaseToken, "content-type": "application/json" },
           body: JSON.stringify({ waitMs: 25_000 }),
         });
+        if (r.status === 401) {
+          // The gate, not the lease: say so ONCE in words — this used to look
+          // exactly like a per-machine tunnel outage (#82).
+          const body = await r.json().catch(() => null) as { error?: string } | null;
+          if (body?.error === "relay key required" && !gateRefusalLogged) {
+            gateRefusalLogged = true;
+            log("tunnel claim refused: relay key required — the relay gate is on and this daemon presents no/the wrong x-joy-relay-key (JOY_RELAY_ACCESS_KEY or perimeter.key; re-run `joy auth`)");
+          }
+        }
         if (r.status === 401 || r.status === 412) {
           // Borrowed lease rotated — pick up the new one next pass.
           if (opts.borrowLease) { await sleep(1000); continue; }

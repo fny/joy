@@ -12,9 +12,12 @@ import {
   recordReceived,
   consumeReceived,
   receiptPath,
+  configureReceiptSaves,
+  flushReceipts,
   type DeliveryState,
   type ReceiptLog,
 } from "./receipts";
+import { vi } from "vitest";
 
 let dir: string;
 const RID = "cmpv8r9pg9ikpyc0uk2sw917r";
@@ -320,4 +323,72 @@ test("inbound receipt with no seq (web/rpc source) is allowed", () => {
   const reloaded = loadReceipts(RID, dir);
   expect(reloaded.inbound[0].seq).toBeUndefined();
   expect(reloaded.inbound[0].source).toBe("web");
+});
+
+// ── #558: oldest unexpired receipt is consumed first ─────────────────────────
+
+test("identical sends 14 minutes apart both suppress their late echoes (#558)", () => {
+  const MIN = 60_000;
+  const state = initDeliveryState(RID, dir);
+  recordReceived(state, RID, "yes", 0 * MIN, dir);
+  recordReceived(state, RID, "yes", 14 * MIN, dir);
+  // First echo at 14:10 must take the minute-0 entry (about to expire)...
+  expect(consumeReceived(state, RID, "yes", 14 * MIN + 10_000, dir)).toBe(true);
+  expect(state.receipts.received).toEqual([{ text: "yes", at: 14 * MIN }]);
+  // ...so the second echo at 15:10 still finds the minute-14 entry.
+  expect(consumeReceived(state, RID, "yes", 15 * MIN + 10_000, dir)).toBe(true);
+  expect(state.receipts.received).toEqual([]);
+});
+
+// ── #560: forwardedUuids is bounded like the log it mirrors ──────────────────
+
+test("pruning the outbound log also prunes forwardedUuids; inbound uuids survive (#560)", () => {
+  // Debounced mode: 2600 synchronous fsync'd rewrites would take seconds.
+  configureReceiptSaves({ immediate: false });
+  const state = initDeliveryState(RID, dir);
+  try {
+    recordInboundReceipt(state, RID, { uuid: "in-keep", text: "hi", source: "relay", at: 1 }, dir);
+    for (let i = 0; i < 2600; i++) recordOutboundReceipt(state, RID, { uuid: `o-${i}`, turn: "t", at: i }, dir);
+  } finally {
+    configureReceiptSaves({ immediate: true });
+    flushReceipts();
+  }
+  expect(state.receipts.outbound.length).toBeLessThanOrEqual(2000);
+  // 2600 seen; at most 2000 outbound + 1 inbound remembered — never all 2600.
+  expect(state.forwardedUuids.size).toBeLessThanOrEqual(2001);
+  expect(state.forwardedUuids.has("o-2599")).toBe(true);
+  expect(state.forwardedUuids.has("o-0")).toBe(false);
+  expect(state.forwardedUuids.has("in-keep")).toBe(true);
+  // The set matches the log exactly.
+  const fromLog = new Set([...state.receipts.outbound.map((r) => r.uuid), ...state.receipts.inbound.map((r) => r.uuid)]);
+  expect([...state.forwardedUuids].sort()).toEqual([...fromLog].sort());
+});
+
+// ── #556: sustained activity cannot postpone persistence indefinitely ────────
+
+test("a receipt every 200ms still reaches disk within the max delay (#556)", () => {
+  vi.useFakeTimers();
+  configureReceiptSaves({ immediate: false, debounceMs: 300, maxDelayMs: 1000 });
+  try {
+    const state = initDeliveryState(RID, dir);
+    const p = receiptPath(RID, dir);
+    let i = 0;
+    const tick = () => recordOutboundReceipt(state, RID, { uuid: `u-${i++}`, turn: "t", at: Date.now() }, dir);
+    tick();
+    // 200ms cadence: each save used to re-arm the 300ms debounce, so nothing was written.
+    for (let t = 200; t <= 800; t += 200) { vi.advanceTimersByTime(200); tick(); } // saves at 0,200,…,800
+    expect(existsSync(p)).toBe(false); // 800ms in: still inside the 1000ms max delay window
+    vi.advanceTimersByTime(200);       // 1000ms since the first dirty change: the clamp fires
+    expect(existsSync(p)).toBe(true);
+    const written = loadReceipts(RID, dir).outbound.length;
+    expect(written).toBeGreaterThanOrEqual(5);
+    // Quiet period after the stream: the trailing debounce lands the rest.
+    tick();
+    vi.advanceTimersByTime(350);
+    expect(loadReceipts(RID, dir).outbound.length).toBe(i);
+  } finally {
+    configureReceiptSaves({ immediate: true, debounceMs: 300, maxDelayMs: 2000 });
+    flushReceipts();
+    vi.useRealTimers();
+  }
 });

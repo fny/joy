@@ -69,19 +69,49 @@ export function readAgentConfig(agent: string): { ok: true; agent: string; path:
   }
 }
 
+// Segments that walk off the document onto shared prototypes: an assignment
+// `__proto__.x = 1` made `node = Object.prototype` and polluted every object
+// in the daemon process until restart (#54). Refused at parse time; setAtPath
+// additionally descends only through OWN properties.
+const FORBIDDEN_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
 /** `examples[0].title` → ["examples", 0, "title"]. Dots and [n] only — quoted
- *  keys aren't supported (none of the agent configs need them). */
+ *  keys aren't supported (none of the agent configs need them).
+ *
+ *  The whole expression is parsed against an ANCHORED grammar (#525):
+ *  `key ( "." key | "[" digits "]" )*`. The old regex scan skipped anything
+ *  it did not recognise, so `examples[-1].title` became the string property
+ *  "-1" on an array — a write JSON serialization drops — and the op reported
+ *  `ok:true, applied:1` while the file was unchanged. Unmatched brackets,
+ *  negative/blank indices, empty segments and stray separators are errors. */
 export function parsePathExpr(expr: string): Array<string | number> {
   const out: Array<string | number> = [];
-  const re = /([^.[\]]+)|\[(\d+)\]/g;
-  let m: RegExpExecArray | null;
-  let consumed = 0;
-  while ((m = re.exec(expr)) !== null) {
-    consumed = re.lastIndex;
-    out.push(m[2] !== undefined ? Number(m[2]) : m[1]);
-  }
-  if (out.length === 0 || consumed !== expr.length && expr.slice(consumed).replace(/\./g, "").length > 0) {
-    if (out.length === 0) throw new Error(`bad path: "${expr}"`);
+  const bad = (why: string): never => { throw new Error(`bad path: "${expr}" (${why})`); };
+  const key = (k: string): string => {
+    if (!k) bad("empty key");
+    if (FORBIDDEN_SEGMENTS.has(k)) bad(`"${k}" is not an allowed key`);
+    return k;
+  };
+  let i = 0;
+  const readKey = (): string => {
+    const start = i;
+    while (i < expr.length && expr[i] !== "." && expr[i] !== "[" && expr[i] !== "]") i++;
+    return key(expr.slice(start, i));
+  };
+  out.push(readKey());
+  while (i < expr.length) {
+    const c = expr[i];
+    if (c === ".") { i++; out.push(readKey()); continue; }
+    if (c === "[") {
+      const close = expr.indexOf("]", i);
+      if (close < 0) bad("unmatched \"[\"");
+      const idx = expr.slice(i + 1, close);
+      if (!/^\d+$/.test(idx)) bad(`index "[${idx}]" must be a non-negative integer`);
+      out.push(Number(idx));
+      i = close + 1;
+      continue;
+    }
+    bad(`unexpected "${c}"`);
   }
   return out;
 }
@@ -103,23 +133,60 @@ export function parseAssignment(line: string): { path: Array<string | number>; v
   return { path: parsePathExpr(pathExpr), value, del: value === null };
 }
 
-function setAtPath(doc: Record<string, unknown>, path: Array<string | number>, value: unknown, del: boolean): void {
-  let node: any = doc;
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Apply one assignment to the parsed doc. Returns whether the doc changed.
+ *
+ *  Traversal is type-checked against the ACTUAL document (#525): a numeric
+ *  index into an object or a string key into an array is an error, not a
+ *  silent property write. Descent reads OWN properties only (#54).
+ *
+ *  Deletion is lookup-only (#526): the old code ran the same auto-vivifying
+ *  walk for `= null`, so deleting `important.missing` first REPLACED the
+ *  scalar `important: "original"` with `{}` and then deleted nothing — the
+ *  op reported success and an unrelated value was gone. Now a delete whose
+ *  parent or target is absent leaves the document untouched, and a parent of
+ *  the wrong type is rejected. */
+function setAtPath(doc: Record<string, unknown>, path: Array<string | number>, value: unknown, del: boolean): boolean {
+  const describe = (i: number) => path.slice(0, i + 1).map((k) => (typeof k === "number" ? `[${k}]` : `.${k}`)).join("").replace(/^\./, "");
+  const childOf = (node: unknown, key: string | number, i: number): unknown => {
+    if (Array.isArray(node)) {
+      if (typeof key !== "number") throw new Error(`path type mismatch: ${describe(i - 1)} is an array; "${key}" is not an index`);
+      return node[key];
+    }
+    if (isObj(node)) {
+      if (typeof key === "number") throw new Error(`path type mismatch: ${describe(i - 1)} is an object; [${key}] is not a key`);
+      return Object.hasOwn(node, key) ? node[key] : undefined;
+    }
+    return undefined;
+  };
+  let node: unknown = doc;
   for (let i = 0; i < path.length - 1; i++) {
     const key = path[i];
     const nextKey = path[i + 1];
-    if (node[key] == null || typeof node[key] !== "object") {
-      node[key] = typeof nextKey === "number" ? [] : {};
+    let child = childOf(node, key, i);
+    if (child === undefined || typeof child !== "object" || child === null) {
+      if (del) return false; // nothing to delete beneath a missing/scalar parent — leave the doc alone
+      // Auto-vivify (or replace a scalar) on the way to a SET: the caller
+      // asked for a nested key, so a container is what they mean.
+      child = typeof nextKey === "number" ? [] : {};
+      (node as any)[key] = child;
     }
-    node = node[key];
+    node = child;
   }
   const last = path[path.length - 1];
-  if (del) {
-    if (Array.isArray(node) && typeof last === "number") node.splice(last, 1);
-    else delete node[last];
-  } else {
+  const parentIdx = path.length - 2;
+  if (Array.isArray(node)) {
+    if (typeof last !== "number") throw new Error(`path type mismatch: ${describe(parentIdx)} is an array; "${last}" is not an index`);
+    if (del) { if (last >= node.length) return false; node.splice(last, 1); return true; }
     node[last] = value;
+    return true;
   }
+  if (!isObj(node)) throw new Error(`path type mismatch: ${describe(parentIdx)} is not a container`);
+  if (typeof last === "number") throw new Error(`path type mismatch: ${describe(parentIdx)} is an object; [${last}] is not a key`);
+  if (del) { if (!Object.hasOwn(node, last)) return false; delete node[last]; return true; }
+  node[last] = value;
+  return true;
 }
 
 /** Replace the config atomically and rotate <name>.joy-bak as part of the
@@ -151,8 +218,9 @@ export function applyAgentConfigAssignments(agent: string, lines: string[]): { o
     if (!line.trim()) continue;
     try {
       const { path, value, del } = parseAssignment(line);
-      setAtPath(doc, path, value, del);
-      applied++;
+      // A no-op delete (#526) is accepted but not counted: `applied` says how
+      // many lines CHANGED the document.
+      if (setAtPath(doc, path, value, del)) applied++;
     } catch (e) {
       return { ok: false, error: String(e) };
     }
