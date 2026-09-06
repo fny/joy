@@ -25,7 +25,7 @@ import { sync } from '@/sync/sync';
 import { machinePane, machineResize, machineSendKeys } from '@/sync/v2/machine';
 import { paneSizeFor, paneSizeChanged, type PaneSize } from '@/utils/paneSize';
 import { describePaneError } from '@/utils/paneError';
-import { createInFlightGuard } from '@/utils/inFlightGuard';
+import { sharedInFlightGuard } from '@/utils/inFlightGuard';
 
 const POLL_MS = 1500;
 
@@ -86,7 +86,10 @@ export default React.memo(function JoyPaneScreen() {
     // fires while a send is landing is refused instead of interleaving (#154:
     // A-text, B-text, A-Enter submitted "AB", then B's Enter answered the next
     // prompt).
-    const guardRef = React.useRef(createInFlightGuard());
+    // Shared per machine+session so a remount never starts a second guard
+    // while the previous mount's send is still landing (#154).
+    const guardRef = React.useRef(sharedInFlightGuard(`pane:${machineId}:${String(params.id ?? '')}`));
+    guardRef.current = sharedInFlightGuard(`pane:${machineId}:${String(params.id ?? '')}`);
 
     React.useEffect(() => {
         mountedRef.current = true;

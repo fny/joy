@@ -105,8 +105,12 @@ export const machineSendKeys = (ctx: MachineCtx, script: string, literal = false
 export const machineSessionInfo = (ctx: MachineCtx) =>
     j<Record<string, unknown>>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}`);
 
-export const machineKillSession = (ctx: MachineCtx) =>
-    j<{ ok: boolean }>(ctx, 'DELETE', `/v2/sessions/${ctx.localSessionId}`);
+/** `ifStatus` makes the kill conditional on the daemon's CURRENT status at
+ *  the instant of the decision (409 status_mismatch otherwise) — the
+ *  detached-session cleanup passes 'ended' so a session that restarted after
+ *  the user confirmed is never killed (#174). */
+export const machineKillSession = (ctx: MachineCtx, opts?: { ifStatus?: 'ended' | 'active' | 'starting' }) =>
+    j<{ ok: boolean; error?: string; status?: string }>(ctx, 'DELETE', `/v2/sessions/${ctx.localSessionId}${opts?.ifStatus ? `?ifStatus=${opts.ifStatus}` : ''}`);
 
 export const machineRestartSession = (ctx: MachineCtx) =>
     j<{ ok: boolean; relaySessionId?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/restart`);

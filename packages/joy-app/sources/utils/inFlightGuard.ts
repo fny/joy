@@ -33,3 +33,14 @@ export function createInFlightGuard(): InFlightGuard {
         },
     };
 }
+
+// Guards keyed by the SURFACE they protect (machine + session), not by the
+// component instance: a pane closed and reopened while its previous send was
+// still landing got a fresh guard and interleaved again (Astra on 40873bd6,
+// #154). Entries are tiny and bounded by the number of surfaces ever opened.
+const shared = new Map<string, InFlightGuard>();
+export function sharedInFlightGuard(key: string): InFlightGuard {
+    let g = shared.get(key);
+    if (!g) { g = createInFlightGuard(); shared.set(key, g); }
+    return g;
+}

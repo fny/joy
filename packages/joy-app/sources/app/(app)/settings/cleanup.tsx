@@ -41,9 +41,9 @@ const joyStateOf = (id: string) => storage.getState().sessions[id]?.metadata?.jo
 
 /** The daemon's own word, asked right before a kill: is this session's agent
  *  still gone (status "ended" = detached)? False on any doubt — offline
- *  machine, no context, 404, a live status — so the caller skips it. The
- *  daemon has no conditional kill, so this is the narrowest window we can
- *  get from the app side (#174). */
+ *  machine, no context, 404, a live status — so the caller skips it. This is
+ *  a pre-check only; the kill itself is conditional (`ifStatus: 'ended'`,
+ *  409 status_mismatch when the daemon disagrees at the decision) (#174). */
 async function daemonSaysDetached(sessionId: string): Promise<boolean> {
     const s = storage.getState().sessions[sessionId];
     const machineId = s?.metadata?.machineId;
@@ -109,7 +109,11 @@ export default React.memo(function CleanupScreen() {
             let failed = 0;
             for (const id of rechecked.kill) {
                 if (!(await daemonSaysDetached(id))) { skipped++; continue; }
-                const r = await sessionKill(id);
+                // The GET above is evidence, not a lock: the kill itself is
+                // conditional on the daemon still seeing the session ended
+                // (409 status_mismatch → skipped, never a live kill; #174).
+                const r = await sessionKill(id, { ifStatus: 'ended' });
+                if (!r.success && /status_mismatch/.test(r.message)) { skipped++; continue; }
                 if (r.success) closed++; else failed++;
             }
             const parts = [`Closed ${closed} detached pane${closed === 1 ? '' : 's'}.`];
@@ -130,9 +134,21 @@ export default React.memo(function CleanupScreen() {
             { confirmText: plan.stopFirst.length ? 'Stop and delete' : 'Delete', destructive: true },
         ).then(async (ok) => {
             if (!ok) return;
-            const deletable = [...plan.deleteNow];
+            // The plan was made before the dialog; a session can change state
+            // while it is open. Re-evaluate every candidate now: a card that
+            // was detached and is running again is neither deleted nor stopped
+            // (the user did not approve stopping it) — it is reported (Astra
+            // on 40873bd6, #173). Detached cards need the daemon's word, too.
+            await sync.refreshSessions().catch(() => { /* fall back to the cards we have */ });
+            const fresh = planFolderDeletion(ids.map((id) => ({ id, state: joyStateOf(id) })));
+            const deletable: string[] = [];
+            const changed: string[] = [];
+            for (const id of fresh.deleteNow) {
+                if (joyStateOf(id) === 'archived' || await daemonSaysDetached(id)) deletable.push(id); else changed.push(id);
+            }
             const kept: string[] = [];
-            for (const id of plan.stopFirst) {
+            for (const id of fresh.stopFirst) {
+                if (!plan.stopFirst.includes(id)) { changed.push(id); continue; } // started since the dialog: not approved for stopping
                 // sessionKill succeeds only once the daemon has archived the
                 // session — that IS the shutdown confirmation.
                 const r = await sessionKill(id);
@@ -141,7 +157,8 @@ export default React.memo(function CleanupScreen() {
             const n = await deleteSessionRecords(deletable);
             const parts = [`Removed ${n} of ${ids.length} session record${ids.length === 1 ? '' : 's'}.`];
             if (kept.length) parts.push(`${kept.length} running session${kept.length === 1 ? '' : 's'} could not be stopped; ${kept.length === 1 ? 'its record was' : 'their records were'} kept.`);
-            Modal.alert(kept.length ? 'Partly deleted' : 'Deleted', parts.join(' '), [{ text: 'OK' }]);
+            if (changed.length) parts.push(`${changed.length} changed state while you were deciding and ${changed.length === 1 ? 'was' : 'were'} left alone.`);
+            Modal.alert(kept.length || changed.length ? 'Partly deleted' : 'Deleted', parts.join(' '), [{ text: 'OK' }]);
         });
     }, []);
 
