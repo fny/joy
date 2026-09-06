@@ -6,7 +6,7 @@ import { test, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Ledger, CommandIdConflictError, RelayTurnConflictError } from "./ledger";
+import { CommandIdConflictError, Ledger, RelayTurnConflictError } from "./ledger";
 import { SessionCoordinator } from "./coordinator";
 import { FakeDriver, FakeClock, settle } from "./coordinator.fakeDriver";
 import { queueFor } from "./queueFacade";
@@ -110,9 +110,13 @@ test("command(id): the durable row with its terminal reason and the runtime turn
 });
 
 test("a relay turn session a's row carries is refused for session b under a DIFFERENT command id (RelayTurnConflictError): b owns nothing, a's row is untouched, b's facade never sees a's id (review 11cf51b5)", async () => {
+  session("a"); session("b");
+  const qa = queueFor({ id: "a" }, coord);
+  const qb = queueFor({ id: "b" }, coord);
   const mine = qa.accept("mine", { id: "a-id", relayTurnId: "shared-turn" });
   expect(mine.id).toBe("a-id");
   expect(() => qb.accept("theirs", { id: "b-id", relayTurnId: "shared-turn" })).toThrow(RelayTurnConflictError);
+  await settle();
   expect(ledger.listCommands("b")).toEqual([]);
   expect(qb.state().commands).toEqual([]);
   expect(qb.itemState("a-id")).toBe("unknown");
@@ -122,16 +126,23 @@ test("a relay turn session a's row carries is refused for session b under a DIFF
   expect(qa.accept("again", { id: "a-id-2", relayTurnId: "shared-turn" })).toMatchObject({ id: "a-id" });
   expect(ledger.listCommands("a")).toHaveLength(1);
 });
+
 test("waitFor re-checks ownership after the wait: an id pruned and re-accepted by another session meanwhile is unknown, never the other session's state", async () => {
+  session("a"); session("b");
+  const qa = queueFor({ id: "a" }, coord);
+  const qb = queueFor({ id: "b" }, coord);
   qa.accept("a-head");                       // submitting (the driver never answers)
   const q = qa.accept("a-queued");
+  await settle();
   const ac = new AbortController();
   const wait = qa.waitFor(q.id, ["completed"], { timeoutMs: 60_000, signal: ac.signal });
   expect(qa.cancel(q.id)).toBe(true);        // cancelled: not an awaited state, the wait continues
+  await settle();
   clock.now += 8 * 24 * 3_600_000;
   ledger.prune();                            // the terminal row is gone...
   expect(ledger.getCommand(q.id)).toBeNull();
   expect(qb.accept("b reuses the id", { id: q.id }).id).toBe(q.id); // ...and its id is b's now
+  await settle();
   ac.abort();
   await expect(wait).resolves.toEqual({ state: null });
   expect(ledger.getCommand(q.id)).toMatchObject({ sessionId: "b", text: "b reuses the id" });
