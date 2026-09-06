@@ -490,8 +490,19 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   credentials and state the installing CLI did (an overridden home used to be
   dropped and the service started against `~/.joy`, #499).
 - `joy stop` signals only a verified daemon: the pid from an authenticated
-  `/status`, or the daemon.json pid whose command line and start time match;
-  a stale record is removed without signalling (#495). A daemon the installed
+  `/status`, or the daemon.json pid whose exact kernel start identity
+  (`startId`, recorded by the daemon at launch), entry script and executable
+  all match; a pid proven to be another process is a stale record, removed
+  without signalling (#495). Verification is exact or nothing: a record with
+  no `startId` (written by a daemon from before identities were recorded, or
+  on an OS that would not report one) is UNVERIFIABLE — exit 1, record kept,
+  nothing signalled, with the hint that the daemon must be restarted once so
+  it records its identity; the command-line shape and the old 120 s
+  `startedAt` skew are no longer evidence. Likewise a live pid the OS will
+  not describe (EACCES on `/proc/<pid>/cmdline`, a hidepid mount) is
+  unverifiable, not dead — only ESRCH ("no such process") is a dead daemon
+  whose record is cleaned up. An unverifiable pid may still be stopped
+  through its supervisor when the unit / job owns it. A daemon the installed
   service owns (the unit's `MainPID` / the launchd job's PID is that pid) is
   stopped through `systemctl --user stop` / `launchctl unload` — a direct
   SIGTERM was undone by `Restart=always` / `KeepAlive` three seconds later
