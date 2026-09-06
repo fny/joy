@@ -19,6 +19,7 @@ import { homedir } from "os";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { joyStateDir } from "../paths";
 import { writeFileAtomic } from "./atomicWrite";
+import { codexConfigPath } from "../codex/codexHome";
 
 export type ConfigAgent = "claude" | "codex" | "opencode" | "pi" | "agy";
 
@@ -32,7 +33,8 @@ interface AgentConfigSpec {
 function specs(): Record<ConfigAgent, AgentConfigSpec> {
   return {
     claude: { path: join(homedir(), ".claude", "settings.json"), format: "json", schemaUrl: "https://json.schemastore.org/claude-code-settings.json" },
-    codex: { path: join(homedir(), ".codex", "config.toml"), format: "toml", schemaUrl: null },
+    // Under $CODEX_HOME when set — the file the running codex actually reads (#524).
+    codex: { path: codexConfigPath(), format: "toml", schemaUrl: null },
     opencode: { path: join(homedir(), ".config", "opencode", "opencode.json"), format: "json", schemaUrl: "https://opencode.ai/config.json" },
     pi: { path: join(homedir(), ".pi", "agent", "settings.json"), format: "json", schemaUrl: null },
     agy: { path: join(homedir(), ".gemini", "antigravity-cli", "settings.json"), format: "json", schemaUrl: null },

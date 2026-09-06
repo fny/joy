@@ -20,6 +20,7 @@ import { rmSync, readFileSync } from "fs";
 import WebSocket from "ws";
 import { joyStateDir } from "../paths";
 import { resolveCodexExecutionPolicy, sandboxModeToPolicy } from "./executionPolicy";
+import { codexHome as resolveCodexHome } from "./codexHome";
 
 export interface AppServerSpawnOpts {
   socketPath: string;
@@ -79,7 +80,7 @@ export interface CodexModel {
  *  never ran) so the caller can fall back to fetchCodexModels(). */
 export function loadCodexModelsCacheFile(codexHome?: string): CodexModel[] | null {
   try {
-    const home = codexHome ?? process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex");
+    const home = codexHome ?? resolveCodexHome(); // the shared resolver (#524 #541 #546)
     const raw = JSON.parse(readFileSync(join(home, "models_cache.json"), "utf8")) as {
       models?: Array<Record<string, unknown>>;
     };
