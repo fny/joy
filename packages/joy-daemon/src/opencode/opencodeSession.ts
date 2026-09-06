@@ -637,7 +637,7 @@ export class OpencodeSession implements AgentSession {
     if (known) {
       // Late evidence for a known id may still carry a server seq we lacked
       // (HTTP ack lost, SSE later): record it, never re-rank as newest.
-      if (serverSeq !== undefined && known.server === undefined) known.server = serverSeq;
+      if (serverSeq !== undefined && known.server === undefined) { known.server = serverSeq; if (this.#lastAdmitted === id && this.#lastAdmittedRank) this.#lastAdmittedRank.server = serverSeq; }
       return;
     }
     const rank = { server: serverSeq, local: ++this.#admissionClock };
@@ -647,9 +647,13 @@ export class OpencodeSession implements AgentSession {
     // observed order let a delayed admission of an OLD prompt (seq 10) rank
     // above a newer one (seq 20) and interrupt the newer work (Astra on
     // a1c76416, #77).
-    const cur = this.#lastAdmitted ? this.#admissionSeq.get(this.#lastAdmitted) : undefined;
+    // The current admission's ordering evidence lives in #lastAdmittedRank,
+    // independent of the cache: 500 older admissions arriving after B could
+    // evict B's entry, and A's delayed first admission then found no current
+    // rank, became newest and interrupted B (Astra on 94053e4f, #77).
+    const cur = this.#lastAdmittedRank;
     const newer = !cur || (rank.server !== undefined && cur.server !== undefined ? rank.server > cur.server : rank.local > cur.local);
-    if (newer) this.#lastAdmitted = id;
+    if (newer) { this.#lastAdmitted = id; this.#lastAdmittedRank = rank; }
     // Admission identity must outlive any tombstone for the same id: evicting
     // a cancelled prompt's entry while its tombstone stayed let a later
     // unsequenced duplicate admission count as first-seen → newest → a
@@ -665,6 +669,7 @@ export class OpencodeSession implements AgentSession {
     }
   }
   #admissionSeq = new Map<string, { server: number | undefined; local: number }>();
+  #lastAdmittedRank: { server: number | undefined; local: number } | undefined;
   #admissionClock = 0;
   /** May an interrupt on behalf of cancelled `id` still fire? Only while no
    *  newer prompt has been admitted — the endpoint interrupts the SESSION. */
