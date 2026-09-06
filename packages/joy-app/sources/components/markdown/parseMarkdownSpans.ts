@@ -9,6 +9,17 @@ import { exceedsInputBudget, parseBudget } from "@/utils/parseBudget";
 //    unbalanced "(" or a newline, so "[x](" repeated cannot rescan either.
 const pattern = /(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\[\]]+)\](?:\(((?:[^()\n]|\([^()\n]*\))+)\))?)|(`(.*?)(?:`|$))/g;
 
+function countChar(text: string, ch: string): number {
+    let n = 0;
+    for (let i = 0; i < text.length; i++) if (text[i] === ch) n++;
+    return n;
+}
+
+// Markdown lets a destination escape its parentheses: "[x](https://a/b\(c\))".
+function unescapeLinkDestination(url: string): string {
+    return url.replace(/\\([()])/g, '$1');
+}
+
 function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles']) {
     const urlPattern = /https?:\/\/[^\s<]+/g;
     let lastIndex = 0;
@@ -22,7 +33,11 @@ function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: Mark
 
         let url = match[0];
         let trailing = '';
+        // Trailing punctuation belongs to the sentence, not the URL — except a
+        // ")" that closes a "(" inside the URL (wikipedia's "Function_(mathematics)"),
+        // which used to be stripped and left the link one character short (#266).
         while (/[),.;:!?]$/.test(url)) {
+            if (url.endsWith(')') && countChar(url, '(') >= countChar(url, ')')) break;
             trailing = url.slice(-1) + trailing;
             url = url.slice(0, -1);
         }
@@ -56,7 +71,7 @@ function pushStyledContent(spans: MarkdownSpan[], text: string, styles: Markdown
         if (m.index > last) {
             pushTextWithAutoLinks(spans, text.slice(last, m.index), styles);
         }
-        spans.push({ styles, text: m[1], url: m[2] });
+        spans.push({ styles, text: m[1], url: unescapeLinkDestination(m[2]) });
         last = m.index + m[0].length;
     }
     if (last < text.length) {
@@ -97,7 +112,7 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
         } else if (match[5]) {
             // Link - handle incomplete links (no URL part)
             if (match[7]) {
-                spans.push({ styles: [], text: match[6], url: match[7] });
+                spans.push({ styles: [], text: match[6], url: unescapeLinkDestination(match[7]) });
             } else {
                 // If no URL part, treat as plain text with brackets
                 pushTextWithAutoLinks(spans, `[${match[6]}]`, []);

@@ -21,7 +21,11 @@ const TableView = React.memo(({ text, delimiter }: { text: string; delimiter: ',
     const [header, ...body] = rows;
     const cellStyle = { paddingVertical: 6, paddingHorizontal: 10, minWidth: 60, maxWidth: 320 } as const;
     const textStyle = { ...Typography.mono(), fontSize: 12, color: theme.colors.text } as const;
+    // Vertical scroller OUTSIDE the horizontal one: a horizontal ScrollView
+    // alone pins overflowY to hidden on web, so rows below the viewport (and
+    // the truncation notice) were unreachable by wheel or touch (#214).
     return (
+        <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator>
         <ScrollView horizontal showsHorizontalScrollIndicator>
             <View>
                 <View style={{ flexDirection: 'row', backgroundColor: theme.colors.surfaceHigh, borderBottomWidth: 1, borderBottomColor: theme.colors.divider }}>
@@ -47,6 +51,7 @@ const TableView = React.memo(({ text, delimiter }: { text: string; delimiter: ',
                 )}
             </View>
         </ScrollView>
+        </ScrollView>
     );
 });
 
@@ -69,7 +74,12 @@ const HtmlView = React.memo(({ html }: { html: string }) => {
             originWhitelist={['about:blank', 'data:*']}
             source={{ html }}
             javaScriptEnabled
-            onShouldStartLoadWithRequest={() => false}
+            // iOS consults this for the INITIAL loadHTMLString too (its URL is
+            // about:blank); refusing everything cancelled the document itself and
+            // the Rendered tab stayed white (#28). about:blank cannot leave the
+            // sandbox, so it is the one navigation allowed; Android never asks
+            // for the initial load and is unaffected either way.
+            onShouldStartLoadWithRequest={(request: { url?: string }) => request.url === 'about:blank'}
             style={{ flex: 1, backgroundColor: '#fff' }}
         />
     );

@@ -7,7 +7,16 @@
 //   <system-reminder>  … </system-reminder>     → stripped (machine context)
 //   any other unknown top-level <tag>…</tag>     → collapsed to a generic chip
 //
+// A block collapses to a card/chip only when it IS the whole message. A
+// notification followed by a real prompt (or by a second notification) used
+// to return only the first block, silently dropping the prompt and the other
+// notification (#269); now the notifications become readable lines and every
+// other character of the message survives as text.
+//
 // Anything else passes through untouched as { kind: 'none', text }.
+
+import { t } from '@/text';
+import { findCodeRanges, isInsideCode } from './markdown/codeRanges';
 
 export type HarnessBlock =
     | { kind: 'task-notification'; status: string; summary: string; outputFile?: string }
@@ -27,30 +36,75 @@ const LEADING_TAG_RE = /^<([a-zA-Z][\w-]*)>/;
 // the CLI's bash/local-command input+output wrappers (the pane shows bash).
 const NOISE_BLOCK_RE = /<(system-reminder|bash-input|bash-stdout|bash-stderr|local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*?<\/\1>\s*/g;
 
+// Trailing whitespace is part of the match so a block replaced by a line keeps
+// exactly one line break before whatever follows it.
+const TASK_NOTIFICATION_RE = /<task-notification>([\s\S]*?)<\/task-notification>\s*/g;
+
+/**
+ * Remove every complete noise block that is NOT inside markdown code. A user
+ * asking to "explain this fenced <system-reminder> example" had the example's
+ * body deleted, leaving an empty fence (#270): quoted content is the user's,
+ * only the harness's own top-level blocks are machine context.
+ */
+function stripNoiseBlocks(raw: string): string {
+    const codeRanges = findCodeRanges(raw);
+    if (codeRanges.length === 0) return raw.replace(NOISE_BLOCK_RE, '');
+    let out = '';
+    let last = 0;
+    NOISE_BLOCK_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = NOISE_BLOCK_RE.exec(raw)) !== null) {
+        if (isInsideCode(codeRanges, m.index)) continue;
+        out += raw.slice(last, m.index);
+        last = m.index + m[0].length;
+    }
+    return out + raw.slice(last);
+}
+
+function parseTaskNotification(body: string): { status: string; summary: string; outputFile?: string } {
+    return {
+        status: pick('status', body) ?? 'done',
+        summary: pick('summary', body) ?? 'Background task finished',
+        outputFile: pick('output-file', body),
+    };
+}
+
 export function parseHarnessBlock(raw: string): HarnessBlock {
     // Strip machine-only blocks (often prepended to a real prompt).
-    const text = raw.replace(NOISE_BLOCK_RE, '').trim();
+    const text = stripNoiseBlocks(raw).trim();
 
-    // Background task completion → card.
+    // Background task completion → card, when the notification is the message.
     if (text.startsWith('<task-notification>')) {
-        const body = pick('task-notification', text) ?? '';
-        return {
-            kind: 'task-notification',
-            status: pick('status', body) ?? 'done',
-            summary: pick('summary', body) ?? 'Background task finished',
-            outputFile: pick('output-file', body),
-        };
+        TASK_NOTIFICATION_RE.lastIndex = 0;
+        const first = TASK_NOTIFICATION_RE.exec(text);
+        if (first && first.index === 0 && first[0].trimEnd().length === text.length) {
+            return { kind: 'task-notification', ...parseTaskNotification(first[1]) };
+        }
+        // Mixed: several notifications, or a notification plus a real prompt.
+        // Each block becomes one line; the rest of the message is kept verbatim.
+        const lines = text.replace(TASK_NOTIFICATION_RE, (_whole, body: string) => {
+            const n = parseTaskNotification(body);
+            return `${t('markdown.taskNotificationLine', { status: n.status, summary: n.summary })}\n`;
+        }).trim();
+        return { kind: 'none', text: lines };
     }
 
     // Any other block that's just `<tag>…</tag>` (whole message) → generic chip,
     // so unknown harness blocks never render as raw XML. Skips known
-    // command/caveat wrappers, which parseLocalCommandMessage handles.
+    // command/caveat wrappers, which parseLocalCommandMessage handles. The
+    // opening and closing tags must belong to ONE block: with two blocks
+    // around prose the first `</tag>` is not the one at the end, and the
+    // message stays text (#269).
     const lead = LEADING_TAG_RE.exec(text);
     if (lead) {
         const tag = lead[1];
         const known = ['command-name', 'command-message', 'command-args', 'local-command-caveat', 'local-command-stdout', 'local-command-stderr', 'bash-input', 'bash-stdout', 'bash-stderr'];
-        if (!known.includes(tag) && new RegExp(`</${tag}>\\s*$`).test(text)) {
-            return { kind: 'unknown-block', tag, text: (pick(tag, text) ?? '').trim() };
+        if (!known.includes(tag)) {
+            const closeTag = `</${tag}>`;
+            const firstClose = text.indexOf(closeTag);
+            if (firstClose !== -1 && text.slice(firstClose + closeTag.length).trim() === '') {
+                return { kind: 'unknown-block', tag, text: text.slice(lead[0].length, firstClose).trim() };
+            }
         }
     }
 
