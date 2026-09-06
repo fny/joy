@@ -327,6 +327,12 @@ app.
   57 fixed, 18 residuals in flight; its hooks-authority review left three
   regressions and a partial, folded into the session-file round.
 
+- 2026-09-08 (count) — the verified-fixed closer ran over every wave's
+  verdicts: 187 more issues closed; **246 open** (from 605). Remaining
+  open: items still awaiting Astra's verdict on residual rounds, the
+  session-file residuals in flight, design follow-ups (#127–#131), and the
+  lows scheduled for Wave F.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
