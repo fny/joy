@@ -4,7 +4,7 @@
 // the app's version (libsodium crypto_secretbox_easy on both ends — see
 // sealedStream.ts for why secretbox).
 import { deriveTunnelKey } from "./sealedStream";
-import { sealRequest, StreamingOpen, concatAll, type ResponseHead } from "./wire";
+import { sealRequest, StreamingOpen, concatAll, requestBinding, type ResponseHead } from "./wire";
 
 export interface TunnelFetchOpts {
   relayUrl: string;
@@ -53,7 +53,11 @@ export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse
   }
   if (!r.ok || !r.body) throw new TunnelError(r.status, "relay_error");
 
-  const open = new StreamingOpen<ResponseHead>(key);
+  // The response must be bound to THIS request (head.r = our stream id) —
+  // StreamingOpen throws TamperError on the head frame otherwise, before any
+  // status or body is surfaced. A relay replaying a recorded response to a
+  // different request therefore fails closed instead of reading as success.
+  const open = new StreamingOpen<ResponseHead>(key, requestBinding(wire));
   const chunks: Uint8Array[] = [];
   const reader = r.body.getReader();
   for (;;) {

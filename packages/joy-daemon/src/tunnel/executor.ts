@@ -8,7 +8,7 @@
 // the local HTTP surface IS the contract (same code path the CLI hits), so
 // tunneled and local requests cannot drift apart.
 import { deriveTunnelKey, SealedWriter, CHUNK_MAX, TamperError } from "./sealedStream";
-import { openHeadAndBody, type RequestHead, type ResponseHead } from "./wire";
+import { openHeadAndBody, requestBinding, type RequestHead, type ResponseHead } from "./wire";
 
 export interface ExecutorOpts {
   relayUrl: string;            // nucleus base, e.g. http://127.0.0.1:PORT
@@ -73,15 +73,20 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
       if (!r.ok) throw new Error(`frames post failed: ${r.status}`);
     };
 
+    const payload = Buffer.from(payloadB64, "base64");
+    // Every response head names the request it answers (wire.ts: binding) —
+    // the client refuses a response bound to any other request, so a relay
+    // cannot answer request B with the bytes it recorded for request A.
+    const r = requestBinding(payload);
     let head: RequestHead, body: Uint8Array;
     try {
-      ({ head, body } = openHeadAndBody<RequestHead>(key, Buffer.from(payloadB64, "base64")));
+      ({ head, body } = openHeadAndBody<RequestHead>(key, payload));
     } catch (e) {
       // Unsealable request (wrong client key, corrupted in transit): answer
       // sealed with OUR key so a legitimate client still gets a readable 400;
       // an illegitimate one learns nothing it could not already infer.
       const w = new SealedWriter(key);
-      const headBytes = new TextEncoder().encode(JSON.stringify({ s: 400, h: { "x-tunnel-error": e instanceof TamperError ? "unsealable" : "bad_request" } }));
+      const headBytes = new TextEncoder().encode(JSON.stringify({ s: 400, h: { "x-tunnel-error": e instanceof TamperError ? "unsealable" : "bad_request" }, r } satisfies ResponseHead));
       await postFrames(Buffer.concat([w.header(), w.push(headBytes, true)]), true);
       return;
     }
@@ -106,7 +111,7 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
     // local surface produces them — this is what makes SSE and large files
     // work through the tunnel without buffering.
     const w = new SealedWriter(key);
-    const headBytes = new TextEncoder().encode(JSON.stringify({ s: status, h: respHeaders } satisfies ResponseHead));
+    const headBytes = new TextEncoder().encode(JSON.stringify({ s: status, h: respHeaders, r } satisfies ResponseHead));
     if (respBody === null) {
       await postFrames(Buffer.concat([w.header(), w.push(headBytes, true)]), true);
       return;
