@@ -32,6 +32,7 @@ import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./re
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, type JobRow, type NewOutbound, type OutboxRow } from "../domain/ledger";
 import { writeAttachmentToCwd } from "../domain/attachments";
+import { queueFor } from "../domain/queueFacade";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
 
@@ -1238,9 +1239,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         log(`turn ${turnId.slice(0, 8)}: cancelled before enqueue → cancelled`);
         return;
       }
-      const queued = sess.enqueue(text, { source: "rpc", visible: false, mirrorToRelay: false });
+      // The command row carries the relay turn: a coordinator-driven session
+      // dedupes a re-offer on it and its terminal can be tied back to it.
+      const queued = queueFor(sess).accept(text, { source: "rpc", visible: false, mirrorToRelay: false, relayTurnId: turnId, relayCommandId: offer.commandId });
       activeTurns.set(turnId, { localId: sess.id, queuedId: queued?.id ?? null, lease: leaseRef });
-      if (cancelRequested.has(turnId) && queued?.id) { try { sess.cancelQueued(queued.id); } catch { /* stub adapters */ } }
+      if (cancelRequested.has(turnId) && queued?.id) { try { queueFor(sess).cancel(queued.id); } catch { /* stub adapters */ } }
       // Every later line for this turn names the session AND the local queue
       // item, so "turn X completed" can be tied to the message it carried.
       const tag = `turn ${turnId.slice(0, 8)} [${sess.id}/${queued?.id ?? "?"}]`;
@@ -1259,7 +1262,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // enqueued its reinjection already — pluck it, then say cancelled.
             const rein = (queued as { reinjectionId?: string }).reinjectionId;
             let plucked = false;
-            if (rein) { try { plucked = sess.cancelQueued(rein); } catch { /* stub adapters */ } }
+            if (rein) { try { plucked = queueFor(sess).cancel(rein); } catch { /* stub adapters */ } }
             // A reinjection that was already admitted (cancelQueued found
             // nothing) is interrupted like an ordinary rejected start. A command
             // that enqueued no work (/title) aborts nothing — that interrupted an
@@ -1287,7 +1290,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
        *  adapters stub it (their inbound can't be plucked), so abort() is
        *  the fallback hammer when the turn already started. */
       const failTurn = async (reason: string, { abortLocal = false } = {}) => {
-        try { if (queued?.id) sess.cancelQueued(queued.id); } catch { /* stub adapters */ }
+        try { if (queued?.id) queueFor(sess).cancel(queued.id); } catch { /* stub adapters */ }
         if (abortLocal) { try { await sess.abort(); } catch { /* pane teardown */ } }
         await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
@@ -1319,8 +1322,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // Adapters with no per-item tracking (codex/opencode/pi) keep the
       // heuristic — pendingCount is the one queue signal all of them fill.
       const qid = queued?.id ?? null;
-      const itemState = (): string =>
-        (qid && sess.queueItemState ? sess.queueItemState(qid) : "unknown");
+      const itemState = (): string => (qid ? queueFor(sess).itemState(qid) : "unknown");
       const tracked = itemState() !== "unknown";
       // A message legitimately queued behind a long turn must NOT time out, so
       // the tracked path waits as long as the turn itself may run.
@@ -1328,7 +1330,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       let deliveryProven = false;
       for (;;) {
         relive();
-        const qs = sess.queueState() as { pendingCount: number; paused: boolean };
+        const qs = queueFor(sess).state();
         if (qs.paused) return failTurn("queue_paused");
         if (tracked) {
           const st = itemState();
@@ -1392,7 +1394,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           }
           if (sess.busy()) { log(`${tag}: started (busy)`); break; }
           if (activitySince()) { log(`${tag}: started (agent output)`); break; }
-          if ((sess.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
+          if (queueFor(sess).state().paused) return failTurn("queue_paused");
           if (Date.now() > startDeadline) return failTurn("no_agent_activity");
           await sleep(POLL_MS);
         }
@@ -1410,7 +1412,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // over, the admitted prompt is plucked, and the in-flight
           // (dispatching) turn is closed with a `cancelled` terminal — the
           // relay leaves executing turns to their owner. Never `failed`.
-          if (queued?.id) { try { sess.cancelQueued(queued.id); } catch { /* stub adapters */ } }
+          if (queued?.id) { try { queueFor(sess).cancel(queued.id); } catch { /* stub adapters */ } }
           try { await sess.abort(); } catch { /* pane teardown */ }
           for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } } // the prompt never runs: its files go too
           await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: sessionGone(e) ?? "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
@@ -1434,7 +1436,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           const id = Number(m.id);
           if (id > watermark) watermark = id;
         }
-        if ((sess.queueState() as { paused: boolean }).paused) return failTurn("queue_paused");
+        if (queueFor(sess).state().paused) return failTurn("queue_paused");
         if (cancelRequested.has(turnId) && sess !== session) break; // replaced under us: over
         if (sess.busy()) idlePolls = 0;
         else if (++idlePolls >= IDLE_DEBOUNCE_POLLS) break;
@@ -1502,7 +1504,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // elsewhere) so an early cancel can't leave it to fire later, then
       // abort whatever is actually running.
       const ctx = activeTurns.get(offer.targetTurnId);
-      if (ctx?.queuedId) { try { session.cancelQueued(ctx.queuedId); } catch { /* stub adapters */ } }
+      if (ctx?.queuedId) { try { queueFor(session).cancel(ctx.queuedId); } catch { /* stub adapters */ } }
       let aborted = false;
       let why = "";
       try { const r = await session.abort(); aborted = r.ok !== false; why = r.error ?? ""; } catch (e) { why = e instanceof Error ? e.message : String(e); }

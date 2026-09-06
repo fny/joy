@@ -32,6 +32,7 @@ import {
 } from "../relay/relay.ts";
 import type { DeliverySource } from "../domain/agentSession";
 import { ledgerFor, type Ledger, NON_TERMINAL_STATES, StaleCommandError, StaleGenerationError } from "../domain/ledger";
+import type { SessionCoordinator } from "../domain/coordinator";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { OPTIONS_SYSTEM_PROMPT } from "./optionsPrompt";
 import { saveWindowRecord, loadWindowRecord, deleteWindowRecord } from "../domain/windowRecord";
@@ -140,6 +141,9 @@ export interface SessionDeps {
   /** The durable acceptance ledger (domain/ledger.ts). Absent → the process's
    *  ledger for the current state dir (ledgerFor()). */
   ledger?: Ledger;
+  /** The session coordinator (domain/coordinator.ts) that owns this
+   *  session's commands. Absent → coordinatorFor(ledger). */
+  coordinator?: SessionCoordinator;
   broadcast(event: string, data: unknown): void;
   addChatMessage(msg: ChatMessage): void;
   /** Called when a relay session is attached — the place to register session-scoped ops.

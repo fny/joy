@@ -2,7 +2,9 @@
 // and the spawn mocked so the real start → resume → reconcile → dispatch path
 // runs end to end in-process. Every test uses an isolated JOY_HOME_DIR so no
 // live daemon state (~/.joy) is read or written. The inbound queue, the
-// dispatch attempts and the receipts live in the ledger (domain/ledger.ts).
+// dispatch attempts and the receipts live in the ledger (domain/ledger.ts),
+// owned by the session coordinator (domain/coordinator.ts); the session is
+// the codex driver and intake goes through the queue facade.
 //
 //   #516  the seq dedupe must survive the delivery echo (live AND after a
 //         restart) — a redelivered seq is never a second turn/start.
@@ -51,6 +53,7 @@ vi.mock("./appServerClient", async (importOriginal) => {
 
 import { CodexSession } from "./codexSession";
 import { ledgerFor } from "../domain/ledger";
+import { queueFor } from "../domain/queueFacade";
 import type { SessionDeps } from "../claude/session";
 import type { TmuxDriver } from "../tmux/driver";
 
@@ -63,6 +66,7 @@ const ok = async () => ({ ok: true, out: "" });
 const fakeTmux = { literal: ok, key: ok, command: ok, commandOnce: ok, captureFresh: ok, captureCached: () => ({ ok: true, out: "" }), runSync: () => ({ ok: true, out: "" }), track() {}, untrack() {} } as unknown as TmuxDriver;
 const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const ledger = () => ledgerFor();
+const relaySend = (s: CodexSession, text: string, seq: number) => queueFor(s).accept(text, { seq, mirrorToRelay: false, source: "relay" });
 
 /** A session resuming thread TH (the recovery constructor path: it reads the
  *  ledger) whose app-server is the fake above. */
@@ -85,33 +89,34 @@ test("#516: a seq redelivered AFTER its echo settled the row is not started agai
   const id = "dur-516";
   H.turnStarts.length = 0;
   const { s, client } = await started(id);
-  s.enqueue("do the thing", { seq: 42, mirrorToRelay: false });
+  const clientId = relaySend(s, "do the thing", 42).id;
   await vi.waitFor(() => expect(H.turnStarts).toHaveLength(1));
-  const clientId = `codex-in:${id}:42`;
+  expect(H.turnStarts[0].clientId).toBe(clientId);
   expect(ledger().getCommand(clientId)).toMatchObject({ state: "accepted" });
-  // Accepted; the userMessage echo confirms delivery: receipt + attempt done + row terminal, one commit.
+  // Accepted; the userMessage echo confirms delivery (running), the turn's
+  // completion is the command's terminal: receipts + attempt done + row terminal.
   echo(client, clientId, 42, "T1");
   await settle(10);
   expect(ledger().listPending(id)).toEqual([]);
-  expect(s.queueState().pendingCount).toBe(0);
-  expect(ledger().getCommand(clientId)).toMatchObject({ state: "completed", terminalReason: "delivered" });
+  expect(queueFor(s).state().pendingCount).toBe(0);
+  expect(ledger().getCommand(clientId)).toMatchObject({ state: "completed", terminalReason: "completed" });
   // The receipt is durable, keyed by seq → the command it ran as.
   expect(ledger().getReceipt(id, "seq", "42")?.commandId).toBe(clientId);
   expect(ledger().hasReceipt(id, "codex_client", clientId)).toBe(true);
 
   // Crash-before-cursor-persist: the relay hands us seq 42 again after the turn
   // completed. Same logical message → no new row, no second turn/start.
-  const again = s.enqueue("do the thing", { seq: 42, mirrorToRelay: false });
+  const again = relaySend(s, "do the thing", 42);
   await settle(30);
   expect(again.id).toBe(clientId);
-  expect(s.queueItemState(again.id)).toBe("delivered");
+  expect(queueFor(s).itemState(again.id)).toBe("delivered");
   expect(H.turnStarts).toHaveLength(1);
   expect(ledger().listPending(id)).toEqual([]);
 
   // A genuinely new seq still flows.
-  s.enqueue("next", { seq: 43, mirrorToRelay: false });
+  const next = relaySend(s, "next", 43);
   await vi.waitFor(() => expect(H.turnStarts).toHaveLength(2));
-  expect(H.turnStarts[1]).toEqual({ text: "next", clientId: `codex-in:${id}:43` });
+  expect(H.turnStarts[1]).toEqual({ text: "next", clientId: next.id });
   s.end("process_exited"); // a crash-shaped end: keeps the ledger rows
 });
 
@@ -119,23 +124,23 @@ test("#516: the receipt survives a daemon restart — recovery does not resend a
   const id = "dur-516-recover";
   H.turnStarts.length = 0;
   const { s, client } = await started(id);
-  s.enqueue("first", { seq: 7, mirrorToRelay: false });
+  const first = relaySend(s, "first", 7);
   await vi.waitFor(() => expect(H.turnStarts).toHaveLength(1));
-  echo(client, `codex-in:${id}:7`, 7, "T1");
+  echo(client, first.id, 7, "T1");
   await settle(10);
   s.end("process_exited"); // daemon dies; the receipt is in the ledger
 
   // The replacement opens the ledger in its constructor (before the relay
   // can pull) and the relay redelivers seq 7 — it must be recognised, not run.
   const { s: s2 } = await started(id);
-  const r = s2.enqueue("first", { seq: 7, mirrorToRelay: false });
+  const r = relaySend(s2, "first", 7);
   await settle(30);
-  expect(r.id).toBe(`codex-in:${id}:7`);
+  expect(r.id).toBe(first.id);
   expect(H.turnStarts).toHaveLength(1);
-  expect(s2.queueState().pendingCount).toBe(0);
-  expect(s2.queueItemState(r.id)).toBe("delivered");
+  expect(queueFor(s2).state().pendingCount).toBe(0);
+  expect(queueFor(s2).itemState(r.id)).toBe("delivered");
   // ...while the next seq runs normally.
-  s2.enqueue("second", { seq: 8, mirrorToRelay: false });
+  relaySend(s2, "second", 8);
   await vi.waitFor(() => expect(H.turnStarts).toHaveLength(2));
   s2.end("process_exited");
 });
@@ -151,14 +156,15 @@ test("#514: a failed attempt commit holds the send; the retry sends exactly once
     return prepare.call(this, sql);
   });
   const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  let cmd: { id: string };
   try {
-    s.enqueue("send me", { seq: 1, mirrorToRelay: false });
+    cmd = relaySend(s, "send me", 1);
     await settle(150);
     // NOT sent: the ledger still says queued, so a crash before the echo would
     // make recovery resend a prompt codex had already accepted.
     expect(H.turnStarts).toHaveLength(0);
     expect(ledger().listPending(id).map((r) => r.state)).toEqual(["queued"]);
-    expect(s.queueState().pendingCount).toBe(1);
+    expect(queueFor(s).state().pendingCount).toBe(1);
   } finally {
     spy.mockRestore();
     stderr.mockRestore();
@@ -166,36 +172,37 @@ test("#514: a failed attempt commit holds the send; the retry sends exactly once
   // Persistence recovers → the scheduled retry sends it, once, with the
   // attempt committed BEFORE the socket write.
   await vi.waitFor(() => expect(H.turnStarts).toHaveLength(1), { timeout: 6000, interval: 50 });
-  expect(ledger().getCommand(`codex-in:${id}:1`)?.state).toBe("accepted");
-  expect(ledger().attemptsForCommand(`codex-in:${id}:1`).map((a) => a.state)).toEqual(["accepted"]);
+  expect(ledger().getCommand(cmd.id)?.state).toBe("accepted");
+  expect(ledger().attemptsForCommand(cmd.id).map((a) => a.state)).toEqual(["accepted"]);
   await settle(50);
   expect(H.turnStarts).toHaveLength(1);
   s.end("killed");
 }, 10_000);
 
-test("C1: a crash between turn/start and the echo is an explicit unknown; the fresh spawn resends under a NEW client id and the late echo of the first send still pairs", async () => {
+test("C1/C2: a crash between turn/start and the echo is an explicit unknown; the fresh spawn's reconcile finds nothing and resends under a NEW client id; the late echo of the first send still pairs", async () => {
   const id = "dur-unknown";
   H.turnStarts.length = 0;
   const { s } = await started(id);
-  s.enqueue("maybe landed", { seq: 5, mirrorToRelay: false });
+  const cmd = relaySend(s, "maybe landed", 5).id;
   await vi.waitFor(() => expect(H.turnStarts).toHaveLength(1));
-  const cmd = `codex-in:${id}:5`;
-  // "crash": no end(); the next generation opens over the accepted attempt.
+  // "crash": no end(); the next generation opens over the accepted attempt —
+  // the command is `unknown` until the replacement reconciles it.
   const { s: s2, client: c2 } = await started(id);
+  await vi.waitFor(() => expect(H.turnStarts).toHaveLength(2));
   expect(ledger().attemptsForCommand(cmd).map((a) => ({ no: a.attemptNo, state: a.state, ref: a.runtimeRef })))
-    .toEqual([{ no: 1, state: "accepted", ref: cmd }, { no: 2, state: "accepted", ref: `${cmd}#a2` }]); // attempt 1 keeps what it knew (accepted, echo pending); the command itself was unknown at reopen
-  expect(H.turnStarts).toHaveLength(2);
+    .toEqual([{ no: 1, state: "superseded", ref: cmd }, { no: 2, state: "accepted", ref: `${cmd}#a2` }]); // thread/read had no trace of send 1 (absent → resend)
+  expect(ledger().listObservations(id, "reconcile").map((o) => (o.payload as { outcome: string }).outcome)).toEqual(["absent"]);
   expect(H.turnStarts[1].clientId).toBe(`${cmd}#a2`);
   // The FIRST send's echo (it had landed after all) pairs with attempt 1 — ours, not a TUI prompt.
   echo(c2, cmd, 5, "T1");
   await settle(10);
-  expect(ledger().getCommand(cmd)).toMatchObject({ state: "completed", terminalReason: "delivered" });
-  expect(ledger().getAttempt(ledger().attemptsForCommand(cmd)[0].id)?.state).toBe("done");
+  expect(ledger().getCommand(cmd)).toMatchObject({ state: "completed", terminalReason: "completed" });
+  expect(ledger().hasReceipt(id, "codex_client", cmd)).toBe(true);
   // The second send's echo is recognised too (a duplicate turn ran — at-least-once — but it is OURS).
   echo(c2, `${cmd}#a2`, 5, "T2");
   await settle(10);
   expect(ledger().hasReceipt(id, "codex_client", `${cmd}#a2`)).toBe(true);
-  expect(s2.queueItemState(cmd)).toBe("delivered");
+  expect(queueFor(s2).itemState(cmd)).toBe("delivered");
   s.end("killed"); s2.end("killed");
 });
 
@@ -211,13 +218,14 @@ test("two non-relay sends in the same millisecond mirror under distinct localIds
   });
   const s = new CodexSession({ id, tmuxWindow: "none", tmux: fakeTmux, cwd: home, status: "starting", startedAt: 0 }, deps);
   s.attachRelay(relay as any);
-  const a = s.enqueue("one");
-  const b = s.enqueue("two"); // same tick, same Date.now() in practice
+  const q = queueFor(s);
+  const a = q.accept("one");
+  const b = q.accept("two"); // same tick, same Date.now() in practice
   expect(a.id).not.toBe(b.id);
   expect(sent).toHaveLength(2);
   expect(new Set(sent).size).toBe(2);
   // Relay sends keep the seq-keyed localId (a redelivery SHOULD dedupe there).
-  s.enqueue("three", { seq: 99 });
+  q.accept("three", { seq: 99, source: "relay" });
   expect(sent[2]).toBe(`codex:in:${id}:99`);
   s.end("killed");
 });

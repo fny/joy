@@ -17,6 +17,7 @@ import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
 import { SessionEndedError } from "./ledger";
+import { queueFor } from "./queueFacade";
 import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
@@ -314,7 +315,7 @@ export function checkSession(registry: SessionRegistry, id: string): Record<stri
   const permissionMode = session.detectPermissionMode();
   if (session.status === "ended") return { state: "ended", reason: session.endReason ?? null, permissionMode };
   const approvals = session.listApprovals?.() ?? [];
-  const qs = session.queueState() as { pendingCount?: number; paused?: boolean };
+  const qs = queueFor(session).state();
   const queue = qs.pendingCount ?? 0;
   if (approvals.length > 0) return { state: "needs_input", approvals, queue, permissionMode };
   const waiting = session.needsInput?.() ?? null;
@@ -622,7 +623,7 @@ export const machineOps: MachineOp[] = [
       const targetLabel = `${({ claude: "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "pi", agy: "Antigravity" } as Record<string, string>)[target.agent]}${target.model ? ` (${target.model})` : ""}`;
       const path = notePath(src.id);
       src.setHandoff?.({ state: "writing", peerLabel: targetLabel, note: path, at: Date.now() });
-      src.enqueue(noteRequestPrompt(path, "to", targetLabel), { source: "rpc", mirrorToRelay: true });
+      queueFor(src).accept(noteRequestPrompt(path, "to", targetLabel), { source: "rpc", mirrorToRelay: true });
       void runHandoffJob(registry, src, target, path);
       return { ok: true, pending: true, note: path };
     },
@@ -645,7 +646,7 @@ export const machineOps: MachineOp[] = [
       if (src.status === "ended") return { ok: false, error: `The original session ${peerId} has ended; restart it first.` };
       const path = notePath(tgt.id);
       tgt.setHandoff?.({ state: "writing", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
-      tgt.enqueue(noteRequestPrompt(path, "back to", sessionLabel(src)), { source: "rpc", mirrorToRelay: true });
+      queueFor(tgt).accept(noteRequestPrompt(path, "back to", sessionLabel(src)), { source: "rpc", mirrorToRelay: true });
       void runHandbackJob(registry, tgt, src.id, path);
       return { ok: true, pending: true, note: path };
     },
@@ -876,8 +877,12 @@ export const machineOps: MachineOp[] = [
       // silently line up behind a turn it doesn't know about — and only drive
       // sessions in a mode that can't park on a permission dialog mid-turn
       // (bypassPermissions or read-only plan), so a wait can't hang forever.
+      // A coordinator-driven session counts its undelivered queue as work
+      // in flight too: a script must never line up behind prompts it does
+      // not know about.
+      const queue = queueFor(session);
       if (params.exclusive === true) {
-        if (session.busy()) return { error: "busy" };
+        if (queue.busy()) return { error: "busy" };
         const mode = session.detectPermissionMode();
         if (mode !== "bypassPermissions" && mode !== "plan") {
           return { error: "mode_not_scriptable", mode: mode ?? "unknown" };
@@ -917,7 +922,7 @@ export const machineOps: MachineOp[] = [
       // caller retries. An ended session refuses outright (#553).
       let queued: { id: string } | undefined;
       try {
-        queued = session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true });
+        queued = queue.accept(trimmed, { source, mirrorToRelay: true, visible: true });
       } catch (e) {
         if (e instanceof SessionEndedError) return { error: "session_ended" };
         return { error: "not_durable", detail: e instanceof Error ? e.message : String(e) };
@@ -948,7 +953,7 @@ export const machineOps: MachineOp[] = [
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
       if (!session) return { error: "session_not_found" };
-      return { ok: true, ...session.queueState() };
+      return { ok: true, ...queueFor(session).state() };
     },
     httpShape: (result) =>
       (result as { error?: string }).error ? { status: 404, body: result } : { status: 200, body: result },
@@ -965,14 +970,17 @@ export const machineOps: MachineOp[] = [
       const text = typeof params.text === "string" ? params.text.trim() : "";
       if (!text) return { error: "empty" };
       // Same durable-ack contract as `send` (#551): no ledger commit, no acceptance.
+      // An explicit queue-add is a VISIBLE, editable chip (a /send has a chat
+      // bubble instead; see `send`).
+      const queue = queueFor(session);
       let msg: { id: string };
       try {
-        msg = session.enqueue(text);
+        msg = queue.accept(text, { source: "rpc", mirrorToRelay: true, visible: true });
       } catch (e) {
-        if (e instanceof SessionEndedError) return { error: "session_ended", ...session.queueState() };
-        return { error: "not_durable", detail: e instanceof Error ? e.message : String(e), ...session.queueState() };
+        if (e instanceof SessionEndedError) return { error: "session_ended", ...queue.state() };
+        return { error: "not_durable", detail: e instanceof Error ? e.message : String(e), ...queue.state() };
       }
-      return { ok: true, id: msg.id, ...session.queueState() };
+      return { ok: true, id: msg.id, ...queue.state() };
     },
     httpShape: (result) => {
       const r = result as { error?: string };
@@ -995,8 +1003,9 @@ export const machineOps: MachineOp[] = [
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
       if (!session) return { error: "session_not_found" };
-      session.resumeQueue();
-      return { ok: true, ...session.queueState() };
+      const queue = queueFor(session);
+      queue.resume();
+      return { ok: true, ...queue.state() };
     },
   },
   {
@@ -1010,8 +1019,9 @@ export const machineOps: MachineOp[] = [
       if (!session) return { error: "session_not_found" };
       const text = typeof params.text === "string" ? params.text.trim() : "";
       if (!text) return { error: "empty" };
-      const ok = session.editQueued(String(params.qid ?? params.queue_id ?? ""), text);
-      return { ok, ...session.queueState() };
+      const queue = queueFor(session);
+      const ok = queue.edit(String(params.qid ?? params.queue_id ?? ""), text);
+      return { ok, ...queue.state() };
     },
   },
   {
@@ -1023,8 +1033,9 @@ export const machineOps: MachineOp[] = [
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
       if (!session) return { error: "session_not_found" };
-      const ok = session.cancelQueued(String(params.qid ?? params.queue_id ?? ""));
-      return { ok, ...session.queueState() };
+      const queue = queueFor(session);
+      const ok = queue.cancel(String(params.qid ?? params.queue_id ?? ""));
+      return { ok, ...queue.state() };
     },
   },
   {
@@ -1036,8 +1047,9 @@ export const machineOps: MachineOp[] = [
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
       if (!session) return { error: "session_not_found" };
-      const ok = session.reorderQueued(String(params.qid ?? params.queue_id ?? ""), Number(params.toIndex ?? params.to ?? 0));
-      return { ok, ...session.queueState() };
+      const queue = queueFor(session);
+      const ok = queue.reorder(String(params.qid ?? params.queue_id ?? ""), Number(params.toIndex ?? params.to ?? 0));
+      return { ok, ...queue.state() };
     },
   },
   {
