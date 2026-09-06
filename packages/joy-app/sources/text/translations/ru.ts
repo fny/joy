@@ -1073,6 +1073,10 @@ export const ru: TranslationStructure = {
         codeCopied: 'Код скопирован',
         copyFailed: 'Ошибка копирования',
         mermaidRenderFailed: 'Не удалось отобразить диаграмму mermaid',
+        // Remote markdown images load on tap only (#94)
+        loadImage: ({ host }: { host: string }) => `Загрузить изображение с ${host}`,
+        // A task notification sharing a message with a real prompt renders as a line (#269)
+        taskNotificationLine: ({ status, summary }: { status: string; summary: string }) => `Фоновая задача ${status}: ${summary}`,
     },
 
 
