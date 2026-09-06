@@ -1085,9 +1085,13 @@ export class SessionCoordinator {
         // Every command that rode this turn ends with it: a steered message
         // shares the running turn (opencode, pi), and an id-less runtime's
         // "the run ended" applies to everything executing.
-        const attempts = o.runtimeTurnId ? this.ledger.attemptsByRuntimeTurnId(sid, o.runtimeTurnId)
+        // Named by turn id, else by the ref the turn echoed — a reconcile
+        // reporting a turn that died with the old runtime names both, its
+        // attempt not yet bound to the turn id (#625).
+        const byTurn = o.runtimeTurnId ? this.ledger.attemptsByRuntimeTurnId(sid, o.runtimeTurnId) : [];
+        const attempts = byTurn.length ? byTurn
           : o.runtimeRef ? [this.ledger.attemptByRef(sid, o.runtimeRef)].filter((a): a is AttemptRow => !!a)
-          : this.#executingAttempts(sid);
+          : o.runtimeTurnId ? [] : this.#executingAttempts(sid);
         if (o.runtimeTurnId == null && o.runtimeRef == null) this.#dropAllTombstones(actor); // "the run ended": no late turn is left to interrupt
         else for (const a of attempts) if (actor.tombstones.get(a.commandId) === a.id) this.#dropTombstone(actor, a.commandId);
         if (!attempts.length) {

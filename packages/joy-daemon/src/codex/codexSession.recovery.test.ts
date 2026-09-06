@@ -473,3 +473,84 @@ test("#519: a history item under a RUNTIME id is never content-matched — an eq
   ]);
   s.end("killed");
 });
+
+// #625: a FRESH spawn (the old app-server died) finds our prompt in a turn
+// history still calls inProgress. The turn is dead with that server; the row
+// must settle either way — re-sent when nothing came of the prompt, ended
+// `interrupted` when it visibly ran — never left waiting for a terminal.
+
+/** A session that submitted `text`, saw turn/start accepted (no echo yet),
+ *  and then "crashed" — no end(): the next generation opens over the
+ *  accepted attempt and the command is `unknown`. Returns the command id. */
+async function crashedMidTurn(id: string, text: string): Promise<{ s: CodexSession; cmdId: string }> {
+  const { s } = await started(id);
+  const cmd = queueFor(s).accept(text, { mirrorToRelay: false });
+  await vi.waitFor(() => expect(H.turnStarts).toHaveLength(1));
+  await vi.waitFor(() => expect(ledger().getCommand(cmd.id)?.state).toBe("accepted"));
+  return { s, cmdId: cmd.id };
+}
+
+test("#625: fresh spawn — a dead in-progress turn holding only our prompt is not replayed; the row is reconciled absent and re-sent exactly once", async () => {
+  const id = "rec-625-resend";
+  const { s, cmdId } = await crashedMidTurn(id, "lost prompt");
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "inProgress", items: [{ type: "userMessage", id: "msg_1", clientId: cmdId, content: [{ type: "text", text: "lost prompt" }] }] },
+  ] } };
+  const { relay, sent } = fakeRelay();
+  const { s: s2 } = await started(id, { relay });
+  await vi.waitFor(() => expect(H.turnStarts).toHaveLength(2));
+  expect(H.turnStarts[1]).toEqual({ text: "lost prompt", clientId: `${cmdId}#a2` }); // a NEW client id per attempt
+  expect(ledger().listObservations(id, "reconcile").map((o) => (o.payload as { outcome: string }).outcome)).toEqual(["absent"]);
+  expect(ledger().attemptsForCommand(cmdId).map((a) => ({ no: a.attemptNo, state: a.state }))).toEqual([{ no: 1, state: "superseded" }, { no: 2, state: "accepted" }]);
+  expect(ledger().getCommand(cmdId)?.state).toBe("accepted"); // waiting on ITS OWN echo now, not the dead turn's
+  // The dead turn left no bracket on the card, and nothing runs a third time.
+  await settle(50);
+  expect(H.turnStarts).toHaveLength(2);
+  expect(sent.filter((x) => x.localId?.startsWith("codex:TH:turn:T1"))).toEqual([]);
+  s.end("killed"); s2.end("killed");
+});
+
+test("#625: fresh spawn — a dead in-progress turn that visibly ran ends its row `interrupted`, is never re-sent, and the session is free for the next prompt", async () => {
+  const id = "rec-625-interrupted";
+  const { s, cmdId } = await crashedMidTurn(id, "half done");
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "inProgress", items: [
+      { type: "userMessage", id: "msg_1", clientId: cmdId, content: [{ type: "text", text: "half done" }] },
+      { type: "agentMessage", id: "ans_1", text: "I started on it" },
+    ] },
+  ] } };
+  const { relay, sent } = fakeRelay();
+  const { s: s2 } = await started(id, { relay });
+  await vi.waitFor(() => expect(ledger().getCommand(cmdId)).toMatchObject({ state: "interrupted", terminalReason: "agent_reported_interrupted" }));
+  expect(H.turnStarts).toHaveLength(1); // not re-run
+  expect(ledger().listObservations(id, "reconcile")).toEqual([]); // settled by the replay, before the coordinator had to ask
+  expect(ledger().listObservations(id, "turn_ended").map((o) => (o.payload as { runtimeTurnId: string; status: string }))).toMatchObject([{ runtimeTurnId: "T1", status: "interrupted" }]);
+  // The partial answer reached the card under its replayed bracket.
+  expect(sent.filter((x) => x.t === "text").map((x) => x.text)).toEqual(["I started on it"]);
+  expect(s2.busy()).toBe(false);
+  expect(queueFor(s2).state()).toMatchObject({ busy: false, pendingCount: 0, inFlight: null, running: null });
+  // The next prompt runs at once.
+  const next = queueFor(s2).accept("next", { mirrorToRelay: false });
+  await vi.waitFor(() => expect(H.turnStarts).toHaveLength(2));
+  expect(H.turnStarts[1]).toEqual({ text: "next", clientId: next.id });
+  s.end("killed"); s2.end("killed");
+});
+
+test("#625: fresh spawn — a dead in-progress turn whose items came back partial is settled by the driver's own thread/read: output there ends the row `interrupted` by ref, no resend", async () => {
+  const id = "rec-625-deferred";
+  const { s, cmdId } = await crashedMidTurn(id, "half done, deferred");
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T1", status: "inProgress", itemsView: "partial", items: [
+      { type: "userMessage", id: "msg_1", clientId: cmdId, content: [{ type: "text", text: "half done, deferred" }] },
+      { type: "commandExecution", id: "call_1", command: "make", status: "inProgress" },
+    ] },
+  ] } };
+  const { s: s2 } = await started(id);
+  await vi.waitFor(() => expect(ledger().getCommand(cmdId)).toMatchObject({ state: "interrupted", terminalReason: "agent_reported_interrupted" }));
+  expect(H.turnStarts).toHaveLength(1);
+  expect(ledger().listObservations(id, "turn_ended").map((o) => (o.payload as { runtimeTurnId: string; status: string }))).toMatchObject([{ runtimeTurnId: "T1", status: "interrupted" }]);
+  await settle(50);
+  expect(H.turnStarts).toHaveLength(1);
+  expect(queueFor(s2).state()).toMatchObject({ busy: false, pendingCount: 0 });
+  s.end("killed"); s2.end("killed");
+});
