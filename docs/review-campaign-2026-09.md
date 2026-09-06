@@ -289,6 +289,13 @@ app.
   strings are in flight; Astra reviews queued for the daemon round, the
   four merges and Wave E.
 
+- 2026-09-08 — Hooks-as-authority merged (617dc734): Claude hooks v4 drive
+  session state behind a per-session live latch; the pane parser is a
+  tie-breaker. Residual rounds from Astra's Wave E and daemon-round
+  verdicts landed: daemon (b2aa492d, 2e425874), voice (475e5976), parsers
+  (70090dd2); sync/encryption and components rounds in flight; E4 query
+  slice and the C1 ledger in worktrees.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
