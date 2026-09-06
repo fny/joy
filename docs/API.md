@@ -258,7 +258,13 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   transient rejection re-queues and retries with backoff, three of them (busy
   refusals excluded) fail the row; a submit that throws or times out is
   `unknown`, reconciled by the driver (`accepted | running | absent → resend
-  | unknown → held`), never blindly resent. The driver's **echo** (Codex
+  | unknown → held`), never blindly resent. A Codex turn history still calls
+  `inProgress` on a FRESH spawn died with the old app-server (#625): one
+  holding nothing but the prompt reconciles `absent` (re-sent once, under a
+  new client id); one that visibly ran ends its row `interrupted` — the
+  replay's synthesized turn end reaches the coordinator like a live one, and
+  a `turn_ended` may name the turn by id or by the ref it echoed — so no row
+  waits for a terminal a dead server cannot send. The driver's **echo** (Codex
   clientId, OpenCode admission, pi rpc response, agy stdin) moves a command
   to `running`; the runtime's **turn end** for that turn is the terminal
   (`completed`, or `failed` / `cancelled` / `interrupted` with

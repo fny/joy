@@ -114,9 +114,16 @@ export class CodexDriver implements RuntimeDriver {
 
   /** thread/read: an attempt whose clientUserMessageId sits in a turn's
    *  items landed — running if that turn is still in progress on a rejoined
-   *  server, accepted otherwise (its replayed echo / turn-end settle it).
-   *  One not in history is dead with the old server (absent → resend) or,
-   *  on a rejoin, possibly still in flight (unknown → held). */
+   *  server, accepted for a terminal turn (its replayed echo / turn-end
+   *  settle it). A turn still "inProgress" on a FRESH spawn died with the
+   *  old server (#625): one holding nothing but our prompt is absent (the
+   *  prompt is re-sent, at-least-once); one that visibly ran is reported
+   *  ended `interrupted` right here — the coordinator ends the row on that
+   *  evidence, named by the ref since the attempt has no turn id yet — so
+   *  the prompt is never run twice and never waits for a terminal the dead
+   *  server cannot send. One not in history is dead with the old server
+   *  (absent → resend) or, on a rejoin, possibly still in flight (unknown →
+   *  held). */
   async reconcile(pending: AttemptRef[]): Promise<ReconcileOutcome[]> {
     const client = this.#port.client();
     const threadId = this.#port.threadId();
@@ -124,20 +131,29 @@ export class CodexDriver implements RuntimeDriver {
     const res = await client.threadRead(threadId);
     const thread = (res.thread ?? res) as Record<string, unknown>;
     const turns = Array.isArray(thread.turns) ? thread.turns as Array<Record<string, unknown>> : [];
-    const byRef = new Map<string, { turnId: string; inProgress: boolean }>();
+    const byRef = new Map<string, { turnId: string; inProgress: boolean; ran: boolean }>();
     for (const turn of turns) {
       const tid = String(turn.id ?? "");
       const items = Array.isArray(turn.items) ? turn.items as Array<Record<string, unknown>> : [];
+      const inProgress = String(turn.status ?? "") === "inProgress";
+      const ran = items.some((item) => String(item.type ?? "") !== "userMessage"); // any output at all: the agent took the prompt
       for (const item of items) {
         if (String(item.type ?? "") !== "userMessage") continue;
         const ref = String(item.clientId ?? item.clientUserMessageId ?? "");
-        if (ref) byRef.set(ref, { turnId: tid, inProgress: String(turn.status ?? "") === "inProgress" });
+        if (ref) byRef.set(ref, { turnId: tid, inProgress, ran });
       }
     }
+    const rejoined = this.#port.rejoined();
     return pending.map((p) => {
       const hit = byRef.get(p.runtimeRef);
-      if (hit) return { attemptId: p.attemptId, outcome: hit.inProgress && this.#port.rejoined() ? "running" as const : "accepted" as const, runtimeTurnId: hit.turnId };
-      return { attemptId: p.attemptId, outcome: this.#port.rejoined() ? "unknown" as const : "absent" as const };
+      if (!hit) return { attemptId: p.attemptId, outcome: rejoined ? "unknown" as const : "absent" as const };
+      if (!hit.inProgress) return { attemptId: p.attemptId, outcome: "accepted" as const, runtimeTurnId: hit.turnId };
+      if (rejoined) return { attemptId: p.attemptId, outcome: "running" as const, runtimeTurnId: hit.turnId };
+      // Dead with the old server (#625): nothing but our prompt → re-send;
+      // any output → it ran, so end it interrupted rather than run it twice.
+      if (!hit.ran) return { attemptId: p.attemptId, outcome: "absent" as const };
+      this.emit({ kind: "turn_ended", runtimeTurnId: hit.turnId, runtimeRef: p.runtimeRef, status: "interrupted", detail: "app-server died mid-turn" });
+      return { attemptId: p.attemptId, outcome: "accepted" as const, runtimeTurnId: hit.turnId };
     });
   }
 }
