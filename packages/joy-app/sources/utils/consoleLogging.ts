@@ -16,7 +16,13 @@
  * └─ console.error / console.warn (always, regardless of flag)
  *    ├─ call original console method ✅
  *    ├─ capture to in-app buffer ✅
- *    └─ send to remote log server (if configured) ✅
+ *    └─ send to remote log server (if configured AND output enabled) ✅
+ *
+ * Remote-disable semantics (#426): the console-output flag is also the
+ * remote-upload flag. Turning output off drops the upload backlog, aborts
+ * what is in flight, and stops NEW uploads for every level — warn/error
+ * keep reaching the native console and the in-app buffer, but nothing
+ * leaves the device until output is enabled again.
  */
 
 import { log } from '@/log';
@@ -26,7 +32,7 @@ import { loadAppConfig } from '@/sync/appConfig';
 import { Platform } from 'react-native';
 import { serializeForLogs } from '@/utils/truncateForLogs';
 import { resolveConsoleOutputEnabled } from '@/utils/consoleOutputSetting';
-import { createLogUploader, type LogUploader } from '@/utils/logUploader';
+import { createLogUploader, sendLogUpload, type LogUploader } from '@/utils/logUploader';
 
 let logBuffer: any[] = []
 const MAX_BUFFER_SIZE = MAX_APP_LOG_ENTRIES
@@ -91,18 +97,17 @@ export function initConsoleLogging() {
 
   if (remoteLogServerUrl) {
     const url = remoteLogServerUrl + '/logs'
+    // The send settles the RESPONSE BODY too, under the same abort signal:
+    // fetch resolves at headers, and releasing the slot then left bodies
+    // streaming with nothing bounding them (#426).
     uploader = createLogUploader({
-      send: (body, signal) => fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-        signal,
-      }),
+      send: (body, signal) => sendLogUpload(fetch, url, body, signal),
     })
   }
 
   function sendLog(level: string, formatted: string) {
-    if (!uploader) {
+    // Output off = remote off, for warn/error as well (#426).
+    if (!uploader || !consoleOutputEnabled) {
       return
     }
 

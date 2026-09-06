@@ -239,6 +239,8 @@ interface StorageState {
     noteSessionVisible: (sessionId: string) => void;
     applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => void;
     applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => void;
+    /** Logout: forget the account's in-memory data (sessions, messages, machines) (#189). */
+    resetAccountData: () => void;
     applySettings: (settings: Settings, version: number) => void;
     applySettingsLocal: (settings: Partial<Settings>) => void;
     // Mod 13: replace the full settings object (no merge), so deprecated/unknown
@@ -1042,6 +1044,15 @@ export const storage = create<StorageState>()((set, get) => {
                     } satisfies SessionMessages
                 }
             };
+        }),
+        resetAccountData: () => set({
+            sessions: {},
+            sessionsData: null,
+            sessionListViewData: null,
+            sessionMessages: {},
+            sessionMessageMru: [],
+            machines: {},
+            isDataReady: false,
         }),
         applyOlderMessagesLoading: (sessionId: string, isLoading: boolean) => set((state) => {
             const existing = state.sessionMessages[sessionId];

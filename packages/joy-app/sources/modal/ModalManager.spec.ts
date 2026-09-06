@@ -113,6 +113,26 @@ describe('ModalManager', () => {
         expect(await p).toBe(true);
     });
 
+    it('#336: a DIFFERENT provider registering in the same tick still settles the old owner\'s dialogs', async () => {
+        // Reviewer: A has a pending confirm; A unregisters and a distinct B
+        // registers synchronously. B shows nothing for it, yet A's promise and
+        // resolver used to stay alive forever.
+        const a = fakeProvider();
+        Modal.setFunctions(a.owner, a.show, a.hide, a.hideAll);
+        const pending = Modal.confirm('A pending');
+        Modal.clearFunctions(a.owner);
+        const b = fakeProvider();
+        Modal.setFunctions(b.owner, b.show, b.hide, b.hideAll);
+        expect(b.shown).toHaveLength(0);
+        expect(await pending).toBe(false);
+        expect(Modal.pendingCount()).toBe(0);
+        // B is fully functional afterwards.
+        const next = Modal.confirm('B');
+        expect(b.shown).toHaveLength(1);
+        Modal.resolveConfirm(b.shown[0].id, true);
+        expect(await next).toBe(true);
+    });
+
     it('#176: the iOS native prompt resolves an erased field as "" and only Cancel as null', async () => {
         platform.OS = 'ios';
         alertMock.prompt.mockReset();

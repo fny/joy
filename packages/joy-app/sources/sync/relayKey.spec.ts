@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { relayKeyForUrl, legacyRelayKeyForUrl, relayKeyNeedsMigration } from './relayKey';
+import { relayKeyForUrl, legacyRelayKeyForUrl, relayKeyNeedsMigration, resolveLegacySlotOwnership } from './relayKey';
 
 const SECURE_STORE_KEY = /^[A-Za-z0-9._-]+$/;
 
@@ -61,5 +61,29 @@ describe('relayKeyForUrl (#398, #192)', () => {
 
     it('still yields a safe key for an unparsable URL', () => {
         expect(relayKeyForUrl('not a url')).toMatch(SECURE_STORE_KEY);
+    });
+});
+
+describe('resolveLegacySlotOwnership (#398 regression)', () => {
+    const http = 'http://relay.example';
+    const https = 'https://relay.example';
+
+    it('a slot the https origin claimed is never handed to http', () => {
+        expect(resolveLegacySlotOwnership(http, 'relay.example', http)).toBe('other');
+    });
+
+    it('an unmarked legacy slot belongs to http only when http is the persisted active relay', () => {
+        expect(resolveLegacySlotOwnership(http, null, http)).toBe('mine');
+        expect(resolveLegacySlotOwnership(http, null, https)).toBe('unknown');
+        expect(resolveLegacySlotOwnership(http, null, 'https://joy.voltai.party:4997')).toBe('unknown');
+    });
+
+    it('a marker naming this origin (a completed migration) keeps ownership whatever is active', () => {
+        expect(resolveLegacySlotOwnership(http, 'http_relay.example', https)).toBe('mine');
+    });
+
+    it('origins whose identifier never changed own their slot outright', () => {
+        expect(resolveLegacySlotOwnership(https, null, http)).toBe('mine');
+        expect(resolveLegacySlotOwnership('https://joy.voltai.party:4997', null, http)).toBe('mine');
     });
 });

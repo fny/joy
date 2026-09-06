@@ -315,6 +315,7 @@ export const zhHans: TranslationStructure = {
         syncStartFailedReload: '应用无法开始同步。请重新加载应用后重试。',
         answerKeptAsDraft: '无法发送回答。已在下方保留为草稿。',
         spawnDidNotStart: '会话已被接受，但未能及时启动。请检查该机器上的守护进程。',
+        historyPageFailed: '无法加载更早的消息。',
     },
 
     newSession: {

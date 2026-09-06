@@ -8,7 +8,8 @@ import type { Machine } from '@/sync/storageTypes';
 // keeps its cached metadata, so it stays in the list as a known, named machine.
 export const MACHINE_ONLINE_WINDOW_MS = 60_000;
 
-export function isMachineOnline(machine: Machine, now: number = Date.now()): boolean {
+/** Liveness at an explicit instant — the testable core. */
+export function isMachineOnlineAt(machine: Machine, now: number): boolean {
     // The relay's v2 lease liveness is authoritative for OFFLINE when present:
     // it is the same signal the work queue dispatches on, so "online" here can
     // never disagree with "a spawn would actually run".
@@ -19,4 +20,31 @@ export function isMachineOnline(machine: Machine, now: number = Date.now()): boo
     // instead of a cached `leaseAlive: true` keeping a silent machine online
     // forever (#323). Records that predate leaseAlive use the same window.
     return now - machine.activeAt < MACHINE_ONLINE_WINDOW_MS;
+}
+
+/**
+ * Liveness now. Deliberately UNARY: it is handed straight to Array.filter all
+ * over the app, and a second `now` parameter received the row index there —
+ * every cached lease passed the filter forever while the direct call said
+ * offline (#323, #180). Callers that need a fixed instant use
+ * isMachineOnlineAt.
+ */
+export function isMachineOnline(machine: Machine): boolean {
+    return isMachineOnlineAt(machine, Date.now());
+}
+
+/**
+ * Milliseconds until the earliest currently-online machine in `machines`
+ * leaves the window, or null when none is online. A page that lists online
+ * machines re-renders at that moment so a silent daemon drops off the list
+ * without waiting for an unrelated store update (#180).
+ */
+export function msUntilNextMachineOffline(machines: Iterable<Machine>, now: number): number | null {
+    let next: number | null = null;
+    for (const machine of machines) {
+        if (!isMachineOnlineAt(machine, now)) continue;
+        const remaining = machine.activeAt + MACHINE_ONLINE_WINDOW_MS - now;
+        if (next === null || remaining < next) next = remaining;
+    }
+    return next === null ? null : Math.max(0, next);
 }

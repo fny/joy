@@ -14,7 +14,7 @@ import { t } from '@/text';
 import { isTauri } from '@/utils/isTauri';
 import { useOverlayNav } from '@/-session/sessionOverlayNav';
 import { DEFAULT_APP_ZOOM } from '@/hooks/useTauriZoom';
-import { applyNavPathname, canNavBack, canNavForward, createNavHistory, type NavDirection } from './sidebarNavHistory';
+import { applyNavEntry, canNavBack, canNavForward, createNavHistory, type NavDirection } from './sidebarNavHistory';
 
 const TAURI_HEADER_CONTROL_LEFT = Math.ceil(92 / DEFAULT_APP_ZOOM);
 
@@ -27,9 +27,18 @@ const TAURI_HEADER_CONTROL_LEFT = Math.ceil(92 / DEFAULT_APP_ZOOM);
  * back/forward/gesture is observed via `popstate` and marked 'pop' so it
  * moves the cursor instead of appending a new entry (#240).
  */
+/** expo-router stamps every history entry with `history.state.id` (fresh on
+ *  pushState, kept on replaceState, restored on popstate) — the browser's own
+ *  entry identity, which the model prefers over pathname inference (#240). */
+function browserEntryKey(): string | null {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return null;
+    const id = (window.history.state as { id?: unknown } | null)?.id;
+    return typeof id === 'string' ? id : null;
+}
+
 function useNavHistory() {
     const pathname = usePathname();
-    const historyRef = React.useRef(createNavHistory(pathname));
+    const historyRef = React.useRef(createNavHistory(pathname, browserEntryKey()));
     const directionRef = React.useRef<NavDirection>(null);
     const [canGoBack, setCanGoBack] = React.useState(false);
     const [canGoForward, setCanGoForward] = React.useState(false);
@@ -47,7 +56,7 @@ function useNavHistory() {
     React.useEffect(() => {
         const dir = directionRef.current;
         directionRef.current = null;
-        historyRef.current = applyNavPathname(historyRef.current, pathname, dir);
+        historyRef.current = applyNavEntry(historyRef.current, { key: browserEntryKey(), pathname }, dir);
         setCanGoBack(canNavBack(historyRef.current));
         setCanGoForward(canNavForward(historyRef.current));
     }, [pathname]);

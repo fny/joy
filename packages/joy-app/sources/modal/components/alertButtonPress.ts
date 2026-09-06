@@ -44,3 +44,35 @@ export function runAlertButton(onPress: (() => unknown) | undefined, host: Alert
         (e) => { if (host.isLive()) host.fail(errorMessage(e)); },
     );
 }
+
+export interface AlertButtonGate {
+    /** True while a press is being handled (sync or awaiting an async action). */
+    isBusy(): boolean;
+    /** Run the press unless one is already in flight; returns whether it ran. */
+    press(onPress: (() => unknown) | undefined, host: AlertButtonHost): boolean;
+}
+
+/**
+ * A SYNCHRONOUS in-flight guard around runAlertButton. The dialog's React
+ * `pending` state only lands after a commit, so two activations of the same
+ * handler before that commit (a double-click, Enter plus click) launched the
+ * async action twice (#331). The gate is claimed before onPress is called
+ * and released only when the operation settles — close or fail.
+ */
+export function createAlertButtonGate(): AlertButtonGate {
+    let busy = false;
+    return {
+        isBusy: () => busy,
+        press(onPress, host) {
+            if (busy) return false;
+            busy = true;
+            runAlertButton(onPress, {
+                isLive: host.isLive,
+                pending: host.pending,
+                close: () => { busy = false; host.close(); },
+                fail: (message) => { busy = false; host.fail(message); },
+            });
+            return true;
+        },
+    };
+}

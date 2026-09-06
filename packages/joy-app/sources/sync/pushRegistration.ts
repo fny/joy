@@ -9,6 +9,7 @@ import { registerPushToken, unregisterPushToken } from './apiPush';
 import { relayScopedMMKV } from './serverConfig';
 import {
     hasPendingCleanup,
+    needsDisabledCleanup,
     reconcileRegistration,
     serialized,
     unregisterDevice,
@@ -249,6 +250,18 @@ export async function unregisterCurrentDevicePushToken(credentials: AuthCredenti
         return { removed: true, pending: [] };
     }
     return serialized(() => unregisterDevice(pushTokenApi(credentials), pushTokenStore(), logCleanup));
+}
+
+/**
+ * Mobile push is OFF right now (startup, foreground, or the setting just
+ * changed): remove whatever of this device is still on the relay. Called by
+ * the sync owner's push-token sync, so an offline removal followed by a
+ * restart is finished without anyone opening the notifications screen (#181).
+ */
+export async function reconcileDisabledPushState(credentials: AuthCredentials): Promise<void> {
+    if (Platform.OS === 'web') return;
+    if (!needsDisabledCleanup(pushTokenStore())) return;
+    await unregisterCurrentDevicePushToken(credentials);
 }
 
 /** True while an old (or disabled) token of this device may still be on the relay. */

@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
+import { useMachinesOnlineTick } from '@/hooks/useMachineOnline';
 import { sync } from '@/sync/sync';
 import { machineStatusOnly } from '@/sync/v2/machine';
 import type { Machine } from '@/sync/storageTypes';
@@ -15,6 +16,10 @@ let cachedJoyMachineIds: Set<string> | null = null;
 
 export function useJoyMachines(): { machines: Machine[]; probing: boolean } {
     const all = useAllMachines({ includeOffline: true });
+    // Re-render when the earliest online machine's heartbeat window lapses,
+    // so the online set (and the probe keyed on it) follows a daemon that
+    // simply went silent instead of waiting for an unrelated update (#180).
+    useMachinesOnlineTick(all);
     const onlineIds = all.filter(isMachineOnline).map(m => m.id);
     const [ids, setIds] = React.useState<Set<string> | null>(cachedJoyMachineIds);
 

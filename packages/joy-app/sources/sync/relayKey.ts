@@ -77,3 +77,31 @@ export function relayKeyForUrl(url: string): string {
 export function relayKeyNeedsMigration(url: string): boolean {
     return relayKeyForUrl(url) !== legacyRelayKeyForUrl(url);
 }
+
+/**
+ * Who owns the values stored under `url`'s LEGACY identifier?
+ *
+ * The legacy identifier of a non-https relay is the CANONICAL identifier of
+ * the https relay on the same host: `relay.example` is https's slot today and
+ * was http's slot before #398. A migration that simply read, copied and
+ * deleted it handed a fresh HTTPS login to the HTTP origin and logged HTTPS
+ * out. So a legacy slot is only taken over with established ownership:
+ *  - 'mine'    — an owner marker names this origin, or there is no marker
+ *                (the slot predates the markers) and the persisted active
+ *                relay IS this origin: the app was using it, so the slot
+ *                was written by it;
+ *  - 'other'   — the marker names another origin (https claimed its slot);
+ *  - 'unknown' — no marker and another relay is active: leave it alone —
+ *                never assigned to this origin, never deleted.
+ * `marker` is the owner recorded for the legacy identifier (canonical id of
+ * the writer), maintained by serverConfig.claimRelaySlot on every canonical
+ * write.
+ */
+export type LegacySlotOwnership = 'mine' | 'other' | 'unknown';
+
+export function resolveLegacySlotOwnership(url: string, marker: string | null, activeUrl: string): LegacySlotOwnership {
+    if (!relayKeyNeedsMigration(url)) return 'mine';
+    const mine = relayKeyForUrl(url);
+    if (marker !== null) return marker === mine ? 'mine' : 'other';
+    return relayKeyForUrl(activeUrl) === mine ? 'mine' : 'unknown';
+}

@@ -314,6 +314,7 @@ export const ca: TranslationStructure = {
         syncStartFailedReload: 'L\'aplicació no ha pogut iniciar la sincronització. Torna a carregar l\'aplicació i torna-ho a provar.',
         answerKeptAsDraft: 'No s\'ha pogut enviar la resposta. S\'ha desat com a esborrany a sota.',
         spawnDidNotStart: 'La sessió s\'ha acceptat però no s\'ha iniciat a temps. Comprova el dimoni d\'aquella màquina.',
+        historyPageFailed: 'No s\'han pogut carregar els missatges anteriors.',
     },
 
     newSession: {

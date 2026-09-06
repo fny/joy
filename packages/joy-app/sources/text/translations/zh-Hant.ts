@@ -314,6 +314,7 @@ export const zhHant: TranslationStructure = {
         syncStartFailedReload: '應用程式無法開始同步。請重新載入應用程式後重試。',
         answerKeptAsDraft: '無法傳送回答。已在下方保留為草稿。',
         spawnDidNotStart: '工作階段已被接受，但未能及時啟動。請檢查該機器上的守護程式。',
+        historyPageFailed: '無法載入更早的訊息。',
     },
 
     newSession: {

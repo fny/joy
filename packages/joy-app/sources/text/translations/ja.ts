@@ -315,6 +315,7 @@ export const ja: TranslationStructure = {
         syncStartFailedReload: 'アプリが同期を開始できませんでした。アプリを再読み込みしてもう一度お試しください。',
         answerKeptAsDraft: '回答を送信できませんでした。下に下書きとして保存しました。',
         spawnDidNotStart: 'セッションは受け付けられましたが、時間内に開始しませんでした。そのマシンのデーモンを確認してください。',
+        historyPageFailed: '以前のメッセージを読み込めませんでした。',
     },
 
     newSession: {

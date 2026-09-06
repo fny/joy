@@ -4,7 +4,7 @@ vi.mock('@/modal', () => ({ Modal: { alert: vi.fn() } }));
 vi.mock('@/text', () => ({ t: (k: string) => k }));
 vi.mock('@/log', () => ({ log: { log: vi.fn(), error: vi.fn() } }));
 
-import { runAlertButton, type AlertButtonHost } from './alertButtonPress';
+import { createAlertButtonGate, runAlertButton, type AlertButtonHost } from './alertButtonPress';
 
 function host(live = true) {
     const calls: string[] = [];
@@ -63,5 +63,43 @@ describe('runAlertButton (#331)', () => {
         }
         expect(calls).toEqual(['pending']);
         expect(unhandled).not.toHaveBeenCalled();
+    });
+});
+
+describe('createAlertButtonGate (#331 residual)', () => {
+    it('two activations before React commits launch the async action once', async () => {
+        // Reviewer: invoking the current press handler twice before the
+        // `pending` state lands started the operation twice.
+        const gate = createAlertButtonGate();
+        const action = vi.fn(async () => {});
+        const { h, calls } = host();
+        expect(gate.press(action, h)).toBe(true);
+        expect(gate.press(action, h)).toBe(false);
+        expect(action).toHaveBeenCalledTimes(1);
+        expect(gate.isBusy()).toBe(true);
+        await flush();
+        expect(calls).toEqual(['pending', 'close']);
+        expect(gate.isBusy()).toBe(false);
+    });
+
+    it('a failed action releases the gate so the user can retry', async () => {
+        const gate = createAlertButtonGate();
+        const { h, calls } = host();
+        gate.press(async () => { throw new Error('offline'); }, h);
+        await flush();
+        expect(calls).toEqual(['pending', 'fail:offline']);
+        expect(gate.isBusy()).toBe(false);
+        expect(gate.press(async () => {}, h)).toBe(true);
+    });
+
+    it('sync handlers release the gate immediately (return or throw)', () => {
+        const gate = createAlertButtonGate();
+        const { h } = host();
+        gate.press(() => {}, h);
+        expect(gate.isBusy()).toBe(false);
+        gate.press(() => { throw new Error('nope'); }, h);
+        expect(gate.isBusy()).toBe(false);
+        gate.press(undefined, h);
+        expect(gate.isBusy()).toBe(false);
     });
 });

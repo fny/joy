@@ -115,6 +115,15 @@ describe('sessionFileLinks', () => {
         expect(parseSessionFileLink('src/report.ts:2026', { sessionRoot })?.line).toBe(2026);
     });
 
+    it('keeps leading/trailing whitespace in a viewer path — it is part of the file name (#163)', () => {
+        expect(resolveSessionFilePath(' notes.txt', sessionRoot)?.absolutePath)
+            .toBe('/Users/kirilldubovitskiy/projects/joy/ notes.txt');
+        expect(resolveSessionFilePath('/tmp/report ', sessionRoot)?.absolutePath).toBe('/tmp/report ');
+        expect(resolveSessionFilePath('', sessionRoot)).toBeNull();
+        // Textual links still trim — there the whitespace is prose, not a name.
+        expect(parseSessionFileLink(' src/report.ts ', { sessionRoot })?.path).toBe('src/report.ts');
+    });
+
     it('resolves viewer input to an absolute path', () => {
         expect(resolveSessionFilePath('packages/joy-app/README.md', sessionRoot)).toEqual({
             path: 'packages/joy-app/README.md',

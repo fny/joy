@@ -359,6 +359,7 @@ export const en = {
         syncStartFailedReload: 'The app could not start syncing. Reload the app and try again.',
         answerKeptAsDraft: 'The answer could not be sent. It was kept as a draft below.',
         spawnDidNotStart: 'The session was accepted but did not start in time. Check the daemon on that machine.',
+        historyPageFailed: 'Older messages could not be loaded.',
     },
 
     newSession: {

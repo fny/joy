@@ -312,6 +312,7 @@ export const it: TranslationStructure = {
         syncStartFailedReload: 'L\'app non è riuscita ad avviare la sincronizzazione. Ricarica l\'app e riprova.',
         answerKeptAsDraft: 'Non è stato possibile inviare la risposta. È stata conservata come bozza qui sotto.',
         spawnDidNotStart: 'La sessione è stata accettata ma non è partita in tempo. Controlla il daemon su quella macchina.',
+        historyPageFailed: 'Impossibile caricare i messaggi precedenti.',
     },
 
     newSession: {
