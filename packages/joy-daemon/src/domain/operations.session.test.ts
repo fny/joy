@@ -160,6 +160,31 @@ describe("teleport import canonicalises the cwd (#549)", () => {
   });
 });
 
+// ── #550 ─────────────────────────────────────────────────────────────────────
+
+describe("same-machine teleport into another folder (#550)", () => {
+  const b64 = TELEPORT_B64;
+  it("an import into ANOTHER folder is allowed; into the source's own folder it is refused", async () => {
+    const src = join(tmpdir(), `joy-src-${uid()}`); mkdirSync(src);
+    const dst = join(tmpdir(), `joy-dst-${uid()}`); mkdirSync(dst);
+    cleanupDirs.push(src, dst, cwdToTranscriptDir(src), cwdToTranscriptDir(dst));
+    const sid = "abc-5500";
+    const live = { id: uid(), cwd: src, status: "active", claudeSessionId: sid, transcriptPath: join(cwdToTranscriptDir(src), `${sid}.jsonl`) };
+    const create = vi.fn(async () => ({ id: "f0f0f0f4", toJSON: () => ({}) }));
+    const reg = { list: () => [live], listRecords: () => [{ id: live.id, claudeSessionId: sid, launchCwd: src }], create } as never;
+    const other = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(other.ok).toBe(true);                                                              // old code: "belongs to a session …"
+    expect((create.mock.calls[0] as unknown[])[0]).toMatchObject({ cwd: dst, resume_id: sid, forkSession: true });
+    const same = (await op("joy-teleport-import").handler(reg, { cwd: src, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(same.error).toMatch(/belongs to a session in/);
+    expect(create).toHaveBeenCalledTimes(1);
+    // The record alone (a daemon-forgotten session in the source folder) refuses too.
+    const recOnly = { list: () => [], listRecords: () => [{ id: "deadbeef", claudeSessionId: sid, launchCwd: `${src}/.` }], create } as never;
+    const viaRec = (await op("joy-teleport-import").handler(recOnly, { cwd: src, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(viaRec.error).toMatch(/belongs to a session in/);
+  });
+});
+
 // ── #552 ─────────────────────────────────────────────────────────────────────
 
 describe("provenance keeps daemon slash commands interceptable (#552)", () => {
