@@ -124,3 +124,27 @@ describe('toolErrorParser', () => {
         });
     });
 });
+
+describe('bounded <tool_use_error> scanning (#458)', () => {
+    const openings = '<tool_use_error>'.repeat(16_000); // 256k characters, no closing tag
+
+    it('repeated unclosed openings classify in well under 100 ms as not-an-error', () => {
+        const t0 = performance.now();
+        expect(isCancelError(openings)).toBe(false);
+        expect(hasToolUseError(openings)).toBe(false);
+        expect(parseToolUseError(openings)).toEqual({ isToolUseError: false, errorMessage: null });
+        expect(parseAllToolUseErrors(openings)).toEqual([]);
+        expect(performance.now() - t0).toBeLessThan(100);
+    });
+
+    it('a pair after many unclosed openings is still found (first opening … first close, as before)', () => {
+        const message = openings + 'boom</tool_use_error>';
+        expect(parseToolUseError(message).errorMessage).toBe('<tool_use_error>'.repeat(15_999) + 'boom');
+        expect(isCancelError(message)).toBe(true);
+    });
+
+    it('extracts multiple pairs in order and stops at a trailing unclosed one', () => {
+        expect(parseAllToolUseErrors('<tool_use_error>a</tool_use_error>x<tool_use_error> b </tool_use_error><tool_use_error>c'))
+            .toEqual(['a', 'b']);
+    });
+});

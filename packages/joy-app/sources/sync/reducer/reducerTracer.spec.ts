@@ -500,3 +500,62 @@ describe('reducerTracer', () => {
         });
     });
 });
+
+describe('deep orphan chains (#389)', () => {
+    const uuidAt = (i: number) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+    const chained = (i: number): NormalizedMessage => ({
+        id: `sc-${i}`,
+        localId: null,
+        createdAt: 3000 + i,
+        role: 'agent',
+        isSidechain: true,
+        content: [{ type: 'text', text: `step ${i}`, uuid: uuidAt(i), parentUUID: uuidAt(i - 1) }],
+    });
+
+    it('releases a 10,000-message chain iteratively, in order, without losing any message', () => {
+        const state = createTracer();
+        const N = 10_000;
+        // History paged backward: every descendant arrives before its parent → all buffered.
+        const buffered = traceMessages(state, Array.from({ length: N }, (_, k) => chained(N - k)));
+        expect(buffered).toHaveLength(0);
+        expect(state.orphanMessages.size).toBe(N);
+
+        traceMessages(state, [{
+            id: 'task', localId: null, createdAt: 1000, role: 'agent', isSidechain: false,
+            content: [{ type: 'tool-call', id: 'tool1', name: 'Task', input: { prompt: 'deep' }, description: null, uuid: 'task-uuid', parentUUID: null }],
+        }]);
+
+        const t0 = performance.now();
+        const released = traceMessages(state, [{
+            id: 'root', localId: null, createdAt: 2000, role: 'agent', isSidechain: true,
+            content: [{ type: 'sidechain', uuid: uuidAt(0), prompt: 'deep' }],
+        }]);
+        expect(performance.now() - t0).toBeLessThan(100);
+
+        expect(released).toHaveLength(N + 1);
+        expect(released[0].id).toBe('root');
+        expect(released.slice(1).map(m => m.id)).toEqual(Array.from({ length: N }, (_, k) => `sc-${k + 1}`));
+        expect(released.every(m => m.sidechainId === 'task')).toBe(true);
+        expect(state.orphanMessages.size).toBe(0);
+        expect(state.processedIds.size).toBe(N + 2);
+    });
+
+    it('keeps depth-first emit order for branching orphans', () => {
+        const state = createTracer();
+        const child = (id: string, uuid: string, parent: string): NormalizedMessage => ({
+            id, localId: null, createdAt: 1, role: 'agent', isSidechain: true,
+            content: [{ type: 'text', text: id, uuid, parentUUID: parent }],
+        });
+        const A = uuidAt(1), B = uuidAt(2), A1 = uuidAt(3), B1 = uuidAt(4), root = uuidAt(0);
+        traceMessages(state, [child('a1', A1, A), child('b1', B1, B), child('a', A, root), child('b', B, root)]);
+        traceMessages(state, [{
+            id: 'task', localId: null, createdAt: 1000, role: 'agent', isSidechain: false,
+            content: [{ type: 'tool-call', id: 't', name: 'Task', input: { prompt: 'p' }, description: null, uuid: 'tu', parentUUID: null }],
+        }]);
+        const out = traceMessages(state, [{
+            id: 'root', localId: null, createdAt: 2000, role: 'agent', isSidechain: true,
+            content: [{ type: 'sidechain', uuid: root, prompt: 'p' }],
+        }]);
+        expect(out.map(m => m.id)).toEqual(['root', 'a', 'a1', 'b', 'b1']);
+    });
+});

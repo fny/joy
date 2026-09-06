@@ -7,6 +7,10 @@ export class MachineEncryption {
     private machineId: string;
     private encryptor: Encryptor & Decryptor;
     private cache: EncryptionCache;
+    // Set when Encryption drops this instance: a decryption still in flight
+    // must not write into the cache its REPLACEMENT (same machine id, new
+    // key) now owns (#351).
+    private retired = false;
 
     constructor(
         machineId: string,
@@ -16,6 +20,11 @@ export class MachineEncryption {
         this.machineId = machineId;
         this.encryptor = encryptor;
         this.cache = cache;
+    }
+
+    /** Stop writing to the shared cache; reads still work. */
+    retire(): void {
+        this.retired = true;
     }
 
     /**
@@ -43,7 +52,7 @@ export class MachineEncryption {
             if (!decrypted[0]) {
                 return null;
             }
-            
+
             const parsed = MachineMetadataSchema.safeParse(decrypted[0]);
             if (!parsed.success) {
                 console.error('Failed to parse machine metadata:', parsed.error);
@@ -51,7 +60,9 @@ export class MachineEncryption {
             }
 
             // Cache the result
-            this.cache.setCachedMachineMetadata(this.machineId, version, parsed.data);
+            if (!this.retired) {
+                this.cache.setCachedMachineMetadata(this.machineId, version, parsed.data);
+            }
             return parsed.data;
         } catch (error) {
             console.error('Failed to decrypt machine metadata:', error);
@@ -81,19 +92,21 @@ export class MachineEncryption {
             return cached;
         }
 
-        // Decrypt if not cached
+        // Only an OPENED state is cached. A null here means the open failed
+        // (or the decryptor was mid-recovery); caching it — as both the
+        // success and the catch path used to — made a transient failure
+        // permanent for that version until eviction (#353). Left uncached,
+        // the next poll simply retries.
         try {
             const encryptedData = decodeBase64(encrypted, 'base64');
             const decrypted = await this.encryptor.decrypt([encryptedData]);
-            const result = decrypted[0] || null;
-            
-            // Cache the result (including null values)
-            this.cache.setCachedDaemonState(this.machineId, version, result);
+            const result = decrypted[0] ?? null;
+            if (result !== null && !this.retired) {
+                this.cache.setCachedDaemonState(this.machineId, version, result);
+            }
             return result;
         } catch (error) {
             console.error('Failed to decrypt daemon state:', error);
-            // Cache null result to avoid repeated decryption attempts
-            this.cache.setCachedDaemonState(this.machineId, version, null);
             return null;
         }
     }

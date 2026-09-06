@@ -75,3 +75,20 @@ describe('joy-file segments', () => {
         ]);
     });
 });
+
+describe('splitJoySegments — bounded tag scanning', () => {
+    it('20k unfinished "<joy-img " fragments split in well under 100 ms and stay plain text', () => {
+        const text = '<joy-img '.repeat(20_000);
+        const t0 = performance.now();
+        const segs = splitJoySegments(text);
+        expect(performance.now() - t0).toBeLessThan(100);
+        expect(segs.every(s => s.kind === 'md')).toBe(true);
+        // Only the trailing (streaming) fragment is stripped; the rest is kept verbatim.
+        expect(segs.map(s => (s as { text: string }).text).join('')).toBe('<joy-img '.repeat(19_999));
+    });
+
+    it('an unfinished tag followed by a complete one does not swallow the complete one', () => {
+        const segs = splitJoySegments('<joy-img src="/a <joy-img src="/b.png" />');
+        expect(segs.some(s => s.kind === 'img' && s.src === '/b.png')).toBe(true);
+    });
+});

@@ -10,6 +10,16 @@ import { machineKillSession, machinePane } from '@/sync/v2/machine';
 
 const POLL_INTERVAL_MS = 5000;
 
+// tunnelJson returns the daemon's HTTP status WITHOUT throwing, so every call
+// here validates status + payload shape. Before this, a daemon 500 during a
+// poll replaced the known session list with [] and cleared the error, made
+// killSession "succeed", and made fetchPane return an empty terminal (#322).
+function daemonError(op: string, res: { status: number; data: unknown }): Error {
+    const body = res.data as { error?: unknown } | null;
+    const detail = typeof body?.error === 'string' ? body.error : `HTTP ${res.status}`;
+    return new Error(`${op} failed: ${detail}`);
+}
+
 export function useJoyRpcSessions(machineId: string | null) {
     const [sessions, setSessions] = React.useState<JoySession[]>([]);
     const [loading, setLoading] = React.useState(false);
@@ -26,18 +36,22 @@ export function useJoyRpcSessions(machineId: string | null) {
         try {
             const lctx = sync.machineOnlyCtx(machineId);
             if (!lctx) throw new Error('no machine context');
-            const result = ((await machineListSessions(lctx)).data?.sessions ?? []) as unknown as JoySession[];
+            const res = await machineListSessions(lctx);
+            const list = res.data?.sessions;
+            if (res.status !== 200 || !Array.isArray(list)) throw daemonError('list sessions', res);
             if (mountedRef.current) {
-                setSessions(Array.isArray(result) ? result : []);
+                setSessions(list as unknown as JoySession[]);
                 setError(null);
             }
         } catch (e) {
+            // Keep the last good list; only the error changes.
             if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
         }
     }, [machineId]);
 
     React.useEffect(() => {
-        setSessions([]);
+        setSessions([]); // a different machine: its list is genuinely unknown
+        setError(null);
         if (!machineId) return;
         setLoading(true);
         refresh().finally(() => { if (mountedRef.current) setLoading(false); });
@@ -56,7 +70,8 @@ export function useJoyRpcSessions(machineId: string | null) {
         if (!machineId) throw new Error('no machine selected');
         const kctx = sync.machineCtxFor(machineId, id);
         if (!kctx) throw new Error('no machine context');
-        await machineKillSession(kctx);
+        const res = await machineKillSession(kctx);
+        if (res.status !== 200 || !res.data?.ok) throw daemonError('kill session', res);
         await refresh();
     }, [machineId, refresh]);
 
@@ -64,8 +79,10 @@ export function useJoyRpcSessions(machineId: string | null) {
         if (!machineId) throw new Error('no machine selected');
         const pctx = sync.machineCtxFor(machineId, id);
         if (!pctx) throw new Error('no machine context');
-        const result = await machinePane(pctx);
-        return (result.data as { text?: string } | null)?.text ?? '';
+        const res = await machinePane(pctx);
+        const text = res.data?.text;
+        if (res.status !== 200 || res.data?.ok === false || typeof text !== 'string') throw daemonError('read pane', res);
+        return text;
     }, [machineId]);
 
     return { sessions, loading, error, refresh, createSession, killSession, fetchPane };

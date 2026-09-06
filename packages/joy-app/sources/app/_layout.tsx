@@ -34,6 +34,7 @@ import { useTauriZoom } from '@/hooks/useTauriZoom';
 import { BrowserNavigationShortcuts } from '@/hooks/useBrowserNavigationShortcuts';
 import { useTauriDrag } from '@/hooks/useTauriDrag';
 import { preventInputZoom } from '@/utils/preventInputZoom';
+import { stripDevCredentialParams } from '@/utils/devCredentialUrl';
 
 // Mobile web: stop iOS Safari from zooming the page when small-font inputs
 // gain focus. Module scope so it runs before first paint.
@@ -256,7 +257,8 @@ export default function RootLayout() {
                 await sodium.ready;
 
                 let credentials = await TokenStorage.getCredentials();
-                const devCredentials = getDevWebQueryCredentials() ?? getDevEnvironmentCredentials();
+                const queryCredentials = getDevWebQueryCredentials();
+                const devCredentials = queryCredentials ?? getDevEnvironmentCredentials();
 
                 if (devCredentials) {
                     const credentialsChanged = credentials?.token !== devCredentials.token
@@ -269,8 +271,13 @@ export default function RootLayout() {
                         }
                     }
 
-                    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-                        window.history.replaceState({}, '', window.location.pathname);
+                    // Scrub ONLY the consumed dev_token/dev_secret query params,
+                    // and only when they came from the URL. Replacing the whole
+                    // URL with the pathname also erased "#key=…" from
+                    // /terminal/connect links before the approval screen read
+                    // it, so terminal pairing failed under env auto-login (#185).
+                    if (queryCredentials && Platform.OS === 'web' && typeof window !== 'undefined') {
+                        window.history.replaceState({}, '', stripDevCredentialParams(window.location.href));
                     }
                 }
 

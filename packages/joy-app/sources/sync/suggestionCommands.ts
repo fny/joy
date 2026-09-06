@@ -3,6 +3,7 @@
  * Reads commands directly from session metadata storage
  */
 
+import { safeGet } from '@/utils/safeGet';
 import Fuse from 'fuse.js';
 import { storage } from './storage';
 
@@ -116,13 +117,23 @@ function getCommandsFromSession(sessionId: string): CommandItem[] {
                     command: cmd,
                     // Prefer the command's own frontmatter description, fall back
                     // to the built-in description map.
-                    description: descriptions?.[cmd] ?? COMMAND_DESCRIPTIONS[cmd],
+                    description: describeCommand(cmd, descriptions),
                 });
             }
         }
     }
 
     return commands;
+}
+
+// Own-property + string-typed description lookup. A command named
+// "__proto__"/"toString"/"constructor" (session metadata is user-controlled)
+// used to receive Object.prototype or a function as its description (#405).
+function describeCommand(cmd: string, descriptions: Record<string, string> | undefined): string | undefined {
+    const own = safeGet(descriptions, cmd);
+    if (typeof own === 'string') return own;
+    const builtin = safeGet(COMMAND_DESCRIPTIONS, cmd);
+    return typeof builtin === 'string' ? builtin : undefined;
 }
 
 // Main export: search commands with fuzzy matching
