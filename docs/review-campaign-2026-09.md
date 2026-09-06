@@ -446,6 +446,23 @@ app.
   their own modules), and the Codex TUI silently downgraded Astra to a
   smaller model (restored to gpt-6-astra xhigh).
 
+- 2026-09-08 (residual rounds, late) — landed and queued for Astra: the
+  Claude-driver boundary residuals (fe602db6: head/payload re-plan after the
+  pane gate, evidence fencing by payload version, transcript edges fenced to
+  the open hook turn, tombstone interrupts through the scheduler, durable
+  relay start intent/ack receipts), Codex residuals (8d9f1eea: partial-items
+  rejoin, snapshot-boundary item identity, owned-client-id bracket flush),
+  app residuals (5249a03e: exact-case paths, table blank runs, per-key
+  decrypt gaps with a visible placeholder row, own-property link
+  resolution), the pairing proof follow-ups (92a53429 + 3d784403: app-side
+  proof over tweetnacl, account flavour behind
+  `JOY_RELAY_PAIRING_PROOF_ACCOUNT`, challenge rotation, cross-package
+  vector; second Fable review: F1 partial only by the flag, rest fixed).
+  Astra verdicts so far closed #50 #51 #55 #525 #552 #562 and the eleven
+  daemon Wave F items; open residual rounds: CLI (#502 #494 #497 #498
+  #501), handoff guard lockout (#53), session/registry (#474 #549 #564
+  #550). **60 open.**
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
