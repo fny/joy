@@ -163,17 +163,25 @@ export const v2 = {
          *  Omitted → a fresh id, i.e. a distinct creation. */
         creationIntentId?: string;
         /** Seal the spec (see spawnSpec.ts) instead of sending plain JSON.
-         *  Only valid once the target daemon opens sealed specs — today no
-         *  caller passes a key, so the wire is unchanged (#107). */
+         *  Only valid when the target daemon opens sealed specs — it
+         *  advertises `capabilities.spawnSpecSealed` in its machine metadata
+         *  (#107). Sealing draws a fresh nonce per call: a retry under the
+         *  same `creationIntentId` must pass `spawnSpecWire` instead. */
         sealKey?: Uint8Array | null;
+        /** The spec ALREADY on the wire form, sent verbatim (wins over `spec`
+         *  + `sealKey`). The relay's idempotency hash covers these bytes, so
+         *  every re-POST of one creation intent must carry the identical
+         *  envelope — spawn.ts encodes once per intent and passes it here. */
+        spawnSpecWire?: string;
     }) =>
         v2fetch('POST', '/sessions', {
             mode: 'spawn', daemonId: machineId, creationIntentId: opts?.creationIntentId ?? randomUUID(),
             // The daemon's nucleus lane decodes this envelope to launch the
-            // real agent session. Plain JSON until the daemon side of #107
-            // lands (the relay stores it verbatim, so cwd/extraArgs are
-            // readable there — see spawnSpec.ts for the sealed contract).
-            ...(spec ? { spawnSpec: encodeSpawnSpec(spec, opts?.sealKey ?? null) } : {}),
+            // real agent session: sealed under the machine's spawn-spec key
+            // when the daemon opens sealed specs, else the plain JSON every
+            // daemon parses (the relay stores it verbatim — spawnSpec.ts).
+            ...(opts?.spawnSpecWire !== undefined ? { spawnSpec: opts.spawnSpecWire }
+                : spec ? { spawnSpec: encodeSpawnSpec(spec, opts?.sealKey ?? null) } : {}),
         }),
     deleteSession: (id: string) => v2fetch('DELETE', `/sessions/${id}`),
     // Retry a spawn that FAILED (e.g. directory missing), opting into

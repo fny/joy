@@ -292,6 +292,14 @@ export const MachineMetadataSchema = z.object({
         pi: z.boolean().optional(),
         detectedAt: z.number(),
     }).optional(),
+    // The daemon's feature advertisement (relay.ts #upsertMachine). Absent on
+    // a daemon that predates it — every flag reads as off, never as an error.
+    capabilities: z.object({
+        // The nucleus lane opens `v2e1:` spawn specs sealed under the machine's
+        // "Joy Spawn Spec" key, so v2SpawnAndWait seals instead of sending the
+        // plain JSON an older daemon needs (#107, sync/v2/spawnSpec.ts).
+        spawnSpecSealed: z.boolean().optional(),
+    }).optional(),
 });
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>;

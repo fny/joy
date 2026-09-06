@@ -369,7 +369,15 @@ export class RelayClient {
 
   async #upsertMachine(metadata: Record<string, unknown>): Promise<boolean> {
     // Always report the LIVE hostname (an OS rename shouldn't need a daemon restart).
-    const base: Record<string, unknown> = { ...metadata, host: hostname() };
+    // `capabilities` is the daemon's feature advertisement (sealed with the
+    // rest of the blob): the app checks it before choosing a wire form. A
+    // capability is only ever ADDED here — an older app ignores the field.
+    //   spawnSpecSealed — the nucleus lane opens `v2e1:` spawn specs sealed
+    //   under deriveSpawnSpecKey(machineKey, machineId), so the app seals
+    //   `POST /joy/v2/sessions` spawnSpec instead of sending plain JSON (#107).
+    const prior = metadata.capabilities;
+    const capabilities = { ...(prior && typeof prior === 'object' && !Array.isArray(prior) ? prior as Record<string, unknown> : {}), spawnSpecSealed: true };
+    const base: Record<string, unknown> = { ...metadata, host: hostname(), capabilities };
     try {
       for (let attempt = 0; attempt < 4; attempt++) {
         const current = await this.fetchOwnMachine();
