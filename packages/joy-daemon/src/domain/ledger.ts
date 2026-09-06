@@ -159,9 +159,14 @@ export interface PrunePolicy {
   /** Terminal commands (with their attempts), acked outbox rows and receipts older than this are removed. */
   terminalOlderThanMs: number;
   observationsOlderThanMs: number;
+  /** Hard cap on a session's forwarded-transcript-uuid receipts (#560) — see
+   *  Ledger#pruneTranscriptReceipts. Age alone never bounded this set. */
+  transcriptReceiptsPerSession: number;
 }
-/** 7-day retention for terminal rows (campaign decision, 2026-09-06). */
-export const DEFAULT_PRUNE_POLICY: PrunePolicy = { terminalOlderThanMs: 7 * 24 * 3_600_000, observationsOlderThanMs: 7 * 24 * 3_600_000 };
+/** 7-day retention for terminal rows (campaign decision, 2026-09-06); 5,000
+ *  forwarded-uuid receipts per session, which is more transcript entries than
+ *  any recovery replays. */
+export const DEFAULT_PRUNE_POLICY: PrunePolicy = { terminalOlderThanMs: 7 * 24 * 3_600_000, observationsOlderThanMs: 7 * 24 * 3_600_000, transcriptReceiptsPerSession: 5_000 };
 
 /** Backpressure thresholds per session (design §1.5). */
 export const OUTBOX_MAX_ROWS = 2_000;
@@ -1018,11 +1023,45 @@ export class Ledger {
       const commands = Number(this.#run(`DELETE FROM commands WHERE state IN (${placeholders(TERMINAL_STATES.length)}) AND updated_at<?`, ...TERMINAL_STATES, cut).changes);
       const outbox = Number(this.#run("DELETE FROM outbox WHERE acked_at IS NOT NULL AND acked_at<?", cut).changes);
       const observations = Number(this.#run("DELETE FROM observations WHERE at<?", now - policy.observationsOlderThanMs).changes);
-      const receipts = Number(this.#run("DELETE FROM receipts WHERE at<?", cut).changes);
+      const receipts = Number(this.#run("DELETE FROM receipts WHERE at<?", cut).changes)
+        + this.#pruneTranscriptReceipts(policy.transcriptReceiptsPerSession);
       this.#run("DELETE FROM session_generations WHERE ended_at IS NOT NULL AND ended_at<? AND session_id NOT IN (SELECT DISTINCT session_id FROM commands)", cut);
       return { commands, outbox, observations, receipts };
     }, "prune");
   }
+
+  /** Bound the forwarded-transcript-uuid set (#560).
+   *
+   *  `transcript_uuid` receipts are the daemon's "already forwarded this
+   *  entry" memory: one per transcript entry, for as long as the session
+   *  lives. Age alone never bounded them — a long-running agent emitting a
+   *  distinct entry a second reaches 86k rows a day and every one of them
+   *  outlives the 7-day cut only to be replaced by the next.
+   *
+   *  What replay actually needs is the identifiers at or after the session's
+   *  COMMITTED transcript cursor: recovery re-reads from there, never from
+   *  the start. So a receipt goes only when it is BOTH outside the newest
+   *  `keepPerSession` for its session AND older than that committed cursor.
+   *  A session with no committed cursor (or one still held pending behind
+   *  unacked outbox rows) keeps everything up to the count cap — the cap is
+   *  the hard bound, the cursor only ever protects MORE. Anything dropped
+   *  that a full replay does reach is re-sent under its stable
+   *  runtimeEventId, which the relay dedupes: at-least-once, the same
+   *  guarantee the emit/ack gap already carries. */
+  #pruneTranscriptReceipts(keepPerSession: number): number {
+    return Number(this.#run(`
+      DELETE FROM receipts WHERE rowid IN (
+        SELECT r.rowid FROM (
+          SELECT rowid AS rowid, session_id, at,
+                 ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY at DESC, ref DESC) AS rn
+            FROM receipts WHERE kind = 'transcript_uuid') r
+        LEFT JOIN checkpoints c
+          ON c.session_id = r.session_id AND c.kind = 'claude_transcript'
+         AND c.pending_through_seq IS NULL AND c.ref <> ''
+        WHERE r.rn > ? AND (c.session_id IS NULL OR r.at < c.updated_at))`,
+      Math.max(1, keepPerSession)).changes);
+  }
+
   /** Drop everything a session left (its record is being deleted for good). */
   forgetSession(sessionId: string): void {
     this.tx(() => {
@@ -1031,6 +1070,9 @@ export class Ledger {
       this.#run("DELETE FROM observations WHERE session_id=?", sessionId);
       this.#run("DELETE FROM checkpoints WHERE session_id=?", sessionId);
       this.#run("DELETE FROM jobs WHERE session_id=?", sessionId);
+      // The forwarded-uuid / seq / runtime-ref receipts too (#560): they were
+      // left behind, so a deleted session's set stayed in the ledger for good.
+      this.#run("DELETE FROM receipts WHERE session_id=?", sessionId);
     }, "forget");
   }
 }
