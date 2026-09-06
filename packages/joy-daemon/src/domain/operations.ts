@@ -20,6 +20,7 @@ import { SessionEndedError } from "./ledger";
 import { queueFor } from "./queueFacade";
 import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
+import { loadWindowRecord } from "./windowRecord";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
 import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, type HandoffTarget } from "./handoff";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots, withPathLock } from "./fileOps";
@@ -39,6 +40,20 @@ import { randomBytes } from "crypto";
 
 /** Accepted git URL shapes for a git-URL session spawn. */
 export const GIT_URL_RE = /^(https?:\/\/|git@|ssh:\/\/)\S+$/;
+
+/** The permission mode a fork / teleport export continues under — FAIL
+ *  CLOSED (#50). The pane read (detectPermissionMode) is null whenever the
+ *  capture fails (control-mode hiccup, mid-redraw, a recovered session with a
+ *  dead pane); passing that through made create() default the continuation
+ *  to bypassPermissions. Fall back to the session's persisted mode (the
+ *  launch / last /permissions set, or codex's settings) and, failing that,
+ *  to `default` — never to bypass. */
+export function sourcePermissionMode(src: Pick<AgentSession, "id" | "detectPermissionMode">): string {
+  const live = src.detectPermissionMode();
+  if (live) return live;
+  const rec = loadWindowRecord(src.id);
+  return rec?.claudePermissionMode ?? rec?.codexSettings?.permissionMode ?? "default";
+}
 
 /** Clone `gitUrl` into `cwd` for a git-URL session spawn — the ONE clone step
  *  shared by the `create` op and the relay lane (nucleusLane runs it before
@@ -570,7 +585,7 @@ export const machineOps: MachineOp[] = [
           case "claude": {
             const resumeId = src.claudeSessionId ?? (src.transcriptPath ? basename(src.transcriptPath, ".jsonl") : undefined);
             if (!resumeId) return { ok: false, error: "This session has no conversation to fork yet." };
-            session = await registry.create({ ...common, resume_id: resumeId, forkSession: true, forceNew: true, permissionMode: src.detectPermissionMode() ?? undefined });
+            session = await registry.create({ ...common, resume_id: resumeId, forkSession: true, forceNew: true, permissionMode: sourcePermissionMode(src) });
             break;
           }
           case "agy": {
@@ -588,7 +603,7 @@ export const machineOps: MachineOp[] = [
           case "codex": {
             const tid = (src as { codexThreadId?: string }).codexThreadId;
             if (!tid) return { ok: false, error: "This Codex session has no thread to fork yet." };
-            session = await registry.create({ ...common, agent: "codex", resume_id: forkCodexThread(tid), forceNew: true, permissionMode: src.detectPermissionMode() ?? undefined });
+            session = await registry.create({ ...common, agent: "codex", resume_id: forkCodexThread(tid), forceNew: true, permissionMode: sourcePermissionMode(src) });
             break;
           }
           default:
@@ -685,7 +700,7 @@ export const machineOps: MachineOp[] = [
       } finally { closeSync(fd); }
       return {
         ok: true, agent: "claude", claudeSessionId, cwd: src.cwd,
-        model: src.currentModel ?? src.model, permissionMode: src.detectPermissionMode() ?? undefined,
+        model: src.currentModel ?? src.model, permissionMode: sourcePermissionMode(src),
         bytes: buf.length, truncated: off > 0, transcriptBase64: buf.toString("base64"),
       };
     },
@@ -731,7 +746,9 @@ export const machineOps: MachineOp[] = [
         const session = await registry.create({
           cwd, resume_id: sid, forkSession: true, forceNew: true, createDir: params.createDir === true,
           model: typeof params.model === "string" ? params.model : undefined,
-          permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
+          // Fail closed (#50): an export that could not read its mode says
+          // nothing, and create() would default that to bypassPermissions.
+          permissionMode: typeof params.permissionMode === "string" && params.permissionMode ? params.permissionMode : "default",
         });
         return { ok: true, session: session.toJSON(), localSessionId: session.id };
       } catch (e) {
