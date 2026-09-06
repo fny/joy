@@ -24,7 +24,14 @@ export function createAttachments(db) {
         if (sess.account_id !== accountId) throw new ApiError(403, 'not_your_session');
         const { rows: [dup] } = await t.query(
           `SELECT id, size FROM attachments WHERE session_id = $1 AND cipher_hash = $2`, [sessionId, hash]);
-        if (dup) return { attachmentId: dup.id, size: dup.size, deduped: true };
+        if (dup) {
+          // The client is about to cite this id in a message. Renew the orphan
+          // clock INSIDE the upload transaction: an unreferenced duplicate older
+          // than the TTL was otherwise acknowledged and then swept before the
+          // message that cites it could commit (#611).
+          await t.query(`UPDATE attachments SET uploaded_at = now() WHERE id = $1`, [dup.id]);
+          return { attachmentId: dup.id, size: dup.size, deduped: true };
+        }
         const id = randomUUID();
         await t.query(
           `INSERT INTO attachments (id, session_id, account_id, cipher_hash, size, body)
@@ -41,42 +48,59 @@ export function createAttachments(db) {
     },
 
     /** Called by POST /messages BEFORE acceptance: every id must exist and
-     *  belong to the session, and each row is marked with the intent marker
-     *  in the SAME transaction — from this instant the orphan sweep cannot
-     *  touch it, so acceptance can never land on a swept attachment. */
+     *  belong to the session, and each gets a reference row under the intent
+     *  marker in the SAME transaction — from this instant the orphan sweep
+     *  cannot touch it, so acceptance can never land on a swept attachment.
+     *  References are a JOIN TABLE (#58): a blob cited by two prompts holds
+     *  one row per prompt, so every offer finds its own authorization. */
     async reference(t, sessionId, marker, ids) {
       for (const id of ids) {
         const { rows: [row] } = await t.query(
           `SELECT id FROM attachments WHERE id = $1 AND session_id = $2`, [id, sessionId]);
         if (!row) throw new ApiError(422, 'unknown_attachment');
-        await t.query(`UPDATE attachments SET referenced_by = $1 WHERE id = $2 AND referenced_by IS NULL`,
-          [marker, id]);
+        await t.query(`INSERT INTO attachment_refs (attachment_id, ref) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [id, marker]);
       }
     },
 
-    /** After acceptance: upgrade the intent marker to the real messageId.
-     *  Rows already claimed by an earlier message keep their reference. */
+    /** After acceptance: upgrade this message's intent rows to the real
+     *  messageId. Rows held by earlier messages are untouched. */
     async claim(t, ids, marker, messageId) {
       for (const id of ids) {
-        await t.query(`UPDATE attachments SET referenced_by = $1 WHERE id = $2 AND referenced_by = $3`,
+        await t.query(`UPDATE attachment_refs SET ref = $1 WHERE attachment_id = $2 AND ref = $3`,
           [messageId, id, marker]);
       }
     },
 
-    /** Session purge cascade. */
+    /** The attachments a given message (command) may cite — what the work
+     *  offer carries so the daemon can fetch device-born content. */
+    async forMessage(t, messageId) {
+      const { rows } = await t.query(
+        `SELECT a.id, a.size FROM attachment_refs r JOIN attachments a ON a.id = r.attachment_id
+         WHERE r.ref = $1 ORDER BY a.created_at`, [messageId]);
+      return rows.map((a) => ({ id: a.id, size: a.size }));
+    },
+
+    /** Session purge cascade (refs cascade from the blob rows). */
     async purgeSession(t, sessionId) {
       await t.query(`DELETE FROM attachments WHERE session_id = $1`, [sessionId]);
     },
 
-    /** Uploaded-but-never-referenced rows older than the TTL. Stale intent
-     *  markers (acceptance failed after the mark) age out the same way. */
+    /** Blobs with no real reference whose LAST upload is older than the TTL.
+     *  Stale intent rows (acceptance failed after the mark) age out first so
+     *  they cannot pin a blob forever; the pin holds while ANY message cites
+     *  the blob (#58). */
     async sweepOrphans(now = Date.now()) {
       const cutoff = new Date(now - ORPHAN_TTL_MS).toISOString();
-      const { rows } = await db.query(
-        `DELETE FROM attachments
-         WHERE (referenced_by IS NULL OR referenced_by LIKE 'intent:%') AND created_at < $1
-         RETURNING id`, [cutoff]);
-      return rows.length;
+      return db.tx(async (t) => {
+        await t.query(`DELETE FROM attachment_refs WHERE ref LIKE 'intent:%' AND created_at < $1`, [cutoff]);
+        const { rows } = await t.query(
+          `DELETE FROM attachments a
+           WHERE a.uploaded_at < $1
+             AND NOT EXISTS (SELECT 1 FROM attachment_refs r WHERE r.attachment_id = a.id)
+           RETURNING id`, [cutoff]);
+        return rows.length;
+      });
     },
   };
 }

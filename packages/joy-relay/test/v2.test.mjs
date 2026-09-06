@@ -657,8 +657,9 @@ describe('review fixes: regression coverage', () => {
       body: { ciphertext: 'msg', attachments: [cited] },
     });
     expect(ok.status).toBe(202);
-    // Age everything past the TTL; the referenced row must survive the sweep.
-    await db.query(`UPDATE attachments SET created_at = now() - interval '2 days' WHERE session_id = $1`, [sessionId]);
+    // Age everything past the TTL (the orphan clock is the LAST upload, #611);
+    // the referenced row must survive the sweep.
+    await db.query(`UPDATE attachments SET created_at = now() - interval '2 days', uploaded_at = now() - interval '2 days' WHERE session_id = $1`, [sessionId]);
     const swept = await att.sweepOrphans();
     expect(swept).toBe(1);
     expect((await call('GET', `/joy/v2/attachments/${orphan}`)).status).toBe(404);
