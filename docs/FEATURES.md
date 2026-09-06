@@ -489,8 +489,18 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   closed answers `session_ended` (#551, #542, #553). Command id, payload
   version, session generation, runtime attempt id and outbox sequence are
   distinct identities; a confirmed delivery stays in the receipt table after
-  its pending row is gone (#516); a write from a superseded generation is
-  refused (#481); a checkpoint commits only once the outbound rows it covers
+  its pending row is gone (#516); the forwarded-transcript-uuid receipts are
+  capped per session (`PrunePolicy.transcriptReceiptsPerSession`, 5,000 —
+  applied as they are written and by the daily sweep) but a receipt goes
+  only when the session's COMMITTED transcript cursor covers it: every
+  receipt carries a ledger-wide insertion ordinal, a checkpoint records the
+  ordinal it was written at (`receiptOrd`, `coversReceipts: false` for the
+  legacy import), and both the cap and the age rule prune by that boundary
+  — never by wall time, never past the committed cursor because a newer one
+  is pending behind unacked output, and never at all for a session with no
+  committed cursor, whose replay re-reads the whole file with no stable
+  occurrence id to dedupe (#560, review 0133a2fb); a write from a
+  superseded generation is refused (#481); a checkpoint commits only once the outbound rows it covers
   are acked (#67); terminals are posted after their session's outputs by
   one sender per session (#74). Execution policy lives in one place: a
   command's state is the ledger row the coordinator moves, a submit is
