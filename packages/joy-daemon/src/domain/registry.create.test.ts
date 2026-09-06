@@ -72,7 +72,14 @@ test("a launch record that cannot be persisted refuses the launch — nothing is
   // The state dir refuses the record write (rename is the atomic writer's
   // landing step). Everything the create needs before that point (hook
   // settings) was written by the previous test in this file.
-  const rename = vi.spyOn(fs, "renameSync").mockImplementation(() => { throw Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" }); });
+  // Only the launch RECORD's rename fails: other atomic writes on the create
+  // path (the options prompt, since #473) must succeed so the assertion is
+  // about the record, not the first writer that happens to run.
+  const realRename = fs.renameSync;
+  const rename = vi.spyOn(fs, "renameSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+    if (String(to).includes("window-")) throw Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" });
+    return realRename(from, to);
+  }) as typeof fs.renameSync);
   await expect(reg.create({ cwd })).rejects.toThrow(/could not persist the launch record/);
   rename.mockRestore();
   expect(seen.launchCmd).toBeNull();
