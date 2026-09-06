@@ -34,6 +34,14 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   if (moduleName === 'preact/hooks') {
     return { filePath: preactHooksCjsPath, type: 'sourceFile' };
   }
+  // tweetnacl (the pairing proof's X25519, encryption/pairingProof.ts) probes
+  // Node's `crypto` for a PRNG behind a `typeof require` guard; Metro still
+  // resolves the name statically and there is no such module in the app.
+  // Give it nothing: only nacl.randomBytes/keyPair would need the PRNG, and
+  // the app never calls them (keys come from expo-crypto + libsodium).
+  if (moduleName === 'crypto' && /[/\\]tweetnacl[/\\]/.test(context.originModulePath ?? '')) {
+    return { type: 'empty' };
+  }
   if (baseResolveRequest) {
     return baseResolveRequest(context, moduleName, platform);
   }
