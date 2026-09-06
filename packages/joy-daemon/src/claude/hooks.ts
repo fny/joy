@@ -73,10 +73,16 @@ try {
       trigger: input.trigger,
       permission_mode: input.permission_mode,
       notification_type: input.notification_type,
-      end_reason: input.end_reason,
+      // SessionEnd's wire field is \`reason\` (input.end_reason never existed):
+      // ship it under the daemon's name, accepting either.
+      end_reason: input.end_reason ?? input.reason,
       error_type: input.error_type,
       tool_name: input.tool_name,
       stop_hook_active: input.stop_hook_active,
+      // Subagent identity: tool hooks fire for subagents too, and the daemon
+      // must not read a background agent's PostToolUse as the main agent's.
+      agent_id: input.agent_id,
+      agent_type: input.agent_type,
     };
     // Drop the keys the event didn't carry so the daemon sees an absent field,
     // not a JSON null it has to special-case.
@@ -111,7 +117,10 @@ process.exit(0);
 // launched under "3" keep their snapshot until they restart: they still
 // flip `hooksLive`, and the daemon copes with the missing fields (a hook
 // without permission_mode simply doesn't refresh the mode).
-const HOOK_VERSION = "4";
+// "5": SessionEnd forwards the real wire field (`reason` → end_reason — the
+// "4" script read a field that never existed, so every exit was "other") and
+// the subagent identity (agent_id / agent_type) rides along.
+const HOOK_VERSION = "5";
 
 // The stamp covers the script version AND the embedded node path: the hook
 // command pins the daemon's absolute execPath, so a node upgrade that removes

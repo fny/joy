@@ -42,10 +42,18 @@ test("#485 selector rows stay selectors: trust dialog (no bottom rule) and optio
   const boxedPicker = [RULE, " ❯ 1. Resume from summary", "   2. Resume full session", RULE].join("\n");
   expect(paneInputText(boxedPicker)).toBeNull();
   expect(dialogFromPane(boxedPicker)).not.toBeNull();
-  // A multi-line numbered draft is AMBIGUOUS with an option run → unknown (null), never "".
-  const ambiguous = [RULE, `❯${NBSP}1. first`, "  2. second", RULE, FOOTER_IDLE].join("\n");
-  expect(paneInputText(ambiguous)).toBeNull();
-  expect(paneShowsEmptyReadyPrompt(ambiguous)).toBe(false);
+  // A multi-line numbered list between two rules is told apart by the prompt
+  // COLUMN (#485 residual): Claude paints the input `❯` flush left, a picker
+  // indents its selected row. Flush left → a numbered DRAFT (the gate clears
+  // it and dispatches); indented → still a selector.
+  const draft = [RULE, `❯${NBSP}1. first`, "  2. second", RULE, FOOTER_IDLE].join("\n");
+  expect(paneShowsReadyPrompt(draft)).toBe(true);
+  expect(paneInputText(draft)).toBe("1. first 2. second");
+  expect(paneShowsEmptyReadyPrompt(draft)).toBe(false);
+  expect(paneInputLineSpan(draft)).toBe(2);
+  const indentedRun = [RULE, " ❯ 1. first", "   2. second", RULE, FOOTER_IDLE].join("\n");
+  expect(paneInputText(indentedRun)).toBeNull();
+  expect(paneShowsReadyPrompt(indentedRun)).toBe(false);
 });
 
 // ── #486: footer keywords inside a multi-line draft are draft text ───────────

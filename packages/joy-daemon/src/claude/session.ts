@@ -640,7 +640,7 @@ export class Session {
   #relay: RelaySession | null = null;
   #tailer: TranscriptTailer | null = null;
   #transcriptPollActive = false;
-  #turn: { turnId: string } | null = null;
+  #turn: { turnId: string; since: number } | null = null;
   // Last "thinking" value pushed to the relay. The pane poll (#pollThinking)
   // reconciles this against the live pane so the app's status matches the
   // window; the event-driven setters below give instant feedback in between.
@@ -807,10 +807,22 @@ export class Session {
   /** Hook-reported waiting-for-input: a permission prompt (PermissionRequest /
    *  Notification permission_prompt), an elicitation, agent_needs_input. Not
    *  idle_prompt — that is plain idleness, not a question. */
-  #needsInput: { kind: string; tool?: string; since: number } | null = null;
+  #needsInput: { kind: string; tool?: string; since: number; agent?: string } | null = null;
   /** `since` of the needs-input episode a "permission" push already went out
    *  for — one push per episode, whichever hook opened it. */
   #needsInputPushedFor = 0;
+  /** First poll at which a hook-reported permission wait was NOT on the pane
+   *  (0 = seen on the last poll, or nothing to track). The pane tie-breaker
+   *  clears the wait only after the dialog has been ABSENT this long — not
+   *  after the wait is merely old (#reconcileDialog). */
+  #needsInputAbsentSince = 0;
+  /** The hook-reported TURN edge — the runtime's own turn state, separate from
+   *  the transcript's #turn bookkeeping (which stays open until the tailer
+   *  reaches turn_duration). null until a hook has said either way. With
+   *  hooks live the dispatch/clear gates and busy() consume THIS (see
+   *  #turnRunning / #hookSaysIdle); the transcript's #turn is then output-
+   *  drain bookkeeping, and the pane's generating footer a safety check only. */
+  #hookTurn: { open: boolean; at: number } | null = null;
 
   // ── Message queue ──────────────────────────────────────────────────────────
   // The ONE verified dispatch queue. EVERY app→Claude text — relay app-send,
@@ -864,31 +876,42 @@ export class Session {
   #submitTimer: ReturnType<typeof setTimeout> | null = null;
   // Pending delayed-Enter for a /steer send — separate from #submitTimer so steering
   // (which submits mid-turn) and the dispatch submit don't cancel each other.
-  #steerSubmitTimer: (ReturnType<typeof setTimeout> & { onSuperseded?: () => void }) | null = null;
-  // A /steer owns the pane from its capture until its Enter lands (#34). The
-  // drain pump, the dirty-clear and the draft restore all stand down while this
-  // is set: they used to run concurrently with a steer, so a drain retry that
-  // captured the box mid-steer read the steered text as a stray human draft,
-  // C-u'd it away, and the steer's Enter then submitted an empty box while the
-  // receipt/mirror recorded it as sent.
-  #steering = false;
+  #steerSubmitTimer: (ReturnType<typeof setTimeout> & { onSuperseded?: () => void; text?: string }) | null = null;
+  // The PANE-WRITER LEASE (#34/#476): the identity of the writer that owns the
+  // input box right now — a /steer from its call until its Enter lands, or a
+  // draft restore from its capture to its type. The drain pump, the dirty-clear
+  // and the draft restore all stand down while it is held: they used to run
+  // concurrently with a steer, so a drain retry that captured the box mid-steer
+  // read the steered text as a stray human draft, C-u'd it away, and the
+  // steer's Enter then submitted an empty box while the receipt/mirror recorded
+  // it as sent. It carries an IDENTITY, not a flag: a steer superseded by a
+  // newer one releases nothing when it settles — the shared flag it used to
+  // clear in its finally let the drain type a queued prompt while the newer
+  // steer was still in its capture (#34, review residual).
+  #paneOwner: symbol | null = null;
+  // The exclusive capture→type section of the current pane writer (a steer or
+  // a draft restore), awaited by the next writer so two never interleave in
+  // the box — a steer arriving while an earlier one is still typing waits for
+  // that type to finish before it captures, clears and supersedes it.
+  #paneSection: Promise<void> | null = null;
   // The in-progress drain pass, awaited by #steer so its capture never
   // interleaves with a pass that is between "captured empty" and "typed".
   #drainDone: Promise<void> | null = null;
-  // Serializes #restoreDraftIfAny: a command echo used to start a restore and
-  // immediately kick the drain, which started a second one before the first
-  // capture resolved — the draft was typed twice (#476).
-  #restoringDraft = false;
 
   /** Clear a pending steer submit AND settle its awaiting promise — a
    *  superseded steer's caller must not hang (its text was deliberately
-   *  replaced; the newer steer owns delivery). */
-  #cancelSteerSubmit(): void {
+   *  replaced; the newer steer owns delivery). Returns the superseded steer's
+   *  text (still sitting in the box) so the superseding steer can clear it
+   *  without preserving it as a human draft. */
+  #cancelSteerSubmit(): string | null {
     if (this.#steerSubmitTimer) {
+      const text = this.#steerSubmitTimer.text ?? null;
       clearTimeout(this.#steerSubmitTimer);
       this.#steerSubmitTimer.onSuperseded?.();
       this.#steerSubmitTimer = null;
+      return text;
     }
+    return null;
   }
   // Count of FAILED clear episodes (C-u loop ran, box still dirty) for the current
   // drain: two failed episodes spaced 750ms → pause with the input_dirty banner.
@@ -1327,7 +1350,7 @@ export class Session {
    * program never silently lines up behind an in-flight turn.
    */
   busy(): boolean {
-    return !!(this.#turn || this.#dispatchInFlight || this.#submitTimer || this.#thinking)
+    return !!(this.#turnRunning() || this.#dispatchInFlight || this.#submitTimer || this.#thinking)
       || this.#queue.length > 0;
   }
 
@@ -1548,7 +1571,7 @@ export class Session {
     // verify round 2): cancelling it only after our capture/clear/type awaits
     // let the old timer fire MID-STAGING — submitting our half-typed text
     // while acknowledging the old steer.
-    this.#cancelSteerSubmit();
+    let superseded = this.#cancelSteerSubmit();
     const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeLines)
     // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
     // pending), steer's clear below would wipe that text AND its stale submit Enter would
@@ -1565,14 +1588,35 @@ export class Session {
       this.#dispatchInFlight = null;
       this.#broadcastQueue();
     }
-    // Own the pane for the whole steer (#34): stand the drain pump down and wait
-    // for any pass already past its capture to finish typing, so the two can
-    // never interleave (steered text C-u'd by the drain as a "draft", or two
-    // messages typed into one box).
-    this.#steering = true;
+    // Own the pane for the whole steer (#34): the lease is THIS steer's
+    // identity from here until its Enter lands. Taking it before any await
+    // stands the drain pump, the dirty-clear and a draft restore down, and
+    // tells an earlier steer still settling that the release is no longer
+    // its to make. The exclusive section is then awaited so a writer already
+    // past its capture (an earlier steer mid-type, a draft restore) finishes
+    // typing before this one captures — the two can never interleave (steered
+    // text C-u'd by the drain as a "draft", or two messages typed into one box).
+    const lease = Symbol("steer");
+    this.#paneOwner = lease;
+    let section: Promise<void> | null = null;
+    let releaseSection: () => void = () => {};
     try {
+      while (this.#paneSection) await this.#paneSection;
       while (this.#drainDone) await this.#drainDone;
       if ((this.status as string) === "ended") return; // re-read after the await
+      if (this.#paneOwner !== lease) {
+        // A newer steer arrived while we waited: it owns the pane and this
+        // text was never typed. A relay steer must not read as delivered —
+        // reject so the pull retries it (same rule as the superseded submit).
+        this.#dlog("steer superseded before it captured — nothing typed");
+        if (opts.source === "relay") throw new Error("steer superseded before submit");
+        return;
+      }
+      // The writer we waited on may have been an earlier steer that armed its
+      // Enter meanwhile: supersede that submit now, the same way as above.
+      superseded = this.#cancelSteerSubmit() ?? superseded;
+      section = new Promise<void>((r) => { releaseSection = r; });
+      this.#paneSection = section;
       // No dispatch gate here (steering types alongside an in-flight turn), so clear any
       // leftover ourselves — guarded on the box actually holding text (never clear a box
       // that reads empty). See docs/pane-input-clearing.md for why C-u, not C-c. Let it
@@ -1614,7 +1658,8 @@ export class Session {
         return;
       }
       if (box) {
-        this.#preserveDraft(box);
+        // A superseded steer's own text is not a human draft — clear it, never restore it.
+        if (superseded === null || flattenForMatch(box) !== flattenForMatch(superseded)) this.#preserveDraft(box);
         if (!(await this.#clearBoxWithCtrlU())) {
           this.#queue.unshift(parked());
           this.#pauseDispatch("input_dirty");
@@ -1626,6 +1671,11 @@ export class Session {
         // Typing failed → the caller (relay pull) must NOT confirm this seq.
         throw new Error("steer: typing into the pane failed");
       }
+      // Typed: the exclusive section ends here. The next writer may capture
+      // (and supersede this Enter) during the settle delay; the lease itself is
+      // held until the Enter lands.
+      releaseSection();
+      if (this.#paneSection === section) this.#paneSection = null;
       // Submit after the settle delay (paste-detection swallows an immediate Enter).
       // Coalesce rapid steers; record the receipt + mirror only once the Enter actually
       // lands. The returned promise resolves when the Enter LANDS (or the steer is
@@ -1662,13 +1712,16 @@ export class Session {
         const onSuperseded = opts.source === "relay"
           ? () => reject(new Error("steer superseded before submit"))
           : resolve;
-        this.#steerSubmitTimer = Object.assign(timer, { onSuperseded }) as typeof timer;
+        this.#steerSubmitTimer = Object.assign(timer, { onSuperseded, text }) as typeof timer;
       });
     } finally {
-      // A superseding steer has already set the flag for itself; only the
-      // LAST steer standing releases the pane and wakes the drain.
-      if (!this.#steerSubmitTimer) {
-        this.#steering = false;
+      releaseSection(); // no-op once released after the type
+      if (section && this.#paneSection === section) this.#paneSection = null;
+      // Only the steer that still HOLDS the lease releases the pane and wakes
+      // the drain; a superseded one settles silently — the newer steer owns
+      // the pane and the release (#34).
+      if (this.#paneOwner === lease) {
+        this.#paneOwner = null;
         this.#maybeDrainQueue();
       }
     }
@@ -1867,16 +1920,16 @@ export class Session {
    *               box was already empty/absent); not a failed attempt
    */
   async #clearInputIfDirty(idleOnly: boolean): Promise<"cleared" | "dirty" | "skipped"> {
-    if (idleOnly && (this.#turn || this.#dispatchInFlight)) return "skipped";
-    if (this.#steering) return "skipped"; // the box text is a steer in progress, not leftover (#34)
+    if (idleOnly && (this.#turnRunning() || this.#dispatchInFlight)) return "skipped";
+    if (this.#paneOwner) return "skipped"; // the box text is a steer / restore in progress, not leftover (#34)
     const pane = await this.#captureBox(); // FRESH — stale here = concatenation
     // captureFresh can take a control-mode round-trip; re-check the idle guards after
     // it: a turn / dispatch may have begun while it was in flight, in which case the
     // text in the box is no longer stale leftover and must not be cleared.
-    if (idleOnly && (this.#turn || this.#dispatchInFlight)) return "skipped";
-    if (this.#steering) return "skipped";
+    if (idleOnly && (this.#turnRunning() || this.#dispatchInFlight)) return "skipped";
+    if (this.#paneOwner) return "skipped";
     if (!pane.ok) return "skipped";
-    if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return "skipped";
+    if (idleOnly && ((paneShowsGenerating(pane.out) && !this.#hookSaysIdle()) || !paneShowsReadyPrompt(pane.out))) return "skipped";
     const box = paneInputText(pane.out);
     if (box === "" || box === null) return "skipped"; // empty / no box → nothing to clear
     this.#preserveDraft(box);
@@ -1911,24 +1964,46 @@ export class Session {
   async #restoreDraftIfAny(): Promise<void> {
     const draft = this.#preservedDraft;
     if (!draft || this.status === "ended") return;
-    if (this.#queue.length > 0 || this.#dispatchInFlight || this.#steering) return; // box is needed again — keep holding
+    if (this.#queue.length > 0 || this.#dispatchInFlight || this.#paneOwner) return; // box is needed again — keep holding
     // CLAIM the draft before the first await and run one restore at a time: a
     // command echo started a restore and then kicked the drain, which started
     // a second restore before the first capture resolved — both saw an empty
     // box and the draft was typed twice (#476). The claim is handed back on
     // every path that cannot proceed, so a later idle trigger retries.
-    if (this.#restoringDraft) return;
-    this.#restoringDraft = true;
     this.#preservedDraft = null;
+    const handBack = () => { this.#preservedDraft = this.#preservedDraft ?? draft; };
+    const lease = Symbol("restore");
+    let section: Promise<void> | null = null;
+    let releaseSection: () => void = () => {};
     try {
+      // Wait for any writer already in its section and any drain pass in
+      // flight, THEN take the pane lease: from here to the type every other
+      // writer stands down, so the checks below stay true across the awaits.
+      while (this.#paneSection) await this.#paneSection;
+      while (this.#drainDone) await this.#drainDone;
+      if ((this.status as string) === "ended" || this.#queue.length > 0 || this.#dispatchInFlight || this.#paneOwner) { handBack(); return; }
+      this.#paneOwner = lease;
+      section = new Promise<void>((r) => { releaseSection = r; });
+      this.#paneSection = section;
       const pane = await this.#captureBox();
-      if (!pane.ok || paneInputText(pane.out) !== "") { // capture failed / user typed anew / no box — never merge
-        this.#preservedDraft = this.#preservedDraft ?? draft;
-        return;
-      }
-      if (!(await this.#typeLines(draft))) this.#preservedDraft = this.#preservedDraft ?? draft; // typing failed — keep for retry
+      // Fence AFTER the capture (#476 residual): the session may have ended
+      // for a restart while it was in flight — the retired instance then typed
+      // the draft into its replacement's window — a steer may have taken the
+      // lease, or a message may have been queued. None of those may be typed
+      // over; hand the draft back for the next idle trigger.
+      if ((this.status as string) === "ended" || this.#paneOwner !== lease || this.#queue.length > 0 || this.#dispatchInFlight) { handBack(); return; }
+      if (!pane.ok || paneInputText(pane.out) !== "") { handBack(); return; } // capture failed / user typed anew / no box — never merge
+      if (!(await this.#typeLines(draft))) handBack(); // typing failed — keep for retry
     } finally {
-      this.#restoringDraft = false;
+      releaseSection();
+      if (section && this.#paneSection === section) this.#paneSection = null;
+      if (this.#paneOwner === lease) {
+        this.#paneOwner = null;
+        // A drain refused while the lease was held (a message queued mid-
+        // restore) needs its trigger back; an empty queue needs nothing (and a
+        // kick would re-run this restore on a failed capture, unbounded).
+        if (this.#queue.length > 0) this.#maybeDrainQueue();
+      }
     }
   }
 
@@ -1975,7 +2050,7 @@ export class Session {
    *  readiness is checked separately, after a fresh capture). */
   #canDrain(): boolean {
     return this.status !== "ended" && !this.#queuePaused && !this.#dispatchInFlight
-      && !this.#turn && !this.#steering && this.#queue.length > 0;
+      && !this.#turnRunning() && !this.#paneOwner && this.#queue.length > 0;
   }
 
   #armDrainRetry(ms: number): void {
@@ -2070,7 +2145,12 @@ export class Session {
 
     const pane = await this.#captureBox();
     if (!this.#canDrain()) return; // re-check after the await
-    if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
+    // The generating footer is a hard veto only while the pane is the
+    // authority: with hooks live and the last turn edge saying idle, a frame
+    // still painting "esc to interrupt" is stale — the ready-prompt and empty-
+    // box checks below remain (hook authority owns readiness, the pane owns
+    // what it alone can see: drafts and dialogs).
+    if (!pane.ok || (paneShowsGenerating(pane.out) && !this.#hookSaysIdle()) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
       this.#noteHold(!pane.ok ? "pane capture failed" : "pane busy or not at the prompt");
       this.#armDrainRetry(500);
@@ -2133,6 +2213,15 @@ export class Session {
       return;
     }
     this.#dispatchInFlight = next; // whole item — timeout re-queues it intact
+    // null until THIS item's delayed Enter actually lands (#armSubmit) — reset
+    // the moment the item goes in flight, BEFORE the first awaited write. The
+    // dialog causal guard treats null as +Infinity, so a dialog first sighted
+    // before our submit (including one racing the type→Enter window) can never
+    // be credited to this dispatch; cancelQueued / abort read null as "typed,
+    // Enter not out". It used to be reset only after the type, so a cancel
+    // landing in the typing window still saw the PREVIOUS item's submit mark,
+    // was refused, and the cancelled prompt got its Enter anyway (#35).
+    this.#dispatchSubmittedAt = null;
     this.#broadcastQueue();
     // OWNERSHIP CHECK for everything after the awaited write (#481). While the
     // keystrokes are in flight this instance can be RETIRED — a restart plucks
@@ -2176,11 +2265,6 @@ export class Session {
     // Arm the echo-confirmation timeout: a successful dispatch produces a new turn.
     // If none appears, the message didn't land.
     this.#dispatchExtends = 0;
-    // null until the delayed Enter ACTUALLY lands (#armSubmit): the dialog
-    // causal guard treats null as +Infinity, so a dialog first sighted before
-    // our submit — including one racing the type→Enter window — can never be
-    // credited to this dispatch (verify round 4).
-    this.#dispatchSubmittedAt = null;
     this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
   }
 
@@ -2242,11 +2326,19 @@ export class Session {
       // the terminal), this used to credit it to our dispatch — "delivered" —
       // while the prompt still sat unsent, later to be C-u'd away as a "human
       // draft" (#32). The box is the evidence: when the pane positively shows
-      // our text still in it, this turn is not ours. An unknown box (no
-      // capture, no live box) keeps the legacy confirm — the echo, the hook
-      // and the timeout still cover a genuinely lost prompt.
+      // our text still in it, this turn is not ours — and when there is NO
+      // evidence (capture failed, no live box on screen) there is nothing to
+      // credit either: absence of a box read is not delivery. A turn start is
+      // only proof for a plain prompt when the box is positively seen without
+      // our text; otherwise the text-matched echo, the hook or the timeout
+      // decide (#32 residual — the unknown case used to keep the legacy
+      // confirm, and an unsent prompt vanished as "delivered").
       const pane = this.#tmux.captureCached(this.tmuxWindow);
       const box = pane.ok ? paneInputText(pane.out) : null;
+      if (!cmdLike && box === null) {
+        this.#dlog(`turn started but the input box is unknown (${pane.ok ? "no live box" : "capture failed"}) — not confirming ${this.#dispatchInFlight.id} on a turn start (#32)`);
+        return;
+      }
       if (box) {
         const flatBox = flattenForMatch(box);
         const flatSent = flattenForMatch(this.#dispatchInFlight.text);
@@ -2376,6 +2468,26 @@ export class Session {
     return this.#needsInput;
   }
 
+  /** With hooks live: has a hook (Stop / StopFailure / idle) closed the turn
+   *  AFTER the transcript's open turn began? Then #turn is bookkeeping for
+   *  output still being tailed (its turn_duration entry lags), not a running
+   *  turn — busy() and the drain gate must not wait on it. */
+  #turnClosedByHook(): boolean {
+    const h = this.#hookTurn;
+    return this.#hooksLive && h !== null && !h.open && (this.#turn === null || h.at >= this.#turn.since);
+  }
+  /** The runtime turn as the authority sees it: the transcript's turn unless a
+   *  later hook closed it (hooks live). */
+  #turnRunning(): boolean {
+    return this.#turn !== null && !this.#turnClosedByHook();
+  }
+  /** Hooks are live and the last hook turn edge says IDLE — the pane's
+   *  generating footer is then a stale frame, not a dispatch veto (the box and
+   *  dialog checks still apply). */
+  #hookSaysIdle(): boolean {
+    return this.#hooksLive && this.#hookTurn !== null && !this.#hookTurn.open;
+  }
+
   /**
    * Set the permission mode ABSOLUTELY: detect the current mode from the
    * footer, walk the Shift+Tab cycle to the target, verify. The cycle order
@@ -2386,25 +2498,44 @@ export class Session {
     const CYCLE = ["bypassPermissions", "auto", "default", "acceptEdits", "plan"];
     const ti = CYCLE.indexOf(target);
     if (ti < 0) return { ok: false, error: `unsupported mode: ${target}` };
-    const current = this.detectPermissionMode();
-    if (current === null) return { ok: false, error: "could not read pane" };
+    // FRESH reads on BOTH sides of the cycle (#480 residual): the cached
+    // snapshot is a periodic sweep that can predate the last Shift+Tab, so a
+    // stale footer already naming the target used to return success — and
+    // persist the wrong mode — without one key sent or one live pane read.
+    const current = await this.#readPermissionModeFresh();
+    if (current === null) return { ok: false, error: "could not read the permission mode (no live footer)" };
     const ci = CYCLE.indexOf(current);
     if (ci < 0) return { ok: false, error: `unrecognized current mode: ${current}` };
     const steps = (ti - ci + CYCLE.length) % CYCLE.length;
     for (let i = 0; i < steps; i++) {
-      await this.#tmux.key(this.tmuxWindow,"BTab");
+      const r = await this.#tmux.key(this.tmuxWindow, "BTab");
+      // A failed key leaves the mode somewhere mid-cycle: report it instead
+      // of verifying a cycle that never happened (a failed send used to be
+      // ignored and the stale footer then "verified" the target).
+      if (!r.ok) return { ok: false, error: `Shift+Tab ${i + 1}/${steps} failed: ${r.error ?? "tmux send-keys failed"}` };
       await sleep(120); // footer needs a beat to repaint between cycles
     }
-    await sleep(250);
-    const after = this.detectPermissionMode();
-    // No hook fires on Shift+Tab: the footer read verifies now, and the next
-    // hook carrying permission_mode re-verifies (correcting the record if the
-    // footer lied — #480's false success can no longer persist).
+    if (steps > 0) await sleep(250);
+    const after = await this.#readPermissionModeFresh();
+    // No hook fires on Shift+Tab: the fresh footer read verifies now, and the
+    // next hook carrying permission_mode re-verifies (correcting the record if
+    // the footer lied — #480's false success can no longer persist).
     if (this.#hooksLive) this.#modeSetTarget = { mode: target, at: Date.now() };
     if (after === target) { saveWindowRecord(this.id, { claudePermissionMode: after }); this.#persistedPermissionMode = after; }
     return after === target
       ? { ok: true, mode: after }
       : { ok: false, mode: after ?? undefined, error: `landed on ${after ?? "unknown"}` };
+  }
+
+  /** The permission mode off a FRESH capture's live footer; null when no live
+   *  box is on screen (dialog, login form, spinner-only frame) or the capture
+   *  failed. Unlike detectPermissionMode this never substitutes the last
+   *  hook-reported mode: a Shift+Tab fires no hook, so around a cycle the hook
+   *  value is exactly the stale reading that must not verify it (#480). */
+  async #readPermissionModeFresh(): Promise<string | null> {
+    const pane = await this.#captureBox();
+    if (!pane.ok || !paneShowsReadyPrompt(pane.out)) return null;
+    return parsePermissionModeFromPane(pane.out);
   }
 
   /** Escape → Claude Code interactive interprets as "interrupt generation". */
@@ -2715,7 +2846,7 @@ export class Session {
       const opened = !this.#turn;
       const turnId = this.#turn?.turnId ?? crypto.randomUUID();
       if (opened) {
-        this.#turn = { turnId };
+        this.#turn = { turnId, since: Date.now() };
         this.#relay.send(encodeTurnStart({ turn: turnId, time: timeMs }));
       }
       this.#relay.send(encodeTextEvent(text, { turn: turnId, time: timeMs }));
@@ -2804,6 +2935,31 @@ export class Session {
     this.#broadcastQueue();
     void this.#restoreDraftIfAny();
     this.#maybeDrainQueue();
+  }
+
+  /** `<bash-input>` echo (either transcript shape): remember the command to
+   *  head its output card and confirm the `!cmd` dispatch it proves (#40). */
+  #noteBashInput(content: string): void {
+    const m = /<bash-input>([\s\S]*?)<\/bash-input>/.exec(content);
+    this.#pendingBashCmd = m ? stripAnsi(m[1]).trim() : "";
+    this.#confirmBashEcho(this.#pendingBashCmd);
+  }
+
+  /** Bash output (`!cmd`, either transcript shape) → a structured card the app
+   *  renders as a tool call: command in the header, stdout/stderr in the body.
+   *  Parts are base64'd so arbitrary output can't break the block. Terminal
+   *  escape codes stripped. */
+  #emitBashCard(content: string, entry: Record<string, unknown>, entryTimeMs: number, sid: string | undefined): void {
+    const so = /<bash-stdout>([\s\S]*?)<\/bash-stdout>/.exec(content);
+    const se = /<bash-stderr>([\s\S]*?)<\/bash-stderr>/.exec(content);
+    const stdout = so ? stripAnsi(so[1]).replace(/\s+$/, "") : "";
+    const stderr = se ? stripAnsi(se[1]).replace(/\s+$/, "") : "";
+    const cmd = this.#pendingBashCmd ?? "";
+    this.#pendingBashCmd = undefined;
+    if (this.#shouldEmitNote(entry, entryTimeMs)) {
+      const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+      this.#emitAgentNote(`<bash-run><cmd>${b64(cmd)}</cmd><stdout>${b64(stdout)}</stdout><stderr>${b64(stderr)}</stderr></bash-run>`, entryTimeMs, sid);
+    }
   }
 
   /** A `!cmd` dispatch never produces a user-text echo, a turn start, or a
@@ -2937,7 +3093,7 @@ export class Session {
       // 20s timeout); RESCHEDULE and submit once the turn clears. Bounded by the dispatch
       // timeout: if it never clears, the item is re-queued and #dispatchInFlight changes,
       // so the guard above then abandons this chain.
-      if (this.#turn) { this.#armSubmit(opts); return; }
+      if (this.#turnRunning()) { this.#armSubmit(opts); return; }
       // Mirror + flip thinking ONLY after the Enter has actually gone out over the
       // wire — so the app never shows "sent" before the pane submitted. A failed
       // Enter (disconnect) leaves it unsent; the dispatch echo timeout surfaces it.
@@ -2955,7 +3111,7 @@ export class Session {
       const st: string = this.status; // re-read: it may have flipped to "ended" during the await
       const delivered = this.#itemOutcome.get(target.id) === "delivered";
       if (st === "ended" || !target || (this.#dispatchInFlight !== target && !delivered)) return;
-      if (this.#dispatchInFlight === target && this.#turn) return;
+      if (this.#dispatchInFlight === target && this.#turnRunning()) return;
       if (this.#dispatchInFlight === target) this.#dispatchSubmittedAt = Date.now(); // Enter is out — dialogs after this are ours
       this.#dlog(`submitted ${target.id}`);
       if (opts.mirrorToRelay) this.#mirrorDispatch(target, opts.text);
@@ -3384,6 +3540,29 @@ export class Session {
     const name = String(ev.event ?? "");
     const str = (k: string) => (typeof ev[k] === "string" && ev[k] ? String(ev[k]) : null);
     if (!name) return { ok: false };
+    // IDENTITY FENCE — before anything below changes authority. The route is
+    // the joy session id, which a restart's replacement inherits, so a
+    // delayed forwarder request from the PREDECESSOR process can reach this
+    // object. The one identity the wire carries is claude's session id: an
+    // event for a conversation other than the bound one is a stale process's
+    // (or a sibling's) and must flip no latch, persist no mode, withdraw no
+    // pending end, close no turn and confirm no dispatch. SessionStart is the
+    // legitimate rotation (/clear mints a new id; the case below adopts it),
+    // a "starting" session has nothing bound yet, and a staged (hook-proposed,
+    // not yet activity-confirmed) sid is this process's own. A same-
+    // conversation --resume replacement shares the sid: that residual is
+    // closed by the live-process check in #armHookSessionEnd, not here.
+    const sid = str("session_id");
+    if (sid && this.claudeSessionId && sid !== this.claudeSessionId && name !== "SessionStart"
+        && this.status !== "starting" && this.#pendingHookBinding?.sid !== sid) {
+      process.stderr.write(`[hook] ${this.id} ${name} for sid ${sid} ≠ bound ${this.claudeSessionId} — ignored (not this process)\n`);
+      return { ok: false };
+    }
+    // ACTOR: a subagent's event (agent_id — tool hooks fire for subagents
+    // too) says nothing about the MAIN agent's turn, wait or mode. It still
+    // proves the process lives (latch, pending end), and PermissionRequest is
+    // honoured per actor; everything else below is main-agent state.
+    const actor = str("agent_id");
     // Any event from this process flips the authority latch — even one the
     // switch below does not know (a newer hook set is still proof the
     // forwarder is installed). SessionEnd is the one event that must NOT
@@ -3394,7 +3573,10 @@ export class Session {
       this.#hookSessionEnd = null;
       if (this.#hookSessionEndTimer) { clearTimeout(this.#hookSessionEndTimer); this.#hookSessionEndTimer = null; }
     }
-    this.#notePermissionMode(str("permission_mode"), name);
+    // permission_mode is the MAIN agent's only on the main agent's own events:
+    // a subagent runs under its own mode, and SubagentStop reports the
+    // subagent's — neither may be persisted as the session's mode.
+    if (!actor && name !== "SubagentStop") this.#notePermissionMode(str("permission_mode"), name);
     switch (name) {
       case "PreCompact": {
         this.markCompacting(str("trigger") ?? "auto");
@@ -3410,8 +3592,11 @@ export class Session {
         // so the pid is still alive here: confirm after a short grace, and a
         // pid that is still alive then wins (a replacement under the same id
         // whose predecessor's hook arrived late must never be torn down).
-        const reason = str("end_reason") ?? "other";
-        const sid = str("session_id");
+        // The wire field is `reason` (Claude Code's SessionEnd input); the
+        // forwarder ships it as end_reason and older forwarders shipped only a
+        // (never-present) input.end_reason — so a real /clear read as "other"
+        // and an unresolved-pid session was detached on a rotation. Accept both.
+        const reason = str("end_reason") ?? str("reason") ?? "other";
         if (reason === "clear" || reason === "resume") {
           process.stderr.write(`[hook] ${this.id} SessionEnd reason=${reason} — conversation rotation, session stays\n`);
           return { ok: true };
@@ -3497,6 +3682,7 @@ export class Session {
         // no confirm-on-foreign-turn races.
         this.#setThinking(true);
         this.#needsInput = null;
+        this.#hookTurn = { open: true, at: Date.now() };
         const prompt = str("prompt");
         // Trusted edge — the pane can't clear it. See takesThinkingLease for
         // why a slash command is exempt.
@@ -3539,9 +3725,13 @@ export class Session {
         // land, but this fires first — thinking clears instantly and the next
         // queued message dispatches without waiting for tailer lag. With
         // hooks live this is THE idle edge; the pane's "esc to interrupt"
-        // read is a tie-breaker only (#pollThinking).
+        // read is a tie-breaker only (#pollThinking). THE turn edge: the
+        // transcript's #turn may stay open until the tailer reaches
+        // turn_duration and the pane may still paint the generating footer —
+        // neither holds the queue or busy() once this has fired (#turnRunning).
         this.#setThinking(false);
         this.#needsInput = null;
+        this.#hookTurn = { open: false, at: Date.now() };
         this.#idlePolls = 0;
         this.#maybeDrainQueue();
         return { ok: true };
@@ -3559,6 +3749,7 @@ export class Session {
         process.stderr.write(`[hook] ${this.id} StopFailure error_type=${errorType}\n`);
         this.#setThinking(false);
         this.#needsInput = null;
+        this.#hookTurn = { open: false, at: Date.now() };
         this.#idlePolls = 0;
         const now = Date.now();
         if (errorType === "authentication_failed") {
@@ -3573,13 +3764,20 @@ export class Session {
         return { ok: true };
       }
       case "PostToolUse": {
-        // A tool just completed → the turn is still live. A refresh, not a
-        // setter: a subagent's tools fire this too, so it may not CREATE a
-        // busy session — it re-asserts thinking only inside an open turn a
-        // stale pane read cleared, and voids the pane's idle count. Any
-        // permission that was pending is answered.
-        this.#needsInput = null;
+        // A tool just completed. For the MAIN agent that is a turn in
+        // progress: its permission wait is answered, the pane's idle count is
+        // void, and thinking is re-asserted inside a running turn a stale
+        // pane read cleared. A SUBAGENT's tool (agent_id) says none of that
+        // about the main agent — a background agent finishing a Read used to
+        // erase the main Bash permission wait and revive a turn Stop had
+        // already closed — so it only answers a wait of ITS OWN actor.
+        if (actor) {
+          if (this.#needsInput?.agent === actor) this.#needsInput = null;
+          return { ok: true };
+        }
+        if (!this.#needsInput?.agent) this.#needsInput = null;
         this.#idlePolls = 0;
+        this.#hookTurn = { open: true, at: Date.now() };
         if (this.#turn && !this.#thinking) this.#setThinking(true);
         return { ok: true };
       }
@@ -3589,11 +3787,14 @@ export class Session {
         // later; this is the instant, tool-named edge). The push goes out on
         // Notification(permission_prompt), Claude's own "tell the user" signal.
         const tool = str("tool_name") ?? undefined;
-        process.stderr.write(`[hook] ${this.id} PermissionRequest tool=${tool ?? "?"}\n`);
-        this.#setThinking(false);
+        process.stderr.write(`[hook] ${this.id} PermissionRequest tool=${tool ?? "?"}${actor ? ` agent=${actor}` : ""}\n`);
+        // A subagent's prompt is a real wait for the human too, tagged with
+        // its actor so only that actor's tool completion answers it; it does
+        // not touch the main agent's thinking.
+        if (!actor) this.#setThinking(false);
         this.#idlePolls = 0;
-        if (this.#needsInput?.kind !== "permission") this.#needsInput = { kind: "permission", tool, since: Date.now() };
-        else if (tool) this.#needsInput.tool = tool;
+        if (this.#needsInput?.kind !== "permission") this.#needsInput = { kind: "permission", tool, since: Date.now(), ...(actor ? { agent: actor } : {}) };
+        else if (tool && (this.#needsInput.agent ?? null) === actor) this.#needsInput.tool = tool;
         return { ok: true };
       }
       case "SubagentStop": {
@@ -3614,7 +3815,7 @@ export class Session {
         process.stderr.write(`[hook] ${this.id} Notification${nt ? ` (${nt})` : ""}: ${(str("message") ?? "").slice(0, 80)}\n`);
         this.#setThinking(false);
         this.#idlePolls = 0;
-        if (nt === "idle_prompt") this.#thinkingLeaseUntil = 0;
+        if (nt === "idle_prompt") { this.#thinkingLeaseUntil = 0; this.#hookTurn = { open: false, at: Date.now() }; }
         if (nt === "auth_success") {
           if (this.#authFailure) process.stderr.write(`[hook] ${this.id} auth episode closed by auth_success\n`);
           this.#authFailure = null;
@@ -3652,9 +3853,15 @@ export class Session {
       this.#persistedPermissionMode = loadWindowRecord(this.id)?.claudePermissionMode ?? null;
     }
     if (this.#persistedPermissionMode !== mode) {
-      process.stderr.write(`[hook] ${this.id} ${event} permission_mode=${mode} (record said ${this.#persistedPermissionMode ?? "none"}) — persisted\n`);
-      saveWindowRecord(this.id, { claudePermissionMode: mode });
-      this.#persistedPermissionMode = mode;
+      // The cache advances only on a SUCCESSFUL write: a failed save used to be
+      // cached as done, so the next identical hook never retried it and the
+      // record kept the wrong mode until it happened to change again.
+      if (saveWindowRecord(this.id, { claudePermissionMode: mode })) {
+        process.stderr.write(`[hook] ${this.id} ${event} permission_mode=${mode} (record said ${this.#persistedPermissionMode ?? "none"}) — persisted\n`);
+        this.#persistedPermissionMode = mode;
+      } else {
+        process.stderr.write(`[hook] ${this.id} ${event} permission_mode=${mode} — record write FAILED, will retry on the next hook\n`);
+      }
     }
     const target = this.#modeSetTarget;
     if (target) {
@@ -3672,9 +3879,22 @@ export class Session {
       const pending = this.#hookSessionEnd;
       if (this.status === "ended" || !pending) return;
       // A resolved pid that is claude's own (not the pane shell, #30) and
-      // still alive is the one thing that outranks the hook.
-      const pid = this.pid;
-      const alive = pid !== undefined && pid !== this.#paneShellPid() && Session.#pidAlive(pid);
+      // still alive is the one thing that outranks the hook. FRESH evidence:
+      // an unresolved, shell or dead cached pid is re-resolved from the pane
+      // shell's live child NOW (#pollEnd's rule) — a replacement or re-exec'd
+      // claude under the shell is proof the hook came from a process that is
+      // not the one being watched, and the session must not be ended on it.
+      const shell = this.#paneShellPid();
+      let pid = this.pid;
+      if (pid === undefined || pid === shell || !Session.#pidAlive(pid)) {
+        const fresh = this.#resolvePidFromPane();
+        if (fresh !== undefined) {
+          process.stderr.write(`[hook] ${this.id} SessionEnd(${pending.reason}): pid ${pid ?? "unresolved"} re-resolved to live child ${fresh}\n`);
+          this.pid = fresh;
+          pid = fresh;
+        }
+      }
+      const alive = pid !== undefined && pid !== shell && Session.#pidAlive(pid);
       if (alive) {
         process.stderr.write(`[hook] ${this.id} SessionEnd(${pending.reason}) but pid ${pid} is alive after ${HOOK_SESSION_END_GRACE_MS}ms — left to the pid probe\n`);
         this.#hookSessionEnd = null;
@@ -3821,15 +4041,22 @@ export class Session {
       // input" hook — and `/model` did the same (2026-09-03).
       this.#thinkingLeaseUntil = 0;
       if (this.#thinking) this.#setThinking(false);
+      this.#needsInputAbsentSince = 0; // the wait is visibly still on
     }
     if (!dialog) {
       // Tie-breaker for a hook-reported permission wait: the human answered in
       // the terminal and no later hook cleared it (an answer of "no" with no
-      // further tool or Stop for a while). No dialog on screen for this long
-      // → stale.
-      if (this.#needsInput?.kind === "permission" && Date.now() - this.#needsInput.since > HOOK_NEEDS_INPUT_STALE_MS) {
-        this.#needsInput = null;
-      }
+      // further tool or Stop for a while). Measured as the time the dialog has
+      // been continuously ABSENT — not the wait's age: one contradictory
+      // (mid-repaint) capture 12s into a still-visible prompt used to erase
+      // the wait for good, even when the dialog was back on the next poll.
+      if (this.#needsInput?.kind === "permission") {
+        if (!this.#needsInputAbsentSince) this.#needsInputAbsentSince = Date.now();
+        else if (Date.now() - this.#needsInputAbsentSince > HOOK_NEEDS_INPUT_STALE_MS) {
+          this.#needsInput = null;
+          this.#needsInputAbsentSince = 0;
+        }
+      } else this.#needsInputAbsentSince = 0;
       this.#dialogPendingKey = null;
       this.#dialogObservedKey = null;
       if (this.#dialog) {
@@ -4058,6 +4285,14 @@ export class Session {
         const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(sysContent);
         const out = m ? stripAnsi(m[1]).trim() : "";
         if (out && this.#shouldEmitNote(entry, entryTimeMs)) this.#emitAgentNote(out, entryTimeMs, sid);
+      } else if (sysContent.startsWith("<bash-input>")) {
+        // `!cmd` recorded under the same shape: its <bash-input> echo is the
+        // ONLY delivery evidence a bash dispatch ever gets (#40) — the user-
+        // role branch below confirms it, and this shape must too, or the
+        // executed command sits pending until dispatch_timeout requeues it.
+        this.#noteBashInput(sysContent);
+      } else if (sysContent.startsWith("<bash-stdout>") || sysContent.startsWith("<bash-stderr>")) {
+        this.#emitBashCard(sysContent, entry, entryTimeMs, sid);
       }
       return;
     }
@@ -4253,25 +4488,12 @@ export class Session {
       // `!cmd`: capture the command from <bash-input> (to head the output card)
       // and suppress its echo — the user's typed `! cmd` already shows.
       if (content.startsWith("<bash-input>")) {
-        const m = /<bash-input>([\s\S]*?)<\/bash-input>/.exec(content);
-        this.#pendingBashCmd = m ? stripAnsi(m[1]).trim() : "";
-        this.#confirmBashEcho(this.#pendingBashCmd);
+        this.#noteBashInput(content);
         return;
       }
-      // Bash output (`!cmd`) → a structured card the app renders as a tool call:
-      // command in the header, stdout/stderr in the body. Parts are base64'd so
-      // arbitrary output can't break the block. Terminal escape codes stripped.
+      // Bash output (`!cmd`) → a structured card the app renders as a tool call.
       if (content.startsWith("<bash-stdout>") || content.startsWith("<bash-stderr>")) {
-        const so = /<bash-stdout>([\s\S]*?)<\/bash-stdout>/.exec(content);
-        const se = /<bash-stderr>([\s\S]*?)<\/bash-stderr>/.exec(content);
-        const stdout = so ? stripAnsi(so[1]).replace(/\s+$/, "") : "";
-        const stderr = se ? stripAnsi(se[1]).replace(/\s+$/, "") : "";
-        const cmd = this.#pendingBashCmd ?? "";
-        this.#pendingBashCmd = undefined;
-        if (this.#shouldEmitNote(entry, entryTimeMs)) {
-          const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
-          this.#emitAgentNote(`<bash-run><cmd>${b64(cmd)}</cmd><stdout>${b64(stdout)}</stdout><stderr>${b64(stderr)}</stderr></bash-run>`, entryTimeMs, sid);
-        }
+        this.#emitBashCard(content, entry, entryTimeMs, sid);
         return;
       }
       if (content.startsWith("<command-name>")) {
@@ -4411,7 +4633,7 @@ export class Session {
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {
-          this.#turn = { turnId: crypto.randomUUID() };
+          this.#turn = { turnId: crypto.randomUUID(), since: Date.now() };
           this.#turnUsage = null; // fresh turn → reset usage accumulator
           this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
           // A fresh turn starting is the proof a dispatched queue message
@@ -4801,9 +5023,9 @@ interface LiveBox {
  *    the next row continues the count (`2.`). A lone `❯ 1. Review the build`
  *    inside a bordered box is a human draft — rejecting every numbered row made
  *    the live box vanish from dispatch, so an app prompt sat queued forever with
- *    no banner while Claude was idle (#485). A multi-line numbered draft
- *    ("1. a" / "2. b") stays ambiguous and reads as a selector → null (unknown,
- *    never "empty").
+ *    no banner while Claude was idle (#485). A multi-line numbered list between
+ *    two rules is told apart by the prompt COLUMN: a flush-left `❯` is the input
+ *    box (a numbered draft), an indented `❯` is a picker's selected row.
  */
 function locateLiveBox(lines: string[]): LiveBox | null {
   for (let i = 1; i < lines.length; i++) {
@@ -4826,7 +5048,17 @@ function locateLiveBox(lines: string[]): LiveBox | null {
       const n = parseInt(numbered[1], 10);
       let k = i + 1;
       while (k < end && !lines[k].trim()) k++;
-      if (k < end && new RegExp(`^\\s*(?:❯\\s*)?${n + 1}\\.\\s+\\S`).test(lines[k])) continue; // option run
+      if (k < end && new RegExp(`^\\s*(?:❯\\s*)?${n + 1}\\.\\s+\\S`).test(lines[k])) {
+        // The count continues: an option run — UNLESS the `❯` is flush left.
+        // Claude paints the input prompt in column 0 (`❯` + nbsp); every
+        // selector row sits indented under its dialog title (live captures:
+        // the trust dialog, permission prompts, the model and resume pickers).
+        // A flush-left numbered list between two rules is a multi-line
+        // numbered DRAFT: it used to read as a selector (null: not ready,
+        // never "empty"), so the drain waited on it forever with no dirty-
+        // input banner while Claude sat idle (#485 residual).
+        if (!/^❯/.test(lines[i])) continue; // indented → option run
+      }
     }
     return { prompt: i, end, bottomRule };
   }
