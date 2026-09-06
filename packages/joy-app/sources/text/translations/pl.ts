@@ -329,12 +329,16 @@ export const pl: TranslationStructure = {
         connectionTooSlow: 'Połączenie jest zbyt wolne — spróbuj ponownie w lepszej sieci',
         logoutFailed: 'Nie udało się usunąć zapisanego logowania z tego urządzenia. Spróbuj ponownie.',
         syncStartFailedReload: 'Aplikacja nie mogła uruchomić synchronizacji. Załaduj aplikację ponownie i spróbuj jeszcze raz.',
+        answerKeptAsDraft: 'Nie udało się wysłać odpowiedzi. Została zachowana jako szkic poniżej.',
+        spawnDidNotStart: 'Sesja została przyjęta, ale nie uruchomiła się na czas. Sprawdź demona na tej maszynie.',
     },
 
     newSession: {
         title: 'Rozpocznij nową sesję',
         machineOffline: 'Maszyna jest offline',
         switchMachinesHint: '• Przełącz maszynę, klikając na nią powyżej',
+        createDirectoryTitle: 'Utworzyć katalog?',
+        createDirectoryMessage: ({ path }: { path: string }) => `Katalog '${path}' nie istnieje na tej maszynie. Utworzyć go?`,
     },
 
     sessionHistory: {
@@ -431,6 +435,8 @@ export const pl: TranslationStructure = {
         collapse: 'Zwiń',
         moreItems: ({ count }: { count: number }) => `+${count} więcej`,
         offlineBanner: 'Brak połączenia — wiadomości z kolejki zostaną wysłane po ponownym połączeniu',
+        removePending: 'Zostanie usunięte, gdy wysyłka się zakończy…',
+        cancelFailed: ({ reason }: { reason: string }) => `Nie udało się anulować wysyłki: ${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

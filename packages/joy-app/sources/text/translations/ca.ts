@@ -312,12 +312,16 @@ export const ca: TranslationStructure = {
         connectionTooSlow: 'La connexió és massa lenta — torna-ho a provar amb una xarxa millor',
         logoutFailed: 'No s\'ha pogut eliminar l\'inici de sessió desat d\'aquest dispositiu. Torna-ho a provar.',
         syncStartFailedReload: 'L\'aplicació no ha pogut iniciar la sincronització. Torna a carregar l\'aplicació i torna-ho a provar.',
+        answerKeptAsDraft: 'No s\'ha pogut enviar la resposta. S\'ha desat com a esborrany a sota.',
+        spawnDidNotStart: 'La sessió s\'ha acceptat però no s\'ha iniciat a temps. Comprova el dimoni d\'aquella màquina.',
     },
 
     newSession: {
         title: 'Iniciar nova sessió',
         machineOffline: 'La màquina està fora de línia',
         switchMachinesHint: '• Canvia de màquina fent clic a la màquina de dalt',
+        createDirectoryTitle: 'Crear el directori?',
+        createDirectoryMessage: ({ path }: { path: string }) => `El directori '${path}' no existeix a la màquina. Vols crear-lo?`,
     },
 
     sessionHistory: {
@@ -414,6 +418,8 @@ export const ca: TranslationStructure = {
         collapse: 'Replega',
         moreItems: ({ count }: { count: number }) => `+${count} més`,
         offlineBanner: 'Sense connexió — els missatges en cua s\'enviaran quan tornis a estar en línia',
+        removePending: 'S\'eliminarà quan l\'enviament es resolgui…',
+        cancelFailed: ({ reason }: { reason: string }) => `No s'ha pogut cancel·lar l'enviament: ${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

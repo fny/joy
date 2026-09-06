@@ -80,7 +80,7 @@ export const WaitingStack = React.memo(function WaitingStack({ sessionId, queue 
                 onRemove: () => { if (!removing) cancelRelease(sessionId, d.id); },
                 onRetry: failed && !removing ? () => retryRelease(sessionId, d.id) : undefined,
                 error: removing
-                    ? `${t('common.delete')}…`
+                    ? t('joyQueue.removePending')
                     : failed ? (parked ? t('joyQueue.sendParked', { reason: d.lastError! }) : t('joyQueue.sendRetrying', { reason: d.lastError! })) : null,
             };
         }),

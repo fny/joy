@@ -357,12 +357,16 @@ export const en = {
         connectionTooSlow: 'The connection is too slow — try again on a better network',
         logoutFailed: 'Could not remove the saved login from this device. Try again.',
         syncStartFailedReload: 'The app could not start syncing. Reload the app and try again.',
+        answerKeptAsDraft: 'The answer could not be sent. It was kept as a draft below.',
+        spawnDidNotStart: 'The session was accepted but did not start in time. Check the daemon on that machine.',
     },
 
     newSession: {
         title: 'Start New Session',
         machineOffline: 'Machine is offline',
         switchMachinesHint: '• Switch machines by clicking on the machine above',
+        createDirectoryTitle: 'Create directory?',
+        createDirectoryMessage: ({ path }: { path: string }) => `The directory '${path}' does not exist on the machine. Create it?`,
     },
 
     sessionHistory: {
@@ -461,6 +465,8 @@ export const en = {
         collapse: 'Collapse',
         moreItems: ({ count }: { count: number }) => `+${count} more`,
         offlineBanner: 'No connection — queued messages will send when you’re back online',
+        removePending: 'Removing once the send settles…',
+        cancelFailed: ({ reason }: { reason: string }) => `Could not cancel the send: ${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

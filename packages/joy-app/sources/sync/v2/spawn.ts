@@ -134,8 +134,8 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
             // (#415).
             const promptOpened = deps.now();
             const approved = await deps.confirm(
-                'Create directory?',
-                `The directory '${missing}' does not exist on the machine. Create it?`,
+                t('newSession.createDirectoryTitle'),
+                t('newSession.createDirectoryMessage', { path: missing }),
                 { cancelText: t('common.cancel'), confirmText: t('common.create') },
             );
             deadline += deps.now() - promptOpened;
@@ -172,7 +172,7 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
     // The relay still holds the accepted spawn: cancel it so it cannot start
     // an agent nobody is waiting for (Astra on 40873bd6).
     await deps.api.deleteSession(v2id).catch(() => { });
-    throw new Error('v2 spawn accepted but the session did not start in time. Check the daemon lane on that machine.');
+    throw new Error(t('errors.spawnDidNotStart'));
 }
 
 

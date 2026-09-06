@@ -291,12 +291,16 @@ export const ru: TranslationStructure = {
         connectionTooSlow: 'Соединение слишком медленное — повторите попытку в лучшей сети',
         logoutFailed: 'Не удалось удалить сохранённый вход с этого устройства. Попробуйте ещё раз.',
         syncStartFailedReload: 'Приложение не смогло запустить синхронизацию. Перезагрузите приложение и попробуйте ещё раз.',
+        answerKeptAsDraft: 'Не удалось отправить ответ. Он сохранён как черновик ниже.',
+        spawnDidNotStart: 'Сессия принята, но не запустилась вовремя. Проверьте демон на этой машине.',
     },
 
     newSession: {
         title: 'Начать новую сессию',
         machineOffline: 'Машина недоступна',
         switchMachinesHint: '• Переключите машину, нажав на неё выше',
+        createDirectoryTitle: 'Создать папку?',
+        createDirectoryMessage: ({ path }: { path: string }) => `Папка '${path}' не существует на машине. Создать её?`,
     },
 
     sessionHistory: {
@@ -542,6 +546,8 @@ export const ru: TranslationStructure = {
         collapse: 'Свернуть',
         moreItems: ({ count }: { count: number }) => `ещё ${count}`,
         offlineBanner: 'Нет подключения — сообщения из очереди отправятся, когда вы снова будете в сети',
+        removePending: 'Будет удалено, когда отправка завершится…',
+        cancelFailed: ({ reason }: { reason: string }) => `Не удалось отменить отправку: ${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

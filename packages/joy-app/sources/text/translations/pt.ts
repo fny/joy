@@ -311,12 +311,16 @@ export const pt: TranslationStructure = {
         connectionTooSlow: 'A conexão está muito lenta — tente novamente em uma rede melhor',
         logoutFailed: 'Não foi possível remover o login salvo deste dispositivo. Tente novamente.',
         syncStartFailedReload: 'O aplicativo não conseguiu iniciar a sincronização. Recarregue o aplicativo e tente novamente.',
+        answerKeptAsDraft: 'Não foi possível enviar a resposta. Ela foi mantida como rascunho abaixo.',
+        spawnDidNotStart: 'A sessão foi aceita, mas não iniciou a tempo. Verifique o daemon nessa máquina.',
     },
 
     newSession: {
         title: 'Iniciar nova sessão',
         machineOffline: 'A máquina está offline',
         switchMachinesHint: '• Troque de máquina clicando na máquina acima',
+        createDirectoryTitle: 'Criar o diretório?',
+        createDirectoryMessage: ({ path }: { path: string }) => `O diretório '${path}' não existe na máquina. Deseja criá-lo?`,
     },
 
     sessionHistory: {
@@ -413,6 +417,8 @@ export const pt: TranslationStructure = {
         collapse: 'Recolher',
         moreItems: ({ count }: { count: number }) => `+${count} mais`,
         offlineBanner: 'Sem conexão — as mensagens na fila serão enviadas quando você voltar a ficar online',
+        removePending: 'Será removido assim que o envio for concluído…',
+        cancelFailed: ({ reason }: { reason: string }) => `Não foi possível cancelar o envio: ${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

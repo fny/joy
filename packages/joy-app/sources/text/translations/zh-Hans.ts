@@ -313,12 +313,16 @@ export const zhHans: TranslationStructure = {
         connectionTooSlow: '连接速度过慢 — 请在网络更好时重试',
         logoutFailed: '无法从此设备移除已保存的登录信息。请重试。',
         syncStartFailedReload: '应用无法开始同步。请重新加载应用后重试。',
+        answerKeptAsDraft: '无法发送回答。已在下方保留为草稿。',
+        spawnDidNotStart: '会话已被接受，但未能及时启动。请检查该机器上的守护进程。',
     },
 
     newSession: {
         title: '开始新会话',
         machineOffline: '设备离线',
         switchMachinesHint: '• 点击上方的设备来切换设备',
+        createDirectoryTitle: '创建目录？',
+        createDirectoryMessage: ({ path }: { path: string }) => `目录 '${path}' 在该机器上不存在。是否创建？`,
     },
 
     sessionHistory: {
@@ -415,6 +419,8 @@ export const zhHans: TranslationStructure = {
         collapse: '收起',
         moreItems: ({ count }: { count: number }) => `还有 ${count} 条`,
         offlineBanner: '无连接 — 队列中的消息将在恢复联网后发送',
+        removePending: '发送完成后即将移除…',
+        cancelFailed: ({ reason }: { reason: string }) => `无法取消发送：${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

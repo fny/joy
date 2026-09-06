@@ -312,12 +312,16 @@ export const zhHant: TranslationStructure = {
         connectionTooSlow: '連線速度過慢 — 請在網路更好時重試',
         logoutFailed: '無法從此裝置移除已儲存的登入資訊。請重試。',
         syncStartFailedReload: '應用程式無法開始同步。請重新載入應用程式後重試。',
+        answerKeptAsDraft: '無法傳送回答。已在下方保留為草稿。',
+        spawnDidNotStart: '工作階段已被接受，但未能及時啟動。請檢查該機器上的守護程式。',
     },
 
     newSession: {
         title: '開始新工作階段',
         machineOffline: '裝置離線',
         switchMachinesHint: '• 點擊上方的裝置來切換裝置',
+        createDirectoryTitle: '建立目錄？',
+        createDirectoryMessage: ({ path }: { path: string }) => `目錄 '${path}' 在該機器上不存在。是否建立？`,
     },
 
     sessionHistory: {
@@ -414,6 +418,8 @@ export const zhHant: TranslationStructure = {
         collapse: '收合',
         moreItems: ({ count }: { count: number }) => `還有 ${count} 則`,
         offlineBanner: '無連線 — 佇列中的訊息將在恢復連線後傳送',
+        removePending: '傳送完成後即將移除…',
+        cancelFailed: ({ reason }: { reason: string }) => `無法取消傳送：${reason}`,
     },
 
     // Per-message delivery status under a sent user message (iMessage-style).

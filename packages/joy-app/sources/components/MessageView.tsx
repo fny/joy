@@ -45,7 +45,7 @@ async function sendOptionAnswer(sessionId: string, answer: string): Promise<void
   useDraftQueueStore.getState().add(sessionId, answer, 'draft');
   Modal.alert(
     t('errors.sendFailedTitle'),
-    result.reason === t('errors.sessionFull') ? result.reason : t('errors.sendFailedMessage'),
+    result.reason === t('errors.sessionFull') ? result.reason : t('errors.answerKeptAsDraft'),
     [{ text: t('common.ok'), style: 'cancel' }],
   );
 }
