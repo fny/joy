@@ -1,0 +1,139 @@
+// computeUsage's aggregation rules beyond the happy path in usage.test.ts:
+// tool counts obey the day range (#490), history copied into a forked /
+// imported transcript is charged once (#491), synthetic CLI user entries are
+// not prompts (#492), and a subagent's burn lands in its parent's project
+// (#493). Each test builds its own root so the fixtures stay independent.
+import { test, expect, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, utimesSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+import { computeUsage } from "./usage";
+
+const roots: string[] = [];
+afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
+function root(): string {
+  const r = mkdtempSync(join(tmpdir(), "joy-usage-"));
+  roots.push(r);
+  return r;
+}
+
+const entry = (o: Record<string, unknown>) => JSON.stringify(o) + "\n";
+
+function assistant(opts: { ts: string; msgId: string; model?: string; input?: number; out?: number; cwd?: string | null; tool?: string }): string {
+  return entry({
+    type: "assistant",
+    timestamp: opts.ts,
+    ...(opts.cwd === null ? {} : { cwd: opts.cwd ?? "/home/u/proj" }),
+    message: {
+      id: opts.msgId,
+      model: opts.model ?? "claude-fable-5",
+      content: opts.tool ? [{ type: "tool_use", name: opts.tool, input: {} }] : [{ type: "text", text: "hi" }],
+      usage: { input_tokens: opts.input ?? 100, output_tokens: opts.out ?? 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    },
+  });
+}
+
+const user = (ts: string, content: unknown, extra: Record<string, unknown> = {}) =>
+  entry({ type: "user", timestamp: ts, cwd: "/home/u/proj", message: { role: "user", content }, ...extra });
+
+test("tools and MCP calls outside the requested day range are not reported (#490)", async () => {
+  const r = root();
+  const proj = join(r, "-home-u-proj");
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, "s.jsonl"), [
+    assistant({ ts: "2026-09-01T10:00:00Z", msgId: "m1", tool: "Bash" }),
+    assistant({ ts: "2026-09-01T10:00:01Z", msgId: "m2", tool: "mcp__joy__send" }),
+    assistant({ ts: "2026-09-05T10:00:00Z", msgId: "m3", tool: "Read" }),
+  ].join(""));
+
+  const sep5 = await computeUsage({ fromDay: "2026-09-05", toDay: "2026-09-05", root: r });
+  expect(sep5.overview.calls).toBe(1);
+  expect(sep5.tools).toEqual([{ name: "Read", calls: 1 }]);
+  expect(sep5.mcpServers).toEqual([]);
+
+  const all = await computeUsage({ fromDay: "2026-09-01", toDay: "2026-09-05", root: r });
+  expect(all.tools.map((t) => t.name).sort()).toEqual(["Bash", "Read"]);
+  expect(all.mcpServers).toEqual([{ name: "joy", calls: 1 }]);
+});
+
+test("the same message.id in two transcripts is charged once; the oldest file owns it (#491)", async () => {
+  const r = root();
+  const proj = join(r, "-home-u-proj");
+  mkdirSync(proj, { recursive: true });
+  // The original conversation, then a fork that COPIED its history (same
+  // message ids, same usage) and added one call of its own. The fork's name
+  // sorts first so the path tie-break cannot be what decides ownership.
+  const shared = [
+    user("2026-09-01T09:59:00Z", "start"),
+    assistant({ ts: "2026-09-01T10:00:00Z", msgId: "m1", input: 100 }),
+    assistant({ ts: "2026-09-01T10:01:00Z", msgId: "m2", input: 100 }),
+  ];
+  const original = join(proj, "zz-original.jsonl");
+  const fork = join(proj, "aa-fork.jsonl");
+  writeFileSync(original, shared.join(""));
+  writeFileSync(fork, [...shared, assistant({ ts: "2026-09-02T10:00:00Z", msgId: "m3", input: 100 })].join(""));
+  const t0 = new Date("2026-09-01T10:01:00Z"), t1 = new Date("2026-09-02T10:00:00Z");
+  utimesSync(original, t0, t0);
+  utimesSync(fork, t1, t1);
+
+  const rep = await computeUsage({ fromDay: "2026-09-01", toDay: "2026-09-02", root: r });
+  expect(rep.overview.calls).toBe(3); // m1, m2, m3 — not 5
+  expect(rep.overview.tokens.input).toBe(300);
+  expect(rep.daily).toEqual([
+    { date: "2026-09-01", cost: expect.any(Number), calls: 2 },
+    { date: "2026-09-02", cost: expect.any(Number), calls: 1 },
+  ]);
+  expect(rep.models[0].calls).toBe(3);
+  expect(rep.projects).toHaveLength(1);
+  expect(rep.projects[0].calls).toBe(3);
+  // Ownership: the history stays with the older file; the fork keeps only
+  // what it added.
+  const byId = Object.fromEntries(rep.sessions.map((s) => [s.id, s]));
+  expect(byId["zz-original"].calls).toBe(2);
+  expect(byId["aa-fork"].calls).toBe(1);
+  // The copied user prompt is a turn in each file that holds it (turns have
+  // no API identity); the fork's own turns are what it adds.
+  expect(byId["zz-original"].turns).toBe(1);
+});
+
+test("isMeta and CLI wrapper user entries are not counted as prompts (#492)", async () => {
+  const r = root();
+  const proj = join(r, "-home-u-proj");
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, "s.jsonl"), [
+    user("2026-09-01T10:00:00Z", "<local-command-caveat>Caveat: the messages below were generated by the user while running local commands.</local-command-caveat>", { isMeta: true }),
+    user("2026-09-01T10:00:01Z", "<command-name>/clear</command-name>\n<command-message>clear</command-message>"),
+    user("2026-09-01T10:00:02Z", "<local-command-stdout>ok</local-command-stdout>"),
+    user("2026-09-01T10:00:03Z", [{ type: "text", text: "<system-reminder>injected</system-reminder>" }], { isMeta: true }),
+    // Genuine prompts: plain text, text block, image-only.
+    user("2026-09-01T10:01:00Z", "fix the bug"),
+    user("2026-09-01T10:02:00Z", [{ type: "image", source: { type: "base64", data: "AA==" } }, { type: "text", text: "what is this?" }]),
+    user("2026-09-01T10:03:00Z", [{ type: "image", source: { type: "base64", data: "AA==" } }]),
+    assistant({ ts: "2026-09-01T10:03:01Z", msgId: "m1" }),
+  ].join(""));
+
+  const rep = await computeUsage({ fromDay: "2026-09-01", toDay: "2026-09-01", root: r });
+  expect(rep.sessions).toHaveLength(1);
+  expect(rep.sessions[0].turns).toBe(3);
+});
+
+test("a subagent transcript with no cwd is attributed to its parent session's project (#493)", async () => {
+  const r = root();
+  const proj = join(r, "-project");
+  mkdirSync(join(proj, "main", "subagents"), { recursive: true });
+  writeFileSync(join(proj, "main.jsonl"), assistant({ ts: "2026-09-01T10:00:00Z", msgId: "m1", cwd: "/project", out: 1000 }));
+  writeFileSync(join(proj, "main", "subagents", "agent-1.jsonl"), assistant({ ts: "2026-09-01T10:05:00Z", msgId: "sub1", cwd: null, out: 1000 }));
+
+  const rep = await computeUsage({ fromDay: "2026-09-01", toDay: "2026-09-01", root: r });
+  expect(rep.projects).toEqual([{
+    name: "project",
+    path: "/project",
+    cost: rep.overview.cost,
+    calls: 2,
+    sessions: 1,
+    avgCostPerSession: rep.overview.cost,
+  }]);
+  expect(rep.sessions).toHaveLength(1);
+  expect(rep.sessions[0].project).toBe("/project");
+  expect(rep.sessions[0].calls).toBe(2);
+});

@@ -248,8 +248,12 @@ function keyToTmux(t: Extract<Token, { type: "key" }>): { name?: string; literal
 
   // Literal character tokens: <a>, <C-c>, <^x>, <M-x>.
   if (literal) {
-    // ctrl/alt of a letter is case-insensitive; tmux prefers lowercase.
-    const ch = len(key) === 1 ? key.toLowerCase() : key;
+    // Ctrl chords are case-insensitive (the C0 encoding has one byte per
+    // letter; tmux prefers lowercase). Alt/Meta chords are NOT: tmux sends
+    // ESC + the literal char, so M-X (1b 58) and M-x (1b 78) are different
+    // keys to the program in the pane — lowercasing ran the lowercase binding
+    // for an uppercase request (#592). Normalize only when Ctrl is present.
+    const ch = len(key) === 1 && mods.includes("Ctrl") ? key.toLowerCase() : key;
     if (mods.length === 0) return { literal: key }; // bare char → literal text
     if (mods.includes("Shift")) {
       throw new TmuxKeyError(`Shift on a literal character "${key}" — type the shifted character directly`);

@@ -82,3 +82,13 @@ test("literal-character tokens", () => {
 test("unsendable combos throw TmuxKeyError", () => {
   expect(() => toTmuxSegments("<S-a>")).toThrow(TmuxKeyError); // Shift on a literal char
 });
+
+test("Alt/Meta chords keep the character's case; only Ctrl normalizes (#592)", () => {
+  // tmux sends ESC + the literal char for M-: M-X (1b 58) and M-x (1b 78) are
+  // different keys to the program in the pane.
+  expect(toTmuxSegments("<M-X>")).toEqual([{ type: "keys", names: ["M-X"] }]);
+  expect(toTmuxSegments("<Alt+X>")).toEqual([{ type: "keys", names: ["M-X"] }]);
+  expect(toTmuxSegments("<M-x>")).toEqual([{ type: "keys", names: ["M-x"] }]);
+  // With Ctrl in the chord the C0 encoding makes case irrelevant — still lowercased.
+  expect(toTmuxSegments("<C-M-X>")).toEqual([{ type: "keys", names: ["C-M-x"] }]);
+});

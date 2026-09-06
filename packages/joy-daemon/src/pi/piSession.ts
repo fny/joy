@@ -52,6 +52,21 @@ function piBinary(): string {
   return "pi"; // last resort — spawn resolves via PATH or fails loudly
 }
 
+/** Flatten pi's ToolResult (`{content:[{type:"text",text}…], details}`), a
+ *  bare string, or anything else into the text the app's tool card shows (#578). */
+function toolResultText(r: unknown): string | undefined {
+  if (r == null) return undefined;
+  if (typeof r === "string") return r;
+  const content = (r as { content?: unknown }).content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((p) => (p && typeof p === "object" && (p as { type?: unknown }).type === "text" ? String((p as { text?: unknown }).text ?? "") : ""))
+      .filter(Boolean);
+    if (parts.length) return parts.join("\n");
+  }
+  try { return JSON.stringify(r, null, 2); } catch { return String(r); }
+}
+
 export class PiSession implements AgentSession {
   readonly agentFlavor = "pi" as const;
   readonly id: string;
@@ -79,10 +94,18 @@ export class PiSession implements AgentSession {
   #started = false;
   #thinking = false;
   #archivePromise: Promise<boolean> | null = null;
-  // Monotonic turn counter — pi's turn_start carries no id; the bracket ids
-  // only need to be unique within this process (no reconcile in bare v1).
+  // Monotonic turn counter — pi's turn_start carries no id.
   #turnSeq = 0;
+  // Per-process nonce in every turn id (#575): a restart under the same joy
+  // id starts #turnSeq at 0 again, and the relay dedupes by runtime event
+  // id — so a second `pi:<id>:t1` was swallowed as a replay of the old
+  // process's turn and the new answer hung off the old bracket.
+  readonly #boot = randomUUID().slice(0, 8);
   #turn: string | null = null;
+  // prompt/steer commands awaiting pi's `response` row, by request id (#577):
+  // a `success:false` used to be ignored along with every non-get_state
+  // response, so a rejected prompt vanished without a trace.
+  #pending = new Map<string, { kind: "prompt" | "steer"; text: string }>();
   // pi-owned queues, mirrored from queue_update events.
   #queuedInHarness = 0;
   #titled = false;
@@ -198,18 +221,33 @@ export class PiSession implements AgentSession {
     const type = String(e.type ?? "");
     switch (type) {
       case "response": {
+        const reqId = typeof e.id === "string" ? e.id : undefined;
+        const pending = reqId ? this.#pending.get(reqId) : undefined;
+        if (pending && reqId) {
+          this.#pending.delete(reqId);
+          if (!e.success) { this.#rejected(pending.kind, pending.text, String((e as { error?: unknown }).error ?? "unknown error")); break; }
+        }
         if (e.command === "get_state" && e.success) {
-          const model = (e.data as { model?: { id?: string } } | undefined)?.model;
+          const data = e.data as { model?: { id?: string }; sessionId?: string } | undefined;
+          const model = data?.model;
           if (model?.id && model.id !== this.currentModel) {
             this.currentModel = model.id;
             void this.#relay?.updateModelCode(model.id);
+            this.#persistRecord();
+          }
+          // The session pi actually opened (#576): with `-c` (or no id at all)
+          // the daemon never learned which conversation it was in, so resume
+          // and fork after a restart had nothing to point at.
+          if (typeof data?.sessionId === "string" && data.sessionId && data.sessionId !== this.#piSessionId) {
+            this.#piSessionId = data.sessionId;
+            this.#continueLast = false;
             this.#persistRecord();
           }
         }
         break;
       }
       case "turn_start": {
-        this.#turn = `pi:${this.id}:t${++this.#turnSeq}`;
+        this.#turn = this.#turnId(++this.#turnSeq);
         this.#relay?.send(encodeTurnStart({ turn: this.#turn }), `${this.#turn}:start`);
         this.#setThinking(true);
         break;
@@ -244,7 +282,7 @@ export class PiSession implements AgentSession {
         break;
       }
       case "tool_execution_start": {
-        const turn = this.#turn ?? `pi:${this.id}:t${this.#turnSeq}`;
+        const turn = this.#turn ?? this.#turnId(this.#turnSeq);
         this.#relay?.send(encodeToolCallStart({
           call: String(e.toolCallId ?? randomUUID()),
           name: String(e.toolName ?? "PiTool"),
@@ -254,8 +292,14 @@ export class PiSession implements AgentSession {
         break;
       }
       case "tool_execution_end": {
-        const turn = this.#turn ?? `pi:${this.id}:t${this.#turnSeq}`;
-        this.#relay?.send(encodeToolCallEnd(String(e.toolCallId ?? ""), { turn }), `${turn}:tool:${String(e.toolCallId ?? "")}:end`);
+        const turn = this.#turn ?? this.#turnId(this.#turnSeq);
+        const call = String(e.toolCallId ?? "");
+        // Carry the OUTPUT and the failure flag (#578): the record held only
+        // the call id, so a permission-denied or crashed tool rendered exactly
+        // like a successful one and its diagnostics were lost.
+        const result = toolResultText(e.result);
+        const isError = e.isError === true;
+        this.#relay?.send(encodeToolCallEnd(call, { turn, ...(result ? { result: result.slice(0, 48_000) } : {}), ...(isError ? { isError: true } : {}) }), `${turn}:tool:${call}:end`);
         break;
       }
       case "queue_update": {
@@ -276,6 +320,30 @@ export class PiSession implements AgentSession {
       }
       default: break; // ready, message_start/update/end, agent_start — ignored in bare v1
     }
+  }
+
+  #turnId(n: number): string { return `pi:${this.id}:${this.#boot}:t${n}`; }
+
+  /** Hand a prompt/steer to pi and track it until pi answers (#577). */
+  #dispatch(kind: "prompt" | "steer", text: string): void {
+    const id = randomUUID().slice(0, 8);
+    this.#pending.set(id, { kind, text });
+    if (!this.#send({ id, type: kind, message: text })) {
+      this.#pending.delete(id);
+      this.#rejected(kind, text, "pi stdin is not writable");
+    }
+  }
+
+  /** Surface a prompt/steer pi refused (or never received) instead of
+   *  acknowledging an unchecked stdin write (#577). */
+  #rejected(kind: string, text: string, error: string): void {
+    const note = `⚠ pi: ${kind} rejected — ${error}`;
+    process.stderr.write(`[pi ${this.id}] ${kind} rejected: ${error} (${text.slice(0, 80).replace(/\n/g, " ")})\n`);
+    this.#relay?.send(encodeUserMessage(note, Date.now()));
+    // The daemon chat log is the lane's cross-adapter activity signal: without
+    // a row here a rejected prompt left the relay turn parked in the start
+    // gate for the whole 180 s no_agent_activity deadline.
+    this.#deps.addChatMessage({ role: "event", content: note, source: "cli", session_id: this.id, event_type: "pi_rejected", event_status: "error" });
   }
 
   #setThinking(value: boolean): void {
@@ -305,7 +373,9 @@ export class PiSession implements AgentSession {
       }
       this.#deps.broadcast("session_update", this.toJSON());
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `pi:in:${this.id}:${opts?.seq ?? at}`);
-      return { id: String(opts?.seq ?? at), text, createdAt: at };
+      // Nothing reaches pi: a lane that owns a relay turn must terminalize it
+      // now, not wait 180 s for agent activity that never comes (#115).
+      return { id: String(opts?.seq ?? at), text, createdAt: at, handled: "command" };
     }
     // /joy-prompt — deliver the CURRENT joy instructions in-band. Pi has no
     // launch-time preamble (bare v1), so this is how a pi session learns the
@@ -315,13 +385,13 @@ export class PiSession implements AgentSession {
     if (/^\/joy-prompt(?:\s|$)/.test(text.trim())) {
       if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `pi:in:${this.id}:${opts?.seq ?? at}`);
       this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
-      return { id: String(opts?.seq ?? at), text, createdAt: at };
+      return { id: String(opts?.seq ?? at), text, createdAt: at, handled: "command" }; // (#115)
     }
     // Mirror the user row FIRST (positional turn pairing needs user-before-
     // turn-start; see the codex CH7 lesson), then hand pi the message: its
     // native queue handles busy — steer mid-turn, prompt when idle.
     if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `pi:in:${this.id}:${opts?.seq ?? at}`);
-    this.#send(this.#thinking ? { type: "steer", message: text } : { type: "prompt", message: text });
+    this.#dispatch(this.#thinking ? "steer" : "prompt", text);
     this.#maybeTitle(text);
     return { id: String(opts?.seq ?? at), text, createdAt: at };
   }
@@ -401,6 +471,7 @@ export class PiSession implements AgentSession {
       try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
     }
     this.#proc = null;
+    this.#pending.clear(); // the process that would have answered is gone (#577)
     if (this.#turn) {
       this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn }), `${this.#turn}:end`);
       this.#turn = null;

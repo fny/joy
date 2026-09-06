@@ -54,19 +54,81 @@ function diskUsedPercent(): number | null {
   }
 }
 
+/**
+ * Edge-trigger + cooldown gate, one state per alert key. `check` answers
+ * whether a push should go out NOW for this sample. The two conditions are
+ * independent (#565): a push needs the key to be ARMED (it dipped under REARM
+ * since the last push — or never fired) AND the cooldown since the last push
+ * to have elapsed. The old combined test `armed===false && inCooldown` let a
+ * 95→80→95 sequence push twice in ten minutes (the dip re-armed, so the
+ * cooldown was never consulted) and a box pinned at 95% push again every
+ * four hours with no downward crossing at all.
+ */
+export class AlertGate {
+  #armed: Record<string, boolean> = {};   // false = fired and no dip under REARM since
+  #lastPush: Record<string, number> = {};
+
+  check(key: string, percent: number | null, now: number = Date.now()): boolean {
+    if (percent == null) return false;
+    if (percent < REARM) { this.#armed[key] = true; return false; }
+    if (percent < HOT) return false;
+    if (this.#armed[key] === false) return false;                        // still hot since the last push
+    const last = this.#lastPush[key];
+    if (last !== undefined && now - last < PUSH_COOLDOWN_MS) return false; // re-armed, but too soon
+    this.#armed[key] = false;
+    this.#lastPush[key] = now;
+    return true;
+  }
+}
+
+type Fire = (key: string, percent: number | null, title: string, body: string) => void;
+interface LimitsDeps {
+  fetchClaudeLimits: typeof fetchClaudeLimits;
+  readCodexLimits: typeof readCodexLimits;
+  host: string;
+}
+
+/**
+ * One scheduled quota check. NEVER rejects: it runs from a timer whose
+ * caller discards the promise, and an escaped rejection terminates Node
+ * under the default policy. The usage endpoint answered 200 with a JSON
+ * `null` body once — `ok:true, limits:null` — and `limits.five_hour` threw
+ * outside the only try/catch (#566). Every quota object is validated before
+ * it is dereferenced, and the whole body is caught as a last resort.
+ */
+export async function runLimitsCheck(fire: Fire, deps: LimitsDeps): Promise<void> {
+  const { host } = deps;
+  try {
+    const claude = await deps.fetchClaudeLimits().catch(() => null);
+    const limits = claude?.ok && claude.limits && typeof claude.limits === "object" ? claude.limits : null;
+    if (limits) {
+      const buckets: Array<[string, unknown]> = [["5-hour", limits.five_hour], ["weekly", limits.seven_day]];
+      for (const [name, raw] of buckets) {
+        const b = raw && typeof raw === "object" ? raw as { utilization?: unknown; resets_at?: unknown } : null;
+        if (typeof b?.utilization !== "number") continue;
+        const resets = typeof b.resets_at === "string" && Number.isFinite(Date.parse(b.resets_at)) ? new Date(b.resets_at).toLocaleTimeString() : "soon";
+        fire(`claude-${name}`, b.utilization, `Claude ${name} limit at ${Math.round(b.utilization)}%`, `resets ${resets} (${host})`);
+      }
+    }
+  } catch { /* a malformed quota response must not take the daemon down */ }
+  try {
+    const codex = deps.readCodexLimits();
+    if (codex.ok && codex.limits && typeof codex.limits === "object") {
+      for (const [name, w] of [["primary", codex.limits.primary], ["secondary", codex.limits.secondary]] as const) {
+        if (typeof w?.used_percent !== "number") continue;
+        fire(`codex-${name}`, w.used_percent, `Codex limit at ${Math.round(w.used_percent)}%`,
+          `${typeof w.window_minutes === "number" && w.window_minutes > 5000 ? "weekly" : "5h"} window (${host})`);
+      }
+    }
+  } catch { /* same */ }
+}
+
 export function startResourceAlerts(pusher: Pusher): void {
-  const armed: Record<string, boolean> = {};   // true = can fire (under threshold since last alert)
-  const lastPush: Record<string, number> = {};
+  const gate = new AlertGate();
   const host = hostname();
 
-  const fire = (key: string, percent: number | null, title: string, body: string) => {
-    if (percent == null) return;
-    if (percent < REARM) { armed[key] = true; return; }
-    if (percent < HOT) return;
-    const now = Date.now();
-    if (armed[key] === false && now - (lastPush[key] ?? 0) < PUSH_COOLDOWN_MS) return;
-    armed[key] = false;
-    lastPush[key] = now;
+  const fire: Fire = (key, percent, title, body) => {
+    if (!gate.check(key, percent)) return;
     void pusher.sendPush(title, body).catch(() => { /* best-effort */ });
   };
 
@@ -74,34 +136,12 @@ export function startResourceAlerts(pusher: Pusher): void {
     fire("ram", ramUsedPercent(), `RAM high on ${host}`, `${ramUsedPercent()}% used — sessions may queue or misbehave`);
     fire("disk", diskUsedPercent(), `Disk high on ${host}`, `${diskUsedPercent()}% full — transcripts and caches may start failing`);
   };
-
-  const limitsCheck = async () => {
-    const claude = await fetchClaudeLimits().catch(() => null);
-    if (claude?.ok) {
-      const buckets: Array<[string, { utilization: number; resets_at: string } | null | undefined]> = [
-        ["5-hour", claude.limits.five_hour],
-        ["weekly", claude.limits.seven_day],
-      ];
-      for (const [name, b] of buckets) {
-        if (b?.utilization != null) {
-          fire(`claude-${name}`, b.utilization, `Claude ${name} limit at ${Math.round(b.utilization)}%`,
-            `resets ${b.resets_at ? new Date(b.resets_at).toLocaleTimeString() : "soon"} (${host})`);
-        }
-      }
-    }
-    const codex = readCodexLimits();
-    if (codex.ok) {
-      for (const [name, w] of [["primary", codex.limits.primary], ["secondary", codex.limits.secondary]] as const) {
-        if (w?.used_percent != null) {
-          fire(`codex-${name}`, w.used_percent, `Codex limit at ${Math.round(w.used_percent)}%`,
-            `${w.window_minutes && w.window_minutes > 5000 ? "weekly" : "5h"} window (${host})`);
-        }
-      }
-    }
-  };
+  const limitsCheck = () => runLimitsCheck(fire, { fetchClaudeLimits, readCodexLimits, host });
 
   setInterval(hostCheck, HOST_CHECK_MS).unref();
   setTimeout(hostCheck, 60_000).unref();
-  setInterval(() => void limitsCheck(), LIMITS_CHECK_MS).unref();
-  setTimeout(() => void limitsCheck(), 90_000).unref();
+  // Belt and braces (#566): runLimitsCheck already contains its failures, but
+  // a timer callback must never hand the loop an unhandled rejection.
+  setInterval(() => { limitsCheck().catch(() => {}); }, LIMITS_CHECK_MS).unref();
+  setTimeout(() => { limitsCheck().catch(() => {}); }, 90_000).unref();
 }
