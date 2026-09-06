@@ -517,14 +517,24 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   its pending row is gone (#516); the forwarded-transcript-uuid receipts are
   capped per session (`PrunePolicy.transcriptReceiptsPerSession`, 5,000 —
   applied as they are written and by the daily sweep) but a receipt goes
-  only when the session's COMMITTED transcript cursor covers it: every
-  receipt carries a ledger-wide insertion ordinal, a checkpoint records the
-  ordinal it was written at (`receiptOrd`, `coversReceipts: false` for the
-  legacy import), and both the cap and the age rule prune by that boundary
-  — never by wall time, never past the committed cursor because a newer one
-  is pending behind unacked output, and never at all for a session with no
-  committed cursor, whose replay re-reads the whole file with no stable
-  occurrence id to dedupe (#560, review 0133a2fb); a write from a
+  only when the session's COMMITTED transcript cursor covers it
+  POSITIONALLY: the tailer records, on each forwarded-uuid receipt, the
+  bound transcript path and the entry's start byte (`transcriptPath` /
+  `byteOffset`, re-placed whenever the uuid is observed again), and a
+  checkpoint covers a receipt only when the paths match and that byte lies
+  below the committed offset. The ledger-wide insertion ordinal only ranks
+  the set (the cap keeps the newest); it never proves coverage — a receipt
+  from a previous run can name an entry beyond the offset a partial
+  recovery (short read + transient EIO) commits (review 939c279a). Both the
+  cap and the age rule prune by that positional rule — never by wall time,
+  never by ordinal alone, never past the committed cursor because a newer
+  one is pending behind unacked output, never a receipt whose position was
+  not recorded (pre-upgrade rows, the legacy import's `coversReceipts:
+  false` cursor, an ack whose entry the tailer never saw — retained until
+  the replay re-places them; over the cap with nothing covered keeps all
+  and warns once), and never at all for a session with no committed
+  cursor, whose replay re-reads the whole file with no stable occurrence
+  id to dedupe (#560, reviews 0133a2fb + 939c279a); a write from a
   superseded generation is refused (#481); a checkpoint commits only once the outbound rows it covers
   are acked (#67); terminals are posted after their session's outputs by
   one sender per session (#74). Execution policy lives in one place: a

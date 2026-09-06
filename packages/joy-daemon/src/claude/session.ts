@@ -777,6 +777,13 @@ export class Session {
   // Positive cache in front of ledger.hasReceipt for transcript uuids this
   // process already handled (bounded; the ledger is the truth).
   #uuidSeen = new Set<string>();
+  // Where the tailer observed each uuid's line (bound transcript path + the
+  // line's start byte), held from the tail callback until the receipt is
+  // written — synchronously (an echo match) or on the relay's ack — so the
+  // receipt carries the position a committed cursor can cover (#560, review
+  // 939c279a). Bounded; an evicted position means a receipt without one,
+  // which is retained until a later observation places it — never lost.
+  #entryPos = new Map<string, { transcriptPath: string; byteOffset: number }>();
   // The most recent `!cmd` command, captured from <bash-input> so it can head
   // the bash-output card.
   #pendingBashCmd?: string;
@@ -1441,11 +1448,18 @@ export class Session {
     if (this.#uuidSeen.has(uuid)) return true;
     return this.#ledger.hasReceipt(this.id, "transcript_uuid", uuid);
   }
-  /** Remember a handled transcript uuid: in the cache now, in the ledger durably. */
+  /** Remember a handled transcript uuid: in the cache now, in the ledger
+   *  durably — with the position the tailer observed its entry at (bound
+   *  transcript path + line start byte), when known: that is what lets the
+   *  session's committed cursor cover the receipt later (#560). Without a
+   *  position (an ack whose entry the tailer never saw, e.g. a restart
+   *  drain) the receipt is retained until a later observation places it. */
   #noteUuid(uuid: string, extra: { commandId?: string; attemptId?: string } = {}): void {
     this.#uuidSeen.add(uuid);
     if (this.#uuidSeen.size > 2000) { for (const u of this.#uuidSeen) { this.#uuidSeen.delete(u); if (this.#uuidSeen.size <= 1500) break; } }
-    try { this.#ledger.addReceipt(this.id, { kind: "transcript_uuid", ref: uuid, commandId: extra.commandId, attemptId: extra.attemptId }); }
+    const pos = this.#entryPos.get(uuid);
+    this.#entryPos.delete(uuid);
+    try { this.#ledger.addReceipt(this.id, { kind: "transcript_uuid", ref: uuid, commandId: extra.commandId, attemptId: extra.attemptId, transcriptPath: pos?.transcriptPath, byteOffset: pos?.byteOffset }); }
     catch (e) { process.stderr.write(`[${this.id}] receipt for ${uuid} failed: ${e instanceof Error ? e.message : e}\n`); }
   }
   /** Stage an item in the ledger (the acceptance) — throws when it cannot be
@@ -3138,9 +3152,21 @@ export class Session {
     let self: TranscriptTailer | null = null;
     this.#tailer = self = tailJsonl(
       transcriptPath,
-      (entry) => {
+      (entry, pos) => {
         if (this.#tailer !== self) return; // stale tailer — rebound since
+        // The entry's observed position, for the forwarded-uuid receipt this
+        // entry may earn (#noteUuid, now or on the relay's ack) — #560.
+        const uuid = typeof entry.uuid === "string" ? entry.uuid : "";
+        if (uuid) {
+          this.#entryPos.set(uuid, { transcriptPath, byteOffset: pos.start });
+          if (this.#entryPos.size > 2000) { for (const u of this.#entryPos.keys()) { this.#entryPos.delete(u); if (this.#entryPos.size <= 1500) break; } }
+        }
         this.onTranscriptEntry(entry);
+        // Re-observed and already receipted (a replay from the committed
+        // cursor, or a previous run's receipt with no position): re-place
+        // the receipt at the position seen NOW, so the cursor can cover it
+        // by where it actually is (review 939c279a). A no-op when unchanged.
+        if (uuid && this.#entryPos.has(uuid) && this.#hasUuid(uuid)) this.#noteUuid(uuid);
         this.#deps.broadcast("transcript_entry", { session_id: this.claudeSessionId, entry });
         this.#scheduleCheckpoint(transcriptPath);
       },

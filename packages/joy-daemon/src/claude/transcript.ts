@@ -154,6 +154,13 @@ const HEALTH_LOG_EVERY = 100;
 const REPLACE_POLL_MS = 2000;
 const EMPTY = Buffer.alloc(0);
 
+/** Where an entry's line sits in the tailed file: `start` is the byte offset
+ *  of its first byte, `end` the offset just past its newline — i.e. what
+ *  offset() reports once the line is consumed. The session records `start`
+ *  on the entry's forwarded-uuid receipt so a committed cursor can prove,
+ *  positionally, that a replay from it never reaches the entry (#560). */
+export interface TranscriptEntryPosition { start: number; end: number }
+
 /**
  * Tail a JSONL file, invoking onEntry for each complete parsed line as it is
  * appended. Reads incrementally from a byte offset, carrying incomplete
@@ -162,7 +169,7 @@ const EMPTY = Buffer.alloc(0);
  */
 export function tailJsonl(
   path: string,
-  onEntry: (entry: Record<string, unknown>) => void,
+  onEntry: (entry: Record<string, unknown>, pos: TranscriptEntryPosition) => void,
   shouldRetry: () => boolean = () => true,
   startOffset = 0,
   onHealth?: (h: TailerHealth) => void,
@@ -206,12 +213,12 @@ export function tailJsonl(
     }
   }
 
-  function handleLine(line: string) {
+  function handleLine(line: string, start: number, end: number) {
     if (!line.trim()) return;
     try {
       const entry = JSON.parse(line);
       parseConsecutive = 0;
-      onEntry(entry);
+      onEntry(entry, { start, end });
     } catch (e) {
       // onEntry throwing is a CONSUMER bug, but counting it as parse
       // health keeps the alarm honest either way.
@@ -268,9 +275,12 @@ export function tailJsonl(
       // read boundary is decoded exactly once, whole, on the next pass.
       const fresh = buf.subarray(0, bytesRead);
       const chunk = leftover.length ? Buffer.concat([leftover, fresh]) : fresh;
+      // Absolute file offset of chunk[0]: the carried leftover began that
+      // many bytes before this read did (#560 — each line's position).
+      const base = byteOffset - bytesRead - leftover.length;
       let start = 0;
       for (let nl = chunk.indexOf(0x0a, start); nl >= 0; nl = chunk.indexOf(0x0a, start)) {
-        handleLine(chunk.toString("utf-8", start, nl));
+        handleLine(chunk.toString("utf-8", start, nl), base + start, base + nl + 1);
         start = nl + 1;
       }
       // Copy the tail so the (possibly large) read buffer can be collected.
