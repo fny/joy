@@ -70,7 +70,7 @@ describe("frontmatter edge cases (#531)", () => {
 describe("description ownership (#532)", () => {
   it("a description removed from the source disappears from the next push", async () => {
     const pushed: Array<Record<string, unknown>> = [];
-    const relay = { getOrCreateMachine: async (meta: Record<string, unknown>) => { pushed.push(meta); return true; } };
+    const relay = { getOrCreateMachine: async (meta: Record<string, unknown>) => { pushed.push(meta); return true; }, capabilities: () => ({}) };
     const reg = new CommandRegistry({ relayClient: relay as never, baseMachineMetadata: {}, homeDir: join(root, "nohome") });
     write(".claude/commands/deploy.md", "---\ndescription: Old description\n---");
     reg.setProject(root, []); // register the project cwd; refresh() rescans it

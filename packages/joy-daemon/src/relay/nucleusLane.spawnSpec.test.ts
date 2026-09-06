@@ -147,6 +147,16 @@ function laneWith(url: string, created: any[], machineKeyOpt: Uint8Array | null 
 }
 
 describe("#107 sealed spawn specs over the relay", () => {
+    it("the handle reports spawnSpecSealed() from its OWN key state — false without a machine key, true with one (drives the machine record's advertisement)", async () => {
+        const relay = makeFakeRelay();
+        const url = await relay.listen(); srv = relay.server;
+        handle = laneWith(url, [], null);
+        expect(handle.spawnSpecSealed()).toBe(false);
+        await handle.stop();
+        handle = laneWith(url, [], machineKey);
+        expect(handle.spawnSpecSealed()).toBe(true);
+    });
+
     it("a spec sealed by the app under this machine's spawn-spec key launches with its fields intact", async () => {
         const relay = makeFakeRelay();
         const url = await relay.listen(); srv = relay.server;
