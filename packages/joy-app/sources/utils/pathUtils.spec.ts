@@ -243,3 +243,40 @@ describe('formatPathRelativeToHome', () => {
         expect(formatPathRelativeToHome('/srv/app', '/home/alice')).toBe('/srv/app');
     });
 });
+
+describe('resolvePath is case-sensitive off Windows (#441)', () => {
+    const meta = (path: string, os?: string) => ({ path, host: 'h', os } as unknown as import('@/sync/storageTypes').Metadata);
+
+    it('a directory that differs only by case is NOT the session directory', () => {
+        expect(resolvePath('/srv/project/file.txt', meta('/srv/Project'))).toBe('/srv/project/file.txt');
+        expect(resolvePath('/srv/project', meta('/srv/Project'))).toBe('/srv/project');
+        expect(resolvePath('/srv/Project/file.txt', meta('/srv/Project'))).toBe('file.txt');
+        expect(resolvePath('/srv/Project', meta('/srv/Project'))).toBe('<root>');
+    });
+
+    it('still folds case on a Windows or macOS host, by os or by the path shape', () => {
+        expect(resolvePath('c:/work/proj/file.txt', meta('C:/work/Proj', 'win32'))).toBe('file.txt');
+        expect(resolvePath('c:/work/proj/file.txt', meta('C:/work/Proj'))).toBe('file.txt');
+        expect(resolvePath('/users/steve/proj/file.txt', meta('/Users/Steve/Proj'))).toBe('file.txt');
+        expect(resolvePath('/tmp/proj/file.txt', meta('/tmp/Proj', 'darwin'))).toBe('file.txt');
+        expect(resolvePath('/srv/project/file.txt', meta('/srv/Project', 'linux'))).toBe('/srv/project/file.txt');
+    });
+});
+
+describe('resolveAbsolutePath keeps filesystem roots (#442)', () => {
+    it('~ on a root home stays the root', () => {
+        expect(resolveAbsolutePath('~', '/')).toBe('/');
+        expect(resolveAbsolutePath('~', 'C:\\')).toBe('C:\\');
+        expect(resolveAbsolutePath('~', 'C:/')).toBe('C:/');
+    });
+
+    it('~/x under a root home joins without doubling the separator', () => {
+        expect(resolveAbsolutePath('~/x', '/')).toBe('/x');
+        expect(resolveAbsolutePath('~/x', 'C:\\')).toBe('C:\\x');
+    });
+
+    it('a non-root trailing separator is still trimmed', () => {
+        expect(resolveAbsolutePath('~', '/home/alice/')).toBe('/home/alice');
+        expect(resolveAbsolutePath('~/x', 'C:\\Users\\alice\\')).toBe('C:\\Users\\alice\\x');
+    });
+});

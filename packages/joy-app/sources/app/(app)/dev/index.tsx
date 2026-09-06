@@ -11,6 +11,7 @@ import { useLocalSettingMutable, useSocketStatus } from '@/sync/storage';
 import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { getServerUrl, setServerUrl, validateServerUrl, getLogServerUrl, setLogServerUrl } from '@/sync/serverConfig';
+import { logServerPromptOutcome } from './logServerPrompt';
 import { Switch } from '@/components/Switch';
 import { useUnistyles } from 'react-native-unistyles';
 import { setLastViewedTitle } from '@/changelog';
@@ -59,18 +60,19 @@ export default function DevScreen() {
             }
         );
 
-        if (newUrl !== undefined && newUrl !== currentUrl) {
-            if (!newUrl || !newUrl.trim()) {
-                setLogServerUrl(null);
-                Modal.alert('Success', 'Remote logging disabled. Restart app for changes to take effect.');
+        // Cancel resolves null and must change nothing; only a SUBMITTED empty
+        // field disables remote logging (#138).
+        const outcome = logServerPromptOutcome(newUrl, currentUrl);
+        if (outcome.kind === 'disable') {
+            setLogServerUrl(null);
+            Modal.alert('Success', 'Remote logging disabled. Restart app for changes to take effect.');
+        } else if (outcome.kind === 'set') {
+            const validation = validateServerUrl(outcome.url);
+            if (validation.valid) {
+                setLogServerUrl(outcome.url);
+                Modal.alert('Success', 'Log server URL updated. Restart app for changes to take effect.');
             } else {
-                const validation = validateServerUrl(newUrl);
-                if (validation.valid) {
-                    setLogServerUrl(newUrl);
-                    Modal.alert('Success', 'Log server URL updated. Restart app for changes to take effect.');
-                } else {
-                    Modal.alert('Invalid URL', validation.error || 'Please enter a valid URL');
-                }
+                Modal.alert('Invalid URL', validation.error || 'Please enter a valid URL');
             }
         }
     };

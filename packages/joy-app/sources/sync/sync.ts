@@ -687,6 +687,7 @@ class Sync {
         this.sessionMessageLocks.delete(sessionId);
         this.recentSendAt.delete(sessionId);
         this.unopenableStrikes.delete(sessionId);
+        this.unopenableGaps.delete(sessionId);
         // #406: the fetch generation is never forgotten (a reused counter revalidated old requests); the git resource is cleared.
         // The project's git status needs the session's metadata to find its
         // key, so both resource clears run BEFORE the store forgets the
@@ -1191,7 +1192,12 @@ class Sync {
                         this.unopenableStrikes.set(sessionId, strikes);
                         throw new Error(`Initial page of ${sessionId}: ${data.unopenable} sealed row(s) could not be opened (${v2ctx.key ? `key present, attempt ${strikes}` : 'no content key yet'}) — retrying`);
                     }
-                    log.log(`💬 fetchInitialLatestPage: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries — anchoring past them (#128)`);
+                    // The scanned range stays a recoverable gap: `cursor` is
+                    // the oldest seq this backward page covered (#128).
+                    const gapFrom = typeof data.cursor === 'number' ? data.cursor - 1 : 0;
+                    const gapTo = Number.isFinite(beforeSeq) ? beforeSeq - 1 : Number.MAX_SAFE_INTEGER;
+                    this.recordUnopenableGap(sessionId, gapFrom, gapTo, v2ctx.key);
+                    log.log(`💬 fetchInitialLatestPage: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries — anchoring past them, kept as a recoverable gap (#128)`);
                     this.unopenableStrikes.delete(sessionId);
                 }
             } catch (e) {
@@ -1298,11 +1304,22 @@ class Sync {
         let pages = 0;
         const v2ctx = this.v2ReadCtx(sessionId);
         if (!v2ctx) throw new Error(`Failed to forward-sync ${sessionId}: no v2 link`);
+        // A gap left by an earlier read is re-tried first whenever the key
+        // has changed since it failed (#128).
+        await this.replayUnopenableGap(sessionId, encryption, v2ctx, gen);
         while (true) {
             // Read from the relay's event log (seq-ordered, forward-paged).
             const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
             this.assertFresh(sessionId, gen); // reset while this page was in flight (#407)
             const messages = Array.isArray(data.messages) ? data.messages : [];
+            // Advance by the page's RAW cursor, not by renderable rows: a page
+            // of lifecycle-only events (turn starts/terminals with no text)
+            // used to leave the cursor unmoved, trip the stall guard below, and
+            // park every later output behind the same page forever.
+            let maxSeq = Math.max(afterSeq, data.cursor ?? afterSeq);
+            for (const message of messages) {
+                if (message.seq > maxSeq) maxSeq = message.seq;
+            }
             // Sealed rows this page could not open must not be stepped over:
             // with no key yet (the card's envelope has not landed) they are
             // the session's first output, and advancing past them lost them
@@ -1323,9 +1340,10 @@ class Sync {
                     throw new Error(`Forward sync of ${sessionId}: ${data.unopenable} sealed row(s) could not be opened (${v2ctx.key ? `key present, attempt ${strikes}` : 'no content key yet'}) — retrying`);
                 }
                 // Still unreadable with the freshest key after every retry:
-                // advance rather than wedge the session. Recoverable gaps are
-                // issue #128.
-                log.log(`💬 fetchForwardSince: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries with the current key — advancing past them (#128)`);
+                // advance rather than wedge the session, but KEEP the page's
+                // range as a gap that a later key change re-reads (#128).
+                this.recordUnopenableGap(sessionId, afterSeq, maxSeq, v2ctx.key);
+                log.log(`💬 fetchForwardSince: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries with the current key — advancing past them, ${afterSeq + 1}..${maxSeq} kept as a recoverable gap (#128)`);
             }
             this.unopenableStrikes.delete(sessionId);
 
@@ -1333,14 +1351,6 @@ class Sync {
             this.assertFresh(sessionId, gen);
             this.applyLifecycle(sessionId, data.lifecycle);
 
-            // Advance by the page's RAW cursor, not by renderable rows: a page
-            // of lifecycle-only events (turn starts/terminals with no text)
-            // used to leave the cursor unmoved, trip the stall guard below, and
-            // park every later output behind the same page forever.
-            let maxSeq = Math.max(afterSeq, data.cursor ?? afterSeq);
-            for (const message of messages) {
-                if (message.seq > maxSeq) maxSeq = message.seq;
-            }
             this.sessionLastSeq.set(sessionId, maxSeq);
 
             if (!data.hasMore) break;
@@ -1566,6 +1576,73 @@ class Sync {
     /** Sessions with a send in the last minute keep polling their messages (#2). */
     private recentSendAt = new Map<string, number>();
     private static readonly MAX_UNOPENABLE_RETRIES = 5;
+
+    /**
+     * Sealed rows a read could not open even after every retry with the key
+     * it had, kept as a recoverable GAP — the seq range and the key it failed
+     * under — instead of being stepped over for good (#128). The cursor still
+     * advances so one corrupt row cannot wedge the session, but the gap is
+     * re-read the next time the session's key DIFFERS from the one that
+     * failed (a corrected envelope, a late key), and the rows land then.
+     */
+    private unopenableGaps = new Map<string, { fromSeq: number; toSeq: number; keyId: string | null }>();
+
+    /** Identity of a session key for gap bookkeeping: same bytes, same id. */
+    private static keyId(key: Uint8Array | null): string | null {
+        if (!key) return null;
+        let s = '';
+        for (let i = 0; i < key.length; i++) s += key[i].toString(16).padStart(2, '0');
+        return s;
+    }
+
+    /** Remember `(fromSeq, toSeq]` as unreadable under `key`; widens an existing gap. */
+    private recordUnopenableGap(sessionId: string, fromSeq: number, toSeq: number, key: Uint8Array | null) {
+        const prev = this.unopenableGaps.get(sessionId);
+        this.unopenableGaps.set(sessionId, {
+            fromSeq: prev ? Math.min(prev.fromSeq, fromSeq) : fromSeq,
+            toSeq: prev ? Math.max(prev.toSeq, toSeq) : toSeq,
+            keyId: Sync.keyId(key),
+        });
+    }
+
+    /**
+     * Re-read a session's recorded gap when its key is no longer the one
+     * that failed. Rows that open now are merged as history (no thinking
+     * derivation: they are older than the head); a gap still unreadable is
+     * kept, stamped with the key that failed this time, so the same key is
+     * not retried on every sync.
+     */
+    private replayUnopenableGap = async (
+        sessionId: string,
+        encryption: ReturnType<Encryption['getSessionEncryption']> & {},
+        v2ctx: { base: string; v2SessionId: string; key: Uint8Array | null; token: string },
+        gen: number,
+    ) => {
+        const gap = this.unopenableGaps.get(sessionId);
+        if (!gap) return;
+        const keyId = Sync.keyId(v2ctx.key);
+        if (keyId === gap.keyId) return; // the key that failed: nothing new to try
+        let afterSeq = gap.fromSeq;
+        let unopenable = 0;
+        for (let pages = 0; pages < Sync.MAX_FORWARD_CATCHUP_PAGES && afterSeq < gap.toSeq; pages++) {
+            const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
+            this.assertFresh(sessionId, gen);
+            const messages = (Array.isArray(data.messages) ? data.messages : []).filter((m) => m.seq <= gap.toSeq);
+            unopenable += data.unopenable ?? 0;
+            await this.applyFetchedMessages(sessionId, encryption, messages, gen);
+            this.assertFresh(sessionId, gen);
+            const next = Math.max(afterSeq, data.cursor ?? afterSeq);
+            if (next === afterSeq || !data.hasMore) break;
+            afterSeq = next;
+        }
+        if (unopenable > 0) {
+            gap.keyId = keyId;
+            log.log(`💬 replayUnopenableGap: ${unopenable} row(s) in ${sessionId} (${gap.fromSeq + 1}..${gap.toSeq}) still unopenable with the new key — gap kept (#128)`);
+        } else {
+            this.unopenableGaps.delete(sessionId);
+            log.log(`💬 replayUnopenableGap: gap ${gap.fromSeq + 1}..${gap.toSeq} in ${sessionId} recovered with the new key (#128)`);
+        }
+    }
 
     private v2ReadCtx(sessionId: string): { base: string; v2SessionId: string; key: Uint8Array | null; token: string } | null {
         const session = storage.getState().sessions[sessionId];

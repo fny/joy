@@ -681,4 +681,43 @@ describe('debounce utilities', () => {
             });
         });
     });
+
+    // #428: null is a VALUE of a nullable T (a state-clearing update), not the
+    // "nothing pending" sentinel — it must be delivered like any other value.
+    describe('null values (#428)', () => {
+        it('createCustomDebounce delivers a debounced null', () => {
+            const fn = vi.fn<(v: string | null) => void>();
+            const debounced = createCustomDebounce<string | null>(fn, { delay: 100, immediateCount: 0 });
+            debounced('draft');
+            debounced(null);
+            vi.advanceTimersByTime(100);
+            expect(fn).toHaveBeenCalledTimes(1);
+            expect(fn).toHaveBeenCalledWith(null);
+        });
+
+        it('createAdvancedDebounce delivers a null on the timer and on flush', () => {
+            const fn = vi.fn<(v: string | null) => void>();
+            const { debounced, flush } = createAdvancedDebounce<string | null>(fn, { delay: 100, immediateCount: 0 });
+            debounced(null);
+            flush();
+            expect(fn).toHaveBeenCalledWith(null);
+            debounced(null);
+            vi.advanceTimersByTime(100);
+            expect(fn).toHaveBeenCalledTimes(2);
+            // Nothing pending after firing: a second flush is a no-op.
+            flush();
+            expect(fn).toHaveBeenCalledTimes(2);
+        });
+
+        it('a reducer sees a pending null as the previous value', () => {
+            const fn = vi.fn<(v: number | null) => void>();
+            const reducer = vi.fn((prev: number | null, cur: number | null) => (prev ?? 0) + (cur ?? 0));
+            const { debounced } = createAdvancedDebounce<number | null>(fn, { delay: 100, immediateCount: 0, reducer });
+            debounced(null);
+            debounced(2);
+            vi.advanceTimersByTime(100);
+            expect(reducer).toHaveBeenCalledWith(null, 2);
+            expect(fn).toHaveBeenCalledWith(2);
+        });
+    });
 });
