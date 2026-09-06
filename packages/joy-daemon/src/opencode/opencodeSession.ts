@@ -23,7 +23,7 @@ import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domai
 import {
   createRelaySession, encodeUserMessage, encodeTurnEnd,
   encodeTurnStart, encodeTextEvent, encodeToolCallStart, encodeToolCallEnd,
-  type RelaySession,
+  type RelaySession, type WireRecord,
 } from "../relay/relay";
 import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueState } from "../claude/session";
 import type { DeliverySource } from "../domain/agentSession";
@@ -100,6 +100,88 @@ export function messagesForReplay(
   if (!deliveredThrough) return asc;
   const at = asc.findIndex((m) => String(m.id ?? "") === deliveredThrough);
   return at >= 0 ? asc.slice(at + 1) : asc;
+}
+
+/** The text of a stored opencode message: its `text` parts joined, or a plain
+ *  string body (older servers). Empty when it carries no text at all. */
+export function messageText(m: Record<string, unknown>): string {
+  if (typeof m.content === "string") return m.content.trim();
+  const parts = Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : [];
+  return parts.filter((p) => String(p.type ?? "") === "text").map((p) => String(p.text ?? "")).join("").trim();
+}
+
+export interface ReplayEmission { record: WireRecord; localId: string; chat?: string }
+
+/**
+ * Project stored opencode history onto the records a Joy card shows.
+ *
+ * Pure so the projection can be asserted without a live server (the failure
+ * it encodes was invisible from the outside: resuming an existing opencode
+ * conversation into a new card published every turn start and every answer
+ * but NO user prompt, so the imported history permanently lost the user's
+ * side — #573).
+ *
+ * `ourPrompt(messageId)` says the prompt was submitted through this daemon,
+ * which means the app already has a user row for it (its own `turn.queued`,
+ * or the live mirror in #mirrorAccepted). Those are skipped; everything else
+ * — a prompt typed in the opencode TUI, or a conversation that predates this
+ * card — gets a user record under the stable `oc:<sid>:<mid>:user` id, which
+ * is what makes a repeated replay idempotent.
+ */
+export function historyReplay(
+  sid: string,
+  msgs: Array<Record<string, unknown>>,
+  opts: { ourPrompt?: (messageId: string) => boolean } = {},
+): { emissions: ReplayEmission[]; completedThrough: string | null } {
+  const emissions: ReplayEmission[] = [];
+  let turn: string | null = null;
+  // Advance the checkpoint only through COMPLETED work: the last assistant
+  // message with a finish. A trailing user prompt / in-flight assistant is
+  // left past the checkpoint so the next reconcile picks it up whole.
+  let completedThrough: string | null = null;
+  for (const m of msgs) {
+    const type = String(m.type ?? "");
+    const mid = String(m.id ?? "");
+    if (type === "user") {
+      turn = mid;
+      const text = messageText(m);
+      // The question BEFORE the turn it opened, the order a reader expects.
+      if (text && !opts.ourPrompt?.(mid)) {
+        const at = Number((m.time as Record<string, unknown> | undefined)?.created ?? 0) || undefined;
+        emissions.push({ record: encodeUserMessage(text, at), localId: `oc:${sid}:${mid}:user` });
+      }
+      emissions.push({ record: encodeTurnStart({ turn }), localId: `oc:${sid}:${turn}:turn-start` });
+      continue;
+    }
+    if (type !== "assistant" || !turn) continue;
+    const parts = Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : [];
+    for (const p of parts) {
+      const pt = String(p.type ?? "");
+      const pidPart = String(p.id ?? p.callID ?? "");
+      const core = `${mid}:${pidPart}`;
+      if (pt === "text") {
+        const text = String(p.text ?? "").trim();
+        if (text) emissions.push({ record: encodeTextEvent(text, { turn }), localId: `oc:${sid}:${core}:text`, chat: text });
+      } else if (pt === "tool" || pt === "tool-call" || pt === "toolCall") {
+        emissions.push({ record: encodeToolCallStart({ call: core, name: "OpencodeTool", input: p.input ?? null, turn }), localId: `oc:${sid}:${core}:tool-start` });
+        // Same outcome semantics as the live normalizer (#68): the stored
+        // part state carries output / error / status.
+        const st = (p.state ?? {}) as Record<string, unknown>;
+        const isError = String(st.status ?? "") === "error" || st.error != null;
+        const raw = isError ? (st.error ?? st.output) : (st.output ?? st.result);
+        const result = raw == null ? undefined : (typeof raw === "string" ? raw : JSON.stringify(raw));
+        const clamped = result && result.length > 48_000 ? `${result.slice(0, 24_000)}\n…[truncated]…\n${result.slice(-24_000)}` : result;
+        emissions.push({ record: encodeToolCallEnd(core, { turn, ...(clamped ? { result: clamped } : {}), ...(isError ? { isError: true } : {}) }), localId: `oc:${sid}:${core}:tool-end` });
+      }
+    }
+    // Assistant message completed → close the turn row (deterministic id
+    // means a live-emitted turn-end for the same turn dedupes).
+    if (m.finish) {
+      emissions.push({ record: encodeTurnEnd("completed", { turn }), localId: `oc:${sid}:${turn}:turn-end` });
+      completedThrough = mid;
+    }
+  }
+  return { emissions, completedThrough };
 }
 
 const WAIT_TIMEOUT_MS = 10 * 60_000;
@@ -486,49 +568,17 @@ export class OpencodeSession implements AgentSession {
       if (this.#deliveredThrough && msgs.length < all.length) {
         process.stderr.write(`[opencode ${this.id}] reconcile: ${all.length - msgs.length} messages already delivered, replaying ${msgs.length}\n`);
       }
-      let turn: string | null = null;
-      // Advance the checkpoint only through COMPLETED work: the last assistant
-      // message with a finish. A trailing user prompt / in-flight assistant is
-      // left past the checkpoint so the next reconcile picks it up whole.
-      let completedThrough: string | null = null;
-      for (const m of msgs) {
-        const type = String(m.type ?? "");
-        const mid = String(m.id ?? "");
-        if (type === "user") {
-          turn = mid;
-          this.#relay?.send(encodeTurnStart({ turn }), `oc:${sid}:${turn}:turn-start`);
-          continue;
-        }
-        if (type !== "assistant" || !turn) continue;
-        const parts = Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : [];
-        for (const p of parts) {
-          const pt = String(p.type ?? "");
-          const pidPart = String(p.id ?? p.callID ?? "");
-          const core = `${mid}:${pidPart}`;
-          if (pt === "text") {
-            const text = String(p.text ?? "").trim();
-            if (text) {
-              this.#relay?.send(encodeTextEvent(text, { turn }), `oc:${sid}:${core}:text`);
-              this.#mirrorChat(`oc:${sid}:${core}:text`, text);
-            }
-          } else if (pt === "tool" || pt === "tool-call" || pt === "toolCall") {
-            this.#relay?.send(encodeToolCallStart({ call: core, name: "OpencodeTool", input: p.input ?? null, turn }), `oc:${sid}:${core}:tool-start`);
-            // Same outcome semantics as the live normalizer (#68): the stored
-            // part state carries output / error / status.
-            const st = (p.state ?? {}) as Record<string, unknown>;
-            const isError = String(st.status ?? "") === "error" || st.error != null;
-            const raw = isError ? (st.error ?? st.output) : (st.output ?? st.result);
-            const result = raw == null ? undefined : (typeof raw === "string" ? raw : JSON.stringify(raw));
-            const clamped = result && result.length > 48_000 ? `${result.slice(0, 24_000)}\n…[truncated]…\n${result.slice(-24_000)}` : result;
-            this.#relay?.send(encodeToolCallEnd(core, { turn, ...(clamped ? { result: clamped } : {}), ...(isError ? { isError: true } : {}) }), `oc:${sid}:${core}:tool-end`);
-          }
-        }
-        // Assistant message completed → close the turn row (deterministic id
-        // means a live-emitted turn-end for the same turn dedupes).
-        if (m.finish) {
-          this.#relay?.send(encodeTurnEnd("completed", { turn }), `oc:${sid}:${turn}:turn-end`);
-          completedThrough = mid;
-        }
+      const { emissions, completedThrough } = historyReplay(sid, msgs, {
+        // A prompt THIS daemon submitted already has a user row on the relay
+        // — the app's own `turn.queued` for an app send, or #mirrorAccepted's
+        // mirror for a terminal/CLI one. Its admission left an
+        // `opencode_msg` receipt, so that receipt is the shared identity
+        // between the live mirror and this replay (#573).
+        ourPrompt: (mid) => this.#ledger.ownsRuntimeRef(this.id, mid, "opencode_msg"),
+      });
+      for (const e of emissions) {
+        this.#relay?.send(e.record, e.localId);
+        if (e.chat) this.#mirrorChat(e.localId, e.chat);
       }
       if (completedThrough && !this.#relay?.outboundPersistDegraded) this.#advanceDeliveredThrough(completedThrough);
     } catch (e) {
