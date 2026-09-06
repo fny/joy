@@ -672,7 +672,7 @@ export class SessionCoordinator {
       // An attempt still awaiting its verdict is THE operation in flight.
       if (this.ledger.attemptsAwaiting(sessionId).some((a) => pending.some((p) => p.id === a.commandId && p.state !== "queued"))) return;
       const running = pending.some((r) => r.state === "running" || r.state === "cancelling");
-      const head = pending.find((r) => r.state === "queued" && r.origin === "steer") ?? pending.find((r) => r.state === "queued");
+      const head = this.#queueHead(sessionId);
       if (!head) return;
       // A steer goes through the driver's steer op whenever it has one: into
       // the running turn, or — a turn the coordinator does not own (typed at
@@ -696,11 +696,21 @@ export class SessionCoordinator {
         if (actor.retired) return;
         if (r === "retired") continue; // pre-empted: re-plan
         if (r === "cancelled") continue; // the row is settled (cancelled / gone); the loop takes the next head
-        const again = this.ledger.getCommand(head.id);
-        if (!again || again.state !== "queued") continue;
+        // The gate wait is unbounded and the queue is editable meanwhile: the
+        // head may have been reordered behind another row, cancelled, or
+        // edited (its payload version advanced). Re-plan from the ledger
+        // rather than submit the row — or the text — the wait began with
+        // (Astra on e8f8b2cc); the head that is still current is dispatched.
+        const fresh = this.#queueHead(sessionId);
+        if (!fresh || fresh.id !== head.id || fresh.payloadVersion !== head.payloadVersion) continue;
       }
-      await this.#dispatch(actor, head, asSteer);
+      await this.#dispatch(actor, head.id, asSteer);
     }
+  }
+  /** The row the pump would dispatch next: a steer first, else the FIFO head. */
+  #queueHead(sessionId: string): CommandRow | null {
+    const pending = this.ledger.listPending(sessionId);
+    return pending.find((r) => r.state === "queued" && r.origin === "steer") ?? pending.find((r) => r.state === "queued") ?? null;
   }
   #holdPump(actor: Actor, ms: number): void {
     actor.holdTimer?.();
@@ -718,10 +728,15 @@ export class SessionCoordinator {
    *  distinguishable (campaign decision, 2026-09-06). */
   static runtimeRef(commandId: string, attemptNo: number): string { return attemptNo <= 1 ? commandId : `${commandId}#a${attemptNo}`; }
 
-  async #dispatch(actor: Actor, cmd: CommandRow, asSteer: boolean): Promise<void> {
+  async #dispatch(actor: Actor, commandId: string, asSteer: boolean): Promise<void> {
     const { sessionId, driver } = actor;
     let attempt: AttemptRow;
     const token = randomUUID();
+    // The row is read HERE, in the same synchronous span as the attempt
+    // commit: the text the driver receives and the payload version the
+    // attempt records are one and the same (no await separates them).
+    const cmd = this.ledger.getCommand(commandId);
+    if (!cmd || cmd.state !== "queued") return;
     try {
       const attemptNo = this.ledger.attemptsForCommand(cmd.id).length + 1;
       const ref = driver.runtimeRef ? driver.runtimeRef(this.#view(cmd), attemptNo) : SessionCoordinator.runtimeRef(cmd.id, attemptNo);
@@ -740,6 +755,14 @@ export class SessionCoordinator {
     this.#emitCommand(cmd.id);
     const ref = this.#ref(attempt, token);
     const view = this.#view(cmd);
+    if (attempt.payloadVersion !== view.payloadVersion) {
+      // Cannot happen (same synchronous span) — but a driver must never be
+      // handed a text the committed attempt does not vouch for.
+      this.#log(`${sessionId}: attempt ${attempt.id} records payload v${attempt.payloadVersion} but the row is v${view.payloadVersion} — not sending`);
+      try { this.ledger.settleAttempt(attempt.id, "rejected", { detail: "payload_version_mismatch", command: { to: "queued" }, generation: actor.generation }); } catch { /* the pump re-plans */ }
+      this.#emitCommand(cmd.id);
+      return;
+    }
     let result: SubmitResult;
     try {
       result = await (asSteer ? driver.steer!(view, ref, actor.abort.signal) : driver.submit(view, ref, actor.abort.signal));

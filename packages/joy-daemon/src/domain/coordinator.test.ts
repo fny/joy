@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Ledger, LedgerWriteError, SessionEndedError } from "./ledger";
 import { SessionCoordinator, SessionNotAdoptedError, type CoordinatorEvent } from "./coordinator";
-import { FakeDriver, FakeClock, settle, CODEX_LIKE, OPENCODE_LIKE } from "./coordinator.fakeDriver";
+import { FakeDriver, FakeClock, settle, deferred, CODEX_LIKE, OPENCODE_LIKE, CLAUDE_LIKE } from "./coordinator.fakeDriver";
 
 let dir: string;
 let ledger: Ledger;
@@ -618,6 +618,51 @@ test("edit bumps the payload version of a queued row only; reorder moves within 
   expect(coord.snapshot("s1").queue.map((q) => q.id)).toEqual([c.id, b.id]);
   expect(coord.snapshot("s1")).toMatchObject({ pendingCount: 3, inFlight: "A" });
   expect(d.submits).toHaveLength(1);
+});
+
+// ── e8f8b2cc review residuals: the editable queue across the pre-attempt gate ──
+
+test("pane gate (e8f8b2cc): an edit while the head waits at prepare re-plans — the driver receives the edited text and the attempt records that payload version", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const gate = deferred<"ready" | "cancelled" | "retired">();
+  const prepared: string[] = [];
+  d.prepare = (cmd) => { prepared.push(cmd.text); return gate.promise; };
+  const row = accept("s1", "before");
+  await settle();
+  expect(prepared).toEqual(["before"]);
+  expect(d.submits).toHaveLength(0);
+  expect(coord.edit(row.id, "after")).toBe(true);
+  gate.resolve("ready");
+  await settle();
+  // The stale head is never submitted: the loop re-planned on the edited row.
+  expect(d.submits).toHaveLength(1);
+  expect(d.lastSubmit.cmd.text).toBe("after");
+  expect(d.lastSubmit.cmd.payloadVersion).toBe(2);
+  const attempt = ledger.getAttempt(d.lastSubmit.attempt.attemptId)!;
+  expect(attempt.payloadVersion).toBe(2);
+  expect(attempt.payloadVersion).toBe(d.lastSubmit.cmd.payloadVersion);
+  expect(ledger.getCommand(row.id)).toMatchObject({ text: "after", payloadVersion: 2, state: "submitting" });
+});
+
+test("pane gate (e8f8b2cc): a reorder while the head waits at prepare re-plans — the new head is submitted first", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const gate = deferred<"ready" | "cancelled" | "retired">();
+  const prepared: string[] = [];
+  d.prepare = (cmd) => { prepared.push(cmd.text); return gate.promise; };
+  const x = accept("s1", "first");
+  const y = accept("s1", "second");
+  await settle();
+  expect(prepared).toEqual(["first"]);
+  expect(coord.reorder(y.id, 0)).toBe(true);
+  gate.resolve("ready");
+  await settle();
+  expect(d.submits).toHaveLength(1);
+  expect(d.lastSubmit.cmd.id).toBe(y.id);
+  expect(d.lastSubmit.cmd.text).toBe("second");
+  expect(stateOf(y.id)).toBe("submitting");
+  expect(stateOf(x.id)).toBe("queued");
+  // The gate was consulted again for the row that actually went.
+  expect(prepared[prepared.length - 1]).toBe("second");
 });
 
 test("waitFor resolves on the named state, immediately when already there, and with the current state on timeout", async () => {

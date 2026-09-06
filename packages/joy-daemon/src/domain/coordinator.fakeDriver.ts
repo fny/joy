@@ -37,6 +37,8 @@ export class FakeDriver implements RuntimeDriver {
   onInterrupt: ((call: InterruptCall) => InterruptResult | void) | null = null;
   onReconcile: ((call: ReconcileCall) => ReconcileOutcome[] | void) | null = null;
   commands: ((text: string) => HandledCommand | null) | null = null;
+  /** The pre-attempt gate (claude's pane wait); undefined → no gate. */
+  prepare: RuntimeDriver["prepare"] = undefined;
   #sinks = new Set<(o: Observation) => void>();
 
   constructor(sessionId: string, generation: number, capabilities: DriverCapabilities = CODEX_LIKE) {
