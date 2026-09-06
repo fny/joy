@@ -33,6 +33,7 @@ import type { AgentSession } from "../domain/agentSession";
 import { codexJoyInstructions, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
 import { CodexNormalizer, itemSignature, type CodexNotification } from "./normalize";
+import type { WireRecord } from "../relay/relay";
 import { buildCodexAttachCommand } from "./attach";
 import { ledgerFor, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand } from "../domain/coordinator";
@@ -149,6 +150,12 @@ export class CodexSession implements AgentSession {
   // the delivered high-water must never pass it, or the next recovery skips
   // its output for good once the full items become available (#518).
   #deferredFloor: string | null = null;
+  // Codex emits turn/started BEFORE the turn's userMessage item, so a prompt
+  // typed in the attached TUI mirrored on that item landed AFTER the turn-
+  // start record and the app bracketed it inside the turn (#131). The
+  // turn-start is held until the turn's first other effect; a TUI user row
+  // goes out first.
+  #heldTurnStart: { record: WireRecord; localId: string } | null = null;
   // Codex approval requests awaiting the app (non-yolo). Insertion-ordered Map
   // = a FIFO; the app bar always shows the HEAD (finding #6).
   #pendingApprovals = new Map<string, PendingApproval>();
@@ -666,17 +673,33 @@ export class CodexSession implements AgentSession {
     this.#deps.addChatMessage({ role: "assistant", content: text, source: "cli", session_id: this.id });
   }
 
+  /** Send the held turn-start (#131) — before anything else of its turn. */
+  #flushHeldTurnStart(): void {
+    const held = this.#heldTurnStart;
+    if (!held) return;
+    this.#heldTurnStart = null;
+    this.#relay?.send(held.record, held.localId);
+  }
+
   #applyEffects(effects: ReturnType<CodexNormalizer["handle"]>): void {
     for (const eff of effects) {
       switch (eff.kind) {
         case "wire": {
-          this.#relay?.send(eff.record, eff.localId);
           const data = (eff.record as { content?: { data?: { ev?: { t?: string; text?: string } } } }).content?.data;
+          if (data?.ev?.t === "turn-start") {
+            // Held until the turn's first item (#131): a TUI-typed prompt's
+            // user row must precede the bracket, as a joy-sent one does.
+            this.#flushHeldTurnStart();
+            this.#heldTurnStart = { record: eff.record, localId: eff.localId };
+            break;
+          }
+          this.#flushHeldTurnStart();
+          this.#relay?.send(eff.record, eff.localId);
           if (data?.ev?.t === "text" && data.ev.text) this.#mirrorChat(eff.localId ?? String(Math.random()), data.ev.text);
           break;
         }
         case "thinking": this.#thinking = eff.value; this.#relay?.setThinking(eff.value); break;
-        case "receipt": this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
+        case "receipt": this.#flushHeldTurnStart(); this.#relay?.stampReceiptOnLastQueued({ uuid: eff.uuid, turn: eff.turn }); break;
         case "model": this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); break;
         case "effort": this.currentEffort = eff.effort; break;
         case "context": void this.#relay?.updateContext(eff.tokens); break;
@@ -692,18 +715,21 @@ export class CodexSession implements AgentSession {
           // The userMessage echo carrying a clientId we submitted proves
           // delivery; the coordinator pairs it with its attempt (a late one
           // for a cancelled row is interrupted there — the tombstone rule).
+          this.#flushHeldTurnStart(); // our own prompt's row is already in the card: the bracket opens here
           if (this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client")) this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" });
           break;
         case "userMessage": {
           // Ours if this session ever submitted that clientId (an attempt
           // row or a retained receipt); anything else was typed in the
-          // attached TUI and has no relay row — mirror it once. Not during
-          // history replay: a fresh card already emitted user rows BEFORE
-          // the turn bracket (#78).
+          // attached TUI and has no relay row — mirror it once, BEFORE the
+          // held turn-start so the app brackets it like a joy-sent prompt
+          // (#131). Not during history replay: a fresh card already emitted
+          // user rows before the turn bracket (#78).
           const ours = !!eff.clientId && this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client");
-          if (ours) { this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" }); break; }
-          if (this.#replayingHistory && this.#freshCard) break; // already emitted before the turn bracket
+          if (ours) { this.#flushHeldTurnStart(); this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" }); break; }
+          if (this.#replayingHistory && this.#freshCard) { this.#flushHeldTurnStart(); break; } // already emitted before the turn bracket
           this.#relay?.send(encodeUserMessage(eff.text, Date.now()), eff.localId);
+          this.#flushHeldTurnStart();
           break;
         }
       }
@@ -916,9 +942,11 @@ export class CodexSession implements AgentSession {
     // DETERMINISTIC localId matching the normalizer's turn-end (finding #9) so
     // it dedupes against a real turn-end the app may already hold.
     if (this.#activeTurnId) {
+      this.#flushHeldTurnStart();
       try { this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#activeTurnId }), `codex:${this.#threadId}:turn:${this.#activeTurnId}:complete`); } catch { /* ignore */ }
       this.#activeTurnId = null;
     }
+    this.#heldTurnStart = null;
     // The session's own flag too, not only the relay's: an ended session read
     // busy forever through busy() and toJSON() (#515).
     this.#thinking = false;
