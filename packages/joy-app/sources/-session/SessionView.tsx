@@ -29,7 +29,7 @@ import { useEscapeAbort } from '@/hooks/useEscapeAbort';
 import { useImagePicker, releaseAttachmentUris } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useSessionMessages, useSessionUsage, useSetting, useUnopenableGaps } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -555,6 +555,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const deviceType = useDeviceType();
     const isTablet = useIsTablet();
     const { messages, isLoaded } = useSessionMessages(sessionId);
+    // Spans this device could not decrypt are chat rows too (ChatList projects
+    // a placeholder each): an initial page that was ENTIRELY unreadable must
+    // mount the chat for its warning, not the empty state (#128).
+    const unopenableGaps = useUnopenableGaps(sessionId);
+    const hasChatRows = messages.length > 0 || unopenableGaps.length > 0;
     // Newest user-sent message timestamp — drives the backstop's "recently sent"
     // trigger (messages are sorted newest-first, so the first user-text wins).
     const lastUserSentAt = React.useMemo(() => {
@@ -1099,7 +1104,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             <GoalBar sessionId={sessionId} />
             <HandoffBar sessionId={sessionId} />
             <Deferred>
-                {messages.length > 0 && (
+                {hasChatRows && (
                     <ChatList ref={chatListRef} session={session} />
                 )}
             </Deferred>
@@ -1124,7 +1129,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             )}
         </>
     );
-    const placeholder = messages.length === 0 ? (
+    const placeholder = !hasChatRows ? (
         <>
             {isLoaded ? (
                 <EmptyMessages session={session} />
