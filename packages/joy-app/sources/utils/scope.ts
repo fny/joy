@@ -69,7 +69,24 @@ export function createScope(): Scope {
 
 /** A scope owned by the component instance, cancelled when it unmounts. */
 export function useScope(): Scope {
-    const [scope] = React.useState(createScope);
-    React.useEffect(() => () => scope.cancel(), [scope]);
-    return scope;
+    // A stable facade over a replaceable inner scope: React StrictMode (and
+    // Fast Refresh) run the effect cleanup and then set up again on the SAME
+    // component instance, so a scope cancelled by that cleanup must be
+    // replaced, not kept — otherwise every later timeout is a no-op (Astra
+    // on d53685b4).
+    const inner = React.useRef<Scope | null>(null);
+    if (inner.current === null || inner.current.cancelled) inner.current = createScope();
+    React.useEffect(() => {
+        if (inner.current === null || inner.current.cancelled) inner.current = createScope();
+        const s = inner.current;
+        return () => s.cancel();
+    }, []);
+    const facade = React.useMemo<Scope>(() => ({
+        get cancelled() { return inner.current?.cancelled ?? true; },
+        get signal() { return (inner.current ?? createScope()).signal; },
+        timeout: (fn, ms) => (inner.current ?? createScope()).timeout(fn, ms),
+        defer: (cleanup) => (inner.current ?? createScope()).defer(cleanup),
+        cancel: () => { inner.current?.cancel(); },
+    }), []);
+    return facade;
 }

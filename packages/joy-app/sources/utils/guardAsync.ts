@@ -60,8 +60,17 @@ function report(onError: ErrorReporter, error: unknown): void {
  * nothing, so the statement is visibly handled rather than floating.
  */
 export function handle(promise: PromiseLike<unknown> | unknown, onError: ErrorReporter = logError): void {
-    if (!isThenable(promise)) return;
-    Promise.resolve(promise).then(undefined, (e) => report(onError, e));
+    // Assimilation happens INSIDE the guarded boundary: a value whose `then`
+    // getter throws used to escape from isThenable before any reporter ran
+    // (Astra on d53685b4).
+    let thenable: boolean;
+    try {
+        thenable = isThenable(promise);
+        if (!thenable) return;
+        Promise.resolve(promise).then(undefined, (e) => report(onError, e));
+    } catch (e) {
+        report(onError, e);
+    }
 }
 
 /**

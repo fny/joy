@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { View, Pressable, TextInput, Linking, Platform } from 'react-native';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { Text } from '@/components/StyledText';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -31,7 +31,7 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
 
     const onCopy = React.useCallback(async () => {
         if (!url) return;
-        await Clipboard.setStringAsync(url);
+        if (!(await copyToClipboard(url, { silent: true }))) return; // the helper reports the failure; never a false 'Copied' (#257 family)
         Modal.alert(t('common.copied'), t('joyLogin.urlCopied'));
     }, [url]);
 
