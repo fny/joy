@@ -53,14 +53,31 @@ function relayKeyHeaders(): Record<string, string> {
  *  `http://127.0.0.1:4997@evil.example/x` — host evil.example, our loopback
  *  as userinfo — and `//evil.example/x` rehomed the same way, both sending
  *  the daemon's X-Joy-Token to an arbitrary host. Only a `/`-rooted path
- *  that resolves to the target's own origin is dispatched. */
+ *  that resolves to the target's own origin is dispatched.
+ *
+ *  A raw space is the one whitespace accepted — encoded to %20 before
+ *  validation, as the old concatenation's fetch used to do — so a client
+ *  that forgot to encode a file name keeps working; C0/C1 controls and DEL
+ *  are refused outright (`new URL` would silently STRIP tab/LF/CR, and the
+ *  local surface must never see a path this function did not see).
+ *
+ *  What the local parser sees must be exactly what was validated here: the
+ *  request-target on the wire is pathname+search, and http.ts parses it with
+ *  `new URL(req.url, base)` — a `..`-collapsed `/..//evil.example/x` resolves
+ *  on our origin but reaches the wire as `//evil.example/x`, which that
+ *  parser reads as host evil.example, path /x. Refused: a `//` pathname, and
+ *  any request-target that does not re-parse to the same origin/path/query. */
 export function resolveLocalPath(targetBase: string, p: unknown): string | null {
-  if (typeof p !== "string" || !/^\/(?![/\\@])\S*$/.test(p)) return null;
+  if (typeof p !== "string" || !/^\/(?![/\\@])[^\x00-\x1f\x7f-\x9f]*$/.test(p)) return null;
   try {
     const base = new URL(targetBase);
-    const u = new URL(p, base);
+    const u = new URL(p.replace(/ /g, "%20"), base);
     if (u.origin !== base.origin || u.username || u.password) return null;
-    return u.href;
+    if (u.pathname.startsWith("//")) return null;
+    const wire = u.pathname + u.search;
+    const again = new URL(wire, base);
+    if (again.origin !== base.origin || again.pathname !== u.pathname || again.search !== u.search) return null;
+    return base.origin + wire; // never a fragment: fetch drops it, and the wire never carries it
   } catch { return null; }
 }
 
@@ -71,7 +88,25 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   let stopped = false;
   let lease: { id: string; token: string } | null = null;
   let renewTimer: ReturnType<typeof setInterval> | null = null;
+  // The gate, not the lease: a 401 whose body says `relay key required` is
+  // said ONCE per outage in words — it used to look exactly like a
+  // per-machine tunnel outage (#82). The flag clears on the next accepted
+  // keyed call, so a later gate flip or key rotation is logged again rather
+  // than being silent for the life of the process.
   let gateRefusalLogged = false;
+  function noteGateRefusal(status: number, bodyText: string, what: string): void {
+    if (status !== 401 || gateRefusalLogged) return;
+    let error = "";
+    try { error = String((JSON.parse(bodyText) as { error?: string } | null)?.error ?? ""); } catch { /* not json */ }
+    if (error !== "relay key required") return;
+    gateRefusalLogged = true;
+    log(`tunnel ${what} refused: relay key required — the relay gate is on and this daemon presents no/the wrong x-joy-relay-key (JOY_RELAY_ACCESS_KEY or perimeter.key; re-run \`joy auth\`)`);
+  }
+  function noteGateAccepted(what: string): void {
+    if (!gateRefusalLogged) return;
+    gateRefusalLogged = false;
+    log(`tunnel ${what} accepted again — the relay takes this daemon's x-joy-relay-key`);
+  }
 
   async function acquire(): Promise<void> {
     const r = await fetch(`${opts.relayUrl}/joy/v2/daemon/leases`, {
@@ -79,7 +114,12 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
       headers: { ...relayKeyHeaders(), authorization: `Bearer ${opts.accountToken}`, "content-type": "application/json" },
       body: JSON.stringify({ machineId: opts.machineId, capabilities: { tunnel: 1 } }),
     });
-    if (!r.ok) throw new Error(`lease acquire failed: ${r.status} ${await r.text()}`);
+    if (!r.ok) {
+      const text = await r.text();
+      noteGateRefusal(r.status, text, "lease acquire");
+      throw new Error(`lease acquire failed: ${r.status} ${text}`);
+    }
+    noteGateAccepted("lease acquire");
     const j = await r.json() as { leaseId: string; leaseToken: string; ttlSeconds: number };
     lease = { id: j.leaseId, token: j.leaseToken };
     // Renew at half TTL — a missed beat expires the lease and 412s the loops,
@@ -213,7 +253,21 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
   };
 
   const loop = (async () => {
-    if (!opts.borrowLease) await acquire();
+    if (!opts.borrowLease) {
+      // Own-lease mode: a failed FIRST acquire (gate flipped with no key,
+      // relay down, 5xx) used to reject this promise with nobody attached —
+      // an unhandledRejection that took the whole process down. Say what
+      // failed and retry with backoff; stop() still ends the wait.
+      let delay = 1000;
+      while (!stopped) {
+        try { await acquire(); break; }
+        catch (e) {
+          log(`tunnel lease acquire failed: ${e instanceof Error ? e.message : String(e)} — retrying in ${delay} ms`);
+          await sleep(delay);
+          delay = Math.min(delay * 2, 30_000);
+        }
+      }
+    }
     while (!stopped) {
       try {
         // Borrowed mode: use the lane's CURRENT lease; if it has none yet,
@@ -227,21 +281,17 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
           headers: { ...relayKeyHeaders(), "x-joy-lease-token": leaseToken, "content-type": "application/json" },
           body: JSON.stringify({ waitMs: 25_000 }),
         });
-        if (r.status === 401) {
-          // The gate, not the lease: say so ONCE in words — this used to look
-          // exactly like a per-machine tunnel outage (#82).
-          const body = await r.json().catch(() => null) as { error?: string } | null;
-          if (body?.error === "relay key required" && !gateRefusalLogged) {
-            gateRefusalLogged = true;
-            log("tunnel claim refused: relay key required — the relay gate is on and this daemon presents no/the wrong x-joy-relay-key (JOY_RELAY_ACCESS_KEY or perimeter.key; re-run `joy auth`)");
-          }
-        }
+        if (r.status === 401) noteGateRefusal(r.status, await r.text().catch(() => ""), "claim");
         if (r.status === 401 || r.status === 412) {
           // Borrowed lease rotated — pick up the new one next pass.
           if (opts.borrowLease) { await sleep(1000); continue; }
-          await acquire(); continue;
-        } // lease lapsed/fenced
+          // Own lease lapsed/fenced (or the gate refused it): re-acquire; a
+          // failure is logged here rather than swallowed by the outer catch.
+          try { await acquire(); } catch (e) { log(`tunnel lease re-acquire failed: ${e instanceof Error ? e.message : String(e)}`); await sleep(1000); }
+          continue;
+        }
         if (!r.ok) { await sleep(1000); continue; }
+        noteGateAccepted("claim");
         const { requests } = await r.json() as { requests: { requestId: string; payload: string }[] };
         // Concurrent execution: one slow request must not head-of-line block
         // the next claim — but errors stay per-request (a failed execute
