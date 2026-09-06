@@ -159,6 +159,46 @@ EdDSA JWTs minted by the relay (`JOY_RELAY_TOKEN_SECRET`, issuers
 A perimeter key (`JOY_RELAY_ACCESS_KEY`, header `x-joy-relay-key`) can gate
 the whole surface; unknown paths are 404 — there is no upstream.
 
+## Structured git status (`GET /v2/sessions/:id/git/status?v=2`)
+
+The daemon parses git's machine formats ONCE — `status --porcelain=v2 -z
+--branch --show-stash -uall`, `diff --numstat -z` (staged and unstaged,
+including the two-path rename form), `for-each-ref` with NUL-separated
+fields, and one `rev-parse` per value — and answers a versioned schema
+(`packages/joy-daemon/src/domain/gitStatus.ts`). Nothing is trimmed and no
+C-quoted path is ever decoded: every record is cut at git's own terminator.
+The app (`sync/v2/machine.ts` → `sync/gitStatusModel.ts`) renders these facts
+and has no git text parser any more. With `v` absent the route still answers
+the original flat shape (`branch/oid/upstream/ahead/behind/clean/entries[]`
+with cwd-relative `path`) for older apps.
+
+| Field | Meaning |
+|---|---|
+| `v: 2`, `ok` | Schema version. `ok:false` carries `code` (`git_missing` \| `git_failed` \| `timeout`) + `error` (git's stderr, one trailing newline removed) |
+| `relation` | `root` (cwd is the worktree root) \| `inside` (a subdirectory) \| `none` (not a repository — a SUCCESSFUL answer: `{v, ok:true, relation:'none', cwd}`) |
+| `repository` | `root` (absolute), `gitDir`, `commonDir`, `linkedWorktree` (gitDir ≠ commonDir, i.e. `git worktree add`), `prefix` (cwd under root: `""` or `"sub/dir/"`) |
+| `head` | `{kind:'branch', name, oid}` \| `{kind:'detached', oid}` \| `{kind:'unborn', name}` (no commit yet; `name` is the branch HEAD points at). A rebase/merge in progress is `detached` + `operation`, never a pseudo-branch |
+| `upstream` | `{name, ahead, behind}` or null; `ahead`/`behind` null when the upstream ref is gone |
+| `operation` | `merge` \| `rebase` \| `cherry-pick` \| `revert` \| `bisect` \| null (from the git dir's state files) |
+| `stashCount`, `clean` | Stash entries; `clean` is "no entries at all" — a conflict-only tree is NOT clean |
+| `branches[]` | `{name, oid, current, worktree, upstream}` from `refs/heads`; `current` marks THIS worktree's checkout, `worktree` the absolute path of whichever checkout holds it (linked worktrees included) |
+| `entries[]` | Scoped to the cwd (pathspec `.`), untracked files listed one by one. Per entry: `path` (see below), `index`/`worktree` (porcelain XY letters, `.` = unchanged, `?` both for untracked), `untracked`, `conflict` (`{xy}` for EVERY `u` record — AA and DD included), `rename` (`{from: path, score, copy}`), `submodule`, `binary` (true from numstat's `-`, null when no numstat covered it), `lines: {staged, unstaged}` |
+| `lines` / `totals.staged` / `totals.unstaged` | `{added, removed}` — exact — or the string `'unavailable'`: binary files, untracked files, and every entry of a side whose numstat read failed. Never a stand-in zero. A side with no change (`.`) is `{0,0}` as a fact. Totals sum the available text files of a side and are `'unavailable'` only when that numstat read failed |
+| `totals.counts` | `{staged, unstaged, untracked, conflicted, entries}` — conflicted entries are counted once, not as staged/unstaged |
+
+**Path identity vs display.** Every path is a `GitPath`:
+`{repo, cwd, display, utf8, rawBase64?}`. `cwd` is the IDENTITY — the
+session-cwd-relative path that `files/content?path=`, `git/diff?path=` and
+`git/entries?path=` accept (`../x` for a rename partner outside the cwd);
+`repo` is the same identity relative to the worktree root. `display` is
+what to SHOW: cwd-relative, C0 control characters replaced by their Unicode
+control pictures (a newline in a name renders as `␊`), undecodable bytes as
+U+FFFD. When the filename bytes are not valid UTF-8, `utf8` is false, the
+three strings are lossy (U+FFFD where the bytes could not be decoded) and
+`rawBase64` carries the exact repo-relative bytes — nothing is silently
+renamed, and a caller that can address raw bytes has them. A filename that
+begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
+
 ## Background daemon behaviors (not ops)
 
 - Sealed sessions refuse plaintext: once a session has a content key, only a
@@ -168,7 +208,8 @@ the whole surface; unknown paths are 404 — there is no upstream.
   dropped with a log line, never sent in the clear (#582).
 - `GET /v2/sessions/:id/git/status` paths are relative to the session cwd (a
   subdirectory session sees `inner.txt`, an outside-cwd rename partner
-  `../x`), not to the repository root (#601). Tracked symlinks keep their own
+  `../x`), not to the repository root (#601); `?v=2` answers the structured
+  schema above, which carries the repo-relative identity as well. Tracked symlinks keep their own
   identity; containment is checked on the real path (#603). Body identifiers
   never override the URL's session/queue-item id (#599).
 - `joy stop` signals only a verified daemon: the pid from an authenticated
