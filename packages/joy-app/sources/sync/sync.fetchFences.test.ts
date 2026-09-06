@@ -21,7 +21,8 @@ const quiet = { log: () => { } };
 
 function baseInstance(Sync: ReturnType<typeof buildSyncSubset>) {
     const x = new Sync();
-    for (const p of ['sessionLastSeq', 'sessionOldestSeq', 'unopenableStrikes', 'messagesSync', 'sessionMessageLocks', 'recentSendAt']) x[p] = new Map();
+    for (const p of ['sessionLastSeq', 'sessionOldestSeq', 'unopenableStrikes', 'unopenableGaps', 'messagesSync', 'sessionMessageLocks', 'recentSendAt']) x[p] = new Map();
+    x.replayUnopenableGap = async () => { }; // #128 gap replay has its own test file
     x.fetchGen = new FetchGeneration();
     x.applyLifecycle = () => { };
     x.v2ReadCtx = () => ({ key: new Uint8Array(32) });
