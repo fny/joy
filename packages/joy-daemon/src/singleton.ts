@@ -108,12 +108,22 @@ export function acquireSingleton(
 
   // Informational pidfile, written whole then renamed in (readers never see
   // a partial record). We hold the OS lock, so no one else writes it now.
+  // Any failure here must give the lock BACK: a thrown acquisition that kept
+  // its SQLite transaction refused the very next clean retry in the same
+  // process although nothing had been acquired (Astra on 0a0db1cd, #589).
   const nonce = randomBytes(8).toString("hex");
   const record = `${process.pid}\n${nonce}\n${now()}\n`;
   const tmp = `${lockPath}.${process.pid}.${nonce}.tmp`;
-  const fd = openSync(tmp, "w");
-  try { writeSync(fd, record); } finally { closeSync(fd); }
-  renameSync(tmp, lockPath);
+  try {
+    const fd = openSync(tmp, "w");
+    try { writeSync(fd, record); } finally { closeSync(fd); }
+    renameSync(tmp, lockPath);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* never created */ }
+    try { db.exec("ROLLBACK"); } catch { /* best effort */ }
+    try { db.close(); } catch { /* best effort */ }
+    throw e;
+  }
 
   let released = false;
   return () => {

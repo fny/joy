@@ -331,7 +331,7 @@ export class OpencodeSession implements AgentSession {
         // (admittedSeq is the server's own ordering receipt).
         if (this.#isEnded()) return; // retired mid-request: do not touch the (cleared) spool (#43)
         // A cancel that raced the reply wins: never overwrite its outcome.
-        if (r.messageID) this.#noteAdmitted(item.clientId);
+        if (r.messageID) this.#noteAdmitted(item.clientId, r.admittedSeq >= 0 ? r.admittedSeq : undefined);
         if (r.messageID && this.#inbound.includes(item)) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
         // The HTTP ack is admission evidence too: a prompt cancelled while
         // this request was in flight (tombstoned by cancelQueued) is now
@@ -431,7 +431,7 @@ export class OpencodeSession implements AgentSession {
         case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
         case "confirmPrompt":
           if (eff.messageID) {
-            this.#noteAdmitted(eff.messageID);
+            this.#noteAdmitted(eff.messageID, eff.seq);
             this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
             if (this.#cancelledIds.has(eff.messageID) && this.#client && this.#ocSessionId) {
               // Admitted after the user cancelled it: interrupt now (#77).
@@ -632,13 +632,27 @@ export class OpencodeSession implements AgentSession {
    *  late admission of an already-admitted id never bumps it, so stale
    *  evidence for an OLD prompt cannot make it "the latest" again and steer
    *  an interrupt at newer work (Astra on 7c27b926, #77). */
-  #noteAdmitted(id: string): void {
-    if (this.#admissionSeq.has(id)) return;
-    this.#admissionSeq.set(id, ++this.#admissionClock);
-    this.#lastAdmitted = id;
+  #noteAdmitted(id: string, serverSeq?: number): void {
+    const known = this.#admissionSeq.get(id);
+    if (known) {
+      // Late evidence for a known id may still carry a server seq we lacked
+      // (HTTP ack lost, SSE later): record it, never re-rank as newest.
+      if (serverSeq !== undefined && known.server === undefined) known.server = serverSeq;
+      return;
+    }
+    const rank = { server: serverSeq, local: ++this.#admissionClock };
+    this.#admissionSeq.set(id, rank);
+    // Newest = SERVER order when both sides have it (admittedSeq / durable.seq
+    // are the server's own counter); arrival order only as a fallback. First-
+    // observed order let a delayed admission of an OLD prompt (seq 10) rank
+    // above a newer one (seq 20) and interrupt the newer work (Astra on
+    // a1c76416, #77).
+    const cur = this.#lastAdmitted ? this.#admissionSeq.get(this.#lastAdmitted) : undefined;
+    const newer = !cur || (rank.server !== undefined && cur.server !== undefined ? rank.server > cur.server : rank.local > cur.local);
+    if (newer) this.#lastAdmitted = id;
     if (this.#admissionSeq.size > 500) { const first = this.#admissionSeq.keys().next().value; if (first !== undefined) this.#admissionSeq.delete(first); }
   }
-  #admissionSeq = new Map<string, number>();
+  #admissionSeq = new Map<string, { server: number | undefined; local: number }>();
   #admissionClock = 0;
   /** May an interrupt on behalf of cancelled `id` still fire? Only while no
    *  newer prompt has been admitted — the endpoint interrupts the SESSION. */

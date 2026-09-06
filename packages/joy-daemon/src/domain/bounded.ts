@@ -116,6 +116,32 @@ function procState(pid: number): string | null {
  * Per-pid failures are skipped — a process vanishing between readdir and read
  * must not end the scan.
  */
+/** Enumeration outcome: `members` when the platform could actually list the
+ *  group (an empty list then means "only zombies / nobody"), `null` when it
+ *  could not (no /proc AND no usable ps) — the two must not be confused: a
+ *  parent holding an exited child unreaped is a zombie-only group that is
+ *  still addressable by kill(-pgid, 0), and treating "addressable but
+ *  unenumerated" as survivors made killProcessGroup refuse a replacement
+ *  although nothing executable remained (Astra on 4b47e729). */
+export function enumerateProcessGroup(pgid: number): number[] | null {
+  let entries: string[] = [];
+  try { entries = fs.readdirSync("/proc"); } catch { /* no /proc */ }
+  if (entries.length > 0) return processGroupMembers(pgid);
+  try {
+    const r = spawnSync("ps", ["-A", "-o", "pid=,pgid=,stat="], { encoding: "utf8", timeout: 5_000 });
+    if (r.status !== 0 || !r.stdout) return null;
+    const out: number[] = [];
+    for (const line of r.stdout.split("\n")) {
+      const m = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
+      if (m && Number(m[2]) === pgid && !m[3].startsWith("Z")) out.push(Number(m[1]));
+    }
+    // ps listed the world: a leader that ps shows outside the group (a
+    // non-leader target pid) still counts when it is alive and not a zombie.
+    if (!out.includes(pgid) && pidAlive(pgid) && procState(pgid) !== "Z") out.push(pgid);
+    return out;
+  } catch { return null; }
+}
+
 export function processGroupMembers(pgid: number): number[] {
   const out: number[] = [];
   let entries: string[] = [];
@@ -178,11 +204,11 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   if (!groupKill("SIGTERM")) return true;
   const groupExists = (): boolean => { try { process.kill(-pid, 0); return true; } catch { return false; } };
   const stillThere = (): number[] => {
-    const members = processGroupMembers(pid);
-    // Enumeration can miss members (no /proc, ps failed) while the group
-    // itself is still addressable: treat an addressable group as survivors
-    // so escalation happens instead of a false "gone".
-    return members.length || !groupExists() ? members : [pid];
+    const members = enumerateProcessGroup(pid);
+    if (members !== null) return members; // a real listing: zombie-only == nobody left
+    // Enumeration unavailable while the group is still addressable: assume
+    // survivors so escalation happens instead of a false "gone".
+    return groupExists() ? [pid] : [];
   };
   for (let i = 0; i < rounds && stillThere().length; i++) await sleep(tick);
   let left = stillThere();
