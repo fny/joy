@@ -296,8 +296,9 @@ export type Op = MachineOp | SessionOp;
 
 /** "Can I talk to this session right now?" — the one computation behind
  *  `joy check`, `joy wait`, and the app's needs-input state. needs_input
- *  = a held approval, or the last assistant text ended in a <joy-options>
- *  block (a question with answers offered). */
+ *  = a held approval, a hook-reported wait (claude's PermissionRequest /
+ *  Notification: permission prompt, elicitation), or the last assistant text
+ *  ended in a <joy-options> block (a question with answers offered). */
 export function checkSession(registry: SessionRegistry, id: string): Record<string, unknown> {
   const session = registry.get(id);
   if (!session) return { error: "session_not_found", state: "ended" };
@@ -307,6 +308,8 @@ export function checkSession(registry: SessionRegistry, id: string): Record<stri
   const qs = session.queueState() as { pendingCount?: number; paused?: boolean };
   const queue = qs.pendingCount ?? 0;
   if (approvals.length > 0) return { state: "needs_input", approvals, queue, permissionMode };
+  const waiting = session.needsInput?.() ?? null;
+  if (waiting) return { state: "needs_input", waiting, queue, permissionMode };
   if (session.busy()) {
     const started = sessionRecords(id).filter((r) => (r.record.content as { data?: { ev?: { t?: string } } }).data?.ev?.t === "turn-start").pop();
     return { state: "busy", busySince: started?.at ?? null, queue, paused: qs.paused === true, permissionMode };
@@ -1434,14 +1437,19 @@ export const sessionOps: SessionOp[] = [
     handler: (session) => session.abort(),
   },
   {
-    // Generic Claude Code hook ingest (SessionStart/UserPromptSubmit/Stop/
-    // Notification/PreCompact) — hit by the generated joy-hook.mjs forwarder
-    // (hooks.ts). Best-effort on the sender side; unknown events return
-    // ok:false.
+    // Generic Claude Code hook ingest — hit by the generated joy-hook.mjs
+    // forwarder (hooks.ts). Payload (all optional but `event`): event,
+    // session_id, transcript_path, prompt, prompt_id, message, source,
+    // trigger, permission_mode, notification_type, end_reason, error_type,
+    // tool_name, stop_hook_active. Events: SessionStart, SessionEnd,
+    // UserPromptSubmit, Stop, StopFailure, PostToolUse, PermissionRequest,
+    // SubagentStop, Notification, PreCompact. Best-effort on the sender
+    // side; unknown events still flip the session's hook-authority latch and
+    // return ok:false.
     name: "hookEvent",
     scope: "session",
     rpcName: "joy-hook",
-    summary: "Claude hook event ingress (PreCompact etc.)",
+    summary: "Claude hook event ingress (state authority once live)",
     http: { method: "POST", path: "/sessions/:id/hook" },
     handler: (session, params) => session.onHookEvent(params as Record<string, unknown>),
   },

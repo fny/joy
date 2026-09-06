@@ -193,6 +193,21 @@ export const THINKING_LEASE_MS = 170_000;
  *  review, 2026-09-04). Long enough to cover that second, short enough
  *  that a no-op command is over before anyone notices. */
 export const SLASH_THINKING_LEASE_MS = 8_000;
+/** SessionEnd → teardown grace: the hook runs INSIDE the exiting claude, so
+ *  its pid is still alive at hook time. Confirm death after this many ms;
+ *  a pid still alive then is a claude that did not exit (a /clear-class
+ *  rotation, a restart replacement under the same id) — the pid probe keeps
+ *  the last word. */
+export const HOOK_SESSION_END_GRACE_MS = 1_500;
+/** With hooks live the pane may CLEAR thinking only after this many
+ *  consecutive not-generating reads (3s apart) past the lease — a tie-breaker
+ *  for the one edge hooks do not report (Stop does not fire on a terminal
+ *  Esc; the transcript's interrupt marker normally closes that). Never SETS. */
+export const HOOK_TIEBREAK_IDLE_POLLS = 6;
+/** A hook-reported permission wait the pane has shown no dialog for, this
+ *  long, is stale (the human answered in the terminal and no later hook
+ *  cleared it). */
+export const HOOK_NEEDS_INPUT_STALE_MS = 10_000;
 export function thinkingLeaseMs(prompt: string | null | undefined): number {
   return (prompt ?? "").trimStart().startsWith("/") ? SLASH_THINKING_LEASE_MS : THINKING_LEASE_MS;
 }
@@ -753,6 +768,44 @@ export class Session {
   #pendingBashCmd?: string;
   #trustHandled = false;
 
+  // ── Hook authority (spike Wave F, candidate A, step one) ───────────────────
+  // True once ANY hook event from THIS session's claude process reached the
+  // daemon. Hooks are best-effort (hooks.ts): before the latch flips, the pane
+  // rules stay in force unchanged; after it, hooks are the AUTHORITY for the
+  // states they observe (turn live/idle, permission mode, exit, auth failure,
+  // waiting-for-input, "my prompt landed") and the pane is a tie-breaker for
+  // those. The latch never clears: one hook proves the forwarder is installed
+  // for this process, a later gap is a missed EDGE — and the transcript stays
+  // the durable fallback for every edge. The pane remains the ONLY source for
+  // what hooks cannot see: draft text, dialogs, the login form, the shells
+  // footer (docs/review-campaign-2026-09-claude-runtime-spike.md §3 A).
+  #hooksLive = false;
+  #hooksLiveAt = 0;
+  /** permission_mode from the most recent hook that carried one. */
+  #hookPermissionMode: string | null = null;
+  #hookPermissionModeAt = 0;
+  /** What the window record currently says (undefined = not loaded yet), so a
+   *  hook's mode is persisted only on change — PostToolUse fires per tool. */
+  #persistedPermissionMode: string | null | undefined = undefined;
+  /** setPermissionMode's last target — verified (or corrected) by the next
+   *  hook that reports a mode, since no hook fires on Shift+Tab itself. */
+  #modeSetTarget: { mode: string; at: number } | null = null;
+  /** SessionEnd with an exit-class end_reason: teardown is confirmed by the
+   *  pid dying within the grace, never by the hook alone (restart race). */
+  #hookSessionEnd: { reason: string; at: number } | null = null;
+  #hookSessionEndTimer: ReturnType<typeof setTimeout> | null = null;
+  /** StopFailure(authentication_failed) opened an auth episode; closed by
+   *  Notification(auth_success) or a fresh SessionStart. With hooks live,
+   *  /login-code types only inside an episode (or a surfaced login form). */
+  #authFailure: { errorType: string; since: number } | null = null;
+  /** Hook-reported waiting-for-input: a permission prompt (PermissionRequest /
+   *  Notification permission_prompt), an elicitation, agent_needs_input. Not
+   *  idle_prompt — that is plain idleness, not a question. */
+  #needsInput: { kind: string; tool?: string; since: number } | null = null;
+  /** `since` of the needs-input episode a "permission" push already went out
+   *  for — one push per episode, whichever hook opened it. */
+  #needsInputPushedFor = 0;
+
   // ── Message queue ──────────────────────────────────────────────────────────
   // The ONE verified dispatch queue. EVERY app→Claude text — relay app-send,
   // HTTP/RPC /send, explicit queue-add, 5xx auto-retry — funnels through here so
@@ -1138,6 +1191,8 @@ export class Session {
     this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
+    if (this.#hookSessionEndTimer) { clearTimeout(this.#hookSessionEndTimer); this.#hookSessionEndTimer = null; }
+    this.#needsInput = null;
     this.#clearDirtyRecheck();
     this.#clearCompacting(); // every end path — a kill mid-compaction leaked the 10-min backstop timer
     // Clear the dialog banner on BOTH end paths while the relay is still
@@ -2067,6 +2122,21 @@ export class Session {
     // or the dispatch echo timeout requeues it. Never confirm on turn-start alone.
     if (this.#submitTimer) return;
     if (opts?.byTurnStart) {
+      // HOOK AUTHORITY (#32): with hooks live, a plain prompt of ours that
+      // really submitted fires UserPromptSubmit with its exact text, and that
+      // hook (or the transcript's text-matched user echo) confirms it. A turn
+      // starting WITHOUT either is by definition not ours — a <task-notification>,
+      // a Claude-side queued message, typing in the terminal — so it never
+      // confirms the in-flight prompt, whatever the box shows (the box read
+      // below is the hook-less fallback, and it can misread). Slash and `!`
+      // commands are exempt: UserPromptSubmit does not fire for a built-in
+      // command, and a command that produced a turn is confirmed by the
+      // <command-name> echo, its dialog, or this turn-start as before.
+      const cmdLike = /^\s*[/!]/.test(this.#dispatchInFlight.text);
+      if (this.#hooksLive && !cmdLike) {
+        this.#dlog(`turn started but hooks are live and no UserPromptSubmit matched ${this.#dispatchInFlight.id} — foreign turn, not confirming (#32)`);
+        return;
+      }
       // A SENT Enter is not a SUBMITTED message: paste-detection can absorb it
       // as a newline, leaving the prompt in the box. If a foreign turn then
       // starts (a <task-notification>, a Claude-side queued message, typing in
@@ -2178,8 +2248,32 @@ export class Session {
    */
   detectPermissionMode(): string | null {
     const pane = this.#tmux.captureCached(this.tmuxWindow);
-    if (!pane.ok) return null;
+    // HOOK AUTHORITY: the footer is read only where it is live — under a
+    // located input box. No box (dialog, login form, spinner-only frame,
+    // capture failure) means the footer is not on screen, and the parser's
+    // "no marker → default" would be a guess; the last hook-reported mode is
+    // the truth there. WITH a box the footer wins even over the hook value: a
+    // Shift+Tab in the terminal fires no hook, so the footer is fresher until
+    // the next event corrects the record.
+    const hookMode = this.#hooksLive ? this.#hookPermissionMode : null;
+    if (!pane.ok) return hookMode;
+    if (hookMode && !paneShowsReadyPrompt(pane.out)) return hookMode;
     return parsePermissionModeFromPane(pane.out);
+  }
+
+  /** Hook authority snapshot (tests, debug). */
+  hookState(): { live: boolean; since: number; permissionMode: string | null; permissionModeAt: number; needsInput: { kind: string; tool?: string; since: number } | null; authFailure: { errorType: string; since: number } | null; sessionEnd: { reason: string; at: number } | null } {
+    return {
+      live: this.#hooksLive, since: this.#hooksLiveAt,
+      permissionMode: this.#hookPermissionMode, permissionModeAt: this.#hookPermissionModeAt,
+      needsInput: this.#needsInput, authFailure: this.#authFailure, sessionEnd: this.#hookSessionEnd,
+    };
+  }
+
+  /** Hook-reported waiting-for-input (see #needsInput) — `joy check`'s
+   *  needs_input for claude, where no approval object exists. */
+  needsInput(): { kind: string; tool?: string; since: number } | null {
+    return this.#needsInput;
   }
 
   /**
@@ -2203,7 +2297,11 @@ export class Session {
     }
     await sleep(250);
     const after = this.detectPermissionMode();
-    if (after === target) saveWindowRecord(this.id, { claudePermissionMode: after });
+    // No hook fires on Shift+Tab: the footer read verifies now, and the next
+    // hook carrying permission_mode re-verifies (correcting the record if the
+    // footer lied — #480's false success can no longer persist).
+    if (this.#hooksLive) this.#modeSetTarget = { mode: target, at: Date.now() };
+    if (after === target) { saveWindowRecord(this.id, { claudePermissionMode: after }); this.#persistedPermissionMode = after; }
     return after === target
       ? { ok: true, mode: after }
       : { ok: false, mode: after ?? undefined, error: `landed on ${after ?? "unknown"}` };
@@ -2297,6 +2395,7 @@ export class Session {
     const esc = await this.#tmux.key(this.tmuxWindow, "Escape");
     if (!esc.ok) return { ok: false, error: esc.error ?? "tmux send-keys failed" }; // the agent was NOT interrupted (#8)
     this.#setThinking(false);
+    this.#needsInput = null; // Escape dismisses a permission prompt too
     // Interrupting mid-tool means Claude won't write that tool's result — close any
     // open tools so their cards don't spin forever.
     this.#closeOpenTools();
@@ -3239,9 +3338,54 @@ export class Session {
     if (this.status === "ended") return { ok: false };
     const name = String(ev.event ?? "");
     const str = (k: string) => (typeof ev[k] === "string" && ev[k] ? String(ev[k]) : null);
+    if (!name) return { ok: false };
+    // Any event from this process flips the authority latch — even one the
+    // switch below does not know (a newer hook set is still proof the
+    // forwarder is installed). SessionEnd is the one event that must NOT
+    // clear a pending end; every other one proves the process lives on.
+    this.#markHooksLive(name);
+    if (name !== "SessionEnd" && this.#hookSessionEnd) {
+      process.stderr.write(`[hook] ${this.id} ${name} after SessionEnd(${this.#hookSessionEnd.reason}) — the process lives on, teardown withdrawn\n`);
+      this.#hookSessionEnd = null;
+      if (this.#hookSessionEndTimer) { clearTimeout(this.#hookSessionEndTimer); this.#hookSessionEndTimer = null; }
+    }
+    this.#notePermissionMode(str("permission_mode"), name);
     switch (name) {
       case "PreCompact": {
         this.markCompacting(str("trigger") ?? "auto");
+        return { ok: true };
+      }
+      case "SessionEnd": {
+        // Claude is EXITING (or rotating its conversation). Exit-class reasons
+        // tear the session down as process_exited — the pane's frozen frame
+        // and the 60s text grace no longer decide liveness (#30's shell-pid
+        // case included: the shell being alive was never evidence). clear /
+        // resume rotate the conversation inside a live process (SessionStart
+        // follows) and end nothing. The hook runs INSIDE the exiting process,
+        // so the pid is still alive here: confirm after a short grace, and a
+        // pid that is still alive then wins (a replacement under the same id
+        // whose predecessor's hook arrived late must never be torn down).
+        const reason = str("end_reason") ?? "other";
+        const sid = str("session_id");
+        if (reason === "clear" || reason === "resume") {
+          process.stderr.write(`[hook] ${this.id} SessionEnd reason=${reason} — conversation rotation, session stays\n`);
+          return { ok: true };
+        }
+        if (sid && this.claudeSessionId && sid !== this.claudeSessionId) {
+          process.stderr.write(`[hook] ${this.id} SessionEnd for sid ${sid} ≠ bound ${this.claudeSessionId} — ignored\n`);
+          return { ok: true };
+        }
+        if (this.status === "starting") {
+          // The startup watchdog owns a claude that dies before its first
+          // transcript entry (and a restart replacement is "starting" while
+          // its predecessor's late SessionEnd could still arrive).
+          process.stderr.write(`[hook] ${this.id} SessionEnd reason=${reason} while starting — left to the startup watchdog\n`);
+          return { ok: true };
+        }
+        process.stderr.write(`[hook] ${this.id} SessionEnd reason=${reason} — confirming exit in ${HOOK_SESSION_END_GRACE_MS}ms\n`);
+        this.#hookSessionEnd = { reason, at: Date.now() };
+        this.#needsInput = null;
+        this.#armHookSessionEnd();
         return { ok: true };
       }
       case "SessionStart": {
@@ -3252,6 +3396,8 @@ export class Session {
         const sid = str("session_id");
         const tp = str("transcript_path");
         process.stderr.write(`[hook] ${this.id} SessionStart sid=${sid ?? "?"} source=${str("source") ?? "?"}\n`);
+        if (str("source") === "startup") this.#authFailure = null; // a fresh process starts with whatever creds it has
+        this.#needsInput = null;
         // STAGED binding (review finding 4, built per 5.6-sol audit #6): the
         // hook proposes {sid, path}; transcript ACTIVITY on that exact path
         // confirms it (see the starting-activation block) — persisting a sid
@@ -3305,6 +3451,7 @@ export class Session {
         // dispatch confirms delivery outright — no echo-timeout heuristics,
         // no confirm-on-foreign-turn races.
         this.#setThinking(true);
+        this.#needsInput = null;
         const prompt = str("prompt");
         // Trusted edge — the pane can't clear it. See takesThinkingLease for
         // why a slash command is exempt.
@@ -3344,23 +3491,152 @@ export class Session {
       case "Stop": {
         // Turn finished. The transcript's end_turn/turn_duration entries also
         // land, but this fires first — thinking clears instantly and the next
-        // queued message dispatches without waiting for tailer lag.
+        // queued message dispatches without waiting for tailer lag. With
+        // hooks live this is THE idle edge; the pane's "esc to interrupt"
+        // read is a tie-breaker only (#pollThinking).
         this.#setThinking(false);
+        this.#needsInput = null;
         this.#idlePolls = 0;
         this.#maybeDrainQueue();
         return { ok: true };
       }
-      case "Notification": {
-        // Claude is WAITING (permission request / idle input prompt) — not
-        // generating. The pane poll can only guess at this state.
-        process.stderr.write(`[hook] ${this.id} Notification: ${(str("message") ?? "").slice(0, 80)}\n`);
+      case "StopFailure": {
+        // The turn FAILED (rate_limit | overloaded | authentication_failed |
+        // billing_error). Not generating any more. authentication_failed opens
+        // the auth episode that gates /login-code (#482): with hooks live the
+        // code is typed only while an episode is open or a login form has
+        // been surfaced — never into a chat pane that merely quotes the URL.
+        // No queue drain here: a queued prompt typed into a session that just
+        // failed for auth/billing/limits fails the same way; the transcript's
+        // turn_duration (or the next Stop) drains as before.
+        const errorType = str("error_type") ?? "unknown";
+        process.stderr.write(`[hook] ${this.id} StopFailure error_type=${errorType}\n`);
+        this.#setThinking(false);
+        this.#needsInput = null;
+        this.#idlePolls = 0;
+        const now = Date.now();
+        if (errorType === "authentication_failed") {
+          this.#authFailure = { errorType, since: now };
+          if (now - this.#autoLoginAt > 5 * 60_000) {
+            this.#autoLoginAt = now;
+            this.#emitAgentNote("Claude auth failed — send /login to reauthenticate (a login prompt will appear here)", now, this.claudeSessionId);
+          }
+        } else {
+          this.#emitAgentNote(`Claude stopped: ${errorType.replace(/_/g, " ")}`, now, this.claudeSessionId);
+        }
+        return { ok: true };
+      }
+      case "PostToolUse": {
+        // A tool just completed → the turn is still live. A refresh, not a
+        // setter: a subagent's tools fire this too, so it may not CREATE a
+        // busy session — it re-asserts thinking only inside an open turn a
+        // stale pane read cleared, and voids the pane's idle count. Any
+        // permission that was pending is answered.
+        this.#needsInput = null;
+        this.#idlePolls = 0;
+        if (this.#turn && !this.#thinking) this.#setThinking(true);
+        return { ok: true };
+      }
+      case "PermissionRequest": {
+        // Claude is about to ask the human for a tool permission — waiting,
+        // not generating (the pane's dialog parser sees the same prompt a poll
+        // later; this is the instant, tool-named edge). The push goes out on
+        // Notification(permission_prompt), Claude's own "tell the user" signal.
+        const tool = str("tool_name") ?? undefined;
+        process.stderr.write(`[hook] ${this.id} PermissionRequest tool=${tool ?? "?"}\n`);
         this.#setThinking(false);
         this.#idlePolls = 0;
+        if (this.#needsInput?.kind !== "permission") this.#needsInput = { kind: "permission", tool, since: Date.now() };
+        else if (tool) this.#needsInput.tool = tool;
+        return { ok: true };
+      }
+      case "SubagentStop": {
+        // Only the permission_mode refresh above; the main turn's state is
+        // untouched (the subagent may have been a background one).
+        return { ok: true };
+      }
+      case "Notification": {
+        // Claude is WAITING — not generating. notification_type says on what:
+        //   permission_prompt → needs_input (permission) + one push per episode
+        //   idle_prompt       → plain idleness (60s at the prompt): thinking
+        //                       off, lease void; NOT needs_input — a script's
+        //                       `joy wait` must not read an idle session as a
+        //                       question awaiting an answer
+        //   auth_success      → the auth episode is over
+        //   elicitation_* / agent_needs_input → needs_input of that kind
+        const nt = str("notification_type") ?? "";
+        process.stderr.write(`[hook] ${this.id} Notification${nt ? ` (${nt})` : ""}: ${(str("message") ?? "").slice(0, 80)}\n`);
+        this.#setThinking(false);
+        this.#idlePolls = 0;
+        if (nt === "idle_prompt") this.#thinkingLeaseUntil = 0;
+        if (nt === "auth_success") {
+          if (this.#authFailure) process.stderr.write(`[hook] ${this.id} auth episode closed by auth_success\n`);
+          this.#authFailure = null;
+        } else if (nt === "permission_prompt") {
+          if (this.#needsInput?.kind !== "permission") this.#needsInput = { kind: "permission", since: Date.now() };
+          if (this.#needsInputPushedFor !== this.#needsInput.since) {
+            this.#needsInputPushedFor = this.#needsInput.since;
+            this.#relay?.notify("permission");
+          }
+        } else if (nt === "agent_needs_input" || nt.startsWith("elicitation")) {
+          if (this.#needsInput?.kind !== nt) this.#needsInput = { kind: nt, since: Date.now() };
+        }
         return { ok: true };
       }
       default:
         return { ok: false };
     }
+  }
+
+  /** Flip the hook-authority latch on the first hook event (see #hooksLive). */
+  #markHooksLive(event: string): void {
+    if (this.#hooksLive) return;
+    this.#hooksLive = true;
+    this.#hooksLiveAt = Date.now();
+    process.stderr.write(`[hook] ${this.id} hooks live (first event: ${event}) — hook authority on, pane demoted to tie-breaker\n`);
+  }
+
+  /** A hook carried permission_mode: remember it, persist it on change, and
+   *  verify (or correct) the last setPermissionMode against it. */
+  #notePermissionMode(mode: string | null, event: string): void {
+    if (!mode) return;
+    this.#hookPermissionMode = mode;
+    this.#hookPermissionModeAt = Date.now();
+    if (this.#persistedPermissionMode === undefined) {
+      this.#persistedPermissionMode = loadWindowRecord(this.id)?.claudePermissionMode ?? null;
+    }
+    if (this.#persistedPermissionMode !== mode) {
+      process.stderr.write(`[hook] ${this.id} ${event} permission_mode=${mode} (record said ${this.#persistedPermissionMode ?? "none"}) — persisted\n`);
+      saveWindowRecord(this.id, { claudePermissionMode: mode });
+      this.#persistedPermissionMode = mode;
+    }
+    const target = this.#modeSetTarget;
+    if (target) {
+      this.#modeSetTarget = null;
+      if (target.mode !== mode) process.stderr.write(`[hook] ${this.id} setPermissionMode(${target.mode}) verified FALSE by ${event}: claude is in ${mode} (#480)\n`);
+    }
+  }
+
+  /** SessionEnd received: end after the grace unless the pid proves the
+   *  process lives on (see the SessionEnd case). */
+  #armHookSessionEnd(): void {
+    if (this.#hookSessionEndTimer) clearTimeout(this.#hookSessionEndTimer);
+    this.#hookSessionEndTimer = setTimeout(() => {
+      this.#hookSessionEndTimer = null;
+      const pending = this.#hookSessionEnd;
+      if (this.status === "ended" || !pending) return;
+      // A resolved pid that is claude's own (not the pane shell, #30) and
+      // still alive is the one thing that outranks the hook.
+      const pid = this.pid;
+      const alive = pid !== undefined && pid !== this.#paneShellPid() && Session.#pidAlive(pid);
+      if (alive) {
+        process.stderr.write(`[hook] ${this.id} SessionEnd(${pending.reason}) but pid ${pid} is alive after ${HOOK_SESSION_END_GRACE_MS}ms — left to the pid probe\n`);
+        this.#hookSessionEnd = null;
+        return;
+      }
+      process.stderr.write(`[end] ${this.id}: SessionEnd(${pending.reason}) confirmed (pid ${pid ?? "unresolved"}) → detached\n`);
+      this.end("process_exited");
+    }, HOOK_SESSION_END_GRACE_MS);
   }
 
   /** Card snapshot for the nucleus lane's v2 publish (see AgentSession). */
@@ -3408,13 +3684,36 @@ export class Session {
       const pane = this.#tmux.captureCached(this.tmuxWindow);
       if (pane.ok) {
         const generating = paneShowsGenerating(pane.out);
-        // Hysteresis: SET on one generating read (thinking should appear fast),
-        // CLEAR only after two consecutive idle reads. A single stale/mid-repaint
-        // capture at a turn boundary used to flip thinking off and back on —
-        // the app status flapping between the busy state and "online"
-        // (2026-07-04). Real turn ends still clear instantly via the transcript
-        // event setters; this is only the poll's own clear path.
-        if (generating) {
+        // HOOK AUTHORITY: once this process has reported a hook, the pane's
+        // "esc to interrupt" read never SETS thinking (UserPromptSubmit /
+        // PostToolUse / the submit callback / the transcript own that edge —
+        // a quoted hint in a reply can no longer pin a session busy, #479)
+        // and CLEARS it only as a tie-breaker: a long run of idle reads past
+        // the lease, for the single edge hooks cannot report (Stop does not
+        // fire on a terminal Esc; the transcript's interrupt marker normally
+        // closes that one first).
+        if (this.#hooksLive) {
+          if (generating || !this.#thinking) {
+            this.#idlePolls = 0;
+          } else {
+            this.#idlePolls += 1;
+            if (this.#idlePolls >= HOOK_TIEBREAK_IDLE_POLLS) {
+              this.#idlePolls = 0;
+              if (Date.now() >= this.#thinkingLeaseUntil) {
+                process.stderr.write(`[hook] ${this.id} pane idle for ${HOOK_TIEBREAK_IDLE_POLLS} polls with no Stop — tie-breaker clears thinking\n`);
+                this.#setThinking(false);
+              }
+            }
+          }
+        }
+        // HOOK-LESS (the pane is the ground truth). Hysteresis: SET on one
+        // generating read (thinking should appear fast), CLEAR only after two
+        // consecutive idle reads. A single stale/mid-repaint capture at a turn
+        // boundary used to flip thinking off and back on — the app status
+        // flapping between the busy state and "online" (2026-07-04). Real turn
+        // ends still clear instantly via the transcript event setters; this is
+        // only the poll's own clear path.
+        else if (generating) {
           this.#idlePolls = 0;
           if (!this.#thinking) this.#setThinking(true);
         } else if (this.#thinking) {
@@ -3478,6 +3777,13 @@ export class Session {
       if (this.#thinking) this.#setThinking(false);
     }
     if (!dialog) {
+      // Tie-breaker for a hook-reported permission wait: the human answered in
+      // the terminal and no later hook cleared it (an answer of "no" with no
+      // further tool or Stop for a while). No dialog on screen for this long
+      // → stale.
+      if (this.#needsInput?.kind === "permission" && Date.now() - this.#needsInput.since > HOOK_NEEDS_INPUT_STALE_MS) {
+        this.#needsInput = null;
+      }
       this.#dialogPendingKey = null;
       this.#dialogObservedKey = null;
       if (this.#dialog) {
@@ -3574,6 +3880,16 @@ export class Session {
     if (this.status === "ended") return;
     const c = code.trim();
     if (!c) return;
+    // HOOK AUTHORITY (#482): with hooks live, a code is typed only inside a
+    // login episode — StopFailure(authentication_failed) opened one and
+    // Notification(auth_success) has not closed it — or while the login bar
+    // (#reconcileLogin: the form seen on two polls) is up, which is how the
+    // user got the URL in the first place. Outside both there is no login in
+    // progress, whatever URL the chat quotes. The form check below stays: the
+    // form itself is pane-only. Hook-less sessions keep today's pane-only gate.
+    if (this.#hooksLive && !this.#authFailure && !this.#login) {
+      throw new Error("login-code: no login in progress (no auth failure reported and no login form surfaced) — code not submitted");
+    }
     const pane = await this.#tmux.captureFresh(this.tmuxWindow);
     // Login box GONE is a deliberate drop (login already completed/cancelled —
     // typing the code into a normal prompt would submit garbage), but capture
