@@ -12,7 +12,7 @@
 // routes reuse the same result; the few legacy HTTP divergences (create's
 // unwrapped 201, kill's 404) are expressed via the optional httpShape.
 
-import type { Session } from "../claude/session";
+import { parseJoyCommand, type Session } from "../claude/session";
 import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
@@ -20,14 +20,15 @@ import { SessionEndedError } from "./ledger";
 import { queueFor } from "./queueFacade";
 import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
+import { loadWindowRecord } from "./windowRecord";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
-import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, type HandoffTarget } from "./handoff";
+import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, loadHandoffJob, type HandoffTarget } from "./handoff";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots, withPathLock } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
-import { joySessionDir } from "../paths";
+import { joySessionDir, canonicalCwd } from "../paths";
 import { ReverseUtf8Assembler } from "./textStream";
 import { shellJoin } from "./quote";
 import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, rmdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
@@ -39,6 +40,20 @@ import { randomBytes } from "crypto";
 
 /** Accepted git URL shapes for a git-URL session spawn. */
 export const GIT_URL_RE = /^(https?:\/\/|git@|ssh:\/\/)\S+$/;
+
+/** The permission mode a fork / teleport export continues under — FAIL
+ *  CLOSED (#50). The pane read (detectPermissionMode) is null whenever the
+ *  capture fails (control-mode hiccup, mid-redraw, a recovered session with a
+ *  dead pane); passing that through made create() default the continuation
+ *  to bypassPermissions. Fall back to the session's persisted mode (the
+ *  launch / last /permissions set, or codex's settings) and, failing that,
+ *  to `default` — never to bypass. */
+export function sourcePermissionMode(src: Pick<AgentSession, "id" | "detectPermissionMode">): string {
+  const live = src.detectPermissionMode();
+  if (live) return live;
+  const rec = loadWindowRecord(src.id);
+  return rec?.claudePermissionMode ?? rec?.codexSettings?.permissionMode ?? "default";
+}
 
 /** Clone `gitUrl` into `cwd` for a git-URL session spawn — the ONE clone step
  *  shared by the `create` op and the relay lane (nucleusLane runs it before
@@ -64,6 +79,15 @@ export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<void> 
   const canonical = resolvePath(cwd);
   const r = await withPathLock(`git-clone:${canonical}`, () => cloneAttempt(gitUrl, canonical));
   if ("error" in r) throw new Error(r.error);
+}
+
+/** Is a handoff / handback already running for this session (#53)? The
+ *  persisted job (ledger) is the durable truth; the card's `writing` state
+ *  covers the window before the job commits. */
+export function handoffInProgress(s: AgentSession): boolean {
+  try { if (loadHandoffJob(s.id)) return true; } catch { /* no ledger in this context: fall through to the card */ }
+  const meta = s.cardMetadata?.()?.joy__handoff as { state?: string } | undefined;
+  return meta?.state === "writing";
 }
 
 /** The repository a git URL names, for "is this the same repo" comparisons
@@ -497,8 +521,11 @@ export const machineOps: MachineOp[] = [
     // createDir isn't set — each transport maps the sentinel to its contract
     // (RPC: requestToApproveDirectoryCreation, HTTP: 422).
     handler: async (registry, params) => {
-      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
-      if (!cwd) return { error: "cwd required" };
+      const rawCwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      if (!rawCwd) return { error: "cwd required" };
+      // One canonical cwd for the clone AND the launch (#549): the clone used
+      // to land under the literal `~/…` while the registry expanded it.
+      const cwd = canonicalCwd(rawCwd);
       // Reject unknown agents LOUDLY instead of falling through to claude.
       // The historical fall-through is how a stale daemon turned "pi" requests
       // into surprise claude sessions (2026-08-15): a newer app sent a flavor
@@ -570,7 +597,7 @@ export const machineOps: MachineOp[] = [
           case "claude": {
             const resumeId = src.claudeSessionId ?? (src.transcriptPath ? basename(src.transcriptPath, ".jsonl") : undefined);
             if (!resumeId) return { ok: false, error: "This session has no conversation to fork yet." };
-            session = await registry.create({ ...common, resume_id: resumeId, forkSession: true, forceNew: true, permissionMode: src.detectPermissionMode() ?? undefined });
+            session = await registry.create({ ...common, resume_id: resumeId, forkSession: true, forceNew: true, permissionMode: sourcePermissionMode(src) });
             break;
           }
           case "agy": {
@@ -588,7 +615,7 @@ export const machineOps: MachineOp[] = [
           case "codex": {
             const tid = (src as { codexThreadId?: string }).codexThreadId;
             if (!tid) return { ok: false, error: "This Codex session has no thread to fork yet." };
-            session = await registry.create({ ...common, agent: "codex", resume_id: forkCodexThread(tid), forceNew: true, permissionMode: src.detectPermissionMode() ?? undefined });
+            session = await registry.create({ ...common, agent: "codex", resume_id: forkCodexThread(tid), forceNew: true, permissionMode: sourcePermissionMode(src) });
             break;
           }
           default:
@@ -617,6 +644,10 @@ export const machineOps: MachineOp[] = [
       const src = registry.get(id);
       if (!src) return { ok: false, error: "session_not_found" };
       if (src.status === "ended") return { ok: false, error: "This session has ended; restart it before handing off." };
+      // One in-flight job per session (#53): a double tap or a tunnel retry
+      // used to queue a second note prompt, create a second target in the
+      // same cwd and overwrite the persisted job so a restart resumed only one.
+      if (handoffInProgress(src)) return { ok: false, error: "handoff already in progress" };
       const agent = String(params.agent ?? "");
       if (!["claude", "codex", "opencode", "pi", "agy"].includes(agent)) return { ok: false, error: `unknown agent "${agent}"` };
       const target = { agent: agent as HandoffTarget["agent"], model: typeof params.model === "string" ? params.model : undefined, effort: typeof params.effort === "string" ? params.effort : undefined, permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined };
@@ -644,6 +675,7 @@ export const machineOps: MachineOp[] = [
       const src = peerId ? registry.get(peerId) : undefined;
       if (!src) return { ok: false, error: "This session was not picked up from another one (or that session is gone), so there is nothing to hand back to." };
       if (src.status === "ended") return { ok: false, error: `The original session ${peerId} has ended; restart it first.` };
+      if (handoffInProgress(tgt)) return { ok: false, error: "handback already in progress" };
       const path = notePath(tgt.id);
       tgt.setHandoff?.({ state: "writing", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
       queueFor(tgt).accept(noteRequestPrompt(path, "back to", sessionLabel(src)), { source: "rpc", mirrorToRelay: true });
@@ -685,7 +717,7 @@ export const machineOps: MachineOp[] = [
       } finally { closeSync(fd); }
       return {
         ok: true, agent: "claude", claudeSessionId, cwd: src.cwd,
-        model: src.currentModel ?? src.model, permissionMode: src.detectPermissionMode() ?? undefined,
+        model: src.currentModel ?? src.model, permissionMode: sourcePermissionMode(src),
         bytes: buf.length, truncated: off > 0, transcriptBase64: buf.toString("base64"),
       };
     },
@@ -704,22 +736,31 @@ export const machineOps: MachineOp[] = [
       },
     },
     handler: async (registry, params) => {
-      const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+      const rawCwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
       const sid = typeof params.claudeSessionId === "string" ? params.claudeSessionId.trim() : "";
       const b64 = typeof params.transcriptBase64 === "string" ? params.transcriptBase64 : "";
-      if (!cwd) return { error: "cwd required" };
+      if (!rawCwd) return { error: "cwd required" };
       if (!/^[0-9a-f-]{8,64}$/.test(sid)) return { error: "invalid claudeSessionId" };
       if (!b64) return { error: "transcript required" };
+      // The transcript dir and the launch must derive from the SAME
+      // canonical cwd (#549): a `~/…` cwd encoded the literal tilde into the
+      // project dir while create() expanded it, so Claude never found the
+      // imported conversation.
+      const cwd = canonicalCwd(rawCwd);
       const dir = cwdToTranscriptDir(cwd);
       mkdirSync(dir, { recursive: true });
       const target = join(dir, `${sid}.jsonl`);
-      // Never clobber a conversation a session HERE is bound to (a same-box
-      // teleport into the same folder). A file no session owns — an earlier
-      // import's leftover, or the same conversation teleported again — is
-      // replaced: the fork already took what it needed from it, and refusing
-      // made every retry fail (codex review, 2026-09-04).
-      const owned = registry.list().some((s) => s.transcriptPath === target || s.claudeSessionId === sid)
-        || registry.listRecords().some((r) => r.claudeSessionId === sid);
+      // Never clobber a conversation a session HERE is bound to IN THIS
+      // FOLDER (a same-box teleport into the same folder). A same-box
+      // teleport into ANOTHER folder is the supported same-machine fork
+      // (#550): the source keeps its own transcript under its own project
+      // dir and the copy continues under a new id, so a session owning the
+      // conversation elsewhere is no conflict. A file no session owns — an
+      // earlier import's leftover, or the same conversation teleported
+      // again — is replaced: the fork already took what it needed from it,
+      // and refusing made every retry fail (codex review, 2026-09-04).
+      const owned = registry.list().some((s) => s.transcriptPath === target || (s.claudeSessionId === sid && canonicalCwd(s.cwd) === cwd))
+        || registry.listRecords().some((r) => r.claudeSessionId === sid && canonicalCwd(r.launchCwd) === cwd);
       if (owned) return { error: `conversation ${sid.slice(0, 8)} belongs to a session in ${cwd} on this machine` };
       writeFileSync(target, Buffer.from(b64, "base64"));
       // Continue under a NEW claude id (--fork-session): the source keeps its
@@ -731,7 +772,9 @@ export const machineOps: MachineOp[] = [
         const session = await registry.create({
           cwd, resume_id: sid, forkSession: true, forceNew: true, createDir: params.createDir === true,
           model: typeof params.model === "string" ? params.model : undefined,
-          permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined,
+          // Fail closed (#50): an export that could not read its mode says
+          // nothing, and create() would default that to bypassPermissions.
+          permissionMode: typeof params.permissionMode === "string" && params.permissionMode ? params.permissionMode : "default",
         });
         return { ok: true, session: session.toJSON(), localSessionId: session.id };
       } catch (e) {
@@ -910,7 +953,15 @@ export const machineOps: MachineOp[] = [
         // session it never had a card for. Escaped for the attribute.
         const sender = from.startsWith("joy:") ? registry.get(from.slice(4)) : undefined;
         const fromLabel = sender ? `${sessionLabel(sender)}${sender.summary ? ` · ${sender.summary}` : ""}`.replace(/["<>]/g, "") : "";
-        text = `<joy-message from="${from}"${fromLabel ? ` from-label="${fromLabel}"` : ""}${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${text}\n</joy-message>`;
+        const wrap = (body: string) => `<joy-message from="${from}"${fromLabel ? ` from-label="${fromLabel}"` : ""}${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${body}\n</joy-message>`;
+        // A daemon-owned slash command keeps its leading `/command` (#552):
+        // wrapped whole, `/title`, `/steer`, `/login-code` reached the
+        // adapters as ordinary prompts and lost their control behaviour. A
+        // steer's BODY still carries the provenance (the running turn should
+        // know who is talking); the other commands take no message body.
+        const cmd = parseJoyCommand(text);
+        if (!cmd) text = wrap(text);
+        else if ((cmd.name === "steer" || cmd.name === "btw") && cmd.args.trim()) text = `/${cmd.name} ${wrap(cmd.args.trim())}`;
       }
       const trimmed = text;
       const source = meta.via === "http" ? "web" as const : "rpc" as const;

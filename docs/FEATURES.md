@@ -26,7 +26,16 @@ every relay; machines register per account.
   claude session id via `--resume --fork-session`) and Duplicate. Fresh
   sessions are pinned to a generated `--session-id` so several can share a cwd.
 - **Adopt & restart**: daemon recovers live tmux windows at boot; sessions can
-  be restarted in place; kill one / kill all.
+  be restarted in place; kill one / kill all. A recovered card carries its
+  agent flavor like a created one (#562). Every per-session tmux server is
+  stamped (`set-environment -g JOY_OWNER_STATE_DIR`) with the owning daemon's
+  state dir, and the boot-time orphan sweep (`domain/orphanSweep.ts`) retires
+  only recordless, client-less servers stamped as OURS — another daemon
+  universe on the box (another `JOY_HOME_DIR`, a per-relay daemon) shares
+  the socket dir and label scheme and used to lose its live sessions to our
+  boot (#55); unstamped (pre-stamp) servers are left alone. Working
+  directories are canonicalised once (`paths.canonicalCwd`: `~`, `.`/`..`,
+  symlinks) before launch, record and transcript path (#549 #564).
 - **Four flavors, one interface** (`AgentSession`): claude (tmux pane +
   transcript tail), codex (app-server JSON-RPC + attach TUI), opencode
   (serve API), pi (bare `--mode rpc` stdio). Flavor shows in the session list
@@ -155,7 +164,10 @@ every relay; machines register per account.
   card it holds (harness · title (id), tappable → that session), else shows
   the stamped label, else the id. agy and pi child processes get
   `JOY_SESSION_ID` + `JOY_DAEMON_FILE` like the claude launch line, so their
-  `joy send` is attributed (it used to read "cli").
+  `joy send` is attributed (it used to read "cli"). A daemon-owned slash
+  command keeps its leading `/command` outside the wrapper (only a
+  `/steer`/`/btw` body is stamped), so `/title`, `/steer`, `/login-code`
+  sent with provenance are still intercepted (#552).
 - **Handoff** (`domain/handoff.ts`): `joy-handoff` {agent, model?} on a session
   enqueues a note-request prompt (fixed template, ≤~2.5k words, written to
   `~/.joy/sessions/<id>/handoff-<ts>.md`); the daemon polls for the file
@@ -166,9 +178,15 @@ every relay; machines register per account.
   delivers the note INTO the source as a prompt (the source was only idle).
   Progress rides `joy__handoff` {state, peer, peerLabel, note} on both cards;
   the app's `HandoffBar` renders it (open peer, Hand back). Same machine only.
+  One in-flight job per session: a second handoff/handback while the note is
+  being written (card `writing`, or a persisted job) is refused (#53).
 - Session page **Restart / Fork / Teleport**. Restart ends the process with
   `end("restart")` — no archive, record kept — and recreates under the SAME
-  local id, so the v2 binding (and the card) survive. Fork = `joy-fork-session`,
+  local id, so the v2 binding (and the card) survive, with the CURRENT
+  model/effort/permission mode and the user's locked `/title` (persisted as
+  `userTitle` beside the lock, #474 #51). Fork and teleport-export continue
+  under the source's live permission mode, else its persisted one, else
+  `default` — never bypass when the pane read fails (#50). Fork = `joy-fork-session`,
   one contract for every harness ({ok, localSessionId} | {ok:false, error}):
   claude `--resume <id> --fork-session`; agy/pi/codex copy their single
   history file under a fresh id with the embedded id rewritten
@@ -178,8 +196,11 @@ every relay; machines register per account.
   (`waitForLocalSession`). Teleport = `joy-teleport-export`
   on the source (transcript tail from the last `compact_boundary`, else a
   turn-snapped tail ≤6MB; base64) → `joy-teleport-import` on the target
-  (writes `~/.claude/projects/<cwd>/<id>.jsonl`, refuses to clobber, then
-  `create({resume_id})`). Files are never copied. Claude only for now.
+  (canonicalises the cwd, writes `~/.claude/projects/<cwd>/<id>.jsonl`,
+  refuses to clobber a conversation a session owns IN THAT FOLDER — a
+  same-box import into another folder is the supported fork (#550) — then
+  `create({resume_id, forkSession})`). Files are never copied. Claude only
+  for now.
 - **Antigravity (`agy`) sessions** — `packages/joy-daemon/src/agy/`. Headless:
   one `agy --print --output-format stream-json --dangerously-skip-permissions
   --add-dir <cwd> [--conversation <id>] [--model <display name>]` process per
@@ -205,8 +226,8 @@ every relay; machines register per account.
 - The `compact_boundary` record becomes a `<joy-compacted>` agent marker the app
   draws as a centred divider — "Context compacted · 3m 3s · 385k → 17k".
 - `<joy-options>` blocks become tap-to-answer pickers; `<joy-img>`/`<joy-file>`
-  render inline; `<joy-title>` retitles (user `/title` locks); `<joy-notify>`
-  becomes a push.
+  render inline; `<joy-title>` retitles (user `/title` locks, and the locked
+  title survives restarts, #474); `<joy-notify>` becomes a push.
 - **Optimistic sends.** `sync.sendMessage` inserts the user row immediately
   (`meta.deliveryStage: 'local'`, 70% opacity); the POST ack advances it to
   `relay` (80%) and binds the relay `turnId`; `turn.receipted` → `daemon`

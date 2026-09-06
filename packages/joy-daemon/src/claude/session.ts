@@ -965,6 +965,10 @@ export class Session {
     // Title lock survives restarts via the window record.
     const rec = loadWindowRecord(this.id);
     this.#titleLocked = rec?.titleLockedByUser === true;
+    // The locked title comes back WITH the lock (#474): a replacement that
+    // restored only the lock had no summary of its own, so its card kept the
+    // transcript's old ai-title and the user's title was lost.
+    if (this.#titleLocked && rec?.userTitle) this.summary = rec.userTitle;
     // No persisted value = first run since this became durable. Seed from the
     // transcript's CURRENT ai-title so the replay treats it as already-seen
     // rather than "new" — otherwise the first restart after the upgrade stomps
@@ -2906,7 +2910,7 @@ export class Session {
       // Bare /title from the user = UNLOCK + revert to Claude's latest ai-title.
       if (opts?.byUser && this.#titleLocked) {
         this.#titleLocked = false;
-        saveWindowRecord(this.id, { titleLockedByUser: false });
+        saveWindowRecord(this.id, { titleLockedByUser: false, userTitle: null });
         const ai = this.#readLatestAiTitle();
         if (ai) { this.summary = ai; void this.#relay?.updateSummary(ai); this.#deps.broadcast("session_update", this.toJSON()); }
       }
@@ -2914,7 +2918,7 @@ export class Session {
     }
     if (opts?.byUser) {
       this.#titleLocked = true;
-      saveWindowRecord(this.id, { titleLockedByUser: true });
+      saveWindowRecord(this.id, { titleLockedByUser: true, userTitle: t });
     }
     this.summary = t;
     void this.#relay?.updateSummary(t);
