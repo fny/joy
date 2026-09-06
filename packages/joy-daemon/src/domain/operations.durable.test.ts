@@ -39,7 +39,8 @@ function fakeSession(id: string, o: { durable: boolean; status?: "starting" | "a
   if (o.status) (s as { status: string }).status = o.status;
   if (o.ended) { (s as { status: string }).status = "ended"; coordinator.retire(id, "killed"); }
   fakes.set(id, { durable: o.durable, calls });
-  if (!acceptSpy) {
+  // vi.restoreAllMocks() in an afterEach strips the spy; reinstall whenever it is gone.
+  if (!acceptSpy || !vi.isMockFunction(SessionCoordinator.prototype.accept)) {
     const real = SessionCoordinator.prototype.accept;
     acceptSpy = vi.spyOn(SessionCoordinator.prototype, "accept").mockImplementation(function (this: SessionCoordinator, input) {
       const f = fakes.get(input.sessionId);
