@@ -571,6 +571,16 @@ app.
   gaps). Closed #519. In flight: #495 legacy records unverifiable, #625
   foreign prompts on fresh cards. **12 open.**
 
+- 2026-09-10 (morning) — pushed: #495 legacy records are unverifiable
+  (d2315180: no recorded start identity → exit 1, record kept, restart-once
+  hint; EACCES is unverifiable, only ESRCH is death), #625 regression fix
+  (5d64cff6: only prompts owned by pending attempts are filtered from a dead
+  un-ran turn; foreign and settled prompts replay with their interrupted
+  terminal), import round four (2c9eabec: the global outbound file imports
+  per owner with per-owner markers; only the failed owner's session is
+  quarantined). Full daemon regression 1234 tests in three shards; app
+  1832; relay 119. No agents running. **11 open**, all awaiting Astra.
+
 ## Campaign summary (as of 2026-09-09 afternoon)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
