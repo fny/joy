@@ -30,7 +30,10 @@ function installResourceSignals(): void {
 }
 
 export interface UseResourceOptions {
-    /** False: subscribe only, never fetch (a picker that is closed, an offline machine). */
+    /** False: subscribe PASSIVELY — the entry stays alive and its changes are
+     *  seen, but nothing fetches it on this hook's account (mount, screen
+     *  focus, polling, app focus, reconnect, invalidate): a picker that is
+     *  closed, an offline machine. */
     enabled?: boolean;
     /** Poll while the screen is focused and the app is foregrounded. */
     refetchInterval?: number;
@@ -46,11 +49,27 @@ export type ResourceView<T> = ResourceEntry<T> & {
     refresh: () => Promise<ResourceEntry<T>>;
 };
 
-const idleView = new Map<string, ResourceEntry<unknown>>();
-function idleFor<T>(key: string): ResourceEntry<T> {
-    let e = idleView.get(key);
-    if (!e) { e = resources.peek(key); idleView.set(key, e); }
-    return e as ResourceEntry<T>;
+/** The idle entry for "no key yet" (stable: peek caches idle snapshots per key). */
+function idleFor<T>(): ResourceEntry<T> {
+    return resources.peek<T>('');
+}
+
+/**
+ * Ensure `spec` and, once the read that answered it settled, repair a
+ * requirement the settlement did not meet: the entry holds data under
+ * another version than the one this consumer asked for (the read was
+ * superseded by a write or a cancel) — one more ensure, while the consumer
+ * still wants that key. A failed or unavailable read is NOT retried here
+ * (the store's own policies decide that), so this cannot loop on an error.
+ */
+function ensureAndRepair<T>(spec: ResourceSpec<T>, wanted: () => ResourceSpec<T> | null): void {
+    void resources.ensure(spec).then(() => {
+        const s = wanted();
+        if (!s || s.key !== spec.key || s.version === undefined) return;
+        const e = resources.peek<T>(s.key);
+        if (e.fetching || e.error !== null || e.unavailable !== null || !e.hasData) return;
+        if (e.dataVersion !== s.version) void resources.ensure(s);
+    });
 }
 
 /**
@@ -59,7 +78,7 @@ function idleFor<T>(key: string): ResourceEntry<T> {
  */
 export function useResourceEntry<T>(key: string | null): ResourceEntry<T> {
     const subscribe = React.useCallback((listener: () => void) => (key ? resources.subscribe(key, listener) : () => {}), [key]);
-    const getSnapshot = React.useCallback((): ResourceEntry<T> => (key ? resources.peek<T>(key) : idleFor<T>('')), [key]);
+    const getSnapshot = React.useCallback((): ResourceEntry<T> => (key ? resources.peek<T>(key) : idleFor<T>()), [key]);
     return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
@@ -76,13 +95,21 @@ export function useResource<T>(spec: ResourceSpec<T> | null, opts: UseResourceOp
     const specRef = React.useRef(spec);
     specRef.current = spec;
 
-    const subscribe = React.useCallback((listener: () => void) => (key ? resources.subscribe(key, listener) : () => {}), [key]);
-    const getSnapshot = React.useCallback((): ResourceEntry<T> => (key ? resources.peek<T>(key) : idleFor<T>('')), [key]);
+    // Disabled: a passive observer — the entry is kept alive for this
+    // consumer, but no policy (focus, reconnect, invalidate) fetches on its
+    // behalf.
+    const subscribe = React.useCallback(
+        (listener: () => void) => (key ? resources.subscribe(key, listener, { passive: !enabled }) : () => {}),
+        [key, enabled],
+    );
+    const getSnapshot = React.useCallback((): ResourceEntry<T> => (key ? resources.peek<T>(key) : idleFor<T>()), [key]);
     const entry = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
     React.useEffect(() => {
         if (!enabled || !specRef.current) return;
-        void resources.ensure(specRef.current);
+        let live = true;
+        ensureAndRepair(specRef.current, () => (live ? specRef.current : null));
+        return () => { live = false; };
     }, [key, version, enabled]);
 
     const onScreenFocus = opts.refetchOnScreenFocus ?? 'stale';
@@ -104,7 +131,7 @@ export function useResource<T>(spec: ResourceSpec<T> | null, opts: UseResourceOp
 
     const refresh = React.useCallback(() => {
         const s = specRef.current;
-        return s ? resources.refresh(s) : Promise.resolve(idleFor<T>(''));
+        return s ? resources.refresh(s) : Promise.resolve(idleFor<T>());
     }, []);
 
     return React.useMemo(() => ({
@@ -116,8 +143,10 @@ export function useResource<T>(spec: ResourceSpec<T> | null, opts: UseResourceOp
 
 /**
  * Subscribe to many specs at once (a diff per changed file). Ensures each
- * whose key or version changed; the returned array is stable while no entry
- * changed.
+ * whose key or version changed — a version that changes while its read is
+ * still active is served by the store's trailing read, and repaired here
+ * after settlement if that read was superseded; the returned array is
+ * stable while no entry changed.
  */
 export function useResources<T>(specs: ResourceSpec<T>[], opts: { enabled?: boolean } = {}): ResourceEntry<T>[] {
     installResourceSignals();
@@ -129,10 +158,10 @@ export function useResources<T>(specs: ResourceSpec<T>[], opts: { enabled?: bool
     specsRef.current = specs;
 
     const subscribe = React.useCallback((listener: () => void) => {
-        const unsubs = keys.map((k) => resources.subscribe(k, listener));
+        const unsubs = keys.map((k) => resources.subscribe(k, listener, { passive: !enabled }));
         return () => { for (const u of unsubs) u(); };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [keysId]);
+    }, [keysId, enabled]);
     const last = React.useRef<ResourceEntry<T>[]>([]);
     const getSnapshot = React.useCallback((): ResourceEntry<T>[] => {
         const next = keys.map((k) => resources.peek<T>(k));
@@ -146,7 +175,11 @@ export function useResources<T>(specs: ResourceSpec<T>[], opts: { enabled?: bool
 
     React.useEffect(() => {
         if (!enabled) return;
-        for (const s of specsRef.current) void resources.ensure(s);
+        let live = true;
+        for (const s of specsRef.current) {
+            ensureAndRepair(s, () => (live ? specsRef.current.find((c) => c.key === s.key) ?? null : null));
+        }
+        return () => { live = false; };
     }, [keysId, versionsId, enabled]);
 
     return entries;

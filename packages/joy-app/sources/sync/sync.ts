@@ -32,6 +32,8 @@ import { loadPendingSettings, savePendingSettings } from './persistence';
 import { parseToken } from '@/utils/parseToken';
 import { log } from '@/log';
 import { clearGitStatusForSession, invalidateGitStatus } from './gitStatusResource';
+import { forgetSessionFiles } from './fileContents';
+import { resources } from './resource';
 import { AsyncLock } from '@/utils/lock';
 import type { AttachmentPreview } from './attachmentTypes';
 import { Modal } from '@/modal';
@@ -683,7 +685,12 @@ class Sync {
         this.recentSendAt.delete(sessionId);
         this.unopenableStrikes.delete(sessionId);
         // #406: the fetch generation is never forgotten (a reused counter revalidated old requests); the git resource is cleared.
+        // The project's git status needs the session's metadata to find its
+        // key, so both resource clears run BEFORE the store forgets the
+        // session; a screen still mounted on one of these keys keeps its
+        // subscription and sees an idle entry (sync/resource.ts `remove`).
         clearGitStatusForSession(sessionId);
+        forgetSessionFiles(sessionId);
         storage.getState().deleteSession(sessionId);
     }
 
@@ -907,6 +914,11 @@ class Sync {
 
         // Initialize machine encryptions
         await this.encryption.initializeMachines(machineKeysMap);
+        // The machine plane just became usable for these machines: a resource
+        // that answered `unavailable` for lack of a machine context (a screen
+        // that mounted before this sync landed) is read again now, rather
+        // than waiting for a focus or reconnect that may never come.
+        if (Array.from(machineKeysMap.values()).some((k) => k !== null)) resources.onContextReady();
 
         // Process all machines first, then update state once
         const decryptedMachines: Machine[] = [];

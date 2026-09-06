@@ -196,12 +196,20 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     /** Write `content`; on success the resource takes the saved version
      *  (setData supersedes every read that began before the write — a poll
      *  or a prefetch can no longer land pre-save contents over it, #325) and
-     *  the baseline follows if this file is still on screen. */
+     *  the baseline follows if this file is still on screen. Writes are
+     *  ordered by a mutation ticket taken BEFORE the request: a delayed
+     *  acknowledgement of a write that a later write of the same file has
+     *  already replaced is not published (the store revalidates from disk
+     *  instead), and the daemon's content hash stamps the cached version. */
     const commitWrite = React.useCallback(async (k: string, content: string, expectedHash: string | undefined) => {
+        const ticket = resources.beginMutation(k);
         const response = await sessionWriteFile(sessionId, filePath, encodeStringToBase64(content), expectedHash, 'base64');
         if (!response.success) return response;
-        resources.setData<FileContents>(k, { base64: encodeStringToBase64(content), content, isBinary: false });
-        if (keyRef.current === k) {
+        const applied = resources.setData<FileContents>(
+            k, { base64: encodeStringToBase64(content), content, isBinary: false },
+            { ticket, version: response.hash },
+        );
+        if (applied && keyRef.current === k) {
             setBaseline({ key: k, content });
             setConflictUi({ key: k, showDiff: false, dismissed: null });
         }

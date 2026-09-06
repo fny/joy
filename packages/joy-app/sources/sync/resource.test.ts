@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ResourceStore, withTimeout, type ResourceOutcome, type ResourceSpec } from './resource';
 
 function deferred<T>() {
@@ -411,5 +411,333 @@ describe('resource store — family budgets', () => {
         await store.refresh(spec('c', 'cccc')); // 12 > 10: evict the oldest unobserved (b)
         expect(store.keys().sort()).toEqual(['a', 'c']);
         u();
+    });
+
+    it('observed members are exempt only while observed: unsubscribing reclaims them', async () => {
+        const store = new ResourceStore();
+        store.defineFamily('f', { maxBytes: 1, size: (d) => (d as string).length });
+        const unsubs: Array<() => void> = [];
+        for (let i = 0; i < 20; i++) {
+            unsubs.push(store.subscribe(`b${i}`, () => {}));
+            await store.ensure({ key: `b${i}`, family: 'f', fetch: async () => ok('x'.repeat(1024)) });
+        }
+        expect(store.keys().length).toBe(20);
+        unsubs.forEach((u) => u());
+        expect(store.keys().length).toBe(0);
+    });
+
+    it('an oversized mounted entry stays while mounted and is reclaimed on unmount', async () => {
+        const store = new ResourceStore();
+        store.defineFamily('f', { maxBytes: 10, size: (d) => (d as string).length });
+        const u = store.subscribe('big', () => {});
+        await store.ensure({ key: 'big', family: 'f', fetch: async () => ok('x'.repeat(100)) });
+        await store.ensure({ key: 'small', family: 'f', fetch: async () => ok('y') });
+        expect(store.keys()).toContain('big'); // ten times over budget, but on screen
+        u();
+        expect(store.keys()).not.toContain('big');
+    });
+
+    it('failed, unavailable and empty entries count toward maxEntries', async () => {
+        const store = new ResourceStore();
+        store.defineFamily('f', { maxEntries: 2 });
+        for (let i = 0; i < 5; i++) await store.ensure({ key: `e${i}`, family: 'f', fetch: async () => failed('down') });
+        expect(store.keys().length).toBe(2);
+        await store.ensure({ key: 'u', family: 'f', fetch: async () => unavailable('no ctx') });
+        await store.ensure({ key: 'empty', family: 'f', fetch: async () => ok([]) });
+        expect(store.keys().length).toBe(2);
+        expect(store.keys()).toEqual(['u', 'empty']);
+    });
+
+    it('maxAgeMs expires unobserved members at the next budget pass', async () => {
+        let now = 0;
+        const store = new ResourceStore({ now: () => now });
+        store.defineFamily('f', { maxAgeMs: 100 });
+        await store.ensure({ key: 'old', family: 'f', fetch: async () => ok(1) });
+        now = 60;
+        await store.ensure({ key: 'mid', family: 'f', fetch: async () => ok(2) });
+        now = 150;
+        await store.ensure({ key: 'new', family: 'f', fetch: async () => ok(3) });
+        expect(store.keys().sort()).toEqual(['mid', 'new']);
+    });
+
+    it('an idle entry holding nothing is dropped when its last subscriber leaves', () => {
+        const store = new ResourceStore();
+        const u = store.subscribe('idle', () => {});
+        expect(store.keys()).toContain('idle');
+        u();
+        expect(store.keys()).not.toContain('idle');
+    });
+});
+
+describe('resource store — a requirement that arrives during a read is served by one trailing read', () => {
+    it('invalidate + reconnect during a read: the read lands, invalidated stays, exactly one trailing read clears it', async () => {
+        const store = new ResourceStore();
+        const r = slotted<string>('k', { staleTime: Infinity, refetchOnReconnect: true });
+        const u = store.subscribe('k', () => {});
+        const p = store.ensure(r.spec);
+        store.invalidate('k');
+        store.onReconnect();
+        expect(r.slots.length).toBe(1); // nothing doubles the active read
+        r.slots[0].resolve(ok('before mutation'));
+        await p;
+        // The pre-invalidation read is the last good value but does not satisfy the invalidation.
+        expect(store.peek<string>('k')).toMatchObject({ data: 'before mutation', invalidated: true, fetching: true });
+        expect(r.slots.length).toBe(2);
+        r.slots[1].resolve(ok('after'));
+        await tick();
+        expect(store.peek<string>('k')).toMatchObject({ data: 'after', invalidated: false, fetching: false });
+        expect(r.slots.length).toBe(2);
+        u();
+    });
+
+    it('an invalidation that predates the read is cleared by it', async () => {
+        const store = new ResourceStore();
+        const r = slotted<string>('k', { staleTime: Infinity });
+        const p = store.ensure(r.spec); r.slots[0].resolve(ok('v')); await p;
+        store.invalidate('k');
+        const p2 = store.ensure(r.spec);
+        r.slots[1].resolve(ok('v2'));
+        await p2;
+        expect(store.peek<string>('k')).toMatchObject({ data: 'v2', invalidated: false });
+        expect(r.slots.length).toBe(2);
+    });
+
+    it('ensure for a newer version during a read: the old version lands, then the newest requirement is read once', async () => {
+        const store = new ResourceStore();
+        const v1 = slotted<string>('diff', { version: 'v1', staleTime: Infinity });
+        const v2 = slotted<string>('diff', { version: 'v2', staleTime: Infinity });
+        const v3 = slotted<string>('diff', { version: 'v3', staleTime: Infinity });
+        const old = store.ensure(v1.spec);
+        const next = store.ensure(v2.spec);
+        const newest = store.ensure(v3.spec); // replaces v2 as THE trailing requirement; shares its promise
+        expect(v2.slots.length + v3.slots.length).toBe(0);
+        v1.slots[0].resolve(ok('old'));
+        expect((await old).data).toBe('old');
+        expect(store.peek<string>('diff').dataVersion).toBe('v1');
+        expect(v2.slots.length).toBe(0);
+        expect(v3.slots.length).toBe(1);
+        v3.slots[0].resolve(ok('new'));
+        const e = await next;
+        expect(e).toMatchObject({ data: 'new', dataVersion: 'v3' });
+        expect(await newest).toBe(e);
+    });
+
+    it('an ensure at the running version coalesces; only a different version trails', async () => {
+        const store = new ResourceStore();
+        const v1 = slotted<string>('k', { version: 'v1', staleTime: Infinity });
+        const p1 = store.ensure(v1.spec);
+        const p2 = store.ensure(v1.spec);
+        expect(p2).toBe(p1);
+        v1.slots[0].resolve(ok('v'));
+        await p1;
+        expect(v1.slots.length).toBe(1);
+        expect(store.peek('k').fetching).toBe(false);
+    });
+
+    it('a refresh while a trailing requirement waits answers that requirement too', async () => {
+        const store = new ResourceStore();
+        const v1 = slotted<string>('k', { version: 'v1', staleTime: Infinity });
+        const v2 = slotted<string>('k', { version: 'v2', staleTime: Infinity });
+        void store.ensure(v1.spec);
+        const waiting = store.ensure(v2.spec);
+        const refreshed = store.refresh(v2.spec);
+        expect(v1.slots[0].signal.aborted).toBe(true);
+        expect(v2.slots.length).toBe(1);
+        v2.slots[0].resolve(ok('fresh'));
+        expect((await waiting).data).toBe('fresh');
+        await refreshed;
+        expect(v2.slots.length).toBe(1);
+    });
+
+    it('a mutation while a trailing requirement waits answers it with the written value; nothing trails', async () => {
+        const store = new ResourceStore();
+        const v1 = slotted<string>('k', { version: 'v1', staleTime: Infinity });
+        const v2 = slotted<string>('k', { version: 'v2', staleTime: Infinity });
+        void store.ensure(v1.spec);
+        const waiting = store.ensure(v2.spec);
+        store.setData('k', 'written', { version: 'v2' });
+        expect((await waiting).data).toBe('written');
+        v1.slots[0].resolve(ok('late'));
+        await tick();
+        expect(store.peek<string>('k')).toMatchObject({ data: 'written', fetching: false });
+        expect(v2.slots.length).toBe(0);
+    });
+});
+
+describe('resource store — removal keeps observed keys stable and owned', () => {
+    it('remove of an observed key resets it in place: stable idle snapshot, listeners attached, observers kept', async () => {
+        const store = new ResourceStore();
+        let notified = 0;
+        const u = store.subscribe('k', () => { notified++; });
+        await store.refresh({ key: 'k', fetch: async () => ok('v') });
+        store.remove('k');
+        const snapshot = store.peek('k');
+        expect(snapshot).toMatchObject({ hasData: false, fetching: false, error: null });
+        expect(store.peek('k')).toBe(snapshot);
+        expect(store.isObserved('k')).toBe(true);
+        const before = notified;
+        store.setData('k', 'again');
+        expect(notified).toBe(before + 1);
+        u();
+    });
+
+    it('the recreated key keeps its observers: focus refetches it', async () => {
+        const store = new ResourceStore();
+        let count = 0;
+        const spec: ResourceSpec<number> = { key: 'k', refetchOnFocus: true, fetch: async () => ok(++count) };
+        const u = store.subscribe('k', () => {});
+        await store.ensure(spec);
+        store.remove('k');
+        await store.refresh(spec);
+        expect(store.isObserved('k')).toBe(true);
+        store.onFocus();
+        await tick();
+        expect(count).toBe(3);
+        u();
+    });
+
+    it('remove of an unobserved key drops it; peek of an unknown key is referentially stable', () => {
+        const store = new ResourceStore();
+        store.setData('k', 'v');
+        store.remove('k');
+        expect(store.keys()).not.toContain('k');
+        expect(store.peek('k')).toBe(store.peek('k'));
+        expect(store.peek('never')).toBe(store.peek('never'));
+    });
+
+    it('a subscriber that peeked before subscribing sees the same snapshot after', () => {
+        const store = new ResourceStore();
+        const before = store.peek('k');
+        const u = store.subscribe('k', () => {});
+        expect(store.peek('k')).toBe(before);
+        u();
+    });
+});
+
+describe('resource store — exceptional fetches, passive observers, failure transitions', () => {
+    it('a fetcher that throws synchronously is an error, and the next ensure retries it', async () => {
+        const store = new ResourceStore();
+        let tries = 0;
+        const spec: ResourceSpec<string> = { key: 'k', fetch: () => { tries++; throw new Error('synchronous'); } };
+        await store.ensure(spec);
+        expect(store.peek('k')).toMatchObject({ error: 'synchronous', fetching: false });
+        await store.ensure(spec);
+        expect(tries).toBe(2);
+    });
+
+    it('withTimeout rejects at once on an already-aborted signal and detaches its listener when the timer fires', async () => {
+        const c = new AbortController();
+        c.abort();
+        await expect(withTimeout(new Promise<never>(() => {}), 10_000, c.signal)).rejects.toThrow('aborted');
+        const c2 = new AbortController();
+        const add = vi.spyOn(c2.signal, 'addEventListener');
+        const remove = vi.spyOn(c2.signal, 'removeEventListener');
+        await expect(withTimeout(new Promise<never>(() => {}), 1, c2.signal, 'late')).rejects.toThrow('late');
+        expect(add).toHaveBeenCalledTimes(1);
+        expect(remove).toHaveBeenCalledTimes(1);
+    });
+
+    it('a passive observer keeps the entry alive but never triggers a read', async () => {
+        const store = new ResourceStore();
+        store.defineFamily('f', { maxEntries: 1 });
+        const r = slotted<string>('k', { family: 'f', refetchOnReconnect: true, refetchOnFocus: true });
+        const p = store.ensure(r.spec); r.slots[0].resolve(ok('v')); await p;
+        const u = store.subscribe('k', () => {}, { passive: true });
+        expect(store.isObserved('k')).toBe(true);
+        store.onReconnect();
+        store.onFocus();
+        store.invalidate('k');
+        expect(r.slots.length).toBe(1);
+        expect(store.peek('k').invalidated).toBe(true);
+        await store.ensure({ key: 'other', family: 'f', fetch: async () => ok('o') }); // over maxEntries: the observed key survives
+        expect(store.keys()).toContain('k');
+        u();
+    });
+
+    it('context readiness refetches an observed unavailable entry once; an unobserved one is stale for its next ensure', async () => {
+        const store = new ResourceStore();
+        let ctx = false;
+        let calls = 0;
+        const spec: ResourceSpec<string> = { key: 'env', staleTime: Infinity, fetch: async () => { calls++; return ctx ? ok('KEY') : unavailable('no_ctx'); } };
+        const u = store.subscribe('env', () => {});
+        await store.ensure(spec);
+        expect(store.peek('env').unavailable).toBe('no_ctx');
+        store.onReconnect(); // no policy opted in: nothing
+        expect(calls).toBe(1);
+        ctx = true;
+        store.onContextReady();
+        await tick();
+        expect(calls).toBe(2);
+        expect(store.peek<string>('env')).toMatchObject({ data: 'KEY', unavailable: null });
+        store.onContextReady(); // nothing is unavailable any more
+        await tick();
+        expect(calls).toBe(2);
+        u();
+        // Unobserved: readiness makes the unavailable entry stale for the next ensure only.
+        ctx = false;
+        const other: ResourceSpec<string> = { key: 'idle-env', staleTime: Infinity, fetch: async () => { calls++; return ctx ? ok('KEY') : unavailable('no_ctx'); } };
+        await store.refresh(other);
+        expect(store.peek('idle-env').unavailable).toBe('no_ctx');
+        store.onContextReady();
+        await tick();
+        expect(store.peek('idle-env').fetching).toBe(false);
+        expect(store.isStale(other)).toBe(true);
+    });
+
+    it('an unavailable outcome clears an earlier error (error ?? unavailable is the current state)', async () => {
+        const store = new ResourceStore();
+        await store.refresh({ key: 'k', fetch: async () => failed('prior failure') });
+        await store.refresh({ key: 'k', fetch: async () => unavailable('no ctx') });
+        expect(store.peek('k')).toMatchObject({ error: null, unavailable: 'no ctx' });
+        await store.refresh({ key: 'k', fetch: async () => failed('again') });
+        expect(store.peek('k')).toMatchObject({ error: 'again', unavailable: null });
+    });
+});
+
+describe('resource store — mutation results are ordered by ticket', () => {
+    it('a delayed acknowledgement of an older write is dropped and the key revalidated', async () => {
+        const store = new ResourceStore();
+        const r = slotted<string>('file');
+        const w1 = store.beginMutation('file');       // W1 sent
+        const load = store.ensure(r.spec);            // a reader loads W1's baseline
+        r.slots[0].resolve(ok('first'));
+        await load;
+        const w2 = store.beginMutation('file');       // W2 sent
+        expect(store.setData('file', 'second', { ticket: w2 })).toBe(true);   // W2 acknowledged
+        expect(store.setData('file', 'first', { ticket: w1 })).toBe(false);   // W1's delayed ack
+        expect(store.peek<string>('file').data).toBe('second');
+        expect(r.slots.length).toBe(2);               // revalidated from disk instead
+        r.slots[1].resolve(ok('second'));
+        await tick();
+        expect(store.peek<string>('file')).toMatchObject({ data: 'second', fetching: false });
+    });
+
+    it('a delayed acknowledgement carrying the cached content version is the same content: applied as equal', () => {
+        const store = new ResourceStore();
+        const w1 = store.beginMutation('file');
+        const w2 = store.beginMutation('file');
+        store.setData('file', 'same', { ticket: w2, version: 'hash' });
+        const ref = store.peek<string>('file').data;
+        expect(store.setData('file', 'same', { ticket: w1, version: 'hash' })).toBe(true);
+        expect(store.peek<string>('file')).toMatchObject({ data: 'same', dataVersion: 'hash', fetching: false });
+        expect(store.peek<string>('file').data).toBe(ref);
+    });
+
+    it('without a ticket a write is unconditional', () => {
+        const store = new ResourceStore();
+        store.setData('k', 'a');
+        store.setData('k', 'b');
+        expect(store.peek<string>('k').data).toBe('b');
+    });
+
+    it('revision counts every landed answer (fetched or written), equal or not', async () => {
+        const store = new ResourceStore();
+        const r = slotted<string>('k');
+        const p = store.refresh(r.spec); r.slots[0].resolve(ok('v')); await p;
+        expect(store.peek('k').revision).toBe(1);
+        const p2 = store.refresh(r.spec); r.slots[1].resolve(ok('v')); await p2;
+        expect(store.peek('k').revision).toBe(2);
+        store.setData('k', 'w');
+        expect(store.peek('k').revision).toBe(3);
     });
 });

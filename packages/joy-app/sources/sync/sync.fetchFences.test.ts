@@ -71,6 +71,7 @@ describe('forgetSession (#406)', () => {
         const page = defer<unknown>();
         let removed = false;
         const rows: unknown[] = [];
+        const filesForgotten: string[] = [];
         const Sync = buildSyncSubset(['fetchForwardSince', 'assertFresh', 'forgetSession'], {
             v2MessagesAfter: () => page.promise,
             log: quiet,
@@ -78,22 +79,24 @@ describe('forgetSession (#406)', () => {
             storage: { getState: () => ({ deleteSession: () => { removed = true; } }) },
             gitStatusSync: { clearForSession: () => { } },
             clearGitStatusForSession: () => { }, // E4: the git resource replaced gitStatusSync
+            forgetSessionFiles: (id: string) => { filesForgotten.push(id); }, // E4: the session's file/diff cache goes with it
         });
         const x = baseInstance(Sync);
         x.sessionLastSeq.set('A', 100);
         x.sessionOldestSeq.set('A', 50);
         x.applyFetchedMessages = async (_s: string, _e: unknown, m: unknown[]) => { rows.push(...m); };
-        return { x, page, rows, removed: () => removed };
+        return { x, page, rows, removed: () => removed, filesForgotten };
     }
 
     it('a forward page in flight when the session is removed restores nothing', async () => {
-        const { x, page, rows, removed } = build();
+        const { x, page, rows, removed, filesForgotten } = build();
         const gen = x.fetchGen.current('A'); // the generation the in-flight fetch captured (0)
         const p = x.fetchForwardSince('A', {}, 100, gen);
         x.forgetSession('A');
         page.resolve({ messages: [{ seq: 101 }], lifecycle: [], cursor: 101, hasMore: false });
         await expect(p).rejects.toBeInstanceOf(StaleFetchError);
         expect(removed()).toBe(true);
+        expect(filesForgotten).toEqual(['A']); // the session's file/diff cache goes with it (E4)
         expect(rows).toEqual([]);
         expect(x.sessionLastSeq.has('A')).toBe(false);
         expect(x.sessionOldestSeq.has('A')).toBe(false);
