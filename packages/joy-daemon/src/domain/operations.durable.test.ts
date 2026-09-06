@@ -8,20 +8,22 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { machineOps, cloneForSpawn, gitRepoIdentity } from "./operations";
+import { LedgerWriteError, SessionEndedError } from "./ledger";
 
 const op = (name: string) => machineOps.find((o) => o.rpcName === name)!;
 
-/** A minimal fake session: enqueue succeeds or throws per `durable`. */
-function fakeSession(id: string, o: { durable: boolean; status?: "starting" | "active" | "ended" } = { durable: true }) {
+/** A minimal fake session: enqueue succeeds, or throws the ledger's errors per `durable` / `ended`. */
+function fakeSession(id: string, o: { durable: boolean; status?: "starting" | "active" | "ended"; ended?: boolean } = { durable: true }) {
   const calls: Array<{ text: string; opts: unknown }> = [];
   const s = {
     id, cwd: "/tmp/x", status: o.status ?? "active", claudeSessionId: "sid",
     agentFlavor: "claude", summary: undefined, currentModel: undefined, model: undefined,
     busy: () => false,
     detectPermissionMode: () => "bypassPermissions",
-    enqueue(text: string, opts: { requireDurable?: boolean }) {
+    enqueue(text: string, opts?: unknown) {
       calls.push({ text, opts });
-      if (!o.durable && opts?.requireDurable) throw new Error("queue spool write failed — message not durably staged");
+      if (o.ended) throw new SessionEndedError(id);
+      if (!o.durable) throw new LedgerWriteError("accept", new Error("SQLITE_FULL"));
       return { id: "q1", text, createdAt: 1 };
     },
     queueState: () => ({ pendingCount: calls.length, items: [] }),
@@ -48,21 +50,32 @@ describe("send / queueAdd require a durable spool (#551)", () => {
     expect(r.ok).toBeUndefined();
     expect(r.error).toBe("not_durable");
     expect(chat).toEqual([]); // nothing recorded as accepted
-    expect(calls[0].opts).toMatchObject({ requireDurable: true });
     expect(op("joy-send").httpShape!(r).status).toBe(503);
   });
 
-  it("send: durable spool → ok, chat row recorded once, requireDurable passed", async () => {
+  it("send into an ended session → session_ended (404), nothing recorded (#553)", async () => {
+    const { s } = fakeSession("aaaa0005", { durable: true, ended: true });
+    const { reg, chat } = fakeRegistry(s);
+    const r = (await op("joy-send").handler(reg as never, { session_id: "aaaa0005", text: "late" }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r).toEqual({ error: "session_ended" });
+    expect(chat).toEqual([]);
+    expect(op("joy-send").httpShape!(r).status).toBe(404);
+    const q = (await op("joy-queue-add").handler(reg as never, { id: "aaaa0005", text: "late" }, { via: "rpc" })) as Record<string, unknown>;
+    expect(q.error).toBe("session_ended");
+    expect(op("joy-queue-add").httpShape!(q).status).toBe(404);
+  });
+
+  it("send: durable commit → ok, chat row recorded once", async () => {
     const { s, calls } = fakeSession("aaaa0002", { durable: true });
     const { reg, chat } = fakeRegistry(s);
     const r = (await op("joy-send").handler(reg as never, { session_id: "aaaa0002", text: "hello" }, { via: "http" })) as Record<string, unknown>;
     expect(r).toMatchObject({ ok: true, chat_id: 7, queued_id: "q1" });
     expect(chat).toHaveLength(1);
     expect(calls).toHaveLength(1);
-    expect(calls[0].opts).toMatchObject({ requireDurable: true, mirrorToRelay: true, visible: true, source: "web" });
+    expect(calls[0].opts).toMatchObject({ mirrorToRelay: true, visible: true, source: "web" });
   });
 
-  it("queueAdd: persistence failure → not_durable (503), success passes requireDurable", async () => {
+  it("queueAdd: persistence failure → not_durable (503)", async () => {
     const bad = fakeSession("aaaa0003", { durable: false });
     const r1 = (await op("joy-queue-add").handler(fakeRegistry(bad.s).reg as never, { id: "aaaa0003", text: "x" }, { via: "rpc" })) as Record<string, unknown>;
     expect(r1.error).toBe("not_durable");
@@ -70,7 +83,7 @@ describe("send / queueAdd require a durable spool (#551)", () => {
     const good = fakeSession("aaaa0004", { durable: true });
     const r2 = (await op("joy-queue-add").handler(fakeRegistry(good.s).reg as never, { id: "aaaa0004", text: "x" }, { via: "rpc" })) as Record<string, unknown>;
     expect(r2).toMatchObject({ ok: true, id: "q1" });
-    expect(good.calls[0].opts).toMatchObject({ requireDurable: true });
+    expect(good.calls).toHaveLength(1);
   });
 });
 

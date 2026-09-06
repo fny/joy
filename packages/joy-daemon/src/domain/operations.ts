@@ -16,6 +16,7 @@ import type { Session } from "../claude/session";
 import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
+import { SessionEndedError } from "./ledger";
 import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
@@ -909,16 +910,16 @@ export const machineOps: MachineOp[] = [
       // mirrors it, so showing it as a queued chip is real "not sent yet" state,
       // not a duplicate. mirrorToRelay so it reaches the app's history on dispatch.
       //
-      // requireDurable (#551): a locally accepted prompt has NO relay work item
-      // to replay it — this ack is the only record it was ever sent. Without
-      // the flag, a failed spool write kept the prompt in memory and the API
-      // still said ok:true; a daemon crash then lost an acknowledged
-      // instruction silently. Now persistence failure is a refusal: nothing is
-      // recorded as accepted (no chat-log row either) and the caller retries.
+      // Durable acceptance (#551): a locally accepted prompt has NO relay work
+      // item to replay it — this ack is the only record it was ever sent.
+      // enqueue returns only after the ledger commits; a failed commit is a
+      // refusal (nothing recorded as accepted, no chat-log row either) and the
+      // caller retries. An ended session refuses outright (#553).
       let queued: { id: string } | undefined;
       try {
-        queued = session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true, requireDurable: true });
+        queued = session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true });
       } catch (e) {
+        if (e instanceof SessionEndedError) return { error: "session_ended" };
         return { error: "not_durable", detail: e instanceof Error ? e.message : String(e) };
       }
       const chat_id = registry.nextChatId();
@@ -928,7 +929,7 @@ export const machineOps: MachineOp[] = [
     httpShape: (result) => {
       const r = result as { error?: string };
       if (r.error === "empty") return { status: 400, body: result };
-      if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error === "session_not_found" || r.error === "session_ended") return { status: 404, body: result };
       if (r.error === "busy") return { status: 409, body: result };
       if (r.error === "mode_not_scriptable") return { status: 409, body: result };
       if (r.error === "not_durable") return { status: 503, body: result };
@@ -963,11 +964,12 @@ export const machineOps: MachineOp[] = [
       if (!session) return { error: "session_not_found" };
       const text = typeof params.text === "string" ? params.text.trim() : "";
       if (!text) return { error: "empty" };
-      // Same durable-ack contract as `send` (#551): no spool, no acceptance.
+      // Same durable-ack contract as `send` (#551): no ledger commit, no acceptance.
       let msg: { id: string };
       try {
-        msg = session.enqueue(text, { requireDurable: true });
+        msg = session.enqueue(text);
       } catch (e) {
+        if (e instanceof SessionEndedError) return { error: "session_ended", ...session.queueState() };
         return { error: "not_durable", detail: e instanceof Error ? e.message : String(e), ...session.queueState() };
       }
       return { ok: true, id: msg.id, ...session.queueState() };
@@ -975,7 +977,7 @@ export const machineOps: MachineOp[] = [
     httpShape: (result) => {
       const r = result as { error?: string };
       if (r.error === "empty") return { status: 400, body: result };
-      if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error === "session_not_found" || r.error === "session_ended") return { status: 404, body: result };
       if (r.error === "not_durable") return { status: 503, body: result };
       return { status: 200, body: result };
     },

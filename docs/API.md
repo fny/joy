@@ -201,11 +201,44 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
 
 ## Background daemon behaviors (not ops)
 
+- **The acceptance ledger** (`domain/ledger.ts`, one SQLite file per relay
+  state dir: `~/.joy/relays/<relay>/state/ledger.sqlite`, WAL +
+  `synchronous=FULL`, every method one `BEGIN IMMEDIATE … COMMIT`). It replaced
+  `queue-<id>.json`, `<id>.receipts.json`, `v2-outbound.json`,
+  `codex-inbound-<id>.json`, `codex-checkpoint-<id>.json`, `v2-spawns.json`
+  and the execution fields of `window-<id>.json` (which keeps identity and
+  configuration only). Tables: `commands` (the queue item the app sees — its
+  id is the `queued_id` on the wire), `attempts` (one per submission to a
+  harness), `observations` (echoes, turn ends), `outbox` (every adapter record
+  and turn terminal, in persisted order), `receipts` (retained proof of
+  delivery, independent of the pending row), `checkpoints` (transcript /
+  turn / message replay cursors), `spawn_intents`, `jobs` (handoffs).
+  `enqueue` on every adapter returns only after the accept committed, else
+  throws (`not_durable` 503; `session_ended` 404 for a session whose
+  generation is closed). A dispatch attempt is committed before the first
+  key / socket write; the harness's echo commits the receipt, the attempt's
+  outcome and the command's terminal state together; a crash in between is
+  an explicit `unknown` reconciled by the next generation (Codex resends
+  under a NEW client id per attempt; Claude retypes; pi/agy resend). A
+  redelivered relay seq dedupes against the pending row or the retained
+  receipt — never a second turn (#516). Every write naming a session
+  generation is refused once a newer one opened (#481). Terminal rows are
+  pruned after 7 days; legacy files are imported once at boot
+  (`domain/ledgerImport.ts`, originals in `state/imported-v1/`).
+- **One outbox sender per session** (`relay/outbox.ts`): rows post in `seq`
+  order, retried by `runtimeEventId` with the backoff persisted in the row (a
+  restart resumes the schedule), dropped on a permanent refusal, parked on an
+  unbound session until its bind. A turn terminal is written the instant the
+  outcome is known and lands after that session's earlier outputs (#74). A
+  local checkpoint recorded while its rows are unacked stays pending until
+  the acks arrive, so a crash replays instead of skipping (#67). Backlog over
+  2000 rows / 64 MiB per session pauses new prompt dispatch and holds
+  adapter checkpoints (`RelaySession.outboundPersistDegraded`).
 - Sealed sessions refuse plaintext: once a session has a content key, only a
   valid authenticated `v2e1:` envelope is accepted as a prompt; plaintext JSON
-  fails the turn with `plaintext_on_sealed_session` (#579). Spooled outbound
-  records carry their sealing identity; a sealed record whose key is gone is
-  dropped with a log line, never sent in the clear (#582).
+  fails the turn with `plaintext_on_sealed_session` (#579). Outbox rows carry
+  their sealing identity; a sealed row whose key is gone is dropped with a log
+  line, never sent in the clear (#582).
 - `GET /v2/sessions/:id/git/status` paths are relative to the session cwd (a
   subdirectory session sees `inner.txt`, an outside-cwd rename partner
   `../x`), not to the repository root (#601); `?v=2` answers the structured

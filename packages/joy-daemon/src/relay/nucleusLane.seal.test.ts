@@ -1,18 +1,20 @@
 // The lane's sealing trust boundary, end to end against a fake relay:
 //   #579 — a session that has a content key dispatches ONLY authenticated
 //          v2e1 prompts; plaintext offered to it fails the turn, never enqueues.
-//   #582 — pending output keeps its sealing identity in the spool, so a replay
-//          after the session's window record (and key) is gone still seals —
-//          or drops — and never sends a sealed session's content in plaintext.
+//   #582 — pending output keeps its sealing identity in the ledger's outbox, so
+//          a replay after the session's window record (and key) is gone still
+//          seals — or drops — and never sends a sealed session's content in
+//          plaintext. (Legacy v2-outbound.json entries without the flag are
+//          classified by the one-time import — see ledgerImport.test.ts.)
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import nacl from "tweetnacl";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startNucleusLane, decodeRecord, encodeContent, type NucleusLaneHandle } from "./nucleusLane";
 import { RelaySession, encodeTextEvent } from "./relay";
-import { joyStateDir } from "../paths";
+import { ledgerFor } from "../domain/ledger";
 
 // Never the live daemon's state: each test gets its own JOY_HOME_DIR (the
 // lane reads joyStateDir() when it starts).
@@ -100,8 +102,8 @@ describe("#579 sealed sessions accept only authenticated prompts", () => {
     }, 15_000);
 });
 
-describe("#582 spooled output keeps its sealing identity", () => {
-    it("a sealed session's live output is spooled WITH its key, and posts sealed", async () => {
+describe("#582 outbox rows keep their sealing identity", () => {
+    it("a sealed session's live output is committed WITH its key, and posts sealed", async () => {
         const key = nacl.randomBytes(32);
         const account = nacl.box.keyPair();
         const relay = makeFakeRelay([{ sessionId: "v2s", daemonId: "m2", state: "active", localSessionId: "loc" }]);
@@ -111,16 +113,15 @@ describe("#582 spooled output keeps its sealing identity", () => {
             get: (i: string) => (i === "loc" ? session : undefined), create: async () => session, chatHistory: () => [],
             listRecords: () => [{ id: "loc", v2SessionId: "v2s", v2SessionKey: b64(key), socket: null }], saveRecord: () => {},
         };
-        const spoolPath = join(joyStateDir(), "v2-outbound.json");
         handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m2", accountContentPublicKey: account.publicKey, log: () => {} });
         await sleep(1200);
 
-        relay.state.failFacts = true; // hold the record in the spool so we can look at it
+        relay.state.failFacts = true; // hold the record in the outbox so we can look at it
         adapterFor("loc").send(encodeTextEvent("private answer", { turn: "t" }), "loc:text:1");
         await sleep(400);
-        const spooled = JSON.parse(readFileSync(spoolPath, "utf8"));
-        expect(spooled).toHaveLength(1);
-        expect(spooled[0]).toMatchObject({ kind: "output", v2SessionId: "v2s", sealed: true, key: b64(key) });
+        const pending = ledgerFor().pendingOutbound("loc");
+        expect(pending).toHaveLength(1);
+        expect(pending[0]).toMatchObject({ kind: "output", v2SessionId: "v2s", sealed: true, keyB64: b64(key) });
 
         relay.state.failFacts = false;
         await sleep(2500); // first retry after 1s backoff
@@ -130,19 +131,16 @@ describe("#582 spooled output keeps its sealing identity", () => {
         expect((decodeRecord(posted[0].body.ciphertext, key) as any)?.content?.data?.ev?.text).toBe("private answer");
     }, 15_000);
 
-    it("replay after the window record (and its key) is gone: seals from the spooled key, drops what it cannot seal, never plaintext", async () => {
+    it("replay after the window record (and its key) is gone: seals from the row's key, drops what it cannot seal, never plaintext", async () => {
         const key = nacl.randomBytes(32);
         const account = nacl.box.keyPair();
         const wire = (text: string) => encodeTextEvent(text, { turn: "t" });
         // What a daemon restart finds: the session was killed and its record
         // removed, but its output never drained.
-        mkdirSync(joyStateDir(), { recursive: true });
-        const spoolPath = join(joyStateDir(), "v2-outbound.json");
-        writeFileSync(spoolPath, JSON.stringify([
-            { kind: "output", id: "e1", localId: "gone", v2SessionId: "v2s", turnId: null, wire: wire("still sealable"), runtimeEventId: "rec:e1", at: Date.now(), sealed: true, key: b64(key) },
-            { kind: "output", id: "e2", localId: "gone", v2SessionId: "v2s", turnId: null, wire: wire("sealed, key lost"), runtimeEventId: "rec:e2", at: Date.now(), sealed: true },
-            { kind: "output", id: "e3", localId: "gone", v2SessionId: "v2s", turnId: null, wire: wire("pre-flag entry"), runtimeEventId: "rec:e3", at: Date.now() },
-        ]));
+        ledgerFor().enqueueOutbound([
+            { sessionId: "gone", kind: "output", v2SessionId: "v2s", body: wire("still sealable"), runtimeEventId: "rec:e1", sealed: true, keyB64: b64(key) },
+            { sessionId: "gone", kind: "output", v2SessionId: "v2s", body: wire("sealed, key lost"), runtimeEventId: "rec:e2", sealed: true },
+        ]);
         const relay = makeFakeRelay([]);
         const url = await relay.listen(); srv = relay.server;
         const registry: any = { get: () => undefined, create: async () => { throw new Error("no"); }, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
@@ -154,17 +152,16 @@ describe("#582 spooled output keeps its sealing identity", () => {
         expect(posted[0].body.ciphertext.startsWith("v2e1:")).toBe(true);
         expect((decodeRecord(posted[0].body.ciphertext, key) as any)?.content?.data?.ev?.text).toBe("still sealable");
         // nothing that left this daemon was readable without the key
-        expect(relay.calls.every(c => !JSON.stringify(c.body).includes("key lost") && !JSON.stringify(c.body).includes("pre-flag"))).toBe(true);
-        // the undeliverable entries were dropped, not left to retry forever
-        const left = existsSync(spoolPath) ? JSON.parse(readFileSync(spoolPath, "utf8")) : [];
-        expect(left).toEqual([]);
+        expect(relay.calls.every(c => !JSON.stringify(c.body).includes("key lost"))).toBe(true);
+        // the undeliverable entry was dropped, not left to retry forever
+        expect(ledgerFor().pendingOutbound("gone")).toEqual([]);
+        expect(ledgerFor().getOutbound(2)?.lastError).toMatch(/^dropped: sealed_key_unavailable/);
     }, 15_000);
 
-    it("a daemon that never sealed (no account key) still replays a legacy plaintext entry", async () => {
-        mkdirSync(joyStateDir(), { recursive: true });
-        writeFileSync(join(joyStateDir(), "v2-outbound.json"), JSON.stringify([
-            { kind: "output", id: "e3", localId: "gone", v2SessionId: "v2p", turnId: null, wire: encodeTextEvent("legacy plain", { turn: "t" }), runtimeEventId: "rec:legacy", at: Date.now() },
-        ]));
+    it("a daemon that never sealed (no account key) still replays a plaintext row", async () => {
+        ledgerFor().enqueueOutbound([
+            { sessionId: "gone", kind: "output", v2SessionId: "v2p", body: encodeTextEvent("legacy plain", { turn: "t" }), runtimeEventId: "rec:legacy", sealed: false },
+        ]);
         const relay = makeFakeRelay([]);
         const url = await relay.listen(); srv = relay.server;
         const registry: any = { get: () => undefined, create: async () => { throw new Error("no"); }, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
