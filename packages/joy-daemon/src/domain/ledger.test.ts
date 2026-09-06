@@ -248,9 +248,9 @@ test("spawn intents, jobs and receipts round-trip; prune removes only settled ro
   const live = accept("s1", "still queued");
   const done = accept("s1", "done");
   ledger.recordAttempt(done.id, g, "done");
-  ledger.confirmDelivery(done.id, { kind: "transcript_uuid", ref: "u-done" });
+  ledger.confirmDelivery(done.id, { kind: "transcript_uuid", ref: "u-done", transcriptPath: "/t.jsonl", byteOffset: 42 });
   // A forwarded-uuid receipt ages out only once the committed transcript
-  // cursor covers it (#560): commit one past it.
+  // cursor covers its observed position (#560): commit past byte 42.
   ledger.setCheckpoint("s1", "claude_transcript", "/t.jsonl", 100);
   ledger.enqueueOutbound([{ sessionId: "s1", kind: "output", runtimeEventId: "r-live", sealed: false, body: {} }, { sessionId: "s1", kind: "output", runtimeEventId: "r-acked", sealed: false, body: {} }]);
   ledger.ackOutbound(2);

@@ -137,16 +137,29 @@ export interface OutboxRow {
   ackedAt: number | null; attempts: number; nextRetryAt: number; lastError: string | null;
 }
 /** `ord`: the ledger-wide insertion ordinal (#560) — a monotonic counter,
- *  never wall time (a caller-supplied `at` proves nothing about order). */
-export interface ReceiptRow { sessionId: string; kind: string; ref: string; commandId: string | null; attemptId: string | null; at: number; ord: number | null }
+ *  never wall time (a caller-supplied `at` proves nothing about order); it
+ *  ranks a session's forwarded-uuid set (the cap keeps the newest) but never
+ *  proves cursor coverage. `transcriptPath` / `byteOffset`: where the
+ *  entry's line starts in the transcript the receipt was observed in — the
+ *  only thing a committed cursor can cover (review 939c279a). Null = the
+ *  position was never observed (a receipt from before the columns existed,
+ *  the legacy import, a server ack whose entry position was not retained):
+ *  such a receipt is never pruned until a later observation of the same
+ *  uuid places it. */
+export interface ReceiptRow {
+  sessionId: string; kind: string; ref: string; commandId: string | null; attemptId: string | null; at: number; ord: number | null;
+  transcriptPath: string | null; byteOffset: number | null;
+}
 export interface CheckpointRow {
   sessionId: string; kind: string; ref: string; offset: number; updatedAt: number;
   pendingRef: string | null; pendingOffset: number | null; pendingThroughSeq: number | null;
-  /** The receipt ordinal the committed cursor covers: every receipt with
-   *  `ord <= receiptOrd` was written before this offset was observed, so
-   *  its entry lies at or before the cursor (#560). Null = unknown (a
-   *  cursor from before the column existed, or one installed with
-   *  `coversReceipts: false`): nothing is at-or-before it. */
+  /** The receipt ordinal current when this cursor was written (#560) —
+   *  diagnostic only. Insertion order does not prove byte coverage after a
+   *  restart (a receipt written in a previous run can name an entry beyond
+   *  the offset a recovery tailer later commits — review 939c279a), so a
+   *  cursor covers a receipt by POSITION: same transcript path, entry byte
+   *  offset below the committed offset. Null when the cursor predates the
+   *  column or was installed with `coversReceipts: false`. */
   receiptOrd: number | null; pendingReceiptOrd: number | null;
 }
 export interface GenerationRow { sessionId: string; generation: number; agent: string; startedAt: number; endedAt: number | null; endReason: string | null }
@@ -171,7 +184,13 @@ export interface NewCommand {
    *  generation is open) and by callers with no runtime of their own. */
   generation?: number;
 }
-export interface NewReceipt { kind: string; ref: string; commandId?: string | null; attemptId?: string | null; at?: number }
+/** `transcriptPath` + `byteOffset` (both, or neither): the observed position
+ *  of the entry this receipt is for (#560). Writing a receipt that already
+ *  exists with a position re-places it (a later observation wins). */
+export interface NewReceipt {
+  kind: string; ref: string; commandId?: string | null; attemptId?: string | null; at?: number;
+  transcriptPath?: string | null; byteOffset?: number | null;
+}
 export interface NewOutbound {
   sessionId: string; kind: "output" | "terminal"; runtimeEventId: string;
   relayTurnId?: string | null; v2SessionId?: string | null; sealed: boolean; keyB64?: string | null;
@@ -197,7 +216,8 @@ export interface PrunePolicy {
   observationsOlderThanMs: number;
   /** Cap on a session's forwarded-transcript-uuid receipts (#560) — see
    *  Ledger#pruneTranscriptReceipts. Age alone never bounded this set; the
-   *  cap never reaches past the session's committed transcript cursor. */
+   *  cap only ever removes receipts whose observed position the session's
+   *  committed transcript cursor covers. */
   transcriptReceiptsPerSession: number;
 }
 /** 7-day retention for terminal rows (campaign decision, 2026-09-06); 5,000
@@ -250,6 +270,7 @@ CREATE INDEX IF NOT EXISTS outbox_acked ON outbox(acked_at) WHERE acked_at IS NO
 CREATE TABLE IF NOT EXISTS receipts (
   session_id TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL,
   command_id TEXT, attempt_id TEXT, at INTEGER NOT NULL, ord INTEGER,
+  transcript_path TEXT, byte_offset INTEGER,
   PRIMARY KEY (session_id, kind, ref));
 CREATE INDEX IF NOT EXISTS receipts_at ON receipts(at);
 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -278,12 +299,16 @@ const placeholders = (n: number): string => Array.from({ length: n }, () => "?")
 const TRANSCRIPT_RECEIPT_KIND = "transcript_uuid";
 const TRANSCRIPT_CURSOR_KIND = "claude_transcript";
 /** SQL (over a `receipts` row): its session's COMMITTED transcript cursor
- *  covers it — the cursor recorded a receipt boundary and this receipt was
- *  written at or before it. A cursor with no boundary, or none at all,
- *  covers nothing; a pending newer cursor is not consulted. */
+ *  covers it POSITIONALLY — the receipt recorded where its entry starts, in
+ *  the very file the cursor names, and that start lies below the committed
+ *  offset, so a replay from the cursor never reaches the entry. A receipt
+ *  with no recorded position is never covered (review 939c279a: insertion
+ *  order proved nothing after a restart); a pending newer cursor is not
+ *  consulted. */
 const COVERED_BY_COMMITTED_CURSOR = `EXISTS (
   SELECT 1 FROM checkpoints c WHERE c.session_id=receipts.session_id AND c.kind='${TRANSCRIPT_CURSOR_KIND}'
-   AND c.ref<>'' AND c.receipt_ord IS NOT NULL AND receipts.ord<=c.receipt_ord)`;
+   AND c.ref<>'' AND receipts.transcript_path IS NOT NULL AND receipts.byte_offset IS NOT NULL
+   AND receipts.transcript_path=c.ref AND receipts.byte_offset<c.offset)`;
 
 type Raw = Record<string, unknown>;
 const rowCommand = (r: Raw): CommandRow => ({
@@ -311,6 +336,7 @@ const rowReceipt = (r: Raw): ReceiptRow => ({
   sessionId: r.session_id as string, kind: r.kind as string, ref: r.ref as string,
   commandId: r.command_id as string | null, attemptId: r.attempt_id as string | null, at: r.at as number,
   ord: (r.ord as number | null) ?? null,
+  transcriptPath: (r.transcript_path as string | null) ?? null, byteOffset: (r.byte_offset as number | null) ?? null,
 });
 const rowCheckpoint = (r: Raw): CheckpointRow => ({
   sessionId: r.session_id as string, kind: r.kind as string, ref: r.ref as string, offset: r.offset as number, updatedAt: r.updated_at as number,
@@ -338,12 +364,17 @@ export class Ledger {
   /** The forwarded-transcript-uuid cap enforced at insertion (#560). */
   #transcriptReceiptsPerSession: number;
   /** Per-session bookkeeping for that insertion-time cap: the live count,
-   *  the committed receipt boundary last consulted and how many rows it
-   *  still covers — so an insert over the cap costs one bounded DELETE, not
-   *  a scan. Loaded lazily per process; dropped on rollback, on the sweep
-   *  and on any delete, and reloaded from the table (the sweep is exact on
-   *  its own, so a stale entry costs at most an early re-check). */
-  #transcriptSets = new Map<string, { n: number; boundary: number | null; covered: number }>();
+   *  the committed cursor (path + offset) last consulted and how many rows
+   *  it still covers positionally — so an insert over the cap costs one
+   *  bounded DELETE, not a scan. Loaded lazily per process; dropped on
+   *  rollback, on the sweep and on any delete, and reloaded from the table
+   *  (the sweep is exact on its own, so a stale entry costs at most an early
+   *  re-check). A re-placed receipt (position observed again) resets the
+   *  entry too, since it may have moved into or out of coverage. */
+  #transcriptSets = new Map<string, { n: number; cursor: string | null; covered: number }>();
+  /** Sessions already warned (once per process) that their forwarded-uuid
+   *  set is over the cap with nothing the committed cursor covers. */
+  #uncoveredWarned = new Set<string>();
 
   static path(stateDir: string): string { return join(stateDir, "ledger.sqlite"); }
 
@@ -385,10 +416,12 @@ export class Ledger {
 
   /** Additive column migrations (CREATE TABLE IF NOT EXISTS leaves an
    *  existing table as it was). Receipt ordinals (#560): an existing set is
-   *  backfilled in rowid order and the counter starts past it; an existing
-   *  committed cursor keeps `receipt_ord` NULL — nothing written before the
-   *  column existed can be proven at-or-before it, so it all stays until
-   *  the session's next commit (seconds, for a live one). */
+   *  backfilled in rowid order and the counter starts past it. Receipt
+   *  positions (review 939c279a): existing receipts keep `transcript_path`
+   *  / `byte_offset` NULL — nothing written before the columns existed has
+   *  a proven position, so it stays until a later observation of the same
+   *  uuid places it (the replay from the committed cursor does that for
+   *  every entry it re-reads). */
   #migrate(): void {
     const has = (table: string, column: string): boolean =>
       this.#all(`PRAGMA table_info(${table})`).some((c) => c.name === column);
@@ -396,9 +429,12 @@ export class Ledger {
       this.#db.exec("ALTER TABLE receipts ADD COLUMN ord INTEGER");
       this.#db.exec("UPDATE receipts SET ord=rowid WHERE ord IS NULL");
     }
+    if (!has("receipts", "transcript_path")) this.#db.exec("ALTER TABLE receipts ADD COLUMN transcript_path TEXT");
+    if (!has("receipts", "byte_offset")) this.#db.exec("ALTER TABLE receipts ADD COLUMN byte_offset INTEGER");
     if (!has("checkpoints", "receipt_ord")) this.#db.exec("ALTER TABLE checkpoints ADD COLUMN receipt_ord INTEGER");
     if (!has("checkpoints", "pending_receipt_ord")) this.#db.exec("ALTER TABLE checkpoints ADD COLUMN pending_receipt_ord INTEGER");
     this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_ord ON receipts(session_id, kind, ord)");
+    this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_position ON receipts(session_id, kind, transcript_path, byte_offset)");
     if (!this.#get("SELECT 1 AS x FROM schema_meta WHERE key='receipt_ord'")) {
       const max = Number(this.#get("SELECT COALESCE(MAX(ord),0) AS m FROM receipts")?.m ?? 0);
       this.#run("INSERT INTO schema_meta(key,value) VALUES('receipt_ord',?)", String(max));
@@ -931,45 +967,79 @@ export class Ledger {
   }
 
   // ── receipts ──
-  /** Every receipt takes the next ledger-wide ordinal; a forwarded-uuid
-   *  receipt that puts its session over the cap prunes the set at once
-   *  (#560) — under the committed-cursor rule, never past it. */
+  /** Every new receipt takes the next ledger-wide ordinal and records the
+   *  entry position it was observed at (if the caller knows one); a
+   *  forwarded-uuid receipt that puts its session over the cap prunes the
+   *  set at once (#560) — positionally, never past the committed cursor. A
+   *  receipt that already exists is idempotent on its key; when the write
+   *  carries a position that differs from the stored one, the position is
+   *  re-established (a later observation of the same uuid wins — how a
+   *  receipt from before the columns existed, or from a previous run, earns
+   *  the position that lets a cursor cover it). */
   #addReceiptInner(sessionId: string, rc: NewReceipt, now: number): void {
-    const r = this.#run("INSERT OR IGNORE INTO receipts(session_id,kind,ref,command_id,attempt_id,at,ord) VALUES(?,?,?,?,?,?,?)",
-      sessionId, rc.kind, rc.ref, rc.commandId ?? null, rc.attemptId ?? null, rc.at ?? now, this.#nextReceiptOrd());
-    if (rc.kind === TRANSCRIPT_RECEIPT_KIND && Number(r.changes) > 0) this.#capTranscriptReceiptsOnInsert(sessionId);
+    const pos = rc.transcriptPath != null && rc.byteOffset != null && rc.transcriptPath !== "" && rc.byteOffset >= 0
+      ? { path: rc.transcriptPath, offset: Math.floor(rc.byteOffset) } : null;
+    const cur = this.#get("SELECT transcript_path, byte_offset FROM receipts WHERE session_id=? AND kind=? AND ref=?", sessionId, rc.kind, rc.ref);
+    if (cur) {
+      if (!pos || (cur.transcript_path === pos.path && Number(cur.byte_offset) === pos.offset)) return;
+      this.#run("UPDATE receipts SET transcript_path=?, byte_offset=? WHERE session_id=? AND kind=? AND ref=?", pos.path, pos.offset, sessionId, rc.kind, rc.ref);
+      if (rc.kind === TRANSCRIPT_RECEIPT_KIND) this.#transcriptSets.delete(sessionId);
+      return;
+    }
+    this.#run("INSERT INTO receipts(session_id,kind,ref,command_id,attempt_id,at,ord,transcript_path,byte_offset) VALUES(?,?,?,?,?,?,?,?,?)",
+      sessionId, rc.kind, rc.ref, rc.commandId ?? null, rc.attemptId ?? null, rc.at ?? now, this.#nextReceiptOrd(), pos?.path ?? null, pos?.offset ?? null);
+    if (rc.kind === TRANSCRIPT_RECEIPT_KIND) this.#capTranscriptReceiptsOnInsert(sessionId);
   }
-  /** The session's committed transcript cursor's receipt boundary, if any. */
-  #committedReceiptBoundary(sessionId: string): number | null {
-    const c = this.#get(`SELECT receipt_ord FROM checkpoints WHERE session_id=? AND kind='${TRANSCRIPT_CURSOR_KIND}' AND ref<>''`, sessionId);
-    return (c?.receipt_ord as number | null) ?? null;
+  /** The session's committed transcript cursor (path + offset), if any. */
+  #committedCursor(sessionId: string): { ref: string; offset: number } | null {
+    const c = this.#get(`SELECT ref, offset FROM checkpoints WHERE session_id=? AND kind='${TRANSCRIPT_CURSOR_KIND}' AND ref<>''`, sessionId);
+    return c ? { ref: c.ref as string, offset: Number(c.offset) } : null;
   }
-  /** After a forwarded-uuid receipt landed: over the cap, the OLDEST rows the
-   *  committed cursor covers go, as many as the excess — never one the
-   *  cursor does not cover (those are what a replay still reaches). The
-   *  covered count is re-read only when the boundary moves (a commit or a
-   *  promotion), so a session whose excess is all uncovered costs nothing. */
+  /** Positional coverage of one session's forwarded-uuid receipts by its
+   *  committed cursor: the rows observed in the cursor's file below its
+   *  offset. Receipts with no recorded position are never among them. */
+  #coveredCount(sessionId: string, cursor: { ref: string; offset: number }): number {
+    return Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<?`,
+      sessionId, cursor.ref, cursor.offset)?.n ?? 0);
+  }
+  /** After a forwarded-uuid receipt landed: over the cap, the OLDEST rows
+   *  the committed cursor covers positionally go, as many as the excess —
+   *  never one the cursor does not cover (those are what a replay still
+   *  reaches, and a receipt with no known position might be). The covered
+   *  count is re-read only when the cursor moves (a commit or a promotion)
+   *  or a receipt is re-placed, so a session whose excess is all uncovered
+   *  costs nothing beyond one warning per process. */
   #capTranscriptReceiptsOnInsert(sessionId: string): void {
     let st = this.#transcriptSets.get(sessionId);
     if (!st) {
       const n = Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}'`, sessionId)?.n ?? 0);
-      st = { n: n - 1, boundary: null, covered: 0 };
+      st = { n: n - 1, cursor: null, covered: 0 };
       this.#transcriptSets.set(sessionId, st);
     }
     st.n++;
     const excess = st.n - this.#transcriptReceiptsPerSession;
     if (excess <= 0) return;
-    const boundary = this.#committedReceiptBoundary(sessionId);
-    if (boundary == null) { st.boundary = null; st.covered = 0; return; }
-    if (boundary !== st.boundary) {
-      st.boundary = boundary;
-      st.covered = Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord<=?`, sessionId, boundary)?.n ?? 0);
+    const cursor = this.#committedCursor(sessionId);
+    if (!cursor) { st.cursor = null; st.covered = 0; return; }
+    const key = `${cursor.offset}\n${cursor.ref}`;
+    if (key !== st.cursor) {
+      st.cursor = key;
+      st.covered = this.#coveredCount(sessionId, cursor);
     }
-    if (st.covered <= 0) return;
+    if (st.covered <= 0) { this.#warnUncovered(sessionId, st.n, cursor); return; }
     const deleted = Number(this.#run(`DELETE FROM receipts WHERE rowid IN (
-        SELECT rowid FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord<=? ORDER BY ord LIMIT ?)`,
-      sessionId, boundary, Math.min(st.covered, excess)).changes);
+        SELECT rowid FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<? ORDER BY ord LIMIT ?)`,
+      sessionId, cursor.ref, cursor.offset, Math.min(st.covered, excess)).changes);
     st.n -= deleted; st.covered -= deleted;
+  }
+  /** Once per session per process: the set is over the cap and nothing in
+   *  it is positionally covered, so it is kept whole (never pruned by
+   *  ordinal alone). Expected right after an upgrade or an import, until
+   *  the replay from the cursor re-places the old receipts. */
+  #warnUncovered(sessionId: string, n: number, cursor: { ref: string; offset: number }): void {
+    if (this.#uncoveredWarned.has(sessionId)) return;
+    this.#uncoveredWarned.add(sessionId);
+    process.stderr.write(`[ledger] ${sessionId}: ${n} forwarded-uuid receipts over the cap of ${this.#transcriptReceiptsPerSession}, none of the excess positionally covered by the committed cursor ${cursor.ref}@${cursor.offset} — keeping all (never pruned by ordinal alone, #560)\n`);
   }
   /** Retained proof of delivery (INSERT OR IGNORE — idempotent on the key). */
   addReceipt(sessionId: string, rc: NewReceipt): void {
@@ -1090,12 +1160,14 @@ export class Ledger {
    *  outbox row up to that seq is acked or dropped; until then it is held as
    *  pending and a restart replays from the previous committed cursor — or
    *  from nothing (`ref` is "" while no cursor has ever been committed).
-   *  The cursor also records the receipt ordinal it covers (#560): every
-   *  receipt already written was for an entry at or before `offset`, so it
-   *  may be pruned once this cursor is committed — captured NOW, at the
-   *  write, not at a later promotion. `coversReceipts: false` (the legacy
-   *  import, whose receipts and cursor come from different files) records
-   *  no such boundary: nothing already written is treated as covered. */
+   *  The cursor also records the receipt ordinal current at its write
+   *  (#560) — a diagnostic, NOT a coverage boundary: after a restart a
+   *  receipt from the previous run can name an entry beyond the offset the
+   *  recovery tailer commits (review 939c279a), so a committed cursor
+   *  covers a forwarded-uuid receipt only by position — same `ref` (file)
+   *  and the receipt's observed byte offset below `offset`. `coversReceipts:
+   *  false` (the legacy import) records no ordinal; its receipts carry no
+   *  position either, so nothing imported is treated as covered. */
   setCheckpoint(sessionId: string, kind: string, ref: string, offset: number, opts: { throughSeq?: number | "latest"; generation?: number; coversReceipts?: boolean } = {}): { committed: boolean } {
     return this.tx(() => {
       if (opts.generation != null) this.#fence(sessionId, opts.generation);
@@ -1196,16 +1268,21 @@ export class Ledger {
    *  What replay actually needs is the identifiers at or after the session's
    *  COMMITTED transcript cursor: recovery re-reads from there, never from
    *  the start. So a receipt goes only when it is BOTH outside the newest
-   *  `keepPerSession` for its session AND at or before that committed
-   *  cursor — judged by the ordinal the cursor recorded when its offset was
-   *  observed (`checkpoints.receipt_ord`), never by wall time, and never
-   *  by a NEWER cursor still pending behind unacked output (review
-   *  0133a2fb: that one is not the replay origin; the committed one is).
-   *  A session with no committed cursor keeps every forwarded-uuid receipt,
-   *  cap or not: a replay from nothing re-reads the whole file, and a
-   *  replayed entry carries no stable occurrence id the relay could dedupe
-   *  — dropping the receipt WOULD re-emit the answer. The cap is applied at
-   *  insertion too (#addReceiptInner), so the sweep is a backstop. */
+   *  `keepPerSession` for its session AND positionally covered by that
+   *  committed cursor — its entry was observed in the cursor's file at a
+   *  byte offset below the committed one. Never by wall time; never by
+   *  insertion ordinal (review 939c279a: a receipt from a previous run can
+   *  name an entry beyond the offset a partial recovery commits, and the
+   *  ordinal cannot tell); never by a NEWER cursor still pending behind
+   *  unacked output (review 0133a2fb: that one is not the replay origin;
+   *  the committed one is); and never at all for a receipt whose position
+   *  was not recorded — it waits until a later observation of its uuid
+   *  places it. A session with no committed cursor keeps every
+   *  forwarded-uuid receipt, cap or not: a replay from nothing re-reads the
+   *  whole file, and a replayed entry carries no stable occurrence id the
+   *  relay could dedupe — dropping the receipt WOULD re-emit the answer.
+   *  The cap is applied at insertion too (#addReceiptInner), so the sweep
+   *  is a backstop. */
   #pruneTranscriptReceipts(keepPerSession: number): number {
     let n = 0;
     this.#transcriptSets.clear();
@@ -1214,14 +1291,23 @@ export class Ledger {
     return n;
   }
   /** One session: everything outside its newest `keep` forwarded-uuid
-   *  receipts that the committed cursor covers. Index-driven (the cut is
-   *  the ordinal at position keep+1). */
+   *  receipts that the committed cursor covers positionally. Index-driven
+   *  (the cut is the ordinal at position keep+1). Over the cap with nothing
+   *  covered → keep all, warn once. */
   #pruneSessionTranscriptReceipts(sessionId: string, keep: number): number {
     const cut = this.#get(`SELECT ord FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord IS NOT NULL ORDER BY ord DESC LIMIT 1 OFFSET ?`,
       sessionId, Math.max(1, keep));
     if (!cut) return 0;
-    return Number(this.#run(`DELETE FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord<=? AND ${COVERED_BY_COMMITTED_CURSOR}`,
+    const deleted = Number(this.#run(`DELETE FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord<=? AND ${COVERED_BY_COMMITTED_CURSOR}`,
       sessionId, cut.ord as number).changes);
+    if (deleted === 0) {
+      const cursor = this.#committedCursor(sessionId);
+      if (cursor) {
+        const n = Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}'`, sessionId)?.n ?? 0);
+        if (n > keep) this.#warnUncovered(sessionId, n, cursor);
+      }
+    }
+    return deleted;
   }
 
   /** Drop everything a session left (its record is being deleted for good). */
