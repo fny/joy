@@ -16,6 +16,7 @@ import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
 import { launchdPlist } from "./launchdPlist";
 import { shellQuote } from "./domain/quote";
+import { SUPERVISOR_ENV, type DaemonLauncher } from "./daemonLauncher";
 
 // --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
 // invocation addresses. Consumed HERE, before any relay-scoped const below is
@@ -85,7 +86,8 @@ const warn = c.y("!");
 /** daemon.json. `entry`/`exec` (#495 residual) are the daemon's own
  *  process.argv[1] and process.execPath, recorded at start so a stale pid can
  *  be checked against the exact script it should be running. */
-type DaemonState = { token: string; pid: number; port: number; relay?: string; startedAt: number; version: string; entry?: string; exec?: string };
+type DaemonState = { token: string; pid: number; port: number; relay?: string; startedAt: number; version: string; entry?: string; exec?: string; launcher?: DaemonLauncher };
+
 
 function readState(): DaemonState | null {
   try { return JSON.parse(readFileSync(STATE_FILE, "utf8")) as DaemonState; } catch { return null; }
@@ -195,11 +197,17 @@ async function cmdStart(): Promise<number> {
   }
   mkdirSync(STATE_DIR, { recursive: true });
   const out = openSync(LOG_FILE, "a");
+  // A `joy start` daemon is detached whatever shell it was started from: an
+  // agent pane under the systemd unit inherits INVOCATION_ID, and the daemon
+  // would record itself as service-launched (#502) — strip the supervisor
+  // markers so daemon.json says "detached".
+  const env = { ...process.env };
+  for (const k of SUPERVISOR_ENV) delete env[k];
   const child = spawn(NODE, ["--import", "tsx", SERVER_TS], {
     detached: true,
     stdio: ["ignore", out, out],
     cwd: PKG_DIR,
-    env: process.env,
+    env,
   });
   child.unref();
   process.stdout.write("starting joy-daemon daemon");
@@ -341,27 +349,78 @@ export interface StopDeps {
   platform: string;
   run: (cmd: string, args: string[]) => { status: number | null; stdout: string };
   kill: (pid: number, signal: NodeJS.Signals) => void;
+  /** Is the service definition (unit file / plist) on disk? */
+  exists?: (path: string) => boolean;
+  /** Linux: the pid's /proc/<pid>/cgroup text, null when unreadable. */
+  cgroupOf?: (pid: number) => string | null;
 }
 const defaultStopDeps: StopDeps = {
   platform: osPlatform(),
   run: (cmd, args) => { const r = spawnSync(cmd, args, { encoding: "utf8" }); return { status: r.status, stdout: r.stdout ?? "" }; },
   kill: (pid, signal) => process.kill(pid, signal),
+  exists: (p) => existsSync(p),
+  cgroupOf: (pid) => { try { return readFileSync(`/proc/${pid}/cgroup`, "utf8"); } catch { return null; } },
 };
-export function detectSupervisor(pid: number, deps: Pick<StopDeps, "platform" | "run">): Supervisor | null {
+/** Ask the platform's supervisor whether it runs `pid`. Three answers, not
+ *  two (#502 residual): the supervisor owns the pid; the supervisor answered
+ *  and does NOT (an inactive or absent unit / job — confirmed unsupervised);
+ *  or the inspection itself failed (`systemctl` / `launchctl` missing or
+ *  erroring), which says nothing about ownership — a nonzero `systemctl
+ *  show` used to read as "no supervisor" and the daemon got a direct SIGTERM
+ *  that Restart=always undid. */
+export type SupervisorProbe = Supervisor | null | { kind: "unknown"; reason: string };
+export function detectSupervisor(pid: number, deps: Pick<StopDeps, "platform" | "run">): SupervisorProbe {
   if (deps.platform === "linux") {
     const unit = `${serviceName()}.service`;
     // MainPID is "0" for an inactive unit and for a unit that is not installed.
     const r = deps.run("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit]);
-    return r.status === 0 && Number(r.stdout.trim()) === pid ? { kind: "systemd", unit } : null;
+    if (r.status !== 0) return { kind: "unknown", reason: `systemctl --user show ${unit} ${r.status === null ? "could not run" : `exited ${r.status}`}` };
+    const main = Number(r.stdout.trim());
+    if (!Number.isFinite(main)) return { kind: "unknown", reason: `systemctl --user show ${unit} printed ${JSON.stringify(r.stdout.trim().slice(0, 40))}, not a MainPID` };
+    return main === pid ? { kind: "systemd", unit } : null;
   }
   if (deps.platform === "darwin") {
     const label = launchdLabel();
-    // `launchctl list <label>` prints the job's dictionary, `"PID" = <n>;` while it runs.
+    // `launchctl list <label>` prints the job's dictionary, `"PID" = <n>;`
+    // while it runs; exit 113 is "Could not find service" — not loaded.
     const r = deps.run("launchctl", ["list", label]);
-    const m = r.status === 0 ? /"PID"\s*=\s*(\d+)/.exec(r.stdout) : null;
+    if (r.status === 113) return null;
+    if (r.status !== 0) return { kind: "unknown", reason: `launchctl list ${label} ${r.status === null ? "could not run" : `exited ${r.status}`}` };
+    const m = /"PID"\s*=\s*(\d+)/.exec(r.stdout);
     return m && Number(m[1]) === pid ? { kind: "launchd", label, plist: launchdPlistPath() } : null;
   }
   return null;
+}
+
+/** Who owns `pid`: the supervisor's own answer when it gives one; otherwise
+ *  independent evidence, strongest first — what the daemon recorded about
+ *  its launch (daemon.json `launcher`), the kernel's cgroup for the pid
+ *  (Linux: a unit's process sits in `…/<unit>`), and finally whether the
+ *  service definition is installed at all. With none of it, ownership is
+ *  unknown and `joy stop` must not guess (#502 residual). */
+export type Ownership =
+  | { kind: "supervised"; supervisor: Supervisor; evidence: string }
+  | { kind: "unsupervised"; evidence: string }
+  | { kind: "unknown"; reason: string };
+export function resolveOwnership(pid: number, deps: StopDeps, state: Pick<DaemonState, "launcher"> | null): Ownership {
+  const probe = detectSupervisor(pid, deps);
+  if (probe && probe.kind !== "unknown") return { kind: "supervised", supervisor: probe, evidence: probe.kind === "systemd" ? "the unit's MainPID" : "the launchd job's PID" };
+  if (probe === null) return { kind: "unsupervised", evidence: deps.platform === "linux" ? "the unit does not run this pid" : deps.platform === "darwin" ? "the launchd job does not run this pid" : "no supervisor on this platform" };
+  const unit = `${serviceName()}.service`;
+  const supervisor: Supervisor = deps.platform === "darwin" ? { kind: "launchd", label: launchdLabel(), plist: launchdPlistPath() } : { kind: "systemd", unit };
+  const expected: DaemonLauncher = supervisor.kind;
+  if (state?.launcher === expected) return { kind: "supervised", supervisor, evidence: `daemon.json records a ${expected} launch` };
+  if (state?.launcher === "detached") return { kind: "unsupervised", evidence: "daemon.json records a detached launch" };
+  if (deps.platform === "linux") {
+    const cg = deps.cgroupOf?.(pid) ?? null;
+    if (cg !== null) {
+      if (cg.split("\n").some((l) => l.includes(`/${unit}`))) return { kind: "supervised", supervisor, evidence: `the pid runs in the ${unit} cgroup` };
+      return { kind: "unsupervised", evidence: `the pid does not run in the ${unit} cgroup` };
+    }
+  }
+  const definition = supervisor.kind === "launchd" ? supervisor.plist : systemdUnitPath();
+  if (deps.exists?.(definition)) return { kind: "supervised", supervisor, evidence: `${definition} is installed` };
+  return { kind: "unknown", reason: probe.reason };
 }
 
 export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number> {
@@ -387,7 +446,17 @@ export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number>
   // success while the service restarted the daemon (#502). systemctl stop /
   // launchctl unload leave the service installed: it returns at the next
   // login/boot, and `joy install` re-arms it now.
-  const sup = detectSupervisor(pid, deps);
+  const own = resolveOwnership(pid, deps, st);
+  if (own.kind === "unknown") {
+    // No supervisor answer and no independent evidence either way: a direct
+    // SIGTERM would be undone by a supervisor we cannot see, and a supervisor
+    // stop would miss a detached daemon. Say so instead of guessing.
+    const hint = deps.platform === "darwin" ? `launchctl unload ${launchdPlistPath()}` : `systemctl --user stop ${serviceName()}.service`;
+    console.log(`${bad} could not determine whether the daemon is supervised (${own.reason}) — nothing signalled`);
+    console.log(`  ${c.dim(`stop it through its service (${hint}) or, if you started it detached, signal pid ${pid} yourself`)}`);
+    return 1;
+  }
+  const sup = own.kind === "supervised" ? own.supervisor : null;
   const via = sup ? (sup.kind === "systemd" ? `systemctl --user stop ${sup.unit}` : `launchctl unload ${sup.plist}`) : null;
   if (sup) {
     const r = sup.kind === "systemd" ? deps.run("systemctl", ["--user", "stop", sup.unit]) : deps.run("launchctl", ["unload", sup.plist]);

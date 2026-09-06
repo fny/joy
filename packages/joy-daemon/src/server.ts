@@ -26,6 +26,7 @@ import { acquireSingleton, SingletonError } from "./singleton";
 import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
 import { ledgerFor } from "./domain/ledger";
 import { mkdirSecure, writeSecretFileAtomic } from "./domain/secretFile";
+import { launcherFromEnv } from "./daemonLauncher";
 import { importLegacyState } from "./domain/ledgerImport";
 
 // Provider keys for spawned agents live in the sealed store (~/.joy/env.sealed,
@@ -103,6 +104,9 @@ function writeDaemonState(port: number): void {
       // to name exactly this entry before it signals anything; "contains
       // server.ts and tsx" also matched an unrelated `tsx ~/x/server.ts`.
       entry: process.argv[1], exec: process.execPath,
+      // How this daemon was launched (#502 residual): `joy stop` consults it
+      // when the supervisor itself cannot be asked whether it owns the pid.
+      launcher: launcherFromEnv(process.env),
     }));
   } catch (e) {
     process.stderr.write(`[server] failed to write daemon state: ${e}\n`);

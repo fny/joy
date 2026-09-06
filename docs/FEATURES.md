@@ -360,7 +360,9 @@ sync can no longer overwrite its replacement's status. An older daemon (no
 - Account: backup-key reveal/restore, QR device-link approval, terminal-auth
   deep links (`joy://`), push-token administration.
 - joy CLI: `joy` daemon control (`update`, `auth <relay...>`, `new --agent`,
-  install/uninstall services), release-branch installs.
+  install/uninstall services; `joy stop` stops a service-owned daemon through
+  systemctl/launchctl and refuses to guess when the supervisor cannot be
+  asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
 - Dev tools: always-on developer pages, OTA identity + manual update check,
