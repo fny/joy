@@ -1,3 +1,5 @@
+import { exceedsInputBudget, parseBudget } from './parseBudget';
+
 export type SessionFileLink = {
     path: string;
     absolutePath: string;
@@ -316,8 +318,22 @@ function looksLikePathStart(text: string): boolean {
     return HAS_PATH_SEPARATOR.test(text);
 }
 
+// A file path with spaces spans a few tokens at most; trying EVERY remaining
+// span from every path-like token was cubic — 400 "a/ " tokens took ~1.8 s
+// (#446). Candidates are capped in token count and never cross a line break,
+// and the whole scan runs under a work budget (utils/parseBudget) whose
+// exhaustion leaves the rest of the text plain rather than unrendered.
+const MAX_PATH_SPAN_TOKENS = 8;
+
 export function splitSessionFileText(text: string, sessionRoot?: string | null): SessionFileTextSegment[] {
     const segments: SessionFileTextSegment[] = [];
+    if (exceedsInputBudget(text)) {
+        segments.push({ text, link: null });
+        return segments;
+    }
+    // ~4 µs per candidate parse: 20k candidates keeps the worst case under
+    // ~100 ms; anything past that renders as plain text.
+    const budget = parseBudget(20_000);
     const tokenPattern = /\S+/g;
     const tokens: TokenMatch[] = [];
     let match: RegExpExecArray | null;
@@ -329,7 +345,7 @@ export function splitSessionFileText(text: string, sessionRoot?: string | null):
     let cursor = 0;
     let tokenIndex = 0;
 
-    while (tokenIndex < tokens.length) {
+    while (tokenIndex < tokens.length && !budget.exhausted) {
         const token = tokens[tokenIndex];
         const tokenText = text.slice(token.start, token.end);
         const strippedStart = stripToken(tokenText).core;
@@ -346,6 +362,12 @@ export function splitSessionFileText(text: string, sessionRoot?: string | null):
         let bestTrailing = '';
 
         for (let candidateIndex = tokenIndex; candidateIndex < tokens.length; candidateIndex += 1) {
+            if (candidateIndex - tokenIndex >= MAX_PATH_SPAN_TOKENS) break;
+            if (candidateIndex > tokenIndex
+                && text.slice(tokens[candidateIndex - 1].end, tokens[candidateIndex].start).includes('\n')) {
+                break; // a path never continues on the next line
+            }
+            if (!budget.spend()) break;
             const candidate = text.slice(token.start, tokens[candidateIndex].end);
             const stripped = stripToken(candidate);
             if (!stripped.core) {

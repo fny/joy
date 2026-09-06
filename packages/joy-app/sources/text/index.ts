@@ -10,6 +10,7 @@ import { zhHant } from './translations/zh-Hant';
 import { ja } from './translations/ja';
 import * as Localization from 'expo-localization';
 import { loadSettings } from '@/sync/persistence';
+import { hasOwn } from '@/utils/safeGet';
 import { type SupportedLanguage, SUPPORTED_LANGUAGES, SUPPORTED_LANGUAGE_CODES, DEFAULT_LANGUAGE } from './_all';
 
 /**
@@ -97,7 +98,11 @@ let currentLanguage: SupportedLanguage = DEFAULT_LANGUAGE;
 // Read from settings
 let settings = loadSettings();
 let found = false;
-if (settings.settings.preferredLanguage && settings.settings.preferredLanguage in translations) {
+// Membership checks are OWN-property only: `"__proto__" in translations` is
+// true, so a saved preferredLanguage of "__proto__"/"constructor" (the settings
+// schema is a plain string) selected a non-existent language, suppressed the
+// device fallback and made every t() return its raw key (#419).
+if (settings.settings.preferredLanguage && hasOwn(translations, settings.settings.preferredLanguage)) {
     currentLanguage = settings.settings.preferredLanguage as SupportedLanguage;
     found = true;
     console.log(`[i18n] Using preferred language: ${currentLanguage}`);
@@ -122,7 +127,7 @@ if (!found) {
 
                 console.log(`[i18n] Chinese script code: ${l.languageScriptCode} -> ${chineseVariant}`);
 
-                if (chineseVariant && chineseVariant in translations) {
+                if (chineseVariant && hasOwn(translations, chineseVariant)) {
                     currentLanguage = chineseVariant as SupportedLanguage;
                     console.log(`[i18n] Using Chinese variant: ${currentLanguage}`);
                     break;
@@ -134,7 +139,7 @@ if (!found) {
             }
 
             // Direct match for non-Chinese languages
-            if (l.languageCode in translations) {
+            if (hasOwn(translations, l.languageCode)) {
                 currentLanguage = l.languageCode as SupportedLanguage;
                 console.log(`[i18n] Using device locale: ${currentLanguage}`);
                 break;

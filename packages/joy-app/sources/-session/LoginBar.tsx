@@ -22,6 +22,8 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
     const url = login?.url;
     const error = login?.error;
     const [code, setCode] = React.useState('');
+    const [sending, setSending] = React.useState(false);
+    const [sendError, setSendError] = React.useState<string | null>(null);
 
     const onOpen = React.useCallback(() => {
         if (url) void Linking.openURL(url).catch(() => { });
@@ -33,12 +35,30 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
         Modal.alert(t('common.copied'), t('joyLogin.urlCopied'));
     }, [url]);
 
-    const onSubmit = React.useCallback(() => {
+    // The code is cleared only once the relay has ACCEPTED it. sendMessage
+    // resolves ok:false when the relay is unreachable or the session key is
+    // not ready; clearing first meant the pasted OAuth code was neither
+    // delivered nor retained, with no failure shown (#121). On failure the
+    // code stays in the box for a retry and an error is shown; newer edits
+    // made while the send was in flight are never clobbered.
+    const onSubmit = React.useCallback(async () => {
         const trimmed = code.trim();
-        if (!trimmed) return;
-        sync.sendMessage(sessionId, `/login-code ${trimmed}`, { source: 'chat' });
-        setCode('');
-    }, [sessionId, code]);
+        if (!trimmed || sending) return;
+        setSending(true);
+        setSendError(null);
+        try {
+            const result = await sync.sendMessage(sessionId, `/login-code ${trimmed}`, { source: 'chat' });
+            if (result.ok) {
+                setCode(prev => (prev.trim() === trimmed ? '' : prev));
+            } else {
+                setSendError(t('joyLogin.sendFailed'));
+            }
+        } catch {
+            setSendError(t('joyLogin.sendFailed'));
+        } finally {
+            setSending(false);
+        }
+    }, [sessionId, code, sending]);
 
     if (!url) return null;
 
@@ -57,9 +77,9 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
                     <Ionicons name="open-outline" size={18} color={theme.colors.textSecondary} />
                 </Pressable>
             </View>
-            {!!error && (
+            {!!(error || sendError) && (
                 <Text style={[styles.error, { color: theme.colors.textDestructive ?? '#FF453A' }]} numberOfLines={2}>
-                    {error}
+                    {sendError ?? error}
                 </Text>
             )}
             <View style={styles.row}>
@@ -81,11 +101,11 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
                 />
                 <Pressable
                     onPress={onSubmit}
-                    disabled={!code.trim()}
+                    disabled={!code.trim() || sending}
                     hitSlop={8}
                     accessibilityRole="button"
                     accessibilityLabel={t('joyLogin.submitCode')}
-                    style={(p) => [styles.sendBtn, { backgroundColor: theme.colors.button.primary.background, opacity: !code.trim() ? 0.4 : p.pressed ? 0.7 : 1 }]}
+                    style={(p) => [styles.sendBtn, { backgroundColor: theme.colors.button.primary.background, opacity: (!code.trim() || sending) ? 0.4 : p.pressed ? 0.7 : 1 }]}
                 >
                     <Ionicons name="arrow-up" size={16} color={theme.colors.button.primary.tint} />
                 </Pressable>

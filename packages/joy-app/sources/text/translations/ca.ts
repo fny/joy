@@ -372,6 +372,7 @@ export const ca: TranslationStructure = {
         openUrl: 'Obre l\'URL d\'inici de sessió',
         codePlaceholder: 'Enganxa el codi aquí…',
         submitCode: 'Envia el codi d\'inici de sessió',
+        sendFailed: "No s'ha pogut enviar el codi. Comprova la connexió i torna-ho a provar.",
     },
 
     joyLogs: {

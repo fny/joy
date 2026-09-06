@@ -595,6 +595,13 @@ export const storage = create<StorageState>()((set, get) => {
                     permissionMode: resolvedPermissionMode,
                     modelMode: resolvedModelMode,
                     effortLevel: resolvedEffortLevel,
+                    // Reducer-owned fields live only on the local Session: an
+                    // ordinary fetchSessions row omits them, and spreading it
+                    // erased the todo counts and the usage/context snapshot on
+                    // every poll (#402). Keep the last good values unless the
+                    // producer supplied new ones.
+                    todos: session.todos ?? existing?.todos,
+                    latestUsage: session.latestUsage ?? existing?.latestUsage,
                     metadata: keepMeta ? existing!.metadata : session.metadata,
                     metadataVersion: keepMeta ? existing!.metadataVersion : session.metadataVersion,
                     agentState: keepAgent ? existing!.agentState : session.agentState,
