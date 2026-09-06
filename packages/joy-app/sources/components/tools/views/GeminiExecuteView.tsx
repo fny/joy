@@ -4,51 +4,16 @@ import { StyleSheet } from 'react-native-unistyles';
 import { ToolSectionView } from '../../tools/ToolSectionView';
 import { ToolViewProps } from './_all';
 import { CodeView } from '@/components/CodeView';
+import { getToolModel } from '@/sync/toolModel';
 
 /**
- * Extract execute command info from Gemini's nested input format.
- */
-function extractExecuteInfo(input: any): { command: string; description: string; cwd: string } {
-    let command = '';
-    let description = '';
-    let cwd = '';
-    
-    // Try to get title from toolCall.title
-    // Format: "rm file.txt [current working directory /path] (description)"
-    if (input?.toolCall?.title) {
-        const fullTitle = input.toolCall.title;
-        
-        // Extract command (before [)
-        const bracketIdx = fullTitle.indexOf(' [');
-        if (bracketIdx > 0) {
-            command = fullTitle.substring(0, bracketIdx);
-        } else {
-            command = fullTitle;
-        }
-        
-        // Extract cwd from [current working directory /path]
-        const cwdMatch = fullTitle.match(/\[current working directory ([^\]]+)\]/);
-        if (cwdMatch) {
-            cwd = cwdMatch[1];
-        }
-        
-        // Extract description from (...)
-        const descMatch = fullTitle.match(/\(([^)]+)\)$/);
-        if (descMatch) {
-            description = descMatch[1];
-        }
-    }
-    
-    return { command, description, cwd };
-}
-
-/**
- * Gemini Execute View
- * 
- * Displays shell/terminal commands from Gemini's execute tool.
+ * Gemini Execute View — shell commands from Gemini's `execute` tool. The
+ * command model strips only the recognized trailing
+ * `[current working directory …] (…)` metadata, so `if [ -f x ]; then …`
+ * keeps its brackets.
  */
 export const GeminiExecuteView = React.memo<ToolViewProps>(({ tool }) => {
-    const { command, description, cwd } = extractExecuteInfo(tool.input);
+    const command = getToolModel(tool).command;
 
     if (!command) {
         return null;
@@ -57,18 +22,18 @@ export const GeminiExecuteView = React.memo<ToolViewProps>(({ tool }) => {
     return (
         <>
             <ToolSectionView fullWidth>
-                <CodeView code={command} />
+                <CodeView code={command.command} />
             </ToolSectionView>
-            {(description || cwd) && (
+            {(command.description || command.cwd) ? (
                 <View style={styles.infoContainer}>
-                    {cwd && (
-                        <Text style={styles.cwdText}>📁 {cwd}</Text>
-                    )}
-                    {description && (
-                        <Text style={styles.descriptionText}>{description}</Text>
-                    )}
+                    {command.cwd ? (
+                        <Text style={styles.cwdText}>📁 {command.cwd}</Text>
+                    ) : null}
+                    {command.description ? (
+                        <Text style={styles.descriptionText}>{command.description}</Text>
+                    ) : null}
                 </View>
-            )}
+            ) : null}
         </>
     );
 });
@@ -89,4 +54,3 @@ const styles = StyleSheet.create((theme) => ({
         fontStyle: 'italic',
     },
 }));
-

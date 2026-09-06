@@ -5,6 +5,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { useSetting } from '@/sync/storage';
 import { t } from '@/text';
+import { getDiffStats } from '@/components/diff/calculateDiff';
 
 interface ToolDiffViewProps {
     /** Pre-built unified-diff patch string. Preferred when available. */
@@ -22,19 +23,38 @@ interface ToolDiffViewProps {
 }
 
 /** +N −M counts for the collapse toggle — from the patch when present,
- *  otherwise a cheap line-count delta of the old/new pair. */
+ *  otherwise a real line diff of the old/new pair (a line-count delta called a
+ *  one-line change in five "+5 −0"). Patch lines are counted by hunk state:
+ *  `---` / `+++` are headers only OUTSIDE a hunk, so a removed `--before` or
+ *  an added `++after` inside one still counts. */
 function diffCounts(patch?: string, oldText?: string, newText?: string): { added: number; removed: number } {
     if (patch) {
         let added = 0, removed = 0;
+        let remainingOld = 0, remainingNew = 0;
         for (const line of patch.split('\n')) {
-            if (line.startsWith('+') && !line.startsWith('+++')) added++;
-            else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+            const hunk = line.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
+            if (hunk) {
+                remainingOld = hunk[1] === undefined ? 1 : parseInt(hunk[1], 10);
+                remainingNew = hunk[2] === undefined ? 1 : parseInt(hunk[2], 10);
+                continue;
+            }
+            const inHunk = remainingOld > 0 || remainingNew > 0;
+            if (!inHunk) continue;
+            if (line.startsWith('+')) { added++; remainingNew = Math.max(0, remainingNew - 1); }
+            else if (line.startsWith('-')) { removed++; remainingOld = Math.max(0, remainingOld - 1); }
+            else if (!line.startsWith('\\')) { remainingOld = Math.max(0, remainingOld - 1); remainingNew = Math.max(0, remainingNew - 1); }
+        }
+        if (added === 0 && removed === 0 && !/^@@ /m.test(patch)) {
+            // A bare hunk fragment without @@ headers: fall back to prefix counting.
+            for (const line of patch.split('\n')) {
+                if (line.startsWith('+') && !line.startsWith('+++ ')) added++;
+                else if (line.startsWith('-') && !line.startsWith('--- ')) removed++;
+            }
         }
         return { added, removed };
     }
-    const oldLines = oldText ? oldText.split('\n').length : 0;
-    const newLines = newText ? newText.split('\n').length : 0;
-    return { added: Math.max(0, newLines - oldLines) || newLines, removed: Math.max(0, oldLines - newLines) };
+    const stats = getDiffStats(oldText ?? '', newText ?? '');
+    return { added: stats.additions, removed: stats.deletions };
 }
 
 export const ToolDiffView = React.memo<ToolDiffViewProps>(({

@@ -717,7 +717,26 @@ export const ru: TranslationStructure = {
             other: 'Другое',
             otherDescription: 'Введите свой ответ',
             otherPlaceholder: 'Введите ваш ответ...',
-        }
+        },
+        outcome: {
+            succeeded: 'Завершено',
+            failed: 'Ошибка',
+            cancelled: 'Отменено',
+            denied: 'Отклонено',
+            pending: 'Ожидание',
+            proposed: 'Предложенное изменение — не применено',
+            image: 'Изображение',
+        },
+        detail: {
+            prompt: 'Запрос',
+            answer: 'Ответ',
+            subTools: 'Вложенные инструменты',
+            command: 'Команда',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} с ошибкой`,
+            awaiting: ({ count }: { count: number }) => `${count} ожидают подтверждения`,
+        },
     },
 
     files: {

@@ -55,8 +55,10 @@ const sessionToolCallEndEventSchema = z.object({
     t: z.literal('tool-call-end'),
     call: z.string(),
     // The tool's output (daemon-clamped) and whether it failed. Older daemons
-    // send neither; the card then shows completion only, as before.
-    result: z.string().optional(),
+    // send neither; the card then shows completion only, as before. Any
+    // shape is accepted — a numeric or structured result is a valid result,
+    // and rejecting it dropped the whole envelope.
+    result: z.unknown().optional(),
     isError: z.boolean().optional(),
 });
 
@@ -151,7 +153,11 @@ export type RawToolUseContent = z.infer<typeof rawToolUseContentSchema>;
 const rawToolResultContentSchema = z.object({
     type: z.literal('tool_result'),
     tool_use_id: z.string(),
-    content: z.union([z.array(z.object({ type: z.literal('text'), text: z.string() })), z.string()]),
+    // Any shape a harness reports: a string, an ordered block list (text AND
+    // image blocks), or structured output (Codex `{stdout, exitCode}` objects
+    // arrive here through the hyphenated preprocess). A narrower schema
+    // rejected the WHOLE record and dropped the message.
+    content: z.unknown().optional(),
     is_error: z.boolean().optional(),
     permissions: z.object({
         date: z.number(),
@@ -506,6 +512,13 @@ type NormalizedAgentContent =
             decision?: 'approved' | 'approved_for_session' | 'denied' | 'abort';
         };
     } | {
+        /** User-authored text carried in an array-form user record next to
+         *  tool results — rendered as the user's bubble, not agent text. */
+        type: 'user-text';
+        text: string;
+        uuid: string;
+        parentUUID: string | null;
+    } | {
         type: 'summary',
         summary: string;
     } | {
@@ -700,6 +713,34 @@ function normalizeSessionEnvelope(
     return null;
 }
 
+/**
+ * A tool_result's `content` as the reducer stores it: a string when the
+ * harness sent a string or a text-only block list (EVERY text block joined in
+ * order — the first block alone lost multi-file reads), the ordered block list
+ * itself when it carries non-text blocks (images), or the structured value.
+ * Zero, `false` and the empty string are valid results and survive as-is.
+ */
+export function normalizeToolResultContent(content: unknown): unknown {
+    if (content === undefined || content === null) return '';
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        const texts: string[] = [];
+        let textOnly = true;
+        for (const block of content) {
+            if (block && typeof block === 'object' && (block as { type?: unknown }).type === 'text' && typeof (block as { text?: unknown }).text === 'string') {
+                texts.push((block as { text: string }).text);
+            } else if (typeof block === 'string') {
+                texts.push(block);
+            } else {
+                textOnly = false;
+            }
+        }
+        if (textOnly) return texts.join('\n');
+        return content;
+    }
+    return content;
+}
+
 export function normalizeRawMessage(id: string, localId: string | null, createdAt: number, raw: RawRecord): NormalizedMessage | null {
     // Zod transform handles normalization during validation
     let parsed = rawRecordSchema.safeParse(raw);
@@ -821,6 +862,55 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                     return null;
                 }
 
+                // Array-form user content: text blocks are the user's words
+                // (pasted images / expanded slash commands ship as blocks),
+                // tool_result blocks are results. Both survive.
+                const userTextBlocks: string[] = [];
+                let userToolResultCount = 0;
+                if (Array.isArray(raw.content.data.message?.content)) {
+                    for (const c of raw.content.data.message.content) {
+                        if (c.type === 'text' && typeof c.text === 'string' && c.text.trim().length > 0) {
+                            userTextBlocks.push(c.text);
+                        } else if (c.type === 'tool_result') {
+                            userToolResultCount++;
+                        }
+                    }
+                }
+                const arrayUserText = userTextBlocks.length > 0 ? userTextBlocks.join('\n\n') : null;
+
+                // Array-form sidechain root (Task prompt shipped as blocks).
+                if (raw.content.data.isSidechain && arrayUserText !== null && userToolResultCount === 0) {
+                    return {
+                        id,
+                        localId,
+                        createdAt,
+                        role: 'agent',
+                        isSidechain: true,
+                        content: [{
+                            type: 'sidechain',
+                            uuid: raw.content.data.uuid,
+                            prompt: arrayUserText
+                        }]
+                    };
+                }
+
+                // Text-only array form is a plain user message.
+                if (!raw.content.data.isSidechain && arrayUserText !== null && userToolResultCount === 0) {
+                    return {
+                        id,
+                        localId,
+                        createdAt,
+                        role: 'user',
+                        isSidechain: false,
+                        content: {
+                            type: 'text',
+                            text: arrayUserText,
+                            ...(raw.content.data.isCompactSummary ? { isCompactSummary: true } : {}),
+                        },
+                        claudeUuid: raw.content.data.uuid,
+                    };
+                }
+
                 // Handle sidechain user messages
                 if (raw.content.data.isSidechain && raw.content.data.message && typeof raw.content.data.message.content === 'string') {
                     // Return as a special agent message with sidechain content
@@ -870,7 +960,7 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                             content.push({
                                 ...c,  // WOLOG: Preserve all fields including unknown ones
                                 type: 'tool-result',
-                                content: raw.content.data.toolUseResult ? raw.content.data.toolUseResult : (typeof c.content === 'string' ? c.content : c.content?.[0]?.text ?? ''),
+                                content: raw.content.data.toolUseResult ? raw.content.data.toolUseResult : normalizeToolResultContent(c.content),
                                 is_error: c.is_error || false,
                                 uuid: raw.content.data.uuid,
                                 parentUUID: raw.content.data.parentUuid ?? null,
@@ -883,6 +973,14 @@ export function normalizeRawMessage(id: string, localId: string | null, createdA
                                 } : undefined
                             } as NormalizedAgentContent);
                         }
+                    }
+                    if (arrayUserText !== null) {
+                        content.push({
+                            type: 'user-text',
+                            text: arrayUserText,
+                            uuid: raw.content.data.uuid,
+                            parentUUID: raw.content.data.parentUuid ?? null
+                        });
                     }
                 }
                 return {

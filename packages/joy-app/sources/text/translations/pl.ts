@@ -717,7 +717,26 @@ export const pl: TranslationStructure = {
             other: 'Inne',
             otherDescription: 'Wpisz własną odpowiedź',
             otherPlaceholder: 'Wpisz swoją odpowiedź...',
-        }
+        },
+        outcome: {
+            succeeded: 'Zakończono',
+            failed: 'Niepowodzenie',
+            cancelled: 'Anulowano',
+            denied: 'Odrzucono',
+            pending: 'Oczekiwanie',
+            proposed: 'Proponowana zmiana — nie zastosowana',
+            image: 'Obraz',
+        },
+        detail: {
+            prompt: 'Polecenie',
+            answer: 'Odpowiedź',
+            subTools: 'Narzędzia podrzędne',
+            command: 'Komenda',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} nieudane`,
+            awaiting: ({ count }: { count: number }) => `${count} czeka na zatwierdzenie`,
+        },
     },
 
     files: {

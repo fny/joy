@@ -5,28 +5,46 @@ import { ToolCall } from '@/sync/typesMessage';
 import { ToolSectionView } from '../ToolSectionView';
 import { ToolDiffView } from '@/components/tools/ToolDiffView';
 import { Metadata } from '@/sync/storageTypes';
-import { parseUnifiedDiff } from '@/utils/codexUnifiedDiff';
 import { getPatchDiffStats } from '@/components/diff/calculateDiff';
+import { getToolModel } from '@/sync/toolModel';
 
 interface CodexDiffViewProps {
     tool: ToolCall;
     metadata: Metadata | null;
 }
 
-export const CodexDiffView = React.memo<CodexDiffViewProps>(({ tool, metadata }) => {
-    const { input } = tool;
-    const patch = typeof input?.unified_diff === 'string' ? input.unified_diff : undefined;
-    const fileName = patch ? parseUnifiedDiff(patch).fileName : undefined;
-    const stats = React.useMemo(() => (patch ? getPatchDiffStats(patch) : null), [patch]);
+/**
+ * Codex "current file changes". The model splits a multi-file unified diff
+ * into one patch per file, so each file gets its own header and counts instead
+ * of every hunk being labelled with the last filename.
+ */
+export const CodexDiffView = React.memo<CodexDiffViewProps>(({ tool }) => {
+    const model = getToolModel(tool);
+    const files = React.useMemo(
+        () => (model.fileChanges ?? []).filter((change) => typeof change.patch === 'string' && change.patch.length > 0),
+        [model.fileChanges],
+    );
 
-    if (!patch) return null;
+    if (files.length === 0) return null;
 
     return (
         <>
-            {fileName ? (
+            {files.map((file, index) => (
+                <CodexDiffFileView key={`${file.path}-${index}`} path={file.path} patch={file.patch!} />
+            ))}
+        </>
+    );
+});
+
+const CodexDiffFileView = React.memo<{ path: string; patch: string }>(({ path, patch }) => {
+    const stats = React.useMemo(() => getPatchDiffStats(patch), [patch]);
+    const fileName = path ? path.split('/').pop() || path : undefined;
+    return (
+        <>
+            {path ? (
                 <View style={styles.fileHeader}>
-                    <Text style={styles.fileName} numberOfLines={1}>{fileName}</Text>
-                    {stats && (stats.additions > 0 || stats.deletions > 0) ? (
+                    <Text style={styles.fileName} numberOfLines={1}>{path}</Text>
+                    {stats.additions > 0 || stats.deletions > 0 ? (
                         <DiffStats additions={stats.additions} deletions={stats.deletions} />
                     ) : null}
                 </View>

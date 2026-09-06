@@ -702,7 +702,26 @@ export const zhHans: TranslationStructure = {
             other: '其他',
             otherDescription: '输入您自己的答案',
             otherPlaceholder: '输入您的答案...',
-        }
+        },
+        outcome: {
+            succeeded: '已完成',
+            failed: '失败',
+            cancelled: '已取消',
+            denied: '已拒绝',
+            pending: '等待中',
+            proposed: '建议的更改 — 未应用',
+            image: '图片',
+        },
+        detail: {
+            prompt: '提示',
+            answer: '回答',
+            subTools: '子工具',
+            command: '命令',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} 个失败`,
+            awaiting: ({ count }: { count: number }) => `${count} 个等待批准`,
+        },
     },
 
     files: {

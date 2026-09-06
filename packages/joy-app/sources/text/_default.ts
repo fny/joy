@@ -748,7 +748,26 @@ export const en = {
             modifyingFiles: ({ count }: { count: number }) => `Modifying ${count} files`,
             modifyingMultipleFiles: ({ file, count }: { file: string; count: number }) => `${file} and ${count} more`,
             showingDiff: 'Showing changes',
-        }
+        },
+        outcome: {
+            succeeded: 'Completed',
+            failed: 'Failed',
+            cancelled: 'Cancelled',
+            denied: 'Denied',
+            pending: 'Waiting',
+            proposed: 'Proposed change — not applied',
+            image: 'Image',
+        },
+        detail: {
+            prompt: 'Prompt',
+            answer: 'Answer',
+            subTools: 'Sub-tools',
+            command: 'Command',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} failed`,
+            awaiting: ({ count }: { count: number }) => `${count} awaiting approval`,
+        },
     },
 
     files: {

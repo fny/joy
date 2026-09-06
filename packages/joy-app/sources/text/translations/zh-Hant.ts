@@ -701,7 +701,26 @@ export const zhHant: TranslationStructure = {
             modifyingFiles: ({ count }: { count: number }) => `正在修改 ${count} 個檔案`,
             modifyingMultipleFiles: ({ file, count }: { file: string; count: number }) => `${file} 和其他 ${count} 個`,
             showingDiff: '顯示更改',
-        }
+        },
+        outcome: {
+            succeeded: '已完成',
+            failed: '失敗',
+            cancelled: '已取消',
+            denied: '已拒絕',
+            pending: '等待中',
+            proposed: '建議的變更 — 未套用',
+            image: '圖片',
+        },
+        detail: {
+            prompt: '提示',
+            answer: '回答',
+            subTools: '子工具',
+            command: '指令',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} 個失敗`,
+            awaiting: ({ count }: { count: number }) => `${count} 個等待核准`,
+        },
     },
 
     files: {

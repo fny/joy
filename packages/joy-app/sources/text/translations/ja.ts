@@ -702,7 +702,26 @@ export const ja: TranslationStructure = {
             modifyingFiles: ({ count }: { count: number }) => `${count}ファイルを変更中`,
             modifyingMultipleFiles: ({ file, count }: { file: string; count: number }) => `${file} 他${count}件`,
             showingDiff: '変更を表示中',
-        }
+        },
+        outcome: {
+            succeeded: '完了',
+            failed: '失敗',
+            cancelled: 'キャンセル',
+            denied: '拒否',
+            pending: '待機中',
+            proposed: '提案された変更 — 未適用',
+            image: '画像',
+        },
+        detail: {
+            prompt: 'プロンプト',
+            answer: '回答',
+            subTools: 'サブツール',
+            command: 'コマンド',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} 件失敗`,
+            awaiting: ({ count }: { count: number }) => `${count} 件が承認待ち`,
+        },
     },
 
     files: {
