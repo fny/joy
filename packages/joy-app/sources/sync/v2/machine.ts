@@ -16,11 +16,16 @@ import { t } from '@/text';
  *  applied here once; `.code` keeps the raw reason for logs. */
 const DAEMON_OUTDATED_CODES = new Set(['unbound_response', 'bad_response_head']);
 /** Relay-level refusals with a user-facing sentence (#84): `daemon_busy` is
- *  the relay's per-daemon inbox cap (503 + retry-after: 1) — the machine is
- *  reachable, just saturated; `daemon_offline` is the machine itself. */
+ *  the relay's per-daemon inbox cap and `relay_busy` its relay-wide budget
+ *  (both 503 + retry-after, already retried with backoff in tunnel.ts — this
+ *  is what the user reads when the bounded retries ran out); `daemon_offline`
+ *  is the machine itself; `connection_slow` is a response the relay cut
+ *  because this client could not drain it within its deadline. */
 const RELAY_CODE_MESSAGES: Record<string, () => string> = {
     daemon_busy: () => t('errors.machineBusy'),
+    relay_busy: () => t('errors.relayBusy'),
     daemon_offline: () => t('newSession.machineOffline'),
+    connection_slow: () => t('errors.connectionTooSlow'),
 };
 async function userFacing<T>(p: Promise<T>): Promise<T> {
     try { return await p; }

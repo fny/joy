@@ -309,6 +309,8 @@ export const ja: TranslationStructure = {
         sessionFull: 'このセッションは上限に達しました — 新しいセッションで続けてください',
         pairingCodeExpired: 'コードの有効期限が切れました — もう一度スキャンしてください',
         machineBusy: 'マシンがビジー状態です — しばらくしてからもう一度お試しください',
+        relayBusy: 'リレーがビジー状態です — しばらくしてからもう一度お試しください',
+        connectionTooSlow: '接続が遅すぎます — より良いネットワークでもう一度お試しください',
     },
 
     newSession: {

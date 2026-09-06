@@ -353,6 +353,8 @@ export const en = {
         sessionFull: 'This session is full — continue in a new session',
         pairingCodeExpired: 'The code expired — scan again',
         machineBusy: 'The machine is busy — try again in a moment',
+        relayBusy: 'The relay is busy — try again in a moment',
+        connectionTooSlow: 'The connection is too slow — try again on a better network',
     },
 
     newSession: {

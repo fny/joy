@@ -308,6 +308,8 @@ export const ca: TranslationStructure = {
         sessionFull: 'Aquesta sessió està plena — continua en una sessió nova',
         pairingCodeExpired: 'El codi ha caducat — torna a escanejar-lo',
         machineBusy: 'La màquina està ocupada — torna-ho a provar en un moment',
+        relayBusy: 'El relay està ocupat — torna-ho a provar en un moment',
+        connectionTooSlow: 'La connexió és massa lenta — torna-ho a provar amb una xarxa millor',
     },
 
     newSession: {

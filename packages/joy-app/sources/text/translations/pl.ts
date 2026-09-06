@@ -325,6 +325,8 @@ export const pl: TranslationStructure = {
         sessionFull: 'Ta sesja jest pełna — kontynuuj w nowej sesji',
         pairingCodeExpired: 'Kod wygasł — zeskanuj go ponownie',
         machineBusy: 'Maszyna jest zajęta — spróbuj ponownie za chwilę',
+        relayBusy: 'Przekaźnik jest zajęty — spróbuj ponownie za chwilę',
+        connectionTooSlow: 'Połączenie jest zbyt wolne — spróbuj ponownie w lepszej sieci',
     },
 
     newSession: {
