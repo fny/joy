@@ -921,7 +921,9 @@ async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: string 
  *  daemon, or a typed failure (exit code). */
 async function sendTo(rec: any, text: string, opts: { exclusive?: boolean; from?: string; replyTo?: string | null }): Promise<{ ok: true; queuedId: string | null; seq: number } | { ok: false; code: number }> {
   const seq = await currentSeq(rec.id);
-  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: opts.exclusive === true, from: opts.from, replyTo: opts.replyTo ?? undefined }).catch(() => null);
+  // replyTo travels as-is: `null` is the explicit "no reply expected" the
+  // daemon honours (#112); `?? undefined` used to erase it from the body.
+  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: opts.exclusive === true, from: opts.from, replyTo: opts.replyTo }).catch(() => null);
   if (!r) { console.error(`${bad} daemon not running`); return { ok: false, code: 1 }; }
   const body = await r.json().catch(() => ({})) as any;
   if (body.error === "busy") { console.error(`${bad} session ${rec.id} is busy (--no-queue)`); return { ok: false, code: 3 }; }
