@@ -9,7 +9,7 @@ import * as http from "node:http";
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
 delete process.env.JOY_SESSION_ID;
-const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle } = await import("./cli");
+const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn } = await import("./cli");
 const { launcherFromEnv } = await import("./daemonLauncher");
 const { joyStateDir } = await import("./paths");
 
@@ -295,6 +295,58 @@ describe("a stalled daemon cannot defeat the turn timeout (#501)", () => {
     const t0 = Date.now();
     expect(await cmdWaitIdle([SID, "--turn", "q1", "--timeout", "0.3"])).toBe(4);
     expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
+  // #501 residual (Astra): the deadline used to end the polling and then a
+  // FRESH 3 s catch-up ran — a 20 ms wait returned after ~3030 ms.
+  test("a 20 ms wait with the event stream AND /check stalled returns timeout within ~100 ms — no catch-up after the deadline", async () => {
+    route(`GET /sessions/${SID}/events`, stall);
+    route(`GET /sessions/${SID}/check`, stall);
+    const t0 = Date.now();
+    const out = await waitTurn(SID, { afterSeq: 0, timeoutMs: 20 });
+    const elapsed = Date.now() - t0;
+    expect(out.state).toBe("timeout");
+    expect(elapsed).toBeLessThan(150);
+  });
+
+  test("the pre-wait probes run under the same clock: GET /sessions stalls → ask exits 4 at its --timeout", async () => {
+    route("GET /sessions", stall);
+    const t0 = Date.now();
+    expect(await cmdAsk([SID, "hello", "--timeout", "0.1"])).toBe(4);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(log.err.join("\n")).toMatch(/timed out resolving session/);
+  });
+
+  test("POST /send stalls → ask exits 4 at its --timeout and says the send may or may not have landed", async () => {
+    sessionsRoute(); eventsRoute();
+    route("POST /send", stall);
+    const t0 = Date.now();
+    expect(await cmdAsk([SID, "hello", "--timeout", "0.1"])).toBe(4);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(log.err.join("\n")).toMatch(/timed out waiting for the daemon to accept the message/);
+  });
+
+  test("the seq probe (events?last=0) stalls → ask exits 4 at its --timeout", async () => {
+    sessionsRoute();
+    route(`GET /sessions/${SID}/events`, stall);
+    const t0 = Date.now();
+    expect(await cmdAsk([SID, "hello", "--timeout", "0.1"])).toBe(4);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  test("the finish grace and catch-up are clipped to the deadline: a turn that ends 20 ms before it still returns on time", async () => {
+    sessionsRoute();
+    const ev = eventsRoute([agentText(1, "hi")]);
+    let n = 0;
+    route(`GET /sessions/${SID}/check`, (_q, res) => { n++; if (n === 1) json(res, 200, { state: "busy" }); else json(res, 200, { state: "idle" }); });
+    // the follow stream dies right away and every reconnect stalls, so the
+    // catch-up at the end would want its 3 s — it gets what is left instead
+    setTimeout(() => { for (const r of hanging) r.destroy(); hanging.clear(); route(`GET /sessions/${SID}/events`, stall); }, 50);
+    void ev;
+    const t0 = Date.now();
+    const code = await cmdWaitIdle([SID, "--timeout", "0.6"]);
+    expect(Date.now() - t0).toBeLessThan(1200);
+    expect([0, 1, 4]).toContain(code); // what matters here is WHEN it returned
   });
 });
 
