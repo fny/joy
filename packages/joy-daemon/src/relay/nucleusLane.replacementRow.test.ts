@@ -86,13 +86,16 @@ let handle: NucleusLaneHandle | null = null;
 let srv: http.Server | null = null;
 afterEach(async () => { await handle?.stop(); handle = null; srv?.close(); srv = null; });
 const jobs = () => ledgerFor().listJobs(ARCHIVE_JOB_KIND);
+/** The production schedule is 2s…60s; the retry loop is what is under test,
+ *  not the wall clock, so the lane gets a short one (#623). */
+const FAST_RETRY = { min: 50, max: 200 };
 
 it("a failed archive of the replacement row is persisted and retried with backoff until the relay takes it", async () => {
   let patch = 503;
   const sc = scenario({ patchStatus: () => patch });
   srv = sc.relay.server;
   const url = await sc.relay.listen();
-  handle = startNucleusLane({ registry: sc.registry, relayUrl: url, token: "tok", machineId: "m", log: (l) => sc.logs.push(l) });
+  handle = startNucleusLane({ registry: sc.registry, relayUrl: url, token: "tok", machineId: "m", log: (l) => sc.logs.push(l), archiveRetryMs: FAST_RETRY });
   await until(() => !!handle?.currentLease());
   await sleep(100);
   await sc.announce()(sc.session);
@@ -102,11 +105,15 @@ it("a failed archive of the replacement row is persisted and retried with backof
   expect(jobs().map((j) => j.id)).toEqual(["archive:ghost"]);
   expect(sc.saves()).toBe(0);
   expect(sc.records()).toEqual([]);
-  // Connectivity recovers: the lane's own retry lands the archive (2s backoff).
+  // Connectivity recovers (flipped before the first backoff tick can fire —
+  // nothing has yielded to the timer queue since the announce returned): the
+  // lane's own retry lands the archive. The intent is settled only once the
+  // relay's answer is back and the job has left the ledger — wait for THAT,
+  // not for the fake relay's state flip, which happens before it answers.
   patch = 200;
-  await until(() => sc.rows[0]?.state === "archived", 6_000);
+  await until(() => jobs().length === 0);
+  expect(sc.rows[0]?.state).toBe("archived");
   expect(sc.relay.count("PATCH", "/daemon/sessions/ghost")).toBe(2);
-  expect(jobs()).toEqual([]);
   expect(sc.logs.some((l) => l.includes("archived replacement row ghost"))).toBe(true);
   expect(sc.records()).toEqual([]);
 }, 15_000);
@@ -138,14 +145,14 @@ it("a row the relay no longer has settles the intent instead of retrying forever
   const sc = scenario({ patchStatus: () => 404 });
   srv = sc.relay.server;
   const url = await sc.relay.listen();
-  handle = startNucleusLane({ registry: sc.registry, relayUrl: url, token: "tok", machineId: "m", log: (l) => sc.logs.push(l) });
+  handle = startNucleusLane({ registry: sc.registry, relayUrl: url, token: "tok", machineId: "m", log: (l) => sc.logs.push(l), archiveRetryMs: FAST_RETRY });
   await until(() => !!handle?.currentLease());
   await sleep(100);
   await sc.announce()(sc.session);
   expect(sc.relay.count("PATCH", "/daemon/sessions/ghost")).toBe(1);
   expect(jobs()).toEqual([]);
   expect(sc.logs.some((l) => l.includes("archive ghost: row already gone or settled"))).toBe(true);
-  await sleep(2_500);
+  await sleep(500); // ten of the lane's backoff periods
   expect(sc.relay.count("PATCH", "/daemon/sessions/ghost")).toBe(1); // no retry scheduled
 }, 15_000);
 

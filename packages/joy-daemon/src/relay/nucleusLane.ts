@@ -63,6 +63,10 @@ export interface NucleusLaneOpts {
    *  (RelayClient.setSpawnSpecSealed is fed from this handle, never assumed). */
   machineKey?: Uint8Array | null;
   log?: (line: string) => void;
+  /** Bounds of the backoff between retries of an owed replacement-row
+   *  archive (#120): 2s…60s by default. A test seam — tests inject a short
+   *  schedule instead of waiting on the production timers (#623). */
+  archiveRetryMs?: { min: number; max: number };
 }
 
 export interface NucleusLaneHandle {
@@ -1816,8 +1820,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // across lane restarts too: every boot pass and refresh runs the owed
   // archives before it sweeps orphans.
   const ARCHIVE_JOB_KIND = "archive_relay_row";
-  const ARCHIVE_RETRY_MIN_MS = 2_000;
-  const ARCHIVE_RETRY_MAX_MS = 60_000;
+  const ARCHIVE_RETRY_MIN_MS = opts.archiveRetryMs?.min ?? 2_000;
+  const ARCHIVE_RETRY_MAX_MS = opts.archiveRetryMs?.max ?? 60_000;
   interface ArchiveRowJob { v2SessionId: string; localSessionId: string; card: Record<string, unknown>; keyB64: string | null }
   const pendingArchives = new Map<string, ArchiveRowJob>();
   const archiveAttempts = new Map<string, number>();
