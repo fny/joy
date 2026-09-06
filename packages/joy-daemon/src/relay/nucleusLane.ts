@@ -395,7 +395,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // see docs/API.md). Card PATCHes are coalesced: a burst of dropped records
   // is one card PATCH, not one per record — the timer coalesces the NETWORK
   // publication only, never the evidence.
-  type BudgetState = { localId: string; since: number; dropped: number };
+  // `cardDropped` is the count the relay's card is KNOWN to carry (set after
+  // a PATCH the relay accepted): the boot repair below re-publishes only
+  // cards whose count is behind, not every archived card on every boot.
+  type BudgetState = { localId: string; since: number; dropped: number; cardDropped: number };
   const budgetDropped = new Map<string, BudgetState>();
   const budgetPublish = new Map<string, ReturnType<typeof setTimeout>>();
   const BUDGET_PUBLISH_MS = 1_000;
@@ -417,16 +420,46 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  inside a settling transaction that must roll the settlement back. */
   function readPersistedBudget(v2: string): BudgetState | null {
     const job: JobRow | null = ledger.getJob(budgetJobId(v2));
-    const p = job?.payload as { localId?: unknown; since?: unknown; dropped?: unknown } | null | undefined;
+    const p = job?.payload as { localId?: unknown; since?: unknown; dropped?: unknown; cardDropped?: unknown } | null | undefined;
     if (!p || typeof p.localId !== "string" || typeof p.since !== "number" || typeof p.dropped !== "number" || p.dropped <= 0) return null;
-    return { localId: p.localId, since: p.since, dropped: p.dropped };
+    return { localId: p.localId, since: p.since, dropped: p.dropped, cardDropped: typeof p.cardDropped === "number" ? p.cardDropped : 0 };
+  }
+  /** A budget the ledger could not READ is not an absent budget. The count
+   *  may well be there (a full session is exactly the one with nothing else
+   *  left to say), so a card sealed without it would erase the only warning
+   *  — every card path treats this as an unknown outcome and defers the
+   *  publication until the read succeeds (Astra on a6443ea8). Noted once per
+   *  session; the sweep probes the read and republishes on recovery. */
+  class BudgetUnreadableError extends Error {
+    constructor(readonly v2: string, cause: unknown) { super(`event budget record for ${v2.slice(0, 8)} unreadable: ${errText(cause)}`); }
+  }
+  const budgetUnreadable = new Map<string, string>(); // v2 → localId, while unreadable
+  function noteBudgetUnreadable(localId: string, v2: string, e: unknown): void {
+    if (budgetUnreadable.has(v2)) return;
+    budgetUnreadable.set(v2, localId);
+    log(`${localId}: event budget record unreadable (${errText(e)}) — card publications for ${v2.slice(0, 8)} deferred until the ledger reads again`);
+  }
+  /** Sweep-tick probe: once a deferred session's record reads again, put its
+   *  live card back on the wire (an owed archive's own retry loop carries it). */
+  function retryBudgetReads(): void {
+    for (const [v2, localId] of [...budgetUnreadable]) {
+      try { readPersistedBudget(v2); } catch { continue; }
+      budgetUnreadable.delete(v2);
+      log(`${localId}: event budget record readable again — republishing the card`);
+      const current = registry.get(localId)?.cardMetadata?.();
+      if (current) void publishV2Card(localId, current);
+    }
   }
   /** The loss on record for a session — memory first, the ledger behind it —
    *  and the permanence it implies: a session with a persisted count keeps
    *  dropping instead of re-asking the relay. Null when nothing was lost. */
   function budgetStateFor(localId: string, v2: string): BudgetState | null {
     let st = budgetDropped.get(v2) ?? null;
-    if (!st) { try { st = readPersistedBudget(v2); } catch { return null; } }
+    if (!st) {
+      try { st = readPersistedBudget(v2); }
+      catch (e) { noteBudgetUnreadable(localId, v2, e); throw new BudgetUnreadableError(v2, e); }
+    }
+    if (budgetUnreadable.delete(v2)) log(`${localId}: event budget record readable again`);
     if (!st || st.dropped <= 0) return null;
     st.localId = localId;
     budgetDropped.set(v2, st);
@@ -453,7 +486,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  but no runtime, an owed archive job — each carries the loss on record,
    *  so the warning never depends on a surviving adapter or on the holder
    *  having been told. A card already carrying an equal-or-newer count is
-   *  left alone. */
+   *  left alone. Throws BudgetUnreadableError when the record cannot be
+   *  read — the caller defers the publication rather than sealing a card
+   *  that may drop the warning. */
   function cardWithEventBudget(localId: string, v2: string, card: Record<string, unknown>): Record<string, unknown> {
     const st = budgetStateFor(localId, v2);
     if (!st) return card;
@@ -461,15 +496,44 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (cur && typeof cur.dropped === "number" && cur.dropped >= st.dropped) return card;
     return { ...card, joy__eventBudget: { since: st.since, dropped: st.dropped } };
   }
-  function sealSessionCard(localId: string, v2: string, card: Record<string, unknown>, key: Uint8Array | null): string {
-    return sealCard(cardWithEventBudget(localId, v2, card), key);
+  /** The sealed card and the count it carries (`carried`, null when the
+   *  session has no loss on record) — the caller hands `carried` to
+   *  `markBudgetPublished` once the relay has accepted the PATCH. */
+  function sealSessionCard(localId: string, v2: string, card: Record<string, unknown>, key: Uint8Array | null): { encryptedMetadata: string; carried: number | null } {
+    const merged = cardWithEventBudget(localId, v2, card);
+    const cur = merged.joy__eventBudget as { dropped?: unknown } | null | undefined;
+    const carried = budgetDropped.has(v2) && cur && typeof cur.dropped === "number" ? cur.dropped : null;
+    return { encryptedMetadata: sealCard(merged, key), carried };
+  }
+  /** The relay accepted a card carrying `carried` dropped outputs: remember
+   *  that on the job row, so the boot repair leaves this card alone until
+   *  the count moves again. Best effort — a lost marker costs one redundant
+   *  repair PATCH, never the warning. */
+  function markBudgetPublished(v2: string, carried: number | null): void {
+    if (carried == null) return;
+    const st = budgetDropped.get(v2);
+    if (st) { if (st.cardDropped >= carried) return; st.cardDropped = carried; }
+    try {
+      const job = ledger.getJob(budgetJobId(v2));
+      const p = job?.payload as Record<string, unknown> | null | undefined;
+      if (!job || !p || (typeof p.cardDropped === "number" && p.cardDropped >= carried)) return;
+      ledger.putJob({ id: job.id, sessionId: job.sessionId, kind: job.kind, payload: { ...p, cardDropped: carried } });
+    } catch { /* see above */ }
+  }
+  /** The card a relay row carries, opened with the session key (plaintext
+   *  for an unkeyed session); null when absent, unopenable or not a card. */
+  function openCard(ciphertext: string | null | undefined, key: Uint8Array | null): Record<string, unknown> | null {
+    if (!ciphertext) return null;
+    const p = openEnvelope(ciphertext, key);
+    return p && p.t === "card" && p.metadata && typeof p.metadata === "object" ? (p.metadata as Record<string, unknown>) : null;
   }
   /** Card publisher (re)wired for a bound session: put the loss on record
    *  back on the holder's card too, so its own snapshot carries it (a later
    *  merge of any other key then republishes it). Idempotent — the holder
    *  skips a redundant merge against a card the relay already has. */
   function reassertBudget(localId: string, v2: string): void {
-    if (!budgetStateFor(localId, v2)) return;
+    try { if (!budgetStateFor(localId, v2)) return; }
+    catch { return; } // unreadable: noted once; the sweep republishes the card once the record reads again
     publishBudget(v2);
   }
   /** The verdict for a record the budget refuses: permanent, with the count
@@ -482,8 +546,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       ok: false, fate: "permanent", error: "session_event_budget_exhausted",
       settle: () => {
         const prev = readPersistedBudget(v2);
-        const st: BudgetState = { localId, since: prev?.since ?? budgetDropped.get(v2)?.since ?? Date.now(), dropped: (prev?.dropped ?? 0) + 1 };
-        ledger.putJob({ id: budgetJobId(v2), sessionId: localId, kind: EVENT_BUDGET_JOB_KIND, payload: { v2SessionId: v2, localId, since: st.since, dropped: st.dropped } });
+        const st: BudgetState = {
+          localId, since: prev?.since ?? budgetDropped.get(v2)?.since ?? Date.now(), dropped: (prev?.dropped ?? 0) + 1,
+          cardDropped: prev?.cardDropped ?? budgetDropped.get(v2)?.cardDropped ?? 0,
+        };
+        ledger.putJob({ id: budgetJobId(v2), sessionId: localId, kind: EVENT_BUDGET_JOB_KIND, payload: { v2SessionId: v2, localId, since: st.since, dropped: st.dropped, cardDropped: st.cardDropped } });
         budgetDropped.set(v2, st);
         schedulePublishBudget(v2);
       },
@@ -885,7 +952,69 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
 
     await reconcileOrphans(r.sessions ?? []);
+    await repairArchivedBudgetCards(r.sessions ?? []);
     await reconcileOrphanedTurns(r.sessions ?? []);
+  }
+
+  // A loss on record whose card never got it (#130 residual, Astra on
+  // a6443ea8): the exact aftermath of the original defect — a persisted
+  // count, a row ALREADY archived with a clean card, no runtime — was never
+  // repaired on upgrade. The holder's publisher only exists for a live
+  // handle and the orphan sweep only touches live rows, so nothing ever
+  // re-published that card. This pass runs with every boot pass and refresh:
+  // for every persisted count whose row is settled (not active/starting),
+  // unowned, and whose card is behind the count (the `cardDropped` marker on
+  // the job row, or the card itself when it can be opened), re-publish the
+  // row's own card — other metadata preserved, the count merged, the
+  // lifecycle state untouched (COALESCE server-side). Each card is repaired
+  // once: the marker written after the accepted PATCH keeps the next boot
+  // from patching it again.
+  let repairUnreadableNoted = false;
+  async function repairArchivedBudgetCards(
+    rows: Array<{ sessionId: string; daemonId: string; state: string; localSessionId?: string | null; encryptedMetadata?: string | null }>,
+  ): Promise<void> {
+    const l = lease;
+    if (!l) return;
+    let jobs: JobRow[];
+    try { jobs = ledger.listJobs(EVENT_BUDGET_JOB_KIND); repairUnreadableNoted = false; }
+    catch (e) {
+      if (!repairUnreadableNoted) { repairUnreadableNoted = true; log(`repair: event budget records unreadable (${errText(e)}) — archived-card repair deferred to the next refresh`); }
+      return;
+    }
+    const byV2 = new Map(rows.filter((s) => s.daemonId === machineId && s.localSessionId).map((s) => [s.sessionId, s] as const));
+    for (const j of jobs) {
+      if (stopped) return;
+      const p = j.payload as { v2SessionId?: unknown; localId?: unknown; dropped?: unknown; cardDropped?: unknown } | null;
+      if (!p || typeof p.v2SessionId !== "string" || typeof p.localId !== "string" || typeof p.dropped !== "number" || p.dropped <= 0) continue;
+      if (typeof p.cardDropped === "number" && p.cardDropped >= p.dropped) continue; // the card already says it
+      const row = byV2.get(p.v2SessionId);
+      if (!row || row.state === "active" || row.state === "starting") continue; // live rows: the holder's publisher / the orphan sweep carry it
+      if (pendingArchives.has(row.sessionId)) continue; // the owed archive carries it
+      const localId = row.localSessionId!;
+      const known = registry.get(localId);
+      if (known && !isKilledHandle(known)) continue; // a live handle's own publisher tells the truth
+      const key = sessionKeys.get(row.sessionId) ?? null;
+      const existing = openCard(row.encryptedMetadata, key);
+      const rec = registry.listRecords().find((x) => x.id === localId);
+      const base: Record<string, unknown> = existing ?? {
+        path: rec?.launchCwd ?? "", host: hostname(), machineId,
+        joy__state: "archived", joy__sessionId: localId,
+        v2: { sessionId: row.sessionId, relay: relayUrl, localSessionId: localId },
+      };
+      let sealed: { encryptedMetadata: string; carried: number | null };
+      try { sealed = sealSessionCard(localId, row.sessionId, base, key); }
+      catch (e) { if (e instanceof BudgetUnreadableError) continue; throw e; } // noted once; the next refresh retries
+      if (sealed.carried == null) continue;
+      const cur = existing?.joy__eventBudget as { dropped?: unknown } | null | undefined;
+      if (cur && typeof cur.dropped === "number" && cur.dropped >= sealed.carried) { markBudgetPublished(row.sessionId, sealed.carried); continue; } // carried already, marker only
+      try {
+        await withTimeout(api("PATCH", `/daemon/sessions/${row.sessionId}`, { encryptedMetadata: sealed.encryptedMetadata }, l), 15_000);
+        markBudgetPublished(row.sessionId, sealed.carried);
+        log(`repair: card ${row.sessionId.slice(0, 8)} (local ${localId}, ${row.state}) now carries the ${sealed.carried} dropped output(s) on record`);
+      } catch (e) {
+        log(`repair: card ${row.sessionId.slice(0, 8)} failed: ${errText(e)} — the next refresh retries`);
+      }
+    }
   }
 
   // An ORPHANED TURN wedges its session's queue on the relay, permanently.
@@ -998,8 +1127,20 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         joy__sessionId: s.localSessionId,
         v2: { sessionId: s.sessionId, relay: relayUrl, localSessionId: s.localSessionId },
       };
+      let sealed: { encryptedMetadata: string; carried: number | null };
+      try { sealed = sealSessionCard(s.localSessionId, s.sessionId, card, key); }
+      catch (e) {
+        if (!(e instanceof BudgetUnreadableError)) throw e;
+        // The loss on record cannot be read: a clean archive here would
+        // erase the only warning. Park the archive as an owed job instead —
+        // it retries with backoff until the record reads again.
+        log(`reconcile: archive ${s.sessionId.slice(0, 8)} deferred — ${e.message}`);
+        deferArchive({ v2SessionId: s.sessionId, localSessionId: s.localSessionId, card, keyB64: key ? Buffer.from(key).toString("base64") : null });
+        continue;
+      }
       try {
-        await api("PATCH", `/daemon/sessions/${s.sessionId}`, { encryptedMetadata: sealSessionCard(s.localSessionId, s.sessionId, card, key), state: "archived" }, l);
+        await api("PATCH", `/daemon/sessions/${s.sessionId}`, { encryptedMetadata: sealed.encryptedMetadata, state: "archived" }, l);
+        markBudgetPublished(s.sessionId, sealed.carried);
         log(`reconcile: archived orphan ${s.sessionId.slice(0, 8)} (local ${s.localSessionId} has no runtime)`);
       } catch (e) {
         log(`reconcile: archive ${s.sessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
@@ -1042,10 +1183,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const l = lease;
       if (!l) throw new Error("lane down"); // rebind republishes
       try {
+        // An unreadable budget record throws here: the holder keeps the card
+        // dirty and the sweep republishes it once the record reads again.
+        const sealed = sealSessionCard(localId, v2SessionId, metadata, key);
         await api("PATCH", `/daemon/sessions/${v2SessionId}`, {
-          encryptedMetadata: sealSessionCard(localId, v2SessionId, metadata, key),
+          encryptedMetadata: sealed.encryptedMetadata,
           state: cardStateFor(metadata.joy__state),
         }, l);
+        markBudgetPublished(v2SessionId, sealed.carried);
       } catch (e) {
         log(`card publish ${v2SessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
         if (isRowGone(e)) relayRowGone(localId, v2SessionId, "card PATCH 404");
@@ -1845,13 +1990,18 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (!l) return false;
     const key = job.keyB64 ? new Uint8Array(Buffer.from(job.keyB64, "base64")) : null;
     try {
-      await withTimeout(api("PATCH", `/daemon/sessions/${job.v2SessionId}`, { encryptedMetadata: sealSessionCard(job.localSessionId, job.v2SessionId, job.card, key), state: "archived" }, l), 15_000);
+      // Seals INSIDE the try: an unreadable budget record is a failed
+      // attempt like any other — the job stays, the backoff retries it —
+      // never a clean card that drops the warning.
+      const sealed = sealSessionCard(job.localSessionId, job.v2SessionId, job.card, key);
+      await withTimeout(api("PATCH", `/daemon/sessions/${job.v2SessionId}`, { encryptedMetadata: sealed.encryptedMetadata, state: "archived" }, l), 15_000);
+      markBudgetPublished(job.v2SessionId, sealed.carried);
       log(`archived replacement row ${job.v2SessionId.slice(0, 8)} for ended session ${job.localSessionId}`);
     } catch (e) {
       if (!isRowGone(e) && !sessionGone(e)) {
         const n = (archiveAttempts.get(job.v2SessionId) ?? 0) + 1;
         archiveAttempts.set(job.v2SessionId, n);
-        log(`archive ${job.v2SessionId.slice(0, 8)} failed (attempt ${n}, will retry): ${e instanceof Error ? e.message : e}`);
+        if (!(e instanceof BudgetUnreadableError)) log(`archive ${job.v2SessionId.slice(0, 8)} failed (attempt ${n}, will retry): ${e instanceof Error ? e.message : e}`);
         return false;
       }
       log(`archive ${job.v2SessionId.slice(0, 8)}: row already gone or settled — nothing to do`);
@@ -1881,6 +2031,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       void retryPendingArchives().then(() => scheduleArchiveRetry(), () => scheduleArchiveRetry());
     }, delay);
     archiveRetryTimer.unref?.();
+  }
+  /** Owe an archive WITHOUT attempting it now (its card cannot be sealed
+   *  truthfully yet): persist the intent, count the attempt, and leave it to
+   *  the retry loop's backoff. */
+  function deferArchive(job: ArchiveRowJob): void {
+    pendingArchives.set(job.v2SessionId, job);
+    archiveAttempts.set(job.v2SessionId, (archiveAttempts.get(job.v2SessionId) ?? 0) + 1);
+    try { ledger.putJob({ id: archiveJobId(job.v2SessionId), sessionId: job.v2SessionId, kind: ARCHIVE_JOB_KIND, payload: job }); }
+    catch (e) { log(`archive ${job.v2SessionId.slice(0, 8)}: intent not persisted (${e instanceof Error ? e.message : e}) — retrying in memory only`); }
+    scheduleArchiveRetry();
   }
   /** Persist the intent FIRST (a crash between the POST and the PATCH must
    *  not lose it), try once now, and leave the rest to the retry loop. */
@@ -2073,6 +2233,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // the pressure half clears when every session's backlog is back
         // under the cap.
         retryUnpersisted();
+        retryBudgetReads();
         for (const sid of [...overPressure]) notePressure(sid);
         publishOutboxHealth();
       } catch { /* next tick */ }
