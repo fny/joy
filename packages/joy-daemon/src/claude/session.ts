@@ -208,6 +208,22 @@ export const HOOK_TIEBREAK_IDLE_POLLS = 6;
  *  long, is stale (the human answered in the terminal and no later hook
  *  cleared it). */
 export const HOOK_NEEDS_INPUT_STALE_MS = 10_000;
+/** A confirmed dispatch awaiting the transcript turn it opened (#498): the
+ *  window its turn ran in, per the daemon's clock — `openAt` when Enter went
+ *  out (the confirm time when the hook beat our Enter callback), `closedAt`
+ *  when a hook's Stop / StopFailure or the next prompt ended the run (null
+ *  while it runs). `hookConfirmed`: UserPromptSubmit has been seen for it. */
+export interface PendingTurnRef { ref: string; openAt: number; closedAt: number | null; hookConfirmed: boolean }
+/** Tolerance when placing a transcript entry's timestamp (the CLI's clock)
+ *  inside a pending dispatch's window (the daemon's clock, hook receipt
+ *  times): the first assistant entry of a short reply can be written within
+ *  the same instant its Stop hook reaches us. Applied only when no window
+ *  contains the entry outright; two windows within slack name nobody. */
+export const TURN_WINDOW_SLACK_MS = 1_500;
+/** Pending dispatches kept awaiting a transcript turn. Beyond this the oldest
+ *  are dropped: a turn whose entries have not been tailed after this many
+ *  later turns is not going to be. */
+const PENDING_TURN_REFS_MAX = 32;
 export function thinkingLeaseMs(prompt: string | null | undefined): number {
   return (prompt ?? "").trimStart().startsWith("/") ? SLASH_THINKING_LEASE_MS : THINKING_LEASE_MS;
 }
@@ -843,14 +859,27 @@ export class Session {
    *  #turnRunning / #hookSaysIdle); the transcript's #turn is then output-
    *  drain bookkeeping, and the pane's generating footer a safety check only. */
   #hookTurn: { open: boolean; at: number } | null = null;
-  /** The runtime ref of the dispatch the runtime took whose transcript turn
-   *  has not opened yet (#498): the confirmation (a hook's UserPromptSubmit,
+  /** The dispatches the runtime took whose transcript turns have not opened
+   *  yet (#498), oldest first: the confirmation (a hook's UserPromptSubmit,
    *  the transcript's user echo) lands BEFORE Claude's first assistant entry
    *  opens the relay turn, so the turn is named for the attempt when it
-   *  opens (#nameRuntimeTurn). Cleared once named, when a prompt reaches
-   *  Claude by another route (that turn is not this dispatch's), and at the
-   *  transcript's turn terminal. */
-  #pendingTurnRef: string | null = null;
+   *  opens (#nameRuntimeTurn). A QUEUE, not one slot: with hooks live a
+   *  whole turn can be confirmed and Stopped before the tailer reaches its
+   *  assistant entries (Astra F14: submit A, Stop A, submit B, THEN A's
+   *  entries are tailed), and the single slot named A's turn for B. Each
+   *  entry keeps the window the dispatch's turn ran in — `openAt` (Enter
+   *  out) to `closedAt` (the hook's Stop, or the next prompt) — and a turn
+   *  opening in the transcript is named ONLY for the entry whose window
+   *  provably contains its timestamp (#claimTurnOwner); an entry no window
+   *  claims leaves the attribution missing, which the CLI reports as such.
+   *  Cleared at the transcript's turn terminal and on a hook-less turn open
+   *  (that path names the turn from #lastConfirmedRef). */
+  #pendingTurnRefs: PendingTurnRef[] = [];
+  /** The ref of the dispatch whose user entry the tailer read LAST — the
+   *  transcript is sequential, so the next turn it opens is that prompt's
+   *  (#498). null when the last user prompt read was not a dispatch of ours
+   *  (a terminal prompt, a task notification): that turn is foreign. */
+  #transcriptPromptOwner: { ref: string; at: number } | null = null;
 
   // ── Dispatch ───────────────────────────────────────────────────────────────
   // The queue itself is the session coordinator's (domain/coordinator.ts):
@@ -2150,7 +2179,7 @@ export class Session {
       // opened — name it now; otherwise the turn is named when the transcript
       // opens it. A command runs no turn of its own.
       else if (this.#turn && this.#dispatchSubmittedAt !== null && this.#turn.since >= this.#dispatchSubmittedAt) this.#nameRuntimeTurn(ref);
-      else this.#pendingTurnRef = ref;
+      else this.#pushPendingTurnRef(ref, how === "UserPromptSubmit");
     }
     settle?.(result);
     this.#broadcastQueue();
@@ -2166,9 +2195,79 @@ export class Session {
    *  turn started after the send, and an earlier queued message's answer
    *  came back labelled as this one's. */
   #nameRuntimeTurn(ref: string): void {
-    this.#pendingTurnRef = null;
+    this.#pendingTurnRefs = this.#pendingTurnRefs.filter((r) => r.ref !== ref);
     if (!this.#turn) return;
     this.#driver.emit({ kind: "turn_started", runtimeRef: ref, runtimeTurnId: this.#turn.turnId });
+  }
+
+  /** Remember a confirmed dispatch whose transcript turn has not opened yet
+   *  (#498). Its window opens at the submit (Enter out; the confirm time when
+   *  the hook beat our Enter callback) and stays open until a hook's Stop or
+   *  the next prompt closes it. A second prompt submitted means the earlier
+   *  turn is over as far as ownership goes: the runtime runs one turn at a
+   *  time, so any older window still open closes here. */
+  #pushPendingTurnRef(ref: string, hookConfirmed: boolean): void {
+    const now = Date.now();
+    for (const r of this.#pendingTurnRefs) if (r.closedAt === null) r.closedAt = now;
+    this.#pendingTurnRefs.push({ ref, openAt: Math.min(this.#dispatchSubmittedAt ?? now, now), closedAt: null, hookConfirmed });
+    if (this.#pendingTurnRefs.length > PENDING_TURN_REFS_MAX) this.#pendingTurnRefs.splice(0, this.#pendingTurnRefs.length - PENDING_TURN_REFS_MAX);
+  }
+
+  /** A hook says a prompt was submitted (#498): the dispatch the transcript
+   *  echo already confirmed, if `flat` is its text and its hook has not been
+   *  seen — that window stays open (it IS this prompt's turn). Any other
+   *  prompt reaching Claude closes every window still open: the turn now
+   *  running is not an earlier dispatch's. */
+  #noteHookPromptSubmit(flat: string): void {
+    const own = [...this.#pendingTurnRefs].reverse().find((r) => r.ref === flat && !r.hookConfirmed && r.closedAt === null);
+    if (own) { own.hookConfirmed = true; return; }
+    this.#closePendingTurnWindows();
+  }
+
+  /** The turn that was running is over (a hook's Stop, another prompt's
+   *  submit): every window still open closes now — the runtime runs one turn
+   *  at a time, so its transcript entries end here. */
+  #closePendingTurnWindows(): void {
+    const now = Date.now();
+    for (const r of this.#pendingTurnRefs) if (r.closedAt === null) r.closedAt = now;
+  }
+
+  /** Name the dispatch whose turn the transcript is opening at `entryTimeMs`
+   *  (#498) — or nobody. Provable ownership only:
+   *   1. the transcript's own order: the last user prompt the tailer read was
+   *      a dispatch of ours still awaiting its turn, so the assistant entries
+   *      that follow it are that prompt's turn;
+   *   2. else the hook-observed turn boundaries: exactly one pending window
+   *      [openAt, closedAt] contains the entry's timestamp. A window that
+   *      closed before the entry (its Stop already fired) cannot own it, and
+   *      a window opened after it cannot either — that is how the newest
+   *      pending ref was named for an older entry merely because it arrived
+   *      next. Ambiguity (two windows within clock slack) names nobody.
+   *  The claimed ref and every OLDER pending ref leave the queue: the
+   *  transcript is sequential, so an older dispatch's turn would already
+   *  have opened — it never will. An unclaimed entry leaves the queue as is;
+   *  a later entry may still be provably one of theirs. */
+  #claimTurnOwner(entryTimeMs: number): string | null {
+    const refs = this.#pendingTurnRefs;
+    const take = (i: number): string => {
+      const ref = refs[i].ref;
+      this.#pendingTurnRefs = refs.slice(i + 1);
+      return ref;
+    };
+    const byOrder = this.#transcriptPromptOwner;
+    this.#transcriptPromptOwner = null;
+    if (byOrder) {
+      const i = refs.findIndex((r) => r.ref === byOrder.ref && r.openAt <= byOrder.at + TURN_WINDOW_SLACK_MS);
+      if (i >= 0) return take(i);
+    }
+    const inside = (r: PendingTurnRef, slack: number) => entryTimeMs >= r.openAt - slack && (r.closedAt === null || entryTimeMs <= r.closedAt + slack);
+    let hits = refs.map((r, i) => inside(r, 0) ? i : -1).filter((i) => i >= 0);
+    if (hits.length === 0) hits = refs.map((r, i) => inside(r, TURN_WINDOW_SLACK_MS) ? i : -1).filter((i) => i >= 0);
+    if (hits.length !== 1) {
+      if (hits.length > 1) this.#dlog(`transcript turn at ${new Date(entryTimeMs).toISOString()} fits ${hits.length} pending dispatches — not naming it (#498)`);
+      return null;
+    }
+    return take(hits[0]);
   }
 
   /** Delivery confirmed by a post-submit interactive DIALOG (not by echo):
@@ -3677,7 +3776,7 @@ export class Session {
           // text still QUEUED would re-deliver later as a duplicate turn (seen
           // live with a steered "/goal clear" stuck in the spool): cancel it.
           this.#driver.emit({ kind: "echo", runtimeRef: flat });
-          this.#pendingTurnRef = null; // the next transcript turn is this prompt's, not an earlier dispatch's (#498)
+          this.#noteHookPromptSubmit(flat); // an earlier dispatch's window closes — unless this IS its hook, late (#498)
           const dup = this.#coordinator.snapshot(this.id).commands.find((c) => c.state === "queued" && flattenForMatch(c.text) === flat);
           if (dup) {
             process.stderr.write(`[hook] ${this.id} UserPromptSubmit dropped queued duplicate ${dup.id}\n`);
@@ -3704,6 +3803,7 @@ export class Session {
         this.#hookTurn = { open: false, at: Date.now() };
         this.#idlePolls = 0;
         this.#lastConfirmedRef = null;
+        this.#closePendingTurnWindows(); // the turn that ran is over — its transcript entries end here (#498)
         this.#driver.emit({ kind: "turn_ended", status: "completed" });
         this.#maybeDrainQueue();
         return { ok: true };
@@ -3724,6 +3824,7 @@ export class Session {
         this.#hookTurn = { open: false, at: Date.now() };
         this.#idlePolls = 0;
         this.#lastConfirmedRef = null;
+        this.#closePendingTurnWindows();
         this.#driver.emit({ kind: "turn_ended", status: "failed", detail: errorType });
         const now = Date.now();
         if (errorType === "authentication_failed") {
@@ -4510,6 +4611,12 @@ export class Session {
         // Claude echoes the message multi-line — so MATCH on the flattened echo. `content`
         // itself (newlines intact) is kept for the retry text below.
         const matchContent = flattenForMatch(content);
+        // The transcript's own order (#498): the turn it opens next is this
+        // prompt's — a dispatch of ours still awaiting its turn, or nobody's
+        // (a terminal prompt, a task notification: that turn is foreign).
+        // Keyed on the pending queue, not the ledger match below: a hook's
+        // Stop may already have completed the command whose echo lags.
+        this.#transcriptPromptOwner = this.#pendingTurnRefs.some((r) => r.ref === matchContent) ? { ref: matchContent, at: entryTimeMs } : null;
         // Match against the ledger's attempts awaiting evidence for this text —
         // oldest first, so identical texts pair in submission order. Attempts
         // are persisted, so a restart between the type and the echo (the old
@@ -4627,11 +4734,17 @@ export class Session {
           // hooks the edge was the hook's; the dispatch it confirmed is still
           // waiting for its turn's NAME (#498) — this is it. Either way the
           // turn id rides along so the attempt is bound to it.
-          const owner = this.#pendingTurnRef;
-          this.#pendingTurnRef = null;
           if (entryTimeMs >= this.#tailBoundAt - 60_000) {
-            if (!this.#hooksLive) this.#driver.emit({ kind: "turn_started", runtimeRef: this.#lastConfirmedRef, runtimeTurnId: this.#turn.turnId });
-            else if (owner) this.#nameRuntimeTurn(owner);
+            if (!this.#hooksLive) {
+              this.#pendingTurnRefs = [];
+              this.#transcriptPromptOwner = null;
+              this.#driver.emit({ kind: "turn_started", runtimeRef: this.#lastConfirmedRef, runtimeTurnId: this.#turn.turnId });
+            } else {
+              const owner = this.#claimTurnOwner(entryTimeMs);
+              if (owner) this.#nameRuntimeTurn(owner);
+            }
+          } else {
+            this.#transcriptPromptOwner = null; // replayed history names nothing
           }
         }
         // Capture token usage (cumulative per message) to report at turn-end —
@@ -4681,7 +4794,7 @@ export class Session {
           if (this.#transcriptOwnsTerminal(entryTimeMs)) {
             this.#setThinking(false);
             this.#lastConfirmedRef = null;
-            this.#pendingTurnRef = null;
+            this.#pendingTurnRefs = []; // the transcript is caught up: nothing older is still awaiting its turn
             this.#driver.emit({ kind: "turn_ended", status: "completed" });
           } else if (!this.#hooksLive || !this.#hookTurn?.open) this.#setThinking(false);
           this.#maybeDrainQueue(); // turn done → send the next queued message
