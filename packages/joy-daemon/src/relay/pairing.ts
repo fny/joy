@@ -8,7 +8,8 @@
 // The account secret transits memory only — callers must not persist it.
 import { createHmac, createHash, randomBytes, randomUUID } from "node:crypto";
 import { machineKeyOpensStore } from "../domain/envStore";
-import { mkdirSync, writeFileSync, existsSync, renameSync , readFileSync, readdirSync } from "node:fs";
+import { writeFileSync, existsSync, renameSync , readFileSync, readdirSync } from "node:fs";
+import { mkdirSecure } from "../domain/secretFile";
 import { join } from "node:path";
 import tweetnacl from "tweetnacl";
 
@@ -166,7 +167,9 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
   if (!decrypted || decrypted[0] !== 0) throw new Error("bad approval payload");
 
   // 4. write creds (back up whatever was there)
-  mkdirSync(credsDir, { recursive: true });
+  // 0700: access.key (account bearer + machineKey), perimeter.key and the
+  // replaced generations all live here (#48).
+  mkdirSecure(credsDir);
   // Carry the machineKey forward: ~/.joy/env.sealed is sealed under it, and a
   // fresh key on every re-pair made the store unreadable for good — every
   // later spawn silently lost its provider keys (#117).
@@ -201,6 +204,6 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
     encryption: { publicKey: b64(decrypted.slice(1, 33)), machineKey },
   }, null, 2), { mode: 0o600 });
   const machineId = randomUUID();
-  writeFileSync(join(credsDir, "settings.json"), JSON.stringify({ machineId, serverUrl: relayUrl }, null, 2));
+  writeFileSync(join(credsDir, "settings.json"), JSON.stringify({ machineId, serverUrl: relayUrl }, null, 2), { mode: 0o600 });
   return machineId;
 }

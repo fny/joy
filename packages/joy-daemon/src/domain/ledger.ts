@@ -36,7 +36,7 @@
 //     / acceptCommand take an optional generation (+ expectedAttemptId) and
 //     refuse when it is not current.
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { mkdirSecure, chmodSecretQuiet } from "./secretFile";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { joyStateDir } from "../paths";
@@ -289,7 +289,10 @@ export class Ledger {
   }
 
   private constructor(stateDir: string, now: () => number) {
-    mkdirSync(stateDir, { recursive: true });
+    // 0700 dir / 0600 files (#48): the ledger holds every prompt's text and
+    // the outbox rows' content keys. SQLite creates the db and its WAL/SHM
+    // siblings with the umask default, so they are tightened right after.
+    mkdirSecure(stateDir);
     this.stateDir = stateDir;
     this.path = Ledger.path(stateDir);
     this.#now = now;
@@ -308,6 +311,8 @@ export class Ledger {
       const v = this.#get("SELECT value FROM schema_meta WHERE key='version'");
       if (!v) this.#run("INSERT INTO schema_meta(key,value) VALUES('version',?)", String(SCHEMA_VERSION));
     });
+    // After the first WAL commit, so the -wal/-shm siblings exist to tighten.
+    for (const f of [this.path, `${this.path}-wal`, `${this.path}-shm`]) chmodSecretQuiet(f);
   }
 
   get closed(): boolean { return this.#closed; }

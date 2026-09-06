@@ -164,7 +164,11 @@ export function writeFileAtomic(path: string, data: string | Uint8Array, opts: A
     catch (e) { throw new AtomicWriteError("fsync", path, e); }
     try { fs.closeSync(fd); fd = null; }
     catch (e) { throw new AtomicWriteError("fsync", path, e); }
-    if (prevMode !== null) { try { fs.chmodSync(tmp, prevMode); } catch { /* keep going — content beats mode */ } }
+    // preserveMode on: carry the destination's bits. preserveMode OFF with an
+    // explicit mode: ENFORCE it — `open(…, mode)` is masked by the umask, and
+    // a secret file must not depend on how the daemon was launched (#48).
+    const want = prevMode ?? (opts.preserveMode === false ? opts.mode : undefined);
+    if (want !== undefined) { try { fs.chmodSync(tmp, want); } catch { /* keep going — content beats mode */ } }
   } catch (e) {
     if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
     rmQuiet(tmp);
@@ -243,7 +247,8 @@ export async function writeFileAtomicAsync(path: string, data: string | Uint8Arr
     catch (e) { throw new AtomicWriteError("fsync", path, e); }
     try { await fh.close(); fh = null; }
     catch (e) { throw new AtomicWriteError("fsync", path, e); }
-    if (prevMode !== null) { try { await fsp.chmod(tmp, prevMode); } catch { /* content beats mode */ } }
+    const want = prevMode ?? (opts.preserveMode === false ? opts.mode : undefined);
+    if (want !== undefined) { try { await fsp.chmod(tmp, want); } catch { /* content beats mode */ } }
   } catch (e) {
     if (fh) { try { await fh.close(); } catch { /* ignore */ } }
     rmQuiet(tmp);
