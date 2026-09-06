@@ -362,3 +362,121 @@ describe("opencode backfill vs live delivery (#573 residual, wave F10)", () => {
     expect(userRows()).toEqual([]);
   });
 });
+
+// #629 (seen by the #573 residual agent, out of its scope): the live path never
+// mirrored a prompt typed in the opencode TUI. Such a prompt reached the card
+// only through the history backfill, and only while the projection version
+// was < 2 — once v2 was certified, every later TUI prompt stayed off the card
+// until another backfill. The admission carries the prompt body, so the live
+// path emits the user row itself: the replay's stable `oc:<sid>:<mid>:user`
+// id, before the turn bracket, at the message's own time. A prompt this
+// daemon submitted stays suppressed exactly as before (the app has its row).
+describe("opencode live foreign prompt mirror (#629)", () => {
+  const LOCAL = "abcdef29";
+  const OC = "ses_629";
+  const TYPED_AT = 1_700_000_000_000;
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const until = async (fn: () => boolean) => { for (let n = 0; n < 400; n++) { if (fn()) return; await tick(); } throw new Error("wait expired"); };
+
+  let dir: string;
+  let ledger: Ledger;
+  let sessions: OpencodeSession[];
+  let records: Array<{ record: WireRecord; id?: string }>;
+  let homeBefore: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "oc-629-"));
+    homeBefore = process.env.JOY_HOME_DIR;
+    process.env.JOY_HOME_DIR = dir;
+    ledger = Ledger.open(dir);
+    sessions = []; records = []; fake.clients = [];
+    fake.history = async () => [];
+  });
+  afterEach(() => {
+    for (const s of sessions) s.end("restart");
+    ledger.close(); closeAllLedgers();
+    rmSync(dir, { recursive: true, force: true });
+    if (homeBefore === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = homeBefore;
+  });
+
+  const noop = () => {};
+  /** A resumed card (so the reconcile runs) against an opencode session with
+   *  the given stored history; the relay stub spools to the real outbox. */
+  async function open(history: Array<Record<string, unknown>> = []): Promise<OpencodeSession> {
+    fake.history = async () => history;
+    const coordinator = new SessionCoordinator({ ledger });
+    const s = new OpencodeSession(
+      { id: LOCAL, cwd: dir, status: "starting", startedAt: Date.now(), opencodeSessionId: OC },
+      { ledger, coordinator, broadcast: noop, addChatMessage: noop } as any,
+    );
+    const relay: any = {
+      relaySessionId: LOCAL, outboundPersistDegraded: false,
+      setReceiptSink: noop, start: noop, stop: noop, pausePull: noop,
+      updateJoyState: noop, updateQueue: noop, setThinking: noop, updateModelCode: noop,
+      updateContext: noop, updateSummary: noop, archive: async () => true,
+      send(record: WireRecord, id?: string) {
+        records.push({ record, id });
+        ledger.enqueueOutbound([{ sessionId: LOCAL, kind: "output", runtimeEventId: id ?? `anon:${records.length}`, body: record, sealed: false }]);
+      },
+    };
+    s.attachRelay(relay);
+    sessions.push(s);
+    s.beginWatching();
+    await until(() => s.status === "active");
+    return s;
+  }
+  const ids = () => records.map((r) => r.id);
+  const userRows = () => records.filter((r) => r.record.role === "user");
+  const ackAll = () => { for (const row of ledger.pendingOutbound(LOCAL)) ledger.ackOutbound(row.seq); };
+  const restart = (s: OpencodeSession) => { s.end("restart"); ledger.close(); ledger = Ledger.open(dir); records = []; };
+  let seq = 0;
+  const emit = (type: string, data: Record<string, unknown>) =>
+    fake.clients.at(-1)!.listener!({ type, id: `ev${++seq}`, durable: { seq, aggregateID: OC }, data: { sessionID: OC, ...data } });
+  /** The live events of a prompt: received, then admitted (both carry the
+   *  body on 1.18.10), then the answer's first text. Unfinished on purpose:
+   *  the turn's completion would move the delivered mark past it. */
+  const livePrompt = (mid: string, text: string) => {
+    emit("session.next.prompted", { messageID: mid, prompt: { text }, timestamp: TYPED_AT });
+    emit("session.next.prompt.admitted", { messageID: mid, prompt: { text }, delivery: "queue", timestamp: TYPED_AT + 500 });
+    emit("session.next.step.started", { assistantMessageID: `a_${mid}` });
+    emit("session.next.text.ended", { assistantMessageID: `a_${mid}`, textID: `a_${mid}_p0`, text: "answer" });
+  };
+  /** The projection certified at the current version: whatever follows is
+   *  the live path's doing, never a backfill's. */
+  const certifyProjection = () => { ackAll(); expect(ledger.getCheckpoint(LOCAL, REPLAY_PROJECTION_KIND)?.ref).toBe(String(REPLAY_PROJECTION_VERSION)); };
+
+  it("a prompt typed in the TUI lands as one user row — the replay's id, before its turn start, at its own time", async () => {
+    await open();
+    certifyProjection();
+    livePrompt("u1", "typed in the TUI");
+    expect(userRows().map((r) => r.id)).toEqual([`oc:${OC}:u1:user`]);
+    expect((userRows()[0].record.content as any).text).toBe("typed in the TUI");
+    expect((userRows()[0].record.meta as any).joyTime).toBe(TYPED_AT);
+    expect(ids().indexOf(`oc:${OC}:u1:user`)).toBeLessThan(ids().indexOf(`oc:${OC}:u1:turn-start`));
+  });
+
+  it("a prompt this daemon submitted gets no extra row — the app already has it", async () => {
+    await open();
+    certifyProjection();
+    // The admission's `opencode_msg` receipt is the ownership the replay
+    // and the backfill check too (#573).
+    ledger.addReceipt(LOCAL, { kind: "opencode_msg", ref: "u_mine" });
+    livePrompt("u_mine", "from the app");
+    expect(userRows()).toEqual([]);
+    expect(ids()).toContain(`oc:${OC}:u_mine:turn-start`);
+  });
+
+  it("the reconcile after a live mirror emits the same id — one outbox row, never a second bubble", async () => {
+    let s = await open();
+    certifyProjection();
+    livePrompt("u1", "typed in the TUI");
+    expect(userRows().map((r) => r.id)).toEqual([`oc:${OC}:u1:user`]);
+    expect(ledger.pendingOutbound(LOCAL).filter((r) => r.runtimeEventId === `oc:${OC}:u1:user`)).toHaveLength(1);
+
+    // Restart before the turn finished: the delivered mark is still behind
+    // the prompt, so the replay projects it again — under the same id.
+    restart(s);
+    s = await open([user("u1", "typed in the TUI", TYPED_AT), { ...assistant("a_u1", "answer", TYPED_AT + 1000), finish: undefined }]);
+    expect(userRows().map((r) => r.id)).toEqual([`oc:${OC}:u1:user`]);
+    expect(ledger.pendingOutbound(LOCAL).filter((r) => r.runtimeEventId === `oc:${OC}:u1:user`)).toHaveLength(1);
+  });
+});

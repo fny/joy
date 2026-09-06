@@ -619,6 +619,19 @@ export class OpencodeSession implements AgentSession {
           this.#relay?.setThinking(eff.value);
           if (eff.value && this.#activeTurn) this.#driver.emit({ kind: "turn_started", runtimeTurnId: this.#activeTurn });
           break;
+        case "user": {
+          // A prompt THIS daemon submitted already has its row on the card
+          // (the app's own `turn.queued`, or #mirrorAccepted for a terminal/
+          // CLI send) — its attempt/receipt is the identity the replay checks
+          // too. Anything else was typed in the opencode TUI: mirror it under
+          // the replay's stable `oc:<sid>:<mid>:user` id, so the next
+          // reconcile (replay or backfill) dedupes at the relay instead of
+          // showing the prompt twice — or, before this, never (#629).
+          if (this.#ledger.ownsRuntimeRef(this.id, eff.messageID, "opencode_msg")) break;
+          const row = userEmission(this.#ocSessionId ?? "", { id: eff.messageID, time: { created: eff.at }, content: eff.text });
+          if (row) this.#relay?.send(row.record, row.localId);
+          break;
+        }
         case "confirmPrompt":
           if (eff.messageID) {
             // Admission proven by SSE: the coordinator pairs it with its

@@ -42,6 +42,26 @@ describe("OpencodeNormalizer", () => {
     expect(n.currentTurn).toBe("msg_user1");
   });
 
+  // #629: prompted/admitted share one schema on 1.18.10 — both carry the
+  // prompt body and the server's timestamp. The admission reports the user
+  // message FIRST, before the bracket it opens; the session decides whether
+  // the card needs the row (a prompt typed in the TUI) or has it already.
+  it("prompt.admitted reports the user message before the turn bracket, at the prompt's own time", () => {
+    const n = freshNorm();
+    n.handle(ev("session.next.prompted", { messageID: "msg_user1", prompt: { text: "typed in the TUI" }, timestamp: 1_700_000_000_000 }));
+    const fx = n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user1", prompt: { text: "typed in the TUI" }, delivery: "queue", timestamp: 1_700_000_000_500 }));
+    expect(kinds(fx)).toEqual(["user", "confirmPrompt", "thinking", "wire"]);
+    expect(fx[0]).toEqual({ kind: "user", messageID: "msg_user1", text: "typed in the TUI", at: 1_700_000_000_000 });
+    // An admission without the body falls back to what `prompted` carried;
+    // one with neither reports no user message at all (the pre-#629 shape).
+    n.handle(ev("session.next.prompted", { messageID: "msg_user2", prompt: { text: "steer" }, timestamp: 7 }));
+    expect(n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user2" }))).toEqual([
+      { kind: "user", messageID: "msg_user2", text: "steer", at: 7 },
+      { kind: "confirmPrompt", messageID: "msg_user2", seq: 4 },
+    ]);
+    expect(kinds(n.handle(ev("session.next.prompt.admitted", { messageID: "msg_user3" })))).toEqual(["confirmPrompt"]);
+  });
+
   it("filters other sessions and dedupes by durable.seq", () => {
     const n = freshNorm();
     expect(n.handle(ev("session.next.prompt.admitted", { messageID: "msg_x" }, { sid: "ses_other" }))).toEqual([]);
