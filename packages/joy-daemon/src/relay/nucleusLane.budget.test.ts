@@ -8,7 +8,7 @@
 // that a fresh session was the way out. The budget SEMANTICS are unchanged
 // here (still permanent, still dropped, the turn still terminalizes); what is
 // asserted is that the loss is now counted and carried on the card.
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as http from "node:http";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,6 +28,7 @@ async function until(pred: () => boolean, ms = 10_000): Promise<void> {
 function makeFakeRelay() {
   const calls: Array<{ method: string; path: string; body: any }> = [];
   let budgetOut = false;
+  let workClaims = 0;
   let workOffers: any[] = [];
   // What GET /sessions lists for this daemon — a fresh lane rebuilds its
   // bindings from it (refreshBindings), the way a restarted daemon does.
@@ -42,7 +43,7 @@ function makeFakeRelay() {
       const send = (obj: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
       if (path === "/daemon/leases") return send({ leaseId: "L1", leaseToken: "T1", epoch: 1 });
       if (/^\/daemon\/leases\/[^/]+$/.test(path) && method === "PUT") return send({ ok: true });
-      if (path.endsWith("/claims/work")) { const o = workOffers; workOffers = []; return send({ offers: o }); }
+      if (path.endsWith("/claims/work")) { workClaims++; const o = workOffers; workOffers = []; return send({ offers: o }); }
       if (path.endsWith("/claims/control")) return send({ offers: [] });
       if (path === "/sessions" && method === "GET") return send({ sessions: bindings });
       calls.push({ method, path, body });
@@ -55,6 +56,8 @@ function makeFakeRelay() {
     server, calls,
     listen: () => new Promise<string>((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as any).port}`))),
     pushWork: (o: any) => workOffers.push(o),
+    // Claims start only after the boot pass (refreshBindings) has run.
+    workClaims: () => workClaims,
     exhaust: () => { budgetOut = true; },
     bind: (row: any) => bindings.push(row),
     cards: () => calls.filter((c) => c.method === "PATCH" && c.path.startsWith("/daemon/sessions/")).map((c) => c.body),
@@ -64,7 +67,7 @@ function makeFakeRelay() {
 
 let handle: NucleusLaneHandle | null = null;
 let srv: http.Server | null = null;
-afterEach(async () => { await handle?.stop(); handle = null; srv?.close(); srv = null; });
+afterEach(async () => { await handle?.stop(); handle = null; srv?.close(); srv = null; vi.restoreAllMocks(); });
 
 describe("nucleusLane: relay event budget exhausted (#130)", () => {
   it("counts the dropped output and carries it on the card", async () => {
@@ -227,4 +230,84 @@ describe("nucleusLane: relay event budget exhausted (#130)", () => {
     expect(card).toMatchObject({ joy__state: "archived", joy__sessionId: local, joy__eventBudget: { since: 1234, dropped: 7 } });
     expect(handle.eventBudgetDrops()).toEqual([{ v2SessionId: v2, localSessionId: local, since: 1234, dropped: 7 }]);
   }, 30_000);
+
+  // The exact aftermath of the original defect, as an upgrade finds it: the
+  // count persisted, the row ALREADY archived with a clean card, no runtime.
+  // The holder's publisher only exists for a live handle and the orphan
+  // sweep only touches live rows, so nothing ever repaired that card (Astra
+  // on a6443ea8). The boot pass now re-publishes the row's own card with the
+  // count merged — other metadata preserved, lifecycle state untouched — and
+  // marks the job row so the next boot leaves it alone.
+  it("upgrade repair: a persisted count behind an already-archived clean card is republished once on boot, and not again", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const local = "bud00005", v2 = "v2b5", machine = "mb5";
+    ledgerFor().putJob({ id: `event_budget:${v2}`, sessionId: local, kind: "event_budget", payload: { v2SessionId: v2, localId: local, since: 1234, dropped: 7 } });
+    const clean = { path: "/tmp/gone", host: "h", machineId: machine, joy__state: "archived", joy__sessionId: local, summary: { text: "kept title" } };
+    relay.bind({ sessionId: v2, daemonId: machine, state: "archived", localSessionId: local, encryptedMetadata: JSON.stringify({ v: 1, t: "card", metadata: clean }) });
+    const registry: any = { get: () => undefined, chatHistory: () => [], listRecords: () => [{ id: local, launchCwd: "/tmp/gone" }], saveRecord: () => {} };
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: machine, log: () => {} });
+    await until(() => relay.cards().length >= 1, 15_000);
+    await sleep(1_000);
+    expect(relay.cards()).toHaveLength(1);
+    const [repair] = relay.cards();
+    expect(JSON.parse(repair.encryptedMetadata).metadata).toEqual({ ...clean, joy__eventBudget: { since: 1234, dropped: 7 } });
+    expect(repair.state).toBeUndefined(); // the row's lifecycle state is not the repair's business
+    expect(handle.eventBudgetDrops()).toEqual([{ v2SessionId: v2, localSessionId: local, since: 1234, dropped: 7 }]);
+    // The accepted PATCH is on record with the count it carried…
+    expect(ledgerFor().getJob(`event_budget:${v2}`)?.payload).toMatchObject({ dropped: 7, cardDropped: 7 });
+
+    // …so a second boot over the same ledger finds nothing to repair.
+    await handle.stop(); handle = null;
+    closeAllLedgers();
+    const claimsBefore = relay.workClaims();
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: machine, log: () => {} });
+    await until(() => relay.workClaims() > claimsBefore, 15_000);
+    await sleep(1_000);
+    expect(relay.cards()).toHaveLength(1);
+  }, 40_000);
+
+  // A budget the ledger cannot READ is not an absent budget. Both archive
+  // paths used to swallow the read failure and publish a CLEAN card — the
+  // owed path deleting its retry job on top — and once storage recovered no
+  // later boot repaired the (now archived) row. The read failure is now an
+  // unknown outcome: no card is sealed without the count, the archive is
+  // owed to the retry loop (the orphan path parks one; the owed path keeps
+  // its job), the condition is logged once, and the first read that
+  // succeeds publishes the count.
+  it.each(["orphan", "owed"] as const)("an unreadable budget record defers the %s archive: no clean card, retry job kept, the count published once storage reads again", async (route) => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const local = `bud0000${route === "orphan" ? "6" : "7"}`, v2 = `v2b-${route}`, machine = `mb-${route}`;
+    const ledger = ledgerFor();
+    ledger.putJob({ id: `event_budget:${v2}`, sessionId: local, kind: "event_budget", payload: { v2SessionId: v2, localId: local, since: 1234, dropped: 7 } });
+    if (route === "owed") ledger.putJob({ id: `archive:${v2}`, sessionId: v2, kind: "archive_relay_row", payload: { v2SessionId: v2, localSessionId: local, keyB64: null, card: { joy__state: "archived", joy__sessionId: local } } });
+    relay.bind({ sessionId: v2, daemonId: machine, state: "active", localSessionId: local });
+    const registry: any = { get: () => undefined, chatHistory: () => [], listRecords: () => [{ id: local, launchCwd: "/tmp/lost" }], saveRecord: () => {} };
+    // SQLITE_IOERR on THIS session's budget read only; every other read works.
+    const real = ledger.getJob.bind(ledger);
+    let faults = 0;
+    const spy = vi.spyOn(ledger, "getJob").mockImplementation((id: string) => {
+      if (id === `event_budget:${v2}`) { faults++; throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" }); }
+      return real(id);
+    });
+    const logs: string[] = [];
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: machine, log: (l) => logs.push(l), archiveRetryMs: { min: 200, max: 400 } });
+    await until(() => faults > 0, 15_000);
+    await sleep(1_200); // several backed-off attempts
+    expect(faults).toBeGreaterThan(1); // retried, not given up
+    expect(relay.cards()).toEqual([]); // and no card that drops the warning
+    expect(real(`archive:${v2}`)?.payload).toMatchObject({ v2SessionId: v2, localSessionId: local }); // the retry job is on disk
+    expect(logs.filter((l) => l.includes("event budget record unreadable"))).toHaveLength(1);
+
+    // Storage reads again: the next attempt carries the count of seven.
+    spy.mockRestore();
+    await until(() => relay.cards().some((c) => c.state === "archived"), 15_000);
+    expect(relay.cards()).toHaveLength(1);
+    const card = JSON.parse(relay.cards()[0].encryptedMetadata).metadata;
+    expect(card).toMatchObject({ joy__state: "archived", joy__sessionId: local, joy__eventBudget: { since: 1234, dropped: 7 } });
+    await until(() => ledger.getJob(`archive:${v2}`) === null, 10_000);
+    expect(ledger.getJob(`event_budget:${v2}`)?.payload).toMatchObject({ dropped: 7, cardDropped: 7 });
+    expect(handle.eventBudgetDrops()).toEqual([{ v2SessionId: v2, localSessionId: local, since: 1234, dropped: 7 }]);
+  }, 40_000);
 });
