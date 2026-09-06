@@ -492,6 +492,23 @@ app.
   restart reconciliation against a real relay (orphan cleanup vs surviving
   commands). New low: #626 flaky CLI stream test. **53 open.**
 
+- 2026-09-09 (morning) — coordinator collateral + #53 v2 httpShape pushed
+  (b228aadb). Merged locally, suite in flight before push: lane restart
+  reconciliation against a real relay (relay 849ea4c3 adopts a
+  predecessor's turn under the new epoch; daemon 71c6618a reconciles pending
+  commands before orphan cleanup, resumed turns adopt then /start, 409
+  turn_terminal reconciles instead of cancelling), #564 raw-component path
+  walk, #550 lock-time transcript ownership with `transcriptClaims`, #538
+  kill-verdict propagation, #573 backfill migration checkpoint separated
+  from live delivery, CLI round two (#502 malformed inspection → unknown,
+  #497 completeness before success, #498 Claude dispatch bound to its
+  transcript turn + explicit attribution errors), #628 `killProcessGroup`
+  no longer identifies a group by a dead leader's pid (captured members +
+  start times, optional JOY_PGROUP marker) — the cause of the shard-3
+  SIGTERM stalls. Closed on verdicts: #474 #494 #501 #549 #581. New: #627
+  #629 lows, #628 (fixed in the stack). In flight: #130 durable drop
+  evidence. **47 open.**
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
