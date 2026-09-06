@@ -155,6 +155,42 @@ describe("nucleusLane: spawn-failed report acknowledged before abandoning (#581)
         await sleep(800);
         expect(relay.count("POST", "/daemon/sessions/v2s9/spawn-failed")).toBe(2);
     }, 25_000);
+
+    // #581 residual (Astra on 4a69e55c): the relay answers 200 with
+    // `{ok:true, applied:false, reason:'stale_attempt'}` — it did NOT apply
+    // the failure, the spawn command is still live and still queued. Reading
+    // that as an acknowledgement abandoned the command anyway, so the app
+    // never saw the directory approval it needed: the same dead end the 503
+    // fix closed, one HTTP round trip later.
+    it("a report the relay did not apply to a still-live command is reported again", async () => {
+        const relay = makeFakeRelay();
+        const url = await relay.listen(); srv = relay.server;
+        const registry: any = {
+            get: () => undefined,
+            create: async () => { throw new DirectoryCreationApprovalRequired("/tmp/nope-missing"); },
+            chatHistory: () => [], listRecords: () => [], saveRecord: () => {},
+        };
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: () => {} });
+        const report = "POST /daemon/sessions/v2s8/spawn-failed";
+        relay.answers.set(report, { status: 200, body: { ok: true, applied: false, reason: "stale_attempt" } });
+        const offer = { deliveryId: "dB1", commandId: "sp8", sessionId: "v2s8", kind: "spawn_session", ciphertext: spawnSpec("/tmp/nope-missing") };
+        relay.pushWork(offer);
+        await until(() => relay.count("POST", "/daemon/sessions/v2s8/spawn-failed") === 1);
+        // A current delivery of the SAME command: the stale answer retired the
+        // delivery, never the command.
+        relay.pushWork({ ...offer, deliveryId: "dB2" });
+        await until(() => relay.count("POST", "/daemon/sessions/v2s8/spawn-failed") === 2, 10_000);
+        expect(relay.calls.filter(c => c.path === "/daemon/sessions/v2s8/spawn-failed")[1].body)
+            .toEqual({ reason: "dir_missing:/tmp/nope-missing", deliveryId: "dB2" });
+        // `already_bound` DOES settle the command — a later attempt won it.
+        relay.answers.set(report, { status: 200, body: { ok: true, applied: false, reason: "already_bound" } });
+        relay.pushWork({ ...offer, deliveryId: "dB3" });
+        await until(() => relay.count("POST", "/daemon/sessions/v2s8/spawn-failed") === 3, 10_000);
+        relay.pushWork({ ...offer, deliveryId: "dB4" });
+        await until(() => relay.calls.some(c => c.path === "/daemon/deliveries/dB4/received"));
+        await sleep(800);
+        expect(relay.count("POST", "/daemon/sessions/v2s8/spawn-failed")).toBe(3);
+    }, 25_000);
 });
 
 describe("nucleusLane: a handled joy command is an immediately-terminal turn (#115, lane side)", () => {

@@ -898,19 +898,37 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  a report delayed past a retry that already bound is answered
    *  `{ok:true, applied:false, reason}` and never overwrites the binding —
    *  logged here, not treated as an error (the relay is right to ignore it). */
-  /** Returns whether the relay ACKNOWLEDGED the report (#581). Callers mark
-   *  the spawn abandoned only on true: a report lost to a transient 503 used
-   *  to leave the command abandoned AND unreported — the relay kept offering
-   *  it, the lane answered every offer with a bare receipt, and the app never
-   *  saw the directory approval it needed. Now the next offer retries the
-   *  spawn, hits the same failure, and reports again. */
+  /** `applied:false` reasons that mean the COMMAND has moved on — a later
+   *  attempt bound it, or the session already left provisioning. There is no
+   *  spawn left to fail, so the command is finished with either way. Every
+   *  other `applied:false` (`stale_attempt`, `ambiguous_attempt`) retires
+   *  only THIS delivery: the command is still live and still needs a report
+   *  (#581 residual, Astra on 4a69e55c). */
+  const SPAWN_COMMAND_SETTLED = new Set(["already_bound", "already_progressed"]);
+
+  /** Returns whether the spawn COMMAND may now be abandoned (#581).
+   *
+   *  Two ways it must not be. A report lost to a transient 503 used to leave
+   *  the command abandoned AND unreported — the relay kept offering it, the
+   *  lane answered every offer with a bare receipt, and the app never saw the
+   *  directory approval it needed. And a report the relay answered
+   *  `applied:false, reason:'stale_attempt'` was read as an acknowledgement,
+   *  which abandoned the whole command even though the relay had explicitly
+   *  NOT applied the failure to the still-live spawn: same silent dead end,
+   *  one HTTP round trip later. Either way the next offer — a fresh delivery,
+   *  so no longer stale — retries the spawn, hits the same failure, and
+   *  reports again. */
   async function reportSpawnFailed(offer: WorkOffer, reason: string, leaseRef: Lease): Promise<boolean> {
     const kind = reason.split(":")[0];
     try {
       const r = await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`,
         { reason, deliveryId: offer.deliveryId }, leaseRef) as { ok?: boolean; applied?: boolean; reason?: string } | null;
       if (r && r.applied === false) {
-        log(`spawn ${offer.sessionId.slice(0, 8)}: ${kind} report not applied (${r.reason ?? "unknown"}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt`);
+        const why = r.reason ?? "unknown";
+        const settled = SPAWN_COMMAND_SETTLED.has(why);
+        log(`spawn ${offer.sessionId.slice(0, 8)}: ${kind} report not applied (${why}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt`
+          + (settled ? "; the command already moved on" : "; the command is still live — reporting again on its next offer"));
+        return settled;
       }
       return true;
     } catch (e2) {
