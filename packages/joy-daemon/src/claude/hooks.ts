@@ -5,23 +5,37 @@
 //
 // Hooks are the LIVE STATE EDGES the daemon otherwise has to infer from pane
 // heuristics or transcript lag:
-//   SessionStart     → authoritative transcript binding (session_id +
-//                      transcript_path at claude startup — no mtime discovery,
-//                      and the --continue backfill cap computes against the
-//                      TRUE file the moment it exists)
-//   UserPromptSubmit → a prompt was really submitted (text included): instant
-//                      thinking-on + authoritative dispatch delivery confirm
-//   Stop             → turn finished: thinking-off + queue drain
-//   Notification     → claude is waiting (permission/input): thinking-off
-//   PreCompact       → compaction started (the original hook)
+//   SessionStart      → authoritative transcript binding (session_id +
+//                       transcript_path at claude startup — no mtime discovery,
+//                       and the --continue backfill cap computes against the
+//                       TRUE file the moment it exists)
+//   SessionEnd        → claude is exiting (end_reason): teardown without
+//                       waiting for the pid probe or the pane's frozen frame
+//   UserPromptSubmit  → a prompt was really submitted (text included): instant
+//                       thinking-on + authoritative dispatch delivery confirm
+//   Stop              → turn finished: thinking-off + queue drain
+//   StopFailure       → turn failed (error_type): authentication_failed opens
+//                       the login-code gate
+//   PostToolUse       → a tool completed: the turn is still generating
+//   PermissionRequest → claude is about to ask for permission (tool_name)
+//   Notification      → claude is waiting (notification_type: permission /
+//                       idle prompt / auth_success …): thinking-off, needs-input
+//   SubagentStop      → a subagent finished (permission_mode refresh only)
+//   PreCompact        → compaction started (the original hook)
+//
+// `permission_mode` rides on most of these and is forwarded from every one.
 //
 // Everything is BEST-EFFORT by design: the script bounds its network call,
 // swallows every failure (daemon down → ECONNREFUSED, unknown session → 404,
 // missing daemon.json), and always exits 0 so a hook can never block or stall
 // Claude. When hooks don't arrive (adopted sessions never spawned with
 // --settings, old settings snapshots, daemon downtime) the pane/transcript
-// heuristics carry the session exactly as before — hooks tighten state, they
-// are never load-bearing.
+// heuristics carry the session exactly as before. Once a session HAS seen a
+// hook from its own claude process (session.ts `hooksLive`), hooks become the
+// authority for the states they can observe and the pane parser is demoted to
+// a tie-breaker for those — it stays the only source for what hooks cannot
+// see: draft text, dialogs, the login form, the shells footer
+// (docs/review-campaign-2026-09-claude-runtime-spike.md, candidate A).
 import { execPath } from "node:process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -53,10 +67,20 @@ try {
       session_id: input.session_id,
       transcript_path: input.transcript_path,
       prompt: input.prompt,
+      prompt_id: input.prompt_id,
       message: input.message,
       source: input.source,
       trigger: input.trigger,
+      permission_mode: input.permission_mode,
+      notification_type: input.notification_type,
+      end_reason: input.end_reason,
+      error_type: input.error_type,
+      tool_name: input.tool_name,
+      stop_hook_active: input.stop_hook_active,
     };
+    // Drop the keys the event didn't carry so the daemon sees an absent field,
+    // not a JSON null it has to special-case.
+    for (const k of Object.keys(body)) if (body[k] === undefined || body[k] === null) delete body[k];
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 1500);
     await fetch('http://127.0.0.1:' + port + '/sessions/' + sid + '/hook', {
@@ -80,7 +104,14 @@ process.exit(0);
 // are rewritten on the next daemon start.
 // "3": the command is shell-quoted (#470) — installs stamped "2" still carry
 // the double-quoted, $-expanding command until they are regenerated (Astra).
-const HOOK_VERSION = "3";
+// "4": SessionEnd/PermissionRequest/StopFailure/PostToolUse/SubagentStop are
+// registered and the forwarder ships permission_mode, notification_type,
+// end_reason, error_type, tool_name, prompt_id, stop_hook_active — the fields
+// that let hooks be the state authority (spike Wave F, step one). Sessions
+// launched under "3" keep their snapshot until they restart: they still
+// flip `hooksLive`, and the daemon copes with the missing fields (a hook
+// without permission_mode simply doesn't refresh the mode).
+const HOOK_VERSION = "4";
 
 // The stamp covers the script version AND the embedded node path: the hook
 // command pins the daemon's absolute execPath, so a node upgrade that removes
@@ -135,8 +166,13 @@ export function ensureHookSettings(): string {
         hooks: {
           PreCompact: entry,
           SessionStart: entry,
+          SessionEnd: entry,
           UserPromptSubmit: entry,
           Stop: entry,
+          StopFailure: entry,
+          PostToolUse: entry,
+          PermissionRequest: entry,
+          SubagentStop: entry,
           Notification: entry,
         },
       };
