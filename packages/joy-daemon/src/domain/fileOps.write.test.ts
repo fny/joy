@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, readdirSyn
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { handleWriteFile, validatePath, jailToolArgs, handleRipgrep, handleDifftastic, withPathLock } from "./fileOps";
+import { handleWriteFile, validatePath, jailToolArgs, handleRipgrep, handleDifftastic, withPathLock, jailedToolEnv } from "./fileOps";
 
 let cwd: string;
 beforeEach(() => { cwd = realpathSync(mkdtempSync(join(tmpdir(), "fileops-write-"))); });
@@ -125,4 +125,37 @@ test("handleRipgrep / handleDifftastic refuse jailed-out argv before spawning an
   expect(dt.error).toMatch(/outside the working directory/);
   const pre = await handleRipgrep(cwd, { args: ["--pre", "sh", "-e", "x", "./"] });
   expect(pre.error).toMatch(/not allowed/);
+});
+
+// #537 residual (Astra): configuration the tool inherits — not the argv the
+// jail inspects — must not widen the jail. A RIPGREP_CONFIG_PATH file adding
+// `--follow` made a plain `rg pattern .` walk a symlink out of the tree.
+test("handleRipgrep: an inherited rg config with --follow cannot read through a symlink out of the jail (#537)", async () => {
+  const outside = mkdtempSync(join(tmpdir(), "fileops-outside-"));
+  const cfg = join(outside, "ripgreprc");
+  try {
+    writeFileSync(join(outside, "secret.txt"), "OUTSIDE_SENTINEL_9d1f\n");
+    writeFileSync(cfg, "--follow\n");
+    fs.symlinkSync(outside, join(cwd, "escape")); // a link inside the jail to the outside dir
+    writeFileSync(join(cwd, "inside.txt"), "INSIDE_SENTINEL_9d1f\n");
+    const prev = process.env.RIPGREP_CONFIG_PATH;
+    process.env.RIPGREP_CONFIG_PATH = cfg;
+    try {
+      const r = await handleRipgrep(cwd, { args: ["-n", "SENTINEL_9d1f", "."] });
+      expect(r.success).toBe(true);
+      expect(r.stdout).toContain("inside.txt");          // the jail itself still works
+      expect(r.stdout).not.toContain("OUTSIDE_SENTINEL"); // the symlinked-out file is never followed
+      expect(r.stdout).not.toContain("escape/");
+      // The config env never reaches the child at all.
+      expect(jailedToolEnv().RIPGREP_CONFIG_PATH).toBeUndefined();
+      expect(jailedToolEnv({ FORCE_COLOR: "1" })).toMatchObject({ FORCE_COLOR: "1" });
+    } finally {
+      if (prev === undefined) delete process.env.RIPGREP_CONFIG_PATH; else process.env.RIPGREP_CONFIG_PATH = prev;
+    }
+    // difftastic's own config channel is dropped the same way.
+    process.env.DFT_DISPLAY = "side-by-side";
+    try { expect(jailedToolEnv().DFT_DISPLAY).toBeUndefined(); } finally { delete process.env.DFT_DISPLAY; }
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
