@@ -537,6 +537,47 @@ app.
   291b1f20, specs added). Astra: coordinator collateral verified fixed.
   **23 open.**
 
+## Campaign summary (as of 2026-09-09 afternoon)
+
+**Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
+findings plus Fable's own), executed in six waves with an implement → commit →
+Astra verification → residual-round loop; tunnel/auth/gate files reviewed by
+Fable security agents instead of Astra. 22 issues remain open, every one of
+them either awaiting a verdict on a pushed fix or a flaky-test low.
+
+**Architecture that landed.**
+- Daemon: SQLite ledger + outbox (C1) replacing every JSON store; session
+  coordinator with a pure state table and per-adapter drivers for Codex,
+  OpenCode, pi, agy and Claude (C2, phases 1–5); hooks-as-authority for Claude
+  with per-launch fencing and a single readiness decision; SQLite
+  `BEGIN IMMEDIATE` locks for the daemon singleton and the env store;
+  canonical cwd, transcript-claim ownership, positional receipt coverage,
+  process-group termination that never trusts a dead leader's pid.
+- Relay: tunnel bounds (client_slow / client_gone / relay_busy), request
+  replay guard, event budgets with a persisted, visible loss marker,
+  `expectedMetadataVersion` CAS, conditional session delete, pairing proof of
+  possession (account flavour behind `JOY_RELAY_PAIRING_PROOF_ACCOUNT`).
+- App: canonical tool model, structured git status, the resource query layer
+  (trailing versions, ownership-stable removal, budgets, four-state
+  adapters), durable message links, per-key recoverable decrypt gaps with a
+  visible placeholder, sealed spawn specs, app-side pairing proof.
+
+**Deploy order when the user decides to ship:** relay first only for the
+metadata/tunnel changes; for pairing, daemons first (or together) and the
+account-flavour flag last, after every app build sends the proof. Nothing
+was deployed by the campaign.
+
+**Verification hygiene learned.** Run the daemon suite as three shards with a
+2400 s budget (a `timeout` kill reads as exit 143); union-merging test files
+drops the seam closer — rebuild from both parents; worktree agents must
+install their own node_modules (a `pnpm add` through a symlink rewrote the
+main checkout once); the Codex TUI can silently downgrade Astra's model —
+check the footer before trusting verdicts.
+
+**Left open by design (see the won't-fix criteria below):** flaky-test lows
+are fixed as they surface; the remaining design follow-ups (#127 flag flip)
+wait on rollout, not code.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
