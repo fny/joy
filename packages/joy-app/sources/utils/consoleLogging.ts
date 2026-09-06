@@ -21,17 +21,20 @@
 
 import { log } from '@/log';
 import { MAX_APP_LOG_ENTRIES } from '@/log';
-import { getLogServerUrl } from '@/sync/serverConfig';
-import { loadLocalSettings } from '@/sync/persistence';
+import { getLogServerUrl, relayScopedMMKV } from '@/sync/serverConfig';
 import { loadAppConfig } from '@/sync/appConfig';
 import { Platform } from 'react-native';
 import { serializeForLogs } from '@/utils/truncateForLogs';
+import { resolveConsoleOutputEnabled } from '@/utils/consoleOutputSetting';
+import { createLogUploader, type LogUploader } from '@/utils/logUploader';
 
 let logBuffer: any[] = []
 const MAX_BUFFER_SIZE = MAX_APP_LOG_ENTRIES
 let isConsolePatched = false
 let remoteLogServerUrl: string | null = null
 let consoleOutputEnabled = false
+// Bounded, abortable remote uploads (#426) — see logUploader.ts.
+let uploader: LogUploader | null = null
 let originalConsole: {
   log: typeof console.log,
   info: typeof console.info,
@@ -45,6 +48,9 @@ let originalConsole: {
  */
 export function setConsoleOutputEnabled(enabled: boolean) {
   consoleOutputEnabled = enabled
+  // Turning output off must not leave a backlog of uploads draining in the
+  // background (#426): drop what is queued and abort what is in flight.
+  if (!enabled) uploader?.cancelAll()
 }
 
 export function initConsoleLogging() {
@@ -54,11 +60,13 @@ export function initConsoleLogging() {
 
   remoteLogServerUrl = getLogServerUrl();
 
-  // Determine initial state: user setting > build variant default > off
+  // Determine initial state: EXPLICIT user setting > build variant default >
+  // off. The raw blob is read so an explicit `false` is distinguishable from
+  // an unset preference (#425).
   try {
-    const settings = loadLocalSettings();
+    const raw = relayScopedMMKV().getString('local-settings');
     const config = loadAppConfig();
-    consoleOutputEnabled = settings.consoleLoggingEnabled || config.consoleLoggingDefault || false;
+    consoleOutputEnabled = resolveConsoleOutputEnabled(raw, config.consoleLoggingDefault);
   } catch {
     consoleOutputEnabled = false;
   }
@@ -81,22 +89,30 @@ export function initConsoleLogging() {
     }).join(' ')
   }
 
+  if (remoteLogServerUrl) {
+    const url = remoteLogServerUrl + '/logs'
+    uploader = createLogUploader({
+      send: (body, signal) => fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal,
+      }),
+    })
+  }
+
   function sendLog(level: string, formatted: string) {
-    if (!remoteLogServerUrl) {
+    if (!uploader) {
       return
     }
 
-    void fetch(remoteLogServerUrl + '/logs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level,
-        message: formatted,
-        source: 'mobile',
-        platform: Platform.OS,
-      })
-    }).catch(() => {})
+    uploader.enqueue(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level,
+      message: formatted,
+      source: 'mobile',
+      platform: Platform.OS,
+    }))
   }
 
   // Patch console methods

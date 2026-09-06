@@ -8,7 +8,9 @@ import { isMachineOnline, MACHINE_ONLINE_WINDOW_MS } from '@/utils/machineUtils'
 // returns the current value AND schedules a single re-render at the moment the
 // window expires, so a silent machine flips to offline on time. A fresh
 // heartbeat (activeAt changes) re-runs the effect and re-arms the timer; while a
-// machine keeps beating (~20s) it never reaches the timeout.
+// machine keeps beating (~20s) it never reaches the timeout. isMachineOnline
+// applies the same window to v2 records carrying `leaseAlive: true`, so the
+// timer's expiry flips a stale lease offline too (#323).
 export function useMachineOnline(machine: Machine | null | undefined): boolean {
     const activeAt = machine?.activeAt ?? 0;
     const [, force] = React.useReducer((n: number) => n + 1, 0);
