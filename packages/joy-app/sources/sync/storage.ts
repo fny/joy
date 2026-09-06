@@ -15,6 +15,7 @@ import type { ProjectFilesList } from "./projectFiles";
 import { createReducer, reducer, reconcileSentSeqs, ReducerState, advanceDeliveryStage, bindTurnToLocal, forgetLocalMessage } from "./reducer/reducer";
 import { reconcileMachineMetadata } from "./machineReconcile";
 import { Message } from "./typesMessage";
+import { resolveMessageLink } from '@/utils/messageLink';
 import { NormalizedMessage } from "./typesRaw";
 import { getSessionName, getSessionSubtitle, getSessionAvatarId, type SessionState } from '@/utils/sessionUtils';
 import { applySettings, Settings } from "./settings";
@@ -1469,11 +1470,12 @@ export function useSessionMessages(sessionId: string): {
     }));
 }
 
+/**
+ * The message a detail link addresses — by durable identity (a tool call id,
+ * a server message id) or by this store's own row id (#165).
+ */
 export function useMessage(sessionId: string, messageId: string): Message | null {
-    return storage(useShallow((state) => {
-        const session = state.sessionMessages[sessionId];
-        return session?.messagesMap[messageId] ?? null;
-    }));
+    return storage(useShallow((state) => resolveMessageLink(state.sessionMessages[sessionId], messageId)));
 }
 
 export function useSessionUsage(sessionId: string) {

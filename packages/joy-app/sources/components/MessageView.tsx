@@ -27,6 +27,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { getSessionName } from '@/utils/sessionUtils';
+import { messageLinkId } from '@/utils/messageLink';
 
 
 // Sending a tapped answer option. sendMessage resolves ok:false (relay POST
@@ -515,7 +516,7 @@ function ToolCallBlock(props: {
         metadata={props.metadata}
         messages={props.message.children}
         sessionId={props.sessionId}
-        messageId={props.message.id}
+        messageId={messageLinkId(props.message)}
       />
     </View>
   );

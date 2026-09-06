@@ -62,6 +62,12 @@ export interface TracerState {
     // one of them (a re-fetched page) must not be buffered twice: the copy
     // claimed ANOTHER Task with the same prompt and re-owned the root (#388).
     bufferedIds: Set<string>;
+    // Sidechain roots waiting in pendingRoots, by their STRUCTURAL identity
+    // (the root's own uuid). A root re-delivered under another message id is
+    // still the same root: buffered roots are keyed by identity and claim
+    // Tasks by occurrence — the Nth root with a prompt pairs with the Nth
+    // Task carrying it — never by how many times a page was fetched.
+    bufferedRootUuids: Set<string>;
 }
 
 // Create a new tracer state with empty collections
@@ -74,7 +80,8 @@ export function createTracer(): TracerState {
         orphanMessages: new Map(),
         pendingRoots: new Map(),
         processedIds: new Set(),
-        bufferedIds: new Set()
+        bufferedIds: new Set(),
+        bufferedRootUuids: new Set()
     };
 }
 
@@ -146,6 +153,7 @@ function emitWithDescendants(state: TracerState, results: TracedMessage[], messa
         state.processedIds.add(item.id);
         state.bufferedIds.delete(item.id);
         if (uuid) {
+            state.bufferedRootUuids.delete(uuid);
             state.uuidToSidechainId.set(uuid, sidechainId);
         }
         results.push({ ...item, sidechainId });
@@ -244,12 +252,21 @@ export function traceMessages(state: TracerState, messages: NormalizedMessage[])
         const rootPrompt = getSidechainRootPrompt(message);
 
         if (rootPrompt !== null) {
+            // Structural identity: a root already owned or already waiting
+            // under this uuid is the same root re-delivered under another
+            // message id. It is observed, not a second occurrence — a copy
+            // must not claim another Task with the same prompt (#388).
+            if (uuid && (state.uuidToSidechainId.has(uuid) || state.bufferedRootUuids.has(uuid))) {
+                state.processedIds.add(message.id);
+                continue;
+            }
             const callId = claimTaskForPrompt(state, rootPrompt);
             if (callId !== null) {
                 emitWithDescendants(state, results, message, callId);
             } else {
                 // Task not loaded yet (older page) — wait for it, do not mark processed.
                 state.bufferedIds.add(message.id);
+                if (uuid) state.bufferedRootUuids.add(uuid);
                 const roots = state.pendingRoots.get(rootPrompt);
                 if (roots) roots.push(message); else state.pendingRoots.set(rootPrompt, [message]);
             }

@@ -50,11 +50,13 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     // Gemini tools (lowercase)
     edit: GeminiEditView,
     execute: GeminiExecuteView,
+    run_shell_command: BashView,
     // File attachment events
 };
 
 export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Bash: BashViewFull,
+    run_shell_command: BashViewFull,
     CodexBash: CodexBashViewFull,
     Edit: EditViewFull,
     MultiEdit: MultiEditViewFull,

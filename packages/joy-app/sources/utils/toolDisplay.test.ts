@@ -106,6 +106,19 @@ describe('terminal tool display helpers', () => {
         expect(getToolSummaryDetail(gemini)).toBe('if [ -f x ]; then cat x; fi');
     });
 
+    it('every live preview is the same bounded one-line projection, running or settled', () => {
+        const heredoc = "cat <<'EOF' > f\nbody\nEOF";
+        const running: ToolCall = { ...tool('Bash', { command: heredoc }), state: 'running', completedAt: null };
+        expect(getTerminalToolCommand(running)).toBe("cat <<'EOF' > f …");
+        expect(getTerminalToolCommand(tool('Bash', { command: heredoc }))).toBe("cat <<'EOF' > f …");
+        expect(getToolSummaryDetail(running)).toBe("cat <<'EOF' > f …");
+
+        expect(getTerminalToolCommand(tool('Bash', { command: 'a && \\\n  b | c' }))).toBe('a && b | c');
+        expect(getTerminalToolCommand(tool('run_shell_command', { command: 'npm test', directory: '/repo' }))).toBe('npm test');
+        expect(getToolSummaryCategory('run_shell_command')).toBe('terminal');
+        expect(getTerminalToolCommand(tool('Bash', { command: `echo ${'x'.repeat(500)}` }))!.length).toBeLessThanOrEqual(200);
+    });
+
     it('survives malformed arguments in the summary detail', () => {
         expect(getToolSummaryDetail(tool('Read', null))).toBeNull();
         expect(getToolSummaryDetail(tool('CodexBash', { command: 'ls', parsed_cmd: [null] }))).toBe('ls');

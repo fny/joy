@@ -337,7 +337,7 @@ const TOOL_CATEGORIES: Record<string, string> = {
     CodexPatch: 'edit', GeminiPatch: 'edit', edit: 'edit', NotebookEdit: 'edit',
     Read: 'read', read: 'read', NotebookRead: 'read',
     Bash: 'terminal', CodexBash: 'terminal', GeminiBash: 'terminal',
-    shell: 'terminal', execute: 'terminal',
+    shell: 'terminal', execute: 'terminal', run_shell_command: 'terminal',
     Grep: 'search', Glob: 'search', LS: 'search', search: 'search', WebSearch: 'search',
     WebFetch: 'web',
     Task: 'task', Agent: 'task',

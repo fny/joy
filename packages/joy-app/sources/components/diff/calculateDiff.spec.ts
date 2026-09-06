@@ -74,4 +74,25 @@ describe('getPatchDiffStats (#274)', () => {
         const patch = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-b\n+c\n d\n';
         expect(getPatchDiffStats(patch)).toEqual({ additions: 1, deletions: 1 });
     });
+
+    it('classifies lines structurally: header-shaped content inside the hunk\'s declared counts is content, the next real header is not', () => {
+        const patch = [
+            '--- a/x', '+++ b/x',
+            '@@ -1,3 +1,3 @@',
+            ' keep',
+            '-- SQL comment',      // removed content that begins with "--"
+            '--- a/literal',       // removed content shaped like a header
+            '++ added',            // added content that begins with "++"
+            '+++ b/literal',       // added content shaped like a header
+            '--- a/y', '+++ b/y',  // the next file's real header: the hunk is spent
+            '@@ -1 +1 @@',
+            '-old', '+new',
+            '',
+        ].join('\n');
+        expect(getPatchDiffStats(patch)).toEqual({ additions: 3, deletions: 3 });
+    });
+
+    it('a hunk with omitted counts (one line each side) counts a header-shaped pair as +1 −1', () => {
+        expect(getPatchDiffStats('--- a/x\n+++ b/x\n@@ -1 +1 @@\n--\n++\n')).toEqual({ additions: 1, deletions: 1 });
+    });
 });

@@ -584,6 +584,61 @@ describe('reducerTracer', () => {
             expect(traceMessages(state, [child]).map((m) => m.sidechainId)).toEqual(['a']);
         });
 
+        it('keys buffered roots by structural identity: the same root under another message id is one occurrence (#388)', () => {
+            const state = createTracer();
+            const root = (id: string): NormalizedMessage => ({
+                id, localId: null, createdAt: 1000, role: 'agent', isSidechain: true,
+                content: [{ type: 'sidechain', uuid: 'root-uuid', prompt: 'Same' }]
+            });
+            expect(traceMessages(state, [root('root-page-1')])).toHaveLength(0);
+            expect(traceMessages(state, [root('root-page-2')])).toHaveLength(0);
+            expect(state.pendingRoots.get('Same')).toHaveLength(1);
+            expect(state.bufferedRootUuids.has('root-uuid')).toBe(true);
+
+            const tasks: NormalizedMessage = {
+                id: 'tasks', localId: null, createdAt: 2000, role: 'agent', isSidechain: false,
+                content: [
+                    { type: 'tool-call', id: 'a', name: 'Task', input: { prompt: 'Same' }, description: null, uuid: 'tasks-uuid', parentUUID: null },
+                    { type: 'tool-call', id: 'b', name: 'Task', input: { prompt: 'Same' }, description: null, uuid: 'tasks-uuid', parentUUID: null },
+                ]
+            };
+            const released = traceMessages(state, [tasks]);
+            expect(released.filter((m) => m.sidechainId).map((m) => [m.id, m.sidechainId])).toEqual([['root-page-1', 'a']]);
+            expect(state.uuidToSidechainId.get('root-uuid')).toBe('a');
+            expect(state.promptToTaskIds.get('Same')).toEqual(['b']);
+            expect(state.bufferedRootUuids.size).toBe(0);
+            // A third copy after emission is observed, never a new occurrence.
+            expect(traceMessages(state, [root('root-page-3')])).toHaveLength(0);
+            expect(state.promptToTaskIds.get('Same')).toEqual(['b']);
+        });
+
+        it('pairs the Nth same-prompt root with the Nth same-prompt Task, by occurrence (#388)', () => {
+            const state = createTracer();
+            const root = (id: string, uuid: string): NormalizedMessage => ({
+                id, localId: null, createdAt: 1000, role: 'agent', isSidechain: true,
+                content: [{ type: 'sidechain', uuid, prompt: 'Same' }]
+            });
+            traceMessages(state, [root('root-1', 'uuid-1')]);
+            traceMessages(state, [root('root-2', 'uuid-2')]);
+            traceMessages(state, [root('root-1', 'uuid-1')]); // re-fetched page
+            expect(state.pendingRoots.get('Same')).toHaveLength(2);
+
+            const task = (id: string): NormalizedMessage => ({
+                id: `task-${id}`, localId: null, createdAt: 2000, role: 'agent', isSidechain: false,
+                content: [{ type: 'tool-call', id, name: 'Task', input: { prompt: 'Same' }, description: null, uuid: `${id}-uuid`, parentUUID: null }]
+            });
+            expect(traceMessages(state, [task('a')]).filter((m) => m.sidechainId).map((m) => m.id)).toEqual(['root-1']);
+            expect(traceMessages(state, [task('b')]).filter((m) => m.sidechainId).map((m) => m.id)).toEqual(['root-2']);
+            expect(state.uuidToSidechainId.get('uuid-1')).toBe('a');
+            expect(state.uuidToSidechainId.get('uuid-2')).toBe('b');
+
+            const child = (id: string, parentUUID: string): NormalizedMessage => ({
+                id, localId: null, createdAt: 3000, role: 'agent', isSidechain: true,
+                content: [{ type: 'text', text: id, uuid: `${id}-uuid`, parentUUID }]
+            });
+            expect(traceMessages(state, [child('c1', 'uuid-1'), child('c2', 'uuid-2')]).map((m) => m.sidechainId)).toEqual(['a', 'b']);
+        });
+
         it('buffers an orphan delivered twice only once (#388)', () => {
             const state = createTracer();
             const orphan: NormalizedMessage = {
@@ -735,7 +790,9 @@ describe('deep orphan chains (#389)', () => {
         expect(state.processedIds.size).toBe(N + 2);
         const ids = new Set(released.map(m => m.id));
         expect(ids.size).toBe(N + 1);
-    });
+    // A stack-depth test, not a timing one: under a loaded full-suite run it
+    // takes ~3s and must not flake against the 5s default.
+    }, 20_000);
 
     it('keeps depth-first emit order for branching orphans', () => {
         const state = createTracer();

@@ -137,7 +137,7 @@ export type ToolCallLike = {
 // Families
 // ---------------------------------------------------------------------------
 
-const TERMINAL_TOOLS = new Set(['Bash', 'CodexBash', 'GeminiBash', 'shell', 'execute']);
+const TERMINAL_TOOLS = new Set(['Bash', 'CodexBash', 'GeminiBash', 'shell', 'execute', 'run_shell_command']);
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'CodexPatch', 'GeminiPatch', 'edit', 'NotebookEdit', 'file-edit', 'CodexDiff', 'GeminiDiff']);
 const READ_TOOLS = new Set(['Read', 'read', 'NotebookRead', 'LS']);
 const SEARCH_TOOLS = new Set(['Grep', 'Glob', 'search', 'WebSearch']);
@@ -418,7 +418,8 @@ function buildCommandModel(name: string, args: Record<string, unknown>, tool: To
     const argv = Array.isArray(args.command) ? args.command.filter((part): part is string => typeof part === 'string') : null;
     const operations = parsedOperations(args.parsed_cmd);
     let command: string | null = null;
-    let cwd = asNonEmptyString(args.cwd);
+    // Gemini's `run_shell_command` names its working directory `directory`.
+    let cwd = asNonEmptyString(args.cwd) ?? asNonEmptyString(args.directory);
     let description = asNonEmptyString(tool.description) ?? asNonEmptyString(args.description);
 
     // A single harness-parsed operation is the command; a compound command
@@ -462,6 +463,51 @@ function buildCommandModel(name: string, args: Record<string, unknown>, tool: To
     }
 
     return { command, argv, cwd, description, operations, stdout, stderr, exitCode };
+}
+
+/** Longest one-line command preview a card header / summary row shows. */
+export const COMMAND_PREVIEW_MAX_LENGTH = 200;
+
+// `<<EOF`, `<<-EOF`, `<< 'EOF'`, `<<"EOF"`, `<<\EOF` — a heredoc opener.
+const HEREDOC_RE = /<<-?\s*['"\\]?\w/;
+
+/**
+ * The ONE bounded, single-line projection of a command for every live
+ * preview — the compact card header, the group summary row, the Task child
+ * row, the detail header — running or settled alike. Each surface used to cut
+ * the command its own way (the first `parsed_cmd` of a compound Codex
+ * command, a Gemini title sliced at its first " [", the first 20 or 50
+ * characters), so the same call previewed differently from card to card
+ * (#413 #392 #394 #388).
+ *
+ * The whole command is kept on one line: newlines and runs of whitespace
+ * collapse to one space, so `a && \` + newline + `  b | c` previews as
+ * `a && b | c`. A heredoc is the exception — its body is data, not the
+ * command — so `cat <<'EOF' > f` + body previews as the first line followed
+ * by an ellipsis. Anything longer than `maxLength` is cut with an ellipsis, so
+ * a pathological command can never blow up a header.
+ */
+export function toolCommandPreview(command: string, maxLength: number = COMMAND_PREVIEW_MAX_LENGTH): string {
+    const lines = command.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    if (lines.length === 0) return '';
+    let preview: string;
+    if (lines.length > 1 && HEREDOC_RE.test(lines[0])) {
+        preview = `${lines[0].replace(/\s+/g, ' ')} …`;
+    } else {
+        preview = lines.map((line) => line.replace(/\\$/, '').trim()).join(' ').replace(/\s+/g, ' ').trim();
+    }
+    if (maxLength > 0 && preview.length > maxLength) {
+        return `${preview.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+    }
+    return preview;
+}
+
+/** The bounded one-line preview of a model's command, or null for a non-terminal call. */
+export function commandPreviewOf(model: ToolCallModel, maxLength?: number): string | null {
+    const command = model.command?.command;
+    if (typeof command !== 'string') return null;
+    const preview = toolCommandPreview(command, maxLength);
+    return preview.length > 0 ? preview : null;
 }
 
 // ---------------------------------------------------------------------------
