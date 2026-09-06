@@ -29,40 +29,73 @@ export interface GitStatusFiles {
 }
 
 /**
- * Fetch detailed git status with file-level information
+ * Outcome of a git-status read. The three states are DISTINCT so callers can
+ * keep the last good list on a failed read instead of showing "not a git
+ * repository" (the old `null` meant both):
+ *  - ok:          a fresh, complete file list;
+ *  - not-repo:    the daemon answered and there is nothing to list;
+ *  - unavailable: no answer / a failed request — the last list still stands.
  */
-export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFiles | null> {
+export type GitStatusFilesResult =
+    | { kind: 'ok'; files: GitStatusFiles }
+    | { kind: 'not-repo' }
+    | { kind: 'unavailable'; error: string };
+
+/**
+ * Fetch detailed git status with file-level information (three-state).
+ */
+export async function fetchGitStatusFiles(sessionId: string): Promise<GitStatusFilesResult> {
     try {
         // Check if we have a session with valid metadata
         const session = storage.getState().sessions[sessionId];
         if (!session?.metadata?.path) {
-            return null;
+            return { kind: 'unavailable', error: 'session has no path yet' };
         }
 
         // v2 sessions read git state from the daemon's machine plane over the
         // sealed tunnel: one parsed status call plus two numstat calls, instead
         // of shelling out through a realtime socket.
         const mctx = await sync.awaitMachineCtx(sessionId);
-        if (mctx) {
-            const { status, data } = await machineGitStatus(mctx);
-            if (status !== 200 || !data?.ok) return null; // not a repo (or git failed)
-            const [unstaged, staged] = await Promise.all([
-                machineGitDiff(mctx, { numstat: true }),
-                machineGitDiff(mctx, { numstat: true, staged: true }),
-            ]);
-            return fromV2Status(
-                data,
-                unstaged.data?.diff ?? '',
-                staged.data?.diff ?? '',
-            );
+        if (!mctx) {
+            return { kind: 'unavailable', error: 'no machine context yet' }; // the shell fallback never reached the daemon (#5)
         }
 
-        return null; // no machine context yet; the shell fallback never reached the daemon (#5)
+        const { status, data } = await machineGitStatus(mctx);
+        if (status !== 200 || !data) {
+            return { kind: 'unavailable', error: `status HTTP ${status}` };
+        }
+        if (!data.ok) return { kind: 'not-repo' }; // the daemon answered: not a repo (or git failed there)
 
+        const [unstaged, staged] = await Promise.all([
+            machineGitDiff(mctx, { numstat: true }),
+            machineGitDiff(mctx, { numstat: true, staged: true }),
+        ]);
+        // Each diff response is checked on its own: a 500 / ok:false numstat
+        // used to be read as an EMPTY diff, so a failed read came back as a
+        // successful file list with zero added/removed lines (#377). A failed
+        // read is unavailable; the caller keeps the last real statistics.
+        for (const [label, res] of [['unstaged', unstaged], ['staged', staged]] as const) {
+            if (res.status !== 200 || !res.data?.ok || typeof res.data.diff !== 'string') {
+                return { kind: 'unavailable', error: `${label} numstat failed: ${res.data?.error ?? `HTTP ${res.status}`}` };
+            }
+        }
+        return {
+            kind: 'ok',
+            files: fromV2Status(data, unstaged.data!.diff!, staged.data!.diff!),
+        };
     } catch (error) {
         console.error('Error fetching git status files for session', sessionId, ':', error);
-        return null;
+        return { kind: 'unavailable', error: error instanceof Error ? error.message : String(error) };
     }
+}
+
+/**
+ * Legacy two-state view of fetchGitStatusFiles: null for BOTH "not a repo" and
+ * "unavailable". Callers that own a cache should use fetchGitStatusFiles.
+ */
+export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFiles | null> {
+    const result = await fetchGitStatusFiles(sessionId);
+    return result.kind === 'ok' ? result.files : null;
 }
 
 /** Porcelain v2 status letter → the UI's file status. */

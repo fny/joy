@@ -370,6 +370,7 @@ export const pt: TranslationStructure = {
         openUrl: 'Abrir URL de login',
         codePlaceholder: 'Cole o código aqui…',
         submitCode: 'Enviar código de login',
+        sendFailed: 'Não foi possível enviar o código. Verifique a conexão e tente novamente.',
     },
 
     joyLogs: {

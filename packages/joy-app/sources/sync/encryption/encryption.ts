@@ -127,6 +127,9 @@ export class Encryption {
      * Remove session encryption from memory when session is deleted
      */
     removeSessionEncryption(sessionId: string): void {
+        // Retire first: a decryption still in flight on the old instance must
+        // not repopulate the cache its replacement will own.
+        this.sessionEncryptions.get(sessionId)?.retire();
         this.sessionEncryptions.delete(sessionId);
         // Also clear any cached data for this session
         this.cache.clearSessionCache(sessionId);
@@ -172,7 +175,14 @@ export class Encryption {
      * Remove machine encryption from memory when the machine is deleted
      */
     removeMachineEncryption(machineId: string): void {
+        // Cached metadata/daemon state is keyed by machineId:version, and a
+        // replacement machine with the same id restarts its version numbering,
+        // so without clearing here it served the REMOVED machine's decrypted
+        // records without ever opening its own (#351). Retire the old instance
+        // too so an in-flight decryption cannot write them back.
+        this.machineEncryptions.get(machineId)?.retire();
         this.machineEncryptions.delete(machineId);
+        this.cache.clearMachineCache(machineId);
     }
 
     //

@@ -372,6 +372,7 @@ export const zhHans: TranslationStructure = {
         openUrl: '打开登录 URL',
         codePlaceholder: '在此粘贴授权码…',
         submitCode: '提交授权码',
+        sendFailed: '无法发送验证码。请检查连接后重试。',
     },
 
     joyLogs: {

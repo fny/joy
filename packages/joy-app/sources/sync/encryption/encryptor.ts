@@ -3,6 +3,7 @@ import { encodeBase64, decodeBase64 } from "@/encryption/base64";
 import sodium from '@/encryption/libsodium.lib';
 import { decodeUTF8, encodeUTF8 } from "@/encryption/text";
 import { decryptAESGCMString, encryptAESGCMString } from "@/encryption/aes";
+import { attempt } from "@/utils/isolateBad";
 
 //
 // IMPORTANT: Right now there is a bug in the AES implementation and it works only with a normal strings converted to Uint8Array. 
@@ -71,15 +72,18 @@ export class BoxEncryption implements Encryptor, Decryptor {
     }
 
     async decrypt(data: Uint8Array[]): Promise<(any | null)[]> {
-        // Process as batch, not Promise.all - more efficient
+        // Per-item boundary, like the other decryptors: an authentic box whose
+        // plaintext is not JSON (anyone holding the recipient public key can
+        // seal one) used to throw out of JSON.parse and reject the WHOLE
+        // batch, losing every valid result around it (#352). Now that item is
+        // null and reported; the rest keep their positions.
         const results: (any | null)[] = [];
         for (const item of data) {
-            let decrypted = decryptBox(item, this.privateKey);
-            if (!decrypted) {
-                results.push(null);
-                continue;
-            }
-            results.push(JSON.parse(decodeUTF8(decrypted)));
+            results.push(attempt(() => {
+                const decrypted = decryptBox(item, this.privateKey);
+                if (!decrypted) return null;
+                return JSON.parse(decodeUTF8(decrypted));
+            }, (error) => console.warn('[encryptor] box item skipped (undecodable plaintext):', error)));
         }
         return results;
     }

@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import { AgentDefaultOverridesSchema } from './agentDefaults';
+import { recoverFields } from '@/utils/isolateBad';
 
 //
 // Settings Schema
@@ -139,32 +140,33 @@ Object.freeze(settingsDefaults);
 
 export function settingsParse(settings: unknown): Settings {
     // Handle null/undefined/invalid inputs
-    if (!settings || typeof settings !== 'object') {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
         return { ...settingsDefaults };
     }
+    const input = settings as Record<string, unknown>;
 
-    const parsed = SettingsSchemaPartial.safeParse(settings);
-    if (!parsed.success) {
-        // For invalid settings, preserve unknown fields but use defaults for known fields
-        const unknownFields = { ...(settings as any) };
-        // Remove all known schema fields from unknownFields
-        const knownFields = Object.keys(SettingsSchema.shape);
-        knownFields.forEach(key => delete unknownFields[key]);
-        return { ...settingsDefaults, ...unknownFields };
+    // Fields are validated INDEPENDENTLY: one malformed value (e.g.
+    // showLineNumbers:"false" written by another client) used to fail the
+    // whole-object parse and reset EVERY known setting to its default — saved
+    // API keys, notificationsMobile, the explicit Claude permission-mode
+    // override — and the next unrelated edit synced those defaults back (#399).
+    const { value, invalidKeys } = recoverFields(SettingsSchema.shape, input, settingsDefaults);
+    if (invalidKeys.length > 0) {
+        console.warn(`[settings] ignoring invalid synced field(s), keeping the rest: ${invalidKeys.join(', ')}`);
     }
 
     // Migration: Convert old 'zh' language code to 'zh-Hans'
-    if (parsed.data.preferredLanguage === 'zh') {
+    if (value.preferredLanguage === 'zh') {
         console.log('[Settings Migration] Converting language code from "zh" to "zh-Hans"');
-        parsed.data.preferredLanguage = 'zh-Hans';
+        value.preferredLanguage = 'zh-Hans';
     }
 
-    // Merge defaults, parsed settings, and preserve unknown fields
-    const unknownFields = { ...(settings as any) };
-    // Remove known fields from unknownFields to preserve only the unknown ones
-    Object.keys(parsed.data).forEach(key => delete unknownFields[key]);
+    // Preserve unknown fields (forward compatibility): everything that is not
+    // a known schema key rides along untouched.
+    const unknownFields: Record<string, unknown> = { ...input };
+    Object.keys(SettingsSchema.shape).forEach(key => delete unknownFields[key]);
 
-    return { ...settingsDefaults, ...parsed.data, ...unknownFields };
+    return { ...settingsDefaults, ...unknownFields, ...value };
 }
 
 //

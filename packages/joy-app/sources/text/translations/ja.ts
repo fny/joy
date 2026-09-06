@@ -372,6 +372,7 @@ export const ja: TranslationStructure = {
         openUrl: 'ログインURLを開く',
         codePlaceholder: 'ここにコードを貼り付け…',
         submitCode: 'ログインコードを送信',
+        sendFailed: 'コードを送信できませんでした。接続を確認してもう一度お試しください。',
     },
 
     joyLogs: {

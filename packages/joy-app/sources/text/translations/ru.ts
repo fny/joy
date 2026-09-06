@@ -498,6 +498,7 @@ export const ru: TranslationStructure = {
         openUrl: 'Открыть URL для входа',
         codePlaceholder: 'Вставьте код сюда…',
         submitCode: 'Отправить код входа',
+        sendFailed: 'Не удалось отправить код. Проверьте соединение и попробуйте ещё раз.',
     },
 
     joyLogs: {

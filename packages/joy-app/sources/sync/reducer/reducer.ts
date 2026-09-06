@@ -473,38 +473,48 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             continue;
         }
 
-        // Handle context reset events - reset state and let the message be shown
+        // Handle context reset events - reset state and let the message be shown.
+        // A reset is a SNAPSHOT like any other and obeys the same seq/timestamp
+        // ordering: paging history backward to an old "Context was reset" (seq
+        // 10) used to unconditionally zero the current usage and empty the
+        // todos recorded at seq 100, and dedup then prevented replaying the
+        // newer data to repair the display (#391).
         if (msg.role === 'event' && msg.content.type === 'message' && msg.content.message === 'Context was reset') {
-            // Reset todos to empty array and reset usage to zero
-            state.latestTodos = {
-                todos: [],
-                timestamp: msg.createdAt,  // Use message timestamp, not current time
-                seq: msg.seq ?? null
-            };
-            state.latestUsage = {
-                inputTokens: 0,
-                outputTokens: 0,
-                cacheCreation: 0,
-                cacheRead: 0,
-                contextSize: 0,
-                timestamp: msg.createdAt,  // Use message timestamp to avoid blocking older usage data
-                seq: msg.seq ?? null
-            };
+            if (isLaterSnapshot(state.latestTodos, msg.seq ?? null, msg.createdAt)) {
+                state.latestTodos = {
+                    todos: [],
+                    timestamp: msg.createdAt,  // Use message timestamp, not current time
+                    seq: msg.seq ?? null
+                };
+            }
+            if (isLaterSnapshot(state.latestUsage, msg.seq ?? null, msg.createdAt)) {
+                state.latestUsage = {
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheCreation: 0,
+                    cacheRead: 0,
+                    contextSize: 0,
+                    timestamp: msg.createdAt,  // Use message timestamp to avoid blocking older usage data
+                    seq: msg.seq ?? null
+                };
+            }
             // Don't continue - let the event be processed normally to create a message
         }
 
         // Handle compaction completed events - reset context but keep todos
+        // (same ordering rule as above, #391)
         if (msg.role === 'event' && msg.content.type === 'message' && msg.content.message === 'Compaction completed') {
-            // Reset usage/context to zero but keep todos unchanged
-            state.latestUsage = {
-                inputTokens: 0,
-                outputTokens: 0,
-                cacheCreation: 0,
-                cacheRead: 0,
-                contextSize: 0,
-                timestamp: msg.createdAt,  // Use message timestamp to avoid blocking older usage data
-                seq: msg.seq ?? null
-            };
+            if (isLaterSnapshot(state.latestUsage, msg.seq ?? null, msg.createdAt)) {
+                state.latestUsage = {
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheCreation: 0,
+                    cacheRead: 0,
+                    contextSize: 0,
+                    timestamp: msg.createdAt,  // Use message timestamp to avoid blocking older usage data
+                    seq: msg.seq ?? null
+                };
+            }
             // Don't continue - let the event be processed normally to create a message
         }
 
