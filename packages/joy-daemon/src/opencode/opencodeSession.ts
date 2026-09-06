@@ -288,6 +288,8 @@ export class OpencodeSession implements AgentSession {
   #ocSessionId: string | null = null;
   #resumeOcSessionId?: string;
   #reapPid?: number;
+  /** `JOY_PGROUP` of the server this generation spawned (#628). */
+  #procMarker?: string;
   #thinking = false;
   #started = false;
   #activeTurn: string | null = null;
@@ -408,8 +410,9 @@ export class OpencodeSession implements AgentSession {
       }
       // Killed while we waited for the reap: this generation must not spawn.
       if (this.status === "ended") return;
-      const { proc, port } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
+      const { proc, port, marker } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
       this.#proc = proc;
+      this.#procMarker = marker;
       proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
       proc.on("error", () => { if (this.status !== "ended") this.end("process_exited"); });
       const p = await port;
@@ -774,7 +777,7 @@ export class OpencodeSession implements AgentSession {
     this.endReason = reason;
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
-    if (this.#proc?.pid) killOpencodeServerPid(this.#proc.pid);
+    if (this.#proc?.pid) killOpencodeServerPid(this.#proc.pid, this.#procMarker);
     this.#proc = null;
     // The coordinator is retired FIRST: the turn-end below must not be
     // mistaken for the runtime's verdict on a dead generation's commands.
