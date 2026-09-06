@@ -11,9 +11,10 @@ import { createHash } from "crypto";
 import { spawn as nodeSpawn, exec, type ExecOptions } from "child_process";
 import { promisify } from "util";
 import { existsSync, realpathSync, lstatSync } from "fs";
-import { readFile, writeFile, readdir, stat, lstat, unlink } from "fs/promises";
+import { readFile, readdir, stat, lstat, unlink } from "fs/promises";
 import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, tmpdir } from "os";
+import { writeFileAtomicAsync } from "./atomicWrite";
 
 const execAsync = promisify(exec);
 
@@ -110,7 +111,11 @@ export function validatePath(targetPath: string, workingDirectory: string, extra
   const within = (root: string) => {
     const r = realResolve(resolve(root));
     if (r === null) return false;
-    return realTarget === r || realTarget.startsWith(r + sep);
+    // A root that already ends in the separator (the filesystem root "/")
+    // must not grow a second one: `"//"` is a prefix of nothing, so a session
+    // whose cwd is "/" rejected every one of its own descendants (#536).
+    const prefix = r.endsWith(sep) ? r : r + sep;
+    return realTarget === r || realTarget.startsWith(prefix);
   };
   // Jailed to the session cwd, plus any explicitly allowed extra roots (the
   // readFile op passes the session's own ~/.joy/sessions/<id> dir so the app
@@ -192,42 +197,72 @@ export async function handleReadFile(workingDirectory: string, data: ReadFileReq
   }
 }
 
+// Per-path write serialization (#63): the expectedHash compare and the write
+// must be ONE critical section. Two clients PUTting different content against
+// the same expectedHash both read the file (both hashes match), then both
+// wrote — both returned success and one edit was silently lost. Keyed by the
+// REAL path so two spellings of one file (symlink, `./`) share the lock.
+// In-process only: the daemon is the sole writer on behalf of the app; other
+// processes editing the tree are outside this contract.
+const pathLocks = new Map<string, Promise<unknown>>();
+export async function withPathLock<T>(realPath: string, fn: () => Promise<T>): Promise<T> {
+  const prev = pathLocks.get(realPath) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const mine = prev.then(() => gate);
+  pathLocks.set(realPath, mine);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (pathLocks.get(realPath) === mine) pathLocks.delete(realPath);
+  }
+}
+
 export async function handleWriteFile(workingDirectory: string, data: WriteFileRequest): Promise<WriteFileResponse> {
   const validation = validatePath(data.path, workingDirectory);
   if (!validation.valid) return { success: false, error: validation.error };
   const targetPath = validation.resolvedPath!;
-  try {
-    if (data.expectedHash !== null && data.expectedHash !== undefined) {
-      // Must match existing file's hash.
-      try {
-        const existingBuffer = await readFile(targetPath);
-        const existingHash = createHash("sha256").update(existingBuffer).digest("hex");
-        if (existingHash !== data.expectedHash) {
-          return { success: false, error: `File hash mismatch. Expected: ${data.expectedHash}, Actual: ${existingHash}` };
+  return withPathLock(targetPath, async () => {
+    try {
+      if (data.expectedHash !== null && data.expectedHash !== undefined) {
+        // Must match existing file's hash.
+        try {
+          const existingBuffer = await readFile(targetPath);
+          const existingHash = createHash("sha256").update(existingBuffer).digest("hex");
+          if (existingHash !== data.expectedHash) {
+            return { success: false, error: `File hash mismatch. Expected: ${data.expectedHash}, Actual: ${existingHash}` };
+          }
+        } catch (error) {
+          const nodeError = error as NodeJS.ErrnoException;
+          if (nodeError.code !== "ENOENT") throw error;
+          return { success: false, error: "File does not exist but hash was provided" };
         }
-      } catch (error) {
-        const nodeError = error as NodeJS.ErrnoException;
-        if (nodeError.code !== "ENOENT") throw error;
-        return { success: false, error: "File does not exist but hash was provided" };
+      } else {
+        // expectedHash === null → expecting a NEW file; reject if one exists.
+        try {
+          await stat(targetPath);
+          return { success: false, error: "File already exists but was expected to be new" };
+        } catch (error) {
+          const nodeError = error as NodeJS.ErrnoException;
+          if (nodeError.code !== "ENOENT") throw error;
+          // File doesn't exist — proceed.
+        }
       }
-    } else {
-      // expectedHash === null → expecting a NEW file; reject if one exists.
-      try {
-        await stat(targetPath);
-        return { success: false, error: "File already exists but was expected to be new" };
-      } catch (error) {
-        const nodeError = error as NodeJS.ErrnoException;
-        if (nodeError.code !== "ENOENT") throw error;
-        // File doesn't exist — proceed.
-      }
+      const buffer = Buffer.from(data.content, "base64");
+      // Atomic replace (#539): fs.writeFile truncates first, so an ENOSPC
+      // mid-write left only a partial replacement of the user's source file
+      // with no backup and no rollback. The complete new contents land in a
+      // sibling temp file and are renamed in; on any failure the original is
+      // still there, byte for byte.
+      await writeFileAtomicAsync(targetPath, buffer);
+      const hash = createHash("sha256").update(buffer).digest("hex");
+      return { success: true, hash };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : "Failed to write file" };
     }
-    const buffer = Buffer.from(data.content, "base64");
-    await writeFile(targetPath, buffer);
-    const hash = createHash("sha256").update(buffer).digest("hex");
-    return { success: true, hash };
-  } catch (error) {
-    return { success: false, error: error instanceof Error ? error.message : "Failed to write file" };
-  }
+  });
 }
 
 /**
@@ -355,6 +390,9 @@ function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record
       windowsHide: true,
       env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
     });
+    // Nothing is ever fed to the tool: close stdin so a tool that would read
+    // it (rg with no path operand) exits instead of waiting forever.
+    child.stdin.end();
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => { stdout += d.toString(); });
@@ -364,6 +402,117 @@ function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record
   });
 }
 
+// ── Tool argv jail (#537) ────────────────────────────────────────────────────
+// The app's typed grep/diff routes build argv from validated fields, but the
+// session-scoped `ripgrep`/`difftastic` ops take RAW argv, and only `cwd` was
+// checked: a positional `/etc/passwd`, `-f /etc/shadow` (pattern FILE),
+// `--pre <cmd>` (run a preprocessor on every file), `-L` (follow symlinks
+// out of the tree) or `--ignore-file ~/.ssh/config` all read outside every
+// allowed root. Policy: allow-list of options the app needs; every positional
+// that names a path must validate against the jail; anything else (including
+// every unknown option) is refused rather than forwarded. Positionals keep
+// the caller's spelling (rg prints filenames relative to the operand it was
+// given, and the app parses that), only their containment is checked.
+interface ArgvSpec {
+  /** Options taking no value. */
+  flags: Set<string>;
+  /** Options taking one value (also accepted as --opt=value). Value must
+   *  match the validator when one is given. */
+  valued: Map<string, ((v: string) => boolean) | null>;
+  /** Positional handling: which positionals (after options) are paths. */
+  positionals: (positionals: string[]) => { paths: string[]; error?: string };
+}
+const isCount = (v: string) => /^\d{1,7}$/.test(v);
+const isWord = (v: string) => /^[A-Za-z0-9_.+:-]{1,64}$/.test(v);
+const RG_SPEC: ArgvSpec = {
+  flags: new Set([
+    "-i", "--ignore-case", "-s", "--case-sensitive", "-S", "--smart-case",
+    "-n", "--line-number", "-N", "--no-line-number", "-H", "--with-filename", "-I", "--no-filename",
+    "--no-heading", "--heading", "--column", "--no-column", "-o", "--only-matching",
+    "-w", "--word-regexp", "-x", "--line-regexp", "-F", "--fixed-strings", "-v", "--invert-match",
+    "-l", "--files-with-matches", "--files-without-match", "-c", "--count", "--count-matches",
+    "--json", "--files", "--hidden", "--no-ignore", "--no-ignore-vcs", "-U", "--multiline", "--multiline-dotall",
+    "--no-messages", "--trim", "--stats", "--null", "-0", "--no-config", "--sort-files",
+  ]),
+  valued: new Map<string, ((v: string) => boolean) | null>([
+    ["-e", null], ["--regexp", null],
+    ["-g", null], ["--glob", null], ["--iglob", null],
+    ["-t", isWord], ["--type", isWord], ["-T", isWord], ["--type-not", isWord],
+    ["-m", isCount], ["--max-count", isCount], ["--max-depth", isCount], ["--maxdepth", isCount],
+    ["-A", isCount], ["--after-context", isCount], ["-B", isCount], ["--before-context", isCount], ["-C", isCount], ["--context", isCount],
+    ["-M", isCount], ["--max-columns", isCount], ["--max-filesize", (v) => /^\d{1,12}[KMG]?$/.test(v)],
+    ["--color", isWord], ["--colors", null], ["--sort", isWord], ["--sortr", isWord], ["-E", isWord], ["--encoding", isWord],
+    ["-r", null], ["--replace", null],
+  ]),
+  // rg: [PATTERN] [PATH...] — the first positional is the pattern unless -e/--regexp
+  // supplied it (then every positional is a path). `--files` has no pattern.
+  positionals: (ps) => ps.length ? { paths: ps } : { paths: [] },
+};
+const DIFFT_SPEC: ArgvSpec = {
+  flags: new Set(["--skip-unchanged", "--check-only", "--ignore-comments", "--strip-cr", "--exit-code", "--missing-as-empty", "--sort-paths", "--syntax-highlight", "--no-syntax-highlight"]),
+  valued: new Map<string, ((v: string) => boolean) | null>([
+    ["--context", isCount], ["--width", isCount], ["--tab-width", isCount], ["--graph-limit", isCount], ["--byte-limit", isCount], ["--parse-error-limit", isCount],
+    ["--display", isWord], ["--color", isWord], ["--background", isWord], ["--language", isWord], ["--override", null],
+  ]),
+  positionals: (ps) => ps.length > 2 ? { paths: ps, error: "difftastic accepts at most two paths" } : { paths: ps },
+};
+
+/** Validate raw tool argv against the jail. Returns the argv to run (the
+ *  caller's own strings — never rewritten) or an error. */
+export function jailToolArgs(
+  tool: "rg" | "difft",
+  args: unknown,
+  workingDirectory: string,
+  extraRoots: string[] = [],
+): { ok: true; args: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(args) || !args.every((a) => typeof a === "string")) return { ok: false, error: "args must be an array of strings" };
+  const spec = tool === "rg" ? RG_SPEC : DIFFT_SPEC;
+  const argv = args as string[];
+  const positionals: string[] = [];
+  let sawPatternFlag = false;
+  let optionsEnded = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (optionsEnded || !a.startsWith("-") || a === "-") {
+      // `-` alone means stdin for both tools — refuse it as a path below.
+      positionals.push(a);
+      continue;
+    }
+    if (a === "--") { optionsEnded = true; continue; }
+    // --opt=value form.
+    const eq = a.startsWith("--") ? a.indexOf("=") : -1;
+    const name = eq > 0 ? a.slice(0, eq) : a;
+    const inlineValue = eq > 0 ? a.slice(eq + 1) : undefined;
+    if (spec.flags.has(name)) {
+      if (inlineValue !== undefined) return { ok: false, error: `option ${name} takes no value` };
+      continue;
+    }
+    if (spec.valued.has(name)) {
+      const check = spec.valued.get(name) ?? null;
+      const value = inlineValue ?? argv[++i];
+      if (value === undefined) return { ok: false, error: `option ${name} needs a value` };
+      if (check && !check(value)) return { ok: false, error: `invalid value for ${name}` };
+      if (name === "-e" || name === "--regexp") sawPatternFlag = true;
+      continue;
+    }
+    // Every other option — `-f/--file`, `--pre`, `--pre-glob`, `-L/--follow`,
+    // `--ignore-file`, `--type-add`, `--config`, `-z/--search-zip`, combined
+    // short flags (`-in`) — is refused: unknown options can name files.
+    return { ok: false, error: `option ${name} is not allowed` };
+  }
+  const { paths, error } = spec.positionals(positionals);
+  if (error) return { ok: false, error };
+  // rg's first positional is the PATTERN unless -e supplied one; patterns
+  // are not paths and are not checked (they never open a file).
+  const pathOperands = tool === "rg" && !sawPatternFlag && !argv.includes("--files") ? paths.slice(1) : paths;
+  for (const p of pathOperands) {
+    if (p === "-" || p === "") return { ok: false, error: "stdin / empty path operands are not allowed" };
+    const v = validatePath(p, workingDirectory, extraRoots);
+    if (!v.valid) return { ok: false, error: v.error ?? `Access denied: Path '${p}' is outside the working directory` };
+  }
+  return { ok: true, args: argv };
+}
+
 export async function handleRipgrep(workingDirectory: string, data: RipgrepRequest, extraRoots: string[] = []): Promise<RipgrepResponse> {
   let cwd = data.cwd;
   if (cwd) {
@@ -371,8 +520,12 @@ export async function handleRipgrep(workingDirectory: string, data: RipgrepReque
     if (!validation.valid) return { success: false, error: validation.error };
     cwd = validation.resolvedPath;
   }
+  // Path operands resolve against the cwd rg will run in, not the session
+  // root — the two differ when the caller passed a (validated) `cwd`.
+  const jailed = jailToolArgs("rg", data.args, cwd ?? workingDirectory, extraRoots);
+  if (!jailed.ok) return { success: false, error: jailed.error };
   try {
-    const result = await runTool(RG_BIN, data.args, cwd ?? workingDirectory);
+    const result = await runTool(RG_BIN, jailed.args, cwd ?? workingDirectory);
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run ripgrep" };
@@ -386,8 +539,10 @@ export async function handleDifftastic(workingDirectory: string, data: Difftasti
     if (!validation.valid) return { success: false, error: validation.error };
     cwd = validation.resolvedPath;
   }
+  const jailed = jailToolArgs("difft", data.args, cwd ?? workingDirectory);
+  if (!jailed.ok) return { success: false, error: jailed.error };
   try {
-    const result = await runTool(DIFFT_BIN, data.args, cwd ?? workingDirectory, { FORCE_COLOR: "1" });
+    const result = await runTool(DIFFT_BIN, jailed.args, cwd ?? workingDirectory, { FORCE_COLOR: "1" });
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run difftastic" };

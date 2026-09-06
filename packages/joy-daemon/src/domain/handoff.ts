@@ -176,8 +176,53 @@ export interface HandoffRegistry {
 
 const HARNESS_LABEL: Record<string, string> = HARNESS_NAMES;
 
+/** Backoff between durable-enqueue attempts (see enqueueDurably). Exposed as a
+ *  job option so tests run the schedule in milliseconds. */
+export const HANDOFF_ENQUEUE_RETRY_MS: readonly number[] = [1_000, 3_000, 10_000];
+
+/** The note prompt could not be durably queued after every retry; the job
+ *  must survive for a later attempt instead of being cleared as settled. */
+export class HandoffNotDurableError extends Error {
+  constructor(sessionId: string, cause: unknown) {
+    super(`could not durably queue the handoff note into ${sessionId}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "HandoffNotDurableError";
+  }
+}
+
+/** Queue the note prompt with requireDurable (#542) and bounded retries.
+ *
+ *  Both delivery points used to call enqueue() without requireDurable: a busy
+ *  target whose spool write failed kept the prompt in memory only, the job
+ *  published success and cleared its record, and a daemon crash then lost
+ *  the ONLY copy of the handoff note's delivery — with no job left to redo it.
+ *  Now the spool must land before the job advances. A transient failure
+ *  (ENOSPC clearing, a slow disk) is retried on a short schedule; when every
+ *  attempt fails the caller keeps the job persisted so the next daemon boot
+ *  (resumeHandoffJobs) delivers it. */
+async function enqueueDurably(s: AgentSession, text: string, retryMs: readonly number[]): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; ; attempt++) {
+    if (s.status === "ended") throw new Error(`session ${s.id} ended before the note could be queued`);
+    try {
+      s.enqueue(text, { source: "rpc", mirrorToRelay: true, requireDurable: true });
+      return;
+    } catch (e) {
+      lastError = e;
+      if (attempt >= retryMs.length) break;
+      process.stderr.write(`[handoff] ${s.id}: durable enqueue failed (${e instanceof Error ? e.message : e}); retry ${attempt + 1}/${retryMs.length} in ${retryMs[attempt]}ms\n`);
+      await new Promise((r) => setTimeout(r, retryMs[attempt]));
+    }
+  }
+  throw new HandoffNotDurableError(s.id, lastError);
+}
+
+export interface HandoffJobOptions {
+  /** Retry schedule for the durable enqueue; defaults to HANDOFF_ENQUEUE_RETRY_MS. */
+  enqueueRetryMs?: readonly number[];
+}
+
 /** Source side: wait for the note, create the target, hand it the note. */
-export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession, target: HandoffTarget, path: string, resumed?: HandoffJob): Promise<void> {
+export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession, target: HandoffTarget, path: string, resumed?: HandoffJob, options: HandoffJobOptions = {}): Promise<void> {
   const targetLabel = `${HARNESS_LABEL[target.agent] ?? target.agent}${target.model ? ` (${target.model})` : ""}`;
   // The job advances through persisted phases (note → dst created → prompt
   // delivered) so a replay after a daemon death resumes at the phase it
@@ -186,6 +231,9 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
   let job: HandoffJob = resumed ?? { role: "source", path, target, at: Date.now() };
   const advance = (patch: Partial<HandoffJob>) => { job = { ...job, ...patch }; saveWindowRecord(src.id, { handoffJob: job }); };
   advance({});
+  // Set when the job must OUTLIVE this run: the prompt is not durably
+  // queued yet, and clearing the record would make the loss permanent (#542).
+  let keepJob = false;
   try {
     let dst: AgentSession;
     if (job.dst) {
@@ -202,7 +250,12 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
       // Bind the card BEFORE the prompt goes in: records produced before a
       // session is bound are dropped, and a target can answer in seconds.
       try { await registry.announce?.(dst.id); } catch { /* the periodic pass retries */ }
-      dst.enqueue(pickupPrompt(sessionLabel(src), src.id, readFileSync(path, "utf8")), { source: "rpc", mirrorToRelay: true });
+      try {
+        await enqueueDurably(dst, pickupPrompt(sessionLabel(src), src.id, readFileSync(path, "utf8")), options.enqueueRetryMs ?? HANDOFF_ENQUEUE_RETRY_MS);
+      } catch (e) {
+        if (e instanceof HandoffNotDurableError) keepJob = true;
+        throw e;
+      }
       advance({ delivered: true });
     }
     dst.setHandoff?.({ state: "picked_up", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
@@ -210,16 +263,17 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
     process.stderr.write(`[handoff] ${src.id} → ${dst.id} (${targetLabel}) note=${path}\n`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    process.stderr.write(`[handoff] ${src.id} failed: ${msg}\n`);
-    src.setHandoff?.({ state: "failed", error: msg, note: path, at: Date.now() });
+    process.stderr.write(`[handoff] ${src.id} failed: ${msg}${keepJob ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
+    src.setHandoff?.({ state: "failed", error: keepJob ? `${msg} (will retry on daemon restart)` : msg, note: path, at: Date.now() });
   } finally {
-    saveWindowRecord(src.id, { handoffJob: null });
+    if (!keepJob) saveWindowRecord(src.id, { handoffJob: null });
   }
 }
 
 /** Target side: wait for the note, deliver it into the source as a prompt. */
-export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSession, srcId: string, path: string): Promise<void> {
+export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSession, srcId: string, path: string, options: HandoffJobOptions = {}): Promise<void> {
   saveWindowRecord(tgt.id, { handoffJob: { role: "target", path, peer: srcId, at: Date.now() } });
+  let keepJob = false;
   try {
     const gone = (s: AgentSession | undefined): s is undefined => !s || s.status === "ended";
     if (gone(registry.get(srcId))) throw new Error(`the original session ${srcId} is gone; restart it and hand back again`);
@@ -230,16 +284,23 @@ export async function runHandbackJob(registry: HandoffRegistry, tgt: AgentSessio
     // note would have gone into a dead object and read as "handed back".
     const src = registry.get(srcId);
     if (gone(src)) throw new Error(`the original session ${srcId} ended while the note was being written; restart it and hand back again`);
-    src.enqueue(handbackPrompt(sessionLabel(tgt), tgt.id, note), { source: "rpc", mirrorToRelay: true });
+    try {
+      await enqueueDurably(src, handbackPrompt(sessionLabel(tgt), tgt.id, note), options.enqueueRetryMs ?? HANDOFF_ENQUEUE_RETRY_MS);
+    } catch (e) {
+      // The note is on disk and the job names it: a resumed job finds the
+      // file at once (awaitNote returns immediately) and re-queues (#542).
+      if (e instanceof HandoffNotDurableError) keepJob = true;
+      throw e;
+    }
     src.setHandoff?.({ state: "handed_back", peer: tgt.id, peerLabel: sessionLabel(tgt), note: path, at: Date.now() });
     tgt.setHandoff?.({ state: "returned", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
     process.stderr.write(`[handoff] ${tgt.id} → back to ${src.id} note=${path}\n`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}\n`);
-    tgt.setHandoff?.({ state: "failed", peer: srcId, error: msg, note: path, at: Date.now() });
+    process.stderr.write(`[handoff] handback ${tgt.id} failed: ${msg}${keepJob ? " — job kept; delivery resumes on the next daemon start" : ""}\n`);
+    tgt.setHandoff?.({ state: "failed", peer: srcId, error: keepJob ? `${msg} (will retry on daemon restart)` : msg, note: path, at: Date.now() });
   } finally {
-    saveWindowRecord(tgt.id, { handoffJob: null });
+    if (!keepJob) saveWindowRecord(tgt.id, { handoffJob: null });
   }
 }
 

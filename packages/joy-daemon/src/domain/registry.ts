@@ -25,7 +25,7 @@ import { PI_MODELS, defaultPiModel } from "../pi/models";
 import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
-import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord } from "./windowRecord";
+import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord, resolveRecoveredTranscript } from "./windowRecord";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 
@@ -669,10 +669,16 @@ export class SessionRegistry {
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);
-    // Persist the window→launch-cwd binding now; the claudeSessionId is merged in
-    // once the first transcript entry reveals it. recover()/restart() prefer this
-    // over the newest-mtime / pane-current-path heuristics (BUG-6/13/15).
-    saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel, claudePermissionMode: mode ?? "default" });
+    // Persist the window→launch-cwd binding now. recover()/restart() prefer
+    // this over the newest-mtime / pane-current-path heuristics (BUG-6/13/15).
+    // A FRESH launch also persists the Claude id it pinned with --session-id
+    // (#563): a daemon restart before Claude's first transcript write used to
+    // find a record with no identity and fall back to the newest unclaimed
+    // transcript in the project — an unrelated conversation. With the id on
+    // record, recovery waits for exactly this session's file instead. A
+    // resume/continue launch leaves the field alone: the id is learned from
+    // the transcript (Claude writes a NEW file under a new id on --resume).
+    saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel, claudePermissionMode: mode ?? "default", claudeSessionId: freshClaudeId });
     this.broadcast("session_update", session.toJSON());
 
     if (relaySession) session.attachRelay(relaySession); // no-ops (and stops rs) if kill raced the create
@@ -979,9 +985,14 @@ export class SessionRegistry {
     // a transcript that exists is a conversation to resume; otherwise the
     // replacement starts fresh under the same id.
     const tp = existing?.transcriptPath;
+    // The record's id is now written at launch (#563), BEFORE any turn ran —
+    // so it too is only a conversation to resume when its transcript exists;
+    // otherwise `--resume <id>` would throw "Session not found" (#113).
+    const recId = rec?.claudeSessionId;
+    const recTranscriptExists = !!recId && existsSync(join(cwdToTranscriptDir(cwd), `${recId}.jsonl`));
     const resumeId = existing?.claudeSessionId
       ?? (tp && existsSync(tp) ? basename(tp, ".jsonl") : undefined)
-      ?? rec?.claudeSessionId;
+      ?? (recTranscriptExists ? recId : undefined);
     // Tear the process down WITHOUT archiving the card or deleting the
     // record, then come back under the SAME id. forceKill() archived the
     // relay card and minted a fresh id, so from the app "Restart" killed the
@@ -1124,27 +1135,22 @@ export class SessionRegistry {
       // PAUSED the queue), the goal bar frozen — and, with the checkpoint path
       // no longer matching, replayed the whole 150MB file from byte 0, firing
       // a burst of stale "done" pushes (faraz-vip b52bf522, 2026-09-03).
-      // Then the id (BUG-6: never the newest-mtime file while a record exists —
-      // that adopts an unrelated conversation). Heuristic only with no record.
-      const ckptTranscript = rec?.transcriptCheckpoint?.path && existsSync(rec.transcriptCheckpoint.path)
-        ? rec.transcriptCheckpoint.path
-        : null;
-      const recTranscript = ckptTranscript ?? (rec?.claudeSessionId
-        ? join(cwdToTranscriptDir(cwd), `${rec.claudeSessionId}.jsonl`)
-        : null);
+      // Then the id (BUG-6 / #563: never the newest-mtime file while a record
+      // exists — that adopts an unrelated conversation; a fresh session whose
+      // pinned transcript is not written yet stays pinned to it and waits).
+      // Heuristic only with no record at all.
       // Newest-mtime fallback must never adopt a transcript another recovered
       // session already owns — with several sessions per cwd, both recordless
       // windows would otherwise bind the same (newest) conversation and mirror
       // each other's turns. Better to stay unbound and let pollForTranscript
       // pick up a fresh transcript when it appears.
       const claimed = new Set(
-        [...this.#sessions.values()].filter(s => s.status !== "ended").map(s => s.transcriptPath).filter(Boolean),
+        [...this.#sessions.values()].filter(s => s.status !== "ended").map(s => s.transcriptPath).filter((p): p is string => !!p),
       );
-      const fallback = findLatestTranscript(cwdToTranscriptDir(cwd), 0);
-      const transcriptPath = (recTranscript && existsSync(recTranscript))
-        ? recTranscript
-        : (fallback && !claimed.has(fallback) ? fallback : undefined);
-      const claudeSessionId = transcriptPath ? basename(transcriptPath, ".jsonl") : undefined;
+      const bound = resolveRecoveredTranscript(rec, cwdToTranscriptDir(cwd), claimed, () => findLatestTranscript(cwdToTranscriptDir(cwd), 0));
+      const transcriptPath = bound.transcriptPath;
+      const claudeSessionId = bound.claudeSessionId;
+      if (bound.pending) process.stderr.write(`[recover] ${id}: pinned transcript ${transcriptPath} not written yet — waiting for it (not adopting project history)\n`);
 
       // Replay checkpoint (codex review finding 8): resume the tail where the
       // previous daemon left off instead of replaying the whole file from 0 —
@@ -1161,7 +1167,7 @@ export class SessionRegistry {
         tmuxSocket: socket,
         flags: [],
         status: isAlive ? "active" : "ended",
-        startedAt: transcriptPath ? statSync(transcriptPath).mtimeMs : Date.now(),
+        startedAt: transcriptPath && existsSync(transcriptPath) ? statSync(transcriptPath).mtimeMs : Date.now(),
         claudeSessionId,
         transcriptPath: transcriptPath ?? undefined,
         transcriptStartOffset: startOffset,

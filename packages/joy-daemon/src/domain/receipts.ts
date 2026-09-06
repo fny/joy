@@ -3,10 +3,10 @@
 // that repeated text (e.g. two "yes" sends) pairs with the right transcript
 // entries in order, regardless of text equality alone.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
 import { joyStateDir } from "../paths";
+import { writeFileAtomic } from "./atomicWrite";
 
 export type DeliverySource = "relay" | "web" | "rpc";
 
@@ -60,15 +60,36 @@ export function receiptPath(relaySessionId: string, baseDir = defaultStateDir())
   return join(baseDir, `${relaySessionId}.receipts.json`);
 }
 
+// Row validators (#559): the file parsing as JSON says nothing about its rows.
+// A `null` or field-less row passed straight through here and blew up LATER —
+// in initDeliveryState's `o.uuid` dereference — outside this function's
+// try/catch, so one bad row killed the whole session's delivery state and
+// every good receipt beside it. Each row is checked for exactly the fields
+// recovery and matching read; bad rows are dropped, good ones kept.
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+function isInbound(v: unknown): v is InboundReceipt {
+  return isRecord(v) && typeof v.uuid === "string" && v.uuid.length > 0;
+}
+function isOutbound(v: unknown): v is OutboundReceipt {
+  return isRecord(v) && typeof v.uuid === "string" && v.uuid.length > 0;
+}
+function isReceived(v: unknown): v is ReceivedEntry {
+  return isRecord(v) && typeof v.text === "string" && typeof v.at === "number" && Number.isFinite(v.at);
+}
+function rows<T>(v: unknown, ok: (x: unknown) => x is T): T[] {
+  return Array.isArray(v) ? v.filter(ok) : [];
+}
+
 export function loadReceipts(relaySessionId: string, baseDir = defaultStateDir()): ReceiptLog {
   try {
     const p = receiptPath(relaySessionId, baseDir);
     if (existsSync(p)) {
-      const parsed = JSON.parse(readFileSync(p, "utf-8")) as ReceiptLog;
+      const parsed = JSON.parse(readFileSync(p, "utf-8")) as unknown;
+      const doc = isRecord(parsed) ? parsed : {};
       return {
-        inbound: Array.isArray(parsed.inbound) ? parsed.inbound : [],
-        outbound: Array.isArray(parsed.outbound) ? parsed.outbound : [],
-        received: Array.isArray(parsed.received) ? parsed.received : [],
+        inbound: rows(doc.inbound, isInbound),
+        outbound: rows(doc.outbound, isOutbound),
+        received: rows(doc.received, isReceived),
       };
     }
   } catch {}
@@ -85,48 +106,97 @@ export function loadReceipts(relaySessionId: string, baseDir = defaultStateDir()
 // (same precedent as ENABLE_CONTROL in tmux/driver.ts).
 const SAVE_DEBOUNCE_MS = 300;
 const IMMEDIATE_SAVES = process.env.VITEST === "true";
-const pendingSaves = new Map<string, { log: ReceiptLog; baseDir: string; timer: ReturnType<typeof setTimeout> }>();
+// Retry backoff for a save that FAILED (#557). The old flush dropped the
+// pending entry before writing; a transient EIO/ENOSPC then left the log
+// dirty with nothing scheduled to write it — and because forwardedUuids
+// already held the uuid, recording the same receipt again returned early, so
+// the receipt could never reach disk. A dirty log now stays pending, with
+// bounded backoff, until a write succeeds (or the process exits, where the
+// exit flush makes one last attempt).
+const RETRY_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
+interface PendingSave { log: ReceiptLog; baseDir: string; timer: ReturnType<typeof setTimeout> | null; failures: number }
+const pendingSaves = new Map<string, PendingSave>();
 let exitFlushInstalled = false;
 
-function writeReceiptsNow(relaySessionId: string, log: ReceiptLog, baseDir: string): void {
+/** One write attempt. Atomic (tmp + fsync + rename): a receipts file is read
+ *  back on every restart to rebuild forwardedUuids; a torn write there means
+ *  re-forwarding history. Returns whether it landed. */
+function writeReceiptsNow(relaySessionId: string, log: ReceiptLog, baseDir: string): boolean {
   try {
-    const p = receiptPath(relaySessionId, baseDir);
-    const tmp = p + ".tmp";
-    writeFileSync(tmp, JSON.stringify(log));
-    renameSync(tmp, p);
+    writeFileAtomic(receiptPath(relaySessionId, baseDir), JSON.stringify(log));
+    return true;
   } catch (e) {
     process.stderr.write(`[receipts] save failed for ${relaySessionId}: ${e}\n`);
+    return false;
   }
 }
 
-/** Synchronously flush every pending debounced save (exit hook / tests). */
-export function flushReceipts(): void {
-  for (const [id, p] of pendingSaves) {
-    clearTimeout(p.timer);
-    writeReceiptsNow(id, p.log, p.baseDir);
+function installExitFlush(): void {
+  if (exitFlushInstalled) return;
+  exitFlushInstalled = true;
+  process.on("exit", flushReceipts);
+}
+
+/** Schedule (or re-schedule) the write for one session's pending entry. */
+function scheduleSave(relaySessionId: string, entry: PendingSave, delayMs: number): void {
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => {
+    entry.timer = null;
+    attemptSave(relaySessionId, entry);
+  }, delayMs);
+  entry.timer.unref?.();
+}
+
+/** Write; on success the entry retires, on failure it stays pending and the
+ *  next attempt is scheduled with backoff. The entry is only ever removed
+ *  from `pendingSaves` AFTER a successful replacement. */
+function attemptSave(relaySessionId: string, entry: PendingSave): boolean {
+  if (writeReceiptsNow(relaySessionId, entry.log, entry.baseDir)) {
+    // Retire only if no newer entry replaced this one meanwhile.
+    if (pendingSaves.get(relaySessionId) === entry) pendingSaves.delete(relaySessionId);
+    return true;
   }
-  pendingSaves.clear();
+  entry.failures++;
+  installExitFlush();
+  scheduleSave(relaySessionId, entry, RETRY_BACKOFF_MS[Math.min(entry.failures, RETRY_BACKOFF_MS.length) - 1]);
+  return false;
+}
+
+/** Synchronously attempt every pending save (exit hook / tests). Entries whose
+ *  write fails STAY pending (with their retry timer re-armed) so a later flush
+ *  or timer can still land them. Returns how many are still dirty. */
+export function flushReceipts(): number {
+  for (const [id, entry] of [...pendingSaves]) {
+    if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+    attemptSave(id, entry);
+  }
+  return pendingSaves.size;
+}
+
+/** Number of receipt logs with an unwritten (dirty) state — diagnostics/tests. */
+export function pendingReceiptSaves(): number {
+  return pendingSaves.size;
 }
 
 export function saveReceipts(relaySessionId: string, log: ReceiptLog, baseDir = defaultStateDir()): void {
+  const existing = pendingSaves.get(relaySessionId);
+  // `log` is the live mutable ReceiptLog — the flush serializes its state as of
+  // write time, so coalesced entries are all captured. A pending entry for
+  // the same session is reused (same object) unless the caller handed us a
+  // different log object, which supersedes it.
+  const entry: PendingSave = existing && existing.log === log && existing.baseDir === baseDir
+    ? existing
+    : { log, baseDir, timer: null, failures: existing?.failures ?? 0 };
+  if (existing && existing !== entry && existing.timer) clearTimeout(existing.timer);
+  pendingSaves.set(relaySessionId, entry);
   if (IMMEDIATE_SAVES) {
-    writeReceiptsNow(relaySessionId, log, baseDir);
+    // Under vitest writes stay synchronous — tests read the file right back.
+    // A failed immediate write still follows the retry contract above.
+    attemptSave(relaySessionId, entry);
     return;
   }
-  if (!exitFlushInstalled) {
-    exitFlushInstalled = true;
-    process.on("exit", flushReceipts);
-  }
-  const existing = pendingSaves.get(relaySessionId);
-  if (existing) clearTimeout(existing.timer);
-  const timer = setTimeout(() => {
-    pendingSaves.delete(relaySessionId);
-    writeReceiptsNow(relaySessionId, log, baseDir);
-  }, SAVE_DEBOUNCE_MS);
-  timer.unref?.();
-  // `log` is the live mutable ReceiptLog — the flush serializes its state as of
-  // write time, so coalesced entries are all captured.
-  pendingSaves.set(relaySessionId, { log, baseDir, timer });
+  installExitFlush();
+  scheduleSave(relaySessionId, entry, SAVE_DEBOUNCE_MS);
 }
 
 export function initDeliveryState(relaySessionId: string, baseDir = defaultStateDir()): DeliveryState {

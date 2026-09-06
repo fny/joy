@@ -12,9 +12,10 @@
 // and deliver on the next idle. The in-flight item is persisted at the HEAD:
 // it is undelivered until confirmed, and every confirm path rebroadcasts (and
 // thus re-persists) without it.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
+import { writeFileAtomic } from "./atomicWrite";
 
 export interface PersistedQueueItem {
   id: string;
@@ -33,19 +34,40 @@ function queuePath(sessionId: string, baseDir: string): string {
 /** Returns whether the spool write actually landed. The inbound relay path
  *  treats this as the durable-handoff ack (codex review finding 2): a
  *  swallowed write failure let the cursor advance past a message that only
- *  ever existed in memory. Other callers may ignore the return. */
+ *  ever existed in memory. Other callers may ignore the return.
+ *
+ *  The write is an atomic replace (#555): the spool holds EVERY prompt already
+ *  acknowledged to the relay, so a truncating writeFileSync that hit ENOSPC
+ *  while adding one more prompt replaced all of them with partial JSON — the
+ *  new enqueue correctly rejected its save, but the earlier acknowledged
+ *  prompts were gone on the next restart. Now a failed save leaves the
+ *  previous spool intact, and `false` is returned only after that has been
+ *  confirmed by reading it back. */
 export function saveQueue(sessionId: string, items: PersistedQueueItem[], baseDir = joyStateDir()): boolean {
+  const p = queuePath(sessionId, baseDir);
   try {
-    const p = queuePath(sessionId, baseDir);
     if (items.length === 0) {
       rmSync(p, { force: true });
       return true;
     }
-    mkdirSync(baseDir, { recursive: true });
-    writeFileSync(p, JSON.stringify(items));
+    writeFileAtomic(p, JSON.stringify(items));
     return true;
   } catch (e) {
-    process.stderr.write(`[queue-store] save failed for ${sessionId}: ${e}\n`);
+    // The old spool must still be there, complete. If it is not, that is a
+    // second, louder failure — the caller cannot fix it, but the log must
+    // say so instead of implying the earlier prompts are safe.
+    const intact = spoolIntact(p);
+    process.stderr.write(`[queue-store] save failed for ${sessionId}: ${e}${intact ? " (previous spool intact)" : " — PREVIOUS SPOOL UNREADABLE"}\n`);
+    return false;
+  }
+}
+
+/** True when the spool at `p` is absent (nothing to lose) or parses as an array. */
+function spoolIntact(p: string): boolean {
+  try {
+    if (!existsSync(p)) return true;
+    return Array.isArray(JSON.parse(readFileSync(p, "utf-8")));
+  } catch {
     return false;
   }
 }

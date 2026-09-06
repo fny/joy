@@ -20,38 +20,83 @@ import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
 import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, type HandoffTarget } from "./handoff";
-import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots } from "./fileOps";
+import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots, withPathLock } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
 import { joySessionDir } from "../paths";
-import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, statSync, readdirSync, readFileSync, openSync, readSync, closeSync, rmSync, mkdirSync, writeFileSync, renameSync } from "fs";
 import { readFile } from "fs/promises";
-import { basename, join } from "path";
+import { basename, dirname, join, resolve as resolvePath } from "path";
 import { hostname, platform, release, arch } from "os";
 import { spawn, execFile } from "child_process";
+import { randomBytes } from "crypto";
 
-/** Clone `gitUrl` into `target` for a git-URL session spawn. Reuses an
- *  existing clone (target/.git present) so re-spawning the same URL lands in
- *  the same working copy; refuses a non-empty non-repo target; cleans up a
- *  partial clone on failure. Full clone (agents want history), generous
- *  timeout — the app extends its RPC race accordingly. */
-function cloneForSpawn(gitUrl: string, target: string): Promise<{ ok: true } | { error: string }> {
+/** Accepted git URL shapes for a git-URL session spawn. */
+export const GIT_URL_RE = /^(https?:\/\/|git@|ssh:\/\/)\S+$/;
+
+/** Clone `gitUrl` into `cwd` for a git-URL session spawn — the ONE clone step
+ *  shared by the `create` op and the relay lane (nucleusLane runs it before
+ *  spawning, #151). Validates the URL, reuses an existing clone (cwd/.git
+ *  present) so re-spawning the same URL lands in the same working copy,
+ *  refuses a non-empty non-repo cwd. Resolves on success; throws an Error
+ *  whose message is user-facing ("invalid git url", "git clone failed: …").
+ *  Full clone (agents want history), generous timeout — the app extends its
+ *  RPC race accordingly.
+ *
+ *  Two safeguards (#547): attempts for the same canonical destination are
+ *  SERIALIZED, so a second create for a not-yet-existing cwd waits and then
+ *  reuses the first one's checkout instead of racing it; and each attempt
+ *  clones into a directory it owns (`.<name>.joy-clone-<rand>` beside the
+ *  target), renaming it into place only on success. Cleanup after a failure
+ *  removes only the attempt's own directory. The old code cloned straight
+ *  into `target` and, on failure, `rmSync(target, {recursive})` — when the
+ *  failure was "destination already exists" because a concurrent attempt
+ *  had just finished, that deleted the SUCCESSFUL working copy and any work
+ *  the launched agent had already done in it. */
+export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<void> {
+  if (!GIT_URL_RE.test(gitUrl)) throw new Error("invalid git url");
+  const canonical = resolvePath(cwd);
+  const r = await withPathLock(`git-clone:${canonical}`, () => cloneAttempt(gitUrl, canonical));
+  if ("error" in r) throw new Error(r.error);
+}
+
+function cloneAttempt(gitUrl: string, target: string): Promise<{ ok: true } | { error: string }> {
   return new Promise((resolve) => {
+    // The attempt-owned staging dir. Never `target` itself.
+    const staging = join(dirname(target), `.${basename(target)}.joy-clone-${randomBytes(4).toString("hex")}`);
+    const cleanupStaging = () => { try { rmSync(staging, { recursive: true, force: true }); } catch { /* our own dir; best effort */ } };
     try {
       if (existsSync(target)) {
         if (existsSync(join(target, ".git"))) return resolve({ ok: true }); // existing clone — reuse
         if (readdirSync(target).length > 0) return resolve({ error: `directory ${target} exists and is not a git repo` });
       }
-      execFile("git", ["clone", gitUrl, target], { timeout: 220_000 }, (err, _stdout, stderr) => {
-        if (!err) return resolve({ ok: true });
-        // Don't leave a partial clone behind — it would block the retry.
-        try { if (existsSync(target)) rmSync(target, { recursive: true, force: true }); } catch { /* best effort */ }
-        const detail = (stderr || String(err)).trim().split("\n").slice(-3).join(" ");
-        resolve({ error: `git clone failed: ${detail.slice(0, 300)}` });
+      mkdirSync(dirname(target), { recursive: true });
+      execFile("git", ["clone", gitUrl, staging], { timeout: 220_000 }, (err, _stdout, stderr) => {
+        if (err) {
+          cleanupStaging();
+          const detail = (stderr || String(err)).trim().split("\n").slice(-3).join(" ");
+          return resolve({ error: `git clone failed: ${detail.slice(0, 300)}` });
+        }
+        try {
+          // Something else (a user, another process) may have populated the
+          // destination while we cloned. A finished repo there is reusable;
+          // anything else is theirs to keep — never delete it.
+          if (existsSync(target)) {
+            if (existsSync(join(target, ".git"))) { cleanupStaging(); return resolve({ ok: true }); }
+            if (readdirSync(target).length > 0) { cleanupStaging(); return resolve({ error: `directory ${target} exists and is not a git repo` }); }
+            rmSync(target, { recursive: false, force: true }); // an EMPTY dir only — rename needs the name free
+          }
+          renameSync(staging, target);
+          resolve({ ok: true });
+        } catch (e) {
+          cleanupStaging();
+          resolve({ error: `git clone failed: could not move the clone into place: ${e instanceof Error ? e.message : e}` });
+        }
       });
     } catch (e) {
+      cleanupStaging();
       resolve({ error: `git clone failed: ${e}` });
     }
   });
@@ -409,9 +454,8 @@ export const machineOps: MachineOp[] = [
       // git-URL spawn: clone (or reuse) into cwd first, then launch inside it.
       const gitUrl = typeof params.gitUrl === "string" ? params.gitUrl.trim() : "";
       if (gitUrl) {
-        if (!/^(https?:\/\/|git@|ssh:\/\/)\S+$/.test(gitUrl)) return { error: "invalid git url" };
-        const cloned = await cloneForSpawn(gitUrl, cwd);
-        if ("error" in cloned) return cloned;
+        try { await cloneForSpawn(gitUrl, cwd); }
+        catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
       }
       const session = await registry.create({
         cwd,
@@ -666,9 +710,25 @@ export const machineOps: MachineOp[] = [
     rpcName: "joy-kill-session",
     summary: "Kill one session",
     http: { method: "DELETE", path: "/sessions/:id" },
+    params: {
+      type: "object",
+      required: ["id"],
+      properties: {
+        id: { type: "string", description: "joy session id" },
+        ifStatus: { type: "string", enum: ["starting", "active", "ended"], description: "Only kill when the session's status is exactly this at the moment of the kill decision; otherwise nothing happens and {error:'status_mismatch', status} is returned. The app's detached-session cleanup passes 'ended' so a session that restarted between the user's confirm and the kill is never killed (#174)." },
+      },
+    },
     handler: async (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
       if (!session) return { ok: false };
+      // Conditional kill (#174, TOCTOU): the app decided to clean up a session
+      // it saw as ended; if it restarted in between, the kill must not land.
+      // The check and the kill run in the same synchronous tick, so no status
+      // change can slip between them.
+      const ifStatus = typeof params.ifStatus === "string" ? params.ifStatus : undefined;
+      if (ifStatus !== undefined && session.status !== ifStatus) {
+        return { ok: false, error: "status_mismatch", status: session.status };
+      }
       // A detached session (process already gone) needs forceKill: end() is a
       // no-op on an ended session, so the card stayed "detached", the record
       // and tmux server survived, and the next boot resurrected it (#43).
@@ -678,8 +738,9 @@ export const machineOps: MachineOp[] = [
       return { ok: await session.awaitArchive() };
     },
     httpShape: (result) => {
-      const ok = (result as { ok: boolean }).ok;
-      return { status: ok ? 200 : 404, body: result };
+      const r = result as { ok: boolean; error?: string };
+      if (r.error === "status_mismatch") return { status: 409, body: result };
+      return { status: r.ok ? 200 : 404, body: result };
     },
   },
   {
@@ -775,15 +836,27 @@ export const machineOps: MachineOp[] = [
       }
       const trimmed = text;
       const source = meta.via === "http" ? "web" as const : "rpc" as const;
-      const chat_id = registry.nextChatId();
-      registry.addChatMessage({ role: "user", content: trimmed, source, chat_id, session_id: session.claudeSessionId });
       // Route through the verified dispatch queue (not sendText directly) so a
       // /send while Claude is busy is serialized behind the turn and only typed
       // into an empty, ready box — same robustness as relay app-sends. visible:
       // true — unlike a relay app-send, a /send has NO chat bubble until dispatch
       // mirrors it, so showing it as a queued chip is real "not sent yet" state,
       // not a duplicate. mirrorToRelay so it reaches the app's history on dispatch.
-      const queued = session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true });
+      //
+      // requireDurable (#551): a locally accepted prompt has NO relay work item
+      // to replay it — this ack is the only record it was ever sent. Without
+      // the flag, a failed spool write kept the prompt in memory and the API
+      // still said ok:true; a daemon crash then lost an acknowledged
+      // instruction silently. Now persistence failure is a refusal: nothing is
+      // recorded as accepted (no chat-log row either) and the caller retries.
+      let queued: { id: string } | undefined;
+      try {
+        queued = session.enqueue(trimmed, { source, mirrorToRelay: true, visible: true, requireDurable: true });
+      } catch (e) {
+        return { error: "not_durable", detail: e instanceof Error ? e.message : String(e) };
+      }
+      const chat_id = registry.nextChatId();
+      registry.addChatMessage({ role: "user", content: trimmed, source, chat_id, session_id: session.claudeSessionId });
       return { ok: true, chat_id, queued_id: queued?.id ?? null };
     },
     httpShape: (result) => {
@@ -792,6 +865,7 @@ export const machineOps: MachineOp[] = [
       if (r.error === "session_not_found") return { status: 404, body: result };
       if (r.error === "busy") return { status: 409, body: result };
       if (r.error === "mode_not_scriptable") return { status: 409, body: result };
+      if (r.error === "not_durable") return { status: 503, body: result };
       return { status: 200, body: result };
     },
   },
@@ -823,13 +897,20 @@ export const machineOps: MachineOp[] = [
       if (!session) return { error: "session_not_found" };
       const text = typeof params.text === "string" ? params.text.trim() : "";
       if (!text) return { error: "empty" };
-      const msg = session.enqueue(text);
+      // Same durable-ack contract as `send` (#551): no spool, no acceptance.
+      let msg: { id: string };
+      try {
+        msg = session.enqueue(text, { requireDurable: true });
+      } catch (e) {
+        return { error: "not_durable", detail: e instanceof Error ? e.message : String(e), ...session.queueState() };
+      }
       return { ok: true, id: msg.id, ...session.queueState() };
     },
     httpShape: (result) => {
       const r = result as { error?: string };
       if (r.error === "empty") return { status: 400, body: result };
       if (r.error === "session_not_found") return { status: 404, body: result };
+      if (r.error === "not_durable") return { status: 503, body: result };
       return { status: 200, body: result };
     },
   },
