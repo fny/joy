@@ -51,6 +51,15 @@ Every operation exists in up to three forms, generated from one table:
 | Session RPC | relay E2E tunnel (same carrier) | bare name |
 | HTTP | local daemon server | method + path below |
 
+The `/v2/*` routes on the same local server (what the app reaches over the
+tunnel) answer with the HTTP status an op's `httpShape` gives its v1 path —
+one helper, `httpAnswer` in `domain/operations.ts`, serves both routers. So
+`not_durable` is 503 on `POST /v2/sessions/:id/handoff`, `…/handback` and
+`…/queue` exactly as on `/sessions/:id/…`, a conditional kill's
+`status_mismatch` is 409 and `record_not_terminated` 503 on
+`DELETE /v2/sessions/:id`, and `check` / `approvals` / `env` carry their
+404 / 400 (#53 residual: the v2 routes used to flatten every op to a 200).
+
 ## Machine-readable spec
 
 `GET /openapi.json` on the daemon's local HTTP server dumps OpenAPI 3.1

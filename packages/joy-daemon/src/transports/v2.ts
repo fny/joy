@@ -14,7 +14,7 @@ import { promises as fs } from "fs";
 import { createHash } from "crypto";
 import { existsSync } from "fs";
 import { join, delimiter, dirname, sep, posix } from "path";
-import { machineOps, sessionOps } from "../domain/operations";
+import { machineOps, sessionOps, httpAnswer } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { validatePath, withPathLock } from "../domain/fileOps";
@@ -33,6 +33,12 @@ const mcall = (name: string, registry: SessionRegistry, params: Record<string, u
   mops.get(name)!.handler(registry, params, { via: "http" });
 const scall = (name: string, session: AgentSession, params: Record<string, unknown>) =>
   sops.get(name)!.handler(session, params);
+/** A machine op answered with ITS HTTP contract (`httpShape`), the way the v1
+ *  catalog router answers it — `ok(await mcall(...))` flattened every op to a
+ *  200, so a handoff whose note could not be durably queued was 200
+ *  `{ok:false, error:"not_durable"}` on /v2 and 503 on /sessions (#53). */
+const mshaped = async (name: string, registry: SessionRegistry, params: Record<string, unknown>) =>
+  httpAnswer(mops.get(name)!, await mcall(name, registry, params));
 
 function onPath(bin: string): boolean {
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
@@ -339,17 +345,17 @@ route("DELETE", "/v2/sessions/:id", withSession(async (ctx, _s, p, body) => {
   // that status. The app's cleanup sweep deletes sessions it believes ended;
   // one that restarted in between must not be killed by a stale belief (#174).
   // The kill op answers {ok:false, error:'status_mismatch', status} when the
-  // live status differs; that is a 409 here, not a 404.
+  // live status differs; that is a 409 here, not a 404 — and a kill whose
+  // termination marker could not be written is a 503 (#567): the op's own
+  // httpShape, shared with the v1 route.
   const ifStatus = ctx.url.searchParams.get("ifStatus") ?? (typeof body.ifStatus === "string" ? body.ifStatus : undefined);
-  const r = await mcall("kill", ctx.registry, { id: p.id, ...(ifStatus ? { ifStatus } : {}) }) as { ok: boolean; error?: string; status?: string };
-  if (r.error === "status_mismatch") return ok({ ok: false, error: "status_mismatch", status: r.status }, 409);
-  return ok(r, r.ok ? 200 : 404);
+  return mshaped("kill", ctx.registry, { id: p.id, ...(ifStatus ? { ifStatus } : {}) });
 }));
 route("POST", "/v2/sessions/:id/restart", async (ctx, p, body) =>
   ok(await mcall("restart", ctx.registry, addressed(body, p))));
 route("POST", "/v2/sessions/:id/fork", async (ctx, p) => ok(await mcall("fork", ctx.registry, { id: p.id })));
-route("POST", "/v2/sessions/:id/handoff", async (ctx, p, body) => ok(await mcall("handoff", ctx.registry, addressed(body, p))));
-route("POST", "/v2/sessions/:id/handback", async (ctx, p) => ok(await mcall("handback", ctx.registry, { id: p.id })));
+route("POST", "/v2/sessions/:id/handoff", (ctx, p, body) => mshaped("handoff", ctx.registry, addressed(body, p)));
+route("POST", "/v2/sessions/:id/handback", (ctx, p) => mshaped("handback", ctx.registry, { id: p.id }));
 route("POST", "/v2/sessions/:id/teleport-export", async (ctx, p) => ok(await mcall("teleportExport", ctx.registry, { id: p.id })));
 route("POST", "/v2/teleport-import", async (ctx, _p, body) => ok(await mcall("teleportImport", ctx.registry, body)));
 route("PATCH", "/v2/sessions/:id", withSession(async (ctx, session, p, body) => {
@@ -373,10 +379,10 @@ route("GET", "/v2/sessions/:id/slash-commands", withSession((ctx, session) => {
 // The editable line of messages waiting for the agent. Distinct from the
 // relay's durable turn queue: this one lives on the machine, next to the
 // agent, and the app reaches it over the sealed tunnel.
-route("GET", "/v2/sessions/:id/queue", withSession(async (ctx, _s, p) =>
-  ok(await mcall("queueList", ctx.registry, { id: p.id }))));
-route("POST", "/v2/sessions/:id/queue", withSession(async (ctx, _s, p, body) =>
-  ok(await mcall("queueAdd", ctx.registry, addressed(body, p)))));
+route("GET", "/v2/sessions/:id/queue", withSession((ctx, _s, p) =>
+  mshaped("queueList", ctx.registry, { id: p.id })));
+route("POST", "/v2/sessions/:id/queue", withSession((ctx, _s, p, body) =>
+  mshaped("queueAdd", ctx.registry, addressed(body, p))));
 route("PATCH", "/v2/sessions/:id/queue/:qid", withSession(async (ctx, _s, p, body) =>
   ok(await mcall("queueEdit", ctx.registry, addressed(body, p)))));
 route("DELETE", "/v2/sessions/:id/queue/:qid", withSession(async (ctx, _s, p) =>
@@ -388,12 +394,12 @@ route("POST", "/v2/sessions/:id/queue/resume", withSession(async (ctx, _s, p) =>
 
 // ── environment store (sealed provider keys; names only leave the daemon) ──
 route("GET", "/v2/env", async (ctx) => ok(await mcall("envList", ctx.registry, {})));
-route("POST", "/v2/env", async (ctx, _p, body) => ok(await mcall("envSet", ctx.registry, body)));
-route("DELETE", "/v2/env/:name", async (ctx, p) => ok(await mcall("envUnset", ctx.registry, { name: p.name })));
+route("POST", "/v2/env", (ctx, _p, body) => mshaped("envSet", ctx.registry, body));
+route("DELETE", "/v2/env/:name", (ctx, p) => mshaped("envUnset", ctx.registry, { name: p.name }));
 
 // ── talk-ability + held approvals (joy check / joy approvals) ──────────────
-route("GET", "/v2/sessions/:id/check", async (ctx, p) => ok(await mcall("check", ctx.registry, { id: p.id })));
-route("GET", "/v2/sessions/:id/approvals", async (ctx, p) => ok(await mcall("approvalsList", ctx.registry, { id: p.id })));
+route("GET", "/v2/sessions/:id/check", (ctx, p) => mshaped("check", ctx.registry, { id: p.id }));
+route("GET", "/v2/sessions/:id/approvals", (ctx, p) => mshaped("approvalsList", ctx.registry, { id: p.id }));
 
 // ── approvals (codex holds tool calls for a human decision) ─────────────────
 route("POST", "/v2/sessions/:id/approvals", withSession(async (_ctx, session, _p, body) => {
@@ -627,8 +633,8 @@ route("GET", "/v2/sessions/:id/git/diff", withSession(async (ctx, session) => {
 }));
 
 // ── session terminal ────────────────────────────────────────────────────────
-route("GET", "/v2/sessions/:id/terminal", withSession(async (ctx, _s, p) =>
-  ok(await mcall("pane", ctx.registry, { id: p.id, color: ctx.url.searchParams.get("color") ?? undefined }))));
+route("GET", "/v2/sessions/:id/terminal", withSession((ctx, _s, p) =>
+  mshaped("pane", ctx.registry, { id: p.id, color: ctx.url.searchParams.get("color") ?? undefined })));
 route("PATCH", "/v2/sessions/:id/terminal", withSession(async (ctx, _s, p, body) => {
   const r = await mcall("resize", ctx.registry, addressed(body, p)) as { error?: string };
   return ok(r, r.error ? 400 : 200);

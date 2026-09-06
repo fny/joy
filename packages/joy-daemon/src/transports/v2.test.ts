@@ -3,11 +3,13 @@
 // route dispatch, token auth on the new PUT/PATCH verbs, the typed grep/file
 // adapters, daemon-side porcelain parsing, and that v1 catalog routes still
 // answer on the same server.
-import { test, expect, beforeAll, afterAll, describe } from "vitest";
+import { test, expect, beforeAll, afterAll, describe, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, symlinkSync, unlinkSync } from "fs";
 import { tmpdir, homedir } from "os";
 import { join } from "path";
 import { fakeCoordinatedSession } from "../domain/coordinator.fakeDriver";
+import { SessionCoordinator } from "../domain/coordinator";
+import { LedgerWriteError } from "../domain/ledger";
 import { execFileSync } from "child_process";
 import { request as httpRequest } from "http";
 import { startHttpServer } from "./http";
@@ -403,6 +405,49 @@ describe("review fixes: regression coverage", () => {
       unlinkSync(join(repo, "link.txt"));
       symlinkSync("target.txt", join(repo, "link.txt"));
     }
+  });
+});
+
+describe("#53 the /v2 routes answer an op's HTTP contract, not a flat 200", () => {
+  // The ledger refuses the note's commit (SQLITE_FULL at accept): the op
+  // answers not_durable and its httpShape says 503 — on /v2 exactly as on the
+  // v1 catalog path. The app calls /v2 and used to read a 200 here.
+  const refuseNextAccept = () => vi.spyOn(SessionCoordinator.prototype, "accept").mockImplementationOnce(() => { throw new LedgerWriteError("accept", new Error("SQLITE_FULL")); });
+
+  test("handoff: a note that cannot be durably queued is 503 not_durable on POST /v2/sessions/:id/handoff", async () => {
+    const spy = refuseNextAccept();
+    try {
+      const r = await call("POST", "/v2/sessions/abcd1234/handoff", { body: { agent: "codex" } });
+      expect(r.status).toBe(503);
+      expect(r.json).toMatchObject({ ok: false, error: "not_durable" });
+      expect(String(r.json.detail)).toContain("SQLITE_FULL");
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally { spy.mockRestore(); }
+  });
+
+  test("handback: the same 503 on POST /v2/sessions/:id/handback", async () => {
+    const s = (globalThis as any).__v2KillSession as any; // abcd1234, picked up from sub00001
+    s.cardMetadata = () => ({ joy__handoff: { state: "picked_up", peer: "sub00001" } });
+    const spy = refuseNextAccept();
+    try {
+      const r = await call("POST", "/v2/sessions/abcd1234/handback");
+      expect(r.status).toBe(503);
+      expect(r.json).toMatchObject({ ok: false, error: "not_durable" });
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally { spy.mockRestore(); delete s.cardMetadata; }
+  });
+
+  test("every other handoff refusal stays a 200 sentence; queueAdd carries its 400/503 on /v2 too", async () => {
+    const r = await call("POST", "/v2/sessions/abcd1234/handoff", { body: { agent: "gemini" } });
+    expect(r.status).toBe(200);
+    expect(r.json).toMatchObject({ ok: false, error: 'unknown agent "gemini"' });
+    const spy = refuseNextAccept();
+    try {
+      const q = await call("POST", "/v2/sessions/abcd1234/queue", { body: { text: "never lands" } });
+      expect(q.status).toBe(503);
+      expect(q.json).toMatchObject({ error: "not_durable" });
+    } finally { spy.mockRestore(); }
+    expect((await call("POST", "/v2/sessions/abcd1234/queue", { body: { text: "   " } })).status).toBe(400);
   });
 });
 
