@@ -22,7 +22,7 @@ import type { SessionRegistry } from "./registry";
 import { processTreeStats } from "./procStats";
 import { loadWindowRecord } from "./windowRecord";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
-import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, type HandoffTarget } from "./handoff";
+import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, loadHandoffJob, type HandoffTarget } from "./handoff";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots, withPathLock } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
@@ -79,6 +79,15 @@ export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<void> 
   const canonical = resolvePath(cwd);
   const r = await withPathLock(`git-clone:${canonical}`, () => cloneAttempt(gitUrl, canonical));
   if ("error" in r) throw new Error(r.error);
+}
+
+/** Is a handoff / handback already running for this session (#53)? The
+ *  persisted job (ledger) is the durable truth; the card's `writing` state
+ *  covers the window before the job commits. */
+export function handoffInProgress(s: AgentSession): boolean {
+  try { if (loadHandoffJob(s.id)) return true; } catch { /* no ledger in this context: fall through to the card */ }
+  const meta = s.cardMetadata?.()?.joy__handoff as { state?: string } | undefined;
+  return meta?.state === "writing";
 }
 
 /** The repository a git URL names, for "is this the same repo" comparisons
@@ -632,6 +641,10 @@ export const machineOps: MachineOp[] = [
       const src = registry.get(id);
       if (!src) return { ok: false, error: "session_not_found" };
       if (src.status === "ended") return { ok: false, error: "This session has ended; restart it before handing off." };
+      // One in-flight job per session (#53): a double tap or a tunnel retry
+      // used to queue a second note prompt, create a second target in the
+      // same cwd and overwrite the persisted job so a restart resumed only one.
+      if (handoffInProgress(src)) return { ok: false, error: "handoff already in progress" };
       const agent = String(params.agent ?? "");
       if (!["claude", "codex", "opencode", "pi", "agy"].includes(agent)) return { ok: false, error: `unknown agent "${agent}"` };
       const target = { agent: agent as HandoffTarget["agent"], model: typeof params.model === "string" ? params.model : undefined, effort: typeof params.effort === "string" ? params.effort : undefined, permissionMode: typeof params.permissionMode === "string" ? params.permissionMode : undefined };
@@ -659,6 +672,7 @@ export const machineOps: MachineOp[] = [
       const src = peerId ? registry.get(peerId) : undefined;
       if (!src) return { ok: false, error: "This session was not picked up from another one (or that session is gone), so there is nothing to hand back to." };
       if (src.status === "ended") return { ok: false, error: `The original session ${peerId} has ended; restart it first.` };
+      if (handoffInProgress(tgt)) return { ok: false, error: "handback already in progress" };
       const path = notePath(tgt.id);
       tgt.setHandoff?.({ state: "writing", peer: src.id, peerLabel: sessionLabel(src), note: path, at: Date.now() });
       queueFor(tgt).accept(noteRequestPrompt(path, "back to", sessionLabel(src)), { source: "rpc", mirrorToRelay: true });
