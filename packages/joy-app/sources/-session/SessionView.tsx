@@ -72,7 +72,8 @@ import { DialogBar } from './DialogBar';
 import { CodexApprovalBar } from './CodexApprovalBar';
 import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
-import { machineSetMode, machineSendKeys, machineSetModel, machineSessionUsage, machineHarnessModels } from '@/sync/v2/machine';
+import { machineSetMode, machineSendKeys, machineSetModel, machineSessionUsage } from '@/sync/v2/machine';
+import { useHarnessModels } from '@/hooks/useHarnessModels';
 
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
@@ -608,21 +609,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const joySessionId = session.metadata?.joy__sessionId;
     // Opencode: the daemon's curated allowlist backs the model picker so the
     // chip can CYCLE (codex stays a 1-entry display: its catalog is per-model
-    // efforts and switching rides the pane, not an RPC).
-    const [ocModels, setOcModels] = React.useState<{ id: string; displayName: string }[]>([]);
-    React.useEffect(() => {
-        if (flavor !== 'opencode' || !machineId) return;
-        let cancelled = false;
-        const octx = sync.machineOnlyCtx(machineId);
-        if (!octx) return;
-        machineHarnessModels(octx, 'opencode')
-            .then(({ data }) => {
-                const models = (data?.models ?? []) as { id: string; displayName: string }[];
-                if (!cancelled && models.length) setOcModels(models);
-            })
-            .catch(() => { /* chip stays display-only */ });
-        return () => { cancelled = true; };
-    }, [flavor, machineId]);
+    // efforts and switching rides the pane, not an RPC). Read through the
+    // shared catalog resource — the same entry the new-session picker holds
+    // for this machine + harness — so a late answer lands in ITS cache only.
+    const ocCatalog = useHarnessModels(flavor === 'opencode' ? machineId : null, 'opencode');
+    const ocModels = ocCatalog.data;
 
     const availableModels = React.useMemo(() => {
         if (!isJoyDaemon) return getAvailableModels(flavor, session.metadata, t);
@@ -630,8 +621,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // catalog — resolving currentModelCode against JOY_CLAUDE_MODELS never
         // matched, so codex sessions showed NO model label (bug 2026-07-31).
         // Synthesize a one-entry catalog from the daemon-published code.
-        if (flavor === 'opencode' && ocModels.length) {
-            return ocModels.map((m) => ({ key: m.id, name: m.displayName, description: null }));
+        if (flavor === 'opencode' && ocModels?.length) {
+            return ocModels
+                .map((m) => ({ key: m.id ?? m.model ?? '', name: m.displayName, description: null }))
+                .filter((m) => m.key);
         }
         if (flavor === 'codex' || flavor === 'opencode' || flavor === 'agy' || flavor === 'pi') {
             // Display-only for these: the daemon switches models server-side
