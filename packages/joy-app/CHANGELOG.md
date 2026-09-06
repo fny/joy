@@ -1,3 +1,12 @@
+# Sep 7 — Voice, steadier
+
+- **Voice's idle listener learns the room before waking**, so steady background noise no longer reopens the conversation over and over.
+- **A failed voice start shows once in the status strip** instead of alerting on every sound; tap to retry.
+- **Ending or closing voice while it is still connecting really cancels it**, and when you ask Joy to end the call it stays ended.
+- **Voice no longer announces approvals you already answered in the app**, and stops replaying old events after a long idle.
+- **Sound wake no longer leaves recordings in the app cache.**
+- **The composer shows Send, not the microphone, when only an image is attached.**
+
 # Sep 6 (3) — Reliability sweep
 
 - **"Copied" now means copied.** Every copy button — session ids, commands, code blocks, the machine id, the update id, session metadata, the secret key — checks that the clipboard actually took the text. A refused write shows an error instead of a checkmark over an unchanged clipboard.

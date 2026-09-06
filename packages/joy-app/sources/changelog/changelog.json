@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 7 — Voice, steadier",
+      "summary": "",
+      "markdown": "- **Voice's idle listener learns the room before waking**, so steady background noise no longer reopens the conversation over and over.\n- **A failed voice start shows once in the status strip** instead of alerting on every sound; tap to retry.\n- **Ending or closing voice while it is still connecting really cancels it**, and when you ask Joy to end the call it stays ended.\n- **Voice no longer announces approvals you already answered in the app**, and stops replaying old events after a long idle.\n- **Sound wake no longer leaves recordings in the app cache.**\n- **The composer shows Send, not the microphone, when only an image is attached.**"
+    },
+    {
       "title": "Sep 6 (3) — Reliability sweep",
       "summary": "",
       "markdown": "- **\"Copied\" now means copied.** Every copy button — session ids, commands, code blocks, the machine id, the update id, session metadata, the secret key — checks that the clipboard actually took the text. A refused write shows an error instead of a checkmark over an unchanged clipboard.\n- **Failures are shown, not swallowed.** A palette command, a button action, an environment-key load or delete, a link or store page that would not open, and a failed older-history page used to vanish into the console. They now report what went wrong; a dialog button that runs an async action keeps the dialog open until it finishes and shows the error in place, with the buttons back for a retry.\n- **A late answer never overwrites a newer one.** Switching files while one was still loading or saving, changing machines while an environment or session list was on its way, replacing a drawing background mid-load, deleting a push token during a refresh, backgrounding the app mid-unlock, or typing past an `@` suggestion request — the older result is dropped instead of replacing what you are looking at now.\n- **Voice reconnects to the session you are on**, not the one you were on when the line dropped.\n- **Turning voice off while the browser is still asking for the microphone releases it** instead of listening on afterwards, and restarting the sound detector no longer leaks an audio context.\n- **Nothing keeps running after you leave.** Voice-bar animations, the version tap counter, autocomplete retries and the modal demo's delayed alert all stop with their screen; a live-stream reconnect scheduled just before a stop no longer opens a second stream.\n- **Cancelling the QR scanner on Android** is treated as backing out, not an error."
@@ -306,5 +311,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 6 (3) — Reliability sweep"
+  "latestTitle": "Sep 7 — Voice, steadier"
 }
