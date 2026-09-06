@@ -816,6 +816,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     return registry.get(localId) ?? null;
   }
 
+  /** Report a spawn that could not run. `deliveryId` names the ATTEMPT (#612):
+   *  a report delayed past a retry that already bound is answered
+   *  `{ok:true, applied:false, reason}` and never overwrites the binding —
+   *  logged here, not treated as an error (the relay is right to ignore it). */
+  async function reportSpawnFailed(offer: WorkOffer, reason: string, leaseRef: Lease): Promise<void> {
+    const kind = reason.split(":")[0];
+    try {
+      const r = await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`,
+        { reason, deliveryId: offer.deliveryId }, leaseRef) as { ok?: boolean; applied?: boolean; reason?: string } | null;
+      if (r && r.applied === false) {
+        log(`spawn ${offer.sessionId.slice(0, 8)}: ${kind} report not applied (${r.reason ?? "unknown"}) — delivery ${offer.deliveryId.slice(0, 8)} is not the live attempt`);
+      }
+    } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report ${kind}: ${String(e2)}`); }
+  }
+
   async function handleSpawn(offer: WorkOffer, leaseRef: Lease): Promise<void> {
     await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
     // A client retry re-queues the spawn WITH createDir on the offer — clear
@@ -852,9 +867,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         try { await cloneForSpawn(gitUrl, spec.cwd); } catch (e) { cloneError = e instanceof Error ? e.message : String(e); }
         if (cloneError !== null) {
           abandonedSpawns.add(offer.commandId);
-          try {
-            await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`, { reason: `clone_failed:${cloneError}` }, leaseRef);
-          } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report clone_failed: ${String(e2)}`); }
+          await reportSpawnFailed(offer, `clone_failed:${cloneError}`, leaseRef);
           log(`spawn ${offer.sessionId.slice(0, 8)}: clone of ${gitUrl} failed — ${cloneError}`);
           return;
         }
@@ -899,9 +912,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const elsewhere = boundByLocal.get(session.id);
       if (elsewhere && elsewhere !== offer.sessionId) {
         abandonedSpawns.add(offer.commandId);
-        try {
-          await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`, { reason: `already_bound:${elsewhere}` }, leaseRef);
-        } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report already_bound: ${String(e2)}`); }
+        await reportSpawnFailed(offer, `already_bound:${elsewhere}`, leaseRef);
         log(`spawn ${offer.sessionId.slice(0, 8)}: local ${session.id} is already bound to v2 ${elsewhere.slice(0, 8)} — reported, abandoned`);
         return;
       }
@@ -963,9 +974,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // create it and retry (v1-parity). The relay marks the session failed,
         // which drops it from the work claim — no hot-retry, no app spinner.
         abandonedSpawns.add(offer.commandId);
-        try {
-          await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`, { reason: `dir_missing:${spec.cwd}` }, leaseRef);
-        } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report dir_missing: ${String(e2)}`); }
+        await reportSpawnFailed(offer, `dir_missing:${spec.cwd}`, leaseRef);
         log(`spawn ${offer.sessionId.slice(0, 8)}: directory does not exist — reported for client retry (${spec.cwd})`);
         return;
       }
@@ -979,6 +988,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   let lastBindingsRefresh = 0;
+  /** 409s that say the SESSION is over, not the turn (#614): archived or
+   *  failed while this turn's submit/start was in flight. Cancel-class: the
+   *  prompt must not run, nothing is retried, and no `failed` terminal is
+   *  posted — the relay already resolved the queue (queued turns cancelled)
+   *  and an in-flight turn is closed with a `cancelled` terminal below. */
+  const SESSION_GONE = new Set(["session_archived", "session_failed"]);
+  const sessionGone = (e: unknown): string | null => {
+    const x = e as { status?: number; relayError?: string } | null;
+    return x?.status === 409 && x.relayError && SESSION_GONE.has(x.relayError) ? x.relayError : null;
+  };
+
   async function runTurn(offer: WorkOffer, leaseRef: Lease): Promise<void> {
     const turnId = offer.turnId!;
     if (inFlight.has(turnId)) return;
@@ -1042,7 +1062,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // 2026-09-04). Fail it with the reason instead: the app shows it,
         // the user re-sends, the rest drains. Never dispatched.
         const reason = promptRejectReason(offer.ciphertext, promptKey);
-        await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
+        try {
+          await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
+        } catch (e) {
+          const gone = sessionGone(e);
+          if (gone) { log(`turn ${turnId.slice(0, 8)}: /submitted refused (${gone}) — dropped`); return; }
+          throw e;
+        }
         await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason },
@@ -1050,7 +1076,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         log(`turn ${turnId.slice(0, 8)}: ${reason.replace(/_/g, " ")} → failed`);
         return;
       }
-      await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
+      try {
+        await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
+      } catch (e) {
+        // The session was archived/failed under us: the relay cancelled the
+        // queued turn itself; the prompt never reaches the agent (#614).
+        const gone = sessionGone(e);
+        if (gone) { log(`turn ${turnId.slice(0, 8)}: /submitted refused (${gone}) — dropped, nothing dispatched`); return; }
+        throw e;
+      }
 
       // Materialize the cited attachments into the session's cwd BEFORE the
       // prompt goes in: each becomes a bare `./name` line the agent resolves
@@ -1144,8 +1178,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // unrelated terminal-started turn (Astra on 995abbf6).
             if (rein && !plucked) { try { await sess.abort(); } catch { /* pane teardown */ } }
             for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } }
-            await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
-            log(`${tag}: /start refused for a handled command → cancelled`);
+            await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: sessionGone(e) ?? "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
+            log(`${tag}: /start refused for a handled command (${sessionGone(e) ?? "cancelled"}) → cancelled`);
             return;
           }
           throw e;
@@ -1284,10 +1318,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // cancellation that beat the control offer here. The prompt is
           // already admitted locally: pluck it and abort, then say cancelled
           // (Astra, #77).
+          // Same for session_archived / session_failed (#614): the session is
+          // over, the admitted prompt is plucked, and the in-flight
+          // (dispatching) turn is closed with a `cancelled` terminal — the
+          // relay leaves executing turns to their owner. Never `failed`.
           if (queued?.id) { try { sess.cancelQueued(queued.id); } catch { /* stub adapters */ } }
           try { await sess.abort(); } catch { /* pane teardown */ }
           for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } } // the prompt never runs: its files go too
-          await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
+          await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: sessionGone(e) ?? "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
           log(`${tag}: /start refused (${(e as Error).message}) → admitted prompt plucked + aborted → cancelled`);
           return;
         }

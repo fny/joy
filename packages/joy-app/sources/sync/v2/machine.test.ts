@@ -14,7 +14,7 @@ vi.mock('@/encryption/hmac_sha512', () => ({
         new Uint8Array(createHmac('sha512', Buffer.from(key)).update(Buffer.from(data)).digest()),
 }));
 // @/text pulls expo-localization; the wording itself is not under test here.
-vi.mock('@/text', () => ({ t: (k: string) => (k === 'errors.daemonOutdated' ? 'DAEMON OUT OF DATE' : k) }));
+vi.mock('@/text', () => ({ t: (k: string) => ({ 'errors.daemonOutdated': 'DAEMON OUT OF DATE', 'errors.machineBusy': 'MACHINE BUSY', 'newSession.machineOffline': 'MACHINE OFFLINE' } as Record<string, string>)[k] ?? k }));
 
 const hmac512 = (k: Uint8Array, d: Uint8Array) => createHmac('sha512', Buffer.from(k)).update(Buffer.from(d)).digest();
 const streamKey = (tk: Uint8Array, sid: Uint8Array) => hmac512(tk, Buffer.concat([Buffer.from('stream'), Buffer.from(sid)])).subarray(0, 32);
@@ -66,8 +66,21 @@ describe('machine.ts user-facing tunnel refusals', () => {
         const orig = globalThis.fetch;
         globalThis.fetch = stub((init) => init.body!); // relay reflects our request
         await expect(machineStatusOnly(ctx)).rejects.toMatchObject({ code: 'bad_response_head', message: 'DAEMON OUT OF DATE' });
-        globalThis.fetch = (async () => ({ ok: false, status: 503, headers: { get: () => 'application/json' }, json: async () => ({ error: 'daemon_offline' }) })) as never;
-        await expect(machineStatusOnly(ctx)).rejects.toMatchObject({ code: 'daemon_offline', message: 'tunnel: 503 daemon_offline' });
+        globalThis.fetch = (async () => ({ ok: false, status: 502, headers: { get: () => 'application/json' }, json: async () => ({ error: 'relay_error' }) })) as never;
+        await expect(machineStatusOnly(ctx)).rejects.toMatchObject({ code: 'relay_error', message: 'tunnel: 502 relay_error' });
+        globalThis.fetch = orig;
+    });
+
+    it('relay-level daemon_busy (503, inbox cap, #84) and daemon_offline get their own sentences, codes and status kept', async () => {
+        const { machineStatusOnly } = await import('./machine');
+        const orig = globalThis.fetch;
+        const relayJson = (status: number, error: string) => (async () => ({
+            ok: false, status, headers: { get: (h: string) => (h === 'content-type' ? 'application/json' : h === 'retry-after' ? '1' : null) }, json: async () => ({ error }),
+        })) as never;
+        globalThis.fetch = relayJson(503, 'daemon_busy');
+        await expect(machineStatusOnly(ctx)).rejects.toMatchObject({ code: 'daemon_busy', status: 503, message: 'MACHINE BUSY' });
+        globalThis.fetch = relayJson(503, 'daemon_offline');
+        await expect(machineStatusOnly(ctx)).rejects.toMatchObject({ code: 'daemon_offline', status: 503, message: 'MACHINE OFFLINE' });
         globalThis.fetch = orig;
     });
 

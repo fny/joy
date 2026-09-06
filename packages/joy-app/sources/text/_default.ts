@@ -350,6 +350,9 @@ export const en = {
         failedToRemoveFriend: 'Failed to remove friend',
         searchFailed: 'Search failed. Please try again.',
         failedToSendRequest: 'Failed to send friend request',
+        sessionFull: 'This session is full — continue in a new session',
+        pairingCodeExpired: 'The code expired — scan again',
+        machineBusy: 'The machine is busy — try again in a moment',
     },
 
     newSession: {

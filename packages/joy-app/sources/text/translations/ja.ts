@@ -306,6 +306,9 @@ export const ja: TranslationStructure = {
         failedToRemoveFriend: '友達の削除に失敗しました',
         searchFailed: '検索に失敗しました。再試行してください。',
         failedToSendRequest: '友達リクエストの送信に失敗しました',
+        sessionFull: 'このセッションは上限に達しました — 新しいセッションで続けてください',
+        pairingCodeExpired: 'コードの有効期限が切れました — もう一度スキャンしてください',
+        machineBusy: 'マシンがビジー状態です — しばらくしてからもう一度お試しください',
     },
 
     newSession: {

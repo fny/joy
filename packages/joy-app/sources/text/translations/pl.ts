@@ -322,6 +322,9 @@ export const pl: TranslationStructure = {
         failedToRemoveFriend: 'Nie udało się usunąć przyjaciela',
         searchFailed: 'Wyszukiwanie nie powiodło się. Spróbuj ponownie.',
         failedToSendRequest: 'Nie udało się wysłać zaproszenia do znajomych',
+        sessionFull: 'Ta sesja jest pełna — kontynuuj w nowej sesji',
+        pairingCodeExpired: 'Kod wygasł — zeskanuj go ponownie',
+        machineBusy: 'Maszyna jest zajęta — spróbuj ponownie za chwilę',
     },
 
     newSession: {

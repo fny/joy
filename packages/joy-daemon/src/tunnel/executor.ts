@@ -74,7 +74,13 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
         })(),
         body: bytes as any,
       });
-      if (!r.ok) throw new Error(`frames post failed: ${r.status}`);
+      if (!r.ok) {
+        // 404 request_gone (client left / idle deadline) or 403 wrong_daemon:
+        // the exchange is over — the caller must stop reading its local
+        // response (#83). Carry the relay's code so the log says which.
+        const code = await r.json().then((j) => String((j as { error?: string } | null)?.error ?? ""), () => "");
+        throw new Error(`frames post failed: ${r.status}${code ? ` ${code}` : ""}`);
+      }
     };
 
     const payload = Buffer.from(payloadB64, "base64");
@@ -133,19 +139,27 @@ export function startTunnelExecutor(opts: ExecutorOpts): ExecutorHandle {
     }
     let pendingWire: Uint8Array[] = [w.header(), w.push(headBytes, false)];
     const reader = respBody.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      let v = value as Uint8Array;
-      for (let off = 0; off < v.length; off += CHUNK_MAX) {
-        pendingWire.push(w.push(v.subarray(off, Math.min(off + CHUNK_MAX, v.length)), false));
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        let v = value as Uint8Array;
+        for (let off = 0; off < v.length; off += CHUNK_MAX) {
+          pendingWire.push(w.push(v.subarray(off, Math.min(off + CHUNK_MAX, v.length)), false));
+        }
+        // Flush per read — keeps memory flat and latency low for SSE.
+        await postFrames(Buffer.concat(pendingWire.map(Buffer.from)), false);
+        pendingWire = [];
       }
-      // Flush per read — keeps memory flat and latency low for SSE.
-      await postFrames(Buffer.concat(pendingWire.map(Buffer.from)), false);
-      pendingWire = [];
+      pendingWire.push(w.push(new Uint8Array(0), true));
+      await postFrames(Buffer.concat(pendingWire.map(Buffer.from)), true);
+    } finally {
+      // A frame post that throws (404 request_gone, 403 wrong_daemon, relay
+      // down) ends the exchange — release the LOCAL response too. Without
+      // this a local SSE stream was read to nobody for as long as the local
+      // surface kept writing (#83). Cancelling a finished reader is a no-op.
+      await reader.cancel().catch(() => {});
     }
-    pendingWire.push(w.push(new Uint8Array(0), true));
-    await postFrames(Buffer.concat(pendingWire.map(Buffer.from)), true);
   }
 
   /** The lease this executor should present: the lane's (borrowed) or its

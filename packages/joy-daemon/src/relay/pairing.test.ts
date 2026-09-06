@@ -38,3 +38,44 @@ describe("parseBackupCode", () => {
         expect(() => parseBackupCode("")).toThrow();
     });
 });
+
+// #607: a poll that finds the answer already collected is answered
+// `{state:'consumed', error, consumedAt, message}` — pairWithRelay must
+// surface the relay's words and the moment, not "not authorized".
+import * as http from "node:http";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pairWithRelay } from "./pairing";
+
+describe("pairWithRelay: consumed answer (#607)", () => {
+    it("throws the relay's message and the consumedAt instant", async () => {
+        const consumedAt = Date.UTC(2026, 8, 6, 12, 34, 56);
+        let polls = 0;
+        const server = http.createServer((req, res) => {
+            let raw = ""; req.on("data", (c) => (raw += c));
+            req.on("end", () => {
+                const send = (o: unknown) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
+                if (req.url === "/joy/v2/auth") return send({ token: "acct" });
+                if (req.url === "/joy/v2/auth/response") return send({ success: true });
+                if (req.url === "/joy/v2/auth/request") {
+                    polls++;
+                    if (polls === 1) return send({ state: "requested" });
+                    return send({
+                        state: "consumed", error: "pairing_answer_already_collected", consumedAt,
+                        message: "This pairing answer was already collected — it cannot be re-issued; start a new pairing.",
+                    });
+                }
+                res.writeHead(404); res.end();
+            });
+        });
+        const url = await new Promise<string>((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${(server.address() as any).port}`)));
+        try {
+            const creds = mkdtempSync(join(tmpdir(), "joy-pair-test-"));
+            await expect(pairWithRelay(url, new Uint8Array(32).fill(3), creds)).rejects.toThrow(
+                /already collected — it cannot be re-issued; start a new pairing\. \(collected at 2026-09-06T12:34:56\.000Z\)/,
+            );
+            expect(polls).toBe(2);
+        } finally { server.close(); }
+    });
+});

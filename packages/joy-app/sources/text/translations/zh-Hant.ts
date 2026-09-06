@@ -305,6 +305,9 @@ export const zhHant: TranslationStructure = {
         failedToRemoveFriend: '刪除好友失敗',
         searchFailed: '搜尋失敗。請重試。',
         failedToSendRequest: '傳送好友請求失敗',
+        sessionFull: '此工作階段已滿 — 請在新工作階段中繼續',
+        pairingCodeExpired: '驗證碼已過期 — 請重新掃描',
+        machineBusy: '裝置正忙 — 請稍後再試',
     },
 
     newSession: {

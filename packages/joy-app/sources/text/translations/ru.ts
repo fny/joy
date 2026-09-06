@@ -284,6 +284,9 @@ export const ru: TranslationStructure = {
         failedToRemoveFriend: 'Не удалось удалить друга',
         searchFailed: 'Поиск не удался. Пожалуйста, попробуйте снова.',
         failedToSendRequest: 'Не удалось отправить запрос в друзья',
+        sessionFull: 'Эта сессия заполнена — продолжите в новой сессии',
+        pairingCodeExpired: 'Код истёк — отсканируйте его снова',
+        machineBusy: 'Машина занята — повторите попытку через минуту',
     },
 
     newSession: {
