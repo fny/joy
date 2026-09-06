@@ -205,6 +205,73 @@ test("#32 hooks live: a slash command keeps the turn-start confirm (UserPromptSu
   s.end("killed");
 });
 
+// ── #498: the transcript turn a dispatch opens is named for its attempt ──────
+// Claude never names its turns. The session binds the relay turn it opens for a
+// dispatch to that dispatch's attempt, so GET /sessions/:id/queue/:qid carries
+// the `turn` the reply's records carry and `joy ask` binds on it instead of
+// guessing the first turn started after the send (Astra F9: an earlier queued
+// message's answer came back labelled as this one's).
+
+const turnStartsSent = (sent: any[]) => sent.filter((m) => m?.content?.data?.ev?.t === "turn-start").map((m) => m.content.data.turn as string);
+
+test("#498 hooks live: confirmed by UserPromptSubmit before any assistant entry, the dispatch is named the turn the transcript then opens", async () => {
+  vi.useFakeTimers();
+  const { st, driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("name-turn"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-name-turn");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const item = queueFor(s).accept("P name my turn", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  expect(st.keys).toContain("Enter");
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "P name my turn", prompt_id: "p1", permission_mode: "plan" });
+  // delivered and its turn started (the hook's edge) — but no relay turn exists yet to name
+  expect(queueFor(s).command(item.id)).toMatchObject({ state: "running", turnStarted: true, runtimeTurnId: null });
+  s.onTranscriptEntry({ type: "assistant", uuid: "u-1", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "on it" }] } } as any);
+  const [turn] = turnStartsSent(sent);
+  expect(turn).toBeTruthy();
+  expect(queueFor(s).command(item.id)).toMatchObject({ state: "running", turnStarted: true, runtimeTurnId: turn });
+  s.onHookEvent({ event: "Stop", permission_mode: "plan" });
+  expect(queueFor(s).command(item.id)).toMatchObject({ state: "completed", runtimeTurnId: turn });
+  // A second dispatch behind it gets ITS OWN turn, not the first one's.
+  s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 10 } as any);
+  const second = queueFor(s).accept("P and another", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "P and another", prompt_id: "p2", permission_mode: "plan" });
+  s.onTranscriptEntry({ type: "assistant", uuid: "u-2", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "again" }] } } as any);
+  const turns = turnStartsSent(sent);
+  expect(turns).toHaveLength(2);
+  expect(queueFor(s).command(second.id)).toMatchObject({ runtimeTurnId: turns[1], turnStarted: true });
+  expect(queueFor(s).command(item.id)?.runtimeTurnId).toBe(turn);
+  s.end("killed");
+});
+
+test("#498 no hooks: the turn-start confirm names the turn it confirmed on; a slash command runs no turn of its own", async () => {
+  vi.useFakeTimers();
+  const { st, driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("name-turn-nohooks"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-name-turn-nohooks");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  const item = queueFor(s).accept("P the prompt", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  expect(st.keys).toContain("Enter");
+  s.onTranscriptEntry({ type: "assistant", uuid: "u-1", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "on it" }] } } as any);
+  await vi.advanceTimersByTimeAsync(10); // the confirm awaits a FRESH box read (empty here)
+  const [turn] = turnStartsSent(sent);
+  expect(queueFor(s).command(item.id)).toMatchObject({ state: "running", runtimeTurnId: turn, turnStarted: true });
+  s.onTranscriptEntry({ type: "assistant", uuid: "u-2", message: { role: "assistant", model: "claude-x", stop_reason: "end_turn", content: [{ type: "text", text: "done" }] } } as any);
+  expect(queueFor(s).command(item.id)).toMatchObject({ state: "completed", runtimeTurnId: turn });
+  // A slash command's delivery is its completion: no runtime turn, nothing to attribute.
+  const cmd = queueFor(s).accept("/compact focus on the tests", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onTranscriptEntry({ type: "assistant", uuid: "u-cmd", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "compacting" }] } } as any);
+  await vi.advanceTimersByTimeAsync(10);
+  expect(queueFor(s).command(cmd.id)).toMatchObject({ state: "completed", runtimeTurnId: null, turnStarted: false });
+  s.end("killed");
+});
+
 // ── no hook ever: behaviour identical to today ──────────────────────────────
 
 test("no hook seen: the pane rules stay in force — turn start confirms on an empty box, the pane sets and clears thinking, exit waits for the pid probe", async () => {
