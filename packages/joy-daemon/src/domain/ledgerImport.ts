@@ -21,7 +21,16 @@
 //     record whose execution field has the wrong shape (a string offset),
 //     fails the whole file — nothing of it is committed, nothing stripped,
 //     the session waits for a repair. A command id another session already
-//     owns fails it the same way (CommandIdConflictError).
+//     owns fails it the same way (CommandIdConflictError). A window record
+//     that cannot be read or parsed is a failed import of THAT record too
+//     (review a7edccec): its execution fields cannot be known to be absent,
+//     so its session is quarantined until the record is repaired. Byte
+//     offsets and sequence numbers must be non-negative safe integers; a
+//     handoff job must be one `domain/handoff.ts` can resume (a known
+//     role, and the target / peer that role needs) — accepted execution
+//     state is never imported in a shape that resume would clear.
+//   - A failed file changes nothing, the report's counters included: they
+//     are restored with the rows when its transaction rolls back.
 //   - A legacy checkpoint never moves the ledger's cursor backwards: it is
 //     installed only while the ledger has none of that kind.
 //   - Window records keep their identity fields; the execution fields are
@@ -37,6 +46,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { Ledger, LedgerWriteError, type CommandState, type NewOutbound } from "./ledger";
 import { writeFileAtomic } from "./atomicWrite";
+import type { HandoffJob } from "./handoff";
 
 export interface ImportFailure { file: string; error: string; sessionId?: string }
 export interface ImportReport {
@@ -72,6 +82,9 @@ export interface ImportOptions {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+/** A non-negative safe integer (a byte offset, a sequence number) — a
+ *  finite float or a value past 2^53 is not one. */
+const index = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 /** The old `received[]` echo backstop only ever mattered inside this window. */
 const RECEIVED_WINDOW_MS = 15 * 60 * 1000;
@@ -91,10 +104,13 @@ function readSource(path: string): { doc: unknown; hash: string } {
   return { doc, hash: createHash("sha256").update(raw).digest("hex") };
 }
 
-/** Best-effort read for the window records (a record that does not parse is
- *  not this module's to repair — windowRecord.ts owns it). */
-function readJson(path: string): unknown {
-  try { return JSON.parse(fs.readFileSync(path, "utf8")); } catch { return null; }
+/** Read + parse a window record. Throws like readSource: an unreadable file
+ *  or one that is not JSON (MalformedSource) — the caller fails the record.
+ *  A record that is not an object is malformed too. */
+function readRecord(path: string): Record<string, unknown> {
+  const doc = readSource(path).doc;
+  if (!isRecord(doc)) throw new MalformedSource("a window record is an object");
+  return doc;
 }
 
 /** Legacy file classes, matched against a state-dir entry name. */
@@ -135,7 +151,12 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
   // localId ← v2SessionId, from the window records, for outbound entries
   // that predate the localId field.
   const localByV2 = new Map<string, string>();
-  for (const r of records) if (r.v2SessionId) localByV2.set(r.v2SessionId, r.id);
+  for (const r of records) if (r.raw && r.v2SessionId) localByV2.set(r.v2SessionId, r.id);
+  // The counters describe what COMMITTED: a file whose transaction rolls
+  // back leaves them exactly as they were.
+  const COUNTERS = ["commands", "attempts", "receipts", "outbox", "checkpoints", "spawnIntents", "jobs"] as const;
+  const counters = (): Record<(typeof COUNTERS)[number], number> => Object.fromEntries(COUNTERS.map((k) => [k, report[k]])) as Record<(typeof COUNTERS)[number], number>;
+  const restore = (snap: ReturnType<typeof counters>): void => { for (const k of COUNTERS) report[k] = snap[k]; };
 
   const movedDir = join(stateDir, "imported-v1");
   const move = (name: string): void => {
@@ -167,6 +188,7 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
       move(name);
       continue;
     }
+    const before = counters();
     try {
       ledger.tx(() => {
         let m: RegExpExecArray | null;
@@ -181,6 +203,7 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
       report.files.push(name);
       move(name);
     } catch (e) {
+      restore(before);
       // A wrong-shape source throws MalformedSource inside the transaction;
       // tx() wraps it — report the shape complaint, not the wrapper.
       const cause = e instanceof LedgerWriteError ? e.cause : e;
@@ -191,17 +214,23 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
 
   // Window records: the three execution fields move; the record stays.
   for (const rec of records) {
-    if (!EXEC_FIELDS.some((f) => rec.raw[f] != null)) continue;
     const file = `window-${rec.id}.json`;
+    // A record that could not be read or parsed may hold execution fields
+    // nobody can see: a failed import of this record, its session
+    // quarantined, retried once the record is repaired (review a7edccec).
+    const raw = rec.raw;
+    if (!raw) { fail(file, rec.id, rec.error instanceof MalformedSource ? "malformed" : "unreadable", errMsg(rec.error)); continue; }
+    if (!EXEC_FIELDS.some((f) => raw[f] != null)) continue;
     // Every field is validated BEFORE anything is written or stripped: a
     // malformed one (a string offset) is a failed import of this record —
     // it keeps its fields and its session is quarantined until repaired.
     let fields: RecordFields;
-    try { fields = parseRecordFields(rec.raw); }
+    try { fields = parseRecordFields(raw); }
     catch (e) { fail(file, rec.id, "malformed", errMsg(e)); continue; }
+    const before = counters();
     try { ledger.tx(() => importRecordFields(ledger, rec.id, fields, report), `import ${file}`); }
-    catch (e) { fail(file, rec.id, "import failed", errMsg(e)); continue; }
-    const stripped: Record<string, unknown> = { ...rec.raw };
+    catch (e) { restore(before); fail(file, rec.id, "import failed", errMsg(e)); continue; }
+    const stripped: Record<string, unknown> = { ...raw };
     for (const f of EXEC_FIELDS) delete stripped[f];
     // The record is the session's identity (launch cwd, conversation id): it
     // is replaced atomically or not at all. A failed rewrite leaves the old
@@ -221,17 +250,22 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
   return report;
 }
 
-interface RecordFile { id: string; path: string; raw: Record<string, unknown>; v2SessionId?: string }
+/** A window record: parsed (`raw`), or the read/parse failure it hit. */
+interface RecordFile { id: string; path: string; raw: Record<string, unknown> | null; error?: unknown; v2SessionId?: string }
 function listRecordFiles(stateDir: string): RecordFile[] {
   let names: string[] = [];
   try { names = fs.readdirSync(stateDir); } catch { return []; }
   const out: RecordFile[] = [];
-  for (const n of names) {
+  for (const n of names.sort()) {
     const m = /^window-([0-9a-f]{8})\.json$/.exec(n);
     if (!m) continue;
-    const raw = readJson(join(stateDir, n));
-    if (!isRecord(raw)) continue;
-    out.push({ id: m[1], path: join(stateDir, n), raw, v2SessionId: str(raw.v2SessionId) });
+    const path = join(stateDir, n);
+    try {
+      const raw = readRecord(path);
+      out.push({ id: m[1], path, raw, v2SessionId: str(raw.v2SessionId) });
+    } catch (e) {
+      out.push({ id: m[1], path, raw: null, error: e });
+    }
   }
   return out;
 }
@@ -250,6 +284,14 @@ function optionalNum(row: Record<string, unknown>, field: string, where: string)
   if (n === undefined) throw new MalformedSource(`${where}: ${field} must be a number`);
   return n;
 }
+/** An optional non-negative safe-integer field (a seq, an offset), or a MalformedSource. */
+function optionalIndex(row: Record<string, unknown>, field: string, where: string): number | undefined {
+  const v = row[field];
+  if (v == null) return undefined;
+  const n = index(v);
+  if (n === undefined) throw new MalformedSource(`${where}: ${field} must be a non-negative integer`);
+  return n;
+}
 
 function importQueue(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
   if (!Array.isArray(doc)) throw new MalformedSource("a queue file is an array of items");
@@ -260,7 +302,7 @@ function importQueue(ledger: Ledger, sessionId: string, doc: unknown, report: Im
     if (!isRecord(it)) throw new MalformedSource(`${where}: not an object`);
     const id = requireText(it, "id", where);
     const text = requireText(it, "text", where);
-    const seq = optionalNum(it, "seq", where);
+    const seq = optionalIndex(it, "seq", where);
     const createdAt = optionalNum(it, "createdAt", where);
     const r = ledger.acceptCommand({
       sessionId, id, text, origin: seq != null ? "relay" : "local",
@@ -279,7 +321,7 @@ function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, sourceH
   for (const r of inbound) {
     if (!isRecord(r) || typeof r.uuid !== "string" || !r.uuid) continue;
     ledger.addReceipt(sessionId, { kind: "transcript_uuid", ref: r.uuid, at: num(r.at) }); report.receipts++;
-    const seq = num(r.seq);
+    const seq = index(r.seq);
     if (seq != null) { ledger.addReceipt(sessionId, { kind: "seq", ref: String(seq), at: num(r.at) }); report.receipts++; }
   }
   for (const r of outbound) {
@@ -338,7 +380,7 @@ function importCodexInbound(ledger: Ledger, sessionId: string, doc: unknown, rep
     const where = `codex inbound item ${i}`;
     if (!isRecord(it)) throw new MalformedSource(`${where}: not an object`);
     const clientId = requireText(it, "clientId", where);
-    const seq = optionalNum(it, "seq", where);
+    const seq = optionalIndex(it, "seq", where);
     const at = optionalNum(it, "at", where);
     const state = str(it.state);
     if (state === "delivered") {
@@ -370,7 +412,7 @@ function importCodexCheckpoint(ledger: Ledger, sessionId: string, doc: unknown, 
     ledger.addReceipt(sessionId, { kind: "codex_client", ref: id, commandId: id }); report.receipts++;
   }
   for (const r of Array.isArray(doc.seqReceipts) ? doc.seqReceipts : []) {
-    if (!isRecord(r) || typeof r.seq !== "number" || typeof r.clientId !== "string") continue;
+    if (!isRecord(r) || index(r.seq) === undefined || typeof r.clientId !== "string") continue;
     ledger.addReceipt(sessionId, { kind: "seq", ref: String(r.seq), commandId: r.clientId }); report.receipts++;
     ledger.addReceipt(sessionId, { kind: "codex_client", ref: r.clientId, commandId: r.clientId }); report.receipts++;
   }
@@ -391,7 +433,7 @@ function importSpawns(ledger: Ledger, doc: unknown, report: ImportReport): void 
 interface RecordFields {
   transcriptCheckpoint?: { path: string; offset: number };
   opencodeDeliveredThrough?: string;
-  handoffJob?: Record<string, unknown>;
+  handoffJob?: HandoffJob;
 }
 function parseRecordFields(raw: Record<string, unknown>): RecordFields {
   const out: RecordFields = {};
@@ -399,8 +441,8 @@ function parseRecordFields(raw: Record<string, unknown>): RecordFields {
   if (cp != null) {
     if (!isRecord(cp)) throw new MalformedSource("transcriptCheckpoint: not an object");
     const path = requireText(cp, "path", "transcriptCheckpoint");
-    const offset = num(cp.offset);
-    if (offset === undefined || offset < 0) throw new MalformedSource("transcriptCheckpoint: offset must be a non-negative number");
+    const offset = index(cp.offset);
+    if (offset === undefined) throw new MalformedSource("transcriptCheckpoint: offset must be a non-negative integer");
     out.transcriptCheckpoint = { path, offset };
   }
   const oc = raw.opencodeDeliveredThrough;
@@ -411,16 +453,53 @@ function parseRecordFields(raw: Record<string, unknown>): RecordFields {
   const job = raw.handoffJob;
   if (job != null) {
     if (!isRecord(job)) throw new MalformedSource("handoffJob: not an object");
-    requireText(job, "role", "handoffJob");
-    requireText(job, "path", "handoffJob");
-    out.handoffJob = job;
+    out.handoffJob = parseHandoffJob(job);
   }
   return out;
 }
 
+const HANDOFF_AGENTS: ReadonlyArray<NonNullable<HandoffJob["target"]>["agent"]> = ["claude", "codex", "opencode", "pi", "agy"];
+/** The optional text fields of a handoff target, each a non-empty string when present. */
+function optionalText(row: Record<string, unknown>, field: string, where: string): string | undefined {
+  const v = row[field];
+  if (v == null) return undefined;
+  if (typeof v !== "string" || !v) throw new MalformedSource(`${where}: ${field} must be a non-empty string`);
+  return v;
+}
+/** A handoff job in the shape `handoff.ts` resumes (review a7edccec): a
+ *  known role, and what that role needs — a source its target harness
+ *  (and, once delivered, the session it created), a target its peer. A
+ *  job resume would only clear is not accepted execution state; the
+ *  record fails until repaired. Unknown fields are not carried. */
+function parseHandoffJob(job: Record<string, unknown>): HandoffJob {
+  const where = "handoffJob";
+  const role = requireText(job, "role", where);
+  if (role !== "source" && role !== "target") throw new MalformedSource(`${where}: role must be "source" or "target"`);
+  const path = requireText(job, "path", where);
+  // `at` is informational (nothing reads it back): validated when present,
+  // never invented when a legacy writer left it out.
+  const at = optionalIndex(job, "at", where);
+  const stamp = at === undefined ? {} : { at };
+  if (role === "target") {
+    const peer = requireText(job, "peer", `${where} (target)`);
+    return { role, path, peer, ...stamp } as HandoffJob;
+  }
+  const t = job.target;
+  if (!isRecord(t)) throw new MalformedSource(`${where} (source): target must be an object`);
+  const agent = requireText(t, "agent", `${where}.target`);
+  if (!(HANDOFF_AGENTS as readonly string[]).includes(agent)) throw new MalformedSource(`${where}.target: agent must be one of ${HANDOFF_AGENTS.join(", ")}`);
+  const target: NonNullable<HandoffJob["target"]> = { agent: agent as (typeof HANDOFF_AGENTS)[number] };
+  for (const f of ["model", "effort", "permissionMode"] as const) { const v = optionalText(t, f, `${where}.target`); if (v !== undefined) target[f] = v; }
+  const dst = optionalText(job, "dst", `${where} (source)`);
+  const delivered = job.delivered;
+  if (delivered != null && typeof delivered !== "boolean") throw new MalformedSource(`${where} (source): delivered must be a boolean`);
+  if (delivered === true && !dst) throw new MalformedSource(`${where} (source): delivered without the dst session it was delivered to`);
+  return { role, path, target, ...(dst ? { dst } : {}), ...(delivered != null ? { delivered } : {}), ...stamp } as HandoffJob;
+}
+
 function importRecordFields(ledger: Ledger, sessionId: string, fields: RecordFields, report: ImportReport): void {
   const cp = fields.transcriptCheckpoint;
-  if (cp && !ledger.getCheckpoint(sessionId, "claude_transcript")) { ledger.setCheckpoint(sessionId, "claude_transcript", cp.path, cp.offset); report.checkpoints++; }
+  if (cp && !ledger.getCheckpoint(sessionId, "claude_transcript")) { ledger.setCheckpoint(sessionId, "claude_transcript", cp.path, cp.offset, { coversReceipts: false }); report.checkpoints++; }
   const oc = fields.opencodeDeliveredThrough;
   if (oc && !ledger.getCheckpoint(sessionId, "opencode_msg")) { ledger.setCheckpoint(sessionId, "opencode_msg", oc, 0); report.checkpoints++; }
   const job = fields.handoffJob;

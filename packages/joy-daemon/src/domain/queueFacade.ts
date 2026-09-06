@@ -90,8 +90,13 @@ export function queueFor(session: Pick<AgentSession, "id">, coordinator: Session
       waitFor: async (cid, states, opts) => {
         if (!owned(cid)) return { state: null };
         const state = await coordinator.waitFor(cid, states, { timeoutMs: opts.timeoutMs, signal: opts.signal });
+        // Ownership is re-read AFTER the wait (review 11cf51b5): a row never
+        // changes session, but a terminal row can be pruned during a long
+        // wait and its id accepted again by another session — that row's
+        // state and reason are not this session's to report.
         const row = coordinator.command(cid);
-        return { state, ...(row?.terminalReason ? { reason: row.terminalReason } : {}) };
+        if (!row || row.sessionId !== id) return { state: null };
+        return { state, ...(row.terminalReason ? { reason: row.terminalReason } : {}) };
       },
     };
   }

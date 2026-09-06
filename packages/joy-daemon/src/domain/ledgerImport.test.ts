@@ -297,7 +297,7 @@ test("every semantically required queue / codex-inbound field is checked: a prom
     ["codex-inbound-aaaa0004.json", "aaaa0004", [{ clientId: "c", state: "queued" }], "malformed: codex inbound item 0: text must be a string"],
     ["codex-inbound-aaaa0005.json", "aaaa0005", [{ clientId: "ok", text: "fine", state: "queued" }, { clientId: 5, state: "delivered" }], "malformed: codex inbound item 1: clientId must be a non-empty string"],
     ["queue-aaaa0001.json", "aaaa0001", [{ text: "no id" }], "malformed: queue item 0: id must be a non-empty string"],
-    ["queue-aaaa0002.json", "aaaa0002", [{ id: "x", text: "ok", seq: "5" }], "malformed: queue item 0: seq must be a number"],
+    ["queue-aaaa0002.json", "aaaa0002", [{ id: "x", text: "ok", seq: "5" }], "malformed: queue item 0: seq must be a non-negative integer"],
     ["queue-aaaa0003.json", "aaaa0003", ["junk"], "malformed: queue item 0: not an object"],
   ];
   for (const [name, , doc] of cases) write(name, doc);
@@ -317,7 +317,7 @@ test("a window record whose execution field is malformed (a string offset) is ne
   writeFileSync(file, original);
   const l = Ledger.open(dir);
   const r = importLegacyState(l, dir, { sealsContent: false });
-  expect(r.failed).toEqual([{ file: "window-abcdef12.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative number", sessionId: "abcdef12" }]);
+  expect(r.failed).toEqual([{ file: "window-abcdef12.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "abcdef12" }]);
   expect(r.quarantine).toEqual(["abcdef12"]);
   expect(r.files).toEqual([]);
   expect(readFileSync(file, "utf8")).toBe(original); // not stripped
@@ -369,3 +369,102 @@ test("a legacy queue entry whose id another session already owns fails that file
   l.close();
 });
 
+
+test("a window record that does not parse (a truncating write) is a FAILED import of that record: quarantined, not stripped, not done — a sibling still imports; the repair completes it (review a7edccec)", () => {
+  const file = join(dir, "window-abcdef12.json");
+  const truncated = '{"launchCwd":"/repo","transcriptCheckpoint":';
+  writeFileSync(file, truncated);
+  write("window-abcdef13.json", { launchCwd: "/other", opencodeDeliveredThrough: "msg_1" });
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([{ file: "window-abcdef12.json", error: expect.stringMatching(/^malformed: not JSON/), sessionId: "abcdef12" }]);
+  expect(r.quarantine).toEqual(["abcdef12"]);
+  expect(r.files).toEqual(["window-abcdef13.json"]);
+  expect(readFileSync(file, "utf8")).toBe(truncated);
+  expect(l.getCheckpoint("abcdef13", "opencode_msg")?.ref).toBe("msg_1");
+  expect(l.getMeta("import_v1")).toBeNull();
+  // A record that parses to something other than an object is malformed too.
+  writeFileSync(file, "[1,2]");
+  expect(importLegacyState(l, dir, { sealsContent: false }).failed).toEqual([{ file: "window-abcdef12.json", error: "malformed: a window record is an object", sessionId: "abcdef12" }]);
+  // Repaired: its fields import, the record is stripped, the import completes.
+  writeFileSync(file, JSON.stringify({ launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: 7 } }));
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed).toEqual([]);
+  expect(r2.quarantine).toEqual([]);
+  expect(l.getCheckpoint("abcdef12", "claude_transcript")).toMatchObject({ ref: "/t", offset: 7 });
+  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ launchCwd: "/repo" });
+  expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
+test("a handoff job resume could not act on is a FAILED import, never stripped: a source without its target, a target without its peer, an unknown role or agent, delivered without dst (review a7edccec)", () => {
+  const cases: Array<[string, unknown, string]> = [
+    ["aaaa0001", { role: "source", path: "/note" }, "malformed: handoffJob (source): target must be an object"],
+    ["aaaa0002", { role: "target", path: "/note", at: 1 }, "malformed: handoffJob (target): peer must be a non-empty string"],
+    ["aaaa0003", { role: "observer", path: "/note", at: 1 }, 'malformed: handoffJob: role must be "source" or "target"'],
+    ["aaaa0004", { role: "source", path: "/note", target: { agent: "gemini" }, at: 1 }, "malformed: handoffJob.target: agent must be one of claude, codex, opencode, pi, agy"],
+    ["aaaa0005", { role: "source", path: "/note", target: { agent: "codex" }, delivered: true, at: 1 }, "malformed: handoffJob (source): delivered without the dst session it was delivered to"],
+    ["aaaa0006", { role: "source", path: "/note", target: { agent: "codex", model: 5 }, at: 1 }, "malformed: handoffJob.target: model must be a non-empty string"],
+    ["aaaa0007", { role: "source", path: "/note", target: { agent: "codex" }, at: 1.5 }, "malformed: handoffJob: at must be a non-negative integer"],
+  ];
+  const originals = new Map<string, string>();
+  for (const [id, handoffJob] of cases) {
+    const doc = JSON.stringify({ launchCwd: "/repo", handoffJob });
+    originals.set(id, doc);
+    writeFileSync(join(dir, `window-${id}.json`), doc);
+  }
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual(cases.map(([id, , error]) => ({ file: `window-${id}.json`, error, sessionId: id })));
+  expect(r.quarantine).toEqual(cases.map(([id]) => id));
+  expect(r.jobs).toBe(0);
+  for (const [id] of cases) {
+    expect(l.getJob(id)).toBeNull();
+    expect(readFileSync(join(dir, `window-${id}.json`), "utf8")).toBe(originals.get(id)); // not stripped
+  }
+  expect(l.getMeta("import_v1")).toBeNull();
+  // Repaired to the shape resume needs: imported in exactly that shape (unknown fields dropped), stripped.
+  writeFileSync(join(dir, "window-aaaa0001.json"), JSON.stringify({ launchCwd: "/repo", handoffJob: { role: "source", path: "/note", target: { agent: "codex", model: "gpt-5.5", junk: 1 }, dst: "bbbb0002", delivered: true, at: 9, stray: true } }));
+  writeFileSync(join(dir, "window-aaaa0002.json"), JSON.stringify({ launchCwd: "/repo", handoffJob: { role: "target", path: "/note", peer: "aaaa0001", at: 10 } }));
+  for (const [id] of cases.slice(2)) writeFileSync(join(dir, `window-${id}.json`), JSON.stringify({ launchCwd: "/repo" }));
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed).toEqual([]);
+  expect(r2.jobs).toBe(2);
+  expect(l.getJob("aaaa0001")?.payload).toEqual({ role: "source", path: "/note", target: { agent: "codex", model: "gpt-5.5" }, dst: "bbbb0002", delivered: true, at: 9 });
+  expect(l.getJob("aaaa0002")?.payload).toEqual({ role: "target", path: "/note", peer: "aaaa0001", at: 10 });
+  expect(JSON.parse(readFileSync(join(dir, "window-aaaa0001.json"), "utf8"))).toEqual({ launchCwd: "/repo" });
+  expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
+test("the report's counters are restored when a file's transaction rolls back: a failed file counts nothing, a committed sibling counts", () => {
+  write("queue-aaaa0001.json", [{ id: "good", text: "good" }, { id: "bad", text: 77 }]);
+  write("codex-inbound-bbbb0002.json", [{ clientId: "c1", text: "queued", state: "queued" }, { clientId: "c2", text: "sent", state: "sentUnknown" }, { clientId: "c3", state: "delivered", seq: 4 }, "junk"]);
+  write("cccc0003.receipts.json", { inbound: [{ uuid: "u1", seq: 1 }], outbound: [{ uuid: "u2" }] });
+  write("queue-dddd0004.json", [{ id: "fine", text: "fine" }]);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed.map((f) => f.file)).toEqual(["codex-inbound-bbbb0002.json", "queue-aaaa0001.json"]);
+  expect(r.files).toEqual(["cccc0003.receipts.json", "queue-dddd0004.json"]);
+  expect(r).toMatchObject({ commands: 1, attempts: 0, receipts: 3, outbox: 0, checkpoints: 0, spawnIntents: 0, jobs: 0 });
+  expect(l.db.prepare("SELECT COUNT(*) AS n FROM commands").get()).toEqual({ n: 1 });
+  l.close();
+});
+
+test("byte offsets and sequence numbers must be non-negative safe integers: a float seq, a seq past 2^53, a negative offset all fail their file", () => {
+  write("queue-aaaa0001.json", [{ id: "x", text: "ok", seq: 1.5 }]);
+  write("codex-inbound-aaaa0002.json", [{ clientId: "c", text: "ok", state: "queued", seq: 2 ** 53 }]);
+  write("window-aaaa0003.json", { launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: -1 } });
+  write("window-aaaa0004.json", { launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: 2 ** 53 } });
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([
+    { file: "codex-inbound-aaaa0002.json", error: "malformed: codex inbound item 0: seq must be a non-negative integer", sessionId: "aaaa0002" },
+    { file: "queue-aaaa0001.json", error: "malformed: queue item 0: seq must be a non-negative integer", sessionId: "aaaa0001" },
+    { file: "window-aaaa0003.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "aaaa0003" },
+    { file: "window-aaaa0004.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "aaaa0004" },
+  ]);
+  expect(r.quarantine).toEqual(["aaaa0002", "aaaa0001", "aaaa0003", "aaaa0004"]);
+  expect(r).toMatchObject({ commands: 0, checkpoints: 0 });
+  l.close();
+});

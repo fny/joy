@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  Ledger, ledgerFor, closeAllLedgers, SessionEndedError, StaleGenerationError, StaleCommandError, LedgerWriteError, CommandIdConflictError,
+  Ledger, ledgerFor, closeAllLedgers, SessionEndedError, StaleGenerationError, StaleCommandError, LedgerWriteError, CommandIdConflictError, RelayTurnConflictError,
   OUTBOX_MAX_ROWS, NON_TERMINAL_STATES, STALE_SETTLEMENT_KIND,
 } from "./ledger";
 
@@ -249,6 +249,9 @@ test("spawn intents, jobs and receipts round-trip; prune removes only settled ro
   const done = accept("s1", "done");
   ledger.recordAttempt(done.id, g, "done");
   ledger.confirmDelivery(done.id, { kind: "transcript_uuid", ref: "u-done" });
+  // A forwarded-uuid receipt ages out only once the committed transcript
+  // cursor covers it (#560): commit one past it.
+  ledger.setCheckpoint("s1", "claude_transcript", "/t.jsonl", 100);
   ledger.enqueueOutbound([{ sessionId: "s1", kind: "output", runtimeEventId: "r-live", sealed: false, body: {} }, { sessionId: "s1", kind: "output", runtimeEventId: "r-acked", sealed: false, body: {} }]);
   ledger.ackOutbound(2);
   now += 8 * 24 * 3_600_000;
@@ -402,4 +405,32 @@ test("acceptCommand refuses a caller id another session already owns (CommandIdC
   expect(ledger.transition("same", ["queued"], "completed")).toBe(true);
   expect(() => accept("b", "same", { id: "same" })).toThrow(CommandIdConflictError);
   expect(accept("a", "same", { id: "same" }).deduped).toBe("receipt");
+});
+
+test("acceptCommand refuses a relay turn another session's row carries (RelayTurnConflictError) under any caller id; a seq receipt naming another session's command is refused too (review 11cf51b5)", () => {
+  const a = accept("a", "mine", { id: "a-id", relayTurnId: "shared-turn" });
+  expect(a).toMatchObject({ id: "a-id", deduped: "none", row: { sessionId: "a", relayTurnId: "shared-turn" } });
+  let err: unknown;
+  try { accept("b", "theirs", { id: "b-id", relayTurnId: "shared-turn" }); } catch (e) { err = e; }
+  expect(err).toBeInstanceOf(RelayTurnConflictError);
+  expect(err).toBeInstanceOf(LedgerWriteError);
+  expect(err).toMatchObject({ name: "RelayTurnConflictError", phase: "accept", relayTurnId: "shared-turn", commandId: "a-id", ownerSessionId: "a" });
+  expect(() => accept("b", "theirs", { relayTurnId: "shared-turn" })).toThrow(RelayTurnConflictError); // no caller id either
+  expect(ledger.listCommands("b")).toEqual([]);
+  expect(ledger.getCommand("b-id")).toBeNull();
+  expect(ledger.getCommand("a-id")).toMatchObject({ sessionId: "a", text: "mine", state: "queued", relayTurnId: "shared-turn" });
+  // The owner's re-offer of the turn is the dedupe: the same row back, whatever id it chose this time.
+  expect(accept("a", "again", { id: "a-id-2", relayTurnId: "shared-turn" })).toMatchObject({ id: "a-id", deduped: "pending", row: { sessionId: "a", text: "mine" } });
+  expect(ledger.listCommands("a")).toHaveLength(1);
+  // A terminal row is owned just the same: refused, never handed over as a receipt.
+  expect(ledger.transition("a-id", ["queued"], "completed")).toBe(true);
+  expect(() => accept("b", "theirs", { id: "b-id", relayTurnId: "shared-turn" })).toThrow(RelayTurnConflictError);
+  expect(accept("a", "again", { relayTurnId: "shared-turn" }).deduped).toBe("receipt");
+  // A retained seq receipt is looked up under the caller's session; one that
+  // names another session's command (a mis-homed row) is refused, not returned as b's.
+  ledger.addReceipt("b", { kind: "seq", ref: "7", commandId: "a-id" });
+  expect(() => accept("b", "redelivered", { seq: 7 })).toThrow(CommandIdConflictError);
+  expect(ledger.listCommands("b")).toEqual([]);
+  ledger.addReceipt("b", { kind: "seq", ref: "8", commandId: "gone-b-row" });
+  expect(accept("b", "redelivered", { seq: 8 })).toMatchObject({ id: "gone-b-row", deduped: "receipt", row: null });
 });

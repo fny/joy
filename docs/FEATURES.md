@@ -505,8 +505,18 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   closed answers `session_ended` (#551, #542, #553). Command id, payload
   version, session generation, runtime attempt id and outbox sequence are
   distinct identities; a confirmed delivery stays in the receipt table after
-  its pending row is gone (#516); a write from a superseded generation is
-  refused (#481); a checkpoint commits only once the outbound rows it covers
+  its pending row is gone (#516); the forwarded-transcript-uuid receipts are
+  capped per session (`PrunePolicy.transcriptReceiptsPerSession`, 5,000 —
+  applied as they are written and by the daily sweep) but a receipt goes
+  only when the session's COMMITTED transcript cursor covers it: every
+  receipt carries a ledger-wide insertion ordinal, a checkpoint records the
+  ordinal it was written at (`receiptOrd`, `coversReceipts: false` for the
+  legacy import), and both the cap and the age rule prune by that boundary
+  — never by wall time, never past the committed cursor because a newer one
+  is pending behind unacked output, and never at all for a session with no
+  committed cursor, whose replay re-reads the whole file with no stable
+  occurrence id to dedupe (#560, review 0133a2fb); a write from a
+  superseded generation is refused (#481); a checkpoint commits only once the outbound rows it covers
   are acked (#67); terminals are posted after their session's outputs by
   one sender per session (#74). Execution policy lives in one place: a
   command's state is the ledger row the coordinator moves, a submit is
@@ -529,19 +539,32 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   string id/text (or with a non-numeric seq) fails its whole file with
   nothing committed, and a window record whose execution field has the
   wrong shape (`transcriptCheckpoint.offset: "100"`) is neither imported
-  nor stripped until repaired. Settlements obey the current-owner rule:
+  nor stripped until repaired; a window record that cannot be read or
+  parsed (a truncating write left `{"launch`) fails and quarantines the
+  same way rather than being skipped, byte offsets and sequence numbers
+  must be non-negative safe integers, a handoff job is imported only in
+  the shape `domain/handoff.ts` can resume (a known role, a source's
+  target harness — and its `dst` once delivered — or a target's peer;
+  unknown fields dropped) and the report's counters are restored with
+  the rows when a file's transaction rolls back (review a7edccec).
+  Settlements obey the current-owner rule:
   `settleAttempt`/`confirmDelivery` change the command only when the claimed
   generation is the session's current one AND the attempt is the command's
   newest; anything else is recorded as a `stale_settlement` observation on
   its own attempt (late-echo ownership kept) and never fails the command or
   supersedes the newer attempt. `transition`/`setCheckpoint`/`acceptCommand`
   take the owner's generation (+ expected attempt) and refuse when stale
-  (review 95c4781e). Command ids are global and owned: `acceptCommand`
-  dedupes a caller-chosen id only for the session that owns it and throws
-  `CommandIdConflictError` when another session presents it (the import
-  fails that file), and the session queue facade (`domain/queueFacade.ts`
-  — every `queueFor(session)` lookup / edit / cancel / reorder / waitFor)
-  treats another session's command id as unknown (review 7652e686).
+  (review 95c4781e). Command ids and relay turns are global and owned:
+  `acceptCommand` checks ownership on EVERY dedupe result — a
+  caller-chosen id another session owns throws `CommandIdConflictError`
+  (the import fails that file), a relay turn another session's row
+  carries throws `RelayTurnConflictError` whatever id the caller chose,
+  and a retained seq receipt naming another session's command is refused
+  the same way — and the session queue facade (`domain/queueFacade.ts` —
+  every `queueFor(session)` lookup / edit / cancel / reorder / waitFor)
+  treats another session's command id as unknown, re-checking after a
+  wait in case the id was pruned and re-accepted elsewhere meanwhile
+  (reviews 7652e686, 11cf51b5).
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.

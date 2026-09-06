@@ -87,6 +87,19 @@ export class CommandIdConflictError extends LedgerWriteError {
     this.commandId = commandId; this.ownerSessionId = ownerSessionId;
   }
 }
+/** A relay turn id already names another session's command. The relay-turn
+ *  dedupe is global like the id one, and just as owned: a re-offer of a turn
+ *  dedupes only for the session whose row carries it — a second session
+ *  presenting the same turn (under any command id) is refused rather than
+ *  handed the first session's row (review 11cf51b5). */
+export class RelayTurnConflictError extends LedgerWriteError {
+  relayTurnId: string; commandId: string; ownerSessionId: string;
+  constructor(relayTurnId: string, commandId: string, ownerSessionId: string, sessionId: string) {
+    super("accept", `relay turn ${relayTurnId}: command ${commandId} is owned by session ${ownerSessionId}, not ${sessionId}`);
+    this.name = "RelayTurnConflictError";
+    this.relayTurnId = relayTurnId; this.commandId = commandId; this.ownerSessionId = ownerSessionId;
+  }
+}
 
 // ── rows ─────────────────────────────────────────────────────────────────────
 
@@ -123,10 +136,18 @@ export interface OutboxRow {
   sealed: boolean; keyB64: string | null; body: unknown; bytes: number; createdAt: number;
   ackedAt: number | null; attempts: number; nextRetryAt: number; lastError: string | null;
 }
-export interface ReceiptRow { sessionId: string; kind: string; ref: string; commandId: string | null; attemptId: string | null; at: number }
+/** `ord`: the ledger-wide insertion ordinal (#560) — a monotonic counter,
+ *  never wall time (a caller-supplied `at` proves nothing about order). */
+export interface ReceiptRow { sessionId: string; kind: string; ref: string; commandId: string | null; attemptId: string | null; at: number; ord: number | null }
 export interface CheckpointRow {
   sessionId: string; kind: string; ref: string; offset: number; updatedAt: number;
   pendingRef: string | null; pendingOffset: number | null; pendingThroughSeq: number | null;
+  /** The receipt ordinal the committed cursor covers: every receipt with
+   *  `ord <= receiptOrd` was written before this offset was observed, so
+   *  its entry lies at or before the cursor (#560). Null = unknown (a
+   *  cursor from before the column existed, or one installed with
+   *  `coversReceipts: false`): nothing is at-or-before it. */
+  receiptOrd: number | null; pendingReceiptOrd: number | null;
 }
 export interface GenerationRow { sessionId: string; generation: number; agent: string; startedAt: number; endedAt: number | null; endReason: string | null }
 export interface SpawnIntentRow { relayCommandId: string; localSessionId: string; createdAt: number; boundAt: number | null }
@@ -174,8 +195,9 @@ export interface PrunePolicy {
   /** Terminal commands (with their attempts), acked outbox rows and receipts older than this are removed. */
   terminalOlderThanMs: number;
   observationsOlderThanMs: number;
-  /** Hard cap on a session's forwarded-transcript-uuid receipts (#560) — see
-   *  Ledger#pruneTranscriptReceipts. Age alone never bounded this set. */
+  /** Cap on a session's forwarded-transcript-uuid receipts (#560) — see
+   *  Ledger#pruneTranscriptReceipts. Age alone never bounded this set; the
+   *  cap never reaches past the session's committed transcript cursor. */
   transcriptReceiptsPerSession: number;
 }
 /** 7-day retention for terminal rows (campaign decision, 2026-09-06); 5,000
@@ -227,12 +249,13 @@ CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(session_id, seq) WHERE acked
 CREATE INDEX IF NOT EXISTS outbox_acked ON outbox(acked_at) WHERE acked_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS receipts (
   session_id TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL,
-  command_id TEXT, attempt_id TEXT, at INTEGER NOT NULL,
+  command_id TEXT, attempt_id TEXT, at INTEGER NOT NULL, ord INTEGER,
   PRIMARY KEY (session_id, kind, ref));
 CREATE INDEX IF NOT EXISTS receipts_at ON receipts(at);
 CREATE TABLE IF NOT EXISTS checkpoints (
   session_id TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, offset INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL, pending_ref TEXT, pending_offset INTEGER, pending_through_seq INTEGER,
+  receipt_ord INTEGER, pending_receipt_ord INTEGER,
   PRIMARY KEY (session_id, kind));
 CREATE TABLE IF NOT EXISTS spawn_intents (
   relay_command_id TEXT PRIMARY KEY, local_session_id TEXT NOT NULL,
@@ -251,6 +274,16 @@ interface StaleSettlement { reason: string; claimedGeneration: number; claimIsCu
 
 const b = (v: boolean | undefined | null): number => (v ? 1 : 0);
 const placeholders = (n: number): string => Array.from({ length: n }, () => "?").join(",");
+/** The daemon's "already forwarded this transcript entry" receipt (#560). */
+const TRANSCRIPT_RECEIPT_KIND = "transcript_uuid";
+const TRANSCRIPT_CURSOR_KIND = "claude_transcript";
+/** SQL (over a `receipts` row): its session's COMMITTED transcript cursor
+ *  covers it — the cursor recorded a receipt boundary and this receipt was
+ *  written at or before it. A cursor with no boundary, or none at all,
+ *  covers nothing; a pending newer cursor is not consulted. */
+const COVERED_BY_COMMITTED_CURSOR = `EXISTS (
+  SELECT 1 FROM checkpoints c WHERE c.session_id=receipts.session_id AND c.kind='${TRANSCRIPT_CURSOR_KIND}'
+   AND c.ref<>'' AND c.receipt_ord IS NOT NULL AND receipts.ord<=c.receipt_ord)`;
 
 type Raw = Record<string, unknown>;
 const rowCommand = (r: Raw): CommandRow => ({
@@ -277,10 +310,12 @@ const rowOutbox = (r: Raw): OutboxRow => ({
 const rowReceipt = (r: Raw): ReceiptRow => ({
   sessionId: r.session_id as string, kind: r.kind as string, ref: r.ref as string,
   commandId: r.command_id as string | null, attemptId: r.attempt_id as string | null, at: r.at as number,
+  ord: (r.ord as number | null) ?? null,
 });
 const rowCheckpoint = (r: Raw): CheckpointRow => ({
   sessionId: r.session_id as string, kind: r.kind as string, ref: r.ref as string, offset: r.offset as number, updatedAt: r.updated_at as number,
   pendingRef: r.pending_ref as string | null, pendingOffset: r.pending_offset as number | null, pendingThroughSeq: r.pending_through_seq as number | null,
+  receiptOrd: (r.receipt_ord as number | null) ?? null, pendingReceiptOrd: (r.pending_receipt_ord as number | null) ?? null,
 });
 const rowGeneration = (r: Raw): GenerationRow => ({
   sessionId: r.session_id as string, generation: r.generation as number, agent: r.agent as string,
@@ -300,15 +335,26 @@ export class Ledger {
   #now: () => number;
   #txDepth = 0;
   #closed = false;
+  /** The forwarded-transcript-uuid cap enforced at insertion (#560). */
+  #transcriptReceiptsPerSession: number;
+  /** Per-session bookkeeping for that insertion-time cap: the live count,
+   *  the committed receipt boundary last consulted and how many rows it
+   *  still covers — so an insert over the cap costs one bounded DELETE, not
+   *  a scan. Loaded lazily per process; dropped on rollback, on the sweep
+   *  and on any delete, and reloaded from the table (the sweep is exact on
+   *  its own, so a stale entry costs at most an early re-check). */
+  #transcriptSets = new Map<string, { n: number; boundary: number | null; covered: number }>();
 
   static path(stateDir: string): string { return join(stateDir, "ledger.sqlite"); }
 
-  /** Open (creating + migrating) the ledger for a state dir. */
-  static open(stateDir: string, opts: { now?: () => number } = {}): Ledger {
-    return new Ledger(stateDir, opts.now ?? Date.now);
+  /** Open (creating + migrating) the ledger for a state dir.
+   *  `transcriptReceiptsPerSession`: the per-session cap on forwarded-uuid
+   *  receipts applied as they are written (default: the prune policy's). */
+  static open(stateDir: string, opts: { now?: () => number; transcriptReceiptsPerSession?: number } = {}): Ledger {
+    return new Ledger(stateDir, opts.now ?? Date.now, opts.transcriptReceiptsPerSession ?? DEFAULT_PRUNE_POLICY.transcriptReceiptsPerSession);
   }
 
-  private constructor(stateDir: string, now: () => number) {
+  private constructor(stateDir: string, now: () => number, transcriptReceiptsPerSession: number) {
     // 0700 dir / 0600 files (#48): the ledger holds every prompt's text and
     // the outbox rows' content keys. SQLite creates the db and its WAL/SHM
     // siblings with the umask default, so they are tightened right after.
@@ -316,6 +362,7 @@ export class Ledger {
     this.stateDir = stateDir;
     this.path = Ledger.path(stateDir);
     this.#now = now;
+    this.#transcriptReceiptsPerSession = Math.max(1, transcriptReceiptsPerSession);
     this.#db = new DatabaseSync(this.path);
     // WAL + FULL: a COMMIT returns only after its WAL frame is fsync'd — the
     // power-loss durability the "returns only after commit" contract needs
@@ -330,9 +377,40 @@ export class Ledger {
       this.#db.exec(SCHEMA);
       const v = this.#get("SELECT value FROM schema_meta WHERE key='version'");
       if (!v) this.#run("INSERT INTO schema_meta(key,value) VALUES('version',?)", String(SCHEMA_VERSION));
+      this.#migrate();
     });
     // After the first WAL commit, so the -wal/-shm siblings exist to tighten.
     for (const f of [this.path, `${this.path}-wal`, `${this.path}-shm`]) chmodSecretQuiet(f);
+  }
+
+  /** Additive column migrations (CREATE TABLE IF NOT EXISTS leaves an
+   *  existing table as it was). Receipt ordinals (#560): an existing set is
+   *  backfilled in rowid order and the counter starts past it; an existing
+   *  committed cursor keeps `receipt_ord` NULL — nothing written before the
+   *  column existed can be proven at-or-before it, so it all stays until
+   *  the session's next commit (seconds, for a live one). */
+  #migrate(): void {
+    const has = (table: string, column: string): boolean =>
+      this.#all(`PRAGMA table_info(${table})`).some((c) => c.name === column);
+    if (!has("receipts", "ord")) {
+      this.#db.exec("ALTER TABLE receipts ADD COLUMN ord INTEGER");
+      this.#db.exec("UPDATE receipts SET ord=rowid WHERE ord IS NULL");
+    }
+    if (!has("checkpoints", "receipt_ord")) this.#db.exec("ALTER TABLE checkpoints ADD COLUMN receipt_ord INTEGER");
+    if (!has("checkpoints", "pending_receipt_ord")) this.#db.exec("ALTER TABLE checkpoints ADD COLUMN pending_receipt_ord INTEGER");
+    this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_ord ON receipts(session_id, kind, ord)");
+    if (!this.#get("SELECT 1 AS x FROM schema_meta WHERE key='receipt_ord'")) {
+      const max = Number(this.#get("SELECT COALESCE(MAX(ord),0) AS m FROM receipts")?.m ?? 0);
+      this.#run("INSERT INTO schema_meta(key,value) VALUES('receipt_ord',?)", String(max));
+    }
+  }
+  /** The last receipt ordinal handed out (the boundary a checkpoint records). */
+  #receiptOrd(): number {
+    return Number(this.#get("SELECT value FROM schema_meta WHERE key='receipt_ord'")?.value ?? 0);
+  }
+  #nextReceiptOrd(): number {
+    const r = this.#get("UPDATE schema_meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='receipt_ord' RETURNING value");
+    return Number(r?.value ?? 0);
   }
 
   get closed(): boolean { return this.#closed; }
@@ -374,12 +452,14 @@ export class Ledger {
     } catch (e) {
       try { this.#db.exec("ROLLBACK"); } catch { /* the connection may be gone */ }
       this.#txDepth = 0;
+      this.#transcriptSets.clear();
       throw e instanceof LedgerWriteError ? e : new LedgerWriteError(phase, e);
     }
     try {
       this.#db.exec("COMMIT");
     } catch (e) {
       try { this.#db.exec("ROLLBACK"); } catch { /* ditto */ }
+      this.#transcriptSets.clear();
       throw new LedgerWriteError(phase, e);
     } finally {
       this.#txDepth = 0;
@@ -480,8 +560,13 @@ export class Ledger {
    *  seq / id already exists (same id back, no second row); `receipt` = the
    *  seq was already delivered (the retained receipt or the terminal row
    *  says so) — the caller acks the redelivery without dispatching (#516).
-   *  A caller-chosen id that another session already owns is refused
-   *  (CommandIdConflictError): ids are global, dedupe is per owner. */
+   *  Every dedupe result is checked for ownership before it is returned
+   *  (review 7652e686, 11cf51b5): a caller-chosen id another session owns
+   *  is refused (CommandIdConflictError), a relay turn another session's
+   *  row carries is refused (RelayTurnConflictError), and a retained seq
+   *  receipt — already looked up under the caller's session — is honoured
+   *  only if the command it names is not another session's. Ids and turns
+   *  are global; dedupe is per owner. */
   acceptCommand(c: NewCommand): { id: string; deduped: "none" | "pending" | "receipt"; row: CommandRow | null } {
     return this.tx(() => {
       const gen = this.currentGeneration(c.sessionId);
@@ -497,10 +582,15 @@ export class Ledger {
         const bySeq = this.commandForSeq(c.sessionId, c.seq);
         if (bySeq) return { id: bySeq.id, deduped: isTerminalState(bySeq.state) ? "receipt" : "pending", row: bySeq };
         const receipt = this.getReceipt(c.sessionId, "seq", String(c.seq));
-        if (receipt) return { id: receipt.commandId ?? `seq:${c.seq}`, deduped: "receipt", row: null };
+        if (receipt) {
+          const named = receipt.commandId ? this.getCommand(receipt.commandId) : null;
+          if (named && named.sessionId !== c.sessionId) throw new CommandIdConflictError(named.id, named.sessionId, c.sessionId);
+          return { id: receipt.commandId ?? `seq:${c.seq}`, deduped: "receipt", row: null };
+        }
       }
       if (c.relayTurnId) {
         const byTurn = this.commandForRelayTurn(c.relayTurnId);
+        if (byTurn && byTurn.sessionId !== c.sessionId) throw new RelayTurnConflictError(c.relayTurnId, byTurn.id, byTurn.sessionId, c.sessionId);
         if (byTurn) return { id: byTurn.id, deduped: isTerminalState(byTurn.state) ? "receipt" : "pending", row: byTurn };
       }
       const id = c.id ?? randomUUID().slice(0, 8);
@@ -841,9 +931,45 @@ export class Ledger {
   }
 
   // ── receipts ──
+  /** Every receipt takes the next ledger-wide ordinal; a forwarded-uuid
+   *  receipt that puts its session over the cap prunes the set at once
+   *  (#560) — under the committed-cursor rule, never past it. */
   #addReceiptInner(sessionId: string, rc: NewReceipt, now: number): void {
-    this.#run("INSERT OR IGNORE INTO receipts(session_id,kind,ref,command_id,attempt_id,at) VALUES(?,?,?,?,?,?)",
-      sessionId, rc.kind, rc.ref, rc.commandId ?? null, rc.attemptId ?? null, rc.at ?? now);
+    const r = this.#run("INSERT OR IGNORE INTO receipts(session_id,kind,ref,command_id,attempt_id,at,ord) VALUES(?,?,?,?,?,?,?)",
+      sessionId, rc.kind, rc.ref, rc.commandId ?? null, rc.attemptId ?? null, rc.at ?? now, this.#nextReceiptOrd());
+    if (rc.kind === TRANSCRIPT_RECEIPT_KIND && Number(r.changes) > 0) this.#capTranscriptReceiptsOnInsert(sessionId);
+  }
+  /** The session's committed transcript cursor's receipt boundary, if any. */
+  #committedReceiptBoundary(sessionId: string): number | null {
+    const c = this.#get(`SELECT receipt_ord FROM checkpoints WHERE session_id=? AND kind='${TRANSCRIPT_CURSOR_KIND}' AND ref<>''`, sessionId);
+    return (c?.receipt_ord as number | null) ?? null;
+  }
+  /** After a forwarded-uuid receipt landed: over the cap, the OLDEST rows the
+   *  committed cursor covers go, as many as the excess — never one the
+   *  cursor does not cover (those are what a replay still reaches). The
+   *  covered count is re-read only when the boundary moves (a commit or a
+   *  promotion), so a session whose excess is all uncovered costs nothing. */
+  #capTranscriptReceiptsOnInsert(sessionId: string): void {
+    let st = this.#transcriptSets.get(sessionId);
+    if (!st) {
+      const n = Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}'`, sessionId)?.n ?? 0);
+      st = { n: n - 1, boundary: null, covered: 0 };
+      this.#transcriptSets.set(sessionId, st);
+    }
+    st.n++;
+    const excess = st.n - this.#transcriptReceiptsPerSession;
+    if (excess <= 0) return;
+    const boundary = this.#committedReceiptBoundary(sessionId);
+    if (boundary == null) { st.boundary = null; st.covered = 0; return; }
+    if (boundary !== st.boundary) {
+      st.boundary = boundary;
+      st.covered = Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord<=?`, sessionId, boundary)?.n ?? 0);
+    }
+    if (st.covered <= 0) return;
+    const deleted = Number(this.#run(`DELETE FROM receipts WHERE rowid IN (
+        SELECT rowid FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord<=? ORDER BY ord LIMIT ?)`,
+      sessionId, boundary, Math.min(st.covered, excess)).changes);
+    st.n -= deleted; st.covered -= deleted;
   }
   /** Retained proof of delivery (INSERT OR IGNORE — idempotent on the key). */
   addReceipt(sessionId: string, rc: NewReceipt): void {
@@ -866,6 +992,7 @@ export class Ledger {
       : this.#all("SELECT * FROM receipts WHERE session_id=? ORDER BY at, kind, ref", sessionId)).map(rowReceipt);
   }
   deleteReceipt(sessionId: string, kind: string, ref: string): boolean {
+    this.#transcriptSets.delete(sessionId);
     return this.tx(() => Number(this.#run("DELETE FROM receipts WHERE session_id=? AND kind=? AND ref=?", sessionId, kind, ref).changes) > 0, "receipt");
   }
 
@@ -962,8 +1089,14 @@ export class Ledger {
    *  session's newest outbox row) the checkpoint is committed only once every
    *  outbox row up to that seq is acked or dropped; until then it is held as
    *  pending and a restart replays from the previous committed cursor — or
-   *  from nothing (`ref` is "" while no cursor has ever been committed). */
-  setCheckpoint(sessionId: string, kind: string, ref: string, offset: number, opts: { throughSeq?: number | "latest"; generation?: number } = {}): { committed: boolean } {
+   *  from nothing (`ref` is "" while no cursor has ever been committed).
+   *  The cursor also records the receipt ordinal it covers (#560): every
+   *  receipt already written was for an entry at or before `offset`, so it
+   *  may be pruned once this cursor is committed — captured NOW, at the
+   *  write, not at a later promotion. `coversReceipts: false` (the legacy
+   *  import, whose receipts and cursor come from different files) records
+   *  no such boundary: nothing already written is treated as covered. */
+  setCheckpoint(sessionId: string, kind: string, ref: string, offset: number, opts: { throughSeq?: number | "latest"; generation?: number; coversReceipts?: boolean } = {}): { committed: boolean } {
     return this.tx(() => {
       if (opts.generation != null) this.#fence(sessionId, opts.generation);
       const now = this.#now();
@@ -971,12 +1104,13 @@ export class Ledger {
       const blocked = through != null && through > 0
         && !!this.#get("SELECT 1 AS x FROM outbox WHERE session_id=? AND acked_at IS NULL AND seq<=? LIMIT 1", sessionId, through);
       const cur = this.getCheckpoint(sessionId, kind);
+      const receiptOrd = opts.coversReceipts === false ? null : this.#receiptOrd();
       if (blocked) {
-        if (cur) this.#run("UPDATE checkpoints SET pending_ref=?, pending_offset=?, pending_through_seq=?, updated_at=? WHERE session_id=? AND kind=?", ref, offset, through, now, sessionId, kind);
-        else this.#run("INSERT INTO checkpoints(session_id,kind,ref,offset,updated_at,pending_ref,pending_offset,pending_through_seq) VALUES(?,?,'',0,?,?,?,?)", sessionId, kind, now, ref, offset, through);
+        if (cur) this.#run("UPDATE checkpoints SET pending_ref=?, pending_offset=?, pending_through_seq=?, pending_receipt_ord=?, updated_at=? WHERE session_id=? AND kind=?", ref, offset, through, receiptOrd, now, sessionId, kind);
+        else this.#run("INSERT INTO checkpoints(session_id,kind,ref,offset,updated_at,pending_ref,pending_offset,pending_through_seq,pending_receipt_ord) VALUES(?,?,'',0,?,?,?,?,?)", sessionId, kind, now, ref, offset, through, receiptOrd);
         return { committed: false };
       }
-      this.#run("INSERT OR REPLACE INTO checkpoints(session_id,kind,ref,offset,updated_at,pending_ref,pending_offset,pending_through_seq) VALUES(?,?,?,?,?,NULL,NULL,NULL)", sessionId, kind, ref, offset, now);
+      this.#run("INSERT OR REPLACE INTO checkpoints(session_id,kind,ref,offset,updated_at,pending_ref,pending_offset,pending_through_seq,receipt_ord,pending_receipt_ord) VALUES(?,?,?,?,?,NULL,NULL,NULL,?,NULL)", sessionId, kind, ref, offset, now, receiptOrd);
       return { committed: true };
     }, "checkpoint");
   }
@@ -988,8 +1122,8 @@ export class Ledger {
     for (const cp of rows) {
       const stillUnacked = this.#get("SELECT 1 AS x FROM outbox WHERE session_id=? AND acked_at IS NULL AND seq<=? LIMIT 1", sessionId, cp.pendingThroughSeq!);
       if (stillUnacked) continue;
-      this.#run("UPDATE checkpoints SET ref=?, offset=?, updated_at=?, pending_ref=NULL, pending_offset=NULL, pending_through_seq=NULL WHERE session_id=? AND kind=?",
-        cp.pendingRef, cp.pendingOffset ?? 0, this.#now(), sessionId, cp.kind);
+      this.#run("UPDATE checkpoints SET ref=?, offset=?, updated_at=?, receipt_ord=?, pending_ref=NULL, pending_offset=NULL, pending_through_seq=NULL, pending_receipt_ord=NULL WHERE session_id=? AND kind=?",
+        cp.pendingRef, cp.pendingOffset ?? 0, this.#now(), cp.pendingReceiptOrd, sessionId, cp.kind);
     }
   }
 
@@ -1041,7 +1175,10 @@ export class Ledger {
       const commands = Number(this.#run(`DELETE FROM commands WHERE state IN (${placeholders(TERMINAL_STATES.length)}) AND updated_at<?`, ...TERMINAL_STATES, cut).changes);
       const outbox = Number(this.#run("DELETE FROM outbox WHERE acked_at IS NOT NULL AND acked_at<?", cut).changes);
       const observations = Number(this.#run("DELETE FROM observations WHERE at<?", now - policy.observationsOlderThanMs).changes);
-      const receipts = Number(this.#run("DELETE FROM receipts WHERE at<?", cut).changes)
+      // Age retires a forwarded-uuid receipt only under the same rule as the
+      // cap (#560): its entry must lie at or before the committed cursor.
+      this.#transcriptSets.clear();
+      const receipts = Number(this.#run(`DELETE FROM receipts WHERE at<? AND (kind<>'${TRANSCRIPT_RECEIPT_KIND}' OR ${COVERED_BY_COMMITTED_CURSOR})`, cut).changes)
         + this.#pruneTranscriptReceipts(policy.transcriptReceiptsPerSession);
       this.#run("DELETE FROM session_generations WHERE ended_at IS NOT NULL AND ended_at<? AND session_id NOT IN (SELECT DISTINCT session_id FROM commands)", cut);
       return { commands, outbox, observations, receipts };
@@ -1059,25 +1196,32 @@ export class Ledger {
    *  What replay actually needs is the identifiers at or after the session's
    *  COMMITTED transcript cursor: recovery re-reads from there, never from
    *  the start. So a receipt goes only when it is BOTH outside the newest
-   *  `keepPerSession` for its session AND older than that committed cursor.
-   *  A session with no committed cursor (or one still held pending behind
-   *  unacked outbox rows) keeps everything up to the count cap — the cap is
-   *  the hard bound, the cursor only ever protects MORE. Anything dropped
-   *  that a full replay does reach is re-sent under its stable
-   *  runtimeEventId, which the relay dedupes: at-least-once, the same
-   *  guarantee the emit/ack gap already carries. */
+   *  `keepPerSession` for its session AND at or before that committed
+   *  cursor — judged by the ordinal the cursor recorded when its offset was
+   *  observed (`checkpoints.receipt_ord`), never by wall time, and never
+   *  by a NEWER cursor still pending behind unacked output (review
+   *  0133a2fb: that one is not the replay origin; the committed one is).
+   *  A session with no committed cursor keeps every forwarded-uuid receipt,
+   *  cap or not: a replay from nothing re-reads the whole file, and a
+   *  replayed entry carries no stable occurrence id the relay could dedupe
+   *  — dropping the receipt WOULD re-emit the answer. The cap is applied at
+   *  insertion too (#addReceiptInner), so the sweep is a backstop. */
   #pruneTranscriptReceipts(keepPerSession: number): number {
-    return Number(this.#run(`
-      DELETE FROM receipts WHERE rowid IN (
-        SELECT r.rowid FROM (
-          SELECT rowid AS rowid, session_id, at,
-                 ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY at DESC, ref DESC) AS rn
-            FROM receipts WHERE kind = 'transcript_uuid') r
-        LEFT JOIN checkpoints c
-          ON c.session_id = r.session_id AND c.kind = 'claude_transcript'
-         AND c.pending_through_seq IS NULL AND c.ref <> ''
-        WHERE r.rn > ? AND (c.session_id IS NULL OR r.at < c.updated_at))`,
-      Math.max(1, keepPerSession)).changes);
+    let n = 0;
+    this.#transcriptSets.clear();
+    const sessions = this.#all(`SELECT DISTINCT session_id FROM receipts WHERE kind='${TRANSCRIPT_RECEIPT_KIND}'`);
+    for (const s of sessions) n += this.#pruneSessionTranscriptReceipts(s.session_id as string, keepPerSession);
+    return n;
+  }
+  /** One session: everything outside its newest `keep` forwarded-uuid
+   *  receipts that the committed cursor covers. Index-driven (the cut is
+   *  the ordinal at position keep+1). */
+  #pruneSessionTranscriptReceipts(sessionId: string, keep: number): number {
+    const cut = this.#get(`SELECT ord FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord IS NOT NULL ORDER BY ord DESC LIMIT 1 OFFSET ?`,
+      sessionId, Math.max(1, keep));
+    if (!cut) return 0;
+    return Number(this.#run(`DELETE FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND ord<=? AND ${COVERED_BY_COMMITTED_CURSOR}`,
+      sessionId, cut.ord as number).changes);
   }
 
   /** Drop everything a session left (its record is being deleted for good). */
@@ -1091,6 +1235,7 @@ export class Ledger {
       // The forwarded-uuid / seq / runtime-ref receipts too (#560): they were
       // left behind, so a deleted session's set stayed in the ledger for good.
       this.#run("DELETE FROM receipts WHERE session_id=?", sessionId);
+      this.#transcriptSets.delete(sessionId);
     }, "forget");
   }
 }
