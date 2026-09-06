@@ -1,3 +1,7 @@
+# Sep 8 (3) — Review follow-ups
+
+- **File viewer**: the file screen shows what is in the shared file cache, so a save made in the file panel appears there at once, a file the daemon reports as unchanged loses its stale diff, and a refresh that fails keeps the last loaded version on screen with a notice instead of an error. Inline chat images read through the same cache as the file viewer.
+
 # Sep 8 (2) — Review follow-ups
 
 - **Voice**: the idle listener rotates its recording every five minutes instead of growing one file; a session that finishes while voice is still connecting is reported once connected; ending a call while it is connecting always wins.

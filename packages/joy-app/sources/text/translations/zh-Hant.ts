@@ -780,6 +780,7 @@ export const zhHant: TranslationStructure = {
         reload: '重新載入',
         overwrite: '覆蓋',
         conflicted: '衝突',
+        refreshFailed: '無法從機器重新整理；顯示的是上次載入的版本。',
     },
 
 
