@@ -2,6 +2,11 @@
  * File view/edit overlay panel.
  * Shown in the main content area when a file is selected from the "All Files" sidebar tab.
  * Uses Pierre for viewing file content, CodeMirror for editing (web only).
+ *
+ * What is on disk is a RESOURCE (sync/fileContents, keyed session + path):
+ * the panel subscribes to it, polls it while a text file is open, and hands
+ * a successful save back to it. Only the editor's text and the baseline it
+ * was seeded from live here — unsent user intent stays out of the cache.
  */
 import * as React from 'react';
 import { View, ScrollView, ActivityIndicator, Pressable, Platform } from 'react-native';
@@ -13,15 +18,15 @@ import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { FileRenderedView, fileRenderKind, isRasterImagePath } from '@/components/FileContentRender';
 import { isBinaryPath } from '@/utils/binaryFile';
 import { downloadFile } from '@/utils/downloadFile';
-import { sessionReadFile, sessionWriteFile } from '@/sync/ops';
+import { sessionWriteFile } from '@/sync/ops';
 import { Modal } from '@/modal';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { layout } from '@/components/layout';
-import { useActiveInterval } from '@/hooks/useActiveInterval';
-import { currentGen, isLatest, nextGen, useLatestKey } from '@/utils/latest';
-import { guarded, logError, alertError, type ErrorReporter } from '@/utils/guardAsync';
-import { noteForegroundFileWrite } from '@/hooks/usePrefetchFileContents';
+import { guarded, logError, alertError } from '@/utils/guardAsync';
+import { resources } from '@/sync/resource';
+import { fileContentsSpec, type FileContents } from '@/sync/fileContents';
+import { useResource } from '@/hooks/useResource';
 
 interface FileViewPanelProps {
     sessionId: string;
@@ -29,12 +34,6 @@ interface FileViewPanelProps {
     /** Publishes the right-side controls (edit/preview toggle, save button) into the chat header. */
     onHeaderRightSlotChange: (slot: React.ReactNode) => void;
 }
-
-type FileState =
-    | { kind: 'loading' }
-    | { kind: 'error'; message: string }
-    | { kind: 'binary' }
-    | { kind: 'loaded'; content: string; originalHash: string | null };
 
 function getFileLanguage(path: string): string | null {
     const ext = path.split('.').pop()?.toLowerCase();
@@ -75,19 +74,6 @@ function getFileLanguage(path: string): string | null {
     return ext ? (map[ext] ?? null) : null;
 }
 
-function decodeBase64ToBytes(base64: string): Uint8Array {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-}
-
-function decodeUtf8Bytes(bytes: Uint8Array): string {
-    return new TextDecoder().decode(bytes);
-}
-
 function encodeStringToBase64(str: string): string {
     const encoder = new TextEncoder();
     const bytes = encoder.encode(str);
@@ -98,17 +84,6 @@ function encodeStringToBase64(str: string): string {
     return btoa(binary);
 }
 
-/** Read file and decode to string, returns null on failure */
-async function readFileContent(sessionId: string, filePath: string): Promise<string | null> {
-    const res = await sessionReadFile(sessionId, filePath);
-    if (!res.success || !res.content) return null;
-    try {
-        return decodeUtf8Bytes(decodeBase64ToBytes(res.content));
-    } catch {
-        return null;
-    }
-}
-
 /** Compute SHA-256 hash of a UTF-8 string (matches server's crypto.createHash('sha256').update(str).digest('hex')) */
 async function computeSHA256(content: string): Promise<string> {
     const data = new TextEncoder().encode(content);
@@ -117,20 +92,25 @@ async function computeSHA256(content: string): Promise<string> {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** Text of a loaded resource, or null when it is binary (an empty file is ''). */
+function textOf(data: FileContents | undefined): string | null {
+    return data && !data.isBinary && data.content !== null ? data.content : null;
+}
+
+/** The version of the file the editor was seeded from (a load, a reload, a
+ *  save). Keyed by the resource so switching files never carries it over. */
+type Baseline = { key: string; content: string };
+/** Per-file conflict UI: the diff view toggle and a dismissed on-disk version. */
+type ConflictUi = { key: string; showDiff: boolean; dismissed: string | null };
+
 export const FileViewPanel = React.memo(function FileViewPanel({
     sessionId,
     filePath,
     onHeaderRightSlotChange,
 }: FileViewPanelProps) {
     const { theme } = useUnistyles();
-    const [fileState, setFileState] = React.useState<FileState>({ kind: 'loading' });
     const [editContent, setEditContent] = React.useState('');
-    const [isSaving, setIsSaving] = React.useState(false);
     const [displayMode, setDisplayMode] = React.useState<'edit' | 'preview'>('edit');
-
-    // External change detection
-    const [externalChange, setExternalChange] = React.useState<string | null>(null); // new content from device
-    const [showConflictDiff, setShowConflictDiff] = React.useState(false);
 
     const fileName = filePath.split('/').pop() || filePath;
     const language = getFileLanguage(filePath);
@@ -140,298 +120,174 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     // first. Raster images have no source view — they render from bytes; svg
     // is XML text with an image preview (#217).
     const renderKind = fileRenderKind(filePath);
-    const isSvg = renderKind === 'image' && !isRasterImagePath(filePath);
+    const isRaster = isRasterImagePath(filePath);
+    const isSvg = renderKind === 'image' && !isRaster;
     const isRenderable = renderKind !== null && (renderKind !== 'image' || isSvg);
-    const [imageBase64, setImageBase64] = React.useState<string | null>(null);
+    // Images first, then the shared binary gate (utils/binaryFile), then text
+    // (#217). A known non-image binary is never read: the panel only shows
+    // the notice, and Download fetches its bytes on demand.
+    const knownBinary = isBinaryPath(filePath) && !isRaster;
 
-    const hasChanges = fileState.kind === 'loaded' && editContent !== fileState.content;
+    const spec = React.useMemo(() => fileContentsSpec(sessionId, filePath), [sessionId, filePath]);
+    const key = spec.key;
+    const keyRef = React.useRef(key);
+    keyRef.current = key;
 
-    // Every load, save and reload of THIS panel is a generation. A completion
-    // (after the read, after the async hash, after the write) commits only
-    // while it is still the newest — a.txt's late hash or save response can no
-    // longer replace b.txt's contents or saved baseline (#218, #220).
-    const fileKey = useLatestKey('file-view');
+    const [savingKey, setSavingKey] = React.useState<string | null>(null);
+    const isSaving = savingKey === key;
+    const [baseline, setBaseline] = React.useState<Baseline | null>(null);
+    const loaded = baseline !== null && baseline.key === key;
 
-    // Load file content
+    // The resource: shown from cache at once, revalidated on open, polled
+    // every 5s while a text file is open (only while focused and foregrounded
+    // — useActiveInterval inside — and never during a save: the save's result
+    // is authoritative and enters the cache through setData).
+    const file = useResource(spec, {
+        enabled: !knownBinary,
+        refetchInterval: loaded && !isSaving ? 5000 : 0,
+        refetchOnScreenFocus: 'stale',
+    });
+    const data = file.data;
+    const diskText = textOf(data);
+
+    // Seed the editor from the first text version of THIS file. A late
+    // response for the previous file lands in its own key, never here.
     React.useEffect(() => {
-        let cancelled = false;
-        const gen = nextGen(fileKey);
-        const stale = () => cancelled || !isLatest(fileKey, gen);
-        setFileState({ kind: 'loading' });
-        setExternalChange(null);
-        setShowConflictDiff(false);
-        setIsSaving(false); // a save still in flight belongs to the previous file
+        if (loaded || diskText === null) return;
+        setBaseline({ key, content: diskText });
+        setEditContent(diskText);
+    }, [key, loaded, diskText]);
 
-        // A read that throws (tunnel down, decode failure) shows as an error
-        // in the panel instead of a spinner that never clears.
-        const showReadFailure: ErrorReporter = (e) => {
-            logError(e);
-            if (!stale()) setFileState({ kind: 'error', message: t('files.failedToRead') });
-        };
+    const hasChanges = loaded && editContent !== baseline.content;
 
-        setImageBase64(null);
-        // Images first, then the shared binary gate (utils/binaryFile), then
-        // text. The panel's own extension list disagreed with the renderer's:
-        // svg was "binary" (never read, never previewed) while webp/avif were
-        // raster images the gate did not know, so they were decoded as text
-        // and never reached the image renderer (#217). Raster bytes go to
-        // imageBase64; svg is loaded as text below and previewed from it.
-        if (isRasterImagePath(filePath)) {
-            guarded(async () => {
-                const res = await sessionReadFile(sessionId, filePath);
-                if (stale()) return;
-                if (res.success && res.content) {
-                    setImageBase64(res.content);
-                    setFileState({ kind: 'binary' }); // not editable — rendered below
-                } else {
-                    setFileState({ kind: 'error', message: res.error || t('files.failedToRead') });
-                }
-            }, showReadFailure)();
-            return () => { cancelled = true; };
-        }
-        if (isBinaryPath(filePath)) {
-            setFileState({ kind: 'binary' });
-            return;
-        }
+    // External change detection is DERIVED: the disk version (polled) differs
+    // from the baseline. An older poll can no longer overwrite a newer one
+    // (#219 — latest wins in the resource), and a reverted edit clears the
+    // warning by itself because disk equals the baseline again (#221).
+    const [conflictUi, setConflictUi] = React.useState<ConflictUi>({ key, showDiff: false, dismissed: null });
+    const ui = conflictUi.key === key ? conflictUi : { key, showDiff: false, dismissed: null };
+    const externalChange = loaded && !isSaving && diskText !== null && diskText !== baseline.content && diskText !== ui.dismissed
+        ? diskText
+        : null;
+    const showConflictDiff = ui.showDiff && externalChange !== null;
 
-        guarded(async () => {
-            try {
-                const fileResponse = await sessionReadFile(sessionId, filePath);
-
-                if (stale()) return;
-
-                if (!fileResponse.success || !fileResponse.content) {
-                    setFileState({ kind: 'error', message: fileResponse.error || t('files.failedToRead') });
-                    return;
-                }
-
-                let rawBytes: Uint8Array;
-                let decodedContent: string;
-                try {
-                    rawBytes = decodeBase64ToBytes(fileResponse.content);
-                    decodedContent = decodeUtf8Bytes(rawBytes);
-                } catch {
-                    setFileState({ kind: 'binary' });
-                    return;
-                }
-
-                const hasNullBytes = rawBytes.some((byte) => byte === 0);
-                const nonPrintableCount = decodedContent.split('').filter(char => {
-                    const code = char.charCodeAt(0);
-                    return code < 32 && code !== 9 && code !== 10 && code !== 13;
-                }).length;
-                if (hasNullBytes || (nonPrintableCount / decodedContent.length > 0.1)) {
-                    setFileState({ kind: 'binary' });
-                    return;
-                }
-
-                const hash = await computeSHA256(decodedContent);
-                if (stale()) return; // the hash is async too: re-check before committing
-                setFileState({ kind: 'loaded', content: decodedContent, originalHash: hash });
-                setEditContent(decodedContent);
-            } catch {
-                if (!stale()) {
-                    setFileState({ kind: 'error', message: t('files.failedToRead') });
-                }
-            }
-        }, showReadFailure)();
-
-        return () => { cancelled = true; };
-    }, [sessionId, filePath, fileKey]);
-
-    // Poll for external changes every 5s — but ONLY while the screen is focused
-    // and the app is foregrounded (useActiveInterval), so a backgrounded/locked
-    // device isn't re-reading the file + hashing it every 5s (battery).
-    const originalHash = fileState.kind === 'loaded' ? fileState.originalHash : null;
-    // Polls are ordered: each gets a sequence number and a response commits
-    // only if it is newer than the last ACCEPTED one. Two overlapping reads
-    // (a slow one that saw OLD, a later one that saw NEW and returned first)
-    // used to let the slow one overwrite externalChange with the older
-    // contents, which Reload then installed (#219).
-    const pollSeq = React.useRef(0);
-    const acceptedPollSeq = React.useRef(0);
-    useActiveInterval(() => {
-        if (!originalHash) return;
-        // A poll peeks at the generation without minting one: it must not
-        // supersede a save in flight, but its content is dropped if a load,
-        // save or reload happened while it was out.
-        const gen = currentGen(fileKey);
-        const seq = ++pollSeq.current;
-        void (async () => {
-            try {
-                const content = await readFileContent(sessionId, filePath);
-                if (content === null || !isLatest(fileKey, gen)) return;
-                const currentHash = await computeSHA256(content);
-                if (!isLatest(fileKey, gen)) return;
-                if (seq <= acceptedPollSeq.current) return; // an older poll's response (#219)
-                acceptedPollSeq.current = seq;
-                if (currentHash !== originalHash) {
-                    setExternalChange(content);
-                } else {
-                    // Disk matches the saved baseline again (the external edit
-                    // was reverted): the warning and the conflict view must
-                    // go, or Reload would install the obsolete snapshot (#221).
-                    setExternalChange(null);
-                    setShowConflictDiff(false);
-                }
-            } catch (e) {
-                logError(e); // best-effort poll; the next tick retries
-            }
-        })();
-    }, 5000, !!originalHash);
-
+    // Reload installs what is on disk NOW (a fresh read), not a snapshot.
     const handleReload = React.useCallback(() => {
-        if (!externalChange) return;
-        const snapshot = externalChange;
-        setExternalChange(null);
-        setShowConflictDiff(false);
-        const gen = nextGen(fileKey);
+        const k = key;
+        setConflictUi({ key: k, showDiff: false, dismissed: null });
         guarded(async () => {
-            // Reload installs what is on disk NOW, not the poll's snapshot: the
-            // snapshot could be an older overlapping poll's contents (#219) or
-            // a change that has since been reverted (#221).
-            const fresh = await readFileContent(sessionId, filePath);
-            if (!isLatest(fileKey, gen)) return;
-            if (fresh === null) throw new Error(t('files.failedToRead'));
-            const hash = await computeSHA256(fresh);
-            if (!isLatest(fileKey, gen)) return;
-            setFileState({ kind: 'loaded', content: fresh, originalHash: hash });
+            const entry = await resources.refresh(spec);
+            if (keyRef.current !== k) return;
+            const fresh = entry.error || entry.unavailable ? null : textOf(entry.data);
+            if (fresh === null) throw new Error(entry.error ?? entry.unavailable ?? t('files.failedToRead'));
+            setBaseline({ key: k, content: fresh });
             setEditContent(fresh);
-        }, (e) => {
-            // The warning bar comes back so the reload can be retried.
-            if (isLatest(fileKey, gen)) setExternalChange(snapshot);
-            alertError()(e);
-        })();
-    }, [externalChange, fileKey, sessionId, filePath]);
+        }, alertError())();
+    }, [key, spec]);
 
     const handleDismissWarning = React.useCallback(() => {
-        setExternalChange(null);
-    }, []);
+        setConflictUi({ key, showDiff: false, dismissed: externalChange });
+    }, [key, externalChange]);
 
     const handleShowDiff = React.useCallback(() => {
-        setShowConflictDiff(true);
-    }, []);
+        setConflictUi({ key, showDiff: true, dismissed: null });
+    }, [key]);
+
+    /** Write `content`; on success the resource takes the saved version
+     *  (setData supersedes every read that began before the write — a poll
+     *  or a prefetch can no longer land pre-save contents over it, #325) and
+     *  the baseline follows if this file is still on screen. */
+    const commitWrite = React.useCallback(async (k: string, content: string, expectedHash: string | undefined) => {
+        const response = await sessionWriteFile(sessionId, filePath, encodeStringToBase64(content), expectedHash, 'base64');
+        if (!response.success) return response;
+        resources.setData<FileContents>(k, { base64: encodeStringToBase64(content), content, isBinary: false });
+        if (keyRef.current === k) {
+            setBaseline({ key: k, content });
+            setConflictUi({ key: k, showDiff: false, dismissed: null });
+        }
+        return response;
+    }, [sessionId, filePath]);
 
     const handleSave = React.useCallback(async () => {
-        if (fileState.kind !== 'loaded' || !hasChanges) return;
-        setIsSaving(true);
-        const gen = nextGen(fileKey);
-        // A prefetch of this file that began before the save must not land
-        // its pre-save read over the saved content (#325): once when the
-        // write starts, once when it has landed on disk.
-        noteForegroundFileWrite(sessionId, filePath);
-
+        if (!loaded || !hasChanges || isSaving) return;
+        const k = key;
+        const content = editContent;
+        setSavingKey(k);
         try {
-            const base64 = encodeStringToBase64(editContent);
-            const response = await sessionWriteFile(
-                sessionId,
-                filePath,
-                base64,
-                fileState.originalHash,
-                'base64',
-            );
-            noteForegroundFileWrite(sessionId, filePath);
-            if (!isLatest(fileKey, gen)) return; // another file is on screen now
-
-            if (!response.success) {
-                if (response.error?.includes('hash') || response.error?.includes('mismatch')) {
-                    // Fetch the current server content for diff
-                    const serverContent = await readFileContent(sessionId, filePath);
-                    if (!isLatest(fileKey, gen)) return;
-                    if (serverContent) {
-                        setExternalChange(serverContent);
-                        setShowConflictDiff(true);
-                    } else {
-                        Modal.alert(t('files.fileConflict'), t('files.fileConflictDescription'));
-                    }
-                } else {
-                    Modal.alert(t('common.error'), response.error || t('files.failedToSave'));
-                }
-                return;
+            const response = await commitWrite(k, content, await computeSHA256(baseline.content));
+            if (response.success || keyRef.current !== k) return;
+            if (response.error?.includes('hash') || response.error?.includes('mismatch')) {
+                // Disk moved under us: read it and open the conflict view on it.
+                const entry = await resources.refresh(spec);
+                if (keyRef.current !== k) return;
+                if (textOf(entry.data) !== null) setConflictUi({ key: k, showDiff: true, dismissed: null });
+                else Modal.alert(t('files.fileConflict'), t('files.fileConflictDescription'));
+            } else {
+                Modal.alert(t('common.error'), response.error || t('files.failedToSave'));
             }
-
-            // Update original content + hash to match saved state
-            setFileState({
-                kind: 'loaded',
-                content: editContent,
-                originalHash: response.hash ?? null,
-            });
-            setExternalChange(null);
-            setShowConflictDiff(false);
         } finally {
-            if (isLatest(fileKey, gen)) setIsSaving(false);
+            setSavingKey((s) => (s === k ? null : s));
         }
-    }, [sessionId, filePath, editContent, fileState, hasChanges, fileKey]);
+    }, [loaded, hasChanges, isSaving, key, editContent, baseline, commitWrite, spec]);
 
     const handleForceSave = React.useCallback(async () => {
-        if (fileState.kind !== 'loaded') return;
-        setIsSaving(true);
-        const gen = nextGen(fileKey);
-        noteForegroundFileWrite(sessionId, filePath); // see handleSave (#325)
-
+        if (!loaded || isSaving) return;
+        const k = key;
+        const content = editContent;
+        setSavingKey(k);
         try {
-            // Re-read to get current hash, then write
-            const serverContent = await readFileContent(sessionId, filePath);
-            const currentHash = serverContent ? await computeSHA256(serverContent) : undefined;
-            if (!isLatest(fileKey, gen)) return;
-
-            const base64 = encodeStringToBase64(editContent);
-            const response = await sessionWriteFile(sessionId, filePath, base64, currentHash, 'base64');
-            noteForegroundFileWrite(sessionId, filePath);
-            if (!isLatest(fileKey, gen)) return;
-
-            if (!response.success) {
-                Modal.alert(t('common.error'), response.error || t('files.failedToSave'));
-                return;
-            }
-
-            setFileState({
-                kind: 'loaded',
-                content: editContent,
-                originalHash: response.hash ?? null,
-            });
-            setExternalChange(null);
-            setShowConflictDiff(false);
+            // Re-read for the current hash, then overwrite that version.
+            const entry = await resources.refresh(spec);
+            if (keyRef.current !== k) return;
+            const current = textOf(entry.data);
+            const response = await commitWrite(k, content, current !== null ? await computeSHA256(current) : undefined);
+            if (!response.success && keyRef.current === k) Modal.alert(t('common.error'), response.error || t('files.failedToSave'));
         } finally {
-            if (isLatest(fileKey, gen)) setIsSaving(false);
+            setSavingKey((s) => (s === k ? null : s));
         }
-    }, [sessionId, filePath, editContent, fileState, fileKey]);
+    }, [loaded, isSaving, key, editContent, commitWrite, spec]);
 
-    // Publish right-slot controls (edit/preview toggle, save button) into the chat header.
-    const isLoaded = fileState.kind === 'loaded';
-    // Download what is on disk: text/images from memory, a non-image binary
-    // (never fetched — the panel only shows the notice) by reading its bytes now.
+    // Download what is on disk: the resource's bytes (a non-image binary is
+    // read on demand — the panel never fetched it), or the editor's text.
     const downloadCurrent = React.useCallback(async () => {
-        if (imageBase64) return downloadFile(fileName, { base64: imageBase64 });
-        if (fileState.kind === 'binary') {
-            const res = await sessionReadFile(sessionId, filePath);
-            if (!res.success || !res.content) throw new Error(res.error || 'read failed');
-            return downloadFile(fileName, { base64: res.content });
-        }
-        return downloadFile(fileName, { utf8: editContent });
-    }, [imageBase64, fileState.kind, sessionId, filePath, fileName, editContent]);
+        if (loaded && !isRaster) return downloadFile(fileName, { utf8: editContent });
+        const entry = data ? file : await resources.ensure(spec, { staleTime: Infinity });
+        if (!entry.data) throw new Error(entry.error || entry.unavailable || 'read failed');
+        return downloadFile(fileName, { base64: entry.data.base64 });
+    }, [loaded, isRaster, fileName, editContent, data, file, spec]);
+    const download = React.useCallback(() => {
+        void downloadCurrent().catch((e) => { logError(e); Modal.alert(t('common.error'), t('files.failedToRead')); });
+    }, [downloadCurrent]);
+
+    const imageBase64 = isRaster && data ? data.base64 : null;
+    const isBinary = knownBinary || (data?.isBinary ?? false);
+    // A read failure with nothing cached is an error state, not a spinner
+    // that never clears; with a last good value on screen it is just a
+    // missed revalidation.
+    const loadError = !data && !knownBinary ? (file.error ?? file.unavailable) : null;
+    const canDownload = loaded || !!imageBase64 || isBinary;
 
     React.useEffect(() => {
         onHeaderRightSlotChange(
             <FileHeaderRight
                 showToggle={isMarkdown || isRenderable}
-                isLoaded={isLoaded}
+                isLoaded={loaded}
                 displayMode={displayMode}
                 onDisplayModeChange={setDisplayMode}
                 hasChanges={hasChanges}
                 isSaving={isSaving}
                 onSave={handleSave}
-                onDownload={() => { void downloadCurrent().catch(() => Modal.alert(t('common.error'), t('files.failedToRead'))); }}
-                canDownload={isLoaded || !!imageBase64 || fileState.kind === 'binary'}
+                onDownload={download}
+                canDownload={canDownload}
             />
         );
         return () => onHeaderRightSlotChange(null);
-    }, [isMarkdown, isRenderable, isLoaded, displayMode, hasChanges, isSaving, handleSave, onHeaderRightSlotChange, imageBase64, fileState.kind, downloadCurrent]);
+    }, [isMarkdown, isRenderable, loaded, displayMode, hasChanges, isSaving, handleSave, onHeaderRightSlotChange, download, canDownload]);
 
     return (
         <View style={styles.outer}>
             {/* External change warning bar */}
-            {externalChange && !showConflictDiff && (
+            {externalChange !== null && !showConflictDiff && (
                 <View style={[styles.warningBar, { backgroundColor: theme.colors.warning + '18', borderBottomColor: theme.colors.divider }]}>
                     <Ionicons name="alert-circle" size={16} color={theme.colors.warning} />
                     <Text style={[styles.warningText, { color: theme.colors.text }]}>
@@ -451,7 +307,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
             )}
 
             {/* Conflict diff view */}
-            {showConflictDiff && externalChange && fileState.kind === 'loaded' ? (
+            {showConflictDiff && externalChange !== null ? (
                 <View style={{ flex: 1 }}>
                     <View style={[styles.conflictHeader, { backgroundColor: theme.colors.surfaceHigh, borderBottomColor: theme.colors.divider }]}>
                         <Text style={[styles.conflictTitle, { color: theme.colors.text }]}>
@@ -471,7 +327,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                         >
                             <Text style={styles.actionButtonText}>{t('files.reload')}</Text>
                         </Pressable>
-                        <Pressable onPress={() => setShowConflictDiff(false)} hitSlop={8} style={{ padding: 4 }}>
+                        <Pressable onPress={() => setConflictUi({ key, showDiff: false, dismissed: null })} hitSlop={8} style={{ padding: 4 }}>
                             <Ionicons name="close" size={18} color={theme.colors.textSecondary} />
                         </Pressable>
                     </View>
@@ -487,32 +343,35 @@ export const FileViewPanel = React.memo(function FileViewPanel({
                         />
                     </ScrollView>
                 </View>
-            ) : fileState.kind === 'loading' ? (
-                <View style={styles.centered}>
-                    <ActivityIndicator size="small" color={theme.colors.textSecondary} />
-                </View>
-            ) : fileState.kind === 'error' ? (
+            ) : loadError ? (
                 <View style={styles.centered}>
                     <Ionicons name="alert-circle-outline" size={32} color={theme.colors.textDestructive} />
                     <Text style={{ color: theme.colors.textSecondary, marginTop: 8, ...Typography.default() }}>
-                        {fileState.message}
+                        {loadError}
                     </Text>
+                    <Pressable onPress={() => { void file.refresh(); }} style={{ marginTop: 16, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, backgroundColor: theme.colors.button.primary.background }} accessibilityRole="button">
+                        <Text style={{ color: theme.colors.button.primary.tint, ...Typography.default('semiBold') }}>{t('common.retry')}</Text>
+                    </Pressable>
                 </View>
             ) : imageBase64 ? (
                 <FileRenderedView filePath={filePath} base64={imageBase64} />
-            ) : fileState.kind === 'binary' ? (
+            ) : isBinary ? (
                 <View style={styles.centered}>
                     <Ionicons name="document-outline" size={32} color={theme.colors.textSecondary} />
                     <Text style={{ color: theme.colors.textSecondary, marginTop: 8, ...Typography.default() }}>
                         {t('files.binaryFile')}
                     </Text>
                     <Pressable
-                        onPress={() => { void downloadCurrent().catch(() => Modal.alert(t('common.error'), t('files.failedToRead'))); }}
+                        onPress={download}
                         style={{ marginTop: 16, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, backgroundColor: theme.colors.button.primary.background }}
                         accessibilityRole="button"
                     >
                         <Text style={{ color: theme.colors.button.primary.tint, ...Typography.default('semiBold') }}>{t('files.download')}</Text>
                     </Pressable>
+                </View>
+            ) : !loaded ? (
+                <View style={styles.centered}>
+                    <ActivityIndicator size="small" color={theme.colors.textSecondary} />
                 </View>
             ) : isRenderable && !isMarkdown && displayMode === 'preview' ? (
                 <FileRenderedView filePath={filePath} content={editContent} />
@@ -538,6 +397,7 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         </View>
     );
 });
+
 
 /** Right-side header controls for the file-view overlay. */
 const FileHeaderRight = React.memo(function FileHeaderRight({
