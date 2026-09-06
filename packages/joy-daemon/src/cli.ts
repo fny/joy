@@ -14,6 +14,7 @@ import { joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir
 import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay/pairing";
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
+import { launchdPlist } from "./launchdPlist";
 
 // --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
 // invocation addresses. Consumed HERE, before any relay-scoped const below is
@@ -527,28 +528,17 @@ WantedBy=default.target
     return 0;
   }
   if (plat === "darwin") {
-    const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${launchdLabel()}</string>
-  <key>ProgramArguments</key>
-  <array><string>${NODE}</string><string>--import</string><string>tsx</string><string>${SERVER_TS}</string></array>
-  <key>WorkingDirectory</key><string>${PKG_DIR}</string>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${process.env.PATH ?? ""}</string><key>JOY_RELAY_URL</key><string>${joyRelayUrl()}</string></dict>
-  <key>RunAtLoad</key><true/>
-  <!-- KeepAlive=true (restart on ANY exit, incl. clean exit 0) is load-bearing:
-       the daemon self-restarts by exiting 0 (see scheduleDaemonRestart). Do not
-       narrow to a SuccessfulExit condition or the self-restart would leave it
-       dead. launchd relaunches immediately and wins the port over the 1s-delayed
-       detached replacement, which then exits via the singleton lock. -->
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>${LOG_FILE}</string>
-  <key>StandardErrorPath</key><string>${LOG_FILE}</string>
-</dict>
-</plist>
-`;
+    // Built by a pure, XML-escaping function: a `&` in PATH used to produce a
+    // plist launchctl could not parse (#500).
+    const plist = launchdPlist({
+      label: launchdLabel(),
+      node: NODE,
+      serverTs: SERVER_TS,
+      pkgDir: PKG_DIR,
+      path: process.env.PATH ?? "",
+      relayUrl: joyRelayUrl(),
+      logFile: LOG_FILE,
+    });
     const path = launchdPlistPath();
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, plist);
