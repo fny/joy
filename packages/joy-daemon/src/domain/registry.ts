@@ -6,10 +6,9 @@
 import { setTimeout as sleep } from "timers/promises";
 import { existsSync, mkdirSync, statSync, readFileSync, readdirSync } from "fs";
 import { join, basename, resolve } from "path";
-import { homedir } from "os";
 import { run } from "../tmux/shell";
 import { tmux, tmuxHandleFor, disposeTmuxHandle, type TmuxDriver } from "../tmux/driver";
-import { tmuxServerLabel, tmuxNamesFor, TMUX_AGENT_WINDOW } from "../paths";
+import { tmuxServerLabel, tmuxNamesFor, TMUX_AGENT_WINDOW, canonicalCwd, expandHome } from "../paths";
 import { applyEnvStore } from "./envStore";
 import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
@@ -89,17 +88,9 @@ export class DirectoryCreationApprovalRequired extends Error {
   }
 }
 
-/**
- * Expand a leading ~ to the joy-daemon user's home directory. tmux's -c flag
- * does NOT expand tildes (it's not a shell), and the app may send paths with
- * ~ unresolved. Without this, tmux silently falls back to the daemon's own
- * cwd and Claude opens in the wrong directory.
- */
-export function expandHome(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
-  return p;
-}
+// `expandHome` / `canonicalCwd` live in paths.ts (operations.ts needs them
+// without importing the registry); re-exported for the existing callers.
+export { expandHome, canonicalCwd };
 
 interface StoredChatMessage extends ChatMessage {
   id: string;
@@ -311,7 +302,11 @@ export class SessionRegistry {
     const id = opts.id ?? crypto.randomUUID().replace(/-/g, "").slice(0, 8);
     const quarantined = this.#quarantined.get(id);
     if (quarantined !== undefined) throw new Error(`session ${id} is quarantined (${quarantined}) — accepts no work until the legacy import completes (quarantined)`);
-    const cwd = expandHome(opts.cwd);
+    // ONE canonical form (#564): `~`, `/.`, `..` and symlinks all resolved
+    // BEFORE validation, launch, record and transcript-path construction —
+    // Claude derives its project dir from its physical cwd, so a session
+    // launched in `/repo/.` was pinned to a transcript it never wrote.
+    const cwd = canonicalCwd(opts.cwd);
     // Reserved while this create runs: a second create({id}) during the tmux
     // setup used to kill the first one's server and return a second object
     // (Astra on 01bdac2f). Released in the wrapper below.
@@ -946,7 +941,7 @@ export class SessionRegistry {
     const rec = existing ? null : loadWindowRecord(opts.id);
     if (!existing && !opts.cwd && !rec) throw new Error(`unknown session: ${opts.id}`);
 
-    const cwd = existing?.cwd ?? rec?.launchCwd ?? opts.cwd!;
+    const cwd = canonicalCwd(existing?.cwd ?? rec?.launchCwd ?? opts.cwd!);
 
     // Codex restart (review #5): restarting a codex session must NOT fall
     // through to the claude create path. Rebuild a codex session resuming its
@@ -1119,8 +1114,9 @@ export class SessionRegistry {
       // guard / relay path / transcript lookup (BUG-15).
       const rec = loadWindowRecord(id);
       const paneCwd = drv.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_current_path}").out.trim();
-      const cwd = rec?.launchCwd || paneCwd;
-      if (!cwd) continue;
+      const rawCwd = rec?.launchCwd || paneCwd;
+      if (!rawCwd) continue;
+      const cwd = canonicalCwd(rawCwd); // a legacy record may hold a non-canonical path (#564)
 
       const shellPid = parseInt(drv.runSync("display-message", "-t", tmuxWindow, "-p", "#{pane_pid}").out.trim());
       let pid: number | undefined;

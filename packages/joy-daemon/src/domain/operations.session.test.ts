@@ -143,6 +143,23 @@ describe("handoff / handback in-progress guard (#53)", () => {
 
 const TELEPORT_B64 = Buffer.from(JSON.stringify({ type: "user", message: { role: "user", content: "x" } }) + "\n").toString("base64");
 
+// ── #549 ─────────────────────────────────────────────────────────────────────
+
+describe("teleport import canonicalises the cwd (#549)", () => {
+  const b64 = TELEPORT_B64;
+  it("a `~/…` cwd is expanded before the transcript dir is derived, and the same cwd reaches create()", async () => {
+    const name = `joy-wavef-${uid()}`;
+    const expanded = join(homedir(), name);
+    cleanupDirs.push(cwdToTranscriptDir(expanded), cwdToTranscriptDir(`~/${name}`));
+    const create = vi.fn(async () => ({ id: "f0f0f0f3", toJSON: () => ({}) }));
+    const r = (await op("joy-teleport-import").handler({ list: () => [], listRecords: () => [], create } as never, { cwd: `~/${name}`, claudeSessionId: "abc-5490", transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r.ok).toBe(true);
+    expect(existsSync(join(cwdToTranscriptDir(expanded), "abc-5490.jsonl"))).toBe(true);      // where Claude will look
+    expect(existsSync(cwdToTranscriptDir(`~/${name}`))).toBe(false);                          // old code: the literal tilde dir
+    expect((create.mock.calls[0] as unknown[])[0]).toMatchObject({ cwd: expanded, resume_id: "abc-5490" });
+  });
+});
+
 // ── #552 ─────────────────────────────────────────────────────────────────────
 
 describe("provenance keeps daemon slash commands interceptable (#552)", () => {
