@@ -346,9 +346,9 @@ export async function sessionRipgrep(
 /**
  * Kill the session process immediately
  */
-export async function sessionKill(sessionId: string): Promise<SessionKillResponse> {
+export async function sessionKill(sessionId: string, opts?: { ifStatus?: 'ended' | 'active' | 'starting' }): Promise<SessionKillResponse> {
     try {
-        const { data } = await machineKillSession(requireCtx(sessionId, 'kill session'));
+        const { data } = await machineKillSession(requireCtx(sessionId, 'kill session'), opts);
         const r = (data ?? {}) as { success?: boolean; ok?: boolean; message?: string; error?: string };
         const success = r.success ?? r.ok ?? false;
         return { success, message: r.message ?? r.error ?? (success ? 'killed' : 'no response') };
