@@ -71,8 +71,16 @@ export async function cloneForSpawn(gitUrl: string, cwd: string): Promise<void> 
  *  repository. Anything unparseable compares as its trimmed lower-case text. */
 export function gitRepoIdentity(url: string): string {
   const u = url.trim().replace(/\/+$/, "").replace(/\.git$/i, "").replace(/\/+$/, "");
-  let m = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.*)$/i.exec(u); // scheme://[user@]host[:port]/path
-  if (m) return `${m[1].toLowerCase()}/${m[2].replace(/^\/+/, "")}`;
+  // scheme://[user@]host[:port]/path — an explicit NON-default port is part
+  // of the identity: two services on one host differ by port (Astra on
+  // 6d994569, #151); only the scheme's default port is dropped.
+  let m = /^([a-z][a-z0-9+.-]*):\/\/(?:[^@/]+@)?([^/:]+)(?::(\d+))?\/(.*)$/i.exec(u);
+  if (m) {
+    const scheme = m[1].toLowerCase(); const port = m[3];
+    const defaults: Record<string, string> = { https: "443", http: "80", ssh: "22", git: "9418" };
+    const portPart = port && defaults[scheme] !== port ? `:${port}` : "";
+    return `${m[2].toLowerCase()}${portPart}/${m[4].replace(/^\/+/, "")}`;
+  }
   m = /^(?:[^@/]+@)?([^/:]+):(.*)$/.exec(u); // scp-like user@host:path
   if (m && !/^[a-z]:[\\/]/i.test(u)) return `${m[1].toLowerCase()}/${m[2].replace(/^\/+/, "")}`;
   return u.toLowerCase();

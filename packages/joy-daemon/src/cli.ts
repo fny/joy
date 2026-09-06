@@ -5,7 +5,7 @@
 // this CLI finds and authenticates to it — one daemon (and one state dir,
 // tmux server, service unit) per relay; --relay picks which one.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync, readlinkSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync, readlinkSync, realpathSync } from "fs";
 import { join, dirname, resolve, basename, sep, isAbsolute } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
@@ -245,8 +245,38 @@ export function processIdentity(pid: number): ProcessIdentity | null {
 /** The script operand of a `node [flags] <script>` command line, when it is a
  *  server.ts: the first whitespace-separated token ending in `server.ts`. */
 export function serverEntryOf(command: string): string | null {
-  const m = /(?:^|\s)(\S*server\.ts)(?=\s|$)/.exec(command);
-  return m ? m[1] : null;
+  // The script operand is the first argument after the executable that is
+  // neither a flag nor a flag's value — not "any token ending in server.ts":
+  // `python3 unrelated.py …/server.ts` named our entry as a trailing argument
+  // and passed (Astra on 6d994569, #495).
+  const argv = command.trim().split(/\s+/);
+  const valued = new Set(["--import", "--require", "-r", "--loader", "--experimental-loader", "--conditions", "-C", "--env-file", "--eval", "-e", "--print", "-p", "--input-type", "--title", "--stack-size", "--max-old-space-size", "--openssl-config", "--icu-data-dir", "--inspect-port", "--report-directory"]);
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("-")) { if (valued.has(a) && !a.includes("=")) i++; continue; }
+    return a.endsWith("server.ts") ? a : null; // the first operand IS the script; anything else is another program
+  }
+  return null;
+}
+
+/** Does the live command's executable match the recorded process.execPath?
+ *  argv[0] is often a bare `node` or a symlink, so both sides are resolved
+ *  through PATH and realpath; an executable that cannot be resolved is not
+ *  evidence either way (Astra on 6d994569, #495). */
+export function execMatches(command: string, recordedExec: string | undefined): boolean {
+  if (!recordedExec) return true;
+  const argv0 = command.trim().split(/\s+/)[0] ?? "";
+  if (!argv0) return true;
+  const resolveExec = (p: string): string | null => {
+    try {
+      if (p.includes("/")) return realpathSync(p);
+      for (const dir of (process.env.PATH ?? "").split(":")) { if (!dir) continue; try { return realpathSync(join(dir, p)); } catch { /* next */ } }
+      return null;
+    } catch { return null; }
+  };
+  const a = resolveExec(argv0); const b = resolveExec(recordedExec);
+  if (!a || !b) return true;
+  return a === b;
 }
 
 /** LEGACY identity, for a daemon.json written before `entry` was recorded
@@ -287,6 +317,9 @@ export function verifyDaemonPid(
     const entry = operand && !isAbsolute(operand) && identity.cwd ? resolve(identity.cwd, operand) : operand;
     if (entry !== state.entry) {
       return { ok: false, reason: `pid ${pid} is not the daemon daemon.json records (expected ${state.entry}; running: ${shown})` };
+    }
+    if (!execMatches(identity.command, state.exec)) {
+      return { ok: false, reason: `pid ${pid} runs a different executable than daemon.json records (${shown})` };
     }
   } else if (!looksLikeJoyDaemon(identity.command)) {
     return { ok: false, reason: `pid ${pid} is not a joy-daemon (${shown})` };
