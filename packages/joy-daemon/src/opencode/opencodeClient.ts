@@ -19,7 +19,7 @@ import { writeFileSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
 import { LineDecoder, TextAccumulator } from "../domain/textStream";
-import { withDeadline, killProcessGroup } from "../domain/bounded";
+import { withDeadline, killProcessGroup, BoundedTail } from "../domain/bounded";
 import * as http from "http";
 
 // Provider API keys (e.g. FIREWORKS_API_KEY for the opencode config's
@@ -49,6 +49,11 @@ export function userShellEnv(): Record<string, string> {
 export interface OpencodeSpawnResult {
   proc: ChildProcess;
   port: Promise<number>; // resolves when the server prints its listen line
+  /** Bounded tail of everything the server printed AFTER startup (#69): the
+   *  last few KiB of stdout+stderr, for a diagnostic when it misbehaves. The
+   *  streams are still drained — an unread pipe would block the child — but
+   *  nothing older than the window is retained. */
+  serverLog: BoundedTail;
 }
 
 /** Spawn `opencode serve --port 0` in `cwd`. Port is parsed from stdout
@@ -63,6 +68,7 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
   // `opencode.exe` server as a child — killing just the launcher orphans the
   // server (observed live 2026-08-01). Detached makes the launcher a process-
   // group leader so killOpencodeServer can take the whole group down.
+  let listenTimedOut: () => void = () => {};
   const proc = spawn(bin, ["serve", "--port", "0"], {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
@@ -73,27 +79,43 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
       ...(opts?.joySessionId ? { JOY_SESSION_ID: opts.joySessionId } : {}),
     },
   });
+  // Post-startup output is DRAINED but not retained (#69). A long-running
+  // `opencode serve` keeps logging to stderr; the startup listener used to
+  // append every later chunk to the parse buffer and re-run the listen regex
+  // over it, so the daemon held the server's whole log for the life of the
+  // session. Simply dropping the listener is not the fix either — nothing
+  // would read the pipe, it fills at ~64 KiB, and the server blocks on write
+  // forever. So the listeners stay for the process's life, the startup PARSER
+  // is retired the moment the port settles, and what continues to arrive
+  // lands in a fixed-size tail.
+  const serverLog = new BoundedTail(16 * 1024);
   const listen = new Promise<number>((resolve, reject) => {
     // The port is parsed from COMPLETE lines only: the listen line can arrive
     // split ("…:42" then "123\n"), and a regex over the growing buffer
     // resolved port 42 and connected to the wrong server (#570). One line
     // decoder per stream also keeps a split multibyte character whole.
-    const out = new LineDecoder();
-    const err = new LineDecoder();
+    let out: LineDecoder | null = new LineDecoder();
+    let err: LineDecoder | null = new LineDecoder();
     let settled = false;
+    /** Retire the startup parser: no more regex, no more line buffers. Called
+     *  on EVERY exit from startup — the listen line, the process dying, and
+     *  the 30 s deadline below, which used to leave both decoders growing for
+     *  the life of the process. */
+    const stopParsing = () => { settled = true; out = null; err = null; };
     const onLine = (line: string) => {
       const m = /listening on http:\/\/127\.0\.0\.1:(\d+)\b/.exec(line);
-      if (m && !settled) { settled = true; proc.stdout?.off("data", onOut); proc.stderr?.off("data", onErr); resolve(parseInt(m[1], 10)); }
+      if (m && !settled) { const p = parseInt(m[1], 10); stopParsing(); resolve(p); }
     };
-    const onOut = (d: Buffer) => { for (const l of out.push(d)) onLine(l); };
-    const onErr = (d: Buffer) => { for (const l of err.push(d)) onLine(l); };
+    const onOut = (d: Buffer) => { if (out) { for (const l of out.push(d)) onLine(l); } else serverLog.push(d); };
+    const onErr = (d: Buffer) => { if (err) { for (const l of err.push(d)) onLine(l); } else serverLog.push(d); };
     proc.stdout?.on("data", onOut);
     proc.stderr?.on("data", onErr);
-    proc.on("exit", (code) => { if (!settled) { settled = true; reject(new Error(`opencode serve exited during startup (code ${code})`)); } });
-    proc.on("error", (e) => { if (!settled) { settled = true; reject(e); } });
+    proc.on("exit", (code) => { if (!settled) { stopParsing(); reject(new Error(`opencode serve exited during startup (code ${code})`)); } });
+    proc.on("error", (e) => { if (!settled) { stopParsing(); reject(e); } });
+    listenTimedOut = stopParsing;
   });
-  const port = withDeadline(listen, 30_000, () => { throw new Error("opencode serve: no listen line within 30s"); });
-  return { proc, port };
+  const port = withDeadline(listen, 30_000, () => { listenTimedOut(); throw new Error("opencode serve: no listen line within 30s"); });
+  return { proc, port, serverLog };
 }
 
 /** One opencode SSE/global event. `durable.seq` is a per-session monotonic
